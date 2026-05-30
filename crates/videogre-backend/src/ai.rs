@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::fs;
 use tokio::process::Command;
+use tokio::time::{Duration, timeout};
 
 use crate::protocol::{
     AiArtifact, AiArtifactKind, AiArtifactStatus, AiWorkflowResult, HealthLevel,
@@ -69,10 +70,7 @@ pub async fn run_ai_workflow(
             "ai-consent-required",
             "Audio was extracted locally. Cloud AI did not run because consent was not granted.",
         )?;
-        state.emit_event(
-            "ai.artifacts.changed",
-            state.database.list_ai_artifacts(&params.session_id)?,
-        );
+        emit_ai_artifacts_changed(&state, &params.session_id)?;
         return Ok(AiWorkflowResult {
             session_id: params.session_id,
             audio_path: audio_path.display().to_string(),
@@ -103,10 +101,7 @@ pub async fn run_ai_workflow(
             "ai-audio-too-large",
             "Extracted audio is too large for a single cloud transcription upload.",
         )?;
-        state.emit_event(
-            "ai.artifacts.changed",
-            state.database.list_ai_artifacts(&params.session_id)?,
-        );
+        emit_ai_artifacts_changed(&state, &params.session_id)?;
         return Ok(AiWorkflowResult {
             session_id: params.session_id,
             audio_path: audio_path.display().to_string(),
@@ -133,10 +128,7 @@ pub async fn run_ai_workflow(
                 "openai-api-key-missing",
                 "Set OPENAI_API_KEY before running cloud transcription.",
             )?;
-            state.emit_event(
-                "ai.artifacts.changed",
-                state.database.list_ai_artifacts(&params.session_id)?,
-            );
+            emit_ai_artifacts_changed(&state, &params.session_id)?;
             return Ok(AiWorkflowResult {
                 session_id: params.session_id,
                 audio_path: audio_path.display().to_string(),
@@ -146,7 +138,35 @@ pub async fn run_ai_workflow(
     };
 
     let client = reqwest::Client::new();
-    let transcript = transcribe_audio(&client, &api_key, &audio_path).await?;
+    let transcript = match transcribe_audio(&client, &api_key, &audio_path).await {
+        Ok(transcript) => transcript,
+        Err(error) => {
+            artifacts.push(state.database.save_ai_artifact(
+                &params.session_id,
+                AiArtifactKind::Transcript,
+                AiArtifactStatus::Failed,
+                json!({
+                    "message": format!("Cloud transcription failed: {error}"),
+                    "provider": "openai",
+                    "model": transcription_model(),
+                }),
+                None,
+            )?);
+            emit_health_event(
+                &state,
+                Some(&params.session_id),
+                HealthLevel::Warn,
+                "ai-transcription-failed",
+                "Cloud transcription failed. The local recording and extracted audio are still available.",
+            )?;
+            emit_ai_artifacts_changed(&state, &params.session_id)?;
+            return Ok(AiWorkflowResult {
+                session_id: params.session_id,
+                audio_path: audio_path.display().to_string(),
+                artifacts,
+            });
+        }
+    };
     artifacts.push(state.database.save_ai_artifact(
         &params.session_id,
         AiArtifactKind::Transcript,
@@ -159,7 +179,35 @@ pub async fn run_ai_workflow(
         None,
     )?);
 
-    let publish_pack = summarize_and_chapter(&client, &api_key, &transcript).await?;
+    let publish_pack = match summarize_and_chapter(&client, &api_key, &transcript).await {
+        Ok(publish_pack) => publish_pack,
+        Err(error) => {
+            artifacts.push(state.database.save_ai_artifact(
+                &params.session_id,
+                AiArtifactKind::Summary,
+                AiArtifactStatus::Failed,
+                json!({
+                    "message": format!("Summary and chapter generation failed: {error}"),
+                    "provider": "openai",
+                    "model": text_model(),
+                }),
+                None,
+            )?);
+            emit_health_event(
+                &state,
+                Some(&params.session_id),
+                HealthLevel::Warn,
+                "ai-publish-pack-failed",
+                "Transcript was saved, but summary and chapter generation failed.",
+            )?;
+            emit_ai_artifacts_changed(&state, &params.session_id)?;
+            return Ok(AiWorkflowResult {
+                session_id: params.session_id,
+                audio_path: audio_path.display().to_string(),
+                artifacts,
+            });
+        }
+    };
     artifacts.push(state.database.save_ai_artifact(
         &params.session_id,
         AiArtifactKind::Summary,
@@ -183,10 +231,7 @@ pub async fn run_ai_workflow(
         None,
     )?);
 
-    state.emit_event(
-        "ai.artifacts.changed",
-        state.database.list_ai_artifacts(&params.session_id)?,
-    );
+    emit_ai_artifacts_changed(&state, &params.session_id)?;
 
     Ok(AiWorkflowResult {
         session_id: params.session_id,
@@ -199,8 +244,17 @@ pub fn list_ai_artifacts(state: &AppState, session_id: &str) -> Result<Vec<AiArt
     state.database.list_ai_artifacts(session_id)
 }
 
+fn emit_ai_artifacts_changed(state: &AppState, session_id: &str) -> Result<()> {
+    state.emit_event(
+        "ai.artifacts.changed",
+        state.database.list_ai_artifacts(session_id)?,
+    );
+    Ok(())
+}
+
 async fn extract_audio(ffmpeg_path: &str, input_path: &Path, output_path: &Path) -> Result<()> {
-    let status = Command::new(ffmpeg_path)
+    let mut command = Command::new(ffmpeg_path);
+    command
         .args([
             "-y",
             "-hide_banner",
@@ -220,13 +274,24 @@ async fn extract_audio(ffmpeg_path: &str, input_path: &Path, output_path: &Path)
             &output_path.display().to_string(),
         ])
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
+        .stderr(Stdio::piped());
+
+    let output = timeout(Duration::from_secs(20 * 60), command.output())
         .await
+        .context("FFmpeg audio extraction timed out")?
         .with_context(|| format!("Could not start {ffmpeg_path} for audio extraction"))?;
 
-    if !status.success() {
-        bail!("FFmpeg audio extraction failed with {status}");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "FFmpeg audio extraction failed with {}{}",
+            output.status,
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        );
     }
 
     Ok(())

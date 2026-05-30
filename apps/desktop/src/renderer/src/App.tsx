@@ -166,14 +166,14 @@ export function App(): ReactElement {
     setLogs((current) => [...current.slice(-79), log])
   }, [])
 
-  const refreshSessions = useCallback(async (activeClient: BackendClient | null = client) => {
+  const refreshSessions = useCallback(async (activeClient: BackendClient | null) => {
     if (!activeClient) {
       return
     }
 
     const nextSessions = await activeClient.request<SessionSummary[]>('sessions.list')
     setSessions(nextSessions)
-  }, [client])
+  }, [])
 
   useEffect(() => {
     localStorage.setItem('videogre.settings', JSON.stringify(settings))
@@ -686,14 +686,14 @@ export function App(): ReactElement {
               type="checkbox"
               onChange={(event) => setAiConsent(event.target.checked)}
             />
-            <span>Allow cloud AI to upload extracted audio for transcription.</span>
+            <span>Allow cloud AI to upload extracted audio and transcript for summaries and chapters.</span>
           </label>
           <div className="notice warn">
             <AlertTriangle aria-hidden="true" size={18} />
             <span>Recordings stay local by default. Without consent, Videogre only extracts local audio.</span>
           </div>
           <div className="ai-model-note">
-            Uses `OPENAI_API_KEY` when present. Artifacts are stored locally with each session.
+            Uses OPENAI_API_KEY when present. Artifacts are stored locally with each session.
           </div>
         </Panel>
 
