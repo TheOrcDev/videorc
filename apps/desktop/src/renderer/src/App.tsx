@@ -143,6 +143,49 @@ function loadJson<T>(key: string, fallback: T): T {
   }
 }
 
+function loadCaptureConfig(): CaptureConfig {
+  const loaded = loadJson('videogre.captureConfig', defaultCaptureConfig) as Partial<CaptureConfig>
+
+  return {
+    ...defaultCaptureConfig,
+    ...loaded,
+    sources: { ...defaultCaptureConfig.sources, ...(loaded.sources ?? {}) },
+    layout: { ...defaultCaptureConfig.layout, ...(loaded.layout ?? {}) },
+    video: normalizeVideoSettings(loaded.video),
+    recordEnabled: typeof loaded.recordEnabled === 'boolean' ? loaded.recordEnabled : defaultCaptureConfig.recordEnabled,
+    streamEnabled: typeof loaded.streamEnabled === 'boolean' ? loaded.streamEnabled : defaultCaptureConfig.streamEnabled,
+    rtmpPreset: loaded.rtmpPreset ?? defaultCaptureConfig.rtmpPreset,
+    rtmpServerUrl: loaded.rtmpServerUrl ?? defaultCaptureConfig.rtmpServerUrl,
+    streamKey: loaded.streamKey ?? defaultCaptureConfig.streamKey
+  }
+}
+
+function normalizeVideoSettings(video: unknown): VideoSettings {
+  const candidate = video && typeof video === 'object' ? (video as Partial<VideoSettings>) : {}
+  const preset =
+    typeof candidate.preset === 'string' && candidate.preset in videoPresets
+      ? (candidate.preset as VideoPreset)
+      : defaultCaptureConfig.video.preset
+  const fallback = videoPresets[preset]
+
+  return {
+    preset,
+    width: clampNumber(candidate.width, fallback.width, 640, 3840),
+    height: clampNumber(candidate.height, fallback.height, 360, 2160),
+    fps: clampNumber(candidate.fps, fallback.fps, 24, 60),
+    bitrateKbps: clampNumber(candidate.bitrateKbps, fallback.bitrateKbps, 1000, 50000)
+  }
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) {
+    return fallback
+  }
+
+  return Math.min(max, Math.max(min, Math.round(parsed)))
+}
+
 function compactTime(timestamp: string): string {
   try {
     return new Intl.DateTimeFormat(undefined, {
@@ -187,10 +230,10 @@ export function App(): ReactElement {
   const [aiConsent, setAiConsent] = useState(false)
   const [aiRunningSessionId, setAiRunningSessionId] = useState<string | null>(null)
   const [exportRunningSessionId, setExportRunningSessionId] = useState<string | null>(null)
+  const [startRequestPending, setStartRequestPending] = useState(false)
+  const [stopRequestPending, setStopRequestPending] = useState(false)
   const [settings, setSettings] = useState<SettingsState>(() => loadJson('videogre.settings', defaultSettings))
-  const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(() =>
-    loadJson('videogre.captureConfig', defaultCaptureConfig)
-  )
+  const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(loadCaptureConfig)
   const [lastError, setLastError] = useState<string | null>(null)
   const [lastNotice, setLastNotice] = useState<string | null>(null)
 
@@ -437,8 +480,43 @@ export function App(): ReactElement {
     return () => window.clearTimeout(timer)
   }, [client, refreshPreview, wsStatus])
 
+  const outputEnabled = captureConfig.recordEnabled || captureConfig.streamEnabled
+  const streamReady =
+    !captureConfig.streamEnabled ||
+    Boolean(captureConfig.rtmpServerUrl.trim() && captureConfig.streamKey.trim())
+  const isSessionActive =
+    isActiveRecordingState(recording.state) || startRequestPending || stopRequestPending
+  const startBlockedReason = (() => {
+    if (wsStatus !== 'connected') {
+      return `Backend socket is ${wsStatus}.`
+    }
+    if (isSessionActive) {
+      return 'A capture session is already active.'
+    }
+    if (!outputEnabled) {
+      return 'Enable Record MKV, Stream RTMP, or both before starting.'
+    }
+    if (captureConfig.streamEnabled && !captureConfig.rtmpServerUrl.trim()) {
+      return 'Enter an RTMP server before streaming.'
+    }
+    if (captureConfig.streamEnabled && !captureConfig.streamKey.trim()) {
+      return 'Enter a stream key before streaming, or turn Stream RTMP off.'
+    }
+    if (!health) {
+      return 'Checking FFmpeg before starting.'
+    }
+    if (!health.ffmpeg.available) {
+      return health.ffmpeg.message ?? 'FFmpeg is not available.'
+    }
+
+    return null
+  })()
+
   const startSession = useCallback(async () => {
-    if (!client) {
+    if (!client || startBlockedReason) {
+      if (startBlockedReason && !isSessionActive) {
+        setLastError(startBlockedReason)
+      }
       return
     }
 
@@ -446,28 +524,44 @@ export function App(): ReactElement {
       setLastError(null)
       setLastNotice(null)
       setStreamHealth(null)
+      setStartRequestPending(true)
+      setRecording((current) =>
+        isActiveRecordingState(current.state)
+          ? current
+          : { state: 'starting', message: 'Starting capture session.' }
+      )
       const status = await client.request<RecordingStatus>('session.start', sessionParams)
       setRecording(status)
       await refreshSessions(client)
     } catch (error) {
       setLastError(error instanceof Error ? error.message : String(error))
+      setRecording((current) =>
+        current.state === 'starting' && !current.sessionId
+          ? { state: 'idle', message: 'Ready to start a capture session.' }
+          : current
+      )
+    } finally {
+      setStartRequestPending(false)
     }
-  }, [client, refreshSessions, sessionParams])
+  }, [client, isSessionActive, refreshSessions, sessionParams, startBlockedReason])
 
   const stopSession = useCallback(async () => {
-    if (!client) {
+    if (!client || stopRequestPending) {
       return
     }
 
     try {
       setLastError(null)
       setLastNotice(null)
+      setStopRequestPending(true)
       const status = await client.request<RecordingStatus>('session.stop')
       setRecording(status)
     } catch (error) {
       setLastError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setStopRequestPending(false)
     }
-  }, [client])
+  }, [client, stopRequestPending])
 
   const remuxSession = useCallback(
     async (sessionId: string) => {
@@ -538,21 +632,25 @@ export function App(): ReactElement {
     [client]
   )
 
-  const canStart =
+  const canStart = !startBlockedReason
+  const canStop =
     wsStatus === 'connected' &&
-    !['recording', 'streaming', 'starting', 'stopping'].includes(recording.state) &&
-    (captureConfig.recordEnabled || captureConfig.streamEnabled)
-  const canStop = wsStatus === 'connected' && ['recording', 'streaming', 'starting'].includes(recording.state)
-  const isSessionActive = ['recording', 'streaming', 'starting', 'stopping'].includes(recording.state)
+    ['recording', 'streaming', 'starting'].includes(recording.state) &&
+    !stopRequestPending
+  const visibleStartBlockedReason =
+    startBlockedReason &&
+    !lastError &&
+    !isActiveRecordingState(recording.state) &&
+    !startRequestPending &&
+    !stopRequestPending
+      ? startBlockedReason
+      : null
   const selectedCaptureDevice = findDevice(
     deviceList.devices,
     captureConfig.sources.screenId ?? captureConfig.sources.windowId
   )
   const selectedCamera = findDevice(deviceList.devices, captureConfig.sources.cameraId)
   const selectedMicrophone = findDevice(deviceList.devices, captureConfig.sources.microphoneId)
-  const streamReady =
-    !captureConfig.streamEnabled ||
-    Boolean(captureConfig.rtmpServerUrl.trim() && captureConfig.streamKey.trim())
   const setupSteps = setupChecklist({
     audioMeter,
     captureConfig,
@@ -626,13 +724,19 @@ export function App(): ReactElement {
           </div>
 
           <div className="transport-row">
-            <button className="primary-action" type="button" disabled={!canStart} onClick={startSession}>
+            <button
+              className="primary-action"
+              type="button"
+              disabled={!canStart}
+              onClick={startSession}
+              title={startBlockedReason ?? 'Start session'}
+            >
               <Play size={18} />
-              Start session
+              {startRequestPending ? 'Starting...' : 'Start session'}
             </button>
             <button className="secondary-action" type="button" disabled={!canStop} onClick={stopSession}>
               <CircleStop size={18} />
-              Stop
+              {stopRequestPending ? 'Stopping...' : 'Stop'}
             </button>
           </div>
 
@@ -645,6 +749,12 @@ export function App(): ReactElement {
             <div className="notice error">
               <AlertTriangle aria-hidden="true" size={18} />
               <span>{lastError}</span>
+            </div>
+          ) : null}
+          {visibleStartBlockedReason ? (
+            <div className="notice warn">
+              <AlertTriangle aria-hidden="true" size={18} />
+              <span>{visibleStartBlockedReason}</span>
             </div>
           ) : null}
           {lastNotice ? (
@@ -1215,6 +1325,10 @@ function mergeStreamHealth(current: StreamHealth | null, update: StreamHealth): 
     droppedFrames: update.droppedFrames ?? current.droppedFrames,
     speed: update.speed ?? current.speed
   }
+}
+
+function isActiveRecordingState(state: RecordingStatus['state']): boolean {
+  return ['recording', 'streaming', 'starting', 'stopping'].includes(state)
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {

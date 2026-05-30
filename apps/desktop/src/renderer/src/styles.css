@@ -633,6 +633,10 @@ h1 {
   color: #6c4c16;
 }
 
+.notice.warn {
+  margin-top: 14px;
+}
+
 .notice.error {
   margin-top: 14px;
   border: 1px solid #df9a8d;
