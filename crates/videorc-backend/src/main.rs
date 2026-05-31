@@ -3,6 +3,7 @@ mod audio;
 mod camera_capture;
 mod devices;
 mod ffmpeg;
+mod pipeline;
 mod protocol;
 mod recording;
 mod scene;

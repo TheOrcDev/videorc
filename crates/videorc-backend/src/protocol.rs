@@ -123,6 +123,10 @@ pub struct RecordingStatus {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audio_tracks: Vec<AudioTrack>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<RecordingPipelineStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
 
@@ -135,6 +139,63 @@ pub enum RecordingState {
     Streaming,
     Stopping,
     Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingPipelineStatus {
+    pub container: RecordingContainer,
+    pub finalization: RecordingFinalizationState,
+    pub stages: Vec<RecordingPipelineStageStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingPipelineStageStatus {
+    pub stage: RecordingPipelineStage,
+    pub state: RecordingPipelineStageState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordingPipelineStage {
+    Capture,
+    Render,
+    VideoEncoder,
+    AudioEncoder,
+    Muxer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordingPipelineStageState {
+    Pending,
+    Starting,
+    Running,
+    Finalizing,
+    Finished,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordingFinalizationState {
+    None,
+    Finalizing,
+    Finalized,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordingContainer {
+    None,
+    Mkv,
+    Flv,
+    Tee,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -537,6 +598,8 @@ pub struct SessionSummary {
     pub output_path: Option<String>,
     pub mp4_path: Option<String>,
     pub stream_preset: Option<String>,
+    pub container: Option<String>,
+    pub duration_ms: Option<i64>,
     pub layout: LayoutSettings,
     pub sources: SourceSelection,
     pub health_events: Vec<HealthEvent>,

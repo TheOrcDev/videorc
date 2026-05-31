@@ -57,6 +57,7 @@ export function StudioTab(): ReactElement {
   const banner = studioBlocker(studio)
   const audioSummary =
     recording.audioTracks?.map((track) => track.label).join(' + ') ?? (selectedMicrophone ? 'Microphone' : 'None')
+  const pipelineSummary = recording.pipeline ? pipelineStatusLabel(recording.pipeline.finalization) : 'Ready'
 
   return (
     <div className="flex flex-col gap-4">
@@ -180,6 +181,7 @@ export function StudioTab(): ReactElement {
                   .filter(Boolean)
                   .join(' + ') || 'None'}
               />
+              <SummaryRow label="Pipeline" value={pipelineSummary} />
             </dl>
             <Separator />
             <div className="flex flex-wrap items-center gap-2">
@@ -212,6 +214,19 @@ function SummaryRow({ label, value }: { label: string; value: string }): ReactEl
       <dd className="truncate text-right font-medium">{value}</dd>
     </>
   )
+}
+
+function pipelineStatusLabel(status: string): string {
+  switch (status) {
+    case 'finalizing':
+      return 'Finalizing'
+    case 'finalized':
+      return 'Finalized'
+    case 'failed':
+      return 'Failed'
+    default:
+      return 'Running'
+  }
 }
 
 function Metric({ label, value }: { label: string; value: string }): ReactElement {

@@ -3,7 +3,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
@@ -19,11 +19,13 @@ use crate::audio::{
 use crate::camera_capture::{native_camera_name_for_id, parse_native_camera_id};
 use crate::devices::{find_avfoundation_camera_index, find_avfoundation_screen_index};
 use crate::ffmpeg::resolve_ffmpeg_path;
+use crate::pipeline::{RecordingPipeline, container_for_outputs, container_key};
 use crate::protocol::{
     AudioTrack, AudioTrackSource, CameraCorner, CameraFit, CameraShape, CameraSize, HealthLevel,
     PreviewLiveParams, PreviewLiveSource, PreviewLiveState, PreviewLiveStatus, PreviewSnapshot,
-    PreviewSnapshotParams, RecordingState, RecordingStatus, RemuxSessionParams, RtmpPreset,
-    RtmpSettings, StartSessionParams, StreamHealth, VideoPreset, VideoSettings,
+    PreviewSnapshotParams, RecordingPipelineStage, RecordingState, RecordingStatus,
+    RemuxSessionParams, RtmpPreset, RtmpSettings, StartSessionParams, StreamHealth, VideoPreset,
+    VideoSettings,
 };
 use crate::screen_capture::{parse_screencapturekit_display_id, parse_screencapturekit_window_id};
 use crate::state::AppState;
@@ -54,6 +56,7 @@ pub struct ActiveRecording {
     pub started_at: String,
     pub mode: String,
     pub audio_tracks: Vec<AudioTrack>,
+    pub pipeline: RecordingPipeline,
     pub native_audio: Option<NativeAudioCaptureSession>,
     pub stop_requested: bool,
 }
@@ -84,6 +87,8 @@ impl ActiveRecording {
             stream_url: self.stream_url.clone(),
             started_at: Some(self.started_at.clone()),
             audio_tracks: self.audio_tracks.clone(),
+            pipeline: Some(self.pipeline.status()),
+            duration_ms: None,
             message,
         }
     }
@@ -124,6 +129,8 @@ pub fn idle_status() -> RecordingStatus {
         stream_url: None,
         started_at: None,
         audio_tracks: Vec::new(),
+        pipeline: None,
+        duration_ms: None,
         message: Some("Ready to start a capture session.".to_string()),
     }
 }
@@ -167,6 +174,8 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
         .as_ref()
         .map(|target| target.redacted_url.clone());
     let mode = output_mode(params.output.record_enabled, params.output.stream_enabled);
+    let container =
+        container_for_outputs(params.output.record_enabled, params.output.stream_enabled);
 
     state.database.create_session(&NewSession {
         id: session_id.clone(),
@@ -174,6 +183,7 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
         started_at: started_at.to_rfc3339(),
         mode: mode.to_string(),
         output_path: output_path.as_ref().map(|path| path.display().to_string()),
+        container: Some(container_key(&container).to_string()),
         stream_preset: params
             .output
             .stream_enabled
@@ -217,6 +227,11 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
     }
     emit_audio_track_health_events(&state, &session_id, &params, &audio_tracks)?;
 
+    let mut pipeline = RecordingPipeline::new(
+        params.output.record_enabled,
+        params.output.stream_enabled,
+        &audio_tracks,
+    );
     let args = ffmpeg_args(
         &capture,
         &params,
@@ -233,6 +248,8 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
             stream_url: stream_url.clone(),
             started_at: Some(started_at.to_rfc3339()),
             audio_tracks: audio_tracks.clone(),
+            pipeline: Some(pipeline.status()),
+            duration_ms: None,
             message: Some(format!("Starting {mode} session.")),
         },
     );
@@ -249,6 +266,7 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
     let stdout = child.stdout.take();
     let stdin = child.stdin.take();
     let pid = child.id().unwrap_or_default();
+    pipeline.mark_running();
     let active = ActiveRecording {
         session_id: session_id.clone(),
         pid,
@@ -258,6 +276,7 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
         started_at: started_at.to_rfc3339(),
         mode: mode.to_string(),
         audio_tracks,
+        pipeline,
         native_audio: native_audio_source
             .map(|prepared| attach_fifo_writer(prepared.source, prepared.fifo_path)),
         stop_requested: false,
@@ -338,6 +357,9 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     let wait_session_id = session_id.clone();
     let mut force_stop_now = false;
     active.stop_requested = true;
+    active
+        .pipeline
+        .mark_finalizing("Waiting for FFmpeg to flush and close output files.");
     if let Some(mut stdin) = active.stdin.take() {
         stdin
             .write_all(b"q\n")
@@ -418,6 +440,7 @@ pub async fn remux_session(state: AppState, params: RemuxSessionParams) -> Resul
         "completed",
         None,
         Some(output.display().to_string()),
+        None,
     )?;
     state.emit_log("info", "Created MP4 copy for session.");
     Ok(output.display().to_string())
@@ -1134,50 +1157,57 @@ async fn monitor_session(
 ) {
     let status = child.wait().await;
     let mut guard = state.recording.lock().await;
-    let active_recording = guard
+    let monitored_recording = guard
         .as_ref()
         .filter(|active| active.session_id == session_id)
-        .map(|active| active.stop_requested);
-    let native_audio_stats = guard
-        .as_ref()
-        .filter(|active| active.session_id == session_id)
-        .and_then(|active| {
-            active.native_audio.as_ref().map(|audio| {
-                (
-                    audio.device_name.clone(),
-                    audio.captured_frames(),
-                    audio.dropped_frames(),
-                )
-            })
+        .map(|active| {
+            let native_audio_stats = active.native_audio.as_ref().map(|audio| NativeAudioStats {
+                device_name: audio.device_name.clone(),
+                captured_frames: audio.captured_frames(),
+                dropped_frames: audio.dropped_frames(),
+            });
+            MonitoredRecording {
+                stop_requested: active.stop_requested,
+                started_at: active.started_at.clone(),
+                pipeline: active.pipeline.clone(),
+                native_audio_stats,
+            }
         });
-    let had_active_recording = active_recording.is_some();
-    let stop_requested = active_recording.unwrap_or(false);
-    if had_active_recording {
+    if monitored_recording.is_some() {
         guard.take();
     }
     drop(guard);
 
-    if !had_active_recording {
+    let Some(mut monitored_recording) = monitored_recording else {
         return;
-    }
+    };
 
-    if let Some((device_name, captured_frames, dropped_frames)) = native_audio_stats {
+    if let Some(native_audio_stats) = monitored_recording.native_audio_stats {
         state.emit_log(
-            if dropped_frames > 0 { "warn" } else { "info" },
+            if native_audio_stats.dropped_frames > 0 {
+                "warn"
+            } else {
+                "info"
+            },
             format!(
-                "Native microphone capture ended for {device_name}: {captured_frames} frames captured, {dropped_frames} frames dropped."
+                "Native microphone capture ended for {}: {} frames captured, {} frames dropped.",
+                native_audio_stats.device_name,
+                native_audio_stats.captured_frames,
+                native_audio_stats.dropped_frames
             ),
         );
     }
 
     let ended_at = Utc::now().to_rfc3339();
+    let duration_ms = recording_duration_ms(&monitored_recording.started_at, &ended_at);
     match status {
-        Ok(exit_status) if exit_status.success() || stop_requested => {
+        Ok(exit_status) if exit_status.success() || monitored_recording.stop_requested => {
             let message = if exit_status.success() {
                 "Capture session finalized.".to_string()
             } else {
                 format!("Capture session finalized after stop signal ({exit_status}).")
             };
+            monitored_recording.pipeline.mark_finished();
             state.emit_log(
                 if exit_status.success() {
                     "info"
@@ -1186,9 +1216,20 @@ async fn monitor_session(
                 },
                 &message,
             );
-            let _ = state
-                .database
-                .finish_session(&session_id, "completed", Some(ended_at), None);
+            let _ = state.database.finish_session(
+                &session_id,
+                "completed",
+                Some(ended_at),
+                None,
+                duration_ms,
+            );
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Info,
+                "recording-finalized",
+                "Recording pipeline finalized and output metadata was saved.",
+            );
             state.emit_event(
                 "recording.status",
                 RecordingStatus {
@@ -1198,16 +1239,25 @@ async fn monitor_session(
                     stream_url: None,
                     started_at: None,
                     audio_tracks: Vec::new(),
+                    pipeline: Some(monitored_recording.pipeline.status()),
+                    duration_ms,
                     message: Some("Capture session finalized.".to_string()),
                 },
             );
         }
         Ok(exit_status) => {
             let message = format!("FFmpeg exited with {exit_status}");
+            monitored_recording
+                .pipeline
+                .mark_failed(RecordingPipelineStage::Muxer, &message);
             state.emit_log("error", &message);
-            let _ = state
-                .database
-                .finish_session(&session_id, "failed", Some(ended_at), None);
+            let _ = state.database.finish_session(
+                &session_id,
+                "failed",
+                Some(ended_at),
+                None,
+                duration_ms,
+            );
             let _ = emit_health_event(
                 &state,
                 Some(&session_id),
@@ -1224,16 +1274,25 @@ async fn monitor_session(
                     stream_url: None,
                     started_at: None,
                     audio_tracks: Vec::new(),
+                    pipeline: Some(monitored_recording.pipeline.status()),
+                    duration_ms,
                     message: Some(message),
                 },
             );
         }
         Err(error) => {
             let message = format!("Could not wait for FFmpeg: {error}");
+            monitored_recording
+                .pipeline
+                .mark_failed(RecordingPipelineStage::Muxer, &message);
             state.emit_log("error", &message);
-            let _ = state
-                .database
-                .finish_session(&session_id, "failed", Some(ended_at), None);
+            let _ = state.database.finish_session(
+                &session_id,
+                "failed",
+                Some(ended_at),
+                None,
+                duration_ms,
+            );
             let _ = emit_health_event(
                 &state,
                 Some(&session_id),
@@ -1250,6 +1309,8 @@ async fn monitor_session(
                     stream_url: None,
                     started_at: None,
                     audio_tracks: Vec::new(),
+                    pipeline: Some(monitored_recording.pipeline.status()),
+                    duration_ms,
                     message: Some(message),
                 },
             );
@@ -1257,6 +1318,28 @@ async fn monitor_session(
     }
 
     restart_idle_live_preview_if_desired(state).await;
+}
+
+#[derive(Debug)]
+struct NativeAudioStats {
+    device_name: String,
+    captured_frames: u64,
+    dropped_frames: u64,
+}
+
+#[derive(Debug)]
+struct MonitoredRecording {
+    stop_requested: bool,
+    started_at: String,
+    pipeline: RecordingPipeline,
+    native_audio_stats: Option<NativeAudioStats>,
+}
+
+fn recording_duration_ms(started_at: &str, ended_at: &str) -> Option<i64> {
+    let started = DateTime::parse_from_rfc3339(started_at).ok()?;
+    let ended = DateTime::parse_from_rfc3339(ended_at).ok()?;
+
+    Some((ended - started).num_milliseconds().max(0))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2373,6 +2456,8 @@ mod tests {
                     stream_url: None,
                     started_at: None,
                     audio_tracks: Vec::new(),
+                    pipeline: None,
+                    duration_ms: None,
                     message: Some("Stopping.".to_string()),
                 },
             ))
@@ -2387,6 +2472,8 @@ mod tests {
                     stream_url: None,
                     started_at: None,
                     audio_tracks: Vec::new(),
+                    pipeline: None,
+                    duration_ms: None,
                     message: Some("Capture session finalized.".to_string()),
                 },
             ))

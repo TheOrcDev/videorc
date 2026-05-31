@@ -44,10 +44,36 @@ export interface RecordingStatus {
   streamUrl?: string
   startedAt?: string
   audioTracks?: AudioTrack[]
+  pipeline?: RecordingPipelineStatus
+  durationMs?: number
   message?: string
 }
 
 export type AudioTrackSource = 'microphone' | 'test-tone'
+
+export type RecordingContainer = 'none' | 'mkv' | 'flv' | 'tee'
+export type RecordingFinalizationState = 'none' | 'finalizing' | 'finalized' | 'failed'
+export type RecordingPipelineStage = 'capture' | 'render' | 'video-encoder' | 'audio-encoder' | 'muxer'
+export type RecordingPipelineStageState =
+  | 'pending'
+  | 'starting'
+  | 'running'
+  | 'finalizing'
+  | 'finished'
+  | 'failed'
+  | 'skipped'
+
+export interface RecordingPipelineStatus {
+  container: RecordingContainer
+  finalization: RecordingFinalizationState
+  stages: RecordingPipelineStageStatus[]
+}
+
+export interface RecordingPipelineStageStatus {
+  stage: RecordingPipelineStage
+  state: RecordingPipelineStageState
+  detail?: string
+}
 
 export interface AudioTrack {
   id: string
@@ -347,6 +373,8 @@ export interface SessionSummary {
   outputPath?: string
   mp4Path?: string
   streamPreset?: string
+  container?: RecordingContainer
+  durationMs?: number
   layout: LayoutSettings
   sources: SourceSelection
   healthEvents: HealthEvent[]

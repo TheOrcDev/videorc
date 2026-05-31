@@ -8,7 +8,7 @@ import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useStudio } from '@/hooks/use-studio'
 import type { SessionSummary } from '@/lib/backend'
-import { dayLabel } from '@/lib/format'
+import { dayLabel, durationMsLabel } from '@/lib/format'
 
 export function LibraryTab({ onOpenInAi }: { onOpenInAi: (sessionId: string) => void }): ReactElement {
   const { sessions, remuxSession } = useStudio()
@@ -71,6 +71,10 @@ function SessionRow({
           ) : null}
           {session.aiArtifacts.length ? (
             <Badge variant="secondary">{session.aiArtifacts.length} AI</Badge>
+          ) : null}
+          {session.container ? <Badge variant="outline">{session.container.toUpperCase()}</Badge> : null}
+          {typeof session.durationMs === 'number' ? (
+            <Badge variant="secondary">{durationMsLabel(session.durationMs)}</Badge>
           ) : null}
           {session.mp4Path ? <Badge variant="success">MP4</Badge> : null}
         </div>

@@ -24,6 +24,7 @@ pub struct NewSession {
     pub started_at: String,
     pub mode: String,
     pub output_path: Option<String>,
+    pub container: Option<String>,
     pub stream_preset: Option<String>,
     pub sources: SourceSelection,
     pub layout: LayoutSettings,
@@ -56,15 +57,16 @@ impl Database {
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO sessions (
-                id, title, started_at, status, mode, output_path, stream_preset,
+                id, title, started_at, status, mode, output_path, container, stream_preset,
                 sources_json, layout_json, output_json
-            ) VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9)",
+            ) VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 session.id,
                 session.title,
                 session.started_at,
                 session.mode,
                 session.output_path,
+                session.container,
                 session.stream_preset,
                 serde_json::to_string(&session.sources)?,
                 serde_json::to_string(&session.layout)?,
@@ -80,15 +82,17 @@ impl Database {
         status: &str,
         ended_at: Option<String>,
         mp4_path: Option<String>,
+        duration_ms: Option<i64>,
     ) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
             "UPDATE sessions
              SET status = ?2,
                  ended_at = COALESCE(?3, ended_at),
-                 mp4_path = COALESCE(?4, mp4_path)
+                 mp4_path = COALESCE(?4, mp4_path),
+                 duration_ms = COALESCE(?5, duration_ms)
              WHERE id = ?1",
-            params![session_id, status, ended_at, mp4_path],
+            params![session_id, status, ended_at, mp4_path, duration_ms],
         )?;
         Ok(())
     }
@@ -186,15 +190,15 @@ impl Database {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
-                    stream_preset, sources_json, layout_json
+                    stream_preset, container, duration_ms, sources_json, layout_json
              FROM sessions
              ORDER BY started_at DESC
              LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
             let id: String = row.get(0)?;
-            let sources_json: String = row.get(9)?;
-            let layout_json: String = row.get(10)?;
+            let sources_json: String = row.get(11)?;
+            let layout_json: String = row.get(12)?;
             Ok((
                 id,
                 row.get::<_, String>(1)?,
@@ -205,6 +209,8 @@ impl Database {
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<i64>>(10)?,
                 sources_json,
                 layout_json,
             ))
@@ -222,6 +228,8 @@ impl Database {
                 output_path,
                 mp4_path,
                 stream_preset,
+                container,
+                duration_ms,
                 sources_json,
                 layout_json,
             ) = row?;
@@ -238,6 +246,8 @@ impl Database {
                 output_path,
                 mp4_path,
                 stream_preset,
+                container,
+                duration_ms,
                 sources: serde_json::from_str(&sources_json)?,
                 layout: serde_json::from_str(&layout_json)?,
             });
@@ -273,6 +283,8 @@ impl Database {
                 output_path TEXT,
                 mp4_path TEXT,
                 stream_preset TEXT,
+                container TEXT,
+                duration_ms INTEGER,
                 sources_json TEXT NOT NULL,
                 layout_json TEXT NOT NULL,
                 output_json TEXT NOT NULL
@@ -306,6 +318,8 @@ impl Database {
             );
             ",
         )?;
+        ensure_column(&conn, "sessions", "container", "container TEXT")?;
+        ensure_column(&conn, "sessions", "duration_ms", "duration_ms INTEGER")?;
         Ok(())
     }
 
@@ -370,6 +384,20 @@ impl Database {
             .lock()
             .map_err(|_| anyhow::anyhow!("SQLite connection lock was poisoned"))
     }
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+
+    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {definition}"), [])?;
+    Ok(())
 }
 
 pub fn default_database_path() -> PathBuf {

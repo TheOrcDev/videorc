@@ -47,6 +47,17 @@ export function durationLabel(startedAt: string, now: number): string {
   return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
 }
 
+export function durationMsLabel(durationMs?: number): string {
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) {
+    return '--:--'
+  }
+
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+}
+
 export function formatDb(value?: number): string {
   return typeof value === 'number' ? `${value.toFixed(1)} dB` : 'Not checked'
 }
