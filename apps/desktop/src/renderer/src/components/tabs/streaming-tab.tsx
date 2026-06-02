@@ -54,6 +54,7 @@ const PLATFORM_ICON: Record<StreamPlatform, Icon> = {
 export function StreamingTab(): ReactElement {
   const {
     captureConfig,
+    connectPlatformAccount,
     disconnectPlatformAccount,
     patchStreamMetadataDraft,
     patchStreamTargetMetadataDraft,
@@ -122,6 +123,7 @@ export function StreamingTab(): ReactElement {
             key={target.id}
             runtime={runtimeById.get(target.id)}
             target={target}
+            onConnect={connectPlatformAccount}
             onDisconnect={disconnectPlatformAccount}
             onPatch={patchStreamingTarget}
           />
@@ -227,6 +229,7 @@ function DestinationCard({
   account,
   disabled,
   runtime,
+  onConnect,
   onDisconnect,
   onPatch
 }: {
@@ -234,6 +237,7 @@ function DestinationCard({
   account?: PlatformAccount
   disabled: boolean
   runtime?: StreamTargetRuntime
+  onConnect: (platform: StreamPlatform) => void
   onDisconnect: (platform: StreamPlatform) => void
   onPatch: (targetId: string, patch: Partial<StreamTargetSettings>) => void
 }): ReactElement {
@@ -306,6 +310,7 @@ function DestinationCard({
           account={account}
           disabled={disabled}
           platform={target.platform}
+          onConnect={onConnect}
           onDisconnect={onDisconnect}
         />
       ) : (
@@ -354,11 +359,13 @@ function OAuthAccountPanel({
   account,
   disabled,
   platform,
+  onConnect,
   onDisconnect
 }: {
   account?: PlatformAccount
   disabled: boolean
   platform: StreamPlatform
+  onConnect: (platform: StreamPlatform) => void
   onDisconnect: (platform: StreamPlatform) => void
 }): ReactElement {
   if (!account) {
@@ -366,12 +373,12 @@ function OAuthAccountPanel({
       <div className="flex flex-col gap-2 rounded-lg border bg-muted/30 p-3">
         <div className="flex items-center justify-between gap-3">
           <span className="text-sm font-medium">No account connected</span>
-          <Button disabled size="sm" variant="secondary">
+          <Button disabled={disabled} size="sm" variant="secondary" onClick={() => onConnect(platform)}>
             <LinkSimple data-icon="inline-start" weight="bold" />
             Connect
           </Button>
         </div>
-        <p className="text-xs text-muted-foreground">Provider setup pending.</p>
+        <p className="text-xs text-muted-foreground">Uses backend provider credentials.</p>
       </div>
     )
   }

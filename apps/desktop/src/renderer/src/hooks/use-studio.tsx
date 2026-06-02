@@ -41,6 +41,7 @@ import type {
   LayoutSettings,
   PreviewLiveStatus,
   PlatformAccount,
+  OAuthStartResult,
   RecordingStatus,
   RuntimeInfo,
   RtmpPreset,
@@ -128,6 +129,7 @@ export type StudioContextValue = {
   // actions
   refreshBackend: () => Promise<void>
   refreshPlatformAccounts: () => Promise<void>
+  connectPlatformAccount: (platform: PlatformAccount['platform']) => Promise<void>
   disconnectPlatformAccount: (platform: PlatformAccount['platform']) => Promise<void>
   refreshStreamMetadata: () => Promise<void>
   saveStreamMetadataDraft: () => Promise<void>
@@ -566,11 +568,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           .then(setStreamMetadataValidation)
       }),
       nextClient.on('platformAccounts.oauth.callback', (payload) => {
-        const result = payload as { status?: string; message?: string }
-        if (result.status === 'success') {
-          toast.success('OAuth callback received.', {
-            description: 'Provider token exchange is the next OAuth slice.'
-          })
+        const result = payload as {
+          status?: string
+          message?: string
+          accountConnected?: boolean
+        }
+        if (result.status === 'success' && result.accountConnected) {
+          void refreshPlatformAccountsForClient(nextClient)
+          toast.success('Account connected.')
+        } else if (result.status === 'success') {
+          toast.success('OAuth callback received.')
         } else {
           toast.error('OAuth callback failed.', {
             description: result.message ?? result.status ?? 'Connection could not be completed.'
@@ -1143,6 +1150,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [client, refreshPlatformAccountsForClient, reportError, wsStatus]
   )
 
+  const connectPlatformAccount = useCallback(
+    async (platform: PlatformAccount['platform']) => {
+      if (!client || wsStatus !== 'connected') {
+        toast.error('Backend socket is not connected.')
+        return
+      }
+      if (!window.videorc?.openOAuthUrl) {
+        toast.error('OAuth browser launch is unavailable outside Electron.')
+        return
+      }
+
+      try {
+        setLastError(null)
+        const result = await client.request<OAuthStartResult>('platformAccounts.oauth.startProvider', { platform })
+        await window.videorc.openOAuthUrl(result.authUrl)
+        toast.success('OAuth browser opened.')
+      } catch (error) {
+        reportError(error)
+      }
+    },
+    [client, reportError, wsStatus]
+  )
+
   const patchStreamMetadataDraft = useCallback((patch: Partial<StreamMetadataDraft>) => {
     setStreamMetadataDraft((current) => (current ? { ...current, ...patch } : current))
     setStreamMetadataValidation(null)
@@ -1555,6 +1585,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     runtimeInfo,
     refreshBackend,
     refreshPlatformAccounts,
+    connectPlatformAccount,
     disconnectPlatformAccount,
     refreshStreamMetadata,
     saveStreamMetadataDraft,
