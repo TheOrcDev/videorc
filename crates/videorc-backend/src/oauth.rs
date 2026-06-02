@@ -114,6 +114,14 @@ pub struct PendingOAuthExchange {
     pub code_verifier: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshedOAuthToken {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub scopes: Vec<String>,
+    pub expires_at: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct OAuthProviderConfig {
     authorization_url: String,
@@ -334,7 +342,14 @@ where
     if token.access_token.trim().is_empty() {
         anyhow::bail!("OAuth token response did not include an access token.");
     }
-    let profile = fetch_provider_profile(exchange, &token.access_token, client).await?;
+    let profile = fetch_provider_profile(
+        exchange.platform,
+        &exchange.profile_url,
+        &exchange.client_id,
+        &token.access_token,
+        client,
+    )
+    .await?;
 
     let platform_id = stream_platform_id(exchange.platform);
     let access_ref = format!("platform:{platform_id}:oauth:access");
@@ -373,35 +388,115 @@ where
     })
 }
 
+pub async fn refresh_provider_token(
+    platform: StreamPlatform,
+    refresh_token: &str,
+    client: &reqwest::Client,
+) -> Result<RefreshedOAuthToken> {
+    if refresh_token.trim().is_empty() {
+        anyhow::bail!("Refresh token is empty.");
+    }
+    let config = provider_config(platform)?;
+    let mut form = vec![
+        ("grant_type", "refresh_token".to_string()),
+        ("refresh_token", refresh_token.to_string()),
+        ("client_id", config.client_id),
+    ];
+    if let Some(client_secret) = config.client_secret {
+        form.push(("client_secret", client_secret));
+    }
+    let response = client
+        .post(&config.token_url)
+        .form(&form)
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "Could not refresh {} OAuth token",
+                stream_platform_label(platform)
+            )
+        })?;
+    if !response.status().is_success() {
+        let status = response.status();
+        anyhow::bail!(
+            "{} token refresh failed with HTTP {status}",
+            stream_platform_label(platform)
+        );
+    }
+    let token = response
+        .json::<OAuthTokenResponse>()
+        .await
+        .context("Could not parse OAuth refresh response")?;
+    if token.access_token.trim().is_empty() {
+        anyhow::bail!("OAuth refresh response did not include an access token.");
+    }
+    let scopes = token
+        .scopes()
+        .filter(|scopes| !scopes.is_empty())
+        .unwrap_or_else(|| config.scopes.clone());
+    let expires_at = token
+        .expires_in
+        .and_then(|seconds| Utc::now().checked_add_signed(Duration::seconds(seconds)))
+        .map(|expires_at| expires_at.to_rfc3339());
+    Ok(RefreshedOAuthToken {
+        access_token: token.access_token,
+        refresh_token: token.refresh_token,
+        scopes,
+        expires_at,
+    })
+}
+
+pub async fn validate_provider_access(
+    platform: StreamPlatform,
+    access_token: &str,
+    client: &reqwest::Client,
+) -> Result<()> {
+    if access_token.trim().is_empty() {
+        anyhow::bail!("Access token is empty.");
+    }
+    let config = provider_config(platform)?;
+    fetch_provider_profile(
+        platform,
+        &config.profile_url,
+        &config.client_id,
+        access_token,
+        client,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn fetch_provider_profile(
-    exchange: &PendingOAuthExchange,
+    platform: StreamPlatform,
+    profile_url: &str,
+    client_id: &str,
     access_token: &str,
     client: &reqwest::Client,
 ) -> Result<ProviderProfile> {
-    let request = client.get(&exchange.profile_url).bearer_auth(access_token);
-    let request = if exchange.platform == StreamPlatform::Twitch {
-        request.header("Client-Id", &exchange.client_id)
+    let request = client.get(profile_url).bearer_auth(access_token);
+    let request = if platform == StreamPlatform::Twitch {
+        request.header("Client-Id", client_id)
     } else {
         request
     };
     let response = request.send().await.with_context(|| {
         format!(
             "Could not fetch {} account profile",
-            stream_platform_label(exchange.platform)
+            stream_platform_label(platform)
         )
     })?;
     if !response.status().is_success() {
         let status = response.status();
         anyhow::bail!(
             "{} profile lookup failed with HTTP {status}",
-            stream_platform_label(exchange.platform)
+            stream_platform_label(platform)
         );
     }
     let value = response
         .json::<serde_json::Value>()
         .await
         .context("Could not parse OAuth profile response")?;
-    parse_provider_profile(exchange.platform, value)
+    parse_provider_profile(platform, value)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

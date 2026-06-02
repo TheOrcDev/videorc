@@ -213,6 +213,28 @@ pub struct PlatformAccountPlatformParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlatformAccountValidationState {
+    Valid,
+    Refreshed,
+    NeedsReconnect,
+    Missing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformAccountValidation {
+    pub platform: StreamPlatform,
+    pub state: PlatformAccountValidationState,
+    pub account_id: Option<String>,
+    pub account_label: Option<String>,
+    pub scopes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamSessionTargetHistory {
     pub target_id: String,

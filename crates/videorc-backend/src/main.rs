@@ -59,7 +59,10 @@ use crate::ffmpeg::{default_ffmpeg_path, resolve_ffmpeg_path_ref};
 use crate::oauth::{OAuthCompleteParams, OAuthStartParams, OAuthStartProviderParams};
 use crate::state::AppState;
 use crate::storage::Database;
-use crate::streaming::{StreamMetadataDraft, validate_stream_metadata_draft};
+use crate::streaming::{
+    PlatformAccountStatus, PlatformAccountValidation, PlatformAccountValidationState,
+    StreamMetadataDraft, UpsertPlatformAccount, validate_stream_metadata_draft,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -311,6 +314,223 @@ async fn complete_oauth_callback(
     }
 
     result
+}
+
+async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountValidation> {
+    let credentials = match state.database.list_platform_account_credentials() {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            return vec![PlatformAccountValidation {
+                platform: streaming::StreamPlatform::Custom,
+                state: PlatformAccountValidationState::NeedsReconnect,
+                account_id: None,
+                account_label: None,
+                scopes: Vec::new(),
+                expires_at: None,
+                message: format!("Could not load platform accounts: {error}"),
+            }];
+        }
+    };
+    let client = reqwest::Client::new();
+    let mut changed = false;
+    let mut validations = Vec::new();
+
+    for credential in credentials {
+        let mut account = credential.account.clone();
+        let Some(access_ref) = credential.token_secret_ref.as_deref() else {
+            account.status = PlatformAccountStatus::NeedsReconnect;
+            changed |= upsert_validated_account(state, &credential, account.clone()).is_ok();
+            validations.push(platform_validation(
+                &account,
+                PlatformAccountValidationState::NeedsReconnect,
+                "No access token is stored for this account.",
+            ));
+            continue;
+        };
+
+        let mut access_token = match secrets::get_secret(access_ref) {
+            Ok(token) => token,
+            Err(error) => {
+                account.status = PlatformAccountStatus::NeedsReconnect;
+                changed |= upsert_validated_account(state, &credential, account.clone()).is_ok();
+                validations.push(platform_validation(
+                    &account,
+                    PlatformAccountValidationState::NeedsReconnect,
+                    format!("Could not read access token: {error}"),
+                ));
+                continue;
+            }
+        };
+
+        let mut refreshed = false;
+        if token_expires_soon(account.expires_at.as_deref()) {
+            let Some(refresh_ref) = credential.refresh_token_secret_ref.as_deref() else {
+                account.status = PlatformAccountStatus::NeedsReconnect;
+                changed |= upsert_validated_account(state, &credential, account.clone()).is_ok();
+                validations.push(platform_validation(
+                    &account,
+                    PlatformAccountValidationState::NeedsReconnect,
+                    "Access token is expired and no refresh token is stored.",
+                ));
+                continue;
+            };
+
+            match secrets::get_secret(refresh_ref) {
+                Ok(refresh_token) => {
+                    match oauth::refresh_provider_token(account.platform, &refresh_token, &client)
+                        .await
+                    {
+                        Ok(token) => {
+                            if let Err(error) = secrets::put_secret(access_ref, &token.access_token)
+                            {
+                                account.status = PlatformAccountStatus::NeedsReconnect;
+                                changed |=
+                                    upsert_validated_account(state, &credential, account.clone())
+                                        .is_ok();
+                                validations.push(platform_validation(
+                                    &account,
+                                    PlatformAccountValidationState::NeedsReconnect,
+                                    format!("Could not store refreshed access token: {error}"),
+                                ));
+                                continue;
+                            }
+                            if let Some(next_refresh_token) = token.refresh_token.as_deref()
+                                && let Err(error) =
+                                    secrets::put_secret(refresh_ref, next_refresh_token)
+                            {
+                                account.status = PlatformAccountStatus::NeedsReconnect;
+                                changed |=
+                                    upsert_validated_account(state, &credential, account.clone())
+                                        .is_ok();
+                                validations.push(platform_validation(
+                                    &account,
+                                    PlatformAccountValidationState::NeedsReconnect,
+                                    format!("Could not store refreshed refresh token: {error}"),
+                                ));
+                                continue;
+                            }
+                            access_token = token.access_token;
+                            account.scopes = token.scopes;
+                            account.expires_at = token.expires_at;
+                            account.status = PlatformAccountStatus::Connected;
+                            changed |=
+                                upsert_validated_account(state, &credential, account.clone())
+                                    .is_ok();
+                            refreshed = true;
+                        }
+                        Err(error) => {
+                            account.status = PlatformAccountStatus::NeedsReconnect;
+                            changed |=
+                                upsert_validated_account(state, &credential, account.clone())
+                                    .is_ok();
+                            validations.push(platform_validation(
+                                &account,
+                                PlatformAccountValidationState::NeedsReconnect,
+                                format!("Token refresh failed: {error}"),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                Err(error) => {
+                    account.status = PlatformAccountStatus::NeedsReconnect;
+                    changed |=
+                        upsert_validated_account(state, &credential, account.clone()).is_ok();
+                    validations.push(platform_validation(
+                        &account,
+                        PlatformAccountValidationState::NeedsReconnect,
+                        format!("Could not read refresh token: {error}"),
+                    ));
+                    continue;
+                }
+            }
+        }
+
+        match oauth::validate_provider_access(account.platform, &access_token, &client).await {
+            Ok(()) => {
+                account.status = PlatformAccountStatus::Connected;
+                changed |= upsert_validated_account(state, &credential, account.clone()).is_ok();
+                validations.push(platform_validation(
+                    &account,
+                    if refreshed {
+                        PlatformAccountValidationState::Refreshed
+                    } else {
+                        PlatformAccountValidationState::Valid
+                    },
+                    if refreshed {
+                        "Token refreshed and account access is valid."
+                    } else {
+                        "Account access is valid."
+                    },
+                ));
+            }
+            Err(error) => {
+                account.status = PlatformAccountStatus::NeedsReconnect;
+                changed |= upsert_validated_account(state, &credential, account.clone()).is_ok();
+                validations.push(platform_validation(
+                    &account,
+                    PlatformAccountValidationState::NeedsReconnect,
+                    format!("Account validation failed: {error}"),
+                ));
+            }
+        }
+    }
+
+    if changed && let Ok(accounts) = state.database.list_platform_accounts() {
+        state.emit_event("platformAccounts.changed", accounts);
+    }
+
+    validations
+}
+
+fn upsert_validated_account(
+    state: &AppState,
+    credential: &storage::PlatformAccountCredentials,
+    account: streaming::PlatformAccount,
+) -> anyhow::Result<streaming::PlatformAccount> {
+    state
+        .database
+        .upsert_platform_account(UpsertPlatformAccount {
+            platform: account.platform,
+            account_id: account.account_id,
+            account_label: account.account_label,
+            account_handle: account.account_handle,
+            avatar_url: account.avatar_url,
+            scopes: account.scopes,
+            token_secret_ref: credential.token_secret_ref.clone(),
+            refresh_token_secret_ref: credential.refresh_token_secret_ref.clone(),
+            stream_key_secret_ref: credential.stream_key_secret_ref.clone(),
+            expires_at: account.expires_at,
+            status: account.status,
+        })
+}
+
+fn platform_validation(
+    account: &streaming::PlatformAccount,
+    state: PlatformAccountValidationState,
+    message: impl Into<String>,
+) -> PlatformAccountValidation {
+    PlatformAccountValidation {
+        platform: account.platform,
+        state,
+        account_id: Some(account.account_id.clone()),
+        account_label: Some(account.account_label.clone()),
+        scopes: account.scopes.clone(),
+        expires_at: account.expires_at.clone(),
+        message: message.into(),
+    }
+}
+
+fn token_expires_soon(expires_at: Option<&str>) -> bool {
+    let Some(expires_at) = expires_at else {
+        return false;
+    };
+    chrono::DateTime::parse_from_rfc3339(expires_at)
+        .map(|expires_at| {
+            expires_at.with_timezone(&chrono::Utc)
+                <= chrono::Utc::now() + chrono::Duration::minutes(5)
+        })
+        .unwrap_or(true)
 }
 
 async fn ws_handler(
@@ -689,6 +909,9 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }
+        "platformAccounts.validate" => {
+            ServerResponse::ok(command.id, validate_platform_accounts(state).await)
         }
         "streamTargets.metadata.get" => match state.database.stream_metadata_draft() {
             Ok(draft) => ServerResponse::ok(command.id, draft),

@@ -337,6 +337,7 @@ export type StreamUrlMode = 'server-and-key' | 'full-url'
 export type StreamAuthMode = 'manual-rtmp' | 'oauth'
 export type StreamPrivacy = 'public' | 'unlisted' | 'private'
 export type PlatformAccountStatus = 'connected' | 'needs-reconnect' | 'disconnected'
+export type PlatformAccountValidationState = 'valid' | 'refreshed' | 'needs-reconnect' | 'missing'
 export type StreamTargetState =
   | 'not-configured'
   | 'ready'
@@ -404,6 +405,16 @@ export interface PlatformAccount {
 
 export interface PlatformAccountPlatformParams {
   platform: StreamPlatform
+}
+
+export interface PlatformAccountValidation {
+  platform: StreamPlatform
+  state: PlatformAccountValidationState
+  accountId?: string
+  accountLabel?: string
+  scopes: string[]
+  expiresAt?: string
+  message: string
 }
 
 export interface StreamMetadataDraft {

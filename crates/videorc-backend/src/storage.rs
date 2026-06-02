@@ -40,6 +40,14 @@ pub struct NewSession {
     pub output: OutputSettings,
 }
 
+#[derive(Debug, Clone)]
+pub struct PlatformAccountCredentials {
+    pub account: PlatformAccount,
+    pub token_secret_ref: Option<String>,
+    pub refresh_token_secret_ref: Option<String>,
+    pub stream_key_secret_ref: Option<String>,
+}
+
 impl Database {
     pub fn open_default() -> Result<Self> {
         let path = default_database_path();
@@ -355,6 +363,20 @@ impl Database {
              ORDER BY platform ASC",
         )?;
         let rows = stmt.query_map([], |row| self.platform_account_from_row(row))?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn list_platform_account_credentials(&self) -> Result<Vec<PlatformAccountCredentials>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, platform, account_id, account_label, account_handle, avatar_url,
+                    scopes_json, token_secret_ref, refresh_token_secret_ref, stream_key_secret_ref,
+                    expires_at, connected_at, updated_at, status
+             FROM platform_accounts
+             ORDER BY platform ASC",
+        )?;
+        let rows = stmt.query_map([], |row| self.platform_account_credentials_from_row(row))?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -805,6 +827,19 @@ impl Database {
             updated_at: row.get(12)?,
             status: serde_json::from_str(&status_json)
                 .unwrap_or(PlatformAccountStatus::NeedsReconnect),
+        })
+    }
+
+    fn platform_account_credentials_from_row(
+        &self,
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<PlatformAccountCredentials> {
+        let account = self.platform_account_from_row(row)?;
+        Ok(PlatformAccountCredentials {
+            account,
+            token_secret_ref: row.get(7)?,
+            refresh_token_secret_ref: row.get(8)?,
+            stream_key_secret_ref: row.get(9)?,
         })
     }
 
