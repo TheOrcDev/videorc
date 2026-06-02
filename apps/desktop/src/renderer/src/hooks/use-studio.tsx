@@ -47,6 +47,7 @@ import type {
   SessionLogEntry,
   SessionSummary,
   StartSessionParams,
+  StreamScreen,
   StreamHealth,
   StreamingSettings,
   StreamTargetRuntime,
@@ -77,6 +78,7 @@ export type StudioContextValue = {
   streamTargets: StreamTargetRuntime[]
   diagnosticStats: DiagnosticStats
   sessions: SessionSummary[]
+  screens: StreamScreen[]
   // preview + audio
   previewUrl: string | null
   previewLoading: boolean
@@ -95,6 +97,7 @@ export type StudioContextValue = {
   exportRunningSessionId: string | null
   startRequestPending: boolean
   stopRequestPending: boolean
+  screenImportPending: boolean
   // settings + capture config
   settings: SettingsState
   setSettings: Dispatch<SetStateAction<SettingsState>>
@@ -111,6 +114,8 @@ export type StudioContextValue = {
   runtimeInfo: RuntimeInfo | null
   // actions
   refreshBackend: () => Promise<void>
+  refreshScreens: () => Promise<void>
+  importScreenImage: () => Promise<void>
   refreshPreview: () => Promise<void>
   reloadSceneFromCaptureConfig: () => Promise<void>
   resetSceneSource: (sourceId?: string) => Promise<void>
@@ -205,6 +210,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [streamTargets, setStreamTargets] = useState<StreamTargetRuntime[]>([])
   const [diagnosticStats, setDiagnosticStats] = useState<DiagnosticStats>(idleDiagnosticStats)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
+  const [screens, setScreens] = useState<StreamScreen[]>([])
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewLiveStatus, setPreviewLiveStatus] = useState<PreviewLiveStatus>({
@@ -223,6 +229,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [exportRunningSessionId, setExportRunningSessionId] = useState<string | null>(null)
   const [startRequestPending, setStartRequestPending] = useState(false)
   const [stopRequestPending, setStopRequestPending] = useState(false)
+  const [screenImportPending, setScreenImportPending] = useState(false)
   const [settings, setSettings] = useState<SettingsState>(() => loadJson(STORAGE_KEYS.settings, defaultSettings))
   const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(loadCaptureConfig)
   const [lastError, setLastError] = useState<string | null>(null)
@@ -305,6 +312,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const nextSessions = await activeClient.request<SessionSummary[]>('sessions.list')
     setSessions(nextSessions)
   }, [])
+
+  const refreshScreensForClient = useCallback(async (activeClient: BackendClient | null) => {
+    if (!activeClient) {
+      return
+    }
+
+    const nextScreens = await activeClient.request<StreamScreen[]>('screens.list')
+    setScreens(nextScreens)
+  }, [])
+
+  const refreshScreens = useCallback(async () => {
+    try {
+      await refreshScreensForClient(client)
+    } catch (error) {
+      reportError(error)
+    }
+  }, [client, refreshScreensForClient, reportError])
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings))
@@ -456,6 +480,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('scene.changed', (payload) => {
         applyScene(payload as Scene)
       }),
+      nextClient.on('screens.changed', (payload) => {
+        setScreens(payload as StreamScreen[])
+      }),
       nextClient.on('ai.artifacts.changed', () => {
         void refreshSessions(nextClient)
       }),
@@ -491,6 +518,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (nextScene.sources.length) {
           applyScene(nextScene)
         }
+        await refreshScreensForClient(nextClient)
         await refreshSessions(nextClient)
       })
       .catch((error: unknown) => {
@@ -506,7 +534,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setClient(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appendLog, applyPreviewLiveStatus, connection, refreshSessions, reportError, settings.ffmpegPath])
+  }, [
+    appendLog,
+    applyPreviewLiveStatus,
+    connection,
+    refreshScreensForClient,
+    refreshSessions,
+    reportError,
+    settings.ffmpegPath
+  ])
 
   const loadScene = useCallback(
     async (config: Pick<CaptureConfig, 'sources' | 'layout' | 'video'>) => {
@@ -559,16 +595,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
     try {
       setLastError(null)
-      const [nextHealth, nextDevices, nextSessions, nextDiagnostics] = await Promise.all([
+      const [nextHealth, nextDevices, nextSessions, nextDiagnostics, nextScreens] = await Promise.all([
         client.request<BackendHealth>('health.ping', { ffmpegPath: settings.ffmpegPath.trim() || undefined }),
         client.request<DeviceList>('devices.list', { ffmpegPath: settings.ffmpegPath.trim() || undefined }),
         client.request<SessionSummary[]>('sessions.list'),
-        client.request<DiagnosticStats>('diagnostics.stats')
+        client.request<DiagnosticStats>('diagnostics.stats'),
+        client.request<StreamScreen[]>('screens.list')
       ])
       setHealth(nextHealth)
       setDeviceList(nextDevices)
       setSessions(nextSessions)
       setDiagnosticStats(nextDiagnostics)
+      setScreens(nextScreens)
       if (!sceneEditMode) {
         await reloadSceneFromCaptureConfig()
       }
@@ -765,6 +803,41 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     settings.ffmpegPath,
     wsStatus
   ])
+
+  const importScreenImage = useCallback(async () => {
+    if (!client || wsStatus !== 'connected') {
+      toast.error('Backend socket is not connected.')
+      return
+    }
+    if (!window.videorc?.pickScreenImage) {
+      toast.error('Screen image picker is unavailable outside Electron.')
+      return
+    }
+
+    try {
+      setLastError(null)
+      const path = await window.videorc.pickScreenImage()
+      if (!path) {
+        return
+      }
+
+      setScreenImportPending(true)
+      const screen = await client.request<StreamScreen>('screens.importImage', {
+        path,
+        ffmpegPath: settings.ffmpegPath.trim() || undefined
+      })
+      setScreens((current) => {
+        const withoutExisting = current.filter((item) => item.id !== screen.id)
+        return [...withoutExisting, screen].sort((a, b) => a.sortOrder - b.sortOrder)
+      })
+      await refreshScreensForClient(client)
+      toast.success(`Imported ${screen.name}.`)
+    } catch (error) {
+      reportError(error)
+    } finally {
+      setScreenImportPending(false)
+    }
+  }, [client, refreshScreensForClient, reportError, settings.ffmpegPath, wsStatus])
 
   const openSystemPermission = useCallback(async (pane: SystemPermissionPane) => {
     if (!window.videorc?.openSystemPermissions) {
@@ -1137,6 +1210,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     streamTargets,
     diagnosticStats,
     sessions,
+    screens,
     previewUrl,
     previewLoading,
     previewLiveStatus,
@@ -1153,6 +1227,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     exportRunningSessionId,
     startRequestPending,
     stopRequestPending,
+    screenImportPending,
     settings,
     setSettings,
     captureConfig,
@@ -1165,6 +1240,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     lastError,
     runtimeInfo,
     refreshBackend,
+    refreshScreens,
+    importScreenImage,
     refreshPreview,
     reloadSceneFromCaptureConfig,
     resetSceneSource,

@@ -9,6 +9,7 @@ import { DiagnosticsTab } from '@/components/tabs/diagnostics-tab'
 import { LayoutTab } from '@/components/tabs/layout-tab'
 import { LibraryTab } from '@/components/tabs/library-tab'
 import { RecordingTab } from '@/components/tabs/recording-tab'
+import { ScreensTab } from '@/components/tabs/screens-tab'
 import { SettingsTab } from '@/components/tabs/settings-tab'
 import { SourcesTab } from '@/components/tabs/sources-tab'
 import { StreamingTab } from '@/components/tabs/streaming-tab'
@@ -102,6 +103,9 @@ export function AppShell(): ReactElement {
           </TabsContent>
           <TabsContent value="layout">
             <LayoutTab />
+          </TabsContent>
+          <TabsContent value="screens">
+            <ScreensTab />
           </TabsContent>
           <TabsContent value="recording">
             <RecordingTab />
