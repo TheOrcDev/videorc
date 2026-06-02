@@ -4,6 +4,7 @@ mod camera_capture;
 mod devices;
 mod diagnostics;
 mod ffmpeg;
+mod live_scene;
 mod pipeline;
 mod protocol;
 mod recording;

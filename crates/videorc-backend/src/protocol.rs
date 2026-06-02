@@ -483,6 +483,28 @@ fn default_side_by_side_camera_side() -> SideBySideCameraSide {
     SideBySideCameraSide::Right
 }
 
+/// The canonical default layout (screen + camera, medium bottom-right camera). Used
+/// as a starting point for the active scene model and tests.
+#[cfg(test)]
+pub(crate) fn default_layout_settings() -> LayoutSettings {
+    LayoutSettings {
+        layout_preset: default_layout_preset(),
+        camera_transform_mode: default_camera_transform_mode(),
+        camera_transform: None,
+        camera_corner: CameraCorner::BottomRight,
+        camera_size: CameraSize::Medium,
+        camera_shape: CameraShape::Rectangle,
+        camera_margin: 32,
+        camera_fit: default_camera_fit(),
+        camera_mirror: false,
+        camera_zoom: default_camera_zoom(),
+        camera_offset_x: 0,
+        camera_offset_y: 0,
+        side_by_side_split: default_side_by_side_split(),
+        side_by_side_camera_side: default_side_by_side_camera_side(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputSettings {

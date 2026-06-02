@@ -236,6 +236,78 @@ export interface SceneSourceNudgeParams {
   large?: boolean
 }
 
+// --- LS1: active-session scene revision model ---
+// Mirrors crates/videorc-backend/src/live_scene.rs. The model owns the revision +
+// event contract only; a committed revision does not reach the live FFmpeg output
+// until the live render consumer (LS2+) is wired.
+
+export type ApplyMode = 'hot' | 'warm' | 'cold'
+
+export type MutationKind =
+  | 'layout.set_preset'
+  | 'layout.patch'
+  | 'source.transform.patch'
+  | 'source.visibility.set'
+  | 'source.order.set'
+  | 'source.device.switch'
+  | 'audio.mic.patch'
+  | 'output.resolution.patch'
+  | 'output.fps.patch'
+  | 'output.bitrate.patch'
+
+export type LiveEditStatus = 'started' | 'applied' | 'failed' | 'reverted'
+
+export type SourceRuntimePhase =
+  | 'idle'
+  | 'starting'
+  | 'live'
+  | 'reconnecting'
+  | 'failed'
+  | 'permission-needed'
+
+export type SessionMode = 'idle' | 'recording' | 'streaming' | 'recording-streaming'
+
+export interface SceneMutation {
+  id: string
+  expectedRevision: number
+  kind: MutationKind
+  /** The renderer's optimistic guess. Advisory — the backend reclassifies. */
+  applyMode?: ApplyMode
+  payload?: unknown
+  createdAt: string
+}
+
+export interface LiveEditEvent {
+  id: string
+  sessionId: string
+  mutationId: string
+  revisionBefore: number
+  revisionAfter?: number
+  applyMode: ApplyMode
+  status: LiveEditStatus
+  message?: string
+  timestamp: string
+}
+
+export interface SourceRuntimeState {
+  sourceId: string
+  deviceId?: string
+  state: SourceRuntimePhase
+  message?: string
+  lastFrameAt?: string
+}
+
+export interface ActiveSceneState {
+  sessionId: string
+  sceneId: string
+  revision: number
+  layout: LayoutSettings
+  sources: SceneSource[]
+  outputs: SceneOutputKind[]
+  mode: SessionMode
+  updatedAt: string
+}
+
 export type RtmpPreset = 'youtube' | 'twitch' | 'x' | 'custom'
 export type VideoPreset = 'tutorial-1080p30' | 'tutorial-1440p30' | 'stream-1080p60' | 'custom'
 
