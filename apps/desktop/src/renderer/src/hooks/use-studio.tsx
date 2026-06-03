@@ -64,7 +64,8 @@ import type {
   SystemPermissionPane,
   VideoPreset,
   VideoSettings,
-  YouTubeBroadcastTransitionResult
+  YouTubeBroadcastTransitionResult,
+  YouTubeStreamStatusResult
 } from '@/lib/backend'
 import {
   findDevice,
@@ -282,6 +283,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const previewRequestPending = useRef(false)
   const previewRefreshQueued = useRef(false)
   const toastedFailedTargets = useRef<Set<string>>(new Set())
+  const platformLifecycleRun = useRef(0)
   const [previewRefreshNonce, setPreviewRefreshNonce] = useState(0)
 
   // Surface a per-target stream drop from any tab (the Streaming tab has the full
@@ -1317,6 +1319,121 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return null
   })()
 
+  const activatePreparedYouTubeBroadcasts = useCallback(
+    async (streamingForStart: StreamingSettings, runId: number) => {
+      if (!client) {
+        return
+      }
+
+      const youtubeTargets = streamingForStart.targets.filter(
+        (target) =>
+          target.enabled &&
+          target.authMode === 'oauth' &&
+          target.platform === 'youtube' &&
+          Boolean(target.platformBroadcastId) &&
+          Boolean(target.platformStreamId)
+      )
+
+      for (const target of youtubeTargets) {
+        const broadcastId = target.platformBroadcastId
+        const streamId = target.platformStreamId
+        if (!broadcastId || !streamId) {
+          continue
+        }
+        if (platformLifecycleRun.current !== runId) {
+          return
+        }
+
+        try {
+          setCaptureConfig((current) =>
+            bridgeStreamingToLegacy({
+              ...current,
+              streaming: patchPreparedTarget(current.streaming, target.id, {
+                status: {
+                  state: 'connecting',
+                  message: 'Waiting for YouTube ingest.'
+                }
+              })
+            })
+          )
+
+          let lastStatus: YouTubeStreamStatusResult | null = null
+          for (let attempt = 0; attempt < 8; attempt += 1) {
+            if (platformLifecycleRun.current !== runId) {
+              return
+            }
+            lastStatus = await client.request<YouTubeStreamStatusResult>('streamTargets.youtube.streamStatus', {
+              accountId: target.accountId,
+              streamId
+            })
+            const statusSnapshot = lastStatus
+            setCaptureConfig((current) =>
+              bridgeStreamingToLegacy({
+                ...current,
+                streaming: patchPreparedTarget(current.streaming, target.id, {
+                  status: {
+                    state: statusSnapshot.active ? 'connecting' : 'warning',
+                    message: statusSnapshot.message
+                  }
+                })
+              })
+            )
+            if (statusSnapshot.active) {
+              break
+            }
+            await delay(2000)
+          }
+
+          if (!lastStatus?.active) {
+            throw new Error(lastStatus?.message ?? 'YouTube ingest did not become active yet.')
+          }
+          if (platformLifecycleRun.current !== runId) {
+            return
+          }
+
+          const transition = await client.request<YouTubeBroadcastTransitionResult>(
+            'streamTargets.youtube.transition',
+            {
+              accountId: target.accountId,
+              broadcastId,
+              status: 'live'
+            }
+          )
+          setCaptureConfig((current) =>
+            bridgeStreamingToLegacy({
+              ...current,
+              streaming: patchPreparedTarget(current.streaming, target.id, {
+                status: {
+                  state: 'live',
+                  message: transition.lifecycleStatus
+                    ? `YouTube broadcast is live (${transition.lifecycleStatus}).`
+                    : 'YouTube broadcast is live.'
+                }
+              })
+            })
+          )
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          setCaptureConfig((current) =>
+            bridgeStreamingToLegacy({
+              ...current,
+              streaming: patchPreparedTarget(current.streaming, target.id, {
+                status: {
+                  state: 'warning',
+                  message: `YouTube go-live needs review: ${message}`
+                }
+              })
+            })
+          )
+          toast.warning(`Could not transition ${target.label} live on YouTube.`, {
+            description: message
+          })
+        }
+      }
+    },
+    [client]
+  )
+
   const runStartSession = useCallback(async (streamingOverride?: StreamingSettings) => {
     if (!client || startBlockedReason) {
       if (startBlockedReason && !isSessionActive) {
@@ -1331,6 +1448,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setStreamTargets([])
       setStartRequestPending(true)
       const streamingForStart = streamingOverride ?? captureConfig.streaming
+      const lifecycleRunId = platformLifecycleRun.current + 1
+      platformLifecycleRun.current = lifecycleRunId
       const enabledOauthTargets = streamingForStart.targets.filter(
         (target) => target.enabled && target.authMode === 'oauth'
       )
@@ -1359,6 +1478,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const status = await client.request<RecordingStatus>('session.start', nextSessionParams)
       setRecording(status)
       await refreshSessions(client)
+      await activatePreparedYouTubeBroadcasts(streamingForStart, lifecycleRunId)
     } catch (error) {
       reportError(error)
       setRecording((current) =>
@@ -1370,6 +1490,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setStartRequestPending(false)
     }
   }, [
+    activatePreparedYouTubeBroadcasts,
     captureConfig.streaming.targets,
     client,
     isSessionActive,
@@ -1601,6 +1722,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
     try {
       setLastError(null)
+      platformLifecycleRun.current += 1
       setStopRequestPending(true)
       const status = await client.request<RecordingStatus>('session.stop')
       setRecording(status)
@@ -1948,4 +2070,8 @@ function patchPreparedTarget(
       target.id === targetId ? { ...target, ...patch, updatedAt: now } : target
     )
   }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
