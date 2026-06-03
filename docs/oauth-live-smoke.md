@@ -45,6 +45,12 @@ For release candidates, make missing prerequisites fail:
 pnpm smoke:provider-readiness:strict
 ```
 
+To generate a redacted markdown readiness report for the evidence template:
+
+```sh
+pnpm smoke:provider-readiness:evidence
+```
+
 ## Provider Prerequisites
 
 Set the OAuth credentials in the environment used to launch the app or build the backend.
@@ -167,6 +173,7 @@ If native access is not available:
 - Commit:
 - Runner:
 - Provider readiness: pass/fail, redacted output attached
+- Provider readiness evidence: paste `pnpm smoke:provider-readiness:evidence` output
 - YouTube: pass/fail, channel, broadcast ID/URL, notes
 - Twitch: pass/fail, channel URL, notes
 - X: pass/fail/blocked, partner/API evidence, notes

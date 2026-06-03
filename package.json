@@ -20,6 +20,7 @@
     "smoke:streaming-secrets": "node scripts/smoke-streaming-secrets.mjs",
     "smoke:platform-lifecycle": "node scripts/smoke-platform-lifecycle.mjs",
     "smoke:provider-readiness": "node scripts/smoke-provider-readiness.mjs",
+    "smoke:provider-readiness:evidence": "node scripts/smoke-provider-readiness.mjs --markdown",
     "smoke:provider-readiness:strict": "VIDEORC_SMOKE_REQUIRE_PROVIDER_READY=1 node scripts/smoke-provider-readiness.mjs",
     "smoke:oauth-guards": "node scripts/smoke-oauth-guards-app.mjs",
     "smoke:oauth": "node scripts/smoke-oauth-app.mjs",
