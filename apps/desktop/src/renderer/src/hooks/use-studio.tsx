@@ -16,6 +16,7 @@ import { toast } from 'sonner'
 import { BackendClient } from '@/backendClient'
 import {
   bridgeStreamingToLegacy,
+  areEnabledStreamTargetsStartReady,
   defaultSettings,
   loadCaptureConfig,
   loadJson,
@@ -1206,7 +1207,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const outputEnabled = captureConfig.recordEnabled || captureConfig.streamEnabled
   const streamReady =
-    !captureConfig.streamEnabled || captureConfig.streaming.targets.some((target) => target.enabled)
+    !captureConfig.streamEnabled || areEnabledStreamTargetsStartReady(captureConfig.streaming)
   const isSessionActive = isActiveRecordingState(recording.state) || startRequestPending || stopRequestPending
 
   const renameScreen = useCallback(
@@ -1450,8 +1451,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!outputEnabled) {
       return 'Enable Record MKV, Stream RTMP, or both before starting.'
     }
-    if (captureConfig.streamEnabled && !captureConfig.streaming.targets.some((target) => target.enabled)) {
-      return 'Enable at least one livestream destination before streaming.'
+    if (captureConfig.streamEnabled && !streamReady) {
+      return captureConfig.streaming.targets.some((target) => target.enabled)
+        ? 'Finish manual livestream destination setup before streaming.'
+        : 'Enable at least one livestream destination before streaming.'
     }
     if (!health) {
       return 'Checking FFmpeg before starting.'

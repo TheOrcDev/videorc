@@ -419,6 +419,15 @@ export function isStreamTargetReady(target: StreamTargetSettings): boolean {
   return target.streamKey.trim().length > 0 || Boolean(target.streamKeySecretRef) || target.streamKeyPresent
 }
 
+export function isStreamTargetStartReady(target: StreamTargetSettings): boolean {
+  return target.authMode === 'oauth' || isStreamTargetReady(target)
+}
+
+export function areEnabledStreamTargetsStartReady(streaming: StreamingSettings): boolean {
+  const enabled = streaming.targets.filter((target) => target.enabled)
+  return enabled.length > 0 && enabled.every(isStreamTargetStartReady)
+}
+
 // Until the backend consumes the per-target model (M3), keep the legacy single
 // RTMP fields in sync with the primary enabled target so the existing go-live
 // path still streams to one platform.

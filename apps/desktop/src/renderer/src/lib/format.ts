@@ -168,7 +168,7 @@ export function setupChecklist({
       detail: captureConfig.streamEnabled
         ? streamReady
           ? 'RTMP target is set.'
-          : 'RTMP server and stream key are required.'
+          : 'Manual RTMP credentials are required.'
         : 'Streaming is off.',
       tone: streamReady ? 'good' : 'warn'
     }
