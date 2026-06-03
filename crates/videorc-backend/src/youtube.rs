@@ -263,7 +263,7 @@ pub async fn transition_youtube_broadcast(
         .api_base_url
         .unwrap_or_else(|| YOUTUBE_API_BASE_URL.to_string());
     let status = youtube_transition_status(request.status);
-    let response: YouTubeBroadcastTransitionResponse = client
+    let response = client
         .post(youtube_api_url(
             &base_url,
             "/youtube/v3/liveBroadcasts/transition",
@@ -276,9 +276,25 @@ pub async fn transition_youtube_broadcast(
         .bearer_auth(&request.access_token)
         .send()
         .await
-        .context("Could not transition YouTube broadcast.")?
-        .error_for_status()
-        .context("YouTube broadcast transition failed.")?
+        .context("Could not transition YouTube broadcast.")?;
+
+    if !response.status().is_success() {
+        let status_code = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if body.contains("redundantTransition") {
+            return Ok(YouTubeBroadcastTransitionResult {
+                platform: StreamPlatform::Youtube,
+                account_id: request.account_id,
+                broadcast_id: request.broadcast_id,
+                requested_status: request.status,
+                lifecycle_status: Some(status.to_string()),
+                message: format!("YouTube broadcast already requested transition: {status}."),
+            });
+        }
+        anyhow::bail!("YouTube broadcast transition failed ({status_code}): {body}");
+    }
+
+    let response: YouTubeBroadcastTransitionResponse = response
         .json()
         .await
         .context("Could not parse YouTube broadcast transition response.")?;
@@ -372,7 +388,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use axum::extract::{OriginalUri, State};
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, StatusCode};
     use axum::response::IntoResponse;
     use axum::routing::post;
     use axum::{Json, Router};
@@ -654,6 +670,85 @@ mod tests {
             Some("Bearer access-token")
         );
         assert_eq!(logs[0].body, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn treats_redundant_youtube_transition_as_successful_noop() {
+        async fn transition_broadcast(
+            State(logs): State<RequestLogs>,
+            OriginalUri(uri): OriginalUri,
+            headers: HeaderMap,
+        ) -> impl axum::response::IntoResponse {
+            logs.lock().unwrap().push(RequestLog {
+                path: "/youtube/v3/liveBroadcasts/transition".to_string(),
+                query: uri.query().unwrap_or_default().to_string(),
+                authorization: headers
+                    .get("authorization")
+                    .and_then(|header| header.to_str().ok())
+                    .map(ToOwned::to_owned),
+                body: Value::Null,
+            });
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": {
+                        "errors": [{
+                            "reason": "redundantTransition"
+                        }],
+                        "message": "Invalid transition"
+                    }
+                })),
+            )
+                .into_response()
+        }
+
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn({
+            let logs = logs.clone();
+            async move {
+                axum::serve(
+                    listener,
+                    Router::new()
+                        .route(
+                            "/youtube/v3/liveBroadcasts/transition",
+                            post(transition_broadcast),
+                        )
+                        .with_state(logs),
+                )
+                .await
+                .unwrap();
+            }
+        });
+
+        let result = transition_youtube_broadcast(
+            YouTubeBroadcastTransitionRequest {
+                access_token: "access-token".to_string(),
+                account_id: "UC123".to_string(),
+                broadcast_id: "broadcast-123".to_string(),
+                status: YouTubeBroadcastTransitionStatus::Complete,
+                api_base_url: Some(format!("http://{address}")),
+            },
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.broadcast_id, "broadcast-123");
+        assert_eq!(
+            result.requested_status,
+            YouTubeBroadcastTransitionStatus::Complete
+        );
+        assert_eq!(result.lifecycle_status.as_deref(), Some("complete"));
+        assert!(result.message.contains("already requested"));
+
+        let logs = logs.lock().unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].query,
+            "broadcastStatus=complete&id=broadcast-123&part=id%2Cstatus"
+        );
     }
 
     #[test]
