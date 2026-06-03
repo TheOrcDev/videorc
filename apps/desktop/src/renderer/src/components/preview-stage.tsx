@@ -116,6 +116,7 @@ export function PreviewStage({
   const [displayPreviewUrl, setDisplayPreviewUrl] = useState<string | null>(previewUrl)
   const isLive = previewLiveStatus.state === 'live'
   const latestFrameUrl = useMemo(() => latestPreviewFrameUrl(previewUrl), [previewUrl])
+  const hasRetainedPreviewFrame = Boolean(displayPreviewUrl && !previewUrl)
   const showActiveScreen = Boolean(activeScreen && activeScreen.status === 'ready' && !screenImageFailed)
   const showUnavailable = !showActiveScreen && (previewLiveStatus.state === 'unavailable' || imageFailed)
   const badgeLabel =
@@ -139,7 +140,6 @@ export function PreviewStage({
 
   useEffect(() => {
     if (!previewUrl) {
-      setDisplayPreviewUrl(null)
       return
     }
 
@@ -264,7 +264,7 @@ export function PreviewStage({
           </div>
         )}
         <Badge className="absolute top-2 left-2" variant={isLive ? 'success' : 'secondary'}>
-          {previewLoading ? 'Connecting' : badgeLabel}
+          {previewLoading && hasRetainedPreviewFrame ? 'Updating' : previewLoading ? 'Connecting' : badgeLabel}
         </Badge>
         {activeScreen ? (
           <Badge className="absolute top-2 right-2" variant={showActiveScreen ? 'warning' : 'destructive'}>
