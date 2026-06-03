@@ -95,6 +95,37 @@ A distributable macOS build still needs:
 
 Electron Builder's [macOS docs](https://www.electron.build/docs/mac) describe hardened runtime, entitlements, and notarization requirements. Electron's [code signing guide](https://www.electronjs.org/docs/latest/tutorial/code-signing) explains why distributed macOS apps need signing and notarization.
 
+## OAuth Client IDs
+
+Production builds should inject Videogre-owned OAuth client IDs at backend compile time. Development and self-hosted builds can override those IDs at runtime.
+
+Bundled production defaults:
+
+```sh
+VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID=...
+VIDEORC_BUNDLED_TWITCH_CLIENT_ID=...
+VIDEORC_BUNDLED_X_CLIENT_ID=...
+pnpm package:backend
+```
+
+Runtime/self-host overrides:
+
+```sh
+VIDEORC_YOUTUBE_CLIENT_ID=...
+VIDEORC_TWITCH_CLIENT_ID=...
+VIDEORC_X_CLIENT_ID=...
+```
+
+Runtime values take precedence over bundled defaults. Client secrets, when used for provider flows, remain runtime-only:
+
+```sh
+VIDEORC_YOUTUBE_CLIENT_SECRET=...
+VIDEORC_TWITCH_CLIENT_SECRET=...
+VIDEORC_X_CLIENT_SECRET=...
+```
+
+The backend exposes credential source status to the renderer as `environment`, `bundled`, or `missing`; it never exposes actual client ID or secret values. Before release, open the packaged app's Streaming tab and confirm YouTube, Twitch, and X OAuth rows report either `Bundled default` or the intended runtime override.
+
 ## FFmpeg Strategy
 
 Decision:
@@ -132,8 +163,10 @@ The release process must make source for the exact FFmpeg archive available besi
 - `pnpm package:desktop`
 - `pnpm smoke:packaged`
 - `pnpm smoke:packaged:bundled`
+- Build the backend with bundled OAuth client IDs for production release candidates
 - Launch the packaged app from `apps/desktop/release/mac*/Videorc.app`
 - Confirm the packaged backend emits `READY`
+- Confirm Streaming tab OAuth credential source badges show bundled defaults or intended overrides
 - Confirm FFmpeg unavailable states are visible and non-crashing
 - Record a short MKV using the bundled FFmpeg path
 - Stop recording and confirm the session appears in Library
