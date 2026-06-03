@@ -42,6 +42,8 @@ pub struct OAuthStartParams {
 #[serde(rename_all = "camelCase")]
 pub struct OAuthStartProviderParams {
     pub platform: StreamPlatform,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -200,7 +202,7 @@ impl OAuthSessions {
         }
         let config = provider_config(params.platform)?;
         let state = Uuid::new_v4().to_string();
-        let redirect_uri = format!("http://127.0.0.1:{backend_port}/oauth/callback");
+        let redirect_uri = provider_redirect_uri(params.redirect_uri.as_deref(), backend_port)?;
         let expires_at = Utc::now() + Duration::minutes(OAUTH_STATE_TTL_MINUTES);
         let mut extra_params = config.extra_params.clone();
         let code_verifier = if config.pkce {
@@ -710,6 +712,36 @@ fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
     }
 }
 
+fn provider_redirect_uri(redirect_uri: Option<&str>, backend_port: u16) -> Result<String> {
+    let value = redirect_uri
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("http://127.0.0.1:{backend_port}/oauth/callback"));
+    validate_provider_redirect_uri(&value)?;
+    Ok(value)
+}
+
+fn validate_provider_redirect_uri(value: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(value).context("OAuth redirect URI is not a valid URL.")?;
+    match parsed.scheme() {
+        "http" => {
+            let host = parsed.host_str().unwrap_or_default();
+            if matches!(host, "127.0.0.1" | "localhost") && parsed.path() == "/oauth/callback" {
+                return Ok(());
+            }
+        }
+        "videorc" if parsed.host_str() == Some("oauth") && parsed.path() == "/callback" => {
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    anyhow::bail!(
+        "OAuth provider redirect URI must be loopback http://127.0.0.1:<port>/oauth/callback or videorc://oauth/callback."
+    )
+}
+
 pub fn provider_client_id(platform: StreamPlatform) -> Result<String> {
     Ok(provider_config(platform)?.client_id)
 }
@@ -1009,6 +1041,20 @@ mod tests {
         assert_eq!(completed.error.as_deref(), Some("access_denied"));
         assert_eq!(completed.message.as_deref(), Some("User cancelled."));
         assert!(!completed.code_present);
+    }
+
+    #[test]
+    fn provider_redirect_uri_allows_loopback_and_app_protocol_callbacks() {
+        assert_eq!(
+            provider_redirect_uri(None, 61234).unwrap(),
+            "http://127.0.0.1:61234/oauth/callback"
+        );
+        assert_eq!(
+            provider_redirect_uri(Some("videorc://oauth/callback"), 61234).unwrap(),
+            "videorc://oauth/callback"
+        );
+        assert!(provider_redirect_uri(Some("https://example.com/oauth/callback"), 61234).is_err());
+        assert!(provider_redirect_uri(Some("videorc://bad/callback"), 61234).is_err());
     }
 
     #[test]

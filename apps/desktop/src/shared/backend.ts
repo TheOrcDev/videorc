@@ -639,6 +639,7 @@ export interface OAuthStartParams {
 
 export interface OAuthStartProviderParams {
   platform: StreamPlatform
+  redirectUri?: string
 }
 
 export interface OAuthStartResult {
@@ -936,8 +937,10 @@ export interface VideorcApi {
   getRuntimeInfo: () => Promise<RuntimeInfo>
   pickScreenImage: () => Promise<string | null>
   openOAuthUrl: (authUrl: string) => Promise<void>
+  getOAuthCallbackRedirectUri: () => Promise<string | null>
   openSystemPermissions: (pane?: SystemPermissionPane) => Promise<void>
   revealPermissionTarget: () => Promise<void>
+  onOAuthCallbackUrl: (callback: (callbackUrl: string) => void) => () => void
   onBackendConnection: (callback: (connection: BackendConnection) => void) => () => void
   onBackendLog: (callback: (log: BackendLogEvent) => void) => () => void
 }

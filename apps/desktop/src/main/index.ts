@@ -12,6 +12,10 @@ let backendConnection: BackendConnection | null = null
 let stdoutBuffer = ''
 let appIcon: NativeImage | null | undefined
 const backendLogs: BackendLogEvent[] = []
+const pendingOAuthCallbackUrls: string[] = []
+const OAUTH_CALLBACK_PROTOCOL = 'videorc'
+const OAUTH_APP_PROTOCOL_REDIRECT_URI = 'videorc://oauth/callback'
+const oauthAppProtocolEnabled = process.env.VIDEORC_OAUTH_CALLBACK_MODE === 'app-protocol'
 
 const MACOS_PERMISSION_URLS: Record<SystemPermissionPane, string> = {
   privacy: 'x-apple.systempreferences:com.apple.preference.security',
@@ -52,6 +56,11 @@ function createWindow(): void {
   if (backendConnection) {
     mainWindow.webContents.once('did-finish-load', () => {
       mainWindow?.webContents.send('backend:connection', backendConnection)
+      flushOAuthCallbackUrls()
+    })
+  } else {
+    mainWindow.webContents.once('did-finish-load', () => {
+      flushOAuthCallbackUrls()
     })
   }
 }
@@ -92,6 +101,61 @@ function setDockIcon(): void {
   if (icon) {
     app.dock?.setIcon(icon)
   }
+}
+
+function registerOAuthCallbackProtocol(): void {
+  if (process.defaultApp) {
+    const appPath = process.argv[1]
+    if (appPath) {
+      app.setAsDefaultProtocolClient(OAUTH_CALLBACK_PROTOCOL, process.execPath, [appPath])
+      return
+    }
+  }
+
+  app.setAsDefaultProtocolClient(OAUTH_CALLBACK_PROTOCOL)
+}
+
+function oauthCallbackRedirectUri(): string | null {
+  return oauthAppProtocolEnabled ? OAUTH_APP_PROTOCOL_REDIRECT_URI : null
+}
+
+function sendOAuthCallbackUrl(callbackUrl: string): void {
+  if (!mainWindow || mainWindow.webContents.isDestroyed()) {
+    pendingOAuthCallbackUrls.push(callbackUrl)
+    return
+  }
+
+  mainWindow.webContents.send('oauth:callback-url', callbackUrl)
+}
+
+function flushOAuthCallbackUrls(): void {
+  if (!mainWindow || mainWindow.webContents.isDestroyed() || pendingOAuthCallbackUrls.length === 0) {
+    return
+  }
+
+  const callbackUrls = pendingOAuthCallbackUrls.splice(0)
+  for (const callbackUrl of callbackUrls) {
+    mainWindow.webContents.send('oauth:callback-url', callbackUrl)
+  }
+}
+
+function dispatchOAuthCallbackUrl(rawUrl: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    return
+  }
+
+  if (
+    parsed.protocol !== `${OAUTH_CALLBACK_PROTOCOL}:` ||
+    parsed.hostname !== 'oauth' ||
+    parsed.pathname !== '/callback'
+  ) {
+    return
+  }
+
+  sendOAuthCallbackUrl(parsed.toString())
 }
 
 function workspaceRoot(): string {
@@ -280,12 +344,42 @@ async function openOAuthUrl(authUrl: string): Promise<void> {
   await shell.openExternal(parsed.toString())
 }
 
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+
+if (!hasSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', (_event, argv) => {
+    const callbackUrl = argv.find((arg) => arg.startsWith(`${OAUTH_CALLBACK_PROTOCOL}://`))
+    if (callbackUrl) {
+      dispatchOAuthCallbackUrl(callbackUrl)
+    }
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore()
+      }
+      mainWindow.focus()
+    }
+  })
+}
+
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  dispatchOAuthCallbackUrl(url)
+})
+
 app.whenReady().then(() => {
+  if (!hasSingleInstanceLock) {
+    return
+  }
+
+  registerOAuthCallbackProtocol()
   ipcMain.handle('backend:get-connection', () => backendConnection)
   ipcMain.handle('backend:get-logs', () => backendLogs)
   ipcMain.handle('system:open-permissions', (_event, pane?: SystemPermissionPane) => openSystemPermissions(pane))
   ipcMain.handle('screens:pick-image', () => pickScreenImage())
   ipcMain.handle('oauth:open-url', (_event, authUrl: string) => openOAuthUrl(authUrl))
+  ipcMain.handle('oauth:callback-redirect-uri', () => oauthCallbackRedirectUri())
 
   setDockIcon()
   startBackend()

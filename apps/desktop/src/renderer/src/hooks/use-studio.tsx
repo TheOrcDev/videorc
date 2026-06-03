@@ -53,6 +53,7 @@ import type {
   PlatformAccountValidation,
   PreparedTwitchBroadcast,
   PreparedYouTubeBroadcast,
+  OAuthCompleteParams,
   OAuthStartResult,
   OAuthProviderCredentialStatus,
   RecordingStatus,
@@ -1372,7 +1373,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
       try {
         setLastError(null)
-        const result = await client.request<OAuthStartResult>('platformAccounts.oauth.startProvider', { platform })
+        const redirectUri = await window.videorc.getOAuthCallbackRedirectUri()
+        const params = redirectUri ? { platform, redirectUri } : { platform }
+        const result = await client.request<OAuthStartResult>('platformAccounts.oauth.startProvider', params)
         await window.videorc.openOAuthUrl(result.authUrl)
         toast.success('OAuth browser opened.')
       } catch (error) {
@@ -1381,6 +1384,42 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [client, reportError, wsStatus]
   )
+
+  useEffect(() => {
+    if (!window.videorc?.onOAuthCallbackUrl) {
+      return
+    }
+
+    return window.videorc.onOAuthCallbackUrl((callbackUrl) => {
+      if (!client || wsStatus !== 'connected') {
+        toast.error('OAuth callback received before the backend was connected.')
+        return
+      }
+
+      let parsed: URL
+      try {
+        parsed = new URL(callbackUrl)
+      } catch (error) {
+        reportError(error)
+        return
+      }
+
+      const state = parsed.searchParams.get('state')?.trim()
+      if (!state) {
+        toast.error('OAuth callback was missing state.')
+        return
+      }
+
+      const params: OAuthCompleteParams = {
+        state,
+        code: parsed.searchParams.get('code') ?? undefined,
+        error: parsed.searchParams.get('error') ?? undefined,
+        errorDescription: parsed.searchParams.get('error_description') ?? undefined
+      }
+
+      void client.request('platformAccounts.oauth.complete', params).catch(reportError)
+    })
+  }, [client, reportError, wsStatus])
 
   const patchStreamMetadataDraft = useCallback((patch: Partial<StreamMetadataDraft>) => {
     setStreamMetadataDraft((current) => (current ? { ...current, ...patch } : current))

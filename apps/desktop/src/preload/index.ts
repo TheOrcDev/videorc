@@ -54,8 +54,16 @@ const api: VideorcApi = {
   getRuntimeInfo: () => Promise.resolve(runtimeInfo()),
   pickScreenImage: () => ipcRenderer.invoke('screens:pick-image'),
   openOAuthUrl: (authUrl) => ipcRenderer.invoke('oauth:open-url', authUrl),
+  getOAuthCallbackRedirectUri: () => ipcRenderer.invoke('oauth:callback-redirect-uri'),
   openSystemPermissions,
   revealPermissionTarget,
+  onOAuthCallbackUrl: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, callbackUrl: string): void => {
+      callback(callbackUrl)
+    }
+    ipcRenderer.on('oauth:callback-url', listener)
+    return () => ipcRenderer.removeListener('oauth:callback-url', listener)
+  },
   onBackendConnection: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, connection: BackendConnection): void => {
       callback(connection)

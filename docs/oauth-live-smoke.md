@@ -49,6 +49,15 @@ pnpm smoke:provider-readiness:strict
 
 Set the OAuth credentials in the environment used to launch the app or build the backend.
 
+By default, OAuth uses the backend loopback callback at `http://127.0.0.1:<port>/oauth/callback`.
+If a provider app registration supports desktop custom-scheme callbacks, launch Videorc with:
+
+```sh
+VIDEORC_OAUTH_CALLBACK_MODE=app-protocol
+```
+
+Then register `videorc://oauth/callback` as an allowed redirect URI for the provider app. The app-protocol path is opt-in so existing loopback provider registrations keep working.
+
 YouTube:
 
 ```sh
