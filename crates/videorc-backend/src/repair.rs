@@ -9,6 +9,8 @@
 //! hence `allow(dead_code)`.
 #![allow(dead_code)]
 
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
@@ -691,6 +693,83 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
     args
 }
 
+// --- Safe backup-then-atomic-replace (slice 6) ---
+
+/// The hidden persistent backup directory name, kept beside each recording.
+pub const BACKUP_DIR: &str = ".videorc-backups";
+
+#[derive(Debug)]
+pub enum SafeReplaceError {
+    /// The repaired output did not pass validation; the original was left untouched.
+    ValidationFailed(String),
+    /// A filesystem operation failed (e.g. a locked file during replace).
+    Io(String),
+    /// The original path has no parent/filename.
+    InvalidPath,
+}
+
+impl std::fmt::Display for SafeReplaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SafeReplaceError::ValidationFailed(reason) => {
+                write!(f, "repaired output failed validation: {reason}")
+            }
+            SafeReplaceError::Io(reason) => write!(f, "{reason}"),
+            SafeReplaceError::InvalidPath => write!(f, "invalid recording path"),
+        }
+    }
+}
+
+/// The hidden persistent backup path for an original recording:
+/// `<dir>/.videorc-backups/<filename>`.
+pub fn backup_path_for(original: &Path) -> Option<PathBuf> {
+    let dir = original.parent()?;
+    let name = original.file_name()?;
+    Some(dir.join(BACKUP_DIR).join(name))
+}
+
+/// Atomically replaces `original` with `repaired_temp` — but only after `repaired_temp`
+/// passes `validate`. The original is first copied to its hidden persistent backup, so
+/// it can always be restored. On validation failure the original is left untouched and
+/// the temp removed. The replace is an atomic rename, so `repaired_temp` must live on
+/// the same filesystem (the caller writes it beside the original). Returns the backup
+/// path on success.
+pub fn safe_replace<V>(
+    original: &Path,
+    repaired_temp: &Path,
+    validate: V,
+) -> Result<PathBuf, SafeReplaceError>
+where
+    V: FnOnce(&Path) -> Result<(), String>,
+{
+    if let Err(reason) = validate(repaired_temp) {
+        let _ = fs::remove_file(repaired_temp);
+        return Err(SafeReplaceError::ValidationFailed(reason));
+    }
+
+    let backup = backup_path_for(original).ok_or(SafeReplaceError::InvalidPath)?;
+    if let Some(backup_dir) = backup.parent() {
+        fs::create_dir_all(backup_dir).map_err(|error| SafeReplaceError::Io(error.to_string()))?;
+    }
+    fs::copy(original, &backup)
+        .map_err(|error| SafeReplaceError::Io(format!("backup failed: {error}")))?;
+
+    fs::rename(repaired_temp, original)
+        .map_err(|error| SafeReplaceError::Io(format!("replace failed: {error}")))?;
+    Ok(backup)
+}
+
+/// Restores an original recording from its hidden backup, returning `false` if no
+/// backup exists. Backups persist until the user deletes them, so this stays available.
+pub fn restore_from_backup(original: &Path) -> Result<bool, SafeReplaceError> {
+    let backup = backup_path_for(original).ok_or(SafeReplaceError::InvalidPath)?;
+    if !backup.exists() {
+        return Ok(false);
+    }
+    fs::copy(&backup, original).map_err(|error| SafeReplaceError::Io(error.to_string()))?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1101,5 +1180,83 @@ mod tests {
         assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "copy"));
         assert!(args.iter().any(|arg| arg == "pan=stereo|c0=c0|c1=c0"));
         assert!(args.windows(2).any(|w| w[0] == "-c:a" && w[1] == "aac"));
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("videorc-repair-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn derives_hidden_backup_path() {
+        let backup = backup_path_for(Path::new("/movies/Videorc/rec.mp4")).unwrap();
+        assert_eq!(
+            backup,
+            Path::new("/movies/Videorc/.videorc-backups/rec.mp4")
+        );
+    }
+
+    #[test]
+    fn safe_replace_backs_up_then_replaces_on_valid_output() {
+        let dir = scratch_dir("replace-valid");
+        let original = dir.join("rec.mp4");
+        let temp = dir.join("rec.repaired.mp4");
+        fs::write(&original, b"ORIGINAL").unwrap();
+        fs::write(&temp, b"REPAIRED").unwrap();
+
+        let backup = safe_replace(&original, &temp, |_| Ok(())).unwrap();
+        assert_eq!(fs::read(&original).unwrap(), b"REPAIRED");
+        assert_eq!(fs::read(&backup).unwrap(), b"ORIGINAL");
+        assert!(!temp.exists(), "temp consumed by the rename");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn safe_replace_keeps_original_when_validation_fails() {
+        let dir = scratch_dir("replace-invalid");
+        let original = dir.join("rec.mp4");
+        let temp = dir.join("rec.repaired.mp4");
+        fs::write(&original, b"ORIGINAL").unwrap();
+        fs::write(&temp, b"BROKEN").unwrap();
+
+        let result = safe_replace(&original, &temp, |_| Err("still not 100%".to_string()));
+        assert!(matches!(result, Err(SafeReplaceError::ValidationFailed(_))));
+        assert_eq!(
+            fs::read(&original).unwrap(),
+            b"ORIGINAL",
+            "original untouched"
+        );
+        assert!(!temp.exists(), "failed temp removed");
+        assert!(
+            !backup_path_for(&original).unwrap().exists(),
+            "no backup is written before validation passes"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_brings_back_the_original() {
+        let dir = scratch_dir("restore");
+        let original = dir.join("rec.mp4");
+        let temp = dir.join("rec.repaired.mp4");
+        fs::write(&original, b"ORIGINAL").unwrap();
+        fs::write(&temp, b"REPAIRED").unwrap();
+        safe_replace(&original, &temp, |_| Ok(())).unwrap();
+        assert_eq!(fs::read(&original).unwrap(), b"REPAIRED");
+
+        assert!(restore_from_backup(&original).unwrap());
+        assert_eq!(
+            fs::read(&original).unwrap(),
+            b"ORIGINAL",
+            "restored from backup"
+        );
+
+        // A file that was never repaired has no backup.
+        let other = dir.join("never-repaired.mp4");
+        fs::write(&other, b"X").unwrap();
+        assert!(!restore_from_backup(&other).unwrap());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
