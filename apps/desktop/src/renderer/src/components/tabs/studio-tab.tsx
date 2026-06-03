@@ -1,12 +1,14 @@
 import {
   Broadcast,
+  CheckCircle,
   FolderOpen,
   ImageSquare,
   Play,
   Record,
   SpeakerHigh,
   SpeakerSlash,
-  StopCircle
+  StopCircle,
+  WarningCircle
 } from '@phosphor-icons/react'
 import type { ReactElement } from 'react'
 
@@ -14,13 +16,24 @@ import { BlockingBanner } from '@/components/blocking-banner'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from '@/components/ui/dialog'
 import { Field, FieldContent, FieldLabel } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudio } from '@/hooks/use-studio'
-import type { StreamScreen } from '@/lib/backend'
+import type { GoLiveDestinationPreflight, StreamPlatform, StreamScreen } from '@/lib/backend'
 import { cn } from '@/lib/utils'
 
 const STATE_TONE: Record<string, StatusTone> = {
@@ -71,7 +84,14 @@ export function StudioTab(): ReactElement {
     screens,
     activeScreen,
     activateScreen,
-    clearActiveScreen
+    clearActiveScreen,
+    goLiveConfirmationOpen,
+    goLiveConfirmationPending,
+    goLivePreflight,
+    streamMetadataDraft,
+    patchStreamMetadataDraft,
+    cancelGoLiveConfirmation,
+    confirmGoLive
   } = studio
 
   const active = recording.state === 'recording' || recording.state === 'streaming'
@@ -83,6 +103,16 @@ export function StudioTab(): ReactElement {
 
   return (
     <div className="flex flex-col gap-4">
+      <GoLiveConfirmationDialog
+        draft={streamMetadataDraft}
+        open={goLiveConfirmationOpen}
+        pending={goLiveConfirmationPending || startRequestPending}
+        preflight={goLivePreflight}
+        onCancel={cancelGoLiveConfirmation}
+        onConfirm={() => void confirmGoLive()}
+        onPatchDraft={patchStreamMetadataDraft}
+      />
+
       {visibleStartBlockedReason && banner ? (
         <BlockingBanner
           description={visibleStartBlockedReason}
@@ -243,6 +273,157 @@ export function StudioTab(): ReactElement {
       </div>
     </div>
   )
+}
+
+function GoLiveConfirmationDialog({
+  open,
+  pending,
+  preflight,
+  draft,
+  onPatchDraft,
+  onCancel,
+  onConfirm
+}: {
+  open: boolean
+  pending: boolean
+  preflight: ReturnType<typeof useStudio>['goLivePreflight']
+  draft: ReturnType<typeof useStudio>['streamMetadataDraft']
+  onPatchDraft: ReturnType<typeof useStudio>['patchStreamMetadataDraft']
+  onCancel: () => void
+  onConfirm: () => void
+}): ReactElement {
+  const errorCount = preflight?.issues.filter((issue) => issue.severity === 'error').length ?? 0
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
+      <DialogContent className="max-h-[88vh] gap-4 overflow-hidden sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>Confirm Go Live</DialogTitle>
+          <DialogDescription>
+            Review destinations and metadata before Videogre starts the livestream.
+          </DialogDescription>
+        </DialogHeader>
+
+        <ScrollArea className="max-h-[60vh] pr-3">
+          <div className="flex flex-col gap-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field>
+                <FieldLabel htmlFor="go-live-title">Title</FieldLabel>
+                <Input
+                  id="go-live-title"
+                  disabled={pending || !draft}
+                  value={draft?.title ?? ''}
+                  onChange={(event) => onPatchDraft({ title: event.target.value })}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="go-live-description">Description</FieldLabel>
+                <textarea
+                  className="min-h-20 rounded-md border bg-background px-3 py-2 text-sm outline-none transition focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={pending || !draft}
+                  id="go-live-description"
+                  value={draft?.description ?? ''}
+                  onChange={(event) => onPatchDraft({ description: event.target.value })}
+                />
+              </Field>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-medium">Destinations</span>
+                {errorCount ? (
+                  <Badge variant="destructive">{errorCount} issue{errorCount === 1 ? '' : 's'}</Badge>
+                ) : (
+                  <Badge variant="success">Ready</Badge>
+                )}
+              </div>
+              <div className="grid gap-2">
+                {preflight?.destinations.length ? (
+                  preflight.destinations.map((destination) => (
+                    <GoLiveDestinationRow destination={destination} key={destination.targetId} />
+                  ))
+                ) : (
+                  <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+                    No livestream destinations are enabled.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {preflight?.issues.length ? (
+              <div className="flex flex-col gap-2 rounded-md border border-destructive/25 bg-destructive/5 p-3">
+                <div className="flex items-center gap-2 text-sm font-medium text-destructive">
+                  <WarningCircle className="size-4" weight="fill" />
+                  Resolve before going live
+                </div>
+                <ul className="grid gap-1.5 text-sm text-muted-foreground">
+                  {preflight.issues.map((issue, index) => (
+                    <li key={`${issue.platform ?? 'global'}-${issue.targetId ?? 'all'}-${index}`}>
+                      {issue.platform ? `${platformLabel(issue.platform)}: ` : ''}
+                      {issue.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        </ScrollArea>
+
+        <DialogFooter>
+          <Button disabled={pending} variant="outline" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button disabled={pending || !preflight} onClick={onConfirm}>
+            <Broadcast data-icon="inline-start" weight="fill" />
+            {pending ? 'Checking…' : 'Confirm Go Live'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function GoLiveDestinationRow({
+  destination
+}: {
+  destination: GoLiveDestinationPreflight
+}): ReactElement {
+  return (
+    <div className="grid gap-2 rounded-md border bg-muted/25 p-3 sm:grid-cols-[1fr_auto]">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium">{destination.label}</span>
+          <Badge variant={destination.ready ? 'success' : 'destructive'}>
+            {destination.ready ? (
+              <CheckCircle data-icon="inline-start" weight="fill" />
+            ) : (
+              <WarningCircle data-icon="inline-start" weight="fill" />
+            )}
+            {destination.ready ? 'Ready' : 'Blocked'}
+          </Badge>
+          <Badge variant="outline">{destination.authMode === 'oauth' ? 'OAuth' : 'Manual RTMP'}</Badge>
+        </div>
+        <p className="mt-1 truncate text-sm text-muted-foreground">{destination.title || 'Untitled'}</p>
+        {destination.accountLabel ? (
+          <p className="mt-0.5 text-xs text-muted-foreground">{destination.accountLabel}</p>
+        ) : null}
+      </div>
+      <p className="text-xs text-muted-foreground sm:max-w-64 sm:text-right">{destination.message}</p>
+    </div>
+  )
+}
+
+function platformLabel(platform: StreamPlatform): string {
+  switch (platform) {
+    case 'youtube':
+      return 'YouTube'
+    case 'twitch':
+      return 'Twitch'
+    case 'x':
+      return 'X'
+    case 'custom':
+      return 'Custom RTMP'
+  }
 }
 
 function MixerRow({

@@ -37,11 +37,14 @@ import type {
   Device,
   DeviceList,
   ExportPublishPackResult,
+  GoLivePreflight,
   HealthEvent,
   LayoutSettings,
   PreviewLiveStatus,
   PlatformAccount,
   PlatformAccountValidation,
+  PreparedTwitchBroadcast,
+  PreparedYouTubeBroadcast,
   OAuthStartResult,
   RecordingStatus,
   RuntimeInfo,
@@ -89,6 +92,9 @@ export type StudioContextValue = {
   platformAccountValidations: PlatformAccountValidation[]
   streamMetadataDraft: StreamMetadataDraft | null
   streamMetadataValidation: StreamMetadataValidation | null
+  goLivePreflight: GoLivePreflight | null
+  goLiveConfirmationOpen: boolean
+  goLiveConfirmationPending: boolean
   // preview + audio
   previewUrl: string | null
   previewLoading: boolean
@@ -136,6 +142,8 @@ export type StudioContextValue = {
   disconnectPlatformAccount: (platform: PlatformAccount['platform']) => Promise<void>
   refreshStreamMetadata: () => Promise<void>
   saveStreamMetadataDraft: () => Promise<void>
+  cancelGoLiveConfirmation: () => void
+  confirmGoLive: () => Promise<void>
   refreshScreens: () => Promise<void>
   importScreenImage: () => Promise<void>
   renameScreen: (screenId: string, name: string) => Promise<void>
@@ -243,6 +251,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [platformAccountValidations, setPlatformAccountValidations] = useState<PlatformAccountValidation[]>([])
   const [streamMetadataDraft, setStreamMetadataDraft] = useState<StreamMetadataDraft | null>(null)
   const [streamMetadataValidation, setStreamMetadataValidation] = useState<StreamMetadataValidation | null>(null)
+  const [goLivePreflight, setGoLivePreflight] = useState<GoLivePreflight | null>(null)
+  const [goLiveConfirmationOpen, setGoLiveConfirmationOpen] = useState(false)
+  const [goLiveConfirmationPending, setGoLiveConfirmationPending] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewLiveStatus, setPreviewLiveStatus] = useState<PreviewLiveStatus>({
@@ -1048,7 +1059,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const outputEnabled = captureConfig.recordEnabled || captureConfig.streamEnabled
   const streamReady =
-    !captureConfig.streamEnabled || Boolean(captureConfig.rtmpServerUrl.trim() && captureConfig.streamKey.trim())
+    !captureConfig.streamEnabled || captureConfig.streaming.targets.some((target) => target.enabled)
   const isSessionActive = isActiveRecordingState(recording.state) || startRequestPending || stopRequestPending
 
   const renameScreen = useCallback(
@@ -1285,11 +1296,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!outputEnabled) {
       return 'Enable Record MKV, Stream RTMP, or both before starting.'
     }
-    if (captureConfig.streamEnabled && !captureConfig.rtmpServerUrl.trim()) {
-      return 'Enter an RTMP server before streaming.'
-    }
-    if (captureConfig.streamEnabled && !captureConfig.streamKey.trim()) {
-      return 'Enter a stream key before streaming, or turn Stream RTMP off.'
+    if (captureConfig.streamEnabled && !captureConfig.streaming.targets.some((target) => target.enabled)) {
+      return 'Enable at least one livestream destination before streaming.'
     }
     if (!health) {
       return 'Checking FFmpeg before starting.'
@@ -1301,7 +1309,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return null
   })()
 
-  const startSession = useCallback(async () => {
+  const runStartSession = useCallback(async (streamingOverride?: StreamingSettings) => {
     if (!client || startBlockedReason) {
       if (startBlockedReason && !isSessionActive) {
         reportError(new Error(startBlockedReason))
@@ -1314,7 +1322,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setStreamHealth(null)
       setStreamTargets([])
       setStartRequestPending(true)
-      const enabledOauthTargets = captureConfig.streaming.targets.filter(
+      const streamingForStart = streamingOverride ?? captureConfig.streaming
+      const enabledOauthTargets = streamingForStart.targets.filter(
         (target) => target.enabled && target.authMode === 'oauth'
       )
       if (enabledOauthTargets.length) {
@@ -1332,7 +1341,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ? current
           : { state: 'starting', message: 'Starting capture session.' }
       )
-      const status = await client.request<RecordingStatus>('session.start', sessionParams)
+      const nextSessionParams: StartSessionParams = streamingOverride
+        ? {
+            ...sessionParams,
+            output: { ...sessionParams.output, streamEnabled: true },
+            streaming: streamingOverride
+          }
+        : sessionParams
+      const status = await client.request<RecordingStatus>('session.start', nextSessionParams)
       setRecording(status)
       await refreshSessions(client)
     } catch (error) {
@@ -1354,6 +1370,145 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     sessionParams,
     startBlockedReason,
     validatePlatformAccountsForClient
+  ])
+
+  const prepareOauthTargetsForGoLive = useCallback(async (): Promise<StreamingSettings> => {
+    if (!client) {
+      throw new Error('Backend socket is not connected.')
+    }
+
+    let nextStreaming = captureConfig.streaming
+    for (const target of captureConfig.streaming.targets.filter(
+      (target) => target.enabled && target.authMode === 'oauth'
+    )) {
+      if (target.platform === 'youtube') {
+        const prepared = await client.request<PreparedYouTubeBroadcast>('streamTargets.youtube.prepare', {
+          accountId: target.accountId,
+          video: captureConfig.video
+        })
+        nextStreaming = patchPreparedTarget(nextStreaming, target.id, {
+          accountId: prepared.accountId,
+          accountLabel: prepared.accountLabel,
+          serverUrl: prepared.serverUrl,
+          streamKeySecretRef: prepared.streamKeySecretRef,
+          streamKeyPresent: true
+        })
+      } else if (target.platform === 'twitch') {
+        const prepared = await client.request<PreparedTwitchBroadcast>('streamTargets.twitch.prepare', {
+          accountId: target.accountId
+        })
+        nextStreaming = patchPreparedTarget(nextStreaming, target.id, {
+          accountId: prepared.accountId,
+          accountLabel: prepared.accountLabel,
+          serverUrl: prepared.serverUrl,
+          streamKeySecretRef: prepared.streamKeySecretRef,
+          streamKeyPresent: true
+        })
+      } else if (target.platform === 'x') {
+        await client.request('streamTargets.x.prepare', { accountId: target.accountId })
+      }
+    }
+
+    setCaptureConfig((current) => bridgeStreamingToLegacy({ ...current, streaming: nextStreaming }))
+    await refreshPlatformAccountsForClient(client)
+    return nextStreaming
+  }, [captureConfig.streaming, captureConfig.video, client, refreshPlatformAccountsForClient])
+
+  const openGoLiveConfirmation = useCallback(async () => {
+    if (!client || startBlockedReason) {
+      if (startBlockedReason && !isSessionActive) {
+        reportError(new Error(startBlockedReason))
+      }
+      return
+    }
+
+    try {
+      setLastError(null)
+      setGoLiveConfirmationPending(true)
+      if (streamMetadataDraft) {
+        const saved = await client.request<StreamMetadataDraft>(
+          'streamTargets.metadata.update',
+          streamMetadataDraft
+        )
+        setStreamMetadataDraft(saved)
+        const validation = await client.request<StreamMetadataValidation>(
+          'streamTargets.metadata.validate',
+          saved
+        )
+        setStreamMetadataValidation(validation)
+      }
+      const preflight = await client.request<GoLivePreflight>('streamTargets.confirmation.validate', {
+        streaming: captureConfig.streaming
+      })
+      setGoLivePreflight(preflight)
+      setGoLiveConfirmationOpen(true)
+    } catch (error) {
+      reportError(error)
+    } finally {
+      setGoLiveConfirmationPending(false)
+    }
+  }, [captureConfig.streaming, client, isSessionActive, reportError, startBlockedReason, streamMetadataDraft])
+
+  const startSession = useCallback(async () => {
+    if (captureConfig.streamEnabled) {
+      await openGoLiveConfirmation()
+      return
+    }
+    await runStartSession()
+  }, [captureConfig.streamEnabled, openGoLiveConfirmation, runStartSession])
+
+  const cancelGoLiveConfirmation = useCallback(() => {
+    if (goLiveConfirmationPending || startRequestPending) {
+      return
+    }
+    setGoLiveConfirmationOpen(false)
+  }, [goLiveConfirmationPending, startRequestPending])
+
+  const confirmGoLive = useCallback(async () => {
+    if (!client || goLiveConfirmationPending || startRequestPending) {
+      return
+    }
+
+    try {
+      setLastError(null)
+      setGoLiveConfirmationPending(true)
+      if (streamMetadataDraft) {
+        const saved = await client.request<StreamMetadataDraft>(
+          'streamTargets.metadata.update',
+          streamMetadataDraft
+        )
+        setStreamMetadataDraft(saved)
+        const validation = await client.request<StreamMetadataValidation>(
+          'streamTargets.metadata.validate',
+          saved
+        )
+        setStreamMetadataValidation(validation)
+      }
+      const preflight = await client.request<GoLivePreflight>('streamTargets.confirmation.validate', {
+        streaming: captureConfig.streaming
+      })
+      setGoLivePreflight(preflight)
+      if (!preflight.valid) {
+        toast.error('Resolve Go Live issues before starting.')
+        return
+      }
+      const streamingForStart = await prepareOauthTargetsForGoLive()
+      setGoLiveConfirmationOpen(false)
+      await runStartSession(streamingForStart)
+    } catch (error) {
+      reportError(error)
+    } finally {
+      setGoLiveConfirmationPending(false)
+    }
+  }, [
+    captureConfig.streaming,
+    client,
+    goLiveConfirmationPending,
+    prepareOauthTargetsForGoLive,
+    reportError,
+    runStartSession,
+    startRequestPending,
+    streamMetadataDraft
   ])
 
   const stopSession = useCallback(async () => {
@@ -1605,6 +1760,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     platformAccountValidations,
     streamMetadataDraft,
     streamMetadataValidation,
+    goLivePreflight,
+    goLiveConfirmationOpen,
+    goLiveConfirmationPending,
     previewUrl,
     previewLoading,
     previewLiveStatus,
@@ -1643,6 +1801,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     disconnectPlatformAccount,
     refreshStreamMetadata,
     saveStreamMetadataDraft,
+    cancelGoLiveConfirmation,
+    confirmGoLive,
     refreshScreens,
     importScreenImage,
     renameScreen,
@@ -1690,4 +1850,18 @@ function isEditableTargetSafe(target: EventTarget | null): boolean {
   return target instanceof HTMLElement
     ? Boolean(target.closest('input, textarea, select, button, [contenteditable="true"]'))
     : false
+}
+
+function patchPreparedTarget(
+  streaming: StreamingSettings,
+  targetId: string,
+  patch: Partial<StreamTargetSettings>
+): StreamingSettings {
+  const now = new Date().toISOString()
+  return {
+    ...streaming,
+    targets: streaming.targets.map((target) =>
+      target.id === targetId ? { ...target, ...patch, updatedAt: now } : target
+    )
+  }
 }

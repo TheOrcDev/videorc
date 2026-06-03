@@ -37,10 +37,11 @@ use crate::protocol::{
     VideoPreset, VideoSettings,
 };
 use crate::screen_capture::{parse_screencapturekit_display_id, parse_screencapturekit_window_id};
+use crate::secrets;
 use crate::state::AppState;
-use crate::storage::{NewSession, default_preview_dir};
+use crate::storage::{NewSession, PlatformAccountCredentials, default_preview_dir};
 use crate::streaming::{
-    StreamPlatform, StreamTargetRuntime, StreamTargetSettings, StreamTargetState,
+    StreamAuthMode, StreamPlatform, StreamTargetRuntime, StreamTargetSettings, StreamTargetState,
     StreamTargetsSnapshot, StreamUrlMode, StreamingSettings, stream_platform_from_preset,
     stream_platform_id, stream_platform_label,
 };
@@ -229,11 +230,15 @@ pub fn idle_status() -> RecordingStatus {
     }
 }
 
-pub async fn start_session(state: AppState, params: StartSessionParams) -> Result<RecordingStatus> {
+pub async fn start_session(
+    state: AppState,
+    mut params: StartSessionParams,
+) -> Result<RecordingStatus> {
     if state.recording.lock().await.is_some() {
         bail!("A capture session is already running");
     }
 
+    hydrate_oauth_stream_keys(&state, &mut params)?;
     validate_outputs(&params)?;
 
     let ffmpeg_path = resolve_ffmpeg_path(params.output.ffmpeg_path.clone());
@@ -580,6 +585,68 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
         output_path,
     ));
     Ok(running_status)
+}
+
+fn hydrate_oauth_stream_keys(state: &AppState, params: &mut StartSessionParams) -> Result<()> {
+    if !params.output.stream_enabled {
+        return Ok(());
+    }
+    let Some(streaming) = params
+        .streaming
+        .as_mut()
+        .filter(|streaming| streaming.enabled)
+    else {
+        return Ok(());
+    };
+    if !streaming
+        .targets
+        .iter()
+        .any(|target| target.enabled && target.auth_mode == StreamAuthMode::Oauth)
+    {
+        return Ok(());
+    }
+
+    let credentials = state.database.list_platform_account_credentials()?;
+    hydrate_oauth_stream_keys_from_credentials(streaming, &credentials, secrets::get_secret)
+}
+
+fn hydrate_oauth_stream_keys_from_credentials(
+    streaming: &mut StreamingSettings,
+    credentials: &[PlatformAccountCredentials],
+    mut get_secret: impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    for target in streaming
+        .targets
+        .iter_mut()
+        .filter(|target| target.enabled && target.auth_mode == StreamAuthMode::Oauth)
+    {
+        if !target.stream_key.trim().is_empty() {
+            target.stream_key_present = true;
+            continue;
+        }
+        let credential = credentials.iter().find(|credential| {
+            credential.account.platform == target.platform
+                && target.account_id.as_deref().is_none_or(|account_id| {
+                    credential.account.account_id == account_id
+                        || credential.account.id == account_id
+                })
+        });
+        let secret_ref = target
+            .stream_key_secret_ref
+            .clone()
+            .or_else(|| credential.and_then(|credential| credential.stream_key_secret_ref.clone()));
+        let Some(secret_ref) = secret_ref else {
+            continue;
+        };
+        let stream_key = get_secret(&secret_ref)?;
+        if !stream_key.trim().is_empty() {
+            target.stream_key = stream_key;
+            target.stream_key_secret_ref = Some(secret_ref);
+            target.stream_key_present = true;
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
@@ -3336,7 +3403,10 @@ mod tests {
         CameraCorner, CameraFit, CameraShape, CameraSize, CameraTransform, LayoutPreset,
         LayoutSettings, OutputSettings, PreviewLiveParams, RtmpSettings, SourceSelection,
     };
-    use crate::streaming::{StreamMode, StreamPlatform, StreamTargetState, default_stream_targets};
+    use crate::streaming::{
+        PlatformAccount, PlatformAccountStatus, StreamAuthMode, StreamMode, StreamPlatform,
+        StreamTargetState, default_stream_targets,
+    };
 
     fn base_params(record_enabled: bool, stream_enabled: bool) -> StartSessionParams {
         StartSessionParams {
@@ -3490,6 +3560,69 @@ mod tests {
             resolution.skipped[0].reason.contains("stream key"),
             "skip reason should explain why: {}",
             resolution.skipped[0].reason
+        );
+    }
+
+    #[test]
+    fn oauth_stream_targets_hydrate_key_from_account_secret_ref() {
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "",
+        )]);
+        let youtube = streaming
+            .targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Youtube)
+            .unwrap();
+        youtube.auth_mode = StreamAuthMode::Oauth;
+        youtube.account_id = Some("UC123".to_string());
+        youtube.stream_key_secret_ref = None;
+        let credentials = vec![PlatformAccountCredentials {
+            account: PlatformAccount {
+                id: "backend-account-id".to_string(),
+                platform: StreamPlatform::Youtube,
+                account_id: "UC123".to_string(),
+                account_label: "Videogre Channel".to_string(),
+                account_handle: None,
+                avatar_url: None,
+                scopes: Vec::new(),
+                access_token_present: true,
+                refresh_token_present: true,
+                stream_key_present: true,
+                expires_at: None,
+                connected_at: "2026-06-03T00:00:00Z".to_string(),
+                updated_at: "2026-06-03T00:00:00Z".to_string(),
+                status: PlatformAccountStatus::Connected,
+            },
+            token_secret_ref: Some("platform:youtube:oauth:access".to_string()),
+            refresh_token_secret_ref: None,
+            stream_key_secret_ref: Some("platform:youtube:UC123:stream-key".to_string()),
+        }];
+
+        hydrate_oauth_stream_keys_from_credentials(&mut streaming, &credentials, |secret_ref| {
+            assert_eq!(secret_ref, "platform:youtube:UC123:stream-key");
+            Ok("secret-youtube-key".to_string())
+        })
+        .unwrap();
+
+        let targets = stream_targets_from_streaming(&streaming).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0].url,
+            "rtmp://a.rtmp.youtube.com/live2/secret-youtube-key"
+        );
+        assert!(!targets[0].redacted_url.contains("secret-youtube-key"));
+        let youtube = streaming
+            .targets
+            .iter()
+            .find(|target| target.platform == StreamPlatform::Youtube)
+            .unwrap();
+        assert_eq!(youtube.stream_key, "secret-youtube-key");
+        assert!(youtube.stream_key_present);
+        assert_eq!(
+            youtube.stream_key_secret_ref.as_deref(),
+            Some("platform:youtube:UC123:stream-key")
         );
     }
 
