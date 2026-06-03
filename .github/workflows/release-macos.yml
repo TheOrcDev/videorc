@@ -35,11 +35,8 @@ jobs:
 
       - name: Verify
         run: |
-          pnpm typecheck
-          pnpm build
           cargo fmt --check --all
-          cargo test
-          cargo clippy -- -D warnings
+          pnpm smoke:local-gates
 
       - name: Build signed and notarized macOS DMG
         run: pnpm dist:desktop:signed

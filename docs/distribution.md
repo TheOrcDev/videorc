@@ -74,7 +74,7 @@ Unsigned local builds are useful for smoke testing only. The production release 
 pnpm dist:desktop:signed
 ```
 
-The GitHub Actions workflow at `.github/workflows/release-macos.yml` runs that command for manual dispatches and `v*` tags.
+The GitHub Actions workflow at `.github/workflows/release-macos.yml` runs `cargo fmt --check --all`, `pnpm smoke:local-gates`, and then `pnpm dist:desktop:signed` for manual dispatches and `v*` tags.
 
 Required GitHub secrets:
 

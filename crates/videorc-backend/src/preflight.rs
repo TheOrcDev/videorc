@@ -133,7 +133,10 @@ fn destination_preflight(
 
     match target.auth_mode {
         StreamAuthMode::ManualRtmp => {
-            let missing_credentials = if matches!(target.url_mode, Some(crate::streaming::StreamUrlMode::FullUrl)) {
+            let missing_credentials = if matches!(
+                target.url_mode,
+                Some(crate::streaming::StreamUrlMode::FullUrl)
+            ) {
                 target.server_url.trim().is_empty() && target.stream_key_secret_ref.is_none()
             } else {
                 target.server_url.trim().is_empty() || !target_has_stream_key(target)

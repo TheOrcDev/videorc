@@ -699,7 +699,9 @@ fn youtube_account_credentials(
         .context("No connected YouTube OAuth account is available.")
 }
 
-fn store_manual_stream_key(params: StoreManualStreamKeyParams) -> Result<StoreManualStreamKeyResult> {
+fn store_manual_stream_key(
+    params: StoreManualStreamKeyParams,
+) -> Result<StoreManualStreamKeyResult> {
     let secret_ref = manual_stream_key_secret_ref(&params.target_id)?;
     let stream_key = params.stream_key.trim();
     if stream_key.is_empty() {

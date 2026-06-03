@@ -617,7 +617,9 @@ fn hydrate_stream_key_secret_refs_from_credentials(
     mut get_secret: impl FnMut(&str) -> Result<String>,
 ) -> Result<()> {
     for target in streaming.targets.iter_mut().filter(|target| target.enabled) {
-        if matches!(target.url_mode, Some(StreamUrlMode::FullUrl)) && !target.server_url.trim().is_empty() {
+        if matches!(target.url_mode, Some(StreamUrlMode::FullUrl))
+            && !target.server_url.trim().is_empty()
+        {
             target.stream_key_present = true;
             continue;
         }
@@ -3609,10 +3611,14 @@ mod tests {
             stream_key_secret_ref: Some("platform:youtube:UC123:stream-key".to_string()),
         }];
 
-        hydrate_stream_key_secret_refs_from_credentials(&mut streaming, &credentials, |secret_ref| {
-            assert_eq!(secret_ref, "platform:youtube:UC123:stream-key");
-            Ok("secret-youtube-key".to_string())
-        })
+        hydrate_stream_key_secret_refs_from_credentials(
+            &mut streaming,
+            &credentials,
+            |secret_ref| {
+                assert_eq!(secret_ref, "platform:youtube:UC123:stream-key");
+                Ok("secret-youtube-key".to_string())
+            },
+        )
         .unwrap();
 
         let targets = stream_targets_from_streaming(&streaming).unwrap();
@@ -3637,7 +3643,8 @@ mod tests {
 
     #[test]
     fn manual_stream_targets_hydrate_key_from_target_secret_ref() {
-        let mut streaming = streaming_for(&[(StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "")]);
+        let mut streaming =
+            streaming_for(&[(StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "")]);
         let twitch = streaming
             .targets
             .iter_mut()
@@ -3655,7 +3662,10 @@ mod tests {
 
         let targets = stream_targets_from_streaming(&streaming).unwrap();
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].url, "rtmp://live.twitch.tv/app/secret-twitch-key");
+        assert_eq!(
+            targets[0].url,
+            "rtmp://live.twitch.tv/app/secret-twitch-key"
+        );
         assert!(!targets[0].redacted_url.contains("secret-twitch-key"));
         let twitch = streaming
             .targets
@@ -3697,7 +3707,10 @@ mod tests {
             .iter()
             .find(|target| target.platform == StreamPlatform::Custom)
             .unwrap();
-        assert_eq!(custom.server_url, "rtmp://example.test/live/full-url-secret");
+        assert_eq!(
+            custom.server_url,
+            "rtmp://example.test/live/full-url-secret"
+        );
         assert_eq!(custom.stream_key, "");
         assert!(custom.stream_key_present);
     }

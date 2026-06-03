@@ -128,9 +128,9 @@ pub struct StoreManualStreamKeyResult {
 
 pub fn manual_stream_key_secret_ref(target_id: &str) -> Result<String> {
     if target_id.trim().is_empty()
-        || !target_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+        || !target_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
     {
         bail!("Stream target id is invalid.");
     }
