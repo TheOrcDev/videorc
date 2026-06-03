@@ -301,6 +301,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(loadCaptureConfig)
   const [lastError, setLastError] = useState<string | null>(null)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
+  const latestPreviewConfig = useRef({
+    ffmpegPath: settings.ffmpegPath,
+    layout: captureConfig.layout,
+    sources: captureConfig.sources,
+    video: captureConfig.video
+  })
   const previewRequestPending = useRef(false)
   const previewRefreshQueued = useRef(false)
   const previewRequestRun = useRef(0)
@@ -348,6 +354,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }),
     [captureConfig, settings]
   )
+
+  const previewRestartKey = useMemo(
+    () =>
+      JSON.stringify({
+        ffmpegPath: settings.ffmpegPath.trim(),
+        sources: captureConfig.sources,
+        video: captureConfig.video
+      }),
+    [captureConfig.sources, captureConfig.video, settings.ffmpegPath]
+  )
+
+  useEffect(() => {
+    latestPreviewConfig.current = {
+      ffmpegPath: settings.ffmpegPath,
+      layout: captureConfig.layout,
+      sources: captureConfig.sources,
+      video: captureConfig.video
+    }
+  }, [captureConfig.layout, captureConfig.sources, captureConfig.video, settings.ffmpegPath])
 
   const reportError = useCallback((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error)
@@ -1100,12 +1125,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     try {
       previewRequestPending.current = true
       const requestRun = ++previewRequestRun.current
+      const previewConfig = latestPreviewConfig.current
       setPreviewLoading(true)
       const status = await client.request<PreviewLiveStatus>('preview.live.start', {
-        sources: captureConfig.sources,
-        layout: captureConfig.layout,
-        ffmpegPath: settings.ffmpegPath.trim() || undefined,
-        video: captureConfig.video
+        sources: previewConfig.sources,
+        layout: previewConfig.layout,
+        ffmpegPath: previewConfig.ffmpegPath.trim() || undefined,
+        video: previewConfig.video
       })
       if (requestRun === previewRequestRun.current) {
         applyPreviewLiveStatus(status)
@@ -1129,12 +1155,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [
     applyPreviewLiveStatus,
-    captureConfig.layout,
-    captureConfig.sources,
-    captureConfig.video,
     client,
     reportError,
-    settings.ffmpegPath,
     wsStatus
   ])
 
@@ -1497,7 +1519,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }, 500)
 
     return () => window.clearTimeout(timer)
-  }, [client, deviceList.devices.length, health?.ffmpeg.available, isSessionActive, previewRefreshNonce, refreshPreview, wsStatus])
+  }, [
+    client,
+    deviceList.devices.length,
+    health?.ffmpeg.available,
+    isSessionActive,
+    previewRefreshNonce,
+    previewRestartKey,
+    refreshPreview,
+    wsStatus
+  ])
 
   const startBlockedReason = (() => {
     if (wsStatus !== 'connected') {
