@@ -172,6 +172,7 @@ The release process must make source for the exact FFmpeg archive available besi
 - `pnpm smoke:provider-readiness`
 - `pnpm smoke:oauth-guards`
 - `pnpm smoke:streaming-secrets`
+- `pnpm smoke:platform-lifecycle`
 - `pnpm package:desktop`
 - `pnpm smoke:packaged`
 - `pnpm smoke:packaged:bundled`

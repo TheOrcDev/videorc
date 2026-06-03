@@ -18,6 +18,7 @@ pnpm smoke:oauth-guards
 pnpm smoke:sources
 pnpm smoke:start-labels
 pnpm smoke:streaming-secrets
+pnpm smoke:platform-lifecycle
 pnpm smoke:screens
 pnpm smoke:multistream
 pnpm smoke:dev
