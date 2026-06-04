@@ -139,7 +139,10 @@ export function PreviewStage({
   const usingNativeSurface = nativePreviewSurfaceEnabled && previewSurfaceStatus?.transport === 'native-surface'
   const nativeSurfaceLive = usingNativeSurface && previewSurfaceStatus?.state === 'live'
   const isLive = usingNativeSurface ? previewSurfaceStatus?.state === 'live' : previewLiveStatus.state === 'live'
-  const latestFrameUrl = useMemo(() => latestPreviewFrameUrl(previewUrl), [previewUrl])
+  const latestFrameUrl = useMemo(
+    () => (previewLiveStatus.transport === 'latest-jpeg-polling' ? latestPreviewFrameUrl(previewUrl) : null),
+    [previewLiveStatus.transport, previewUrl]
+  )
   const previewPollMs = useMemo(() => previewPollingIntervalMs(previewLiveStatus), [previewLiveStatus])
   const activeTransport = usingNativeSurface ? previewSurfaceStatus?.transport : previewLiveStatus.transport
   const transportLabel = previewTransportLabel(activeTransport ?? 'unavailable')

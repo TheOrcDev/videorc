@@ -440,10 +440,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
 
   const applyPreviewLiveStatus = useCallback((status: PreviewLiveStatus) => {
+    if (nativePreviewSurfaceEnabled && status.transport !== 'native-surface') {
+      setPreviewLoading(false)
+      setPreviewUrl(null)
+      return
+    }
     setPreviewLiveStatus(status)
     setPreviewLoading(status.state === 'connecting' || status.state === 'reconnecting')
     setPreviewUrl(status.url ? `${status.url}${status.url.includes('?') ? '&' : '?'}cache=${Date.now()}` : null)
-  }, [])
+  }, [nativePreviewSurfaceEnabled])
 
   const applyPreviewSurfaceStatus = useCallback((status: PreviewSurfaceStatus) => {
     previewSurfaceStatusRef.current = status

@@ -43,7 +43,7 @@ use crate::preview_camera::preview_camera_latest_frame_info;
 use crate::preview_screen::preview_screen_latest_frame_info;
 use crate::protocol::{
     AudioSettings, AudioTrack, AudioTrackSource, CameraCorner, CameraFit, CameraShape, CameraSize,
-    CameraTransformMode, CompositorSceneUpdateParams, HealthLevel, LayoutPreset,
+    CameraTransformMode, CompositorSceneUpdateParams, CompositorState, HealthLevel, LayoutPreset,
     PreviewCameraState, PreviewLiveParams, PreviewLiveSource, PreviewLiveState, PreviewLiveStatus,
     PreviewScreenSourceKind, PreviewScreenState, PreviewSnapshot, PreviewSnapshotParams,
     PreviewTransport, RecordingPipelineStage, RecordingState, RecordingStatus, RemuxSessionParams,
@@ -612,7 +612,7 @@ pub async fn start_session(
 
     *state.recording.lock().await = Some(active);
     state.emit_event("recording.status", running_status.clone());
-    publish_recording_live_preview_status(&state, None).await;
+    publish_recording_live_preview_status(&state, use_encoder_bridge, None).await;
     if let Some(stdout) = stdout {
         tokio::spawn(publish_preview_stdout(state.clone(), None, stdout));
     }
@@ -1293,8 +1293,16 @@ async fn stop_idle_live_preview_for_recording(state: AppState) {
     stop_live_preview_process(process).await;
 }
 
-async fn publish_recording_live_preview_status(state: &AppState, message: Option<String>) {
-    let status = recording_live_preview_status(state, message);
+async fn publish_recording_live_preview_status(
+    state: &AppState,
+    use_native_surface: bool,
+    message: Option<String>,
+) {
+    let status = if use_native_surface {
+        recording_native_surface_preview_status(state, message).await
+    } else {
+        recording_live_preview_status(state, message)
+    };
     {
         let mut guard = state.live_preview.lock().await;
         guard.status = status.clone();
@@ -1679,6 +1687,30 @@ fn recording_live_preview_status(state: &AppState, message: Option<String>) -> P
         url: Some(live_preview_url(state)),
         message: Some(message.unwrap_or_else(|| {
             "Live preview is following the active recording session.".to_string()
+        })),
+    }
+}
+
+async fn recording_native_surface_preview_status(
+    state: &AppState,
+    message: Option<String>,
+) -> PreviewLiveStatus {
+    let compositor = state.compositor.lock().await.status.clone();
+    PreviewLiveStatus {
+        state: if compositor.state == CompositorState::Live {
+            PreviewLiveState::Live
+        } else {
+            PreviewLiveState::Connecting
+        },
+        source: PreviewLiveSource::RecordingSession,
+        transport: PreviewTransport::NativeSurface,
+        target_fps: Some(compositor.target_fps),
+        width: Some(compositor.width),
+        height: Some(compositor.height),
+        url: None,
+        message: Some(message.unwrap_or_else(|| {
+            "Preview is using the native compositor surface; JPEG/MJPEG fallback is inactive."
+                .to_string()
         })),
     }
 }

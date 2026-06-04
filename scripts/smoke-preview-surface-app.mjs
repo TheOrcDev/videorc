@@ -30,6 +30,10 @@ async function runPreviewSurfaceSmoke(connection, smoke) {
     const bootstrap = await smokeCommand(smoke, 'inspect-native-preview-bootstrap')
     assertNativeBootstrap(bootstrap)
     const firstStatus = await waitForNativeSurface(ws)
+    const nativeStage = await smokeCommand(smoke, 'inspect-native-preview-bootstrap', {
+      requireNativePlaceholder: true
+    })
+    assertNativeBootstrap(nativeStage, { requireNativePreview: true })
     const badges = await smokeCommand(smoke, 'inspect-preview-stage-badges')
     assertNativePreviewBadge(badges)
     await assertJpegFallbackInactive(connection)
@@ -144,7 +148,7 @@ function assertNativeMeasurement(measurement, label) {
   }
 }
 
-function assertNativeBootstrap(result) {
+function assertNativeBootstrap(result, options = {}) {
   if (!result.hasStage || !result.hasSurface) {
     throw new Error(`Preview stage did not render: ${JSON.stringify(result)}`)
   }
@@ -153,6 +157,14 @@ function assertNativeBootstrap(result) {
   }
   if (!result.hasUpdateNativePreviewSurfaceScene) {
     throw new Error(`Native preview scene bridge is unavailable: ${JSON.stringify(result)}`)
+  }
+  if (options.requireNativePreview) {
+    if (!result.hasNativePlaceholder) {
+      throw new Error(`Preview stage did not render the native surface placeholder: ${JSON.stringify(result)}`)
+    }
+    if ((result.previewImageCount ?? 0) !== 0 || result.hasJpegPollingPreviewImage) {
+      throw new Error(`Native preview rendered a JPEG/MJPEG fallback image: ${JSON.stringify(result)}`)
+    }
   }
   if ((result.surfaceWidth ?? 0) <= 0 || (result.surfaceHeight ?? 0) <= 0) {
     throw new Error(`Native preview surface has invalid bounds: ${JSON.stringify(result)}`)

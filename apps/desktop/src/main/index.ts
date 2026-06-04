@@ -1232,12 +1232,21 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
       if (${JSON.stringify(command)} === 'inspect-native-preview-bootstrap') {
         const stage = await waitFor('[data-videorc-preview-stage]');
         const surface = await waitFor('[data-videorc-preview-surface]');
+        const nativePlaceholder = params.requireNativePlaceholder
+          ? await waitFor('[data-videorc-native-preview-surface]')
+          : document.querySelector('[data-videorc-native-preview-surface]');
         const rect = surface.getBoundingClientRect();
-        const nativePlaceholder = document.querySelector('[data-videorc-native-preview-surface]');
+        const previewImages = Array.from(stage.querySelectorAll('[data-videorc-preview-image]'));
+        const previewImageSrcs = previewImages
+          .map((image) => image.getAttribute('src') ?? '')
+          .filter(Boolean);
         return {
           hasStage: Boolean(stage),
           hasSurface: Boolean(surface),
           hasNativePlaceholder: Boolean(nativePlaceholder),
+          previewImageCount: previewImages.length,
+          previewImageSrcs,
+          hasJpegPollingPreviewImage: previewImageSrcs.some((src) => src.includes('/preview/live.jpg') || src.includes('/preview/live.mjpeg')),
           surfaceWidth: rect.width,
           surfaceHeight: rect.height,
           hasVideorcBridge: Boolean(window.videorc),

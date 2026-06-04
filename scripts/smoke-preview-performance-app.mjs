@@ -200,6 +200,7 @@ function launchAndReadConnection() {
       detached: true,
       env: {
         ...process.env,
+        VIDEORC_NATIVE_PREVIEW_SURFACE: '0',
         VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
         VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
       },

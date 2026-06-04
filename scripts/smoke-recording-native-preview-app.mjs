@@ -63,6 +63,10 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
     const bootstrap = await smokeCommand(smoke, 'inspect-native-preview-bootstrap')
     assertNativeBootstrap(bootstrap)
     const surfaceBefore = await waitForNativeSurface(ws)
+    const nativeStage = await smokeCommand(smoke, 'inspect-native-preview-bootstrap', {
+      requireNativePlaceholder: true
+    })
+    assertNativeBootstrap(nativeStage, { requireNativePreview: true })
     await waitForNativePreviewDiagnostics(ws)
 
     samples.length = 0
@@ -315,12 +319,20 @@ async function waitForNativePreviewDiagnostics(ws) {
   )
 }
 
-function assertNativeBootstrap(result) {
+function assertNativeBootstrap(result, options = {}) {
   if (!result.hasStage || !result.hasSurface) {
     throw new Error(`Preview stage did not render: ${JSON.stringify(result)}`)
   }
   if (!result.hasVideorcBridge || !result.hasCreateNativePreviewSurface || !result.hasUpdateNativePreviewSurfaceBounds) {
     throw new Error(`Native preview bridge is incomplete: ${JSON.stringify(result)}`)
+  }
+  if (options.requireNativePreview) {
+    if (!result.hasNativePlaceholder) {
+      throw new Error(`Preview stage did not render the native surface placeholder: ${JSON.stringify(result)}`)
+    }
+    if ((result.previewImageCount ?? 0) !== 0 || result.hasJpegPollingPreviewImage) {
+      throw new Error(`Native preview rendered a JPEG/MJPEG fallback image: ${JSON.stringify(result)}`)
+    }
   }
 }
 
