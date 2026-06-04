@@ -1,6 +1,8 @@
 mod ai;
 mod audio;
 mod camera_capture;
+mod compositor;
+mod compositor_synthetic;
 mod devices;
 mod diagnostics;
 mod ffmpeg;
@@ -45,6 +47,7 @@ use axum::response::Html;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use compositor::compositor_status;
 use futures_util::stream;
 use futures_util::{SinkExt, StreamExt};
 use preview_camera::{
@@ -1138,6 +1141,10 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
         }
         "preview.surface.status" => {
             let status = preview_surface_status(state).await;
+            ServerResponse::ok(command.id, status)
+        }
+        "compositor.status" => {
+            let status = compositor_status(state).await;
             ServerResponse::ok(command.id, status)
         }
         "preview.camera.start" => {

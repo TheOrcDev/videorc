@@ -248,30 +248,34 @@ pub fn apply_preview_surface_resize(
     stats
 }
 
-pub fn apply_native_preview_surface_stats(
+#[allow(clippy::too_many_arguments)]
+pub fn apply_compositor_stats(
     mut stats: DiagnosticStats,
     target_fps: u32,
-    source_fps: f64,
-    present_fps: f64,
+    render_fps: f64,
+    frame_age_ms: u64,
+    repeated_frames: u64,
+    dropped_frames: u64,
     render_frame_time_p50_ms: f64,
     render_frame_time_p95_ms: f64,
     render_frame_time_p99_ms: f64,
 ) -> DiagnosticStats {
     stats.preview_target_fps = Some(f64::from(target_fps));
-    stats.preview_frame_age_ms = Some(0);
+    stats.preview_frame_age_ms = Some(frame_age_ms);
     stats.preview_transport = PreviewTransport::NativeSurface;
     stats
         .preview_source_fps
-        .insert("synthetic-preview".to_string(), source_fps);
-    stats.preview_present_fps = Some(present_fps);
-    stats.preview_input_to_present_latency_ms = Some(0);
+        .insert("synthetic-compositor".to_string(), render_fps);
+    stats.render_fps = Some(render_fps);
+    stats.preview_present_fps = Some(render_fps);
+    stats.preview_input_to_present_latency_ms = Some(frame_age_ms);
     stats.preview_render_frame_time_p50_ms = Some(render_frame_time_p50_ms);
     stats.preview_render_frame_time_p95_ms = Some(render_frame_time_p95_ms);
     stats.preview_render_frame_time_p99_ms = Some(render_frame_time_p99_ms);
-    stats.preview_repeated_frames = 0;
-    stats.preview_latency_ms = Some(0);
-    stats.preview_dropped_frames = 0;
-    stats.bottleneck = if present_fps < f64::from(target_fps) * 0.9 {
+    stats.preview_repeated_frames = repeated_frames;
+    stats.preview_latency_ms = Some(frame_age_ms);
+    stats.preview_dropped_frames = dropped_frames;
+    stats.bottleneck = if render_fps < f64::from(target_fps) * 0.9 || dropped_frames > 0 {
         DiagnosticBottleneck::Preview
     } else {
         DiagnosticBottleneck::None

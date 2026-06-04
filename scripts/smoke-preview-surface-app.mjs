@@ -48,6 +48,16 @@ async function runPreviewSurfaceSmoke(connection, smoke) {
     if ((firstDiagnostics.previewPresentFps ?? 0) < minFps) {
       throw new Error(`Diagnostics preview FPS ${format(firstDiagnostics.previewPresentFps)} is below ${minFps}.`)
     }
+    const compositorStatus = await request(ws, timeoutMs, 'compositor.status')
+    if (compositorStatus.state !== 'live') {
+      throw new Error(`Compositor status is ${compositorStatus.state}, expected live.`)
+    }
+    if ((compositorStatus.renderFps ?? 0) < 30) {
+      throw new Error(`Compositor render FPS ${format(compositorStatus.renderFps)} is below the 30fps floor.`)
+    }
+    if ((compositorStatus.framesRendered ?? 0) <= 0) {
+      throw new Error(`Compositor did not render frames: ${JSON.stringify(compositorStatus)}`)
+    }
 
     await smokeCommand(smoke, 'resize-window', { width: 1280, height: 820 })
     const resizedStatus = await waitForNativeSurface(ws, firstStatus.framesRendered)

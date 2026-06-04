@@ -864,6 +864,33 @@ fn default_preview_surface_target_fps() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct CompositorStatus {
+    pub state: CompositorState,
+    pub target_fps: u32,
+    pub width: u32,
+    pub height: u32,
+    pub render_fps: Option<f64>,
+    pub frames_rendered: u64,
+    pub repeated_frames: u64,
+    pub dropped_frames: u64,
+    pub frame_age_ms: Option<u64>,
+    pub frame_time_p95_ms: Option<f64>,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompositorState {
+    Stopped,
+    Starting,
+    Live,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct PreviewCameraStartParams {
     pub sources: SourceSelection,
     pub layout: LayoutSettings,

@@ -4,6 +4,7 @@ use std::time::Instant;
 use chrono::Utc;
 use tokio::sync::broadcast;
 
+use crate::compositor::{CompositorSlot, initial_compositor_state};
 use crate::diagnostics::idle_diagnostics;
 use crate::ffmpeg_work::FfmpegWorkCoordinator;
 use crate::oauth::OAuthSessions;
@@ -48,6 +49,7 @@ pub struct AppState {
     pub preview_camera: PreviewCameraSlot,
     pub preview_screen: PreviewScreenSlot,
     pub preview_surface: PreviewSurfaceSlot,
+    pub compositor: CompositorSlot,
     pub scene: Arc<tokio::sync::Mutex<Scene>>,
     pub source_registry: Arc<tokio::sync::Mutex<SourceRegistry>>,
     pub diagnostics: Arc<tokio::sync::Mutex<DiagnosticStats>>,
@@ -75,6 +77,7 @@ impl AppState {
             preview_camera: Arc::new(tokio::sync::Mutex::new(initial_preview_camera_state())),
             preview_screen: Arc::new(tokio::sync::Mutex::new(initial_preview_screen_state())),
             preview_surface: Arc::new(tokio::sync::Mutex::new(initial_preview_surface_state())),
+            compositor: Arc::new(tokio::sync::Mutex::new(initial_compositor_state())),
             scene: Arc::new(tokio::sync::Mutex::new(default_scene())),
             source_registry: Arc::new(tokio::sync::Mutex::new(SourceRegistry::new())),
             diagnostics: Arc::new(tokio::sync::Mutex::new(idle_diagnostics())),
