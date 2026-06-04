@@ -1,12 +1,14 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{ChildStdin, Command};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior};
 use uuid::Uuid;
 
@@ -44,6 +46,27 @@ struct EncoderBridgeRuntimeStats {
     input_fps: Option<f64>,
     dropped_frames: u64,
     encoder_speed: Option<f64>,
+}
+
+#[derive(Debug)]
+pub struct EncoderBridgeRecordingSession {
+    stop: Arc<AtomicBool>,
+    writer: Option<JoinHandle<()>>,
+}
+
+impl EncoderBridgeRecordingSession {
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for EncoderBridgeRecordingSession {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(writer) = self.writer.take() {
+            writer.abort();
+        }
+    }
 }
 
 pub async fn run_synthetic_encoder_bridge(
@@ -215,6 +238,37 @@ pub async fn run_synthetic_encoder_bridge(
     })
 }
 
+pub fn start_synthetic_recording_bridge(
+    state: AppState,
+    session_id: String,
+    target_fps: u32,
+    width: u32,
+    height: u32,
+    stdin: ChildStdin,
+) -> Result<EncoderBridgeRecordingSession> {
+    let byte_len = raw_yuv420p_len(width, height)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_stop = stop.clone();
+    let writer = tokio::spawn(async move {
+        let params = SyntheticRecordingWriterParams {
+            state,
+            session_id,
+            target_fps: target_fps.max(1),
+            width: width.max(1),
+            height: height.max(1),
+            byte_len,
+            stdin,
+            stop: writer_stop,
+        };
+        write_synthetic_recording_frames(params).await;
+    });
+
+    Ok(EncoderBridgeRecordingSession {
+        stop,
+        writer: Some(writer),
+    })
+}
+
 impl EncoderBridgeSettings {
     fn from_params(params: EncoderBridgeSyntheticParams) -> Result<Self> {
         let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path);
@@ -318,12 +372,162 @@ fn render_synthetic_rgba_frame(frame: &SyntheticCompositorFrame, bytes: &mut [u8
     }
 }
 
+fn render_synthetic_yuv420p_frame(frame: &SyntheticCompositorFrame, bytes: &mut [u8]) {
+    let width = frame.width.max(1) as usize;
+    let height = frame.height.max(1) as usize;
+    let y_len = width * height;
+    let uv_width = width.div_ceil(2);
+    let uv_height = height.div_ceil(2);
+    let u_start = y_len;
+    let v_start = y_len + uv_width * uv_height;
+    let marker_size = (width.min(height) / 10).clamp(8, 48);
+    let marker_x = (frame.marker_x as usize).min(width.saturating_sub(1));
+    let marker_y = (frame.marker_y as usize).min(height.saturating_sub(1));
+    let marker_left = marker_x.saturating_sub(marker_size);
+    let marker_top = marker_y.saturating_sub(marker_size);
+    let marker_right = marker_x.saturating_add(marker_size).min(width);
+    let marker_bottom = marker_y.saturating_add(marker_size).min(height);
+
+    bytes[..y_len].fill(48_u8.saturating_add((frame.sequence % 96) as u8));
+    bytes[u_start..v_start].fill(128);
+    bytes[v_start..].fill(128);
+
+    for y in marker_top..marker_bottom {
+        let row_start = y * width + marker_left;
+        let row_end = y * width + marker_right;
+        bytes[row_start..row_end].fill(235);
+    }
+
+    let uv_left = marker_left / 2;
+    let uv_top = marker_top / 2;
+    let uv_right = marker_right.div_ceil(2).min(uv_width);
+    let uv_bottom = marker_bottom.div_ceil(2).min(uv_height);
+    for y in uv_top..uv_bottom {
+        let row_start = y * uv_width + uv_left;
+        let row_end = y * uv_width + uv_right;
+        bytes[u_start + row_start..u_start + row_end].fill(60);
+        bytes[v_start + row_start..v_start + row_end].fill(190);
+    }
+}
+
 fn raw_rgba_len(width: u32, height: u32) -> Result<usize> {
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
         .and_then(|pixels| pixels.checked_mul(4))
         .context("Raw RGBA frame size overflowed")?;
     usize::try_from(pixels).context("Raw RGBA frame size did not fit in memory")
+}
+
+fn raw_yuv420p_len(width: u32, height: u32) -> Result<usize> {
+    let width = u64::from(width.max(1));
+    let height = u64::from(height.max(1));
+    let y = width
+        .checked_mul(height)
+        .context("Raw YUV frame size overflowed")?;
+    let uv = width
+        .div_ceil(2)
+        .checked_mul(height.div_ceil(2))
+        .and_then(|plane| plane.checked_mul(2))
+        .context("Raw YUV frame size overflowed")?;
+    usize::try_from(y.saturating_add(uv)).context("Raw YUV frame size did not fit in memory")
+}
+
+struct SyntheticRecordingWriterParams {
+    state: AppState,
+    session_id: String,
+    target_fps: u32,
+    width: u32,
+    height: u32,
+    byte_len: usize,
+    stop: Arc<AtomicBool>,
+    stdin: ChildStdin,
+}
+
+async fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
+    let SyntheticRecordingWriterParams {
+        state,
+        session_id,
+        target_fps,
+        width,
+        height,
+        byte_len,
+        stop,
+        mut stdin,
+    } = params;
+    let frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
+    let mut ticker = tokio::time::interval(frame_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let source = SyntheticMovingSource;
+    let mut bytes = vec![0; byte_len];
+    let mut sequence = 0_u64;
+    let mut frames_in_window = 0_u64;
+    let mut window_started_at = Instant::now();
+    let mut queue_depth = 0_u64;
+
+    while !stop.load(Ordering::Relaxed) {
+        ticker.tick().await;
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        sequence = sequence.saturating_add(1);
+        let frame = source.render(sequence, width, height);
+        render_synthetic_yuv420p_frame(&frame, &mut bytes);
+
+        queue_depth = 1;
+        if let Err(error) = stdin.write_all(&bytes).await {
+            emit_encoder_bridge_diagnostics(
+                &state,
+                &session_id,
+                target_fps,
+                EncoderBridgeRuntimeStats {
+                    queue_depth,
+                    input_fps: measured_input_fps(frames_in_window, window_started_at),
+                    dropped_frames: 0,
+                    encoder_speed: None,
+                },
+                Some(format!(
+                    "Could not write compositor frame into recording FFmpeg: {error}"
+                )),
+            )
+            .await;
+            break;
+        }
+        queue_depth = 0;
+        frames_in_window = frames_in_window.saturating_add(1);
+
+        if window_started_at.elapsed() >= Duration::from_millis(500) {
+            emit_encoder_bridge_diagnostics(
+                &state,
+                &session_id,
+                target_fps,
+                EncoderBridgeRuntimeStats {
+                    queue_depth,
+                    input_fps: measured_input_fps(frames_in_window, window_started_at),
+                    dropped_frames: 0,
+                    encoder_speed: None,
+                },
+                None,
+            )
+            .await;
+            window_started_at = Instant::now();
+            frames_in_window = 0;
+        }
+    }
+
+    let _ = stdin.shutdown().await;
+    emit_encoder_bridge_diagnostics(
+        &state,
+        &session_id,
+        target_fps,
+        EncoderBridgeRuntimeStats {
+            queue_depth,
+            input_fps: measured_input_fps(frames_in_window, window_started_at),
+            dropped_frames: 0,
+            encoder_speed: None,
+        },
+        None,
+    )
+    .await;
 }
 
 async fn read_encoder_progress(
@@ -496,6 +700,24 @@ mod tests {
             bytes
                 .chunks_exact(4)
                 .any(|pixel| pixel[0] == 255 && pixel[1] == 240 && pixel[2] == 32)
+        );
+    }
+
+    #[test]
+    fn synthetic_recording_frame_renders_yuv420p_pixels_and_marker() {
+        let frame = SyntheticMovingSource.render(1, 32, 24);
+        let mut bytes = vec![0; raw_yuv420p_len(frame.width, frame.height).unwrap()];
+
+        render_synthetic_yuv420p_frame(&frame, &mut bytes);
+
+        let y_len = 32 * 24;
+        let uv_len = 16 * 12;
+        assert_eq!(bytes.len(), y_len + uv_len * 2);
+        assert!(bytes[..y_len].iter().any(|value| *value == 235));
+        assert!(
+            bytes[y_len..y_len + uv_len]
+                .iter()
+                .any(|value| *value == 60)
         );
     }
 

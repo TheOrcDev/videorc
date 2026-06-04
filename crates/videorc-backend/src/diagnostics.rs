@@ -197,7 +197,9 @@ pub fn apply_encoder_bridge_stats(
     stats.capture_fps = stats.encoder_bridge_input_fps;
     stats.dropped_frames = bridge.dropped_frames;
     stats.skipped_frames = bridge.dropped_frames;
-    stats.encoder_speed = bridge.encoder_speed;
+    if bridge.encoder_speed.is_some() {
+        stats.encoder_speed = bridge.encoder_speed;
+    }
     stats.bottleneck = classify_bottleneck(
         stats.capture_fps,
         stats.render_fps,
