@@ -14,6 +14,8 @@ use crate::source_registry::SourceRegistrySnapshot;
 pub fn idle_diagnostics() -> DiagnosticStats {
     DiagnosticStats {
         session_id: None,
+        active_output_mode: None,
+        active_scene_revision: None,
         target_fps: None,
         capture_fps: None,
         render_fps: None,
@@ -117,14 +119,28 @@ pub fn apply_source_registry_snapshot(
     stats
 }
 
-pub fn starting_diagnostics(session_id: &str, target_fps: u32) -> DiagnosticStats {
+pub fn starting_diagnostics(
+    session_id: &str,
+    target_fps: u32,
+    active_output_mode: &str,
+) -> DiagnosticStats {
     DiagnosticStats {
         session_id: Some(session_id.to_string()),
+        active_output_mode: Some(active_output_mode.to_string()),
         target_fps: Some(f64::from(target_fps)),
         bottleneck: DiagnosticBottleneck::Unknown,
         updated_at: Utc::now().to_rfc3339(),
         ..idle_diagnostics()
     }
+}
+
+pub fn apply_active_scene_revision(
+    mut stats: DiagnosticStats,
+    scene_revision: Option<u64>,
+) -> DiagnosticStats {
+    stats.active_scene_revision = scene_revision;
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
 }
 
 pub fn apply_stream_health(
@@ -458,6 +474,8 @@ mod tests {
     fn idle_diagnostics_include_resource_and_preview_source_defaults() {
         let stats = idle_diagnostics();
 
+        assert_eq!(stats.active_output_mode, None);
+        assert_eq!(stats.active_scene_revision, None);
         assert_eq!(stats.preview_camera_frame_age_ms, None);
         assert_eq!(stats.preview_camera_source_fps, None);
         assert_eq!(stats.preview_camera_dropped_frames, 0);
@@ -472,5 +490,19 @@ mod tests {
         assert_eq!(stats.active_ffprobe_processes, 0);
         assert!(stats.duplicate_capture_sources.is_empty());
         assert!(stats.source_registry.entries.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_track_active_output_mode_and_scene_revision() {
+        let stats = starting_diagnostics("session", 30, "record+stream");
+
+        assert_eq!(stats.session_id.as_deref(), Some("session"));
+        assert_eq!(stats.active_output_mode.as_deref(), Some("record+stream"));
+        assert_eq!(stats.active_scene_revision, None);
+
+        let stats = apply_active_scene_revision(stats, Some(42));
+
+        assert_eq!(stats.active_output_mode.as_deref(), Some("record+stream"));
+        assert_eq!(stats.active_scene_revision, Some(42));
     }
 }

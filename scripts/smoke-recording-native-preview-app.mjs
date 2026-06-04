@@ -71,6 +71,20 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
     if (started.state !== 'recording') {
       throw new Error(`Expected recording state after start, got ${started.state}.`)
     }
+    const activeSceneRevision = Date.now()
+    const compositorStatus = await request(
+      ws,
+      timeoutMs,
+      'compositor.scene.update',
+      compositorSceneUpdateParams(activeSceneRevision, 0.58)
+    )
+    if (compositorStatus.sceneRevision !== activeSceneRevision) {
+      throw new Error(
+        `Compositor scene update returned revision ${compositorStatus.sceneRevision}, expected ${activeSceneRevision}.`
+      )
+    }
+    await assertSameRunningSession(ws, started.sessionId)
+    await waitForActiveSceneDiagnostics(ws, activeSceneRevision, 'record')
 
     const measurementPromise = smokeCommand(smoke, 'measure-native-preview-surface', {
       durationMs: previewMeasurementMs
@@ -112,6 +126,33 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
   } finally {
     ws.close()
   }
+}
+
+async function assertSameRunningSession(ws, sessionId) {
+  const status = await request(ws, timeoutMs, 'recording.status')
+  if (status.sessionId !== sessionId || status.state !== 'recording') {
+    throw new Error(`Scene update restarted or stopped recording: expected ${sessionId}/recording, got ${status.sessionId}/${status.state}.`)
+  }
+}
+
+async function waitForActiveSceneDiagnostics(ws, sceneRevision, outputMode) {
+  const deadline = Date.now() + timeoutMs
+  let lastDiagnostics = null
+  while (Date.now() < deadline) {
+    lastDiagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
+    if (
+      lastDiagnostics.activeSceneRevision === sceneRevision &&
+      lastDiagnostics.activeOutputMode === outputMode
+    ) {
+      return lastDiagnostics
+    }
+    await sleep(150)
+  }
+  throw new Error(
+    `Diagnostics did not report active ${outputMode} scene revision ${sceneRevision}. Last diagnostics: ${JSON.stringify(
+      lastDiagnostics
+    )}`
+  )
 }
 
 function sessionParams() {
@@ -156,6 +197,84 @@ function sessionParams() {
       microphoneMuted: false,
       microphoneSyncOffsetMs: 0
     }
+  }
+}
+
+function compositorSceneUpdateParams(revision, cameraX) {
+  const baseTransform = fullFrameTransform()
+  const cameraTransform = {
+    x: cameraX,
+    y: 0.18,
+    width: 0.24,
+    height: 0.24,
+    cropLeft: 0,
+    cropTop: 0,
+    cropRight: 0,
+    cropBottom: 0
+  }
+  const layout = {
+    layoutPreset: 'screen-camera',
+    cameraTransformMode: 'custom',
+    cameraTransform: {
+      x: cameraTransform.x,
+      y: cameraTransform.y,
+      width: cameraTransform.width,
+      height: cameraTransform.height
+    },
+    cameraCorner: 'bottom-right',
+    cameraSize: 'medium',
+    cameraShape: 'rectangle',
+    cameraMargin: 32,
+    cameraFit: 'fill',
+    cameraMirror: false,
+    cameraZoom: 100,
+    cameraOffsetX: 0,
+    cameraOffsetY: 0,
+    sideBySideSplit: '70-30',
+    sideBySideCameraSide: 'right'
+  }
+  return {
+    revision,
+    layout,
+    activeScreen: null,
+    scene: {
+      id: 'scene:native-preview-recording-smoke',
+      name: 'Native Preview Recording Smoke',
+      outputs: [],
+      sources: [
+        {
+          id: 'source:test-pattern',
+          name: 'Test pattern',
+          kind: 'test-pattern',
+          transform: baseTransform,
+          defaultTransform: baseTransform,
+          visible: true,
+          locked: false
+        },
+        {
+          id: 'source:camera',
+          name: 'Camera',
+          kind: 'camera',
+          transform: cameraTransform,
+          defaultTransform: cameraTransform,
+          visible: true,
+          locked: false
+        }
+      ]
+    }
+  }
+}
+
+function fullFrameTransform() {
+  return {
+    x: 0,
+    y: 0,
+    width: 1,
+    height: 1,
+    cropLeft: 0,
+    cropTop: 0,
+    cropRight: 0,
+    cropBottom: 0
   }
 }
 

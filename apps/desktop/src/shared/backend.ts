@@ -1010,6 +1010,8 @@ export interface SourceRegistrySnapshot {
 
 export interface DiagnosticStats {
   sessionId?: string
+  activeOutputMode?: string
+  activeSceneRevision?: number
   targetFps?: number
   captureFps?: number
   renderFps?: number

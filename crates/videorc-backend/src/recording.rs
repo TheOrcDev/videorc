@@ -27,9 +27,9 @@ use crate::audio::{
 use crate::camera_capture::{native_camera_name_for_id, parse_native_camera_id};
 use crate::devices::{find_avfoundation_camera_index, find_avfoundation_screen_index};
 use crate::diagnostics::{
-    apply_audio_stats, apply_duplicate_capture_sources, apply_preview_frame_age,
-    apply_preview_stats, apply_runtime_diagnostics_snapshot, apply_stream_health,
-    starting_diagnostics,
+    apply_active_scene_revision, apply_audio_stats, apply_duplicate_capture_sources,
+    apply_preview_frame_age, apply_preview_stats, apply_runtime_diagnostics_snapshot,
+    apply_stream_health, starting_diagnostics,
 };
 use crate::ffmpeg::{ffprobe_path_for, resolve_ffmpeg_path};
 use crate::ffmpeg_work::{CapturePermit, MaintenanceCancelToken};
@@ -422,7 +422,7 @@ pub async fn start_session(
     );
     let duplicate_capture_sources = duplicate_capture_sources_for_capture(&state, &capture).await;
     let initial_diagnostics = apply_duplicate_capture_sources(
-        starting_diagnostics(&session_id, params.output.video.fps),
+        starting_diagnostics(&session_id, params.output.video.fps, mode),
         duplicate_capture_sources,
     );
     {
@@ -548,10 +548,13 @@ pub async fn start_session(
 
                 log_state.emit_log("warn", trimmed);
                 if let Some(stream_health) = parse_ffmpeg_stream_health(&log_session_id, trimmed) {
+                    let scene_revision = current_compositor_scene_revision(&log_state).await;
                     let diagnostic_stats = {
                         let mut diagnostics = log_state.diagnostics.lock().await;
-                        let next =
-                            apply_stream_health(diagnostics.clone(), &stream_health, target_fps);
+                        let next = apply_active_scene_revision(
+                            apply_stream_health(diagnostics.clone(), &stream_health, target_fps),
+                            scene_revision,
+                        );
                         *diagnostics = next.clone();
                         next
                     };
@@ -1328,14 +1331,18 @@ async fn update_preview_diagnostics(
     preview_dropped_frames: u64,
     preview_target_fps: Option<f64>,
 ) {
+    let scene_revision = current_compositor_scene_revision(state).await;
     let diagnostic_stats = {
         let mut diagnostics = state.diagnostics.lock().await;
-        let next = apply_preview_stats(
-            diagnostics.clone(),
-            preview_latency_ms,
-            preview_dropped_frames,
-            preview_target_fps,
-            PreviewTransport::LatestJpegPolling,
+        let next = apply_active_scene_revision(
+            apply_preview_stats(
+                diagnostics.clone(),
+                preview_latency_ms,
+                preview_dropped_frames,
+                preview_target_fps,
+                PreviewTransport::LatestJpegPolling,
+            ),
+            scene_revision,
         );
         *diagnostics = next.clone();
         next
@@ -1372,13 +1379,17 @@ pub async fn update_preview_frame_age(
         metrics.present_fps = present_fps;
         (metrics.present_fps, metrics.repeated_frames)
     };
+    let scene_revision = current_compositor_scene_revision(state).await;
     let diagnostic_stats = {
         let mut diagnostics = state.diagnostics.lock().await;
-        let next = apply_preview_frame_age(
-            diagnostics.clone(),
-            preview_frame_age_ms,
-            preview_present_fps,
-            preview_repeated_frames,
+        let next = apply_active_scene_revision(
+            apply_preview_frame_age(
+                diagnostics.clone(),
+                preview_frame_age_ms,
+                preview_present_fps,
+                preview_repeated_frames,
+            ),
+            scene_revision,
         );
         *diagnostics = next.clone();
         next
@@ -1387,6 +1398,10 @@ pub async fn update_preview_frame_age(
         "diagnostics.stats",
         apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
     );
+}
+
+async fn current_compositor_scene_revision(state: &AppState) -> Option<u64> {
+    state.compositor.lock().await.status.scene_revision
 }
 
 fn preview_target_fps_for_source(idle_pid: Option<u32>) -> Option<f64> {

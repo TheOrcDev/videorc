@@ -9,7 +9,9 @@ use tokio::time::{Duration, MissedTickBehavior};
 use uuid::Uuid;
 
 use crate::compositor_synthetic::SyntheticMovingSource;
-use crate::diagnostics::{apply_compositor_stats, apply_runtime_diagnostics_snapshot};
+use crate::diagnostics::{
+    apply_active_scene_revision, apply_compositor_stats, apply_runtime_diagnostics_snapshot,
+};
 use crate::preview_camera::{preview_camera_latest_frame_info, preview_camera_status};
 use crate::preview_screen::{preview_screen_latest_frame_info, preview_screen_status};
 use crate::protocol::{
@@ -85,6 +87,16 @@ pub async fn start_synthetic_compositor(
 ) -> CompositorStatus {
     stop_current_compositor(&state).await;
 
+    let previous_scene_status = {
+        let compositor = state.compositor.lock().await;
+        (
+            compositor.status.scene_revision,
+            compositor.status.scene_id.clone(),
+            compositor.status.scene_layout.clone(),
+            compositor.status.active_screen_id.clone(),
+            compositor.status.scene_sources.clone(),
+        )
+    };
     let run_id = Uuid::new_v4().to_string();
     let target_fps = params.target_fps.clamp(30, 120);
     let status = CompositorStatus {
@@ -92,11 +104,11 @@ pub async fn start_synthetic_compositor(
         target_fps,
         width: params.width.max(1),
         height: params.height.max(1),
-        scene_revision: None,
-        scene_id: None,
-        scene_layout: None,
-        active_screen_id: None,
-        scene_sources: Vec::new(),
+        scene_revision: previous_scene_status.0,
+        scene_id: previous_scene_status.1,
+        scene_layout: previous_scene_status.2,
+        active_screen_id: previous_scene_status.3,
+        scene_sources: previous_scene_status.4,
         sources: Vec::new(),
         render_fps: None,
         frames_rendered: 0,
@@ -140,6 +152,16 @@ pub async fn update_compositor_surface_size(
         compositor.status.clone()
     };
     state.emit_event("compositor.status", status.clone());
+    let diagnostic_stats = {
+        let mut diagnostics = state.diagnostics.lock().await;
+        let next = apply_active_scene_revision(diagnostics.clone(), status.scene_revision);
+        *diagnostics = next.clone();
+        next
+    };
+    state.emit_event(
+        "diagnostics.stats",
+        apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
+    );
     status
 }
 

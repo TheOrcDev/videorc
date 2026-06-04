@@ -89,6 +89,11 @@ export function DiagnosticsTab(): ReactElement {
           title="Live stats"
         >
           <div className="grid gap-2 sm:grid-cols-2">
+            <DiagnosticMetric label="Output mode" value={diagnosticStats.activeOutputMode ?? 'Idle'} />
+            <DiagnosticMetric
+              label="Scene revision"
+              value={diagnosticStats.activeSceneRevision == null ? 'None' : diagnosticStats.activeSceneRevision.toString()}
+            />
             <DiagnosticMetric label="Capture FPS" value={formatMetric(diagnosticStats.captureFps ?? streamHealth?.fps, 'fps')} />
             <DiagnosticMetric label="Render FPS" value={formatMetric(diagnosticStats.renderFps ?? streamHealth?.fps, 'fps')} />
             <DiagnosticMetric label="Skipped frames" value={diagnosticStats.skippedFrames.toString()} />

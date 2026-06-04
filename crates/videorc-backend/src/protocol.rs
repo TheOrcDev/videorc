@@ -728,6 +728,8 @@ pub struct StreamHealth {
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticStats {
     pub session_id: Option<String>,
+    pub active_output_mode: Option<String>,
+    pub active_scene_revision: Option<u64>,
     pub target_fps: Option<f64>,
     pub capture_fps: Option<f64>,
     pub render_fps: Option<f64>,

@@ -1084,6 +1084,8 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
         }
         "diagnostics.stats" => {
             let stats = state.diagnostics.lock().await.clone();
+            let scene_revision = state.compositor.lock().await.status.scene_revision;
+            let stats = diagnostics::apply_active_scene_revision(stats, scene_revision);
             let source_registry = state.source_registry.lock().await.snapshot();
             let stats = diagnostics::apply_source_registry_snapshot(stats, source_registry);
             let stats = diagnostics::apply_runtime_diagnostics_snapshot(
