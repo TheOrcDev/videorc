@@ -1,4 +1,6 @@
-use std::time::Instant;
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::{Instant, SystemTime};
 
 use chrono::Utc;
 use tokio::sync::watch;
@@ -24,6 +26,7 @@ pub type CompositorSlot = std::sync::Arc<tokio::sync::Mutex<CompositorRuntime>>;
 pub struct CompositorRuntime {
     pub status: CompositorStatus,
     scene: Option<CompositorSceneSnapshot>,
+    image_sources: HashMap<String, CompositorImageSource>,
     run_id: Option<String>,
     stop_tx: Option<watch::Sender<bool>>,
     render_task: Option<JoinHandle<()>>,
@@ -55,10 +58,21 @@ struct CompositorSceneSnapshot {
     active_screen: Option<StreamScreen>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct CompositorImageSource {
+    image_path: String,
+    file_revision: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+    state: String,
+    message: Option<String>,
+}
+
 pub fn initial_compositor_state() -> CompositorRuntime {
     CompositorRuntime {
         status: stopped_status(Some("Compositor is not running.".to_string())),
         scene: None,
+        image_sources: HashMap::new(),
         run_id: None,
         stop_tx: None,
         render_task: None,
@@ -164,6 +178,10 @@ pub async fn update_compositor_scene(
             layout: params.layout,
             active_screen: params.active_screen,
         };
+        let active_image_source = snapshot
+            .active_screen
+            .as_ref()
+            .map(|screen| compositor.cache_image_source(screen));
         compositor.status.scene_revision = Some(snapshot.revision);
         compositor.status.scene_id = snapshot.scene.as_ref().map(|scene| scene.id.clone());
         compositor.status.scene_layout = Some(snapshot.layout.clone());
@@ -171,13 +189,59 @@ pub async fn update_compositor_scene(
             .active_screen
             .as_ref()
             .map(|screen| screen.id.clone());
-        compositor.status.scene_sources = compositor_scene_sources(&snapshot);
+        compositor.status.scene_sources =
+            compositor_scene_sources(&snapshot, active_image_source.as_ref());
         compositor.status.updated_at = Utc::now().to_rfc3339();
         compositor.scene = Some(snapshot);
         compositor.status.clone()
     };
     state.emit_event("compositor.status", status.clone());
     status
+}
+
+impl CompositorRuntime {
+    fn cache_image_source(&mut self, screen: &StreamScreen) -> CompositorImageSource {
+        let path = Path::new(&screen.image_path);
+        let file_revision = image_file_revision(path);
+        if let Some(cached) = self.image_sources.get(&screen.id)
+            && cached.image_path == screen.image_path
+            && cached.file_revision == file_revision
+        {
+            return cached.clone();
+        }
+
+        let source = if file_revision.is_some() {
+            match image::image_dimensions(path) {
+                Ok((width, height)) => CompositorImageSource {
+                    image_path: screen.image_path.clone(),
+                    file_revision,
+                    width: Some(width),
+                    height: Some(height),
+                    state: "live".to_string(),
+                    message: None,
+                },
+                Err(error) => CompositorImageSource {
+                    image_path: screen.image_path.clone(),
+                    file_revision,
+                    width: None,
+                    height: None,
+                    state: "source-missing".to_string(),
+                    message: Some(format!("Could not read uploaded screen image: {error}")),
+                },
+            }
+        } else {
+            CompositorImageSource {
+                image_path: screen.image_path.clone(),
+                file_revision,
+                width: None,
+                height: None,
+                state: "source-missing".to_string(),
+                message: Some("Uploaded screen image file is missing.".to_string()),
+            }
+        };
+        self.image_sources.insert(screen.id.clone(), source.clone());
+        source
+    }
 }
 
 async fn stop_current_compositor(state: &AppState) {
@@ -444,6 +508,7 @@ fn stopped_status(message: Option<String>) -> CompositorStatus {
 
 fn compositor_scene_sources(
     snapshot: &CompositorSceneSnapshot,
+    active_image_source: Option<&CompositorImageSource>,
 ) -> Vec<CompositorSceneSourceStatus> {
     let scene_source_count = snapshot
         .scene
@@ -461,6 +526,7 @@ fn compositor_scene_sources(
                     id: source.id.clone(),
                     name: source.name.clone(),
                     kind: compositor_scene_source_kind(&source.kind),
+                    state: "referenced".to_string(),
                     device_id: source.device_id.clone(),
                     visible: source.visible,
                     transform: source.transform.clone(),
@@ -473,6 +539,10 @@ fn compositor_scene_sources(
                         None
                     },
                     image_path: None,
+                    file_revision: None,
+                    width: None,
+                    height: None,
+                    message: None,
                 }),
         );
     }
@@ -481,16 +551,34 @@ fn compositor_scene_sources(
             id: format!("screen-image:{}", active_screen.id),
             name: active_screen.name.clone(),
             kind: CompositorSceneSourceKind::ScreenImage,
+            state: active_image_source
+                .map(|source| source.state.clone())
+                .unwrap_or_else(|| "source-missing".to_string()),
             device_id: None,
             visible: true,
             transform: full_frame_transform(),
             fit: CompositorSceneSourceFit::Cover,
             mirror: false,
             shape: None,
-            image_path: Some(active_screen.image_path.clone()),
+            image_path: active_image_source.map(|source| source.image_path.clone()),
+            file_revision: active_image_source.and_then(|source| source.file_revision.clone()),
+            width: active_image_source.and_then(|source| source.width),
+            height: active_image_source.and_then(|source| source.height),
+            message: active_image_source.and_then(|source| source.message.clone()),
         });
     }
     sources
+}
+
+fn image_file_revision(path: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    Some(format!("{}:{modified_ms}", metadata.len()))
 }
 
 fn compositor_scene_source_kind(kind: &SceneSourceKind) -> CompositorSceneSourceKind {
@@ -646,6 +734,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn compositor_image_source_cache_reports_live_and_missing_states() {
+        let state = test_state();
+        let layout = crate::protocol::default_layout_settings();
+        let image_path =
+            std::env::temp_dir().join(format!("videorc-compositor-image-{}.png", Uuid::new_v4()));
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]));
+        image.save(&image_path).unwrap();
+        let screen = test_stream_screen_with_path("cached-screen", &image_path);
+
+        let first = update_compositor_scene(
+            &state,
+            CompositorSceneUpdateParams {
+                revision: 1,
+                scene: None,
+                layout: layout.clone(),
+                active_screen: Some(screen.clone()),
+            },
+        )
+        .await;
+
+        let first_source = &first.scene_sources[0];
+        assert_eq!(first_source.state, "live");
+        assert_eq!(first_source.width, Some(1));
+        assert_eq!(first_source.height, Some(1));
+        assert!(first_source.file_revision.is_some());
+        let first_revision = first_source.file_revision.clone();
+
+        let second = update_compositor_scene(
+            &state,
+            CompositorSceneUpdateParams {
+                revision: 2,
+                scene: None,
+                layout: layout.clone(),
+                active_screen: Some(screen.clone()),
+            },
+        )
+        .await;
+
+        assert_eq!(second.scene_sources[0].file_revision, first_revision);
+        assert_eq!(state.compositor.lock().await.image_sources.len(), 1);
+
+        std::fs::remove_file(&image_path).unwrap();
+        let missing = update_compositor_scene(
+            &state,
+            CompositorSceneUpdateParams {
+                revision: 3,
+                scene: None,
+                layout,
+                active_screen: Some(screen),
+            },
+        )
+        .await;
+
+        assert_eq!(missing.scene_sources[0].state, "source-missing");
+        assert!(missing.scene_sources[0].message.is_some());
+        assert_eq!(state.compositor.lock().await.image_sources.len(), 1);
+    }
+
     #[test]
     fn compositor_frame_age_uses_latest_real_source_age() {
         let sources = vec![
@@ -677,10 +824,14 @@ mod tests {
     }
 
     fn test_stream_screen(id: &str) -> StreamScreen {
+        test_stream_screen_with_path(id, &std::path::PathBuf::from(format!("/tmp/{id}.png")))
+    }
+
+    fn test_stream_screen_with_path(id: &str, image_path: &std::path::Path) -> StreamScreen {
         StreamScreen {
             id: id.to_string(),
             name: format!("Screen {id}"),
-            image_path: format!("/tmp/{id}.png"),
+            image_path: image_path.display().to_string(),
             thumbnail_path: None,
             sort_order: 1,
             status: StreamScreenStatus::Ready,

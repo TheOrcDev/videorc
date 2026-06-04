@@ -195,7 +195,10 @@ function buildPreviewSurfaceSceneFromCompositorStatus(status: CompositorStatus):
     transform: source.transform,
     visible: source.visible,
     frameUrl: compositorLayerFrameUrl(source.kind),
-    imageUrl: source.kind === 'screen-image' && source.imagePath ? fileUrlFromPath(source.imagePath) : undefined,
+    imageUrl:
+      source.kind === 'screen-image' && source.state !== 'source-missing' && source.imagePath
+        ? fileUrlFromPath(source.imagePath)
+        : undefined,
     fit: source.fit,
     mirror: source.mirror,
     shape: source.shape
@@ -1158,6 +1161,7 @@ function smokeCompositorStatusFromSceneParams(params: PreviewSurfaceSceneUpdateP
         id: source.id,
         name: source.name,
         kind: source.kind,
+        state: 'referenced',
         deviceId: source.deviceId,
         visible: source.visible,
         transform: source.transform,
@@ -1171,11 +1175,15 @@ function smokeCompositorStatusFromSceneParams(params: PreviewSurfaceSceneUpdateP
               id: `screen-image:${params.activeScreen.id}`,
               name: params.activeScreen.name,
               kind: 'screen-image' as const,
+              state: params.activeScreen.status === 'ready' ? 'live' : 'source-missing',
               visible: true,
               transform: fullFrameTransform(),
               fit: 'cover' as const,
               mirror: false,
-              imagePath: params.activeScreen.imagePath
+              imagePath: params.activeScreen.imagePath,
+              fileRevision: params.activeScreen.status === 'ready' ? 'smoke-revision' : undefined,
+              width: params.activeScreen.status === 'ready' ? 1280 : undefined,
+              height: params.activeScreen.status === 'ready' ? 720 : undefined
             }
           ]
         : [])

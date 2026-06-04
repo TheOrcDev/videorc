@@ -937,6 +937,7 @@ pub struct CompositorSceneSourceStatus {
     pub id: String,
     pub name: String,
     pub kind: CompositorSceneSourceKind,
+    pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
     pub visible: bool,
@@ -947,6 +948,14 @@ pub struct CompositorSceneSourceStatus {
     pub shape: Option<CameraShape>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -799,6 +799,7 @@ export interface CompositorSceneSourceStatus {
   id: string
   name: string
   kind: CompositorSceneSourceKind
+  state: string
   deviceId?: string
   visible: boolean
   transform: SceneTransform
@@ -806,6 +807,10 @@ export interface CompositorSceneSourceStatus {
   mirror: boolean
   shape?: CameraShape
   imagePath?: string
+  fileRevision?: string
+  width?: number
+  height?: number
+  message?: string
 }
 
 export interface CompositorSceneUpdateParams {
