@@ -776,7 +776,7 @@ export interface PreviewSurfaceBounds {
 }
 
 export type PreviewSurfaceState = 'unavailable' | 'starting' | 'live' | 'stopped' | 'failed'
-export type PreviewSurfaceSource = 'synthetic' | 'camera'
+export type PreviewSurfaceSource = 'synthetic' | 'camera' | 'screen' | 'window'
 
 export interface PreviewSurfaceStatus {
   state: PreviewSurfaceState
@@ -821,6 +821,31 @@ export interface PreviewCameraStatus {
   framesCaptured: number
   droppedFrames: number
   sequence?: number
+  updatedAt: string
+  message?: string
+}
+
+export type PreviewScreenState = 'starting' | 'live' | 'permission-needed' | 'source-missing' | 'failed'
+export type PreviewScreenSourceKind = 'screen' | 'window'
+
+export interface PreviewScreenStartParams {
+  sources: SourceSelection
+  video: VideoSettings
+}
+
+export interface PreviewScreenStatus {
+  state: PreviewScreenState
+  sourceId?: string
+  sourceKind?: PreviewScreenSourceKind
+  targetFps: number
+  width?: number
+  height?: number
+  sourceFps?: number
+  framesCaptured: number
+  droppedFrames: number
+  sequence?: number
+  includeCursor: boolean
+  excludeCurrentProcessWindows: boolean
   updatedAt: string
   message?: string
 }

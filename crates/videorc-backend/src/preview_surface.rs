@@ -43,6 +43,8 @@ pub async fn create_preview_surface(
     let now = Utc::now().to_rfc3339();
     let message = match params.source {
         PreviewSurfaceSource::Camera => "Native camera preview surface running.",
+        PreviewSurfaceSource::Screen => "Native screen preview surface running.",
+        PreviewSurfaceSource::Window => "Native window preview surface running.",
         PreviewSurfaceSource::Synthetic => "Synthetic native preview surface running.",
     };
     let status = PreviewSurfaceStatus {

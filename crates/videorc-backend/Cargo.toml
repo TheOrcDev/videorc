@@ -33,4 +33,4 @@ objc2-av-foundation = { version = "0.3.2", default-features = false, features = 
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2", "objc2-core-video"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSValue"] }
-objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["SCShareableContent", "block2", "libc", "objc2-core-foundation", "objc2-core-graphics"] }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["SCShareableContent", "SCStream", "block2", "dispatch2", "libc", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }

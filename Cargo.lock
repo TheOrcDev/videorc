@@ -1072,10 +1072,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74b7c5390f477482f001bc354d6571a70db7e4f8d5288e860c45521fbce11394"
 dependencies = [
  "block2",
+ "dispatch2",
  "libc",
  "objc2",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-media",
  "objc2-foundation",
 ]
 

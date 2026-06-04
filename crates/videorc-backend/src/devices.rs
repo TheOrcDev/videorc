@@ -57,7 +57,7 @@ pub async fn list_devices(ffmpeg_path: &str) -> DeviceList {
 
     let native_capture_sources = list_native_capture_sources();
     warnings.extend(native_capture_sources.warnings);
-    devices.extend(discovery_only_native_capture_devices(
+    devices.extend(preview_ready_native_capture_devices(
         native_capture_sources.devices,
     ));
 
@@ -77,11 +77,9 @@ pub async fn list_devices(ffmpeg_path: &str) -> DeviceList {
         Ok(av_devices) => {
             let screens = avfoundation_screen_devices(&av_devices);
             if screens.is_empty() {
-                devices.insert(0, missing_avfoundation_screen_device());
+                devices.push(missing_avfoundation_screen_device());
             } else {
-                for screen in screens.into_iter().rev() {
-                    devices.insert(0, screen);
-                }
+                devices.extend(screens);
             }
 
             for device in av_devices {
@@ -136,21 +134,20 @@ pub async fn list_devices(ffmpeg_path: &str) -> DeviceList {
     DeviceList { devices, warnings }
 }
 
-fn discovery_only_native_capture_devices(devices: Vec<Device>) -> Vec<Device> {
+fn preview_ready_native_capture_devices(devices: Vec<Device>) -> Vec<Device> {
     devices
         .into_iter()
         .map(|mut device| {
             if matches!(device.kind, DeviceKind::Screen | DeviceKind::Window)
                 && device.status == DeviceStatus::Available
             {
-                device.status = DeviceStatus::Unavailable;
                 device.detail = Some(match device.kind {
                     DeviceKind::Screen => {
-                        "Native ScreenCaptureKit display discovery is available, but preview/recording still uses selectable FFmpeg screen sources until the native video bridge lands."
+                        "Native ScreenCaptureKit display is available for native preview. Recording still uses the FFmpeg fallback bridge until the compositor output lands."
                             .to_string()
                     }
                     DeviceKind::Window => {
-                        "Native ScreenCaptureKit window discovery is available, but window preview/recording is pending the native video bridge."
+                        "Native ScreenCaptureKit window is available for native preview. Recording still uses the FFmpeg fallback bridge until the compositor output lands."
                             .to_string()
                     }
                     _ => unreachable!(),
@@ -547,8 +544,8 @@ mod tests {
     }
 
     #[test]
-    fn native_screen_and_window_sources_are_not_selectable_until_bridge_exists() {
-        let devices = discovery_only_native_capture_devices(vec![
+    fn native_screen_and_window_sources_are_selectable_for_preview() {
+        let devices = preview_ready_native_capture_devices(vec![
             Device {
                 id: "screen:screencapturekit:1".to_string(),
                 name: "Display 1".to_string(),
@@ -572,9 +569,16 @@ mod tests {
             },
         ]);
 
-        assert_eq!(devices[0].status, DeviceStatus::Unavailable);
-        assert_eq!(devices[1].status, DeviceStatus::Unavailable);
+        assert_eq!(devices[0].status, DeviceStatus::Available);
+        assert_eq!(devices[1].status, DeviceStatus::Available);
         assert_eq!(devices[2].status, DeviceStatus::Available);
+        assert!(
+            devices[0]
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("native preview")
+        );
     }
 
     #[test]

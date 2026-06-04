@@ -340,7 +340,8 @@ async function createNativePreviewSurface(bounds: PreviewSurfaceBounds): Promise
       webPreferences: {
         sandbox: true,
         contextIsolation: true,
-        nodeIntegration: false
+        nodeIntegration: false,
+        backgroundThrottling: false
       }
     })
     nativePreviewSurfaceWindow.setIgnoreMouseEvents(true, { forward: true })

@@ -12,6 +12,7 @@ mod oauth;
 mod pipeline;
 mod preflight;
 mod preview_camera;
+mod preview_screen;
 mod preview_surface;
 mod protocol;
 mod recording;
@@ -49,6 +50,9 @@ use preview_surface::{
 };
 use preview_camera::{
     latest_preview_camera_png, preview_camera_status, start_preview_camera, stop_preview_camera,
+};
+use preview_screen::{
+    latest_preview_screen_png, preview_screen_status, start_preview_screen, stop_preview_screen,
 };
 use protocol::{
     BackendConnection, BackendHealth, ClientCommand, RecordingState, ServerEvent, ServerResponse,
@@ -118,6 +122,7 @@ async fn main() -> Result<()> {
         .route("/preview/live.mjpeg", get(live_preview_handler))
         .route("/preview/live.jpg", get(live_preview_frame_handler))
         .route("/preview/camera/live.png", get(live_camera_frame_handler))
+        .route("/preview/screen/live.png", get(live_screen_frame_handler))
         .route("/preview/{id}", get(preview_handler))
         .route("/oauth/callback", get(oauth_callback_handler))
         .route("/ws", get(ws_handler))
@@ -267,6 +272,27 @@ async fn live_camera_frame_handler(
     }
 
     match latest_preview_camera_png(&state).await {
+        Some(bytes) => (
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn live_screen_frame_handler(
+    State(state): State<AppState>,
+    Query(query): Query<WsQuery>,
+) -> Response {
+    if query.token != state.token {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match latest_preview_screen_png(&state).await {
         Some(bytes) => (
             [
                 (header::CONTENT_TYPE, "image/png"),
@@ -1122,6 +1148,25 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
         }
         "preview.camera.status" => {
             let status = preview_camera_status(state).await;
+            ServerResponse::ok(command.id, status)
+        }
+        "preview.screen.start" => {
+            match serde_json::from_value::<protocol::PreviewScreenStartParams>(command.params) {
+                Ok(params) => {
+                    let status = start_preview_screen(state.clone(), params).await;
+                    ServerResponse::ok(command.id, status)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "preview.screen.stop" => {
+            let status = stop_preview_screen(state).await;
+            ServerResponse::ok(command.id, status)
+        }
+        "preview.screen.status" => {
+            let status = preview_screen_status(state).await;
             ServerResponse::ok(command.id, status)
         }
         "audio.meter.sample" => {

@@ -238,7 +238,9 @@ export function PreviewStage({
           return
         }
         lastNativeBoundsRef.current = bounds
-        onNativePreviewSurfaceBounds(bounds)
+        void Promise.resolve(onNativePreviewSurfaceBounds(bounds)).catch((error: unknown) => {
+          console.error('Native preview surface bounds update failed:', error)
+        })
       })
     }
 
