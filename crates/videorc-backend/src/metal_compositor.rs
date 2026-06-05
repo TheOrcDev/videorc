@@ -142,6 +142,136 @@ pub fn composite_sources(
     Some(read_texture_bgra(&target, out_width, out_height))
 }
 
+/// A persisted GPU compositor: device, command queue, render pipeline, and sampler built
+/// once and reused per frame (compiling shaders per frame would stutter). This is the
+/// hot-path-ready form of `composite_sources`, used by the flag-gated Metal path in the
+/// compositor loop.
+pub struct MetalSceneCompositor {
+    device: Retained<MetalDevice>,
+    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
+}
+
+impl MetalSceneCompositor {
+    /// Build the compositor, or `None` when no Metal device / shader compile is available.
+    pub fn new() -> Option<Self> {
+        let device = MTLCreateSystemDefaultDevice()?;
+        let queue = device.newCommandQueue()?;
+        let pipeline = build_pipeline(&device)?;
+        let sampler = build_sampler(&device)?;
+        Some(Self {
+            device,
+            queue,
+            pipeline,
+            sampler,
+        })
+    }
+
+    /// Composite `sources` over `background` into an offscreen BGRA8 target and read back.
+    pub fn compose_bgra(
+        &self,
+        out_width: usize,
+        out_height: usize,
+        background: [f64; 4],
+        sources: &[GpuSource<'_>],
+    ) -> Option<Vec<u8>> {
+        let target = make_texture(
+            &self.device,
+            out_width,
+            out_height,
+            MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead,
+        )?;
+        let command_buffer = self.queue.commandBuffer()?;
+        let encoder = {
+            let pass = clear_pass(&target, background);
+            command_buffer.renderCommandEncoderWithDescriptor(&pass)?
+        };
+        encoder.setRenderPipelineState(&self.pipeline);
+        unsafe { encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0) };
+        for source in sources {
+            let texture = upload_texture(&self.device, source)?;
+            let vertices = quad_vertices(source.dest);
+            let buffer = unsafe {
+                self.device.newBufferWithBytes_length_options(
+                    NonNull::new(vertices.as_ptr() as *mut c_void)?,
+                    std::mem::size_of_val(&vertices),
+                    MTLResourceOptions::StorageModeShared,
+                )?
+            };
+            unsafe {
+                encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
+                encoder.setFragmentTexture_atIndex(Some(&texture), 0);
+                encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+            }
+        }
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        Some(read_texture_bgra(&target, out_width, out_height))
+    }
+
+    /// Composite over a TV-black (Y=16) background and convert to planar YUV420P, matching
+    /// the CPU compositor's output format/coefficients so the encoder pipeline is unchanged.
+    pub fn compose_yuv420p(
+        &self,
+        out_width: usize,
+        out_height: usize,
+        sources: &[GpuSource<'_>],
+    ) -> Option<Vec<u8>> {
+        let background = [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 1.0];
+        let bgra = self.compose_bgra(out_width, out_height, background, sources)?;
+        Some(bgra_to_yuv420p(&bgra, out_width, out_height))
+    }
+}
+
+/// Full-range BT.601 RGB→YUV, identical to the CPU compositor's `rgb_to_yuv`, so the GPU
+/// path produces byte-compatible YUV420P.
+fn rgb_to_yuv(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    let r = i32::from(r);
+    let g = i32::from(g);
+    let b = i32::from(b);
+    let y = ((77 * r + 150 * g + 29 * b) >> 8).clamp(0, 255) as u8;
+    let u = (128 + ((-43 * r - 85 * g + 128 * b) >> 8)).clamp(0, 255) as u8;
+    let v = (128 + ((128 * r - 107 * g - 21 * b) >> 8)).clamp(0, 255) as u8;
+    (y, u, v)
+}
+
+/// Convert a BGRA8 buffer to planar YUV420P (Y plane, then U, then V), 2×2-averaged chroma.
+pub fn bgra_to_yuv420p(bgra: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let y_size = width * height;
+    let chroma_w = width / 2;
+    let chroma_h = height / 2;
+    let chroma_size = chroma_w * chroma_h;
+    let mut out = vec![0u8; y_size + 2 * chroma_size];
+    for y in 0..height {
+        for x in 0..width {
+            let i = (y * width + x) * 4;
+            let (yy, _, _) = rgb_to_yuv(bgra[i + 2], bgra[i + 1], bgra[i]);
+            out[y * width + x] = yy;
+        }
+    }
+    for cy in 0..chroma_h {
+        for cx in 0..chroma_w {
+            let (mut rs, mut gs, mut bs) = (0u32, 0u32, 0u32);
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let px = (cx * 2 + dx).min(width - 1);
+                    let py = (cy * 2 + dy).min(height - 1);
+                    let i = (py * width + px) * 4;
+                    bs += u32::from(bgra[i]);
+                    gs += u32::from(bgra[i + 1]);
+                    rs += u32::from(bgra[i + 2]);
+                }
+            }
+            let (_, u, v) = rgb_to_yuv((rs / 4) as u8, (gs / 4) as u8, (bs / 4) as u8);
+            out[y_size + cy * chroma_w + cx] = u;
+            out[y_size + chroma_size + cy * chroma_w + cx] = v;
+        }
+    }
+    out
+}
+
 /// Create a `CAMetalLayer` configured to present BGRA8 frames at `width`×`height` device
 /// pixels (Phase 2 preview surface). To display, the Electron/native integration attaches
 /// it to an on-screen `NSView` positioned over the React preview rect; this owns the
@@ -339,6 +469,44 @@ mod tests {
         for chunk in pixels.chunks_exact(4) {
             assert_eq!(chunk, [0, 0, 255, 255]);
         }
+    }
+
+    #[test]
+    fn bgra_to_yuv420p_matches_full_range_bt601() {
+        // 4×4 solid red. BGRA red = [0, 0, 255, 255]. Full-range BT.601: Y=76, U=85, V=255.
+        let red = [0u8, 0, 255, 255].repeat(16);
+        let yuv = bgra_to_yuv420p(&red, 4, 4);
+        assert_eq!(yuv.len(), 16 + 2 * 4); // Y(16) + U(4) + V(4)
+        assert!(yuv[..16].iter().all(|&y| y == 76), "Y plane");
+        assert!(yuv[16..20].iter().all(|&u| u == 85), "U plane");
+        assert!(yuv[20..24].iter().all(|&v| v == 255), "V plane");
+    }
+
+    #[test]
+    fn metal_scene_compositor_is_send() {
+        // The async compositor loop holds this across await points.
+        fn assert_send<T: Send>() {}
+        assert_send::<MetalSceneCompositor>();
+    }
+
+    #[test]
+    fn metal_scene_compositor_composes_a_full_frame_source_or_skips() {
+        let Some(compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        // A 2×2 solid-red source filling a 4×4 frame → all red → YUV (76,85,255).
+        let red = [0u8, 0, 255, 255].repeat(4);
+        let sources = [GpuSource {
+            bgra: &red,
+            width: 2,
+            height: 2,
+            dest: [0.0, 0.0, 1.0, 1.0],
+        }];
+        let yuv = compositor.compose_yuv420p(4, 4, &sources).unwrap();
+        assert_eq!(yuv.len(), 16 + 2 * 4);
+        assert!(yuv[..16].iter().all(|&y| y == 76), "Y plane red");
+        assert!(yuv[16..20].iter().all(|&u| u == 85), "U plane red");
     }
 
     #[test]

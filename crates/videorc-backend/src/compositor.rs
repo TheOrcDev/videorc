@@ -348,6 +348,9 @@ async fn run_synthetic_compositor_loop(
     let mut ticker = tokio::time::interval(frame_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let (width, height) = compositor_dimensions(&state).await;
+    // Persisted GPU compositor (Some only on macOS with VIDEORC_METAL_COMPOSITOR + a GPU);
+    // built once and reused per frame. Held across the loop's awaits (it is Send).
+    let gpu_compositor = new_gpu_compositor();
 
     let mut frames_rendered = 0_u64;
     let mut frames_in_window = 0_u64;
@@ -381,7 +384,8 @@ async fn run_synthetic_compositor_loop(
                 frames_rendered = frames_rendered.saturating_add(1);
                 frames_in_window = frames_in_window.saturating_add(1);
                 let published =
-                    publish_compositor_frame(&state, frames_rendered, width, height).await;
+                    publish_compositor_frame(&state, frames_rendered, width, height, gpu_compositor.as_ref())
+                        .await;
                 let fallback_frame_age_ms = published.fallback_frame_age_ms;
                 if is_repeated_compositor_frame(previous_fingerprint, published.fingerprint) {
                     repeated_frames = repeated_frames.saturating_add(1);
@@ -501,11 +505,115 @@ fn is_repeated_compositor_frame(
     }
 }
 
+/// Whether the flag-gated Metal/GPU compositor path is requested.
+fn metal_compositor_enabled() -> bool {
+    std::env::var("VIDEORC_METAL_COMPOSITOR")
+        .is_ok_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"))
+}
+
+#[cfg(target_os = "macos")]
+use crate::metal_compositor::MetalSceneCompositor as GpuCompositor;
+/// Uninhabited stand-in so signatures stay platform-uniform off macOS (always `None`).
+#[cfg(not(target_os = "macos"))]
+enum GpuCompositor {}
+
+#[cfg(target_os = "macos")]
+fn new_gpu_compositor() -> Option<GpuCompositor> {
+    if !metal_compositor_enabled() {
+        return None;
+    }
+    match GpuCompositor::new() {
+        Some(compositor) => {
+            tracing::info!("Metal GPU compositor enabled (VIDEORC_METAL_COMPOSITOR)");
+            Some(compositor)
+        }
+        None => {
+            tracing::warn!(
+                "VIDEORC_METAL_COMPOSITOR set but no Metal device is available; using the CPU compositor"
+            );
+            None
+        }
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn new_gpu_compositor() -> Option<GpuCompositor> {
+    None
+}
+
+/// Compose the scene on the GPU for the cases the GPU path reproduces exactly: fill-placed
+/// Screen/Window/Camera sources with no crop and no camera mirror/circle/contain, and no
+/// uploaded-image source. Returns `None` for anything else so the exact CPU compositor is
+/// used instead — enabling the flag therefore never produces a frame that differs from the
+/// CPU path; it only offloads the cases it can match.
+#[cfg(target_os = "macos")]
+fn try_gpu_compose(gpu: Option<&GpuCompositor>, inputs: &CompositorRenderInputs<'_>) -> Option<Vec<u8>> {
+    let gpu = gpu?;
+    let snapshot = inputs.snapshot?;
+    if inputs.active_image_source.is_some() {
+        return None;
+    }
+    let scene = snapshot.scene.as_ref()?;
+    let layout = &snapshot.layout;
+    let mut sources = Vec::new();
+    for source in scene.sources.iter().filter(|source| source.visible) {
+        let transform = &source.transform;
+        if transform.crop_left != 0.0
+            || transform.crop_top != 0.0
+            || transform.crop_right != 0.0
+            || transform.crop_bottom != 0.0
+        {
+            return None;
+        }
+        let dest = [
+            transform.x as f32,
+            transform.y as f32,
+            transform.width as f32,
+            transform.height as f32,
+        ];
+        match source.kind {
+            SceneSourceKind::Camera => {
+                if layout.camera_mirror
+                    || camera_circle_mask_applies(layout)
+                    || matches!(layout.camera_fit, CameraFit::Fit)
+                {
+                    return None;
+                }
+                let frame = inputs.camera_frame?;
+                sources.push(crate::metal_compositor::GpuSource {
+                    bgra: &frame.bytes,
+                    width: frame.width as usize,
+                    height: frame.height as usize,
+                    dest,
+                });
+            }
+            SceneSourceKind::Screen | SceneSourceKind::Window => {
+                let frame = inputs.screen_frame?;
+                sources.push(crate::metal_compositor::GpuSource {
+                    bgra: &frame.bytes,
+                    width: frame.width as usize,
+                    height: frame.height as usize,
+                    dest,
+                });
+            }
+            SceneSourceKind::TestPattern => return None,
+        }
+    }
+    if sources.is_empty() {
+        return None;
+    }
+    gpu.compose_yuv420p(inputs.width as usize, inputs.height as usize, &sources)
+}
+#[cfg(not(target_os = "macos"))]
+fn try_gpu_compose(_gpu: Option<&GpuCompositor>, _inputs: &CompositorRenderInputs<'_>) -> Option<Vec<u8>> {
+    None
+}
+
 async fn publish_compositor_frame(
     state: &AppState,
     sequence: u64,
     width: u32,
     height: u32,
+    gpu: Option<&GpuCompositor>,
 ) -> CompositorPublishResult {
     let (frame_store, snapshot, active_image_source) = {
         let compositor = state.compositor.lock().await;
@@ -532,18 +640,23 @@ async fn publish_compositor_frame(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut bytes = store.checkout_buffer(raw_yuv420p_len(width, height));
-    render_compositor_yuv420p_frame(
-        CompositorRenderInputs {
-            sequence,
-            width,
-            height,
-            snapshot: snapshot.as_ref(),
-            active_image_source: active_image_source.as_ref(),
-            camera_frame: camera_frame.as_ref().map(|(frame, _layout)| frame),
-            screen_frame: screen_frame.as_ref(),
-        },
-        &mut bytes,
-    );
+    let inputs = CompositorRenderInputs {
+        sequence,
+        width,
+        height,
+        snapshot: snapshot.as_ref(),
+        active_image_source: active_image_source.as_ref(),
+        camera_frame: camera_frame.as_ref().map(|(frame, _layout)| frame),
+        screen_frame: screen_frame.as_ref(),
+    };
+    // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
+    match try_gpu_compose(gpu, &inputs) {
+        Some(yuv) => {
+            let len = bytes.len().min(yuv.len());
+            bytes[..len].copy_from_slice(&yuv[..len]);
+        }
+        None => render_compositor_yuv420p_frame(inputs, &mut bytes),
+    }
     store.publish(
         sequence,
         width,
