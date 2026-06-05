@@ -43,6 +43,16 @@ describe('evaluateAcceptance', () => {
     assert.match(v.failures.join(' '), /startup: metadata width 640/)
   })
 
+  it('fails the strict OBS preview gate when no real native Metal surface is reported', () => {
+    const input = cleanInput()
+    input.claimsNative = false
+    input.requireObsNativePreview = true
+    const v = evaluateAcceptance(input)
+
+    assert.equal(v.pass, false)
+    assert.match(v.failures.join(' '), /real native Metal surface/)
+  })
+
   it('fails on duplicate frames re-fed to the encoder', () => {
     const input = cleanInput()
     input.diagnostics.encoderBridgeRepeatedFrames = 12

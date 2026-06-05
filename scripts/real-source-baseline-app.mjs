@@ -200,6 +200,7 @@ async function main() {
       startupVerdict: startupReport.verdict,
       diagnostics,
       claimsNative,
+      requireObsNativePreview: true,
       expectAudio: Boolean(sources.microphone),
     })
     printSummary(report, startupReport, diagnostics, previewTransport, baselinePath, acceptance)

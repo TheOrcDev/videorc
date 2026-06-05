@@ -20,6 +20,7 @@ export const DEFAULT_ACCEPTANCE_GATES = Object.freeze({
  * @param {{pass:boolean, failures:string[]}} [input.startupVerdict] - from analyzeStartupResolution()
  * @param {object} input.diagnostics - summarized live diagnostics for the run
  * @param {boolean} input.claimsNative - whether the preview reported the real native Metal transport
+ * @param {boolean} [input.requireObsNativePreview] - whether OBS parity requires that real native transport
  * @param {boolean} input.expectAudio - whether a mic was selected
  * @param {object} [gates]
  * @returns {{pass:boolean, failures:string[]}}
@@ -74,6 +75,9 @@ export function evaluateAcceptance(input, gates = DEFAULT_ACCEPTANCE_GATES) {
   }
 
   // 5. Transport honesty: a "native" preview must not have fetched image-poll routes.
+  if (input.requireObsNativePreview && !input.claimsNative) {
+    failures.push('transport: preview did not report the real native Metal surface')
+  }
   const imagePolls = d.imagePollDuringSession?.total
   if (input.claimsNative && imagePolls != null && imagePolls > 0) {
     failures.push(
