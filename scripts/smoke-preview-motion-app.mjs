@@ -13,6 +13,8 @@ const obsMaxFrameAgeMs = Number(process.env.VIDEORC_PREVIEW_MOTION_OBS_MAX_AGE_M
 const obsMaxIntervalP95Ms = Number(process.env.VIDEORC_PREVIEW_MOTION_OBS_MAX_INTERVAL_P95_MS ?? 24)
 const expectedSurfaceTransport =
   process.env.VIDEORC_EXPECT_NATIVE_METAL_PREVIEW === '1' ? 'native-surface' : 'electron-proof-surface'
+const expectedSurfaceBacking =
+  process.env.VIDEORC_EXPECT_NATIVE_METAL_PREVIEW === '1' ? 'cametal-layer' : 'electron-browser-window'
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-preview-motion-${Date.now()}`)
 )
@@ -60,6 +62,7 @@ async function runPreviewMotionSmoke(connection, smoke) {
 
     await request(ws, timeoutMs, 'diagnostics.preview_baseline.record', {
       transport: liveStatus.transport,
+      surfaceBacking: liveStatus.backing,
       targetFps: liveStatus.targetFps,
       measuredFps: renderer.measuredFps,
       presentFps: diagnostics.previewPresentFps,
@@ -137,6 +140,7 @@ function assertNativeBootstrap(result, options = {}) {
 function isObsQualified(status, renderer, diagnostics) {
   return (
     status.transport === 'native-surface' &&
+    status.backing === 'cametal-layer' &&
     (status.targetFps ?? 0) >= 60 &&
     (renderer.measuredFps ?? 0) >= obsMinFps &&
     (renderer.intervalP95Ms ?? Number.POSITIVE_INFINITY) <= obsMaxIntervalP95Ms &&
@@ -153,6 +157,7 @@ async function waitForNativeSurface(ws, previousFrames = -1) {
     if (
       lastStatus.state === 'live' &&
       lastStatus.transport === expectedSurfaceTransport &&
+      lastStatus.backing === expectedSurfaceBacking &&
       (lastStatus.targetFps ?? 0) >= 60 &&
       lastStatus.framesRendered > previousFrames
     ) {

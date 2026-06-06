@@ -95,6 +95,7 @@ function idleNativePreviewSurfaceStatus(message = 'Native preview surface is not
     state: 'unavailable',
     source: 'synthetic',
     transport: 'unavailable',
+    backing: 'none',
     targetFps: 60,
     width: 0,
     height: 0,
@@ -661,6 +662,7 @@ async function createNativePreviewSurface(bounds: PreviewSurfaceBounds): Promise
         ? 'camera'
         : 'synthetic',
     transport: 'electron-proof-surface',
+    backing: 'electron-browser-window',
     targetFps: 60,
     width: rect.width,
     height: rect.height,
@@ -693,6 +695,7 @@ async function updateNativePreviewSurfaceBounds(bounds: PreviewSurfaceBounds): P
     state: 'live',
     source: nativePreviewSurfaceStatus.source,
     transport: 'electron-proof-surface',
+    backing: 'electron-browser-window',
     width: rect.width,
     height: rect.height,
     droppedFrames: nativePreviewSurfaceStatus.droppedFrames ?? 0,

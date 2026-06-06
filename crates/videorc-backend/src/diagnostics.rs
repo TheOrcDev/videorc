@@ -8,7 +8,8 @@ use crate::ffmpeg_work::FfmpegWorkSnapshot;
 use crate::frame_store::FrameStoreStats;
 use crate::protocol::{
     CompositorBackend, DiagnosticBottleneck, DiagnosticStats, PermissionPane, PreviewCameraStatus,
-    PreviewImagePollCounts, PreviewScreenStatus, PreviewTransport, StreamHealth,
+    PreviewImagePollCounts, PreviewScreenStatus, PreviewSurfaceBacking, PreviewTransport,
+    StreamHealth,
 };
 use crate::source_registry::SourceRegistrySnapshot;
 
@@ -94,6 +95,7 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         preview_frame_age_ms: None,
         preview_transport: PreviewTransport::Unavailable,
         preview_source_fps: Default::default(),
+        preview_surface_backing: PreviewSurfaceBacking::None,
         preview_present_fps: None,
         preview_input_to_present_latency_ms: None,
         preview_render_frame_time_p50_ms: None,
@@ -488,6 +490,7 @@ pub fn apply_compositor_stats(
     mut stats: DiagnosticStats,
     target_fps: u32,
     preview_transport: PreviewTransport,
+    preview_surface_backing: PreviewSurfaceBacking,
     compositor_backend: CompositorBackend,
     compositor_fallback_reason: Option<String>,
     compositor_cpu_fallback_frames: u64,
@@ -502,6 +505,7 @@ pub fn apply_compositor_stats(
     stats.preview_target_fps = Some(f64::from(target_fps));
     stats.preview_frame_age_ms = Some(frame_age_ms);
     stats.preview_transport = preview_transport;
+    stats.preview_surface_backing = preview_surface_backing;
     stats.compositor_backend = Some(compositor_backend);
     stats.compositor_fallback_reason = compositor_fallback_reason;
     stats.compositor_cpu_fallback_frames = compositor_cpu_fallback_frames;
@@ -842,6 +846,7 @@ mod tests {
             idle_diagnostics(),
             30,
             PreviewTransport::ElectronProofSurface,
+            PreviewSurfaceBacking::ElectronBrowserWindow,
             CompositorBackend::CpuFallback,
             Some("VIDEORC_METAL_COMPOSITOR disabled".to_string()),
             12,
@@ -863,6 +868,10 @@ mod tests {
             Some("VIDEORC_METAL_COMPOSITOR disabled")
         );
         assert_eq!(stats.compositor_cpu_fallback_frames, 12);
+        assert_eq!(
+            stats.preview_surface_backing,
+            PreviewSurfaceBacking::ElectronBrowserWindow
+        );
     }
 
     #[test]

@@ -7,8 +7,9 @@ use crate::compositor::{
 };
 use crate::diagnostics::{apply_preview_surface_resize, apply_runtime_diagnostics_snapshot};
 use crate::protocol::{
-    PreviewSurfaceBoundsParams, PreviewSurfaceCreateParams, PreviewSurfacePresentParams,
-    PreviewSurfaceSource, PreviewSurfaceState, PreviewSurfaceStatus, PreviewTransport,
+    PreviewSurfaceBacking, PreviewSurfaceBoundsParams, PreviewSurfaceCreateParams,
+    PreviewSurfacePresentParams, PreviewSurfaceSource, PreviewSurfaceState, PreviewSurfaceStatus,
+    PreviewTransport,
 };
 use crate::state::AppState;
 
@@ -46,6 +47,7 @@ pub async fn create_preview_surface(
         state: PreviewSurfaceState::Live,
         source: params.source,
         transport: PreviewTransport::ElectronProofSurface,
+        backing: PreviewSurfaceBacking::ElectronBrowserWindow,
         target_fps,
         width: surface_dimension(params.bounds.width),
         height: surface_dimension(params.bounds.height),
@@ -114,6 +116,7 @@ pub async fn destroy_preview_surface(state: &AppState) -> PreviewSurfaceStatus {
         let mut next = slot.status.clone();
         next.state = PreviewSurfaceState::Stopped;
         next.transport = PreviewTransport::Unavailable;
+        next.backing = PreviewSurfaceBacking::None;
         next.frames_rendered = 0;
         next.presented_frame_id = None;
         next.compositor_frame_lag = None;
@@ -142,6 +145,12 @@ pub async fn update_preview_surface_present(
     let status = {
         let mut slot = state.preview_surface.lock().await;
         let mut next = slot.status.clone();
+        if let Some(transport) = params.transport {
+            next.transport = transport;
+        }
+        if let Some(backing) = params.backing {
+            next.backing = backing;
+        }
         if let Some(frame_id) = params.presented_frame_id {
             next.presented_frame_id = Some(frame_id);
             next.frames_rendered = next.frames_rendered.max(frame_id);
@@ -164,6 +173,7 @@ pub async fn update_preview_surface_present(
         next.preview_dropped_frames = status.dropped_frames;
         next.preview_frame_age_ms = status.input_to_present_latency_ms;
         next.preview_render_frame_time_p95_ms = status.interval_p95_ms;
+        next.preview_surface_backing = status.backing;
         next.updated_at = Utc::now().to_rfc3339();
         *diagnostics = next.clone();
         next
@@ -211,6 +221,7 @@ fn unavailable_status(message: Option<String>) -> PreviewSurfaceStatus {
         state: PreviewSurfaceState::Unavailable,
         source: PreviewSurfaceSource::Synthetic,
         transport: PreviewTransport::Unavailable,
+        backing: PreviewSurfaceBacking::None,
         target_fps: 60,
         width: 0,
         height: 0,
@@ -270,6 +281,7 @@ mod tests {
 
         assert_eq!(status.state, PreviewSurfaceState::Live);
         assert_eq!(status.transport, PreviewTransport::ElectronProofSurface);
+        assert_eq!(status.backing, PreviewSurfaceBacking::ElectronBrowserWindow);
         assert_eq!(status.target_fps, 60);
         assert_eq!(status.width, 800);
         assert_eq!(status.height, 450);
@@ -321,6 +333,8 @@ mod tests {
         let status = update_preview_surface_present(
             &state,
             PreviewSurfacePresentParams {
+                transport: Some(PreviewTransport::NativeSurface),
+                backing: Some(PreviewSurfaceBacking::CaMetalLayer),
                 presented_frame_id: Some(42),
                 compositor_frame_lag: Some(1),
                 dropped_frames: 3,
@@ -331,6 +345,8 @@ mod tests {
         )
         .await;
 
+        assert_eq!(status.transport, PreviewTransport::NativeSurface);
+        assert_eq!(status.backing, PreviewSurfaceBacking::CaMetalLayer);
         assert_eq!(status.presented_frame_id, Some(42));
         assert_eq!(status.compositor_frame_lag, Some(1));
         assert_eq!(status.dropped_frames, 3);
@@ -338,6 +354,10 @@ mod tests {
         assert_eq!(status.present_fps, Some(58.5));
 
         let diagnostics = state.diagnostics.lock().await;
+        assert_eq!(
+            diagnostics.preview_surface_backing,
+            PreviewSurfaceBacking::CaMetalLayer
+        );
         assert_eq!(diagnostics.preview_present_fps, Some(58.5));
         assert_eq!(diagnostics.preview_input_to_present_latency_ms, Some(37));
         assert_eq!(diagnostics.preview_dropped_frames, 3);
@@ -361,6 +381,7 @@ mod tests {
 
         assert_eq!(status.state, PreviewSurfaceState::Stopped);
         assert_eq!(status.transport, PreviewTransport::Unavailable);
+        assert_eq!(status.backing, PreviewSurfaceBacking::None);
         assert_eq!(status.started_at, None);
     }
 }

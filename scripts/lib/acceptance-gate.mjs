@@ -88,6 +88,9 @@ export function evaluateAcceptance(input, gates = DEFAULT_ACCEPTANCE_GATES) {
   if (input.requireObsNativePreview && !input.claimsNative) {
     failures.push('transport: preview did not report the real native Metal surface')
   }
+  if (input.requireObsNativePreview && d.previewSurfaceBacking !== 'cametal-layer') {
+    failures.push(`transport: expected CAMetalLayer preview backing, got ${d.previewSurfaceBacking ?? 'unknown'}`)
+  }
   const imagePolls = d.imagePollDuringSession?.total
   if (input.claimsNative && imagePolls != null && imagePolls > 0) {
     failures.push(

@@ -703,6 +703,19 @@ impl PreviewTransport {
     }
 }
 
+/// What actually hosts the preview surface. The transport can say "surface", but OBS
+/// parity requires that the host be a real CAMetalLayer rather than the Electron proof
+/// BrowserWindow used for development smoke tests.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewSurfaceBacking {
+    #[serde(rename = "cametal-layer")]
+    CaMetalLayer,
+    ElectronBrowserWindow,
+    #[default]
+    None,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioMeterParams {
@@ -815,6 +828,8 @@ pub struct DiagnosticStats {
     pub preview_transport: PreviewTransport,
     #[serde(default)]
     pub preview_source_fps: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub preview_surface_backing: PreviewSurfaceBacking,
     pub preview_present_fps: Option<f64>,
     pub preview_input_to_present_latency_ms: Option<u64>,
     pub preview_render_frame_time_p50_ms: Option<f64>,
@@ -916,6 +931,8 @@ pub struct EncoderBridgeSyntheticResult {
 #[serde(rename_all = "camelCase")]
 pub struct PreviewBaselineParams {
     pub transport: PreviewTransport,
+    #[serde(default)]
+    pub surface_backing: PreviewSurfaceBacking,
     pub target_fps: Option<f64>,
     pub measured_fps: Option<f64>,
     pub present_fps: Option<f64>,
@@ -958,6 +975,10 @@ pub struct PreviewSurfaceBoundsParams {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewSurfacePresentParams {
+    #[serde(default)]
+    pub transport: Option<PreviewTransport>,
+    #[serde(default)]
+    pub backing: Option<PreviewSurfaceBacking>,
     pub presented_frame_id: Option<u64>,
     pub compositor_frame_lag: Option<u64>,
     #[serde(default)]
@@ -973,6 +994,8 @@ pub struct PreviewSurfaceStatus {
     pub state: PreviewSurfaceState,
     pub source: PreviewSurfaceSource,
     pub transport: PreviewTransport,
+    #[serde(default)]
+    pub backing: PreviewSurfaceBacking,
     pub target_fps: u32,
     pub width: u32,
     pub height: u32,

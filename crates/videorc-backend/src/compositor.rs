@@ -541,12 +541,17 @@ async fn run_synthetic_compositor_loop(
                         .as_ref()
                         .map(|status| status.transport)
                         .unwrap_or(PreviewTransport::Unavailable);
+                    let preview_surface_backing = surface_status
+                        .as_ref()
+                        .map(|status| status.backing)
+                        .unwrap_or_default();
                     let diagnostic_stats = {
                         let mut diagnostics = state.diagnostics.lock().await;
                         let next = apply_compositor_stats(
                             diagnostics.clone(),
                             target_fps,
                             preview_transport,
+                            preview_surface_backing,
                             published.compositor_backend,
                             published.compositor_fallback_reason.clone(),
                             cpu_fallback_frames,

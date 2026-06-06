@@ -42,6 +42,7 @@ any image-poll route during the session fails on transport honesty.
 | A/V duration skew | target 100 ms, hard-fail **150 ms** | analyzer |
 | Lip-sync (flash+click) | median target 100 ms, hard-fail **150 ms** | `measure:av-sync` |
 | Transport honesty | **0** image-poll requests during a "native" preview | `previewImagePollCounts` delta |
+| Native preview backing | `cametal-layer` | `previewSurfaceBacking` |
 | Encode backend | `hardware-videotoolbox` | diagnostics |
 | Maintenance ffmpeg/ffprobe during capture | **0** | diagnostics |
 
@@ -98,5 +99,6 @@ manual notes) in a dated acceptance note alongside this checklist.
 > **Status:** the automated gates and tooling are implemented and unit-tested. The native
 > Metal preview (Phase 2) and GPU compositor (Phase 3) are the remaining work that the
 > "OBS-native" preview-path and sharpness checks above are designed to hold accountable;
-> until they land, expect the preview-path badge to read **Fallback** and the transport-
-> honesty gate to fail a native claim — which is the intended, honest behavior.
+> until they land, expect the preview-path badge to read **Fallback** or **Proof surface**
+> and the transport/backing honesty gates to fail a native claim — which is the intended,
+> honest behavior.

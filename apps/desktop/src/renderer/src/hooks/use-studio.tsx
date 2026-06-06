@@ -272,6 +272,7 @@ const idleDiagnosticStats = (): DiagnosticStats => ({
   firstEncodedFrameMs: undefined,
   previewTransport: 'unavailable',
   previewSourceFps: {},
+  previewSurfaceBacking: 'none',
   previewRepeatedFrames: 0,
   previewSurfaceResizeCount: 0,
   previewDroppedFrames: 0,
@@ -298,6 +299,7 @@ const idlePreviewSurfaceStatus = (): PreviewSurfaceStatus => ({
   state: 'unavailable',
   source: 'synthetic',
   transport: 'unavailable',
+  backing: 'none',
   targetFps: 60,
   width: 0,
   height: 0,
@@ -885,6 +887,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 framesRendered: Math.max(surfaceStatus.framesRendered, status.framesRendered)
               })
               const presentParams: PreviewSurfacePresentParams = {
+                transport: surfaceStatus.transport,
+                backing: surfaceStatus.backing,
                 presentedFrameId: surfaceStatus.presentedFrameId,
                 compositorFrameLag: surfaceStatus.compositorFrameLag,
                 droppedFrames: surfaceStatus.droppedFrames,

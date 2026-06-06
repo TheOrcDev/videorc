@@ -291,6 +291,8 @@ function summarizeDiagnostics(events, snapshots, startedAt, stopRequestedAt) {
   const surfaceSamples = snapshots.map((s) => s.surface).filter(Boolean)
   const transports = new Set(measured.map((s) => s.previewTransport).filter(Boolean))
   for (const s of surfaceSamples) if (s.transport) transports.add(s.transport)
+  const surfaceBackings = new Set(measured.map((s) => s.previewSurfaceBacking).filter(Boolean))
+  for (const s of surfaceSamples) if (s.backing) surfaceBackings.add(s.backing)
   const bottlenecks = new Set(measured.map((s) => s.bottleneck).filter(Boolean))
 
   // Transport honesty: how much HTTP image-polling happened DURING the session. A truly
@@ -336,6 +338,10 @@ function summarizeDiagnostics(events, snapshots, startedAt, stopRequestedAt) {
     compositorBackend: measured.map((s) => s.compositorBackend).filter(Boolean).pop() ?? null,
     compositorFallbackReason: measured.map((s) => s.compositorFallbackReason).filter(Boolean).pop() ?? null,
     compositorCpuFallbackFrames: maxOf(measured.map((s) => s.compositorCpuFallbackFrames ?? 0)) ?? 0,
+    previewSurfaceBacking:
+      measured.map((s) => s.previewSurfaceBacking).filter(Boolean).pop() ??
+      surfaceSamples.map((s) => s.backing).filter(Boolean).pop() ??
+      null,
     encoderBridgeRepeatedFrames: maxOf(measured.map((s) => s.encoderBridgeRepeatedFrames ?? 0)) ?? 0,
     encoderBridgeSyntheticFrames: maxOf(measured.map((s) => s.encoderBridgeSyntheticFrames ?? 0)) ?? 0,
     encoderBridgeSourceAgeMs: maxOf(collect('encoderBridgeSourceAgeMs')),
@@ -369,6 +375,7 @@ function summarizeDiagnostics(events, snapshots, startedAt, stopRequestedAt) {
     ).length,
     imagePollDuringSession,
     transports: [...transports],
+    surfaceBackings: [...surfaceBackings],
     bottlenecks: [...bottlenecks],
   }
 }
@@ -446,6 +453,10 @@ function writeBaselineReport(outputPath, { sources, previewTransport, size, diag
   lines.push('## Live diagnostics during recording')
   lines.push('')
   lines.push(`- Preview transport(s) reported: ${diagnostics.transports.join(', ') || 'unknown'} (preview.live.start said: ${previewTransport})`)
+  lines.push(
+    `- Preview surface backing(s) reported: ${diagnostics.surfaceBackings.join(', ') || 'unknown'} ` +
+      `(strict OBS backing: ${diagnostics.previewSurfaceBacking ?? 'unknown'})`
+  )
   {
     const p = diagnostics.imagePollDuringSession
     const honest = p.total === 0 ? '✅ none (consistent with native)' : `⚠️ ${p.total} image-poll request(s) during session — NOT native`
@@ -514,6 +525,9 @@ function printSummary(report, startupReport, diagnostics, previewTransport, base
   for (const f of startupReport.verdict.failures) console.log(`  ✗ ${f}`)
   for (const w of startupReport.verdict.warnings) console.log(`  ! ${w}`)
   console.log(`Preview transport: ${previewTransport} (diagnostics saw: ${diagnostics.transports.join(', ') || 'unknown'})`)
+  console.log(
+    `Preview backing: ${diagnostics.previewSurfaceBacking ?? 'unknown'} (saw: ${diagnostics.surfaceBackings.join(', ') || 'unknown'})`
+  )
   console.log(
     `Transport honesty: ${diagnostics.imagePollDuringSession.total === 0 ? 'native (0 image polls)' : `NOT native (${diagnostics.imagePollDuringSession.total} image polls during session)`}`
   )

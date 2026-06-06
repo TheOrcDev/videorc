@@ -15,6 +15,7 @@ const cleanInput = () => ({
     micDroppedFrames: 0,
     minMicCaptureCoverage: 1.0,
     imagePollDuringSession: { total: 0 },
+    previewSurfaceBacking: 'cametal-layer',
   },
   claimsNative: true,
   expectAudio: true,
@@ -51,6 +52,16 @@ describe('evaluateAcceptance', () => {
 
     assert.equal(v.pass, false)
     assert.match(v.failures.join(' '), /real native Metal surface/)
+  })
+
+  it('fails the strict OBS preview gate when the surface is still the Electron proof window', () => {
+    const input = cleanInput()
+    input.requireObsNativePreview = true
+    input.diagnostics.previewSurfaceBacking = 'electron-browser-window'
+    const v = evaluateAcceptance(input)
+
+    assert.equal(v.pass, false)
+    assert.match(v.failures.join(' '), /expected CAMetalLayer preview backing/)
   })
 
   it('fails the strict OBS compositor gate when the live compositor falls back to CPU', () => {

@@ -27,10 +27,10 @@ fails a "native" claim — by design.
   (CAMetalLayer + blit + present), compile-and-run tested headlessly.
 - Scene/transform math in `scene.rs` (tested) maps 1:1 to each `GpuSource.dest` rect.
 - Honest diagnostics expose `previewTransport`, `previewImagePollCounts`,
-  `recordingProtected`, `encodeBackend`, `compositorBackend`,
+  `previewSurfaceBacking`, `recordingProtected`, `encodeBackend`, `compositorBackend`,
   `compositorFallbackReason`, `compositorCpuFallbackFrames`, and the at-risk
   classification. The real-source OBS gate now fails while the shared compositor is on
-  CPU fallback.
+  CPU fallback or the preview surface backing is still the Electron proof BrowserWindow.
 
 ## What remains (on-device only)
 
@@ -81,9 +81,9 @@ fails a "native" claim — by design.
      the reported bounds (no Electron addon, mirrors today's overlay approach but native).
 3. **Stop the PNG polling on the native path.** Once the layer shows real pixels, remove
    `startFramePolling`/`backendPreviewFrameUrl` for native mode and set
-   `previewTransport = native-surface` only when the layer is actually presenting. The
-   transport-honesty counters then read **0 image polls**, flipping the badge to
-   **OBS-native** and passing the gate.
+   `previewTransport = native-surface` and `previewSurfaceBacking = cametal-layer` only
+   when the layer is actually presenting. The transport-honesty counters then read
+   **0 image polls**, flipping the badge to **OBS-native** and passing the gate.
 4. **Keep React for controls only** — handles, badges, overlays draw above the native
    layer.
 5. **Done gate (human, on-device):** with native preview enabled, a 60s real

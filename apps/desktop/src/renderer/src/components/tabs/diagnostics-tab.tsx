@@ -145,6 +145,10 @@ export function DiagnosticsTab(): ReactElement {
               )}
             />
             <DiagnosticMetric label="Surface state" value={`${previewSurfaceStatus.state} (${previewSurfaceStatus.framesRendered} frames)`} />
+            <DiagnosticMetric
+              label="Surface backing"
+              value={formatPreviewSurfaceBacking(diagnosticStats.previewSurfaceBacking ?? previewSurfaceStatus.backing)}
+            />
             <DiagnosticMetric label="Mic drops" value={diagnosticStats.micDroppedFrames.toString()} />
             <DiagnosticMetric label="Mic coverage" value={formatCoverage(diagnosticStats.micCaptureCoverage)} />
             <DiagnosticMetric label="Encode backend" value={formatEncodeBackend(diagnosticStats.encodeBackend)} />
@@ -174,7 +178,11 @@ export function DiagnosticsTab(): ReactElement {
             <StatusBadge label="Memory" tone={memorySummary.tone} value={memorySummary.label} />
             <StatusBadge label="Network" tone={networkSummary.tone} value={networkSummary.label} />
             <StatusBadge label="Preview" tone={previewStatusTone(previewLiveStatus, previewCameraStatus, previewScreenStatus)} value={previewLiveStatus.state} />
-            <StatusBadge label="Preview path" tone={previewPathBadge(diagnosticStats.previewTransport).tone} value={previewPathBadge(diagnosticStats.previewTransport).label} />
+            <StatusBadge
+              label="Preview path"
+              tone={previewPathBadge(diagnosticStats.previewTransport, diagnosticStats.previewSurfaceBacking).tone}
+              value={previewPathBadge(diagnosticStats.previewTransport, diagnosticStats.previewSurfaceBacking).label}
+            />
             <StatusBadge label="Recording" tone={recordingBadge(diagnosticStats).tone} value={recordingBadge(diagnosticStats).label} />
             <StatusBadge label="Camera" tone={previewSourceTone(previewCameraStatus.state)} value={previewCameraStatus.state} />
             <StatusBadge label="Screen" tone={previewSourceTone(previewScreenStatus.state)} value={previewScreenStatus.state} />
@@ -578,6 +586,9 @@ function previewDiagnosisCopy({
   if (diagnosticStats.previewTransport !== 'native-surface') {
     return { label: 'Fallback', tone: diagnosticStats.previewTransport === 'unavailable' ? 'neutral' : 'warn' }
   }
+  if (diagnosticStats.previewSurfaceBacking !== 'cametal-layer') {
+    return { label: 'Surface backing', tone: 'warn' }
+  }
 
   const targetFps = diagnosticStats.previewTargetFps ?? previewSurfaceStatus.targetFps
   const minimumSourceFps = targetFps * 0.9
@@ -715,6 +726,19 @@ function formatPreviewTransport(transport?: string): string {
   }
 }
 
+function formatPreviewSurfaceBacking(backing?: string): string {
+  switch (backing) {
+    case 'cametal-layer':
+      return 'CAMetalLayer'
+    case 'electron-browser-window':
+      return 'Electron BrowserWindow'
+    case 'none':
+      return 'None'
+    default:
+      return '--'
+  }
+}
+
 function formatCoverage(value?: number): string {
   return typeof value === 'number' ? `${(value * 100).toFixed(0)}%` : '--'
 }
@@ -756,10 +780,12 @@ function formatImagePolls(counts?: DiagnosticStats['previewImagePollCounts']): s
 
 // The plan's "OBS-native preview" vs "Fallback preview" badge. Only the real Metal
 // layer may report native-surface; the Electron proof window stays explicitly non-native.
-function previewPathBadge(transport?: string): { label: string; tone: StatusTone } {
+function previewPathBadge(transport?: string, backing?: string): { label: string; tone: StatusTone } {
   switch (transport) {
     case 'native-surface':
-      return { label: 'OBS-native', tone: 'good' }
+      return backing === 'cametal-layer'
+        ? { label: 'OBS-native', tone: 'good' }
+        : { label: 'Surface proof', tone: 'warn' }
     case 'electron-proof-surface':
       return { label: 'Proof surface', tone: 'warn' }
     case 'latest-jpeg-polling':

@@ -15,6 +15,8 @@ const minFps = Number(process.env.VIDEORC_PREVIEW_SURFACE_MIN_FPS ?? 55)
 const maxIntervalP95Ms = Number(process.env.VIDEORC_PREVIEW_SURFACE_MAX_INTERVAL_P95_MS ?? 24)
 const expectedSurfaceTransport =
   process.env.VIDEORC_EXPECT_NATIVE_METAL_PREVIEW === '1' ? 'native-surface' : 'electron-proof-surface'
+const expectedSurfaceBacking =
+  process.env.VIDEORC_EXPECT_NATIVE_METAL_PREVIEW === '1' ? 'cametal-layer' : 'electron-browser-window'
 const expectedSurfaceBadge =
   expectedSurfaceTransport === 'native-surface' ? 'Native preview' : 'Electron proof'
 const outputDirectory = resolve(
@@ -59,6 +61,11 @@ async function runPreviewSurfaceSmoke(connection, smoke) {
         `Diagnostics preview transport is ${firstDiagnostics.previewTransport}, expected ${expectedSurfaceTransport}.`
       )
     }
+    if (firstDiagnostics.previewSurfaceBacking !== expectedSurfaceBacking) {
+      throw new Error(
+        `Diagnostics preview backing is ${firstDiagnostics.previewSurfaceBacking}, expected ${expectedSurfaceBacking}.`
+      )
+    }
     if ((firstDiagnostics.previewPresentFps ?? 0) < minFps) {
       throw new Error(`Diagnostics preview FPS ${format(firstDiagnostics.previewPresentFps)} is below ${minFps}.`)
     }
@@ -98,6 +105,7 @@ async function waitForNativeSurface(ws, previousFrames = -1) {
     if (
       lastStatus.state === 'live' &&
       lastStatus.transport === expectedSurfaceTransport &&
+      lastStatus.backing === expectedSurfaceBacking &&
       (lastStatus.targetFps ?? 0) >= 60 &&
       lastStatus.framesRendered > previousFrames
     ) {

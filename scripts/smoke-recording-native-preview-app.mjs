@@ -25,6 +25,8 @@ const layoutStressUpdates = Number(process.env.VIDEORC_NATIVE_PREVIEW_LAYOUT_STR
 const layoutStressIntervalMs = Number(process.env.VIDEORC_NATIVE_PREVIEW_LAYOUT_STRESS_INTERVAL_MS ?? 750)
 const expectedSurfaceTransport =
   process.env.VIDEORC_EXPECT_NATIVE_METAL_PREVIEW === '1' ? 'native-surface' : 'electron-proof-surface'
+const expectedSurfaceBacking =
+  process.env.VIDEORC_EXPECT_NATIVE_METAL_PREVIEW === '1' ? 'cametal-layer' : 'electron-browser-window'
 
 const scenarios = [
   ...(process.env.VIDEORC_NATIVE_PREVIEW_INCLUDE_1440 === '1'
@@ -134,7 +136,7 @@ async function runNativePreviewRecordingScenario(ws, smoke, samples, scenario, p
   assertStatsHealthy(scenario, stats)
   if (stats.nativePreviewSamples === 0) {
     throw new Error(
-      `[${scenario.label}] Recording diagnostics never reported ${expectedSurfaceTransport} preview transport.`
+      `[${scenario.label}] Recording diagnostics never reported ${expectedSurfaceTransport}/${expectedSurfaceBacking} preview transport.`
     )
   }
   if (surfaceDuring.framesRendered <= previousSurface.framesRendered) {
@@ -333,6 +335,7 @@ async function waitForNativeSurface(ws, previousFrames = -1) {
     if (
       lastStatus.state === 'live' &&
       lastStatus.transport === expectedSurfaceTransport &&
+      lastStatus.backing === expectedSurfaceBacking &&
       (lastStatus.targetFps ?? 0) >= 60 &&
       lastStatus.framesRendered > previousFrames
     ) {
@@ -355,6 +358,7 @@ async function waitForNativePreviewDiagnostics(samples) {
       lastDiagnostics = sample
       if (
         sample.previewTransport === expectedSurfaceTransport &&
+        sample.previewSurfaceBacking === expectedSurfaceBacking &&
         (sample.previewPresentFps ?? 0) >= minPreviewFps
       ) {
         return sample
@@ -363,7 +367,7 @@ async function waitForNativePreviewDiagnostics(samples) {
     await sleep(250)
   }
   throw new Error(
-    `Passive diagnostics did not report ${expectedSurfaceTransport} preview before recording. Last diagnostics: ${JSON.stringify(lastDiagnostics)}`
+    `Passive diagnostics did not report ${expectedSurfaceTransport}/${expectedSurfaceBacking} preview before recording. Last diagnostics: ${JSON.stringify(lastDiagnostics)}`
   )
 }
 
@@ -432,7 +436,11 @@ function summarizeDiagnostics(samples, targetFps, scenarioStartedAt, stopRequest
     duplicateCaptureSamples: measuredSamples.filter(
       (sample) => Array.isArray(sample.duplicateCaptureSources) && sample.duplicateCaptureSources.length > 0
     ).length,
-    nativePreviewSamples: measuredSamples.filter((sample) => sample.previewTransport === expectedSurfaceTransport).length,
+    nativePreviewSamples: measuredSamples.filter(
+      (sample) =>
+        sample.previewTransport === expectedSurfaceTransport &&
+        sample.previewSurfaceBacking === expectedSurfaceBacking
+    ).length,
     maxBackendRssBytes: backendRssValues.length ? Math.max(...backendRssValues) : null,
     maxActiveFfmpegProcesses: ffmpegProcessValues.length ? Math.max(...ffmpegProcessValues) : 0,
     maxActiveFfprobeProcesses: ffprobeProcessValues.length ? Math.max(...ffprobeProcessValues) : 0,

@@ -149,7 +149,7 @@ export function PreviewStage({
   )
   const previewPollMs = useMemo(() => previewPollingIntervalMs(previewLiveStatus), [previewLiveStatus])
   const activeTransport = usingNativeSurface ? previewSurfaceStatus?.transport : previewLiveStatus.transport
-  const transportLabel = previewTransportLabel(activeTransport ?? 'unavailable')
+  const transportLabel = previewTransportLabel(activeTransport ?? 'unavailable', previewSurfaceStatus?.backing)
   const syntheticNativeSurface = usingNativeSurface && previewSurfaceStatus?.source === 'synthetic'
   const expectsCamera =
     !syntheticNativeSurface && (scene?.sources.some((source) => source.visible && source.kind === 'camera') ?? false)
@@ -401,7 +401,7 @@ export function PreviewStage({
           <Badge
             className="absolute top-9 left-2"
             variant={
-              activeTransport === 'native-surface'
+              activeTransport === 'native-surface' && previewSurfaceStatus?.backing === 'cametal-layer'
                 ? 'success'
                 : activeTransport === 'electron-proof-surface'
                   ? 'warning'
@@ -578,7 +578,10 @@ function previewBadgeState({
       if (previewSurfaceStatus.transport === 'electron-proof-surface') {
         return { label: 'Proof surface', variant: 'warning' }
       }
-      return { label: 'Native preview', variant: 'success' }
+      if (previewSurfaceStatus.transport === 'native-surface' && previewSurfaceStatus.backing === 'cametal-layer') {
+        return { label: 'Native preview', variant: 'success' }
+      }
+      return { label: 'Proof surface', variant: 'warning' }
     }
     return { label: 'Connecting', variant: 'secondary' }
   }
@@ -595,10 +598,10 @@ function previewBadgeState({
   return { label: 'Unavailable', variant: 'secondary' }
 }
 
-function previewTransportLabel(transport: PreviewLiveStatus['transport']): string | null {
+function previewTransportLabel(transport: PreviewLiveStatus['transport'], backing?: PreviewSurfaceStatus['backing']): string | null {
   switch (transport) {
     case 'native-surface':
-      return 'Native preview'
+      return backing === 'cametal-layer' ? 'Native preview' : 'Surface proof'
     case 'electron-proof-surface':
       return 'Electron proof'
     case 'latest-jpeg-polling':

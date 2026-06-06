@@ -798,6 +798,7 @@ export interface PreviewSurfaceBounds {
 
 export type PreviewSurfaceState = 'unavailable' | 'starting' | 'live' | 'stopped' | 'failed'
 export type PreviewSurfaceSource = 'synthetic' | 'camera' | 'screen' | 'window'
+export type PreviewSurfaceBacking = 'cametal-layer' | 'electron-browser-window' | 'none'
 export type CompositorState = 'stopped' | 'starting' | 'live' | 'failed'
 export type CompositorSourceKind = 'camera' | 'screen' | 'window'
 export type CompositorSceneSourceKind = SceneSourceKind | 'screen-image'
@@ -897,6 +898,7 @@ export interface PreviewSurfaceStatus {
   state: PreviewSurfaceState
   source: PreviewSurfaceSource
   transport: PreviewTransport
+  backing: PreviewSurfaceBacking
   targetFps: number
   width: number
   height: number
@@ -914,6 +916,8 @@ export interface PreviewSurfaceStatus {
 }
 
 export interface PreviewSurfacePresentParams {
+  transport?: PreviewTransport
+  backing?: PreviewSurfaceBacking
   presentedFrameId?: number
   compositorFrameLag?: number
   droppedFrames: number
@@ -1090,6 +1094,7 @@ export interface DiagnosticStats {
   previewFrameAgeMs?: number
   previewTransport: PreviewTransport
   previewSourceFps: Record<string, number>
+  previewSurfaceBacking: PreviewSurfaceBacking
   previewPresentFps?: number
   previewInputToPresentLatencyMs?: number
   previewRenderFrameTimeP50Ms?: number
