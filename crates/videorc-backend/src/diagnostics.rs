@@ -145,6 +145,12 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         preview_camera_frame_age_ms: None,
         preview_camera_source_fps: None,
         preview_camera_dropped_frames: 0,
+        preview_camera_capture_gap_p95_ms: None,
+        preview_camera_capture_gap_max_ms: None,
+        preview_camera_pixel_buffer_lock_p95_ms: None,
+        preview_camera_row_copy_p95_ms: None,
+        preview_camera_publish_p95_ms: None,
+        preview_camera_frame_bytes: 0,
         preview_screen_frame_age_ms: None,
         preview_screen_source_fps: None,
         preview_screen_dropped_frames: 0,
@@ -477,6 +483,30 @@ pub fn apply_preview_camera_source_stats(
     if status.dropped_frames > 0 {
         stats.bottleneck = DiagnosticBottleneck::Capture;
     }
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PreviewCameraCaptureTimingStats {
+    pub capture_gap_p95_ms: Option<f64>,
+    pub capture_gap_max_ms: Option<f64>,
+    pub pixel_buffer_lock_p95_ms: Option<f64>,
+    pub row_copy_p95_ms: Option<f64>,
+    pub publish_p95_ms: Option<f64>,
+    pub frame_bytes: u64,
+}
+
+pub fn apply_preview_camera_capture_timing_stats(
+    mut stats: DiagnosticStats,
+    timings: PreviewCameraCaptureTimingStats,
+) -> DiagnosticStats {
+    stats.preview_camera_capture_gap_p95_ms = timings.capture_gap_p95_ms;
+    stats.preview_camera_capture_gap_max_ms = timings.capture_gap_max_ms;
+    stats.preview_camera_pixel_buffer_lock_p95_ms = timings.pixel_buffer_lock_p95_ms;
+    stats.preview_camera_row_copy_p95_ms = timings.row_copy_p95_ms;
+    stats.preview_camera_publish_p95_ms = timings.publish_p95_ms;
+    stats.preview_camera_frame_bytes = timings.frame_bytes;
     stats.updated_at = Utc::now().to_rfc3339();
     stats
 }
@@ -1127,6 +1157,28 @@ mod tests {
         assert_eq!(stats.preview_screen_publish_p95_ms, Some(1.1));
         assert_eq!(stats.preview_screen_frame_bytes, 8_294_400);
         assert_eq!(stats.preview_screen_capture_queue_depth, 3);
+    }
+
+    #[test]
+    fn preview_camera_capture_timing_stats_record_source_cadence() {
+        let stats = apply_preview_camera_capture_timing_stats(
+            idle_diagnostics(),
+            PreviewCameraCaptureTimingStats {
+                capture_gap_p95_ms: Some(33.1),
+                capture_gap_max_ms: Some(72.4),
+                pixel_buffer_lock_p95_ms: Some(0.3),
+                row_copy_p95_ms: Some(4.2),
+                publish_p95_ms: Some(0.8),
+                frame_bytes: 3_686_400,
+            },
+        );
+
+        assert_eq!(stats.preview_camera_capture_gap_p95_ms, Some(33.1));
+        assert_eq!(stats.preview_camera_capture_gap_max_ms, Some(72.4));
+        assert_eq!(stats.preview_camera_pixel_buffer_lock_p95_ms, Some(0.3));
+        assert_eq!(stats.preview_camera_row_copy_p95_ms, Some(4.2));
+        assert_eq!(stats.preview_camera_publish_p95_ms, Some(0.8));
+        assert_eq!(stats.preview_camera_frame_bytes, 3_686_400);
     }
 
     #[test]

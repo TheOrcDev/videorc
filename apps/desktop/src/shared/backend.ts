@@ -1194,6 +1194,18 @@ export interface DiagnosticStats {
   previewCameraFrameAgeMs?: number
   previewCameraSourceFps?: number
   previewCameraDroppedFrames: number
+  /** P95 interval between AVFoundation camera sample callbacks. */
+  previewCameraCaptureGapP95Ms?: number
+  /** Max interval between AVFoundation camera sample callbacks. */
+  previewCameraCaptureGapMaxMs?: number
+  /** P95 time spent locking the AVFoundation camera CVPixelBuffer base address. */
+  previewCameraPixelBufferLockP95Ms?: number
+  /** P95 time spent copying BGRA rows out of the AVFoundation camera sample. */
+  previewCameraRowCopyP95Ms?: number
+  /** P95 wall time spent publishing the copied camera frame to the source frame store. */
+  previewCameraPublishP95Ms?: number
+  /** Bytes copied for the latest native camera capture frame. */
+  previewCameraFrameBytes: number
   previewScreenFrameAgeMs?: number
   previewScreenSourceFps?: number
   previewScreenDroppedFrames: number

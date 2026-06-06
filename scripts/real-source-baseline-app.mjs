@@ -494,6 +494,12 @@ function summarizeDiagnostics(events, snapshots, startedAt, stopRequestedAt) {
       ...surfaceSamples.map((s) => num(s.compositorFrameLag)).filter((v) => v !== null),
     ]),
     previewCameraFrameAgeMs: maxOf(collect('previewCameraFrameAgeMs')),
+    previewCameraCaptureGapP95Ms: maxOf(collect('previewCameraCaptureGapP95Ms')),
+    previewCameraCaptureGapMaxMs: maxOf(collect('previewCameraCaptureGapMaxMs')),
+    previewCameraPixelBufferLockP95Ms: maxOf(collect('previewCameraPixelBufferLockP95Ms')),
+    previewCameraRowCopyP95Ms: maxOf(collect('previewCameraRowCopyP95Ms')),
+    previewCameraPublishP95Ms: maxOf(collect('previewCameraPublishP95Ms')),
+    previewCameraFrameBytes: maxOf(collect('previewCameraFrameBytes')) ?? 0,
     previewScreenFrameAgeMs: maxOf(collect('previewScreenFrameAgeMs')),
     previewScreenCaptureGapP95Ms: maxOf(collect('previewScreenCaptureGapP95Ms')),
     previewScreenCaptureGapMaxMs: maxOf(collect('previewScreenCaptureGapMaxMs')),
@@ -662,6 +668,11 @@ function writeBaselineReport(outputPath, { sources, previewTransport, size, diag
   lines.push(`- Preview frame lag/dropped frames: ${fmt(diagnostics.previewCompositorFrameLag, 0)} / ${diagnostics.previewDroppedFrames}`)
   lines.push(`- Preview repeated frames: ${diagnostics.previewRepeatedFrames}`)
   lines.push(`- Source frame age (max): camera ${fmt(diagnostics.previewCameraFrameAgeMs, 0)}ms | screen ${fmt(diagnostics.previewScreenFrameAgeMs, 0)}ms`)
+  lines.push(
+    `- Camera capture cadence: callback gap p95 ${fmt(diagnostics.previewCameraCaptureGapP95Ms)}ms / max ${fmt(diagnostics.previewCameraCaptureGapMaxMs)}ms | ` +
+      `lock ${fmt(diagnostics.previewCameraPixelBufferLockP95Ms)}ms | copy ${fmt(diagnostics.previewCameraRowCopyP95Ms)}ms | publish ${fmt(diagnostics.previewCameraPublishP95Ms)}ms | ` +
+      `frame ${diagnostics.previewCameraFrameBytes} bytes`
+  )
   lines.push(
     `- Screen capture cadence: callback gap p95 ${fmt(diagnostics.previewScreenCaptureGapP95Ms)}ms / max ${fmt(diagnostics.previewScreenCaptureGapMaxMs)}ms | ` +
       `lock ${fmt(diagnostics.previewScreenPixelBufferLockP95Ms)}ms | copy ${fmt(diagnostics.previewScreenRowCopyP95Ms)}ms | publish ${fmt(diagnostics.previewScreenPublishP95Ms)}ms | ` +

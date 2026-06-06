@@ -971,6 +971,24 @@ pub struct DiagnosticStats {
     pub preview_camera_frame_age_ms: Option<u64>,
     pub preview_camera_source_fps: Option<f64>,
     pub preview_camera_dropped_frames: u64,
+    /// P95 interval between AVFoundation camera sample callbacks.
+    #[serde(default)]
+    pub preview_camera_capture_gap_p95_ms: Option<f64>,
+    /// Max interval between AVFoundation camera sample callbacks.
+    #[serde(default)]
+    pub preview_camera_capture_gap_max_ms: Option<f64>,
+    /// P95 time spent locking the AVFoundation camera CVPixelBuffer base address.
+    #[serde(default)]
+    pub preview_camera_pixel_buffer_lock_p95_ms: Option<f64>,
+    /// P95 time spent copying BGRA rows out of the AVFoundation camera sample.
+    #[serde(default)]
+    pub preview_camera_row_copy_p95_ms: Option<f64>,
+    /// P95 wall time spent publishing the copied camera frame to the source frame store.
+    #[serde(default)]
+    pub preview_camera_publish_p95_ms: Option<f64>,
+    /// Bytes copied for the latest native camera capture frame.
+    #[serde(default)]
+    pub preview_camera_frame_bytes: u64,
     pub preview_screen_frame_age_ms: Option<u64>,
     pub preview_screen_source_fps: Option<f64>,
     pub preview_screen_dropped_frames: u64,

@@ -309,6 +309,7 @@ const idleDiagnosticStats = (): DiagnosticStats => ({
   previewSurfaceResizeCount: 0,
   previewDroppedFrames: 0,
   previewCameraDroppedFrames: 0,
+  previewCameraFrameBytes: 0,
   previewScreenDroppedFrames: 0,
   previewScreenFrameBytes: 0,
   previewScreenCaptureQueueDepth: 0,

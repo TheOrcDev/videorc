@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::camera_capture::parse_native_camera_id;
 use crate::diagnostics::{
+    PreviewCameraCaptureTimingStats, apply_preview_camera_capture_timing_stats,
     apply_preview_camera_source_stats, apply_preview_source_frame_store_stats,
 };
 use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats};
@@ -109,6 +110,76 @@ pub struct PreviewCameraShared {
     frames_in_window: u64,
     window_started_at: Option<Instant>,
     source_fps: Option<f64>,
+    capture_timings: CameraCaptureTimingWindow,
+}
+
+#[derive(Debug, Default)]
+struct CameraCaptureTimingWindow {
+    last_callback_at: Option<Instant>,
+    callback_gap_ms: Vec<f64>,
+    pixel_buffer_lock_ms: Vec<f64>,
+    row_copy_ms: Vec<f64>,
+    publish_ms: Vec<f64>,
+    frame_bytes: u64,
+}
+
+impl CameraCaptureTimingWindow {
+    fn record_callback_at(&mut self, now: Instant) {
+        if let Some(previous) = self.last_callback_at.replace(now) {
+            push_timing_sample(
+                &mut self.callback_gap_ms,
+                now.duration_since(previous).as_secs_f64() * 1000.0,
+            );
+        }
+    }
+
+    fn record_valid_frame(
+        &mut self,
+        pixel_buffer_lock_ms: f64,
+        row_copy_ms: f64,
+        publish_ms: f64,
+        frame_bytes: u64,
+    ) {
+        push_timing_sample(&mut self.pixel_buffer_lock_ms, pixel_buffer_lock_ms);
+        push_timing_sample(&mut self.row_copy_ms, row_copy_ms);
+        push_timing_sample(&mut self.publish_ms, publish_ms);
+        self.frame_bytes = frame_bytes;
+    }
+
+    fn snapshot(&self) -> PreviewCameraCaptureTimingStats {
+        PreviewCameraCaptureTimingStats {
+            capture_gap_p95_ms: percentile(&self.callback_gap_ms, 95),
+            capture_gap_max_ms: max_sample(&self.callback_gap_ms),
+            pixel_buffer_lock_p95_ms: percentile(&self.pixel_buffer_lock_ms, 95),
+            row_copy_p95_ms: percentile(&self.row_copy_ms, 95),
+            publish_p95_ms: percentile(&self.publish_ms, 95),
+            frame_bytes: self.frame_bytes,
+        }
+    }
+}
+
+fn push_timing_sample(samples: &mut Vec<f64>, value: f64) {
+    const MAX_SAMPLES: usize = 240;
+    if samples.len() >= MAX_SAMPLES {
+        samples.remove(0);
+    }
+    samples.push(value);
+}
+
+fn percentile(samples: &[f64], p: u32) -> Option<f64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    let index = (((p as f64 / 100.0) * sorted.len() as f64).ceil() as usize)
+        .saturating_sub(1)
+        .min(sorted.len() - 1);
+    Some(sorted[index])
+}
+
+fn max_sample(samples: &[f64]) -> Option<f64> {
+    samples.iter().copied().max_by(f64::total_cmp)
 }
 
 pub fn initial_preview_camera_state() -> PreviewCameraRuntime {
@@ -566,6 +637,7 @@ async fn poll_camera_metrics(
                 source_fps: guard.source_fps,
                 latest_frame: guard.frame_store.latest(),
                 frame_store_stats: guard.frame_store.stats(),
+                capture_timings: guard.capture_timings.snapshot(),
             }
         };
 
@@ -596,6 +668,7 @@ async fn poll_camera_metrics(
                 crate::preview_screen::preview_screen_frame_store_stats(&state).await;
             let mut diagnostics = state.diagnostics.lock().await;
             let stats = apply_preview_camera_source_stats(diagnostics.clone(), &status);
+            let stats = apply_preview_camera_capture_timing_stats(stats, snapshot.capture_timings);
             *diagnostics = apply_preview_source_frame_store_stats(
                 stats,
                 snapshot.frame_store_stats,
@@ -613,6 +686,7 @@ struct CameraSharedSnapshot {
     source_fps: Option<f64>,
     latest_frame: Option<FrameHandle<PreviewCameraPixelFormat>>,
     frame_store_stats: FrameStoreStats,
+    capture_timings: PreviewCameraCaptureTimingStats,
 }
 
 fn idle_status(message: Option<String>) -> PreviewCameraStatus {
@@ -1048,6 +1122,16 @@ mod macos {
         sample_buffer: &CMSampleBuffer,
         shared: &Arc<StdMutex<PreviewCameraShared>>,
     ) {
+        let callback_started_at = Instant::now();
+        {
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard
+                .capture_timings
+                .record_callback_at(callback_started_at);
+        }
+
         let Some(pixel_buffer) = (unsafe { sample_buffer.image_buffer() }) else {
             let mut guard = shared
                 .lock()
@@ -1065,9 +1149,11 @@ mod macos {
             return;
         }
 
+        let lock_started_at = Instant::now();
         let lock_result = unsafe {
             CVPixelBufferLockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly)
         };
+        let pixel_buffer_lock_ms = lock_started_at.elapsed().as_secs_f64() * 1000.0;
         if lock_result != 0 {
             let mut guard = shared
                 .lock()
@@ -1111,38 +1197,48 @@ mod macos {
             }
         };
         unsafe {
+            let copy_started_at = Instant::now();
             let source = base_address.cast::<u8>();
             for row in 0..height_usize {
                 let source_row = source.add(row * bytes_per_row);
                 let target_row = &mut bytes[row * row_bytes..(row + 1) * row_bytes];
                 target_row.copy_from_slice(slice::from_raw_parts(source_row, row_bytes));
             }
+            let row_copy_ms = copy_started_at.elapsed().as_secs_f64() * 1000.0;
             CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
-        }
 
-        let mut guard = shared
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let now = Instant::now();
-        guard.frames_captured = guard.frames_captured.saturating_add(1);
-        guard.frames_in_window = guard.frames_in_window.saturating_add(1);
-        let window_started = *guard.window_started_at.get_or_insert(now);
-        let elapsed = window_started.elapsed();
-        if elapsed >= Duration::from_millis(500) {
-            guard.source_fps =
-                Some(guard.frames_in_window as f64 / elapsed.as_secs_f64().max(0.001));
-            guard.frames_in_window = 0;
-            guard.window_started_at = Some(now);
+            let publish_started_at = Instant::now();
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let now = Instant::now();
+            guard.frames_captured = guard.frames_captured.saturating_add(1);
+            guard.frames_in_window = guard.frames_in_window.saturating_add(1);
+            let window_started = *guard.window_started_at.get_or_insert(now);
+            let elapsed = window_started.elapsed();
+            if elapsed >= Duration::from_millis(500) {
+                guard.source_fps =
+                    Some(guard.frames_in_window as f64 / elapsed.as_secs_f64().max(0.001));
+                guard.frames_in_window = 0;
+                guard.window_started_at = Some(now);
+            }
+            let sequence = guard.frames_captured;
+            guard.frame_store.publish(
+                sequence,
+                width,
+                height,
+                PreviewCameraPixelFormat::Bgra8,
+                now,
+                bytes,
+            );
+            let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
+            guard.capture_timings.record_valid_frame(
+                pixel_buffer_lock_ms,
+                row_copy_ms,
+                publish_ms,
+                frame_bytes as u64,
+            );
         }
-        let sequence = guard.frames_captured;
-        guard.frame_store.publish(
-            sequence,
-            width,
-            height,
-            PreviewCameraPixelFormat::Bgra8,
-            now,
-            bytes,
-        );
     }
 
     fn native_camera_permission() -> NativeCameraPermission {
