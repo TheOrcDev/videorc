@@ -1,6 +1,8 @@
 use crate::protocol::{PreviewSurfaceBacking, PreviewSurfaceBounds, PreviewTransport};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NativePreviewHostBounds {
     pub screen_x: f64,
     pub screen_y: f64,
@@ -40,14 +42,16 @@ impl NativePreviewHostBounds {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum NativePreviewHostCommandKind {
     Create,
     UpdateBounds,
     Destroy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NativePreviewHostCommand {
     pub kind: NativePreviewHostCommandKind,
     pub bounds: Option<NativePreviewHostBounds>,

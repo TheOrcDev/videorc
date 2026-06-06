@@ -169,7 +169,6 @@ pub async fn preview_surface_status(state: &AppState) -> PreviewSurfaceStatus {
     state.preview_surface.lock().await.status.clone()
 }
 
-#[allow(dead_code)]
 pub async fn take_native_preview_host_commands(state: &AppState) -> Vec<NativePreviewHostCommand> {
     std::mem::take(
         &mut state

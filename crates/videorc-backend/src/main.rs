@@ -67,7 +67,8 @@ use preview_screen::{
 };
 use preview_surface::{
     create_preview_surface, destroy_preview_surface, preview_surface_status,
-    register_preview_surface_resize, update_preview_surface_bounds, update_preview_surface_present,
+    register_preview_surface_resize, take_native_preview_host_commands,
+    update_preview_surface_bounds, update_preview_surface_present,
 };
 use protocol::{
     BackendConnection, BackendHealth, ClientCommand, RecordingState, ServerEvent, ServerResponse,
@@ -1277,6 +1278,10 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             let status = preview_surface_status(state).await;
             ServerResponse::ok(command.id, status)
         }
+        "preview.surface.take_native_host_commands" => {
+            let commands = take_native_preview_host_commands(state).await;
+            ServerResponse::ok(command.id, commands)
+        }
         "compositor.status" => {
             let status = compositor_status(state).await;
             ServerResponse::ok(command.id, status)
@@ -2251,6 +2256,7 @@ async fn ffmpeg_status(ffmpeg_path: &str) -> ToolStatus {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio::sync::broadcast;
 
     #[test]
     fn response_shape_omits_empty_error() {
@@ -2260,5 +2266,60 @@ mod tests {
         assert_eq!(value["id"], "abc");
         assert_eq!(value["ok"], true);
         assert!(value.get("error").is_none());
+    }
+
+    fn test_state() -> AppState {
+        let (events, _) = broadcast::channel(16);
+        AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_in_memory_for_tests(),
+        )
+    }
+
+    #[tokio::test]
+    async fn preview_surface_native_host_commands_drain_over_ws() {
+        let state = test_state();
+        let create = json!({
+            "id": "create",
+            "method": "preview.surface.create",
+            "params": {
+                "bounds": {
+                    "screenX": 10.0,
+                    "screenY": 20.0,
+                    "width": 640.0,
+                    "height": 360.0,
+                    "scaleFactor": 2.0,
+                    "screenHeight": 1000.0
+                },
+                "targetFps": 60,
+                "source": "synthetic"
+            }
+        });
+        let create_response = handle_text_message(&state, &create.to_string()).await;
+        assert!(create_response.ok);
+
+        let drain = json!({
+            "id": "drain",
+            "method": "preview.surface.take_native_host_commands"
+        });
+        let drain_response = handle_text_message(&state, &drain.to_string()).await;
+        assert!(drain_response.ok);
+        let commands = drain_response.payload.unwrap();
+
+        assert_eq!(commands[0]["kind"], "create");
+        assert_eq!(commands[0]["bounds"]["screenX"], 10.0);
+        assert_eq!(commands[0]["bounds"]["screenY"], 20.0);
+        assert_eq!(commands[0]["bounds"]["width"], 640.0);
+        assert_eq!(commands[0]["bounds"]["height"], 360.0);
+        assert_eq!(commands[0]["bounds"]["scaleFactor"], 2.0);
+        assert_eq!(commands[0]["bounds"]["screenHeight"], 1000.0);
+
+        let empty_response = handle_text_message(&state, &drain.to_string()).await;
+        assert!(empty_response.ok);
+        assert_eq!(empty_response.payload.unwrap(), json!([]));
+
+        destroy_preview_surface(&state).await;
     }
 }

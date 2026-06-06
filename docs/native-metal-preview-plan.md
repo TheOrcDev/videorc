@@ -59,6 +59,10 @@ fails a "native" claim — by design.
 - Preview-surface runtime now preserves those native-host commands in a drainable FIFO, so
   the future main-thread presenter loop can apply create/update/destroy in order instead
   of losing the command emitted during the backend request.
+- The backend WebSocket API exposes the FIFO as
+  `preview.surface.take_native_host_commands`, returning serialized command payloads for
+  the future Electron/AppKit native host loop without letting that loop reach into Rust
+  runtime internals.
 - A `NativePreviewPresenterRunner` now owns the AppKit overlay and a same-device Metal
   presenter on the main thread. It can apply host create/update/destroy commands and only
   returns native `CAMetalLayer` activation after `present_latest()` succeeds against the
