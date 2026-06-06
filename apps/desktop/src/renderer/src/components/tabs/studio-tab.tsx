@@ -15,7 +15,7 @@ import type { ReactElement } from 'react'
 
 import { BlockingBanner } from '@/components/blocking-banner'
 import { LiveChatPanel } from '@/components/live-chat-panel'
-import { PanelSection } from '@/components/panel-section'
+import { InspectorSection } from '@/components/inspector'
 import { PreviewStage } from '@/components/preview-stage'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
 import { Badge } from '@/components/ui/badge'
@@ -137,7 +137,7 @@ export function StudioTab(): ReactElement {
         />
       ) : null}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
         <PreviewStage
           activeScreen={activeScreen}
           layout={captureConfig.layout}
@@ -161,7 +161,7 @@ export function StudioTab(): ReactElement {
         />
 
         <div className="flex flex-col gap-4">
-          <PanelSection icon={Record} title="Session">
+          <InspectorSection icon={Record} title="Session">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2.5">
                 <span
@@ -235,9 +235,9 @@ export function StudioTab(): ReactElement {
                 />
               </Field>
             </div>
-          </PanelSection>
+          </InspectorSection>
 
-          <PanelSection icon={ImageSquare} title="Screens">
+          <InspectorSection icon={ImageSquare} title="Screens">
             <StudioScreensRow
               activeScreen={activeScreen}
               screens={screens}
@@ -245,9 +245,9 @@ export function StudioTab(): ReactElement {
               onClear={() => void clearActiveScreen()}
               onOpenScreens={() => setActive('screens')}
             />
-          </PanelSection>
+          </InspectorSection>
 
-          <PanelSection icon={selectedMicrophone ? SpeakerHigh : SpeakerSlash} title="Mixer">
+          <InspectorSection icon={selectedMicrophone ? SpeakerHigh : SpeakerSlash} title="Mixer">
             <MixerRow
               gainDb={captureConfig.audio.microphoneGainDb}
               meterLevel={meterLevel}
@@ -256,9 +256,9 @@ export function StudioTab(): ReactElement {
               selectedMicrophoneName={selectedMicrophone?.name}
               syncOffsetMs={captureConfig.audio.microphoneSyncOffsetMs}
             />
-          </PanelSection>
+          </InspectorSection>
 
-          <PanelSection icon={Broadcast} title="Live summary">
+          <InspectorSection icon={Broadcast} title="Live summary">
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
               <SummaryRow label="Screen" value={selectedCaptureDevice?.name ?? 'None'} />
               <SummaryRow label="Screen takeover" value={activeScreen?.name ?? 'Normal'} />
@@ -288,11 +288,11 @@ export function StudioTab(): ReactElement {
                 <StatusBadge label="Stream" tone={streamReady ? 'good' : 'warn'} value={streamReady ? 'ready' : 'setup'} />
               ) : null}
             </div>
-          </PanelSection>
+          </InspectorSection>
 
-          <PanelSection icon={ChatCircle} title="Live Chat">
+          <InspectorSection icon={ChatCircle} title="Live Chat">
             <LiveChatPanel snapshot={studio.liveChatSnapshot} onClearLocal={studio.clearLiveChat} />
-          </PanelSection>
+          </InspectorSection>
         </div>
       </div>
     </div>
