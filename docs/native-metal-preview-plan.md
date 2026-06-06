@@ -50,6 +50,9 @@ fails a "native" claim — by design.
 - `MetalSceneCompositor` can now hand its latest cached target texture directly to the
   preview presenter, so the native runtime can present the compositor output without first
   exposing raw Metal texture types across modules or reading pixels back for preview.
+- While a preview surface is live, the compositor now emits lightweight per-frame progress
+  status for the presenter path instead of making proof/native surface presents wait for
+  the two-second diagnostics window.
 - `make_preview_layer()` / `MetalPreviewPresenter` / `present_texture_to_layer()` — the
   GPU-side preview present (CAMetalLayer + render-scaled texture present), compile-and-run
   tested headlessly.

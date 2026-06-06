@@ -543,6 +543,17 @@ async fn run_synthetic_compositor_loop(
                 frame_times_ms.push(render_started_at.elapsed().as_secs_f64() * 1000.0);
 
                 let surface_status = update_preview_surface_frames(&state, frames_rendered).await;
+                if surface_status
+                    .as_ref()
+                    .is_some_and(|status| status.transport.is_surface())
+                {
+                    let Some(status) =
+                        update_compositor_frame_progress(&state, &run_id, frames_rendered).await
+                    else {
+                        break;
+                    };
+                    state.emit_event("compositor.status", status);
+                }
 
                 if window_started_at.elapsed() >= COMPOSITOR_DIAGNOSTIC_WINDOW {
                     let elapsed = window_started_at.elapsed().as_secs_f64().max(0.001);
@@ -1112,6 +1123,21 @@ async fn update_preview_surface_frames(
     surface.status.frames_rendered = frames_rendered;
     surface.status.updated_at = Utc::now().to_rfc3339();
     Some(surface.status.clone())
+}
+
+async fn update_compositor_frame_progress(
+    state: &AppState,
+    run_id: &str,
+    frames_rendered: u64,
+) -> Option<CompositorStatus> {
+    let mut compositor = state.compositor.lock().await;
+    if compositor.run_id.as_deref() != Some(run_id) {
+        return None;
+    }
+    compositor.status.state = CompositorState::Live;
+    compositor.status.frames_rendered = frames_rendered;
+    compositor.status.updated_at = Utc::now().to_rfc3339();
+    Some(compositor.status.clone())
 }
 
 async fn update_compositor_status(
@@ -1976,6 +2002,44 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[tokio::test]
+    async fn compositor_frame_progress_updates_frame_id_without_resetting_metrics() {
+        let state = test_state();
+        {
+            let mut compositor = state.compositor.lock().await;
+            let mut status = stopped_status(None);
+            status.state = CompositorState::Live;
+            status.target_fps = 60;
+            status.width = 640;
+            status.height = 360;
+            status.frames_rendered = 7;
+            status.render_fps = Some(58.0);
+            status.repeated_frames = 2;
+            status.dropped_frames = 1;
+            status.frame_age_ms = Some(9);
+            status.frame_time_p95_ms = Some(12.5);
+            compositor.status = status;
+            compositor.run_id = Some("run".to_string());
+        }
+
+        let status = update_compositor_frame_progress(&state, "run", 42)
+            .await
+            .expect("progress status");
+
+        assert_eq!(status.state, CompositorState::Live);
+        assert_eq!(status.frames_rendered, 42);
+        assert_eq!(status.render_fps, Some(58.0));
+        assert_eq!(status.repeated_frames, 2);
+        assert_eq!(status.dropped_frames, 1);
+        assert_eq!(status.frame_age_ms, Some(9));
+        assert_eq!(status.frame_time_p95_ms, Some(12.5));
+        assert!(
+            update_compositor_frame_progress(&state, "stale-run", 43)
+                .await
+                .is_none()
+        );
     }
 
     async fn set_latest_frame_evidence(
