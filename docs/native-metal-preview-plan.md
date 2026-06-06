@@ -29,8 +29,9 @@ fails a "native" claim — by design.
   camera-only early frame from satisfying a screen+camera recording barrier.
 - The Electron proof surface now coalesces compositor-status IPC updates while a paint is
   in flight, so stale preview frames are dropped before they reach the proof window.
-- `make_preview_layer()` / `present_texture_to_layer()` — the GPU-side preview present
-  (CAMetalLayer + blit + present), compile-and-run tested headlessly.
+- `make_preview_layer()` / `MetalPreviewPresenter` / `present_texture_to_layer()` — the
+  GPU-side preview present (CAMetalLayer + render-scaled texture present), compile-and-run
+  tested headlessly.
 - Scene/transform math in `scene.rs` (tested) maps 1:1 to each `GpuSource.dest` rect.
 - Honest diagnostics expose `previewTransport`, `previewImagePollCounts`,
   `previewSurfaceBacking`, `recordingProtected`, `encodeBackend`, `compositorBackend`,
@@ -73,10 +74,9 @@ fails a "native" claim — by design.
 
 ## Phase 2 — native Metal preview layer (replace PNG polling)
 
-1. **Present the compositor target to a `CAMetalLayer`.** Add a presentation primitive
-   (`objc2-quartz-core` `CAMetalLayer` + a blit/draw from the target texture into
-   `nextDrawable().texture`, then `presentDrawable`). This is the one piece that cannot be
-   readback-tested — it only proves out on a real layer in a window.
+1. **Present the compositor target to a `CAMetalLayer`.** The GPU-side primitive now
+   render-scales the target texture into `nextDrawable().texture`, then calls
+   `presentDrawable`; the remaining hard part is attaching that layer to a real window.
 2. **Embed the layer in the Electron window.** Replace the current child `BrowserWindow`
    that HTML-polls `/preview/camera|screen/live.png` with a native `NSView` hosting the
    `CAMetalLayer`, positioned over the React preview rect (the renderer already reports

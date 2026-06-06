@@ -24,7 +24,7 @@ use objc2_core_video::{
 };
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
+    MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
     MTLCreateSystemDefaultDevice, MTLDevice, MTLDrawable, MTLLibrary, MTLLoadAction, MTLOrigin,
     MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor,
@@ -372,13 +372,95 @@ pub fn make_preview_layer(device: &MetalDevice, width: f64, height: f64) -> Reta
     let layer = CAMetalLayer::new();
     layer.setDevice(Some(device));
     layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-    // The drawable is a blit destination here, so it cannot be framebuffer-only.
+    // The drawable is a render target for the scaled preview present path.
     layer.setFramebufferOnly(false);
     layer.setDrawableSize(CGSize { width, height });
     layer
 }
 
-/// Present a composited texture to the layer's next drawable via a blit copy. Returns
+/// Cached renderer for presenting the compositor target into a `CAMetalLayer`.
+///
+/// The recording compositor intentionally uses nearest sampling to preserve exact crop
+/// edges. Preview presentation is a separate surface concern: it uses linear sampling so
+/// the full-resolution compositor texture can be downsampled to the window's drawable
+/// size without the hard pixel stair-steps of a blit copy.
+pub struct MetalPreviewPresenter {
+    device: Retained<MetalDevice>,
+    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
+}
+
+impl MetalPreviewPresenter {
+    pub fn new(device: Retained<MetalDevice>) -> Option<Self> {
+        let queue = device.newCommandQueue()?;
+        let pipeline = build_pipeline(&device)?;
+        let sampler = build_preview_sampler(&device)?;
+        Some(Self {
+            device,
+            queue,
+            pipeline,
+            sampler,
+        })
+    }
+
+    pub fn device(&self) -> &MetalDevice {
+        &self.device
+    }
+
+    /// Present a composited texture to the layer's next drawable via a scaled render pass.
+    /// Returns `false` when no drawable is available (e.g. a headless test layer).
+    pub fn present_texture_to_layer(&self, layer: &CAMetalLayer, texture: &MetalTexture) -> bool {
+        let Some(drawable) = layer.nextDrawable() else {
+            return false;
+        };
+        let drawable_texture = drawable.texture();
+        let Some(command_buffer) = self.queue.commandBuffer() else {
+            return false;
+        };
+        if encode_texture_present(
+            &self.device,
+            &command_buffer,
+            &self.pipeline,
+            &self.sampler,
+            texture,
+            &drawable_texture,
+            [0.0, 0.0, 0.0, 1.0],
+        )
+        .is_none()
+        {
+            return false;
+        }
+        let mtl_drawable: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&*drawable);
+        command_buffer.presentDrawable(mtl_drawable);
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        true
+    }
+
+    #[cfg(test)]
+    fn render_texture_to_texture(
+        &self,
+        source: &MetalTexture,
+        target: &MetalTexture,
+    ) -> Option<()> {
+        let command_buffer = self.queue.commandBuffer()?;
+        encode_texture_present(
+            &self.device,
+            &command_buffer,
+            &self.pipeline,
+            &self.sampler,
+            source,
+            target,
+            [0.0, 0.0, 0.0, 1.0],
+        )?;
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        Some(())
+    }
+}
+
+/// Present a composited texture to the layer's next drawable. Returns
 /// `false` when no drawable is available (e.g. the layer is not attached to a screen, as
 /// in a headless test) so callers degrade gracefully; the on-screen result is validated
 /// in a window. This is the GPU-side present that replaces the PNG image-poll path.
@@ -387,6 +469,13 @@ pub fn present_texture_to_layer(
     layer: &CAMetalLayer,
     texture: &MetalTexture,
 ) -> bool {
+    let device = queue.device();
+    let Some(pipeline) = build_pipeline(&device) else {
+        return false;
+    };
+    let Some(sampler) = build_preview_sampler(&device) else {
+        return false;
+    };
     let Some(drawable) = layer.nextDrawable() else {
         return false;
     };
@@ -394,29 +483,19 @@ pub fn present_texture_to_layer(
     let Some(command_buffer) = queue.commandBuffer() else {
         return false;
     };
-    let Some(blit) = command_buffer.blitCommandEncoder() else {
+    if encode_texture_present(
+        &device,
+        &command_buffer,
+        &pipeline,
+        &sampler,
+        texture,
+        &drawable_texture,
+        [0.0, 0.0, 0.0, 1.0],
+    )
+    .is_none()
+    {
         return false;
-    };
-    let copy_width = texture.width().min(drawable_texture.width());
-    let copy_height = texture.height().min(drawable_texture.height());
-    unsafe {
-        blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
-            texture,
-            0,
-            0,
-            MTLOrigin { x: 0, y: 0, z: 0 },
-            MTLSize {
-                width: copy_width,
-                height: copy_height,
-                depth: 1,
-            },
-            &drawable_texture,
-            0,
-            0,
-            MTLOrigin { x: 0, y: 0, z: 0 },
-        );
     }
-    blit.endEncoding();
     let mtl_drawable: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&*drawable);
     command_buffer.presentDrawable(mtl_drawable);
     command_buffer.commit();
@@ -526,6 +605,57 @@ fn build_sampler(device: &MetalDevice) -> Option<Retained<ProtocolObject<dyn MTL
     descriptor.setMinFilter(MTLSamplerMinMagFilter::Nearest);
     descriptor.setMagFilter(MTLSamplerMinMagFilter::Nearest);
     device.newSamplerStateWithDescriptor(&descriptor)
+}
+
+fn build_preview_sampler(
+    device: &MetalDevice,
+) -> Option<Retained<ProtocolObject<dyn MTLSamplerState>>> {
+    let descriptor = MTLSamplerDescriptor::new();
+    descriptor.setMinFilter(MTLSamplerMinMagFilter::Linear);
+    descriptor.setMagFilter(MTLSamplerMinMagFilter::Linear);
+    device.newSamplerStateWithDescriptor(&descriptor)
+}
+
+fn encode_texture_present(
+    device: &MetalDevice,
+    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+    sampler: &ProtocolObject<dyn MTLSamplerState>,
+    source: &MetalTexture,
+    target: &MetalTexture,
+    background: [f64; 4],
+) -> Option<()> {
+    let encoder = {
+        let pass = clear_pass(target, background);
+        command_buffer.renderCommandEncoderWithDescriptor(&pass)?
+    };
+    encoder.setRenderPipelineState(pipeline);
+    unsafe { encoder.setFragmentSamplerState_atIndex(Some(sampler), 0) };
+    let vertices = quad_vertices([0.0, 0.0, 1.0, 1.0]);
+    let buffer = unsafe {
+        device.newBufferWithBytes_length_options(
+            NonNull::new(vertices.as_ptr() as *mut c_void)?,
+            std::mem::size_of_val(&vertices),
+            MTLResourceOptions::StorageModeShared,
+        )?
+    };
+    let params = FragParams {
+        crop: [0.0; 4],
+        mirror: 0.0,
+        circle: 0.0,
+    };
+    unsafe {
+        encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
+        encoder.setFragmentTexture_atIndex(Some(source), 0);
+        encoder.setFragmentBytes_length_atIndex(
+            NonNull::new(std::ptr::addr_of!(params) as *mut c_void)?,
+            std::mem::size_of::<FragParams>(),
+            0,
+        );
+        encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+    }
+    encoder.endEncoding();
+    Some(())
 }
 
 fn upload_bgra_to_texture(texture: &MetalTexture, source: &GpuSource<'_>) -> Option<()> {
@@ -869,8 +999,38 @@ mod tests {
         )
         .unwrap();
         // Headless: no drawable is attached, so this returns false — but it must exercise
-        // the full present path (layer config, nextDrawable, blit) without panicking.
+        // the present entry point (layer config, nextDrawable) without panicking.
         let _presented = present_texture_to_layer(&queue, &layer, &texture);
+    }
+
+    #[test]
+    fn preview_presenter_renders_texture_into_target_or_skips_without_a_gpu() {
+        let Some(device) = MTLCreateSystemDefaultDevice() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        let Some(presenter) = MetalPreviewPresenter::new(device) else {
+            return;
+        };
+        let source = make_texture(presenter.device(), 1, 1, MTLTextureUsage::ShaderRead).unwrap();
+        let target = make_texture(
+            presenter.device(),
+            4,
+            4,
+            MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead,
+        )
+        .unwrap();
+        let green = [0u8, 255, 0, 255];
+        let source_frame = full_frame(&green, 1, 1, false, false, [0.0; 4]);
+        upload_bgra_to_texture(&source, &source_frame).unwrap();
+
+        presenter
+            .render_texture_to_texture(&source, &target)
+            .expect("preview render pass");
+
+        let pixels = read_texture_bgra(&target, 4, 4);
+        assert_eq!(pixel(&pixels, 4, 0, 0), [0, 255, 0, 255]);
+        assert_eq!(pixel(&pixels, 4, 3, 3), [0, 255, 0, 255]);
     }
 
     #[test]
