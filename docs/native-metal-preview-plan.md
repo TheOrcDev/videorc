@@ -171,7 +171,7 @@ fails a "native" claim — by design.
   doing the BGRA readback plus BGRA-to-YUV conversion that only the raw FIFO path needs.
   The regression
   `publish_compositor_frame_can_publish_metal_target_without_yuv_payload_or_skips`
-  passed on 2026-06-06. The same opt-in source-complete probe now passes with preview
+  passed on 2026-06-06. One opt-in source-complete probe passed with preview
   120.36fps, present 28.95fps, source-to-present p95/p99 1ms, compositor lag 0,
   startup/final max repeated-frame run 2, `Metal targets 121`, `Metal handles 121`,
   `raw copied 0`, `Metal copied 0`, `zero-copy 121`, `VT output 121 (58289 bytes,
@@ -180,6 +180,14 @@ fails a "native" claim — by design.
   bottleneck for the opt-in H.264 path; remaining OBS-parity work is enabling the
   supported path by default, proving real-source zero-copy, and finishing the native
   preview layer.
+- The native-preview recording smoke now has VideoToolbox-output-specific regression
+  gates: `videotoolbox-h264` mode must produce Annex B bytes, retain Metal target
+  handles, keep raw/Metal copied frames at zero, and keep zero-copy frames at least as
+  high as emitted VideoToolbox output frames. A 2026-06-06 source-complete rerun with
+  those gates accepted the copy/zero-copy path (`raw copied 0`, `Metal copied 0`,
+  `zero-copy 121`, `VT output 121`) while report-only final-file analysis exposed one
+  remaining pacing defect: final max repeated-frame run 3. Startup stayed clean with
+  first-2-second max repeated-frame run 2 and no preview-sized frames.
 - The real-source acceptance gate now fails GPU-required runs when
   `encoderBridgeMetalTargetFrames` stays at 0, preventing a session from passing on a
   generic Metal compositor label while the recording bridge never saw an IOSurface-backed

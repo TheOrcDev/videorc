@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
+import { assertEncoderBridgeVideoOutputHealthy } from './lib/encoder-bridge-output-gates.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { summarizeNativePreviewRecordingDiagnostics } from './lib/native-preview-diagnostics.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
@@ -684,6 +685,11 @@ function assertStatsHealthyStrict(scenario, stats, reports = {}, options = {}) {
       `[${scenario.label}] Recording diagnostics never observed IOSurface-backed Metal target frames.`
     )
   }
+  assertEncoderBridgeVideoOutputHealthy({
+    scenarioLabel: scenario.label,
+    stats,
+    videoOutput: bridgeVideoOutput
+  })
   if (stats.micDroppedFrames > 0) {
     throw new Error(`[${scenario.label}] Native microphone reported ${stats.micDroppedFrames} dropped frame(s).`)
   }
