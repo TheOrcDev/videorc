@@ -50,6 +50,7 @@ export function summarizeNativePreviewRecordingDiagnostics(
       (sample) => Array.isArray(sample.duplicateCaptureSources) && sample.duplicateCaptureSources.length > 0
     ).length,
     maxEncoderBridgeMetalTargetFrames: maxOf(collectCounts('encoderBridgeMetalTargetFrames')) ?? 0,
+    maxCompositorCpuFallbackFrames: maxOf(collectCounts('compositorCpuFallbackFrames')) ?? 0,
     nativePreviewSamples: nativeDiagnosticsSamples + nativeSurfaceSamples,
     minPreviewPresentFps: minOf([...collect('previewPresentFps'), ...collectSurface('presentFps')]),
     maxPreviewInputToPresentLatencyMs: maxOf([
