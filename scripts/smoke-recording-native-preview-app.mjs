@@ -267,7 +267,7 @@ async function runNativePreviewRecordingScenario(ws, smoke, samples, previewSurf
   }
   const measuredCompositorLag = measurement?.compositorFrameLag ?? stats.maxPreviewCompositorFrameLag
   const previewSummary = expectsPreview
-    ? `preview ${format(measurement.measuredFps)}fps, p95 ${format(measurement.intervalP95Ms)}ms, present ${format(stats.minPreviewPresentFps)}fps, source-to-present p95 ${format(stats.maxPreviewInputToPresentLatencyP95Ms)}ms/p99 ${format(stats.maxPreviewInputToPresentLatencyP99Ms)}ms, compositor lag ${format(measuredCompositorLag)} frame(s)`
+    ? `preview ${format(measurement.measuredFps)}fps, p95 ${format(measurement.intervalP95Ms)}ms, diagnostic present ${format(stats.minPreviewPresentFps)}fps, source-to-present p95 ${format(stats.maxPreviewInputToPresentLatencyP95Ms)}ms/p99 ${format(stats.maxPreviewInputToPresentLatencyP99Ms)}ms, compositor lag ${format(measuredCompositorLag)} frame(s)`
     : `preview hidden, live preview samples ${stats.nativePreviewSamples}`
 
   console.log(
