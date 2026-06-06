@@ -1141,6 +1141,12 @@ export interface DiagnosticStats {
   previewRenderFrameTimeP99Ms?: number
   /** P95 time spent fetching latest live source frame handles for a compositor tick. */
   compositorSourceFetchP95Ms?: number
+  /** P95 time spent snapshotting compositor scene/frame-store handles. */
+  compositorSceneSnapshotP95Ms?: number
+  /** P95 time spent fetching the latest camera frame handle. */
+  compositorCameraFrameFetchP95Ms?: number
+  /** P95 time spent fetching the latest screen/window frame handle. */
+  compositorScreenFrameFetchP95Ms?: number
   /** P95 time spent preparing visible scene sources before Metal draw work. */
   compositorGpuPrepareP95Ms?: number
   /** P95 time spent allocating/updating live source Metal textures. */

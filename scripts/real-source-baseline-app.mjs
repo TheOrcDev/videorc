@@ -21,6 +21,7 @@
 // Env:
 //   VIDEORC_BASELINE_RECORDING_MS   recording length (default 60000)
 //   VIDEORC_BASELINE_WIDTH/HEIGHT/FPS/BITRATE_KBPS   output video (default 1920x1080@30, 6000)
+//   VIDEORC_BASELINE_FALLBACK_LIVE_PREVIEW=1   deliberately launch the legacy FFmpeg MJPEG preview
 //   VIDEORC_SMOKE_OUTPUT_DIR        where recordings + reports land
 //   VIDEORC_BASELINE_SCREEN_ID / _CAMERA_ID / _MIC_ID   force a specific device id
 //   VIDEORC_BASELINE_NO_SCREEN / _NO_CAMERA / _NO_MIC   omit that source
@@ -50,6 +51,7 @@ const config = {
   ffmpegPath: process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg',
   ffprobePath: process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? siblingFfprobe(process.env.VIDEORC_SMOKE_FFMPEG_PATH) ?? 'ffprobe',
   bridgeVideoOutput: process.env.VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT ?? 'raw-yuv420p',
+  fallbackLivePreview: process.env.VIDEORC_BASELINE_FALLBACK_LIVE_PREVIEW === '1',
   outputDirectory: resolve(
     process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-real-source-baseline-${Date.now()}`)
   ),
@@ -125,8 +127,9 @@ async function main() {
       testPattern: false,
     }
 
-    // Mirror the UI: warm the real capturers, then start the live preview so the
-    // reported transport reflects the real primary path.
+    // Mirror the UI: warm the real capturers, then use the compositor preview surface
+    // when native preview mode is enabled. The legacy live preview launches a second
+    // FFmpeg AVFoundation graph, so keep it opt-in for fallback transport tests only.
     let previewTransport = 'unknown'
     await tryStep('preview.camera.start', async () => {
       if (sources.camera) await request(ws, config.timeoutMs, 'preview.camera.start', previewSourceParams(sourceSelection))
@@ -134,15 +137,29 @@ async function main() {
     await tryStep('preview.screen.start', async () => {
       if (sources.screen) await request(ws, config.timeoutMs, 'preview.screen.start', previewSourceParams(sourceSelection))
     })
-    await tryStep('preview.live.start', async () => {
-      const status = await request(ws, config.timeoutMs, 'preview.live.start', {
-        sources: sourceSelection,
-        layout: layoutSettings(),
-        ffmpegPath: config.ffmpegPath,
-        video: videoSettings(),
+    if (config.fallbackLivePreview) {
+      await tryStep('preview.live.start', async () => {
+        const status = await request(ws, config.timeoutMs, 'preview.live.start', {
+          sources: sourceSelection,
+          layout: layoutSettings(),
+          ffmpegPath: config.ffmpegPath,
+          video: videoSettings(),
+        })
+        previewTransport = status?.transport ?? previewTransport
       })
-      previewTransport = status?.transport ?? previewTransport
-    })
+    } else {
+      await tryStep('preview.live.stop', async () => {
+        await request(ws, config.timeoutMs, 'preview.live.stop')
+      })
+      await tryStep('preview.surface.create', async () => {
+        const status = await request(ws, config.timeoutMs, 'preview.surface.create', {
+          bounds: previewSurfaceBounds(),
+          targetFps: 60,
+          source: previewSurfaceSource(sourceSelection),
+        })
+        previewTransport = status?.transport ?? previewTransport
+      })
+    }
 
     await waitForPreviewSourceReadiness(ws, sources)
 
@@ -435,6 +452,9 @@ function summarizeDiagnostics(events, snapshots, startedAt, stopRequestedAt) {
     compositorFrameAgeMs: maxOf(compositorSamples.map((s) => num(s.frameAgeMs)).filter((v) => v !== null)),
     compositorFrameTimeP95Ms: maxOf(compositorSamples.map((s) => num(s.frameTimeP95Ms)).filter((v) => v !== null)),
     compositorSourceFetchP95Ms: maxOf(collect('compositorSourceFetchP95Ms')),
+    compositorSceneSnapshotP95Ms: maxOf(collect('compositorSceneSnapshotP95Ms')),
+    compositorCameraFrameFetchP95Ms: maxOf(collect('compositorCameraFrameFetchP95Ms')),
+    compositorScreenFrameFetchP95Ms: maxOf(collect('compositorScreenFrameFetchP95Ms')),
     compositorGpuPrepareP95Ms: maxOf(collect('compositorGpuPrepareP95Ms')),
     compositorGpuSourceTextureP95Ms: maxOf(collect('compositorGpuSourceTextureP95Ms')),
     compositorGpuCommandWaitP95Ms: maxOf(collect('compositorGpuCommandWaitP95Ms')),
@@ -527,7 +547,7 @@ function writeBaselineReport(outputPath, { sources, previewTransport, size, diag
   }
   lines.push('## Live diagnostics during recording')
   lines.push('')
-  lines.push(`- Preview transport(s) reported: ${diagnostics.transports.join(', ') || 'unknown'} (preview.live.start said: ${previewTransport})`)
+  lines.push(`- Preview transport(s) reported: ${diagnostics.transports.join(', ') || 'unknown'} (baseline preview request said: ${previewTransport})`)
   lines.push(
     `- Preview surface backing(s) reported: ${diagnostics.surfaceBackings.join(', ') || 'unknown'} ` +
       `(strict OBS backing: ${diagnostics.previewSurfaceBacking ?? 'unknown'})`
@@ -568,7 +588,8 @@ function writeBaselineReport(outputPath, { sources, previewTransport, size, diag
   lines.push(`- Source frame age (max): camera ${fmt(diagnostics.previewCameraFrameAgeMs, 0)}ms | screen ${fmt(diagnostics.previewScreenFrameAgeMs, 0)}ms`)
   lines.push(`- Compositor: repeated ${diagnostics.compositorRepeatedFrames} | dropped ${diagnostics.compositorDroppedFrames} | frame age max ${fmt(diagnostics.compositorFrameAgeMs, 0)}ms | frame time p95 ${fmt(diagnostics.compositorFrameTimeP95Ms)}ms`)
   lines.push(
-    `- Compositor breakdown p95: source fetch ${fmt(diagnostics.compositorSourceFetchP95Ms)}ms | ` +
+    `- Compositor breakdown p95: source fetch ${fmt(diagnostics.compositorSourceFetchP95Ms)}ms ` +
+      `(scene ${fmt(diagnostics.compositorSceneSnapshotP95Ms)}ms, camera ${fmt(diagnostics.compositorCameraFrameFetchP95Ms)}ms, screen ${fmt(diagnostics.compositorScreenFrameFetchP95Ms)}ms) | ` +
       `prepare ${fmt(diagnostics.compositorGpuPrepareP95Ms)}ms | source texture ${fmt(diagnostics.compositorGpuSourceTextureP95Ms)}ms | ` +
       `command wait ${fmt(diagnostics.compositorGpuCommandWaitP95Ms)}ms | Metal total ${fmt(diagnostics.compositorGpuTotalP95Ms)}ms | ` +
       `frame-store publish ${fmt(diagnostics.compositorFrameStorePublishP95Ms)}ms`
@@ -677,6 +698,24 @@ function videoSettings() {
 
 function previewSourceParams(sources) {
   return { sources, layout: layoutSettings(), video: videoSettings() }
+}
+
+function previewSurfaceSource(sources) {
+  if (sources.windowId) return 'window'
+  if (sources.screenId) return 'screen'
+  if (sources.cameraId) return 'camera'
+  return 'synthetic'
+}
+
+function previewSurfaceBounds() {
+  return {
+    screenX: 80,
+    screenY: 80,
+    width: 1280,
+    height: 720,
+    scaleFactor: 1,
+    screenHeight: 900,
+  }
 }
 
 function sessionParams(sources) {

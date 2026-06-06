@@ -66,6 +66,19 @@ impl<P, M> FrameStore<P, M> {
         buffer
     }
 
+    pub fn checkout_spare_buffer(&mut self, byte_len: usize) -> Option<Vec<u8>> {
+        let mut buffer = self.spare_buffers.pop()?;
+        if buffer.capacity() < byte_len {
+            return None;
+        }
+        buffer.resize(byte_len, 0);
+        Some(buffer)
+    }
+
+    pub fn record_buffer_allocation(&mut self) {
+        self.buffer_allocations = self.buffer_allocations.saturating_add(1);
+    }
+
     pub fn publish(
         &mut self,
         sequence: u64,
@@ -190,6 +203,43 @@ mod tests {
         assert_eq!(stats.buffer_count, 2);
         assert!(stats.bytes_retained <= 2048);
         assert_eq!(stats.buffer_allocations, 2);
+    }
+
+    #[test]
+    fn spare_checkout_reuses_existing_buffer_without_allocation() {
+        let mut store: FrameStore<TestPixelFormat> = FrameStore::new(1);
+        let buffer = store.checkout_buffer(1024);
+        store.publish(1, 16, 16, TestPixelFormat::Rgba, Instant::now(), buffer);
+        let replacement = store.checkout_buffer(1024);
+        store.publish(
+            2,
+            16,
+            16,
+            TestPixelFormat::Rgba,
+            Instant::now(),
+            replacement,
+        );
+
+        let buffer = store
+            .checkout_spare_buffer(512)
+            .expect("spare buffer available");
+
+        assert_eq!(buffer.len(), 512);
+        assert!(buffer.capacity() >= 1024);
+        assert_eq!(store.stats().buffer_allocations, 2);
+    }
+
+    #[test]
+    fn spare_checkout_accounts_for_undersized_spare() {
+        let mut store: FrameStore<TestPixelFormat> = FrameStore::new(1);
+        let buffer = store.checkout_buffer(256);
+        store.publish(1, 8, 8, TestPixelFormat::Rgba, Instant::now(), buffer);
+        let replacement = store.checkout_buffer(256);
+        store.publish(2, 8, 8, TestPixelFormat::Rgba, Instant::now(), replacement);
+
+        assert!(store.checkout_spare_buffer(1024).is_none());
+        store.record_buffer_allocation();
+        assert_eq!(store.stats().buffer_allocations, 3);
     }
 
     #[test]

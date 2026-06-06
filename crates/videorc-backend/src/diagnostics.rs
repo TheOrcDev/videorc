@@ -117,6 +117,9 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         preview_render_frame_time_p95_ms: None,
         preview_render_frame_time_p99_ms: None,
         compositor_source_fetch_p95_ms: None,
+        compositor_scene_snapshot_p95_ms: None,
+        compositor_camera_frame_fetch_p95_ms: None,
+        compositor_screen_frame_fetch_p95_ms: None,
         compositor_gpu_prepare_p95_ms: None,
         compositor_gpu_source_texture_p95_ms: None,
         compositor_gpu_command_wait_p95_ms: None,
@@ -596,6 +599,9 @@ pub fn apply_compositor_stats(
 pub fn apply_compositor_timing_stats(
     mut stats: DiagnosticStats,
     source_fetch_p95_ms: f64,
+    scene_snapshot_p95_ms: f64,
+    camera_frame_fetch_p95_ms: f64,
+    screen_frame_fetch_p95_ms: f64,
     gpu_prepare_p95_ms: f64,
     gpu_source_texture_p95_ms: f64,
     gpu_command_wait_p95_ms: f64,
@@ -603,6 +609,9 @@ pub fn apply_compositor_timing_stats(
     frame_store_publish_p95_ms: f64,
 ) -> DiagnosticStats {
     stats.compositor_source_fetch_p95_ms = Some(source_fetch_p95_ms);
+    stats.compositor_scene_snapshot_p95_ms = Some(scene_snapshot_p95_ms);
+    stats.compositor_camera_frame_fetch_p95_ms = Some(camera_frame_fetch_p95_ms);
+    stats.compositor_screen_frame_fetch_p95_ms = Some(screen_frame_fetch_p95_ms);
     stats.compositor_gpu_prepare_p95_ms = Some(gpu_prepare_p95_ms);
     stats.compositor_gpu_source_texture_p95_ms = Some(gpu_source_texture_p95_ms);
     stats.compositor_gpu_command_wait_p95_ms = Some(gpu_command_wait_p95_ms);
@@ -969,10 +978,23 @@ mod tests {
 
     #[test]
     fn compositor_timing_stats_record_live_breakdown() {
-        let stats =
-            apply_compositor_timing_stats(idle_diagnostics(), 46.8, 0.4, 3.9, 4.9, 7.2, 0.1);
+        let stats = apply_compositor_timing_stats(
+            idle_diagnostics(),
+            46.8,
+            1.2,
+            12.3,
+            34.5,
+            0.4,
+            3.9,
+            4.9,
+            7.2,
+            0.1,
+        );
 
         assert_eq!(stats.compositor_source_fetch_p95_ms, Some(46.8));
+        assert_eq!(stats.compositor_scene_snapshot_p95_ms, Some(1.2));
+        assert_eq!(stats.compositor_camera_frame_fetch_p95_ms, Some(12.3));
+        assert_eq!(stats.compositor_screen_frame_fetch_p95_ms, Some(34.5));
         assert_eq!(stats.compositor_gpu_prepare_p95_ms, Some(0.4));
         assert_eq!(stats.compositor_gpu_source_texture_p95_ms, Some(3.9));
         assert_eq!(stats.compositor_gpu_command_wait_p95_ms, Some(4.9));

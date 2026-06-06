@@ -2755,6 +2755,8 @@ const MICROPHONE_WARMUP_TIMEOUT: Duration = Duration::from_millis(1500);
 const RECORDING_STARTUP_BARRIER_TIMEOUT: Duration = Duration::from_millis(2500);
 /// Consecutive target-resolution real-source compositor frames required before encoding.
 const RECORDING_STARTUP_BARRIER_MIN_FRAMES: u32 = 3;
+const RECORDING_ENCODER_BRIDGE_SOURCE_READY_TIMEOUT: Duration = Duration::from_millis(750);
+const RECORDING_ENCODER_BRIDGE_SOURCE_READY_POLL: Duration = Duration::from_millis(25);
 
 /// Wait for CoreAudio to deliver its first callback (the mic-warmed-up signal) before the
 /// video pipeline starts, so audio and video begin in lockstep instead of the audio
@@ -3011,14 +3013,31 @@ async fn should_use_compositor_encoder_bridge(
             video: Some(params.output.video.clone()),
         })
     });
-    let has_camera_frame = preview_camera_latest_frame_info(state).await.is_some();
-    let has_screen_frame = preview_screen_latest_frame_info(state).await.is_some();
-    recording_encoder_bridge_sources_ready(
-        &scene,
-        active_screen.is_some(),
-        has_camera_frame,
-        has_screen_frame,
-    )
+    wait_for_recording_encoder_bridge_sources_ready(state, &scene, active_screen.is_some()).await
+}
+
+async fn wait_for_recording_encoder_bridge_sources_ready(
+    state: &AppState,
+    scene: &Scene,
+    has_active_screen: bool,
+) -> bool {
+    let deadline = Instant::now() + RECORDING_ENCODER_BRIDGE_SOURCE_READY_TIMEOUT;
+    loop {
+        let has_camera_frame = preview_camera_latest_frame_info(state).await.is_some();
+        let has_screen_frame = preview_screen_latest_frame_info(state).await.is_some();
+        if recording_encoder_bridge_sources_ready(
+            scene,
+            has_active_screen,
+            has_camera_frame,
+            has_screen_frame,
+        ) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep(RECORDING_ENCODER_BRIDGE_SOURCE_READY_POLL).await;
+    }
 }
 
 async fn recording_compositor_target_fps(state: &AppState, video: &VideoSettings) -> u32 {

@@ -323,12 +323,15 @@ pub async fn preview_camera_status(state: &AppState) -> PreviewCameraStatus {
 }
 
 pub async fn preview_camera_frame_store_stats(state: &AppState) -> FrameStoreStats {
-    let slot = state.preview_camera.lock().await;
-    let Some(active) = slot.active.as_ref() else {
-        return FrameStoreStats::default();
+    let shared = {
+        let slot = state.preview_camera.lock().await;
+        let Some(active) = slot.active.as_ref() else {
+            return FrameStoreStats::default();
+        };
+        Arc::clone(&active.shared)
     };
-    active
-        .shared
+
+    shared
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .frame_store
@@ -336,10 +339,11 @@ pub async fn preview_camera_frame_store_stats(state: &AppState) -> FrameStoreSta
 }
 
 pub async fn preview_camera_latest_frame_info(state: &AppState) -> Option<PreviewCameraFrameInfo> {
-    let slot = state.preview_camera.lock().await;
-    let active = slot.active.as_ref()?;
-    let frame = active
-        .shared
+    let shared = {
+        let slot = state.preview_camera.lock().await;
+        Arc::clone(&slot.active.as_ref()?.shared)
+    };
+    let frame = shared
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .frame_store
@@ -355,15 +359,17 @@ pub async fn preview_camera_latest_frame_info(state: &AppState) -> Option<Previe
 pub async fn preview_camera_latest_frame(
     state: &AppState,
 ) -> Option<(FrameHandle<PreviewCameraPixelFormat>, LayoutSettings)> {
-    let slot = state.preview_camera.lock().await;
-    let active = slot.active.as_ref()?;
-    let frame = active
-        .shared
+    let (shared, layout) = {
+        let slot = state.preview_camera.lock().await;
+        let active = slot.active.as_ref()?;
+        (Arc::clone(&active.shared), active.layout.clone())
+    };
+    let frame = shared
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .frame_store
         .latest()?;
-    Some((frame, active.layout.clone()))
+    Some((frame, layout))
 }
 
 pub async fn latest_preview_camera_png(
@@ -373,11 +379,13 @@ pub async fn latest_preview_camera_png(
     let (frame, layout) = {
         let slot = state.preview_camera.lock().await;
         let active = slot.active.as_ref()?;
-        let guard = active
-            .shared
+        let shared = Arc::clone(&active.shared);
+        let layout = active.layout.clone();
+        drop(slot);
+        let guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (guard.frame_store.latest()?, active.layout.clone())
+        (guard.frame_store.latest()?, layout)
     };
 
     let mut rgba = Vec::with_capacity(frame.bytes.len());
@@ -1051,11 +1059,20 @@ mod macos {
         let width_usize = width as usize;
         let height_usize = height as usize;
         let row_bytes = width_usize * 4;
+        let frame_bytes = row_bytes * height_usize;
         let mut bytes = {
             let mut guard = shared
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.frame_store.checkout_buffer(row_bytes * height_usize)
+            if let Some(buffer) = guard.frame_store.checkout_spare_buffer(frame_bytes) {
+                buffer
+            } else {
+                guard.frame_store.record_buffer_allocation();
+                drop(guard);
+                let mut buffer = Vec::with_capacity(frame_bytes);
+                buffer.resize(frame_bytes, 0);
+                buffer
+            }
         };
         unsafe {
             let source = base_address.cast::<u8>();

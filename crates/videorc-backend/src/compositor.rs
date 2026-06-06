@@ -607,6 +607,9 @@ async fn run_synthetic_compositor_loop(
     let mut previous_fingerprint: Option<SourceFrameFingerprint> = None;
     let mut frame_times_ms = Vec::with_capacity(128);
     let mut source_fetch_times_ms = Vec::with_capacity(128);
+    let mut scene_snapshot_times_ms = Vec::with_capacity(128);
+    let mut camera_frame_fetch_times_ms = Vec::with_capacity(128);
+    let mut screen_frame_fetch_times_ms = Vec::with_capacity(128);
     let mut gpu_prepare_times_ms = Vec::with_capacity(128);
     let mut gpu_source_texture_times_ms = Vec::with_capacity(128);
     let mut gpu_command_wait_times_ms = Vec::with_capacity(128);
@@ -656,6 +659,9 @@ async fn run_synthetic_compositor_loop(
                 previous_fingerprint = Some(published.fingerprint);
                 frame_times_ms.push(render_started_at.elapsed().as_secs_f64() * 1000.0);
                 source_fetch_times_ms.push(published.timings.source_fetch_ms);
+                scene_snapshot_times_ms.push(published.timings.scene_snapshot_ms);
+                camera_frame_fetch_times_ms.push(published.timings.camera_frame_fetch_ms);
+                screen_frame_fetch_times_ms.push(published.timings.screen_frame_fetch_ms);
                 gpu_prepare_times_ms.push(published.timings.gpu_prepare_ms);
                 gpu_source_texture_times_ms.push(published.timings.gpu_source_texture_ms);
                 gpu_command_wait_times_ms.push(published.timings.gpu_command_wait_ms);
@@ -680,6 +686,12 @@ async fn run_synthetic_compositor_loop(
                     let measured_fps = frames_in_window as f64 / elapsed;
                     let (p50, p95, p99) = frame_time_percentiles(&frame_times_ms);
                     let (_, source_fetch_p95, _) = frame_time_percentiles(&source_fetch_times_ms);
+                    let (_, scene_snapshot_p95, _) =
+                        frame_time_percentiles(&scene_snapshot_times_ms);
+                    let (_, camera_frame_fetch_p95, _) =
+                        frame_time_percentiles(&camera_frame_fetch_times_ms);
+                    let (_, screen_frame_fetch_p95, _) =
+                        frame_time_percentiles(&screen_frame_fetch_times_ms);
                     let (_, gpu_prepare_p95, _) = frame_time_percentiles(&gpu_prepare_times_ms);
                     let (_, gpu_source_texture_p95, _) =
                         frame_time_percentiles(&gpu_source_texture_times_ms);
@@ -739,6 +751,9 @@ async fn run_synthetic_compositor_loop(
                         let next = apply_compositor_timing_stats(
                             next,
                             source_fetch_p95,
+                            scene_snapshot_p95,
+                            camera_frame_fetch_p95,
+                            screen_frame_fetch_p95,
                             gpu_prepare_p95,
                             gpu_source_texture_p95,
                             gpu_command_wait_p95,
@@ -765,6 +780,9 @@ async fn run_synthetic_compositor_loop(
                     // (cumulative totals, like dropped_frames) — not reset per window.
                     frame_times_ms.clear();
                     source_fetch_times_ms.clear();
+                    scene_snapshot_times_ms.clear();
+                    camera_frame_fetch_times_ms.clear();
+                    screen_frame_fetch_times_ms.clear();
                     gpu_prepare_times_ms.clear();
                     gpu_source_texture_times_ms.clear();
                     gpu_command_wait_times_ms.clear();
@@ -854,6 +872,9 @@ struct GpuCompositorTimings {
 #[derive(Debug, Clone, Copy, Default)]
 struct CompositorPublishTimings {
     source_fetch_ms: f64,
+    scene_snapshot_ms: f64,
+    camera_frame_fetch_ms: f64,
+    screen_frame_fetch_ms: f64,
     gpu_prepare_ms: f64,
     gpu_source_texture_ms: f64,
     gpu_command_wait_ms: f64,
@@ -1301,6 +1322,7 @@ async fn publish_compositor_frame(
     publish_yuv_frame: bool,
 ) -> CompositorPublishResult {
     let source_fetch_started_at = Instant::now();
+    let scene_snapshot_started_at = Instant::now();
     let (frame_store, snapshot, active_image_source) = {
         let compositor = state.compositor.lock().await;
         let active_image_source = compositor
@@ -1315,10 +1337,28 @@ async fn publish_compositor_frame(
             active_image_source,
         )
     };
-    let camera_frame = preview_camera_latest_frame(state).await;
-    let screen_frame = preview_screen_latest_frame(state).await;
+    let scene_snapshot_ms = scene_snapshot_started_at.elapsed().as_secs_f64() * 1000.0;
+    let ((camera_frame, camera_frame_fetch_ms), (screen_frame, screen_frame_fetch_ms)) = tokio::join!(
+        async {
+            let started_at = Instant::now();
+            (
+                preview_camera_latest_frame(state).await,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            )
+        },
+        async {
+            let started_at = Instant::now();
+            (
+                preview_screen_latest_frame(state).await,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            )
+        }
+    );
     let mut timings = CompositorPublishTimings {
         source_fetch_ms: source_fetch_started_at.elapsed().as_secs_f64() * 1000.0,
+        scene_snapshot_ms,
+        camera_frame_fetch_ms,
+        screen_frame_fetch_ms,
         ..CompositorPublishTimings::default()
     };
     let has_image_source = active_image_source

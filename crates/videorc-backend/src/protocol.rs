@@ -887,6 +887,16 @@ pub struct DiagnosticStats {
     /// begins.
     #[serde(default)]
     pub compositor_source_fetch_p95_ms: Option<f64>,
+    /// P95 time spent snapshotting the compositor scene/frame-store handles before
+    /// source frame fetch begins.
+    #[serde(default)]
+    pub compositor_scene_snapshot_p95_ms: Option<f64>,
+    /// P95 wall time spent fetching the latest camera frame handle.
+    #[serde(default)]
+    pub compositor_camera_frame_fetch_p95_ms: Option<f64>,
+    /// P95 wall time spent fetching the latest screen/window frame handle.
+    #[serde(default)]
+    pub compositor_screen_frame_fetch_p95_ms: Option<f64>,
     /// P95 time spent preparing visible scene sources for the Metal compositor before
     /// issuing draw work.
     #[serde(default)]
