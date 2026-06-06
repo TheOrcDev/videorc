@@ -86,6 +86,12 @@ impl AudioCaptureStats {
     pub fn dropped_frames(&self) -> u64 {
         self.dropped_frames.load(Ordering::Relaxed)
     }
+
+    fn reset_recording_window(&self) {
+        self.captured_frames.store(0, Ordering::Relaxed);
+        self.dropped_frames.store(0, Ordering::Relaxed);
+        self.fifo_write_errors.store(0, Ordering::Relaxed);
+    }
 }
 
 pub struct NativeAudioSource {
@@ -250,6 +256,11 @@ pub fn attach_fifo_writer(
                 "Discarded {discarded_preroll_frames} native audio pre-roll frames before starting the recording FIFO."
             );
         }
+        // Warmup starts CoreAudio before FFmpeg is ready, so the bounded callback queue can
+        // legitimately fill during pre-roll. The live recording diagnostics should count
+        // only frames captured/dropped after the FIFO is open and pre-roll has been
+        // discarded.
+        writer_stats.reset_recording_window();
 
         while !writer_stop.load(Ordering::Relaxed) {
             match receiver.recv_timeout(Duration::from_millis(50)) {
@@ -706,6 +717,26 @@ mod tests {
 
         assert_eq!(discard_preroll_audio_frames(&receiver), 1_920);
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn recording_audio_stats_start_after_preroll() {
+        let stats = AudioCaptureStats::default();
+        stats.captured_frames.fetch_add(48_000, Ordering::Relaxed);
+        stats.dropped_frames.fetch_add(4_800, Ordering::Relaxed);
+        stats.fifo_write_errors.fetch_add(1, Ordering::Relaxed);
+
+        stats.reset_recording_window();
+
+        assert_eq!(stats.captured_frames(), 0);
+        assert_eq!(stats.dropped_frames(), 0);
+        assert_eq!(stats.fifo_write_errors.load(Ordering::Relaxed), 0);
+
+        stats.captured_frames.fetch_add(480, Ordering::Relaxed);
+        stats.dropped_frames.fetch_add(96, Ordering::Relaxed);
+
+        assert_eq!(stats.captured_frames(), 480);
+        assert_eq!(stats.dropped_frames(), 96);
     }
 
     #[test]
