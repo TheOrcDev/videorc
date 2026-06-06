@@ -16,6 +16,9 @@ export function classifyObsParityEvidence(input, gates = DEFAULT_ACCEPTANCE_GATE
   const imagePolls = diagnostics.imagePollDuringSession?.total
   const cpuFallbackFrames = diagnostics.compositorCpuFallbackFrames ?? 0
   const metalTargetFrames = diagnostics.encoderBridgeMetalTargetFrames ?? 0
+  const rawVideoCopiedFrames = diagnostics.encoderBridgeRawVideoCopiedFrames ?? 0
+  const metalTargetCopiedFrames = diagnostics.encoderBridgeMetalTargetCopiedFrames ?? 0
+  const zeroCopyFrames = diagnostics.encoderBridgeZeroCopyFrames ?? 0
 
   return [
     classifyStartup({ startupVerdict, diagnostics, startupPassed }),
@@ -27,6 +30,9 @@ export function classifyObsParityEvidence(input, gates = DEFAULT_ACCEPTANCE_GATE
       finalPassed,
       cpuFallbackFrames,
       metalTargetFrames,
+      rawVideoCopiedFrames,
+      metalTargetCopiedFrames,
+      zeroCopyFrames,
       gates,
     }),
   ]
@@ -171,6 +177,9 @@ function classifyRecordingHotPath({
   finalPassed,
   cpuFallbackFrames,
   metalTargetFrames,
+  rawVideoCopiedFrames,
+  metalTargetCopiedFrames,
+  zeroCopyFrames,
   gates,
 }) {
   const evidence = []
@@ -195,6 +204,13 @@ function classifyRecordingHotPath({
   if (metalTargetFrames <= 0) {
     owners.add('Metal target export evidence')
     evidence.push('encoder bridge observed 0 IOSurface-backed Metal target frames')
+  }
+  if (metalTargetCopiedFrames > 0) {
+    owners.add('zero-copy encoder export')
+    evidence.push(`${metalTargetCopiedFrames} Metal target frame(s) copied through raw-video FFmpeg bridge`)
+  } else if (rawVideoCopiedFrames > 0 && zeroCopyFrames <= 0) {
+    owners.add('zero-copy encoder export')
+    evidence.push(`${rawVideoCopiedFrames} raw-video copied encoder frame(s), 0 zero-copy frame(s)`)
   }
   if (diagnostics.minEncoderSpeed != null && diagnostics.minEncoderSpeed < gates.minEncoderSpeed && !finalPassed) {
     owners.add('VideoToolbox / encoder throughput')

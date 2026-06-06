@@ -65,6 +65,13 @@ struct EncoderBridgeRuntimeStats {
     /// Ticks where the bridge still copied YUV into FFmpeg, but the compositor frame also
     /// exposed an IOSurface-backed Metal target that a future VideoToolbox path can adopt.
     metal_target_frames: u64,
+    /// Frames written through the raw-video FFmpeg bridge. Today this is the recording
+    /// export hot path; zero-copy VideoToolbox export should drive it to zero.
+    raw_video_copied_frames: u64,
+    /// Raw-video FFmpeg writes whose source frame also exposed a Metal IOSurface target.
+    metal_target_copied_frames: u64,
+    /// Frames submitted to the encoder without a CPU raw-video copy.
+    zero_copy_frames: u64,
 }
 
 /// A compositor frame fed into the encoder FIFO on one tick.
@@ -216,6 +223,7 @@ pub async fn run_synthetic_encoder_bridge(
                     input_fps,
                     dropped_frames: dropped_frames.saturating_add(encoder_progress.dropped_frames),
                     encoder_speed: encoder_progress.encoder_speed,
+                    raw_video_copied_frames: frames_written,
                     ..Default::default()
                 },
                 encoder_progress.last_error,
@@ -252,6 +260,7 @@ pub async fn run_synthetic_encoder_bridge(
                 input_fps: measured_input_fps(frames_written, write_started_at),
                 dropped_frames: dropped_frames.saturating_add(final_progress.dropped_frames),
                 encoder_speed: final_progress.encoder_speed,
+                raw_video_copied_frames: frames_written,
                 ..Default::default()
             },
             Some(error.clone()),
@@ -271,6 +280,7 @@ pub async fn run_synthetic_encoder_bridge(
             input_fps,
             dropped_frames,
             encoder_speed: final_progress.encoder_speed,
+            raw_video_copied_frames: frames_written,
             ..Default::default()
         },
         final_progress.last_error,
@@ -580,6 +590,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut synthetic_fallback_frames = 0_u64;
     let mut max_source_to_encode_age_ms: Option<u64> = None;
     let mut metal_target_frames = 0_u64;
+    let mut raw_video_copied_frames = 0_u64;
+    let mut metal_target_copied_frames = 0_u64;
     let mut last_fed_sequence: Option<u64> = None;
     let mut consecutive_repeated_frames = 0_u64;
 
@@ -619,12 +631,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         }
         if let Some(frame) = fed {
             last_fed_sequence = Some(frame.sequence);
-            if frame.has_metal_iosurface_target {
-                metal_target_frames = metal_target_frames.saturating_add(1);
-            }
             max_source_to_encode_age_ms =
                 Some(max_source_to_encode_age_ms.map_or(frame.age_ms, |age| age.max(frame.age_ms)));
         }
+        let wrote_metal_target_frame = fed.is_some_and(|frame| frame.has_metal_iosurface_target);
 
         queue_depth = 1;
         if let Err(error) = fifo.write_all(&bytes) {
@@ -641,6 +651,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     synthetic_fallback_frames,
                     source_to_encode_age_ms: max_source_to_encode_age_ms,
                     metal_target_frames,
+                    raw_video_copied_frames,
+                    metal_target_copied_frames,
+                    zero_copy_frames: 0,
                 },
                 Some(format!(
                     "Could not write compositor frame into recording FFmpeg: {error}"
@@ -649,6 +662,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             break;
         }
         queue_depth = 0;
+        raw_video_copied_frames = raw_video_copied_frames.saturating_add(1);
+        if wrote_metal_target_frame {
+            metal_target_frames = metal_target_frames.saturating_add(1);
+            metal_target_copied_frames = metal_target_copied_frames.saturating_add(1);
+        }
         frames_in_window = frames_in_window.saturating_add(1);
 
         if window_started_at.elapsed() >= ENCODER_BRIDGE_DIAGNOSTIC_WINDOW {
@@ -665,6 +683,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     synthetic_fallback_frames,
                     source_to_encode_age_ms: max_source_to_encode_age_ms,
                     metal_target_frames,
+                    raw_video_copied_frames,
+                    metal_target_copied_frames,
+                    zero_copy_frames: 0,
                 },
                 None,
             );
@@ -688,6 +709,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             synthetic_fallback_frames,
             source_to_encode_age_ms: max_source_to_encode_age_ms,
             metal_target_frames,
+            raw_video_copied_frames,
+            metal_target_copied_frames,
+            zero_copy_frames: 0,
         },
         None,
     );
@@ -881,6 +905,9 @@ async fn emit_encoder_bridge_diagnostics(
                 synthetic_fallback_frames: runtime.synthetic_fallback_frames,
                 source_to_encode_age_ms: runtime.source_to_encode_age_ms,
                 metal_target_frames: runtime.metal_target_frames,
+                raw_video_copied_frames: runtime.raw_video_copied_frames,
+                metal_target_copied_frames: runtime.metal_target_copied_frames,
+                zero_copy_frames: runtime.zero_copy_frames,
                 error,
             },
             target_fps,
@@ -927,7 +954,10 @@ mod tests {
 
     #[test]
     fn bridge_frame_with_unchanged_sequence_is_a_repeat() {
-        assert_eq!(classify_bridge_frame(Some(7), Some(7)), BridgeFrameSource::Repeated);
+        assert_eq!(
+            classify_bridge_frame(Some(7), Some(7)),
+            BridgeFrameSource::Repeated
+        );
     }
 
     #[test]

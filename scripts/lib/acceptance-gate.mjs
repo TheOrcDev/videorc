@@ -23,7 +23,7 @@ export const DEFAULT_ACCEPTANCE_GATES = Object.freeze({
  * @param {object} input.diagnostics - summarized live diagnostics for the run
  * @param {boolean} input.claimsNative - whether the preview reported the real native Metal transport
  * @param {boolean} [input.requireObsNativePreview] - whether OBS parity requires that real native transport
- * @param {boolean} [input.requireGpuCompositor] - whether OBS parity requires the Metal compositor backend
+ * @param {boolean} [input.requireGpuCompositor] - whether OBS parity requires the Metal compositor/backend export path
  * @param {boolean} input.expectAudio - whether a mic was selected
  * @param {object} [gates]
  * @returns {{pass:boolean, failures:string[]}}
@@ -73,6 +73,14 @@ export function evaluateAcceptance(input, gates = DEFAULT_ACCEPTANCE_GATES) {
     failures.push(
       'recording: expected encoder bridge to observe IOSurface-backed Metal target frames, got none'
     )
+  }
+  if (input.requireGpuCompositor && (d.encoderBridgeMetalTargetCopiedFrames ?? 0) > 0) {
+    failures.push(
+      `recording: ${d.encoderBridgeMetalTargetCopiedFrames} Metal target frame(s) still copied through the raw-video FFmpeg bridge (not zero-copy)`
+    )
+  }
+  if (input.requireGpuCompositor && (d.encoderBridgeZeroCopyFrames ?? 0) <= 0) {
+    failures.push('recording: expected zero-copy encoder bridge frames, got none')
   }
 
   // 3. Encoder progress speed is useful live telemetry, but VideoToolbox can report

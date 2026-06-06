@@ -14,6 +14,9 @@ function cleanInput() {
       compositorBackend: 'metal',
       compositorCpuFallbackFrames: 0,
       encoderBridgeMetalTargetFrames: 120,
+      encoderBridgeRawVideoCopiedFrames: 0,
+      encoderBridgeMetalTargetCopiedFrames: 0,
+      encoderBridgeZeroCopyFrames: 120,
       encoderBridgeRepeatedFrames: 0,
       encoderBridgeSyntheticFrames: 0,
       previewInputToPresentLatencyP95Ms: 18,
@@ -81,6 +84,7 @@ test('obs parity evidence highlights GPU fallback and missing Metal target expor
   input.diagnostics.compositorCpuFallbackFrames = 412
   input.diagnostics.compositorFallbackReason = 'camera frame unavailable'
   input.diagnostics.encoderBridgeMetalTargetFrames = 0
+  input.diagnostics.encoderBridgeZeroCopyFrames = 0
 
   const items = classifyObsParityEvidence(input)
   const lag = byArea(items, 'Preview lag while recording')
@@ -92,6 +96,19 @@ test('obs parity evidence highlights GPU fallback and missing Metal target expor
   assert.match(lag.evidence.join(' '), /camera frame unavailable/)
   assert.match(quality.owner, /GPU compositor parity/)
   assert.match(hotPath.owner, /Metal target export evidence/)
+})
+
+test('obs parity evidence highlights copied Metal target export as a zero-copy gap', () => {
+  const input = cleanInput()
+  input.diagnostics.encoderBridgeRawVideoCopiedFrames = 120
+  input.diagnostics.encoderBridgeMetalTargetCopiedFrames = 120
+  input.diagnostics.encoderBridgeZeroCopyFrames = 0
+
+  const hotPath = byArea(classifyObsParityEvidence(input), 'Recording hot path')
+
+  assert.equal(hotPath.status, 'fail')
+  assert.match(hotPath.owner, /zero-copy encoder export/)
+  assert.match(hotPath.evidence.join(' '), /120 Metal target frame/)
 })
 
 test('obs parity evidence assigns high native latency to presenter currentness', () => {

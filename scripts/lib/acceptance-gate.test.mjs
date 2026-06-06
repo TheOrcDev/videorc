@@ -12,6 +12,9 @@ const cleanInput = () => ({
     encoderBridgeRepeatedFrames: 0,
     encoderBridgeSyntheticFrames: 0,
     encoderBridgeMetalTargetFrames: 120,
+    encoderBridgeRawVideoCopiedFrames: 0,
+    encoderBridgeMetalTargetCopiedFrames: 0,
+    encoderBridgeZeroCopyFrames: 120,
     minEncoderSpeed: 1.0,
     micDroppedFrames: 0,
     minMicCaptureCoverage: 1.0,
@@ -84,10 +87,27 @@ describe('evaluateAcceptance', () => {
     input.diagnostics.compositorBackend = 'metal'
     input.diagnostics.compositorCpuFallbackFrames = 0
     input.diagnostics.encoderBridgeMetalTargetFrames = 0
+    input.diagnostics.encoderBridgeZeroCopyFrames = 0
     const v = evaluateAcceptance(input)
 
     assert.equal(v.pass, false)
     assert.match(v.failures.join(' '), /IOSurface-backed Metal target frames/)
+  })
+
+  it('fails the strict OBS compositor gate when Metal target frames are still copied', () => {
+    const input = cleanInput()
+    input.requireGpuCompositor = true
+    input.diagnostics.compositorBackend = 'metal'
+    input.diagnostics.compositorCpuFallbackFrames = 0
+    input.diagnostics.encoderBridgeMetalTargetFrames = 120
+    input.diagnostics.encoderBridgeRawVideoCopiedFrames = 120
+    input.diagnostics.encoderBridgeMetalTargetCopiedFrames = 120
+    input.diagnostics.encoderBridgeZeroCopyFrames = 0
+    const v = evaluateAcceptance(input)
+
+    assert.equal(v.pass, false)
+    assert.match(v.failures.join(' '), /still copied through the raw-video FFmpeg bridge/)
+    assert.match(v.failures.join(' '), /expected zero-copy/)
   })
 
   it('fails on duplicate frames re-fed to the encoder when final-file proof is unavailable', () => {

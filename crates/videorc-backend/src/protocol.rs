@@ -809,6 +809,17 @@ pub struct DiagnosticStats {
     /// Metal target. This is a candidate signal for the future zero-copy encoder path.
     #[serde(default)]
     pub encoder_bridge_metal_target_frames: u64,
+    /// FIFO frames written through the raw-video FFmpeg bridge. These are copied bytes,
+    /// not zero-copy VideoToolbox submissions.
+    #[serde(default)]
+    pub encoder_bridge_raw_video_copied_frames: u64,
+    /// Raw-video FFmpeg writes where the source frame also had an IOSurface-backed Metal
+    /// target. This proves the current Metal-target path is still copied.
+    #[serde(default)]
+    pub encoder_bridge_metal_target_copied_frames: u64,
+    /// Frames submitted to the encoder without a CPU raw-video copy.
+    #[serde(default)]
+    pub encoder_bridge_zero_copy_frames: u64,
     pub encoder_bridge_error: Option<String>,
     /// Which encoder the active session actually requested — proves hardware vs software
     /// encode (previously unrecorded).

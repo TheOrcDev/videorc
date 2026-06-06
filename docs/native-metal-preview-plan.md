@@ -108,9 +108,11 @@ fails a "native" claim — by design.
   `metal_scene_compositor_exports_retained_target_pixel_buffer_or_skips` passed on
   2026-06-06.
 - Published compositor frames now carry an honest export tag: CPU YUV420P buffer or
-  IOSurface-backed Metal target available. The recording FIFO bridge still copies YUV
-  bytes into FFmpeg, but its diagnostics now count `encoderBridgeMetalTargetFrames`, so
-  smokes can prove when a future VideoToolbox zero-copy path had a Metal target to adopt.
+  IOSurface-backed Metal target available. The recording FIFO bridge still copies raw
+  video bytes into FFmpeg, but diagnostics now separate `encoderBridgeMetalTargetFrames`
+  from `encoderBridgeRawVideoCopiedFrames`, `encoderBridgeMetalTargetCopiedFrames`, and
+  `encoderBridgeZeroCopyFrames`, so smokes can prove when a Metal target is still copied
+  versus truly encoded zero-copy.
 - The real-source acceptance gate now fails GPU-required runs when
   `encoderBridgeMetalTargetFrames` stays at 0, preventing a session from passing on a
   generic Metal compositor label while the recording bridge never saw an IOSurface-backed
@@ -132,17 +134,24 @@ fails a "native" claim — by design.
   regression verifies that a missing visible camera frame reports the specific camera
   source instead of the old generic `camera frame unavailable` reason.
 - 2026-06-06 source-aware fallback smoke: `pnpm smoke:recording-native-preview`
-  passed at 1080p30 with preview 120.24fps, proof-host p95 interval 9.40ms,
-  source-to-present p95/p99 11ms, compositor lag 0, startup/final max repeated-frame
-  run 2, `Metal targets 1`, `CPU fallback frames 279 (camera source "Camera"
-  id=source:camera frame unavailable)`, and 18ms A/V skew. FFmpeg speed/live FPS
-  telemetry still warned, but decoded startup/final-file gates passed.
+  passed at 1080p30 with preview 120.13fps, proof-host p95 interval 9.80ms,
+  present 30.38fps, source-to-present p95/p99 10ms, compositor lag 0,
+  startup/final max repeated-frame run 2, `Metal targets 1`, `raw copied 424`,
+  `Metal copied 1`, `zero-copy 0`, `CPU fallback frames 410 (camera source
+  "Camera" id=source:camera frame unavailable)`, and 8ms A/V skew. FFmpeg
+  speed/live FPS telemetry still warned, but decoded startup/final-file gates passed.
 - The native-preview recording smoke now has an opt-in source-complete Metal stress mode:
   set `VIDEORC_NATIVE_PREVIEW_SOURCE_COMPLETE_SCENE=1` to replace the intentionally missing
   camera overlay with a synthetic test-pattern overlay. On 2026-06-06, the default smoke
   stayed green, while the source-complete mode reproduced the real readback/export
-  bottleneck at about 8fps and failed startup analysis with only 43 decoded frames, making
-  the zero-copy slice directly measurable without breaking the default smoke.
+  bottleneck at about 8.2fps / 0.27x encoder speed and failed startup analysis with only
+  42 decoded frames, making the zero-copy slice directly measurable without breaking the
+  default smoke.
+- The strict real-source OBS gate now rejects GPU-required sessions when
+  `encoderBridgeMetalTargetCopiedFrames` is greater than 0 or
+  `encoderBridgeZeroCopyFrames` stays at 0. The native-preview smoke summary prints raw
+  copied, Metal copied, and zero-copy counts alongside the existing Metal-target count,
+  making the source-complete stress bottleneck explicit in one log line.
 - A focused Metal regression now proves a synthetic test-pattern overlay scene can compose
   on Metal without requiring camera frames. Switching the default native-preview smoke to
   that fully Metal overlay path is still premature: the readback/encode path exposed the
