@@ -904,6 +904,9 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     let wait_session_id = session_id.clone();
     let mut force_stop_now = false;
     active.stop_requested = true;
+    if let Some(native_audio) = active.native_audio.as_ref() {
+        native_audio.finish_recording_window();
+    }
     active
         .pipeline
         .mark_finalizing("Waiting for FFmpeg to flush and close output files.");
@@ -1739,6 +1742,9 @@ async fn stop_recording_process_for_shutdown(recording: Option<ActiveRecording>)
         let _ = stdin.write_all(b"q\n").await;
         let _ = stdin.shutdown().await;
     }
+    if let Some(native_audio) = recording.native_audio.as_ref() {
+        native_audio.finish_recording_window();
+    }
 
     if recording.pid == 0 {
         return;
@@ -1994,10 +2000,13 @@ async fn monitor_session(
         .as_ref()
         .filter(|active| active.session_id == session_id)
         .map(|active| {
-            let native_audio_stats = active.native_audio.as_ref().map(|audio| NativeAudioStats {
-                device_name: audio.device_name.clone(),
-                captured_frames: audio.captured_frames(),
-                dropped_frames: audio.dropped_frames(),
+            let native_audio_stats = active.native_audio.as_ref().map(|audio| {
+                audio.finish_recording_window();
+                NativeAudioStats {
+                    device_name: audio.device_name.clone(),
+                    captured_frames: audio.captured_frames(),
+                    dropped_frames: audio.dropped_frames(),
+                }
             });
             MonitoredRecording {
                 stop_requested: active.stop_requested,
@@ -3174,14 +3183,17 @@ fn bridge_compositor_ffmpeg_args(
         EncoderBridgeVideoOutput::RawYuv420p => {
             args.extend([
                 "-filter_complex".to_string(),
-                bridge_recording_video_filter(&params.output.video),
+                bridge_recording_video_filter(input_layout.video_input_index, &params.output.video),
                 "-map".to_string(),
                 "[v_main]".to_string(),
             ]);
         }
         EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
         | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => {
-            args.extend(["-map".to_string(), "0:v".to_string()]);
+            args.extend([
+                "-map".to_string(),
+                format!("{}:v", input_layout.video_input_index),
+            ]);
         }
     }
     append_audio_output_args(&mut args, &input_layout);
@@ -3277,6 +3289,17 @@ fn append_bridge_recording_input_args(
     video_output: EncoderBridgeVideoOutput,
 ) -> InputLayout {
     let video = &params.output.video;
+    let audio_first = matches!(
+        video_output,
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+    );
+    let mut next_input_index = 0;
+    let mut audio_inputs = Vec::new();
+    if audio_first {
+        append_bridge_audio_input_args(args, capture, &mut next_input_index, &mut audio_inputs);
+    }
+    let video_input_index = next_input_index;
     match video_output {
         EncoderBridgeVideoOutput::RawYuv420p => {
             args.extend([
@@ -3313,12 +3336,29 @@ fn append_bridge_recording_input_args(
             ]);
         }
     }
+    next_input_index += 1;
 
-    let mut next_input_index = 1;
-    let mut audio_inputs = Vec::new();
-    if append_microphone_input(args, capture.microphone.as_ref(), &mut next_input_index) {
+    if !audio_first {
+        append_bridge_audio_input_args(args, capture, &mut next_input_index, &mut audio_inputs);
+    }
+
+    InputLayout {
+        video_input_index,
+        camera_input_index: None,
+        screen_overlay_input_index: None,
+        audio_inputs,
+    }
+}
+
+fn append_bridge_audio_input_args(
+    args: &mut Vec<String>,
+    capture: &CaptureInputs,
+    next_input_index: &mut usize,
+    audio_inputs: &mut Vec<AudioInput>,
+) {
+    if append_microphone_input(args, capture.microphone.as_ref(), next_input_index) {
         audio_inputs.push(AudioInput {
-            input_index: next_input_index - 1,
+            input_index: *next_input_index - 1,
             track: microphone_audio_track(),
             channels: microphone_channels(capture.microphone.as_ref()),
         });
@@ -3330,22 +3370,17 @@ fn append_bridge_recording_input_args(
             "sine=frequency=880:sample_rate=48000".to_string(),
         ]);
         audio_inputs.push(AudioInput {
-            input_index: next_input_index,
+            input_index: *next_input_index,
             track: test_tone_audio_track(),
             channels: 1,
         });
-    }
-
-    InputLayout {
-        camera_input_index: None,
-        screen_overlay_input_index: None,
-        audio_inputs,
+        *next_input_index += 1;
     }
 }
 
-fn bridge_recording_video_filter(video: &VideoSettings) -> String {
+fn bridge_recording_video_filter(video_input_index: usize, video: &VideoSettings) -> String {
     let fps = video.fps.max(1);
-    format!("[0:v]fps={fps}[v_main]")
+    format!("[{video_input_index}:v]fps={fps}[v_main]")
 }
 
 fn ffmpeg_args(
@@ -3526,6 +3561,7 @@ fn live_preview_ffmpeg_args(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InputLayout {
+    video_input_index: usize,
     camera_input_index: Option<usize>,
     screen_overlay_input_index: Option<usize>,
     audio_inputs: Vec<AudioInput>,
@@ -3627,6 +3663,7 @@ fn append_input_args(
     });
 
     InputLayout {
+        video_input_index: 0,
         camera_input_index,
         screen_overlay_input_index,
         audio_inputs,
@@ -5859,8 +5896,8 @@ mod tests {
         assert_eq!(
             ffmpeg_inputs(&args),
             vec![
-                fifo_path.display().to_string(),
-                "sine=frequency=880:sample_rate=48000".to_string()
+                "sine=frequency=880:sample_rate=48000".to_string(),
+                fifo_path.display().to_string()
             ]
         );
         assert_eq!(
@@ -5898,9 +5935,9 @@ mod tests {
         assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-map" && pair[1] == "0:v")
+                .any(|pair| pair[0] == "-map" && pair[1] == "1:v")
         );
-        assert!(args.iter().any(|arg| arg == "1:a?"));
+        assert!(args.iter().any(|arg| arg == "0:a?"));
         assert!(args.iter().any(|arg| arg == "-shortest"));
         assert!(arg_value(&args, "-filter_complex").is_none());
         assert!(arg_value(&args, "-allow_sw").is_none());
@@ -5928,8 +5965,8 @@ mod tests {
         assert_eq!(
             ffmpeg_inputs(&args),
             vec![
-                fifo_path.display().to_string(),
-                "sine=frequency=880:sample_rate=48000".to_string()
+                "sine=frequency=880:sample_rate=48000".to_string(),
+                fifo_path.display().to_string()
             ]
         );
         assert_eq!(
@@ -5955,14 +5992,69 @@ mod tests {
         assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-map" && pair[1] == "0:v")
+                .any(|pair| pair[0] == "-map" && pair[1] == "1:v")
         );
-        assert!(args.iter().any(|arg| arg == "1:a?"));
+        assert!(args.iter().any(|arg| arg == "0:a?"));
         assert!(args.iter().any(|arg| arg == "-shortest"));
         assert!(arg_value(&args, "-filter_complex").is_none());
         assert!(arg_value(&args, "-allow_sw").is_none());
         assert!(arg_value(&args, "-realtime").is_none());
         assert!(arg_value(&args, "-prio_speed").is_none());
+    }
+
+    #[test]
+    fn bridge_recording_h264_mpegts_opens_native_audio_before_video_fifo() {
+        let params = base_params(true, false);
+        let fifo_path = Path::new("/tmp/videorc-bridge-input.ts");
+        let audio_fifo_path = PathBuf::from("/tmp/videorc-audio-test.f32le");
+        let args = bridge_recording_ffmpeg_args(
+            &CaptureInputs {
+                video: VideoInput::TestPattern,
+                camera_index: None,
+                microphone: Some(MicrophoneInput::CoreAudio {
+                    device_id: 42,
+                    fifo_path: Some(audio_fifo_path.clone()),
+                }),
+            },
+            &params,
+            Some(Path::new("/tmp/videorc-bridge-test.mkv")),
+            fifo_path,
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+        )
+        .unwrap();
+
+        assert_eq!(
+            ffmpeg_inputs(&args),
+            vec![
+                audio_fifo_path.display().to_string(),
+                fifo_path.display().to_string()
+            ]
+        );
+        assert_eq!(
+            input_arg_value(&args, &audio_fifo_path.display().to_string(), "-f"),
+            Some("f32le")
+        );
+        assert_eq!(
+            input_arg_value(
+                &args,
+                &audio_fifo_path.display().to_string(),
+                "-thread_queue_size"
+            ),
+            Some("1024")
+        );
+        assert_eq!(
+            input_arg_value(&args, &fifo_path.display().to_string(), "-f"),
+            Some("mpegts")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-map" && pair[1] == "1:v")
+        );
+        assert!(args.iter().any(|arg| arg == "0:a?"));
+        assert_eq!(
+            arg_value(&args, "-af"),
+            Some("aresample=async=1:first_pts=0")
+        );
     }
 
     #[test]
@@ -6690,7 +6782,7 @@ mod tests {
         );
         assert_eq!(
             input_arg_value(&args, "/tmp/videorc-audio-test.f32le", "-thread_queue_size"),
-            Some("256")
+            Some("1024")
         );
         assert!(args.iter().any(|arg| arg == "1:a?"));
         assert_eq!(
@@ -6955,6 +7047,7 @@ mod tests {
             microphone: None,
         };
         let input_layout = InputLayout {
+            video_input_index: 0,
             camera_input_index: Some(1),
             screen_overlay_input_index: None,
             audio_inputs: Vec::new(),
@@ -7186,6 +7279,7 @@ mod tests {
             microphone: None,
         };
         let input_layout = InputLayout {
+            video_input_index: 0,
             camera_input_index: Some(1),
             screen_overlay_input_index: None,
             audio_inputs: Vec::new(),

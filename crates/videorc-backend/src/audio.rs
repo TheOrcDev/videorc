@@ -17,10 +17,13 @@ pub const NATIVE_AUDIO_CHANNELS: u16 = 2;
 /// Minimum elapsed capture time before audio-capture coverage is meaningful — below this
 /// the sampled count is too noisy (start-up jitter, FIFO preroll) to judge a gap.
 pub const AUDIO_COVERAGE_WARMUP_SECS: f64 = 3.0;
-const AUDIO_RING_CAPACITY_FRAMES: usize = 256;
+// CoreAudio must never block on the realtime callback. The recording bridge can briefly
+// stop reading the audio FIFO while probing/flushing the H.264 video FIFO, so keep a
+// bounded multi-second packet cushion instead of dropping valid mic callbacks.
+const AUDIO_RING_CAPACITY_PACKETS: usize = 1024;
 const METER_SAMPLE_DURATION: Duration = Duration::from_millis(700);
 const FIFO_OPEN_RETRY: Duration = Duration::from_millis(20);
-pub const NATIVE_AUDIO_FFMPEG_QUEUE_SIZE: u32 = 256;
+pub const NATIVE_AUDIO_FFMPEG_QUEUE_SIZE: u32 = 1024;
 
 /// Fraction of the expected audio sample-frames that were actually captured over the
 /// elapsed window: `captured / (elapsed × sample_rate)`. 1.0 means full real-time
@@ -76,6 +79,7 @@ pub struct AudioCaptureStats {
     captured_frames: AtomicU64,
     dropped_frames: AtomicU64,
     fifo_write_errors: AtomicU64,
+    recording_window_finished: AtomicBool,
 }
 
 impl AudioCaptureStats {
@@ -91,6 +95,29 @@ impl AudioCaptureStats {
         self.captured_frames.store(0, Ordering::Relaxed);
         self.dropped_frames.store(0, Ordering::Relaxed);
         self.fifo_write_errors.store(0, Ordering::Relaxed);
+        self.recording_window_finished
+            .store(false, Ordering::Relaxed);
+    }
+
+    fn finish_recording_window(&self) {
+        self.recording_window_finished
+            .store(true, Ordering::Relaxed);
+    }
+
+    fn recording_window_finished(&self) -> bool {
+        self.recording_window_finished.load(Ordering::Relaxed)
+    }
+
+    fn record_captured_frames(&self, frames: u64) {
+        if !self.recording_window_finished() {
+            self.captured_frames.fetch_add(frames, Ordering::Relaxed);
+        }
+    }
+
+    fn record_dropped_frames(&self, frames: u64) {
+        if !self.recording_window_finished() {
+            self.dropped_frames.fetch_add(frames, Ordering::Relaxed);
+        }
     }
 }
 
@@ -171,6 +198,10 @@ impl NativeAudioCaptureSession {
     pub fn dropped_frames(&self) -> u64 {
         self.stats.dropped_frames()
     }
+
+    pub fn finish_recording_window(&self) {
+        self.stats.finish_recording_window();
+    }
 }
 
 impl Drop for NativeAudioCaptureSession {
@@ -238,6 +269,9 @@ pub fn attach_fifo_writer(
     let writer_stats = stats.clone();
     let writer_stop = stop.clone();
     let writer_path = fifo_path.clone();
+    // Clear warmup/pre-roll counters before the session is published as active; the
+    // writer thread repeats this after it drains queued pre-roll frames.
+    stats.reset_recording_window();
     let writer = thread::spawn(move || {
         let mut file = match open_fifo_writer(&writer_path, &writer_stop) {
             Ok(file) => file,
@@ -557,7 +591,7 @@ fn start_platform_audio_source(
         .set_stream_format(stream_format, Scope::Output, Element::Input)
         .with_context(|| format!("Could not set CoreAudio stream format for {device_name}"))?;
 
-    let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_FRAMES);
+    let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
     let stats = Arc::new(AudioCaptureStats::default());
     let callback_stats = stats.clone();
     let stop = Arc::new(AtomicBool::new(false));
@@ -580,16 +614,12 @@ fn start_platform_audio_source(
                 samples,
             };
             frame_cursor = frame_cursor.saturating_add(frame_count as u64);
-            callback_stats
-                .captured_frames
-                .fetch_add(frame_count as u64, Ordering::Relaxed);
+            callback_stats.record_captured_frames(frame_count as u64);
 
             match sender.try_send(frame) {
                 Ok(()) => {}
                 Err(TrySendError::Full(frame)) => {
-                    callback_stats
-                        .dropped_frames
-                        .fetch_add(frame.frame_count() as u64, Ordering::Relaxed);
+                    callback_stats.record_dropped_frames(frame.frame_count() as u64);
                 }
                 Err(TrySendError::Disconnected(_)) => {}
             }
@@ -710,7 +740,7 @@ mod tests {
 
     #[test]
     fn queued_audio_frames_are_discarded_before_fifo_writer_starts() {
-        let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_FRAMES);
+        let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
         for frame in fake_pcm_frames(1_920, 480, 440.0) {
             sender.try_send(frame).unwrap();
         }
@@ -732,11 +762,24 @@ mod tests {
         assert_eq!(stats.dropped_frames(), 0);
         assert_eq!(stats.fifo_write_errors.load(Ordering::Relaxed), 0);
 
-        stats.captured_frames.fetch_add(480, Ordering::Relaxed);
-        stats.dropped_frames.fetch_add(96, Ordering::Relaxed);
+        stats.record_captured_frames(480);
+        stats.record_dropped_frames(96);
 
         assert_eq!(stats.captured_frames(), 480);
         assert_eq!(stats.dropped_frames(), 96);
+
+        stats.finish_recording_window();
+        stats.record_captured_frames(480);
+        stats.record_dropped_frames(96);
+
+        assert_eq!(stats.captured_frames(), 480);
+        assert_eq!(stats.dropped_frames(), 96);
+
+        stats.reset_recording_window();
+        stats.record_captured_frames(240);
+
+        assert_eq!(stats.captured_frames(), 240);
+        assert_eq!(stats.dropped_frames(), 0);
     }
 
     #[test]

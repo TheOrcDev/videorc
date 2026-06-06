@@ -25,6 +25,7 @@
 //   VIDEORC_SMOKE_OUTPUT_DIR        where recordings + reports land
 //   VIDEORC_BASELINE_SCREEN_ID / _CAMERA_ID / _MIC_ID   force a specific device id
 //   VIDEORC_BASELINE_NO_SCREEN / _NO_CAMERA / _NO_MIC   omit that source
+//   VIDEORC_BASELINE_LAYOUT_PRESET  force layout preset; otherwise inferred from selected sources
 //   VIDEORC_SMOKE_FFMPEG_PATH / VIDEORC_SMOKE_FFPROBE_PATH
 
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
@@ -144,7 +145,7 @@ async function main() {
       await tryStep('preview.live.start', async () => {
         const status = await request(ws, config.timeoutMs, 'preview.live.start', {
           sources: sourceSelection,
-          layout: layoutSettings(),
+          layout: layoutSettings(sourceSelection),
           ffmpegPath: config.ffmpegPath,
           video: videoSettings(),
         })
@@ -775,9 +776,9 @@ function printSummary(report, startupReport, diagnostics, previewTransport, base
 
 // --- Param builders ---------------------------------------------------------
 
-function layoutSettings() {
+function layoutSettings(sources) {
   return {
-    layoutPreset: 'screen-camera',
+    layoutPreset: baselineLayoutPreset(sources),
     cameraTransformMode: 'preset',
     cameraTransform: null,
     cameraCorner: 'bottom-right',
@@ -799,7 +800,7 @@ function videoSettings() {
 }
 
 function previewSourceParams(sources) {
-  return { sources, layout: layoutSettings(), video: videoSettings() }
+  return { sources, layout: layoutSettings(sources), video: videoSettings() }
 }
 
 function previewSurfaceSource(sources) {
@@ -823,7 +824,7 @@ function previewSurfaceBounds() {
 function sessionParams(sources) {
   return {
     sources,
-    layout: layoutSettings(),
+    layout: layoutSettings(sources),
     output: {
       recordEnabled: true,
       streamEnabled: false,
@@ -834,6 +835,17 @@ function sessionParams(sources) {
     },
     audio: { microphoneGainDb: 0, microphoneMuted: false, microphoneSyncOffsetMs: 0 },
   }
+}
+
+function baselineLayoutPreset(sources) {
+  const forced = process.env.VIDEORC_BASELINE_LAYOUT_PRESET
+  if (forced) return forced
+  const hasScreen = Boolean(sources.screenId || sources.windowId)
+  const hasCamera = Boolean(sources.cameraId)
+  if (hasScreen && hasCamera) return 'screen-camera'
+  if (hasScreen) return 'screen-only'
+  if (hasCamera) return 'camera-only'
+  return 'screen-camera'
 }
 
 // --- Helpers ----------------------------------------------------------------
