@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 100000)
@@ -26,10 +27,12 @@ const outputDirectory = resolve(
 
 let appProcess
 let stopping = false
+const outputGuard = createPreviewSurfaceOutputGuard()
 
 try {
   const { backend, smoke } = await launchAndReadConnectionsWithRetry()
   await runPreviewSurfaceSmoke(backend, smoke)
+  outputGuard.assertClean()
 } finally {
   await stopApp()
 }
@@ -362,6 +365,7 @@ async function launchAndReadConnectionsWithRetry() {
 
 function handleAppOutput(text, connections, maybeResolve) {
   for (const line of text.split(/\r?\n/)) {
+    outputGuard.inspectLine(line)
     if (line.trim() && !stopping) {
       console.log(line)
     }

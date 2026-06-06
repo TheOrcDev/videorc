@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
+import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
 import { analyzeStartupResolution } from './lib/startup-resolution-analyzer.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -40,12 +41,14 @@ const scenarios = [
 
 let appProcess
 let stopping = false
+const outputGuard = createPreviewSurfaceOutputGuard()
 
 mkdirSync(outputDirectory, { recursive: true })
 
 try {
   const { backend, smoke } = await launchAndReadConnectionsWithRetry()
   await runNativePreviewRecordingSmoke(backend, smoke)
+  outputGuard.assertClean()
 } finally {
   await stopApp()
 }
@@ -695,6 +698,7 @@ async function launchAndReadConnectionsWithRetry() {
 
 function handleAppOutput(text, connections, maybeResolve) {
   for (const line of text.split(/\r?\n/)) {
+    outputGuard.inspectLine(line)
     if (line.trim() && !stopping) {
       console.log(line)
     }
