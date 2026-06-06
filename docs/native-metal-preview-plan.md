@@ -76,6 +76,10 @@ fails a "native" claim — by design.
 - The preview-surface and native-preview recording smokes now fail if app output contains
   preview-surface IPC handler errors, so a decoded MP4 can no longer hide proof/native
   host regressions.
+- The native-preview recording smoke now checks final duration against the actual
+  start-to-stop wall-clock interval, not the nominal post-setup sleep, so multi-scenario
+  validation can include scene/diagnostic setup time without reporting false duration
+  failures.
 - A `NativePreviewPresenterRunner` now owns the AppKit overlay and a same-device Metal
   presenter on the main thread. It can apply host create/update/destroy commands and only
   returns native `CAMetalLayer` activation after `present_latest()` succeeds against the
@@ -103,6 +107,14 @@ fails a "native" claim — by design.
   proof-host changes, `pnpm smoke:recording-native-preview` passed at 1080p30 with a
   15.10s file, startup max repeated-frame run 1, final max repeated-frame run 2, preview
   120.09fps, p95 interval 9.3ms, and 8ms A/V skew.
+- With `VIDEORC_NATIVE_PREVIEW_INCLUDE_1440=1`, the guarded
+  `pnpm smoke:recording-native-preview` passed at 1440p30 and 1080p30 in one run. The
+  1440p scenario produced a 15.03s decoded file, startup/final max repeated-frame run 2,
+  preview 120.12fps, p95 interval 9.4ms, and 5ms A/V skew. The follow-up 1080p scenario
+  produced a 16.80s decoded file matching its actual start-to-stop interval, startup max
+  repeated-frame run 1, final max repeated-frame run 2, preview 120.04fps, p95 interval
+  9.6ms, and 1ms A/V skew. Live FFmpeg speed/FPS telemetry still warned, but decoded
+  startup/final-file gates passed for both resolutions.
 - The preview-surface smoke now retries launch connection timeouts like the recording
   smoke, and after the proof-host shell hardening `pnpm smoke:preview-surface` passed at
   120.4fps initial, 120.2fps after resize, scene update 13.1ms, 105 compositor frames,

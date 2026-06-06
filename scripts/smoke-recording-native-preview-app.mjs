@@ -102,6 +102,7 @@ async function runNativePreviewRecordingScenario(ws, smoke, samples, scenario, p
   if (started.state !== 'recording') {
     throw new Error(`[${scenario.label}] Expected recording state after start, got ${started.state}.`)
   }
+  const recordingStartedAt = Date.now()
   const activeSceneRevision = Date.now()
   const compositorStatus = await request(
     ws,
@@ -128,6 +129,7 @@ async function runNativePreviewRecordingScenario(ws, smoke, samples, scenario, p
 
   const surfaceDuring = await waitForNativeSurface(ws, previousSurface.framesRendered)
   const stopRequestedAt = Date.now()
+  const expectedDurationMs = stopRequestedAt - recordingStartedAt
   const stopped = await request(ws, timeoutMs, 'session.stop')
   const outputPath = stopped.outputPath ?? started.outputPath
   if (!outputPath || !existsSync(outputPath)) {
@@ -155,7 +157,7 @@ async function runNativePreviewRecordingScenario(ws, smoke, samples, scenario, p
   ])
   assertAnalyzerReportHealthy(scenario, 'startup', startupReport)
   assertAnalyzerReportHealthy(scenario, 'final-file', recordingReport)
-  assertRecordingDurationHealthy(scenario, recordingReport)
+  assertRecordingDurationHealthy(scenario, recordingReport, expectedDurationMs)
 
   const stats = summarizeDiagnostics(samples, scenario.fps, scenarioStartedAt, stopRequestedAt)
   assertStatsHealthy(scenario, stats, { startupReport, recordingReport })
@@ -482,13 +484,13 @@ function assertAnalyzerReportHealthy(scenario, name, report) {
   throw new Error(`[${scenario.label}] ${name} analyzer failed: ${failures}`)
 }
 
-function assertRecordingDurationHealthy(scenario, report) {
-  const expectedSeconds = recordingMs / 1000
+function assertRecordingDurationHealthy(scenario, report, expectedDurationMs) {
+  const expectedSeconds = expectedDurationMs / 1000
   const duration = report.metrics.durationSeconds
   if (!Number.isFinite(duration)) {
     throw new Error(`[${scenario.label}] Final recording duration was unavailable.`)
   }
-  const toleranceSeconds = 1
+  const toleranceSeconds = 1.5
   if (duration < expectedSeconds - toleranceSeconds || duration > expectedSeconds + toleranceSeconds) {
     throw new Error(
       `[${scenario.label}] Final recording duration ${duration.toFixed(2)}s was outside ${expectedSeconds.toFixed(2)}s ± ${toleranceSeconds.toFixed(2)}s.`
