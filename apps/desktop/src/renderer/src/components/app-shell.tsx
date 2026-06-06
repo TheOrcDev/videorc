@@ -1,5 +1,6 @@
-import { useCallback, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useState, type ReactElement } from 'react'
 
+import { CommandPalette } from '@/components/command-palette'
 import { OnboardingDialog } from '@/components/onboarding-dialog'
 import { Sidebar } from '@/components/sidebar'
 import type { StatusDotTone } from '@/components/status-dot'
@@ -21,6 +22,7 @@ export function AppShell(): ReactElement {
   const { connection, wsStatus, recording, refreshBackend } = useStudio()
   const [active, setActive] = useState<WorkspaceTab>('studio')
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [commandOpen, setCommandOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(
     () => localStorage.getItem(STORAGE_KEYS.onboarding) !== ONBOARDING_VERSION
   )
@@ -43,6 +45,17 @@ export function AppShell(): ReactElement {
     setActive('ai')
   }, [])
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key.toLowerCase() === 'k' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault()
+        setCommandOpen((value) => !value)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [])
+
   const live = recording.state === 'recording' || recording.state === 'streaming'
   const statusTone: StatusDotTone = live
     ? 'error'
@@ -63,6 +76,7 @@ export function AppShell(): ReactElement {
           statusLabel={statusLabel}
           live={live}
           onRefresh={refreshBackend}
+          onOpenCommand={() => setCommandOpen(true)}
         />
 
         <main className="flex h-screen flex-1 flex-col overflow-y-auto">
@@ -82,6 +96,7 @@ export function AppShell(): ReactElement {
           </div>
         </main>
 
+        <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
         <OnboardingDialog open={onboardingOpen} onComplete={completeOnboarding} />
       </div>
     </WorkspaceNavContext.Provider>

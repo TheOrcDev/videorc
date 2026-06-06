@@ -1,4 +1,4 @@
-import { ArrowsClockwise } from '@phosphor-icons/react'
+import { ArrowsClockwise, MagnifyingGlass } from '@phosphor-icons/react'
 import type { ReactElement } from 'react'
 
 import logoUrl from '@/assets/videorc-logo.png'
@@ -14,7 +14,8 @@ export function Sidebar({
   statusTone,
   statusLabel,
   live,
-  onRefresh
+  onRefresh,
+  onOpenCommand
 }: {
   active: WorkspaceTab
   onSelect: (tab: WorkspaceTab) => void
@@ -22,6 +23,7 @@ export function Sidebar({
   statusLabel: string
   live: boolean
   onRefresh: () => void
+  onOpenCommand: () => void
 }): ReactElement {
   return (
     <aside className="flex w-56 shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground">
@@ -34,6 +36,15 @@ export function Sidebar({
       </div>
 
       <nav className="flex flex-1 flex-col gap-5 overflow-y-auto px-3 py-2">
+        <button
+          type="button"
+          onClick={onOpenCommand}
+          className="flex items-center gap-2 rounded-lg border bg-background/40 px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <MagnifyingGlass className="size-4 shrink-0" />
+          <span className="flex-1 text-left">Search</span>
+          <kbd className="rounded border px-1.5 py-px font-mono text-[10px] font-medium">⌘K</kbd>
+        </button>
         {WORKSPACE_GROUPS.map((group) => {
           const items = WORKSPACE_TABS.filter((tab) => tab.group === group.id)
           if (!items.length) return null
@@ -51,6 +62,7 @@ export function Sidebar({
                     key={tab.id}
                     type="button"
                     aria-current={isActive ? 'page' : undefined}
+                    data-videorc-tab-trigger={tab.id}
                     onClick={() => onSelect(tab.id)}
                     className={cn(
                       'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors',
