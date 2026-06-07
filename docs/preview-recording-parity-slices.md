@@ -15,7 +15,7 @@ the remaining work.
 | # | Slice | Status | Gate |
 |---|---|---|---|
 | 1 | Native preview is the confirmed live default | ✅ already wired as default | on-device eye-check (user) |
-| 2 | Hardware VideoToolbox zero-copy = default recorder | ⏳ prepared, default-flip needs decision | regression risk + on-device (user) |
+| 2 | Hardware VideoToolbox zero-copy = adaptive default | ✅ adaptive default shipped | deterministic (cargo test) + on-device gate (user) |
 | 3 | "Preparing recording…" UX + copyable preflight report | ✅ done | deterministic (cargo test + typecheck) |
 | 4 | Studio health badge + degraded indicator | ✅ done | deterministic (vitest + typecheck + build) |
 | 5 | Developer-only synthetic camera source (selectable) | ⬜ todo | deterministic (cargo test) |
@@ -52,28 +52,39 @@ polling runs only as bootstrap/fallback and is suppressed
    steady state.
 3. Wave a hand fast — preview keeps up, no rubber-banding — both idle and while recording.
 
-## Slice 2 — Hardware VideoToolbox zero-copy = default recorder ⏳
+## Slice 2 — Hardware VideoToolbox zero-copy = adaptive default ✅
 
-The flip point is one branch in `parse_encoder_bridge_video_output`
-(`crates/videorc-backend/src/recording.rs:3201`): with no env set it returns
-`RawYuv420p` (CPU FFmpeg). The proven-on-device hardware path is
-`VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT=videotoolbox-h264-mpegts`.
+**Recommendation delivered:** default to hardware VideoToolbox **zero-copy** (MPEG-TS) — same
+hardware-H.264 quality as the old raw path (both encode via `h264_videotoolbox`), but no CPU
+readback / BGRA→YUV conversion, so lower CPU and higher sustained fps under load, plus
+VideoToolbox can pick proper HD colorimetry (BT.709). Raw-YUV was never a *quality* downgrade;
+the win here is performance.
 
-**Why this isn't a blind one-liner:** in any VideoToolbox mode the compositor sets
-`publish_yuv_frames: false` (`recording.rs:506`) and publishes Metal-target-only frames.
-The GPU compositor falls back to CPU for **uncached image sources** (the Screens overlay
-library is a shipped feature). A naive default-flip could therefore starve the encoder on
-image-overlay scenes and produce a broken recording — exactly the class of regression the
-plan reserves for on-device validation.
+**Why adaptive, not a blind flip:** in any VideoToolbox mode the compositor publishes
+Metal-target-only frames (`publish_yuv_frames: false`, `recording.rs`), so VT must not run
+when the scene isn't actually compositing on Metal (Metal off, test patterns, uncached image
+overlays) or when sources aren't live (headless smokes have no real camera). A blind flip
+would starve the bridge and break the smoke suite.
 
-Decision pending with the operator (see chat). Options: safe-conditional flip (VT only when
-the scene/hardware guarantee Metal targets, auto-fallback to raw otherwise), unconditional
-flip + revert-if-bad, or operator flips after their own real-camera gate.
+`recording_encoder_bridge_video_output` now decides per session
+(`crates/videorc-backend/src/recording.rs`):
 
-**Operator gate:** `pnpm baseline:real-source --gate` passes with
-`encode backend = hardware-videotoolbox`, `zero-copy > 0`, `raw/Metal copied = 0`, startup
-PASS, final-file PASS, encoder speed ≥ 0.98×; plus a by-eye smooth 60s playback that
-includes an image-overlay scene.
+- an explicit `VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT` always wins (forcing a path / pinning a
+  smoke to `raw-yuv420p`);
+- otherwise `adaptive_videotoolbox_ready` picks VT zero-copy **only** when the live preview is
+  already compositing this scene cleanly on Metal (`compositorBackend == metal`, no fallback
+  reason) **and** every selected real source has a fresh frame (≤ 500 ms); else raw-YUV.
+
+This keeps headless/no-camera smokes on raw (camera frame stale → raw) and means a wrong guess
+is caught by the **startup-barrier preflight** (blocks the start with the Slice 3 report)
+rather than writing a bad file. Policy is unit-tested (`adaptive_videotoolbox_*`, 5 cases).
+
+Verified: `cargo test -p videorc-backend` (464 pass), `cargo clippy -D warnings`.
+
+**Operator gate (on-device):** with a real camera + screen, `pnpm baseline:real-source --gate`
+should now pick VT by default and pass with `encode backend = hardware-videotoolbox`,
+`zero-copy > 0`, startup PASS, final-file PASS; plus a by-eye smooth 60s playback. Smokes that
+must stay deterministic on raw should pin `VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT=raw-yuv420p`.
 
 ## Slice 3 — Preflight UX + copyable failure report ✅
 

@@ -447,7 +447,7 @@ pub async fn start_session(
         None
     };
     let encoder_bridge_video_output = if use_encoder_bridge {
-        recording_encoder_bridge_video_output()
+        recording_encoder_bridge_video_output(&state, &params).await
     } else {
         EncoderBridgeVideoOutput::RawYuv420p
     };
@@ -3345,12 +3345,72 @@ fn compositor_encoder_bridge_disabled(record_enabled: bool, stream_enabled: bool
         )
 }
 
-fn recording_encoder_bridge_video_output() -> EncoderBridgeVideoOutput {
-    parse_encoder_bridge_video_output(
-        std::env::var(ENCODER_BRIDGE_VIDEO_OUTPUT_ENV)
-            .ok()
-            .as_deref(),
-    )
+/// Inputs to the adaptive encoder-output decision, extracted so the policy is unit-tested
+/// without a live diagnostics snapshot.
+struct AdaptiveVideoToolboxSignals {
+    /// The live preview compositor is currently on Metal with no active CPU fallback.
+    compositor_on_metal: bool,
+    require_camera: bool,
+    camera_frame_age_ms: Option<u64>,
+    require_screen: bool,
+    screen_frame_age_ms: Option<u64>,
+}
+
+// A selected source older than this at recording start is treated as not live, so the session
+// stays on the raw path instead of starving the Metal-target-only VideoToolbox bridge.
+const ADAPTIVE_VIDEOTOOLBOX_SOURCE_MAX_AGE_MS: u64 = 500;
+
+/// Decide whether the hardware VideoToolbox zero-copy path is safe as the default for this
+/// session. It is only safe when the preview is already compositing this scene cleanly on Metal
+/// (so IOSurface targets exist) and every selected real source is delivering fresh frames.
+fn adaptive_videotoolbox_ready(signals: &AdaptiveVideoToolboxSignals) -> bool {
+    if !signals.compositor_on_metal {
+        return false;
+    }
+    if signals.require_camera && !adaptive_source_frame_fresh(signals.camera_frame_age_ms) {
+        return false;
+    }
+    if signals.require_screen && !adaptive_source_frame_fresh(signals.screen_frame_age_ms) {
+        return false;
+    }
+    true
+}
+
+fn adaptive_source_frame_fresh(age_ms: Option<u64>) -> bool {
+    age_ms.is_some_and(|age| age <= ADAPTIVE_VIDEOTOOLBOX_SOURCE_MAX_AGE_MS)
+}
+
+/// Resolve the encoder-bridge video output for a recording session. An explicit
+/// `VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT` always wins (forcing a path or pinning a smoke to
+/// raw-yuv); otherwise default adaptively to hardware VideoToolbox zero-copy when it is safe,
+/// falling back to the proven raw-YUV path. A wrong guess is caught by the startup-barrier
+/// preflight, which blocks the start rather than writing a bad file.
+async fn recording_encoder_bridge_video_output(
+    state: &AppState,
+    params: &StartSessionParams,
+) -> EncoderBridgeVideoOutput {
+    if let Ok(explicit) = std::env::var(ENCODER_BRIDGE_VIDEO_OUTPUT_ENV) {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("auto") {
+            return parse_encoder_bridge_video_output(Some(trimmed));
+        }
+    }
+
+    let snapshot = { state.diagnostics.lock().await.clone() };
+    let signals = AdaptiveVideoToolboxSignals {
+        compositor_on_metal: snapshot.compositor_backend == Some(CompositorBackend::Metal)
+            && snapshot.compositor_fallback_reason.is_none(),
+        require_camera: params.sources.camera_id.is_some(),
+        camera_frame_age_ms: snapshot.preview_camera_frame_age_ms,
+        require_screen: params.sources.screen_id.is_some() || params.sources.window_id.is_some(),
+        screen_frame_age_ms: snapshot.preview_screen_frame_age_ms,
+    };
+
+    if adaptive_videotoolbox_ready(&signals) {
+        EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+    } else {
+        EncoderBridgeVideoOutput::RawYuv420p
+    }
 }
 
 fn parse_encoder_bridge_video_output(setting: Option<&str>) -> EncoderBridgeVideoOutput {
@@ -5318,6 +5378,70 @@ mod tests {
             "software-x264"
         );
         assert_eq!(encode_backend_label(None), "unknown");
+    }
+
+    #[test]
+    fn adaptive_videotoolbox_ready_for_clean_metal_with_fresh_sources() {
+        assert!(adaptive_videotoolbox_ready(&AdaptiveVideoToolboxSignals {
+            compositor_on_metal: true,
+            require_camera: true,
+            camera_frame_age_ms: Some(40),
+            require_screen: true,
+            screen_frame_age_ms: Some(40),
+        }));
+    }
+
+    #[test]
+    fn adaptive_videotoolbox_not_ready_off_metal() {
+        assert!(!adaptive_videotoolbox_ready(&AdaptiveVideoToolboxSignals {
+            compositor_on_metal: false,
+            require_camera: true,
+            camera_frame_age_ms: Some(40),
+            require_screen: true,
+            screen_frame_age_ms: Some(40),
+        }));
+    }
+
+    #[test]
+    fn adaptive_videotoolbox_not_ready_when_camera_missing_or_stale() {
+        // No camera frames yet (headless / no real camera) keeps the session on raw.
+        assert!(!adaptive_videotoolbox_ready(&AdaptiveVideoToolboxSignals {
+            compositor_on_metal: true,
+            require_camera: true,
+            camera_frame_age_ms: None,
+            require_screen: false,
+            screen_frame_age_ms: None,
+        }));
+        // A stale camera frame also keeps it on raw.
+        assert!(!adaptive_videotoolbox_ready(&AdaptiveVideoToolboxSignals {
+            compositor_on_metal: true,
+            require_camera: true,
+            camera_frame_age_ms: Some(5_000),
+            require_screen: false,
+            screen_frame_age_ms: None,
+        }));
+    }
+
+    #[test]
+    fn adaptive_videotoolbox_ready_for_screen_only_session() {
+        assert!(adaptive_videotoolbox_ready(&AdaptiveVideoToolboxSignals {
+            compositor_on_metal: true,
+            require_camera: false,
+            camera_frame_age_ms: None,
+            require_screen: true,
+            screen_frame_age_ms: Some(20),
+        }));
+    }
+
+    #[test]
+    fn adaptive_videotoolbox_not_ready_when_screen_stale() {
+        assert!(!adaptive_videotoolbox_ready(&AdaptiveVideoToolboxSignals {
+            compositor_on_metal: true,
+            require_camera: false,
+            camera_frame_age_ms: None,
+            require_screen: true,
+            screen_frame_age_ms: Some(2_000),
+        }));
     }
 
     fn base_params(record_enabled: bool, stream_enabled: bool) -> StartSessionParams {
