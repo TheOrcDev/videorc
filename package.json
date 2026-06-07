@@ -7,6 +7,7 @@
   "packageManager": "pnpm@11.0.9",
   "scripts": {
     "dev": "pnpm --filter @videorc/desktop dev",
+    "dev:zerocopy": "VIDEORC_ZEROCOPY_SOURCES=1 pnpm --filter @videorc/desktop dev",
     "build": "pnpm --filter @videorc/desktop build",
     "typecheck": "pnpm --filter @videorc/desktop typecheck",
     "ffmpeg:build:macos": "bash scripts/build-ffmpeg-macos.sh",
