@@ -62,8 +62,8 @@ describe('normalizeMicrophoneSyncOffsetMs', () => {
   })
 
   it('applies the calibrated default until the user sets an offset', () => {
-    expect(normalizeAudioSettings({ microphoneSyncOffsetMs: 0 }).microphoneSyncOffsetMs).toBe(-120)
-    expect(normalizeAudioSettings({}).microphoneSyncOffsetMs).toBe(-120)
+    expect(normalizeAudioSettings({ microphoneSyncOffsetMs: 0 }).microphoneSyncOffsetMs).toBe(-166)
+    expect(normalizeAudioSettings({}).microphoneSyncOffsetMs).toBe(-166)
   })
 
   it('clamps to the backend-supported range', () => {

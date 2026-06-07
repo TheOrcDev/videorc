@@ -6998,7 +6998,7 @@ mod tests {
         assert_eq!(
             arg_value(&args, "-af"),
             Some(
-                "atrim=start=0.120,asetpts=PTS-STARTPTS,pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0"
+                "atrim=start=0.166,asetpts=PTS-STARTPTS,pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0"
             )
         );
     }
