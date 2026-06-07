@@ -19,7 +19,7 @@ the remaining work.
 | 3 | "Preparing recording…" UX + copyable preflight report | ✅ done | deterministic (cargo test + typecheck) |
 | 4 | Studio health badge + degraded indicator | ✅ done | deterministic (vitest + typecheck + build) |
 | 5 | Developer-only synthetic camera source (selectable) | ✅ done | deterministic (cargo test + typecheck) |
-| 6 | ProgramFrame contract + parity check (hardening) | ⬜ todo | deterministic (test:scripts) |
+| 6 | ProgramFrame contract + parity check | ✅ done | deterministic (test:scripts) |
 | 7 | Visual/timing parity fixtures (hardening) | ⬜ todo | deterministic (test:scripts) |
 | 8 | Real-camera product acceptance (closes plan) | ⬜ todo | real-camera by-eye (user) |
 
@@ -106,6 +106,28 @@ user-facing surface without touching that tuned block logic:
 Verified: `cargo test -p videorc-backend preflight` (3 new pass), `cargo clippy -D warnings`,
 desktop `vitest` (40 pass), `typecheck`, `build`. Operator check: start with a covered
 camera lens or a disconnected source → start blocks, no file, report appears in Diagnostics.
+
+## Slice 6 — ProgramFrame contract + preview↔recording parity check ✅
+
+**Contract already present:** each composited frame's `CompositorFrameEvidence`
+(`crates/videorc-backend/src/compositor.rs`) already carries the per-frame identity the plan
+asks for — frame id (`sequence`), scene revision, source frame ids (camera/screen sequences),
+compositor timestamp (`published_at`), and output size; session-constants (fps, color profile,
+encode/compositor backend) live in `DiagnosticStats`. The shared compositor structurally
+guarantees preview and recording consume the *same* program frames, so a redundant unified
+struct was not worth churning the recording hot path.
+
+**New: the parity check.** `scripts/lib/preview-recording-parity.mjs` formalizes the plan's
+acceptance — `evaluatePreviewRecordingParity` / `summarizePreviewRecordingParity` fail when the
+preview is *consistently* behind the composited frame the recording encodes (a one-off spike is
+tolerated; a majority over the frame-lag budget is not) or when preview and recording reference
+different scene revisions. It reads already-exposed diagnostics (`previewCompositorFrameLag`,
+`activeSceneRevision`, presented scene revision) — recording encodes the *latest* composited
+frame, so preview lag behind that frame is exactly its lag behind what's being encoded. No
+hot-path churn.
+
+Verified: `pnpm test:scripts` (118 pass incl. 8 new parity cases), auto-wired via the
+`scripts/lib/*.test.mjs` glob.
 
 ## Slice 5 — Developer-only synthetic diagnostic source ✅
 
