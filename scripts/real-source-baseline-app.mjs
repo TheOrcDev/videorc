@@ -581,7 +581,8 @@ function previewScreenReady(status) {
 
 function describePreviewReadiness(status) {
   if (!status) return 'not selected'
-  return `${status.state ?? 'unknown'} frames=${status.framesCaptured ?? 0} age=${status.frameAgeMs ?? 'n/a'}ms`
+  const message = status.message ? ` message="${status.message}"` : ''
+  return `${status.state ?? 'unknown'} frames=${status.framesCaptured ?? 0} age=${status.frameAgeMs ?? 'n/a'}ms${message}`
 }
 
 // --- Diagnostics sampling ---------------------------------------------------
@@ -650,6 +651,13 @@ function summarizeDiagnostics(events, snapshots, startedAt, stopRequestedAt, opt
   const lastValue = (key) => {
     for (let index = measured.length - 1; index >= 0; index -= 1) {
       const value = measured[index]?.[key]
+      if (value !== undefined && value !== null) return value
+    }
+    return null
+  }
+  const lastSnapshotValue = (samples, key) => {
+    for (let index = samples.length - 1; index >= 0; index -= 1) {
+      const value = samples[index]?.[key]
       if (value !== undefined && value !== null) return value
     }
     return null
@@ -896,6 +904,7 @@ function summarizeDiagnostics(events, snapshots, startedAt, stopRequestedAt, opt
     previewCameraCapabilityDeviceId: lastValue('previewCameraCapabilityDeviceId'),
     previewCameraCapabilityFormats: lastValue('previewCameraCapabilityFormats') ?? [],
     previewCameraCapabilityError: lastValue('previewCameraCapabilityError'),
+    previewScreenMessage: lastValue('previewScreenMessage') ?? lastSnapshotValue(snapshots.map((s) => s.screen), 'message'),
     previewScreenFrameAgeMs: maxOf(collect('previewScreenFrameAgeMs')),
     previewScreenNativeWidth: maxOf(collect('previewScreenNativeWidth')),
     previewScreenNativeHeight: maxOf(collect('previewScreenNativeHeight')),
@@ -1605,6 +1614,7 @@ function gateDiagnosticsManifest(
     compositorBackend: diagnostics.compositorBackend ?? null,
     compositorCpuFallbackFrames: diagnostics.compositorCpuFallbackFrames,
     mediaDimensions: diagnostics.mediaDimensions ?? null,
+    previewScreenMessage: diagnostics.previewScreenMessage ?? null,
     encoderBridgeRawVideoCopiedFrames: diagnostics.encoderBridgeRawVideoCopiedFrames,
     encoderBridgeMetalTargetCopiedFrames: diagnostics.encoderBridgeMetalTargetCopiedFrames,
     encoderBridgeMetalTargetFrames: diagnostics.encoderBridgeMetalTargetFrames,
@@ -1679,7 +1689,7 @@ function append4kMediaPathEvidence(lines, { sources, diagnostics, report, startu
     `- Source native/requested/actual: screen native ${formatDimensionSummary(media.screenSourceNative ?? media.screenSource)} / requested ${formatDimensionSummaryOr(media.screenSourceRequested, formatRequestedSource(requested))} / actual ${formatDimensionSummary(media.screenSourceActual ?? media.screenSource)} / compositor actual ${formatDimensionSummary(media.compositorScreenSource)}`
   )
   lines.push(
-    `- Screen source health: source fps ${formatRange(media.screenSourceActual?.fpsMin, media.screenSourceActual?.fpsMax)} | dropped ${diagnostics.previewScreenDroppedFrames ?? 'n/a'} | IOSurface ${formatBoolean(diagnostics.previewScreenIosurfaceAvailable)} | SCK queue depth ${diagnostics.previewScreenCaptureQueueDepth ?? 'n/a'}`
+    `- Screen source health: source fps ${formatRange(media.screenSourceActual?.fpsMin, media.screenSourceActual?.fpsMax)} | dropped ${diagnostics.previewScreenDroppedFrames ?? 'n/a'} | IOSurface ${formatBoolean(diagnostics.previewScreenIosurfaceAvailable)} | SCK queue depth ${diagnostics.previewScreenCaptureQueueDepth ?? 'n/a'}${diagnostics.previewScreenMessage ? ` | message ${diagnostics.previewScreenMessage}` : ''}`
   )
   lines.push(
     `- Compositor target: ${formatDimensionSummary(media.compositorTarget)} | Metal target ${formatDimensionSummary(media.compositorMetalTarget)}`
@@ -1896,7 +1906,7 @@ function writeBlockedStartupReport({
   if (sources.screen) {
     lines.push(
       `- Screen capture cadence: callback gap p95 ${fmt(diagnostics.previewScreenCaptureGapP95Ms)}ms / max ${fmt(diagnostics.previewScreenCaptureGapMaxMs)}ms | ` +
-        `frame age ${fmt(diagnostics.previewScreenFrameAgeMs, 0)}ms | frame ${diagnostics.previewScreenFrameBytes} bytes`
+        `frame age ${fmt(diagnostics.previewScreenFrameAgeMs, 0)}ms | frame ${diagnostics.previewScreenFrameBytes} bytes${diagnostics.previewScreenMessage ? ` | message ${diagnostics.previewScreenMessage}` : ''}`
     )
   }
   lines.push(`- Image polls at block: ${diagnostics.imagePollDuringSession.total ?? 'n/a'}`)

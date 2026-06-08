@@ -1151,6 +1151,9 @@ pub struct DiagnosticStats {
     pub preview_screen_frame_age_ms: Option<u64>,
     pub preview_screen_source_fps: Option<f64>,
     pub preview_screen_dropped_frames: u64,
+    /// Latest native ScreenCaptureKit status message, including permission/startup errors.
+    #[serde(default)]
+    pub preview_screen_message: Option<String>,
     /// Native ScreenCaptureKit source width selected for the live screen/window source.
     #[serde(default)]
     pub preview_screen_native_width: Option<u32>,

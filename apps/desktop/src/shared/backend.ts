@@ -1375,6 +1375,8 @@ export interface DiagnosticStats {
   previewScreenFrameAgeMs?: number
   previewScreenSourceFps?: number
   previewScreenDroppedFrames: number
+  /** Latest native ScreenCaptureKit status message, including permission/startup errors. */
+  previewScreenMessage?: string
   /** Native ScreenCaptureKit source width selected for the live screen/window source. */
   previewScreenNativeWidth?: number
   /** Native ScreenCaptureKit source height selected for the live screen/window source. */

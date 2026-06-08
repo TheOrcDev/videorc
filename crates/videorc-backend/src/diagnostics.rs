@@ -254,6 +254,7 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         preview_screen_frame_age_ms: None,
         preview_screen_source_fps: None,
         preview_screen_dropped_frames: 0,
+        preview_screen_message: None,
         preview_screen_native_width: None,
         preview_screen_native_height: None,
         preview_screen_requested_width: None,
@@ -688,6 +689,7 @@ pub fn apply_preview_screen_source_stats(
     stats.preview_screen_frame_age_ms = status.frame_age_ms;
     stats.preview_screen_source_fps = status.source_fps;
     stats.preview_screen_dropped_frames = status.dropped_frames;
+    stats.preview_screen_message = status.message.clone();
     stats.preview_screen_native_width = status.native_width;
     stats.preview_screen_native_height = status.native_height;
     stats.preview_screen_requested_width = status.requested_width;
@@ -1484,7 +1486,7 @@ mod tests {
                 include_cursor: true,
                 exclude_current_process_windows: true,
                 updated_at: "2026-06-08T00:00:00Z".to_string(),
-                message: None,
+                message: Some("screen stream started".to_string()),
             },
         );
 
@@ -1495,6 +1497,10 @@ mod tests {
         assert_eq!(stats.preview_screen_actual_width, Some(3840));
         assert_eq!(stats.preview_screen_actual_height, Some(2160));
         assert_eq!(stats.preview_screen_iosurface_available, Some(true));
+        assert_eq!(
+            stats.preview_screen_message.as_deref(),
+            Some("screen stream started")
+        );
     }
 
     #[test]
