@@ -96,6 +96,9 @@ pub struct GpuSource<'a> {
     /// compositor imports it as a Metal texture instead of uploading `bgra` via `replaceRegion`.
     /// The caller keeps the backing surface retained for the duration of the compose.
     pub iosurface: Option<&'a IOSurfaceRef>,
+    /// Zero-copy capture-source pixel buffer. Camera frames prefer this path because
+    /// AVFoundation owns the CoreVideo buffer even when no global IOSurface id is available.
+    pub pixel_buffer: Option<&'a CVPixelBuffer>,
     pub width: usize,
     pub height: usize,
     /// Destination rect (x, y, w, h) in normalized [0,1] coords, top-left origin.
@@ -233,6 +236,23 @@ impl MetalSourceImportStats {
                     GpuSourceKind::Image | GpuSourceKind::TestPattern => {}
                 }
             }
+            SourceImportOutcome::CvpixelbufferImportFailedToByteUpload => {
+                self.import_failures = self.import_failures.saturating_add(1);
+                self.byte_upload_frames = self.byte_upload_frames.saturating_add(1);
+                match kind {
+                    GpuSourceKind::Camera => {
+                        self.camera_import_failures = self.camera_import_failures.saturating_add(1);
+                        self.camera_byte_upload_frames =
+                            self.camera_byte_upload_frames.saturating_add(1);
+                    }
+                    GpuSourceKind::Screen | GpuSourceKind::Window => {
+                        self.screen_import_failures = self.screen_import_failures.saturating_add(1);
+                        self.screen_byte_upload_frames =
+                            self.screen_byte_upload_frames.saturating_add(1);
+                    }
+                    GpuSourceKind::Image | GpuSourceKind::TestPattern => {}
+                }
+            }
         }
     }
 }
@@ -243,6 +263,7 @@ enum SourceImportOutcome {
     CvpixelbufferImported,
     ByteUploaded,
     IosurfaceImportFailedToByteUpload,
+    CvpixelbufferImportFailedToByteUpload,
 }
 
 /// True when a Metal device is available on this machine.
@@ -300,6 +321,7 @@ pub struct MetalSceneCompositor {
     target_width: usize,
     target_height: usize,
     source_textures: Vec<Option<CachedSourceTexture>>,
+    source_texture_cache: Option<MetalSourceTextureCache>,
 }
 
 struct CachedTargetTexture {
@@ -311,6 +333,18 @@ struct CachedSourceTexture {
     texture: Retained<MetalTexture>,
     width: usize,
     height: usize,
+}
+
+struct MetalSourceTextureCache(CFRetained<CVMetalTextureCache>);
+
+impl MetalSourceTextureCache {
+    fn new(cache: CFRetained<CVMetalTextureCache>) -> Self {
+        Self(cache)
+    }
+
+    fn cache(&self) -> &CVMetalTextureCache {
+        self.0.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -438,6 +472,11 @@ unsafe impl Send for CachedTargetTexture {}
 // is owned by a single compositor instance and refreshed sequentially in the render loop.
 unsafe impl Send for CachedSourceTexture {}
 
+// SAFETY: CVMetalTextureCache is retained by one compositor and only used from the render loop.
+// The wrapper exposes immutable references for per-frame texture import.
+unsafe impl Send for MetalSourceTextureCache {}
+unsafe impl Sync for MetalSourceTextureCache {}
+
 impl MetalSceneCompositor {
     /// Build the compositor, or `None` when no Metal device / shader compile is available.
     pub fn new() -> Option<Self> {
@@ -445,6 +484,7 @@ impl MetalSceneCompositor {
         let queue = device.newCommandQueue()?;
         let pipeline = build_pipeline(&device)?;
         let sampler = build_sampler(&device)?;
+        let source_texture_cache = make_texture_cache(&device).map(MetalSourceTextureCache::new);
         Some(Self {
             device,
             queue,
@@ -454,6 +494,7 @@ impl MetalSceneCompositor {
             target_width: 0,
             target_height: 0,
             source_textures: Vec::new(),
+            source_texture_cache,
         })
     }
 
@@ -654,9 +695,31 @@ impl MetalSceneCompositor {
         if self.source_textures.len() <= index {
             self.source_textures.resize_with(index + 1, || None);
         }
-        // Zero-copy fast path: import the capture-source IOSurface directly as a Metal texture,
-        // skipping the per-frame BGRA upload. A fresh texture view is created each frame because
-        // the source surface changes; on any failure we fall through to the byte-upload path.
+        // Zero-copy fast paths: import retained capture-source storage directly as a Metal
+        // texture, skipping the per-frame BGRA upload. A fresh texture view is created each frame
+        // because source storage changes; on any failure we fall through to the byte-upload path.
+        let mut pixel_buffer_import_failed = false;
+        if source_zerocopy_enabled()
+            && let Some(pixel_buffer) = source.pixel_buffer
+        {
+            if let Some(cache) = self.source_texture_cache.as_ref()
+                && let Some(texture) = import_pixel_buffer_texture(
+                    cache.cache(),
+                    pixel_buffer,
+                    source.width,
+                    source.height,
+                )
+            {
+                self.source_textures[index] = Some(CachedSourceTexture {
+                    texture,
+                    width: source.width,
+                    height: source.height,
+                });
+                return Some(SourceImportOutcome::CvpixelbufferImported);
+            }
+            pixel_buffer_import_failed = true;
+        }
+
         let mut iosurface_import_failed = false;
         if source_zerocopy_enabled()
             && let Some(surface) = source.iosurface
@@ -695,6 +758,8 @@ impl MetalSceneCompositor {
         upload_bgra_to_texture(&cached.texture, source)?;
         Some(if iosurface_import_failed {
             SourceImportOutcome::IosurfaceImportFailedToByteUpload
+        } else if pixel_buffer_import_failed {
+            SourceImportOutcome::CvpixelbufferImportFailedToByteUpload
         } else {
             SourceImportOutcome::ByteUploaded
         })
@@ -1387,6 +1452,7 @@ mod tests {
             kind: GpuSourceKind::TestPattern,
             bgra: &red,
             iosurface: None,
+            pixel_buffer: None,
             width: 2,
             height: 2,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -1508,6 +1574,7 @@ mod tests {
             kind: GpuSourceKind::TestPattern,
             bgra,
             iosurface: None,
+            pixel_buffer: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -1599,6 +1666,7 @@ mod tests {
                 kind: GpuSourceKind::Screen,
                 bgra: &screen,
                 iosurface: None,
+                pixel_buffer: None,
                 width: 1920,
                 height: 1080,
                 dest: [0.0, 0.0, 1.0, 1.0],
@@ -1610,6 +1678,7 @@ mod tests {
                 kind: GpuSourceKind::Camera,
                 bgra: &camera,
                 iosurface: None,
+                pixel_buffer: None,
                 width: 320,
                 height: 180,
                 dest: [0.7, 0.7, 0.28, 0.28],
@@ -1634,6 +1703,7 @@ mod tests {
                 kind: GpuSourceKind::Screen,
                 bgra: &screen,
                 iosurface: None,
+                pixel_buffer: None,
                 width: 2,
                 height: 2,
                 dest: [0.0, 0.0, 1.0, 1.0],
@@ -1645,6 +1715,7 @@ mod tests {
                 kind: GpuSourceKind::Camera,
                 bgra: &camera,
                 iosurface: None,
+                pixel_buffer: None,
                 width: 2,
                 height: 2,
                 dest: [0.0, 0.0, 0.5, 0.5],
@@ -1696,6 +1767,51 @@ mod tests {
                 eprintln!("skipping: IOSurface-backed pixel buffer did not import on this device")
             }
         }
+    }
+
+    #[test]
+    fn compose_timings_count_camera_cvpixelbuffer_import_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            return;
+        };
+        let Some(cache) = compositor.source_texture_cache.as_ref() else {
+            return;
+        };
+        let (w, h) = (16usize, 16usize);
+        let Some(pixel_buffer) = make_iosurface_bgra_pixel_buffer(w, h) else {
+            return;
+        };
+        if import_pixel_buffer_texture(cache.cache(), &pixel_buffer, w, h).is_none() {
+            return;
+        }
+        let fallback_bgra = vec![0u8; w * h * 4];
+        let sources = [GpuSource {
+            kind: GpuSourceKind::Camera,
+            bgra: &fallback_bgra,
+            iosurface: None,
+            pixel_buffer: Some(&pixel_buffer),
+            width: w,
+            height: h,
+            dest: [0.0, 0.0, 1.0, 1.0],
+            crop: [0.0; 4],
+            mirror: false,
+            circle: false,
+        }];
+
+        let output = compositor
+            .compose_bgra_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &sources)
+            .expect("compose CVPixelBuffer source import");
+
+        assert_eq!(output.timings.source_import_stats.cvpixelbuffer_frames, 1);
+        assert_eq!(
+            output
+                .timings
+                .source_import_stats
+                .camera_cvpixelbuffer_frames,
+            1
+        );
+        assert_eq!(output.timings.source_import_stats.byte_upload_frames, 0);
+        assert_eq!(output.timings.source_import_stats.import_failures, 0);
     }
 
     #[test]
@@ -1855,6 +1971,7 @@ mod tests {
             kind: GpuSourceKind::TestPattern,
             bgra: &green,
             iosurface: None,
+            pixel_buffer: None,
             width: 2,
             height: 2,
             dest: [0.5, 0.0, 0.5, 1.0],

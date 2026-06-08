@@ -1321,6 +1321,7 @@ struct PreparedGpuSource<'a> {
     pixels: PreparedGpuSourcePixels<'a>,
     kind: crate::metal_compositor::GpuSourceKind,
     iosurface: Option<&'a crate::frame_store::RetainedIoSurface>,
+    pixel_buffer: Option<&'a crate::frame_store::RetainedPixelBuffer>,
     width: usize,
     height: usize,
     dest: [f32; 4],
@@ -1336,6 +1337,7 @@ impl<'a> PreparedGpuSource<'a> {
             kind: self.kind,
             bgra: self.pixels.as_slice(),
             iosurface: self.iosurface.map(|retained| retained.surface()),
+            pixel_buffer: self.pixel_buffer.map(|retained| retained.pixel_buffer()),
             width: self.width,
             height: self.height,
             dest: self.dest,
@@ -1437,6 +1439,7 @@ fn try_gpu_compose(
             kind: crate::metal_compositor::GpuSourceKind::Image,
             bgra: &bgra,
             iosurface: None,
+            pixel_buffer: None,
             width: image_width as usize,
             height: image_height as usize,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -1488,6 +1491,7 @@ fn try_gpu_compose(
                     pixels: PreparedGpuSourcePixels::Borrowed(&frame.bytes),
                     kind: crate::metal_compositor::GpuSourceKind::Camera,
                     iosurface: frame.source_iosurface.as_ref(),
+                    pixel_buffer: frame.source_pixel_buffer.as_ref(),
                     width: frame.width as usize,
                     height: frame.height as usize,
                     dest,
@@ -1520,6 +1524,7 @@ fn try_gpu_compose(
                         }
                     },
                     iosurface: frame.source_iosurface.as_ref(),
+                    pixel_buffer: frame.source_pixel_buffer.as_ref(),
                     width: frame.width as usize,
                     height: frame.height as usize,
                     dest,
@@ -1544,6 +1549,7 @@ fn try_gpu_compose(
                     pixels: PreparedGpuSourcePixels::Owned(pattern.bytes),
                     kind: crate::metal_compositor::GpuSourceKind::TestPattern,
                     iosurface: None,
+                    pixel_buffer: None,
                     width: pattern.width,
                     height: pattern.height,
                     dest,
@@ -2976,6 +2982,7 @@ mod tests {
             metadata: (),
             bytes: vec![0, 0, 0, 255],
             source_iosurface: None,
+            source_pixel_buffer: None,
             captured_at: Instant::now(),
         });
         assert!(!should_blocking_refresh_live_source(1, Some(&fresh_frame)));
@@ -2992,6 +2999,7 @@ mod tests {
             metadata: (),
             bytes: vec![0, 0, 0, 255],
             source_iosurface: None,
+            source_pixel_buffer: None,
             captured_at: Instant::now()
                 - COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_AFTER
                 - Duration::from_millis(1),
@@ -3013,6 +3021,7 @@ mod tests {
             metadata: (),
             bytes: vec![0, 0, 0, 255],
             source_iosurface: None,
+            source_pixel_buffer: None,
             captured_at: Instant::now()
                 - COMPOSITOR_LIVE_SOURCE_STALE_RECOVERY_AFTER
                 - Duration::from_millis(1),
@@ -4296,6 +4305,7 @@ mod tests {
             metadata: (),
             bytes: [0, 0, 255, 255].repeat(16),
             source_iosurface: None,
+            source_pixel_buffer: None,
             captured_at: Instant::now(),
         });
         let mut bytes = vec![0; raw_yuv420p_len(4, 4)];

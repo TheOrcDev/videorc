@@ -39,10 +39,49 @@ mod source_iosurface {
 #[cfg(target_os = "macos")]
 pub use source_iosurface::RetainedIoSurface;
 
+#[cfg(target_os = "macos")]
+mod source_pixel_buffer {
+    use objc2_core_foundation::CFRetained;
+    use objc2_core_video::CVPixelBuffer;
+
+    /// A retained capture-source CVPixelBuffer, kept alive so the GPU compositor can import it
+    /// through CVMetalTextureCache before falling back to the copied BGRA bytes.
+    #[derive(Clone)]
+    pub struct RetainedPixelBuffer(CFRetained<CVPixelBuffer>);
+
+    impl RetainedPixelBuffer {
+        pub fn new(pixel_buffer: CFRetained<CVPixelBuffer>) -> Self {
+            Self(pixel_buffer)
+        }
+
+        pub fn pixel_buffer(&self) -> &CVPixelBuffer {
+            self.0.as_ref()
+        }
+    }
+
+    impl std::fmt::Debug for RetainedPixelBuffer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("RetainedPixelBuffer(..)")
+        }
+    }
+
+    // SAFETY: CoreVideo pixel buffers are retained reference-counted objects whose backing
+    // storage is stable while retained. The wrapper only exposes shared references for GPU import.
+    unsafe impl Send for RetainedPixelBuffer {}
+    unsafe impl Sync for RetainedPixelBuffer {}
+}
+
+#[cfg(target_os = "macos")]
+pub use source_pixel_buffer::RetainedPixelBuffer;
+
 /// Off-macOS stub so `StoredFrame` stays portable; never constructed.
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone)]
 pub struct RetainedIoSurface;
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, Clone)]
+pub struct RetainedPixelBuffer;
 
 #[derive(Debug, Clone)]
 pub struct StoredFrame<P, M = ()> {
@@ -56,6 +95,9 @@ pub struct StoredFrame<P, M = ()> {
     /// Zero-copy capture-source surface, when retained (see `RetainedIoSurface`). `None` keeps
     /// the existing BGRA `bytes` upload path.
     pub source_iosurface: Option<RetainedIoSurface>,
+    /// Retained source CVPixelBuffer for CoreVideo-to-Metal import where the source path supports
+    /// it. `bytes` remains the fallback and artifact path.
+    pub source_pixel_buffer: Option<RetainedPixelBuffer>,
     pub captured_at: Instant,
 }
 
@@ -168,6 +210,7 @@ impl<P, M> FrameStore<P, M> {
             captured_at,
             bytes,
             None,
+            None,
         )
     }
 
@@ -195,6 +238,36 @@ impl<P, M> FrameStore<P, M> {
             captured_at,
             bytes,
             source_iosurface,
+            None,
+        )
+    }
+
+    /// Publish a frame that retains source handles for zero-copy GPU import where supported.
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_with_source_handles(
+        &mut self,
+        sequence: u64,
+        width: u32,
+        height: u32,
+        pixel_format: P,
+        captured_at: Instant,
+        bytes: Vec<u8>,
+        source_iosurface: Option<RetainedIoSurface>,
+        source_pixel_buffer: Option<RetainedPixelBuffer>,
+    ) -> FrameHandle<P, M>
+    where
+        M: Default,
+    {
+        self.publish_full(
+            sequence,
+            width,
+            height,
+            pixel_format,
+            M::default(),
+            captured_at,
+            bytes,
+            source_iosurface,
+            source_pixel_buffer,
         )
     }
 
@@ -209,6 +282,7 @@ impl<P, M> FrameStore<P, M> {
         captured_at: Instant,
         bytes: Vec<u8>,
         source_iosurface: Option<RetainedIoSurface>,
+        source_pixel_buffer: Option<RetainedPixelBuffer>,
     ) -> FrameHandle<P, M> {
         if let Some(previous) = self.latest.take() {
             self.frames_replaced = self.frames_replaced.saturating_add(1);
@@ -225,6 +299,7 @@ impl<P, M> FrameStore<P, M> {
             metadata,
             bytes,
             source_iosurface,
+            source_pixel_buffer,
             captured_at,
         });
         self.latest = Some(Arc::clone(&frame));

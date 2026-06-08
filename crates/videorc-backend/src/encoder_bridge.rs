@@ -2016,6 +2016,7 @@ mod tests {
             kind: GpuSourceKind::Image,
             bgra: &[0, 64, 255, 255],
             iosurface: None,
+            pixel_buffer: None,
             width: 1,
             height: 1,
             dest: [0.0, 0.0, 1.0, 1.0],

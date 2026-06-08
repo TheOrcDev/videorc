@@ -1649,13 +1649,22 @@ mod macos {
             guard.window_started_at = Some(now);
         }
         let sequence = guard.frames_captured;
-        guard.frame_store.publish(
+        let source_pixel_buffer = if crate::metal_compositor::source_zerocopy_enabled() {
+            Some(crate::frame_store::RetainedPixelBuffer::new(
+                pixel_buffer.clone(),
+            ))
+        } else {
+            None
+        };
+        guard.frame_store.publish_with_source_handles(
             sequence,
             width,
             height,
             PreviewCameraPixelFormat::Bgra8,
             now,
             bytes,
+            None,
+            source_pixel_buffer,
         );
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard.capture_timings.record_valid_frame(
