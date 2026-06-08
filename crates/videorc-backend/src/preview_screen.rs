@@ -32,6 +32,12 @@ const PREVIEW_SCREEN_CAPTURE_QUEUE_DEPTH: u32 = 3;
 const PREVIEW_SCREEN_TIMING_WINDOW: usize = 180;
 const SCREEN_CAPTUREKIT_STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
 
+fn native_screen_preview_thread_startup_timeout() -> Duration {
+    SCREEN_CAPTUREKIT_STARTUP_TIMEOUT
+        .saturating_mul(2)
+        .saturating_add(Duration::from_secs(5))
+}
+
 pub type PreviewScreenSlot = Arc<tokio::sync::Mutex<PreviewScreenRuntime>>;
 
 #[derive(Debug)]
@@ -303,13 +309,15 @@ pub async fn start_preview_screen(
         }
     };
 
+    let startup_timeout = native_screen_preview_thread_startup_timeout();
     let startup = tokio::task::spawn_blocking(move || {
         startup_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(startup_timeout)
             .unwrap_or_else(|_| {
-                NativeScreenStartup::Failed(
-                    "Timed out while starting native screen preview.".to_string(),
-                )
+                NativeScreenStartup::Failed(format!(
+                    "Timed out after {:.0}s while starting native screen preview.",
+                    startup_timeout.as_secs_f64()
+                ))
             })
     })
     .await
@@ -1841,6 +1849,14 @@ mod tests {
         assert_eq!(request.native_height, 2400);
         assert_eq!(request.requested_width, 3456);
         assert_eq!(request.requested_height, 2160);
+    }
+
+    #[test]
+    fn thread_startup_timeout_covers_screencapturekit_discovery_and_start() {
+        let timeout = native_screen_preview_thread_startup_timeout();
+
+        assert!(timeout >= SCREEN_CAPTUREKIT_STARTUP_TIMEOUT.saturating_mul(2));
+        assert!(timeout > Duration::from_secs(5));
     }
 
     #[test]
