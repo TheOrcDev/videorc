@@ -200,7 +200,7 @@ function evaluate4kMediaEvidence(mediaDimensions, requestedOutput) {
   requireDimensionAtLeast(
     failures,
     '4k: screen source capture',
-    mediaDimensions?.screenSource?.max,
+    (mediaDimensions?.screenSourceActual ?? mediaDimensions?.screenSource)?.max,
     requested
   )
   requireDimensionAtLeast(

@@ -1051,6 +1051,13 @@ export interface PreviewScreenStatus {
   targetFps: number
   width?: number
   height?: number
+  nativeWidth?: number
+  nativeHeight?: number
+  requestedWidth?: number
+  requestedHeight?: number
+  actualWidth?: number
+  actualHeight?: number
+  iosurfaceAvailable?: boolean
   sourceFps?: number
   frameAgeMs?: number
   framesCaptured: number
@@ -1295,6 +1302,20 @@ export interface DiagnosticStats {
   previewScreenFrameAgeMs?: number
   previewScreenSourceFps?: number
   previewScreenDroppedFrames: number
+  /** Native ScreenCaptureKit source width selected for the live screen/window source. */
+  previewScreenNativeWidth?: number
+  /** Native ScreenCaptureKit source height selected for the live screen/window source. */
+  previewScreenNativeHeight?: number
+  /** Width requested from ScreenCaptureKit after production capture policy selection. */
+  previewScreenRequestedWidth?: number
+  /** Height requested from ScreenCaptureKit after production capture policy selection. */
+  previewScreenRequestedHeight?: number
+  /** Actual latest ScreenCaptureKit frame width received from CoreVideo. */
+  previewScreenActualWidth?: number
+  /** Actual latest ScreenCaptureKit frame height received from CoreVideo. */
+  previewScreenActualHeight?: number
+  /** Whether the latest ScreenCaptureKit frame retained an IOSurface for zero-copy import. */
+  previewScreenIosurfaceAvailable?: boolean
   /** P95 interval between ScreenCaptureKit screen sample callbacks. */
   previewScreenCaptureGapP95Ms?: number
   /** Max interval between ScreenCaptureKit screen sample callbacks. */

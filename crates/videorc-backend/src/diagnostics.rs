@@ -170,6 +170,13 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         preview_screen_frame_age_ms: None,
         preview_screen_source_fps: None,
         preview_screen_dropped_frames: 0,
+        preview_screen_native_width: None,
+        preview_screen_native_height: None,
+        preview_screen_requested_width: None,
+        preview_screen_requested_height: None,
+        preview_screen_actual_width: None,
+        preview_screen_actual_height: None,
+        preview_screen_iosurface_available: None,
         preview_screen_capture_gap_p95_ms: None,
         preview_screen_capture_gap_max_ms: None,
         preview_screen_pixel_buffer_lock_p95_ms: None,
@@ -569,6 +576,13 @@ pub fn apply_preview_screen_source_stats(
     stats.preview_screen_frame_age_ms = status.frame_age_ms;
     stats.preview_screen_source_fps = status.source_fps;
     stats.preview_screen_dropped_frames = status.dropped_frames;
+    stats.preview_screen_native_width = status.native_width;
+    stats.preview_screen_native_height = status.native_height;
+    stats.preview_screen_requested_width = status.requested_width;
+    stats.preview_screen_requested_height = status.requested_height;
+    stats.preview_screen_actual_width = status.actual_width;
+    stats.preview_screen_actual_height = status.actual_height;
+    stats.preview_screen_iosurface_available = status.iosurface_available;
     if status.dropped_frames > 0 {
         stats.bottleneck = DiagnosticBottleneck::Capture;
     }
@@ -939,6 +953,7 @@ fn active_media_process_count(name: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{PreviewScreenSourceKind, PreviewScreenState};
 
     #[test]
     fn preview_transport_counters_track_each_route_independently() {
@@ -1105,6 +1120,13 @@ mod tests {
         assert_eq!(stats.preview_screen_frame_age_ms, None);
         assert_eq!(stats.preview_screen_source_fps, None);
         assert_eq!(stats.preview_screen_dropped_frames, 0);
+        assert_eq!(stats.preview_screen_native_width, None);
+        assert_eq!(stats.preview_screen_native_height, None);
+        assert_eq!(stats.preview_screen_requested_width, None);
+        assert_eq!(stats.preview_screen_requested_height, None);
+        assert_eq!(stats.preview_screen_actual_width, None);
+        assert_eq!(stats.preview_screen_actual_height, None);
+        assert_eq!(stats.preview_screen_iosurface_available, None);
         assert_eq!(stats.preview_screen_capture_gap_p95_ms, None);
         assert_eq!(stats.preview_screen_capture_gap_max_ms, None);
         assert_eq!(stats.preview_screen_pixel_buffer_lock_p95_ms, None);
@@ -1222,6 +1244,45 @@ mod tests {
         assert_eq!(stats.preview_screen_publish_p95_ms, Some(1.1));
         assert_eq!(stats.preview_screen_frame_bytes, 8_294_400);
         assert_eq!(stats.preview_screen_capture_queue_depth, 3);
+    }
+
+    #[test]
+    fn preview_screen_source_stats_record_dimension_evidence() {
+        let stats = apply_preview_screen_source_stats(
+            idle_diagnostics(),
+            &PreviewScreenStatus {
+                state: PreviewScreenState::Live,
+                source_id: Some("screen:screencapturekit:1".to_string()),
+                source_kind: Some(PreviewScreenSourceKind::Screen),
+                target_fps: 30,
+                width: Some(3840),
+                height: Some(2160),
+                native_width: Some(3840),
+                native_height: Some(2160),
+                requested_width: Some(3840),
+                requested_height: Some(2160),
+                actual_width: Some(3840),
+                actual_height: Some(2160),
+                iosurface_available: Some(true),
+                source_fps: Some(30.0),
+                frame_age_ms: Some(12),
+                frames_captured: 90,
+                dropped_frames: 0,
+                sequence: Some(90),
+                include_cursor: true,
+                exclude_current_process_windows: true,
+                updated_at: "2026-06-08T00:00:00Z".to_string(),
+                message: None,
+            },
+        );
+
+        assert_eq!(stats.preview_screen_native_width, Some(3840));
+        assert_eq!(stats.preview_screen_native_height, Some(2160));
+        assert_eq!(stats.preview_screen_requested_width, Some(3840));
+        assert_eq!(stats.preview_screen_requested_height, Some(2160));
+        assert_eq!(stats.preview_screen_actual_width, Some(3840));
+        assert_eq!(stats.preview_screen_actual_height, Some(2160));
+        assert_eq!(stats.preview_screen_iosurface_available, Some(true));
     }
 
     #[test]

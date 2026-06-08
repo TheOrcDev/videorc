@@ -547,12 +547,14 @@ function summarizeDiagnostics(events, snapshots, startedAt, stopRequestedAt, opt
   const steady = active.filter((s) => (s.receivedAt ?? 0) - startedAt >= config.warmupMs)
   const measured = steady.length ? steady : active
   const collect = (key) => measured.map((s) => num(s[key])).filter((v) => v !== null)
+  const collectBooleans = (key) => measured.map((s) => s[key]).filter((value) => typeof value === 'boolean')
   const captureFps = collect('captureFps')
   const renderFps = collect('renderFps')
   const speed = collect('encoderSpeed')
   const rss = collect('backendRssBytes')
   const ffmpegProcs = collect('activeFfmpegProcesses')
   const ffprobeProcs = collect('activeFfprobeProcesses')
+  const screenIosurfaceSamples = collectBooleans('previewScreenIosurfaceAvailable')
 
   const previewMeasurement = options.previewMeasurement?.measurement ?? null
   const previewMeasurementStatus = previewMeasurement?.status ?? null
@@ -780,6 +782,13 @@ function summarizeDiagnostics(events, snapshots, startedAt, stopRequestedAt, opt
     previewCameraPublishP95Ms: maxOf(collect('previewCameraPublishP95Ms')),
     previewCameraFrameBytes: maxOf(collect('previewCameraFrameBytes')) ?? 0,
     previewScreenFrameAgeMs: maxOf(collect('previewScreenFrameAgeMs')),
+    previewScreenNativeWidth: maxOf(collect('previewScreenNativeWidth')),
+    previewScreenNativeHeight: maxOf(collect('previewScreenNativeHeight')),
+    previewScreenRequestedWidth: maxOf(collect('previewScreenRequestedWidth')),
+    previewScreenRequestedHeight: maxOf(collect('previewScreenRequestedHeight')),
+    previewScreenActualWidth: maxOf(collect('previewScreenActualWidth')),
+    previewScreenActualHeight: maxOf(collect('previewScreenActualHeight')),
+    previewScreenIosurfaceAvailable: screenIosurfaceSamples.length ? anyTrue(screenIosurfaceSamples) : null,
     previewScreenCaptureGapP95Ms: maxOf(collect('previewScreenCaptureGapP95Ms')),
     previewScreenCaptureGapMaxMs: maxOf(collect('previewScreenCaptureGapMaxMs')),
     previewScreenPixelBufferLockP95Ms: maxOf(collect('previewScreenPixelBufferLockP95Ms')),
@@ -851,6 +860,21 @@ function summarizeMediaDimensions(snapshots) {
       fpsKeys: ['sourceFps', 'targetFps'],
       stateKey: 'state',
     }),
+    screenSourceNative: summarizeDimensionSamples(remapDimensionSamples(screenStatusSamples, 'nativeWidth', 'nativeHeight'), {
+      idKeys: ['sourceId'],
+      fpsKeys: ['sourceFps', 'targetFps'],
+      stateKey: 'state',
+    }),
+    screenSourceRequested: summarizeDimensionSamples(remapDimensionSamples(screenStatusSamples, 'requestedWidth', 'requestedHeight'), {
+      idKeys: ['sourceId'],
+      fpsKeys: ['sourceFps', 'targetFps'],
+      stateKey: 'state',
+    }),
+    screenSourceActual: summarizeDimensionSamples(remapDimensionSamples(screenStatusSamples, 'actualWidth', 'actualHeight'), {
+      idKeys: ['sourceId'],
+      fpsKeys: ['sourceFps', 'targetFps'],
+      stateKey: 'state',
+    }),
     compositorTarget: summarizeDimensionSamples(compositorSamples, {
       fpsKeys: ['targetFps', 'renderFps'],
       stateKey: 'state',
@@ -878,6 +902,14 @@ function summarizeMediaDimensions(snapshots) {
       bounds: summarizeSurfaceBounds(surfaceSamples),
     }),
   }
+}
+
+function remapDimensionSamples(samples, widthKey, heightKey) {
+  return samples.map((sample) => ({
+    ...sample,
+    width: sample?.[widthKey],
+    height: sample?.[heightKey],
+  }))
 }
 
 function summarizeDimensionSamples(samples, options = {}) {
@@ -1251,7 +1283,10 @@ function append4kMediaPathEvidence(lines, { sources, diagnostics, report, startu
     `- Source native/requested/actual: camera native ${formatDimensionSummary(media.cameraSource)} / requested ${formatRequestedSource(requested)} / compositor actual ${formatDimensionSummary(media.compositorCameraSource)}`
   )
   lines.push(
-    `- Source native/requested/actual: screen native ${formatDimensionSummary(media.screenSource)} / requested ${formatRequestedSource(requested)} / compositor actual ${formatDimensionSummary(media.compositorScreenSource)}`
+    `- Source native/requested/actual: screen native ${formatDimensionSummary(media.screenSourceNative ?? media.screenSource)} / requested ${formatDimensionSummaryOr(media.screenSourceRequested, formatRequestedSource(requested))} / actual ${formatDimensionSummary(media.screenSourceActual ?? media.screenSource)} / compositor actual ${formatDimensionSummary(media.compositorScreenSource)}`
+  )
+  lines.push(
+    `- Screen source health: source fps ${formatRange(media.screenSourceActual?.fpsMin, media.screenSourceActual?.fpsMax)} | dropped ${diagnostics.previewScreenDroppedFrames ?? 'n/a'} | IOSurface ${formatBoolean(diagnostics.previewScreenIosurfaceAvailable)} | SCK queue depth ${diagnostics.previewScreenCaptureQueueDepth ?? 'n/a'}`
   )
   lines.push(
     `- Compositor target: ${formatDimensionSummary(media.compositorTarget)} | Metal target ${formatDimensionSummary(media.compositorMetalTarget)}`
@@ -1321,6 +1356,14 @@ function formatDimensionSummary(summary) {
   if (summary.states?.length) parts.push(`state ${summary.states.join('/')}`)
   if (summary.ids?.length) parts.push(`id ${summary.ids.join(', ')}`)
   return parts.join('; ')
+}
+
+function formatDimensionSummaryOr(summary, fallback) {
+  return !summary || summary.sampleCount === 0 ? fallback : formatDimensionSummary(summary)
+}
+
+function formatBoolean(value) {
+  return typeof value === 'boolean' ? (value ? 'yes' : 'no') : 'n/a'
 }
 
 function formatPreviewBoundsSuffix(summary) {

@@ -1064,6 +1064,27 @@ pub struct DiagnosticStats {
     pub preview_screen_frame_age_ms: Option<u64>,
     pub preview_screen_source_fps: Option<f64>,
     pub preview_screen_dropped_frames: u64,
+    /// Native ScreenCaptureKit source width selected for the live screen/window source.
+    #[serde(default)]
+    pub preview_screen_native_width: Option<u32>,
+    /// Native ScreenCaptureKit source height selected for the live screen/window source.
+    #[serde(default)]
+    pub preview_screen_native_height: Option<u32>,
+    /// Width requested from ScreenCaptureKit after production capture policy selection.
+    #[serde(default)]
+    pub preview_screen_requested_width: Option<u32>,
+    /// Height requested from ScreenCaptureKit after production capture policy selection.
+    #[serde(default)]
+    pub preview_screen_requested_height: Option<u32>,
+    /// Actual latest ScreenCaptureKit frame width received from CoreVideo.
+    #[serde(default)]
+    pub preview_screen_actual_width: Option<u32>,
+    /// Actual latest ScreenCaptureKit frame height received from CoreVideo.
+    #[serde(default)]
+    pub preview_screen_actual_height: Option<u32>,
+    /// Whether the latest ScreenCaptureKit frame retained an IOSurface for zero-copy import.
+    #[serde(default)]
+    pub preview_screen_iosurface_available: Option<bool>,
     /// P95 interval between ScreenCaptureKit screen sample callbacks.
     #[serde(default)]
     pub preview_screen_capture_gap_p95_ms: Option<f64>,
@@ -1507,6 +1528,20 @@ pub struct PreviewScreenStatus {
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iosurface_available: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_fps: Option<f64>,
     pub frame_age_ms: Option<u64>,

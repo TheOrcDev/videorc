@@ -324,6 +324,16 @@ describe('evaluateAcceptance', () => {
     assert.match(v.failures.join(' '), /screen source capture: 1920x1080 below requested 3840x2160/)
   })
 
+  it('prefers explicit screen actual dimensions over legacy source dimensions', () => {
+    const input = clean4kInput()
+    input.diagnostics.mediaDimensions.screenSource = dimensions(3840, 2160)
+    input.diagnostics.mediaDimensions.screenSourceActual = dimensions(1920, 1080)
+    const v = evaluateAcceptance(input)
+
+    assert.equal(v.pass, false)
+    assert.match(v.failures.join(' '), /screen source capture: 1920x1080 below requested 3840x2160/)
+  })
+
   it('fails the 4K fixture when first-frame dimensions fail startup analysis', () => {
     const input = clean4kInput()
     input.startupVerdict = {
