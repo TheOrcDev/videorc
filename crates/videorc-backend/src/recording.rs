@@ -53,13 +53,13 @@ use crate::preview_screen::preview_screen_latest_frame_info;
 use crate::protocol::{
     AudioSettings, AudioTrack, AudioTrackSource, CameraCorner, CameraFit, CameraShape, CameraSize,
     CameraTransformMode, CompositorBackend, CompositorSceneUpdateParams, CompositorState,
-    EncodeBackend, HealthLevel,
-    LayoutPreset, LayoutSettings, PreviewCameraState, PreviewLiveParams, PreviewLiveSource,
-    PreviewLiveState, PreviewLiveStatus, PreviewScreenSourceKind, PreviewScreenState,
-    PreviewSnapshot, PreviewSnapshotParams, PreviewSurfaceState, PreviewTransport,
-    RecordingPipelineStage, RecordingState, RecordingStatus, RemuxSessionParams, RtmpPreset,
-    RtmpSettings, Scene, SceneConfigParams, SceneSourceKind, SideBySideCameraSide, SideBySideSplit,
-    StartSessionParams, StreamHealth, VideoPreset, VideoSettings,
+    EncodeBackend, HealthLevel, LayoutPreset, LayoutSettings, PreviewCameraState,
+    PreviewLiveParams, PreviewLiveSource, PreviewLiveState, PreviewLiveStatus,
+    PreviewScreenSourceKind, PreviewScreenState, PreviewSnapshot, PreviewSnapshotParams,
+    PreviewSurfaceState, PreviewTransport, RecordingPipelineStage, RecordingState, RecordingStatus,
+    RemuxSessionParams, RtmpPreset, RtmpSettings, Scene, SceneConfigParams, SceneSourceKind,
+    SideBySideCameraSide, SideBySideSplit, StartSessionParams, StreamHealth, VideoPreset,
+    VideoSettings,
 };
 use crate::repair::{
     GateStatus, MAINTENANCE_CANCELLED, QualityExpectations, QualityThresholds, RepairJob,
@@ -4755,6 +4755,7 @@ fn validate_outputs(params: &StartSessionParams) -> Result<()> {
     }
 
     validate_video_settings(&params.output.video)?;
+    validate_video_profile_policy(params)?;
 
     Ok(())
 }
@@ -4773,6 +4774,75 @@ fn validate_video_settings(video: &VideoSettings) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_video_profile_policy(params: &StartSessionParams) -> Result<()> {
+    let video = &params.output.video;
+    validate_named_video_profile(video)?;
+
+    if params.output.stream_enabled {
+        if video.width > 1920 || video.height > 1080 {
+            bail!(
+                "4K livestreaming is not enabled for v1. Disable streaming for 4K local recording or select a stream-safe 1080p profile."
+            );
+        }
+        if video.bitrate_kbps > 6000 {
+            bail!(
+                "Streaming bitrate must be 6000 kbps or lower for the v1 platform-safe path. Select stream-safe-1080p30/60 or reduce the custom bitrate."
+            );
+        }
+    }
+
+    if is_4k_video(video) {
+        if !params.output.record_enabled {
+            bail!("4K output profiles require local recording to be enabled.");
+        }
+        if video.fps > 30 && !matches!(video.preset, VideoPreset::Record4k60Experimental) {
+            bail!(
+                "4K60 is experimental. Select record-4k60-experimental explicitly or use record-4k30 for v1 acceptance."
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_named_video_profile(video: &VideoSettings) -> Result<()> {
+    match video.preset {
+        VideoPreset::Record4k30 => require_video_profile(video, 3840, 2160, 30, 30_000),
+        VideoPreset::Record4k60Experimental => require_video_profile(video, 3840, 2160, 60, 50_000),
+        VideoPreset::StreamSafe1080p30 => require_video_profile(video, 1920, 1080, 30, 6000),
+        VideoPreset::StreamSafe1080p60 => require_video_profile(video, 1920, 1080, 60, 6000),
+        _ => Ok(()),
+    }
+}
+
+fn require_video_profile(
+    video: &VideoSettings,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+) -> Result<()> {
+    if video.width != width
+        || video.height != height
+        || video.fps != fps
+        || video.bitrate_kbps != bitrate_kbps
+    {
+        bail!(
+            "Video preset {:?} must be {}x{}@{} {}kbps; edit values under the custom preset.",
+            video.preset,
+            width,
+            height,
+            fps,
+            bitrate_kbps
+        );
+    }
+    Ok(())
+}
+
+fn is_4k_video(video: &VideoSettings) -> bool {
+    video.width >= 3840 || video.height >= 2160
 }
 
 fn build_stream_url(settings: &RtmpSettings) -> Result<StreamTarget> {
@@ -7693,6 +7763,105 @@ mod tests {
         params.output.video.fps = 120;
 
         assert!(validate_outputs(&params).is_err());
+    }
+
+    #[test]
+    fn accepts_record_4k30_for_local_recording() {
+        let mut params = base_params(true, false);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Record4k30,
+            width: 3840,
+            height: 2160,
+            fps: 30,
+            bitrate_kbps: 30_000,
+        };
+
+        validate_outputs(&params).unwrap();
+    }
+
+    #[test]
+    fn accepts_record_4k60_only_as_experimental_local_recording() {
+        let mut params = base_params(true, false);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Record4k60Experimental,
+            width: 3840,
+            height: 2160,
+            fps: 60,
+            bitrate_kbps: 50_000,
+        };
+
+        validate_outputs(&params).unwrap();
+
+        params.output.video.preset = VideoPreset::Custom;
+        let error = validate_outputs(&params).unwrap_err().to_string();
+        assert!(error.contains("4K60 is experimental"), "{error}");
+    }
+
+    #[test]
+    fn rejects_4k_livestream_until_split_outputs_exist() {
+        let mut params = base_params(true, true);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Record4k30,
+            width: 3840,
+            height: 2160,
+            fps: 30,
+            bitrate_kbps: 30_000,
+        };
+
+        let error = validate_outputs(&params).unwrap_err().to_string();
+        assert!(error.contains("4K livestreaming is not enabled"), "{error}");
+    }
+
+    #[test]
+    fn accepts_stream_safe_1080p_profiles_for_streaming() {
+        let mut params = base_params(false, true);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6000,
+        };
+        validate_outputs(&params).unwrap();
+
+        params.output.video = VideoSettings {
+            preset: VideoPreset::StreamSafe1080p60,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: 6000,
+        };
+        validate_outputs(&params).unwrap();
+    }
+
+    #[test]
+    fn rejects_streaming_bitrate_above_platform_safe_limit() {
+        let mut params = base_params(false, true);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: 9000,
+        };
+
+        let error = validate_outputs(&params).unwrap_err().to_string();
+        assert!(error.contains("6000 kbps or lower"), "{error}");
+    }
+
+    #[test]
+    fn rejects_named_profile_with_edited_dimensions() {
+        let mut params = base_params(true, false);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Record4k30,
+            width: 2560,
+            height: 1440,
+            fps: 30,
+            bitrate_kbps: 30_000,
+        };
+
+        let error = validate_outputs(&params).unwrap_err().to_string();
+        assert!(error.contains("must be 3840x2160@30"), "{error}");
     }
 
     #[tokio::test]
