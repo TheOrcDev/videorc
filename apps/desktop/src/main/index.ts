@@ -25,6 +25,7 @@ import {
   type NativePreviewRealSurfaceDriver
 } from '../shared/native-preview-host-driver'
 import { normalizePreviewSurfaceBounds } from '../shared/native-preview-bounds'
+import { accountSkippedPreviewFrame } from '../shared/native-preview-latest-wins'
 import type {
   BackendConnection,
   BackendLogEvent,
@@ -1051,6 +1052,12 @@ async function updateNativePreviewSurfaceCompositor(
       // The next call will surface the real error if the proof window is still broken.
     }
     if (requestSerial < nativePreviewSurfaceCompositorRequestSerial) {
+      nativePreviewSurfaceStatus = {
+        ...nativePreviewSurfaceStatus,
+        ...accountSkippedPreviewFrame(nativePreviewSurfaceStatus, status.framesRendered),
+        updatedAt: new Date().toISOString(),
+        message: `Native preview skipped stale compositor frame ${status.framesRendered}; presenting the newest queued frame.`
+      }
       return nativePreviewSurfaceStatus
     }
   }
@@ -1220,11 +1227,13 @@ async function tryPresentNativePreviewRealSurfaceCompositor(
   }
 
   nativePreviewRealSurfaceInvalidActivationCount = 0
+  const previousDroppedFrames = nativePreviewSurfaceStatus.droppedFrames ?? 0
   nativePreviewSurfaceStatus = {
     ...driverStatus,
     ...nativePreviewRendererTimingStatusFields(status),
     ...nativePreviewMainStatusRefreshFields(status),
     ...mainTimingStatus,
+    droppedFrames: Math.max(driverStatus.droppedFrames ?? 0, previousDroppedFrames),
     framePollingSuppressed: nativePreviewSurfaceFramePollingSuppressed || status.suppressFramePolling === true,
     updatedAt: new Date().toISOString()
   }
