@@ -1448,20 +1448,15 @@ fn try_gpu_compose(
     let mut prepared_sources = Vec::new();
     for source in scene.sources.iter().filter(|source| source.visible) {
         let transform = &source.transform;
-        // OBS-parity: skip a source we can't place or whose frame has not arrived yet, instead of
-        // aborting the entire GPU frame to CPU fallback. CPU fallback produces no IOSurface
-        // target, which drops the native-preview handoff and forces the laggy PNG-polling path.
-        let Some(rect) = scene_source_rect_pixels(transform, inputs.width, inputs.height) else {
-            continue;
-        };
+        let rect = scene_source_rect_pixels(transform, inputs.width, inputs.height)
+            .ok_or("source rectangle is outside compositor bounds")?;
         let source_crop = source_crop_from_transform(transform);
         match source.kind {
             SceneSourceKind::Camera => {
-                let Some(frame) = inputs.camera_frame else {
-                    tracing::trace!("compositor skipping {}", missing_scene_source_frame_reason(source));
-                    continue;
-                };
-                let Some((dest, crop)) = gpu_source_placement(
+                let frame = inputs
+                    .camera_frame
+                    .ok_or_else(|| missing_scene_source_frame_reason(source))?;
+                let (dest, crop) = gpu_source_placement(
                     frame.width,
                     frame.height,
                     rect,
@@ -1469,9 +1464,8 @@ fn try_gpu_compose(
                     source_crop,
                     inputs.width,
                     inputs.height,
-                ) else {
-                    continue;
-                };
+                )
+                .ok_or("camera source placement failed")?;
                 prepared_sources.push(PreparedGpuSource {
                     pixels: PreparedGpuSourcePixels::Borrowed(&frame.bytes),
                     iosurface: frame.source_iosurface.as_ref(),
@@ -1484,11 +1478,10 @@ fn try_gpu_compose(
                 });
             }
             SceneSourceKind::Screen | SceneSourceKind::Window => {
-                let Some(frame) = inputs.screen_frame else {
-                    tracing::trace!("compositor skipping {}", missing_scene_source_frame_reason(source));
-                    continue;
-                };
-                let Some((dest, crop)) = gpu_source_placement(
+                let frame = inputs
+                    .screen_frame
+                    .ok_or_else(|| missing_scene_source_frame_reason(source))?;
+                let (dest, crop) = gpu_source_placement(
                     frame.width,
                     frame.height,
                     rect,
@@ -1496,9 +1489,8 @@ fn try_gpu_compose(
                     source_crop,
                     inputs.width,
                     inputs.height,
-                ) else {
-                    continue;
-                };
+                )
+                .ok_or("screen source placement failed")?;
                 prepared_sources.push(PreparedGpuSource {
                     pixels: PreparedGpuSourcePixels::Borrowed(&frame.bytes),
                     iosurface: frame.source_iosurface.as_ref(),
@@ -1512,7 +1504,7 @@ fn try_gpu_compose(
             }
             SceneSourceKind::TestPattern => {
                 let pattern = synthetic_test_pattern_bgra(inputs.sequence);
-                let Some((dest, crop)) = gpu_source_placement(
+                let (dest, crop) = gpu_source_placement(
                     pattern.width as u32,
                     pattern.height as u32,
                     rect,
@@ -1520,9 +1512,8 @@ fn try_gpu_compose(
                     SourceCrop::none(),
                     inputs.width,
                     inputs.height,
-                ) else {
-                    continue;
-                };
+                )
+                .ok_or("test-pattern source placement failed")?;
                 prepared_sources.push(PreparedGpuSource {
                     pixels: PreparedGpuSourcePixels::Owned(pattern.bytes),
                     iosurface: None,
@@ -1536,9 +1527,9 @@ fn try_gpu_compose(
             }
         }
     }
-    // An empty source set is no longer an error: compose the (TV-black) background so the
-    // IOSurface target — and the native-preview handoff — keep flowing even when every source's
-    // frame is momentarily missing, exactly as OBS keeps presenting the last good scene.
+    if prepared_sources.is_empty() {
+        return Err("no visible compositor sources".to_string());
+    }
     let sources = prepared_sources
         .iter()
         .map(PreparedGpuSource::as_gpu_source)
@@ -3277,145 +3268,6 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn metal_compose_renders_available_sources_when_one_frame_is_missing() {
-        // Regression / OBS-parity invariant: a scene with a camera + a screen where ONE source's
-        // frame has not arrived must still compose on Metal (rendering the source that IS ready)
-        // and produce an IOSurface target. Previously a single missing source frame aborted the
-        // whole GPU compose to CPU fallback, which produces no IOSurface handoff -> the native
-        // CAMetalLayer preview can never engage -> the laggy PNG-polling fallback. OBS always
-        // renders whatever sources are available; this proves Videorc now does too.
-        let Some(mut gpu) = new_gpu_compositor() else {
-            eprintln!("skipping: Metal compositor unavailable");
-            return;
-        };
-        let layout = crate::protocol::default_layout_settings();
-        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
-            sources: crate::protocol::SourceSelection {
-                screen_id: Some("screen:test".to_string()),
-                window_id: None,
-                camera_id: Some("camera:test".to_string()),
-                microphone_id: None,
-                test_pattern: false,
-            },
-            layout: layout.clone(),
-            video: Some(VideoSettings {
-                preset: VideoPreset::Custom,
-                width: 8,
-                height: 4,
-                fps: 30,
-                bitrate_kbps: 2000,
-            }),
-        });
-        // The scene must really have both a visible camera and a visible screen source.
-        assert!(
-            scene
-                .sources
-                .iter()
-                .any(|source| matches!(source.kind, SceneSourceKind::Camera) && source.visible),
-            "scene should contain a visible camera source"
-        );
-        assert!(
-            scene.sources.iter().any(|source| matches!(
-                source.kind,
-                SceneSourceKind::Screen | SceneSourceKind::Window
-            ) && source.visible),
-            "scene should contain a visible screen source"
-        );
-        let snapshot = CompositorSceneSnapshot {
-            revision: 1,
-            scene: Some(scene),
-            layout,
-            active_screen: None,
-        };
-        let camera_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 4,
-            height: 4,
-            pixel_format: PreviewCameraPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [0, 0, 255, 255].repeat(16),
-            source_iosurface: None,
-            captured_at: Instant::now(),
-        });
-
-        // Camera frame is ready; the screen frame is NOT (None).
-        let output = try_gpu_compose(
-            Some(&mut gpu),
-            &CompositorRenderInputs {
-                sequence: 7,
-                width: 8,
-                height: 4,
-                snapshot: Some(&snapshot),
-                active_image_source: None,
-                camera_frame: Some(&camera_frame),
-                screen_frame: None,
-            },
-            true,
-        )
-        .expect("compose must succeed with the camera even though the screen frame is missing");
-
-        assert!(
-            output.export_handle.has_metal_iosurface_target(),
-            "a partially-available scene must still produce an IOSurface target for the native preview"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn metal_compose_produces_target_even_when_all_source_frames_missing() {
-        // Even when NO source frame has arrived yet, the compositor must still produce an
-        // IOSurface target (a black frame) so the native preview handoff never drops to the
-        // PNG-polling fallback. OBS keeps presenting; so do we.
-        let Some(mut gpu) = new_gpu_compositor() else {
-            eprintln!("skipping: Metal compositor unavailable");
-            return;
-        };
-        let layout = crate::protocol::default_layout_settings();
-        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
-            sources: crate::protocol::SourceSelection {
-                screen_id: Some("screen:test".to_string()),
-                window_id: None,
-                camera_id: Some("camera:test".to_string()),
-                microphone_id: None,
-                test_pattern: false,
-            },
-            layout: layout.clone(),
-            video: Some(VideoSettings {
-                preset: VideoPreset::Custom,
-                width: 8,
-                height: 4,
-                fps: 30,
-                bitrate_kbps: 2000,
-            }),
-        });
-        let snapshot = CompositorSceneSnapshot {
-            revision: 1,
-            scene: Some(scene),
-            layout,
-            active_screen: None,
-        };
-        let output = try_gpu_compose(
-            Some(&mut gpu),
-            &CompositorRenderInputs {
-                sequence: 7,
-                width: 8,
-                height: 4,
-                snapshot: Some(&snapshot),
-                active_image_source: None,
-                camera_frame: None,
-                screen_frame: None,
-            },
-            true,
-        )
-        .expect("compose must still succeed (black frame) when no source frame is ready");
-        assert!(
-            output.export_handle.has_metal_iosurface_target(),
-            "an all-missing-source scene must still produce an IOSurface target"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
     fn metal_compose_supports_test_pattern_overlay_without_camera_frame() {
         let Some(mut gpu) = new_gpu_compositor() else {
             eprintln!("skipping: Metal compositor unavailable");
@@ -3646,7 +3498,6 @@ mod tests {
         camera.name = "Face cam".to_string();
         camera.transform = full_frame_transform();
         camera.default_transform = full_frame_transform();
-        let camera_source = camera.clone();
         let snapshot = CompositorSceneSnapshot {
             revision: 1,
             scene: Some(scene),
@@ -3654,9 +3505,7 @@ mod tests {
             active_screen: None,
         };
 
-        // The compose no longer aborts on a missing camera frame: it renders a black frame and
-        // still produces an IOSurface target, so the native preview handoff keeps flowing.
-        let output = try_gpu_compose(
+        let reason = match try_gpu_compose(
             Some(&mut gpu),
             &CompositorRenderInputs {
                 sequence: 7,
@@ -3668,12 +3517,11 @@ mod tests {
                 screen_frame: None,
             },
             true,
-        )
-        .expect("missing camera frame must still produce a Metal target, not CPU fallback");
-        assert!(output.export_handle.has_metal_iosurface_target());
+        ) {
+            Ok(_) => panic!("missing camera frame should fall back to CPU"),
+            Err(reason) => reason,
+        };
 
-        // The diagnostic reason still names the missing source (used when a source is skipped).
-        let reason = missing_scene_source_frame_reason(&camera_source);
         assert!(reason.contains("camera source \"Face cam\""));
         assert!(reason.contains("id=source:face-cam"));
         assert!(reason.contains("device=camera-device-1"));
