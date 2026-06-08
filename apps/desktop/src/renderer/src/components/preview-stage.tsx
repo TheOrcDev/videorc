@@ -100,6 +100,16 @@ function nativePreviewSuspendedForSmoke(runtimeInfo?: RuntimeInfo | null): boole
   return Boolean(runtimeInfo?.nativePreviewSurfaceStageSuspended)
 }
 
+export function previewImageFallbackEnabled({
+  nativePreviewSurfaceEnabled,
+  runtimeInfo
+}: {
+  nativePreviewSurfaceEnabled: boolean
+  runtimeInfo?: RuntimeInfo | null
+}): boolean {
+  return runtimeInfo?.isPackaged === false && !nativePreviewSurfaceEnabled
+}
+
 export function PreviewStage({
   previewUrl,
   previewLoading,
@@ -149,13 +159,17 @@ export function PreviewStage({
 }): ReactElement {
   const [imageFailed, setImageFailed] = useState(false)
   const [screenImageFailed, setScreenImageFailed] = useState(false)
-  const [displayPreviewUrl, setDisplayPreviewUrl] = useState<string | null>(previewUrl)
+  const [displayPreviewUrl, setDisplayPreviewUrl] = useState<string | null>(null)
+  const allowImageFallback = previewImageFallbackEnabled({ nativePreviewSurfaceEnabled, runtimeInfo })
   const usingNativeSurface = nativePreviewSurfaceEnabled && isPreviewSurfaceTransport(previewSurfaceStatus?.transport)
   const nativeSurfaceLive = usingNativeSurface && previewSurfaceStatus?.state === 'live'
   const isLive = usingNativeSurface ? previewSurfaceStatus?.state === 'live' : previewLiveStatus.state === 'live'
   const latestFrameUrl = useMemo(
-    () => (previewLiveStatus.transport === 'latest-jpeg-polling' ? latestPreviewFrameUrl(previewUrl) : null),
-    [previewLiveStatus.transport, previewUrl]
+    () =>
+      allowImageFallback && previewLiveStatus.transport === 'latest-jpeg-polling'
+        ? latestPreviewFrameUrl(previewUrl)
+        : null,
+    [allowImageFallback, previewLiveStatus.transport, previewUrl]
   )
   const previewPollMs = useMemo(() => previewPollingIntervalMs(previewLiveStatus), [previewLiveStatus])
   const activeTransport = usingNativeSurface ? previewSurfaceStatus?.transport : previewLiveStatus.transport
@@ -167,9 +181,9 @@ export function PreviewStage({
     !syntheticNativeSurface &&
     (scene?.sources.some((source) => source.visible && (source.kind === 'screen' || source.kind === 'window')) ?? false)
   const showActiveScreen =
-    !nativePreviewSurfaceEnabled && Boolean(activeScreen && activeScreen.status === 'ready' && !screenImageFailed)
+    allowImageFallback && Boolean(activeScreen && activeScreen.status === 'ready' && !screenImageFailed)
   const showUnavailable =
-    !nativePreviewSurfaceEnabled && !showActiveScreen && (previewLiveStatus.state === 'unavailable' || imageFailed)
+    !usingNativeSurface && !showActiveScreen && (previewLiveStatus.state === 'unavailable' || imageFailed)
   const previewBadge = previewBadgeState({
     expectsCamera,
     expectsScreen,
@@ -191,7 +205,7 @@ export function PreviewStage({
   }, [activeScreen?.id, activeScreen?.imagePath])
 
   useEffect(() => {
-    if (!previewUrl) {
+    if (!allowImageFallback || !previewUrl) {
       setDisplayPreviewUrl(null)
       return
     }
@@ -208,7 +222,7 @@ export function PreviewStage({
     updateFrame()
     const timer = window.setInterval(updateFrame, previewPollMs)
     return () => window.clearInterval(timer)
-  }, [isLive, latestFrameUrl, previewPollMs, previewUrl])
+  }, [allowImageFallback, isLive, latestFrameUrl, previewPollMs, previewUrl])
 
   const stageRef = useRef<HTMLDivElement | null>(null)
   const previewSurfaceRef = useRef<HTMLDivElement | null>(null)
@@ -379,7 +393,7 @@ export function PreviewStage({
             src={fileUrlFromPath(activeScreen.imagePath)}
             onError={() => setScreenImageFailed(true)}
           />
-        ) : displayPreviewUrl && !imageFailed ? (
+        ) : allowImageFallback && displayPreviewUrl && !imageFailed ? (
           <img
             alt="Selected scene preview"
             className="size-full object-contain"
