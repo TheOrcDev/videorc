@@ -9,12 +9,19 @@ Slices 1–7 shipped to `main` with deterministic gates green. This note records
 covered automatically and the **operator real-camera pass** that closes the plan — only the
 operator can sign that off.
 
+**2026-06-08 status update:** Slice 2's adaptive VideoToolbox zero-copy default shipped in
+`878d948` but was later reverted in `8afe2e4`. The current no-env encoder bridge default is
+`RawYuv420p`, so this note is historical evidence for the preview/recording slice work, not a
+claim that zero-copy is currently the default. Until the native 4K media-engine refactor
+re-promotes the path, VideoToolbox zero-copy checks must be run explicitly with
+`VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT=videotoolbox-h264-mpegts`.
+
 ## What shipped (slices 1–7)
 
 | # | Change | Commit |
 |---|---|---|
 | 1 | Native CAMetalLayer preview confirmed as the macOS default | `6da97b4` |
-| 2 | Adaptive hardware VideoToolbox zero-copy as the default encoder | `878d948` |
+| 2 | Adaptive hardware VideoToolbox zero-copy as the default encoder, later reverted by `8afe2e4` | `878d948` |
 | 3 | "Preparing recording…" label + copyable preflight failure report | `6a10584` |
 | 4 | Studio health badge + degraded "Preview may not match recording" | `5327533` |
 | 5 | Developer-only synthetic diagnostic source (frame number + timecode) | `6668c2a` |
@@ -41,8 +48,13 @@ Run on the Mac with a **real camera + screen + mic** and capture permissions gra
 ### Automated metric gates
 
 ```sh
-# 1080p30 (default) — should now pick VideoToolbox zero-copy by default (no env)
+# 1080p30 current default baseline. As of 2026-06-08 this uses the raw-YUV fallback
+# unless the encoder bridge output is explicitly overridden.
 pnpm baseline:real-source --gate
+
+# Opt-in VideoToolbox zero-copy proof for this historical slice.
+VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT=videotoolbox-h264-mpegts \
+  pnpm baseline:real-source --gate
 
 # 1440p30
 VIDEORC_BASELINE_WIDTH=2560 VIDEORC_BASELINE_HEIGHT=1440 VIDEORC_BASELINE_BITRATE_KBPS=8000 \
@@ -53,9 +65,10 @@ VIDEORC_BASELINE_RECORDING_MS=600000 VIDEORC_SMOKE_TIMEOUT_MS=900000 \
   pnpm baseline:real-source --gate
 ```
 
-Expect (slice 2): `encode backend = hardware-videotoolbox`, `zero-copy > 0`, `raw/Metal copied
-= 0`, startup PASS, final-file PASS. If a run regresses, pin the proven path with
-`VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT=raw-yuv420p` and report which scene starved VT.
+For the opt-in VideoToolbox proof, expect `encode backend = hardware-videotoolbox`,
+`zero-copy > 0`, `raw/Metal copied = 0`, startup PASS, and final-file PASS. The current
+no-env run is a raw-YUV fallback baseline and must not be treated as the final accepted
+zero-copy path.
 
 ### By-eye checklist (judge on a moving clip)
 
