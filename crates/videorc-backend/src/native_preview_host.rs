@@ -376,7 +376,11 @@ mod macos {
             // hidden outside Videorc and out of the window cycle.
             window.setLevel(NSFloatingWindowLevel);
             window.setHasShadow(false);
-            window.setHidesOnDeactivate(true);
+            // NEVER setHidesOnDeactivate(true) here: it tracks THIS helper app's
+            // activation, and an accessory helper is never active — AppKit would keep
+            // the window permanently hidden no matter how often it is ordered front.
+            // Hiding when Videorc loses focus is the Electron side's job (it pushes
+            // visible:false bounds on blur).
             window.setCollectionBehavior(
                 NSWindowCollectionBehavior::Transient
                     | NSWindowCollectionBehavior::IgnoresCycle

@@ -157,6 +157,23 @@ function createWindow(): void {
     mainWindow = null
   })
 
+  // The native surface floats above every app, so it must leave the screen with us
+  // and come back when we do. The helper window cannot do this itself (it belongs to
+  // a never-active accessory process), so main owns the blur/focus policy using the
+  // last bounds the renderer reported.
+  mainWindow.on('blur', () => {
+    void setNativePreviewSurfacesVisible(false)
+  })
+  mainWindow.on('focus', () => {
+    void setNativePreviewSurfacesVisible(true)
+  })
+  mainWindow.on('minimize', () => {
+    void setNativePreviewSurfacesVisible(false)
+  })
+  mainWindow.on('restore', () => {
+    void setNativePreviewSurfacesVisible(true)
+  })
+
   if (backendConnection) {
     mainWindow.webContents.once('did-finish-load', () => {
       mainWindow?.webContents.send('backend:connection', backendConnection)
@@ -949,6 +966,9 @@ async function createNativePreviewSurfaceWindow(): Promise<void> {
 
 async function createNativePreviewSurface(bounds: PreviewSurfaceBounds): Promise<PreviewSurfaceStatus> {
   bounds = normalizePreviewSurfaceBounds(bounds)
+  if (!nativePreviewPolicyPushInFlight) {
+    nativePreviewRendererBounds = bounds
+  }
   if (!nativePreviewSurfaceProofEnabled) {
     nativePreviewSurfaceStatus = idleNativePreviewSurfaceStatus('Native preview surface proof mode is disabled.')
     return nativePreviewSurfaceStatus
@@ -1012,6 +1032,9 @@ async function createNativePreviewSurface(bounds: PreviewSurfaceBounds): Promise
 
 async function updateNativePreviewSurfaceBounds(bounds: PreviewSurfaceBounds): Promise<PreviewSurfaceStatus> {
   bounds = normalizePreviewSurfaceBounds(bounds)
+  if (!nativePreviewPolicyPushInFlight) {
+    nativePreviewRendererBounds = bounds
+  }
   if (!nativePreviewSurfaceWindow || nativePreviewSurfaceWindow.isDestroyed()) {
     return createNativePreviewSurface(bounds)
   }
@@ -1061,6 +1084,31 @@ async function applyNativePreviewHostCommands(commands: NativePreviewHostCommand
         : await updateNativePreviewSurfaceBounds(command.bounds)
   }
   return status
+}
+
+// The last bounds that ORIGINATED from the renderer/backend (policy pushes below do
+// not overwrite this), so focus can restore exactly the renderer's last verdict.
+let nativePreviewRendererBounds: PreviewSurfaceBounds | null = null
+let nativePreviewPolicyPushInFlight = false
+
+// Push a visibility-only bounds update to BOTH surface hosts. Used by the
+// main-window blur/focus policy; a no-op before the first bounds arrive.
+async function setNativePreviewSurfacesVisible(visible: boolean): Promise<void> {
+  const rendererBounds = nativePreviewRendererBounds
+  if (!rendererBounds) {
+    return
+  }
+  // On focus, restore the renderer's own verdict (it may legitimately be hidden,
+  // e.g. on a non-Studio tab); on blur, force-hide.
+  const bounds = visible ? rendererBounds : { ...rendererBounds, visible: false }
+  nativePreviewPolicyPushInFlight = true
+  try {
+    await runNativePreviewSurfaceMutation(() => applyNativePreviewHostCommands([{ kind: 'update-bounds', bounds }]))
+  } catch {
+    // Visibility policy is best-effort; the next renderer bounds report re-syncs.
+  } finally {
+    nativePreviewPolicyPushInFlight = false
+  }
 }
 
 // Disable the real driver after a failure WITHOUT orphaning its NSWindow: the helper
@@ -2098,6 +2146,19 @@ async function runSmokePreviewMotionCommand(command: string, params: Record<stri
     return runNativePreviewSurfaceMutation(() =>
       applyNativePreviewHostCommands(params.commands as NativePreviewHostCommand[])
     )
+  }
+
+  if (command === 'proof-window-state') {
+    const window = nativePreviewSurfaceWindow
+    return {
+      exists: Boolean(window && !window.isDestroyed()),
+      visible: Boolean(window && !window.isDestroyed() && window.isVisible()),
+      bounds: window && !window.isDestroyed() ? window.getBounds() : null,
+      nativeOwnsPlacement: nativeSurfaceOwnsPlacement(),
+      nativePresentConfirmedAtMs: nativePreviewNativePresentConfirmedAtMs,
+      realDriverActive: Boolean(nativePreviewRealSurfaceDriver),
+      realDriverUnavailableReason: nativePreviewRealSurfaceDriverUnavailableReason ?? null
+    }
   }
 
   if (command === 'native-preview-surface-status') {

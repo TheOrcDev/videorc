@@ -836,10 +836,11 @@ pub fn make_preview_layer(device: &MetalDevice, width: f64, height: f64) -> Reta
     let layer = CAMetalLayer::new();
     layer.setDevice(Some(device));
     layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-    // CAMetalLayer defaults to opaque: an overlay whose presents never started (or
-    // stalled) would composite as a solid black box covering the in-page fallback
-    // preview underneath. Stay transparent until real pixels are presented.
-    layer.setOpaque(false);
+    // Keep the layer opaque: the present pipeline does not guarantee alpha=1 in the
+    // drawable, and a non-opaque layer with alpha-0 pixels composites as fully
+    // invisible. The empty-black-box problem is solved by visibility gating instead
+    // (the overlay window only appears after the first successful present).
+    layer.setOpaque(true);
     // The drawable is a render target for the scaled preview present path.
     layer.setFramebufferOnly(false);
     layer.setMaximumDrawableCount(3);

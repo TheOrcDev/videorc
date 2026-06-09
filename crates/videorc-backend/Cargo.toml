@@ -31,7 +31,7 @@ block2 = "0.6.1"
 coreaudio = { package = "coreaudio-rs", version = "0.14.2" }
 dispatch2 = "0.3.1"
 objc2 = { version = "0.6.4", features = ["exception"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSColor", "NSGraphics", "NSResponder", "NSView", "NSWindow", "objc2-quartz-core"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSColor", "NSGraphics", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "objc2-quartz-core"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureSessionPreset", "AVCaptureVideoDataOutput", "AVMediaFormat", "AVVideoSettings", "dispatch2", "objc2-core-media", "objc2-core-video"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFNumber"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGDirectDisplay"] }

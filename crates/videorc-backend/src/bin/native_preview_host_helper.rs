@@ -160,6 +160,11 @@ mod macos {
         let mtm = MainThreadMarker::new()
             .context("native preview host helper must run on the macOS main thread")?;
         let app = NSApplication::sharedApplication(mtm);
+        // A non-bundled helper defaults to the PROHIBITED activation policy, under
+        // which the window server refuses to put its windows on screen — presents
+        // would "succeed" into a window nobody can ever see. Accessory keeps it out
+        // of the Dock/app switcher while allowing real on-screen windows.
+        app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
         app.finishLaunching();
         let mut runner = NativePreviewIosurfacePresenterRunner::new()
             .context("Metal preview presenter is unavailable")?;
