@@ -68,6 +68,13 @@ export interface ComputePreviewSurfaceBoundsInput {
   screenHeight?: number
   /** document.visibilityState === 'visible' */
   documentVisible: boolean
+  /**
+   * True while any open Electron overlay (command palette, dialog, select menu,
+   * tooltip, toast) intersects the slot rect. The native surface always floats above
+   * the web content, so the only honest way to keep overlays readable is to hide the
+   * preview for as long as they overlap (plan WS-B slice B3).
+   */
+  overlayOccluded?: boolean
 }
 
 /**
@@ -93,6 +100,7 @@ export function computePreviewSurfaceBounds(
   const visibleRect = clip ? intersectRects(clip, slot) : null
   const visible =
     input.documentVisible &&
+    !(input.overlayOccluded ?? false) &&
     visibleRect !== null &&
     visibleRect.width >= 1 &&
     visibleRect.height >= 1

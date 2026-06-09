@@ -290,7 +290,8 @@ export function PreviewStage({
           screenHeight: window.screen.height,
           // The native surface floats above every app, so it must leave the screen
           // whenever this window is hidden, minimized, or not the focused app.
-          documentVisible: document.visibilityState === 'visible' && document.hasFocus()
+          documentVisible: document.visibilityState === 'visible' && document.hasFocus(),
+          overlayOccluded: overlayOccludesRect(rect)
         })
         if (nativeSurfaceLive && !previewSurfaceBoundsChanged(lastNativeBoundsRef.current, bounds)) {
           return
@@ -325,6 +326,10 @@ export function PreviewStage({
 
     const observer = new ResizeObserver(reportBounds)
     observer.observe(previewSurfaceRef.current)
+    // Overlay portals (dialogs, select menus, tooltips, toasts) mount and unmount
+    // under document.body; every change re-evaluates the occlusion contract.
+    const overlayObserver = new MutationObserver(reportBounds)
+    overlayObserver.observe(document.body, { childList: true, subtree: true })
     window.addEventListener('resize', reportBounds)
     window.addEventListener('scroll', reportBounds, true)
     window.addEventListener('focus', reportBounds)
@@ -335,6 +340,7 @@ export function PreviewStage({
 
     return () => {
       observer.disconnect()
+      overlayObserver.disconnect()
       window.removeEventListener('resize', reportBounds)
       window.removeEventListener('scroll', reportBounds, true)
       window.removeEventListener('focus', reportBounds)
@@ -705,6 +711,31 @@ function fileUrlFromPath(path: string): string {
 function withCacheBust(url: string): string {
   const separator = url.includes('?') ? '&' : '?'
   return `${url}${separator}t=${Date.now()}`
+}
+
+// Open Electron overlay UI that the native surface would otherwise cover: Radix
+// popper portals (select menus, tooltips), dialog/command-palette content, and
+// Sonner toasts. The B3 occlusion contract hides the preview while any of these
+// intersect the slot, and restores it the moment they close.
+const OVERLAY_SELECTORS =
+  '[data-radix-popper-content-wrapper], [role="dialog"], [data-sonner-toast]'
+
+function overlayOccludesRect(slotRect: DOMRect): boolean {
+  for (const overlay of document.querySelectorAll(OVERLAY_SELECTORS)) {
+    const rect = overlay.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) {
+      continue
+    }
+    const intersects =
+      rect.left < slotRect.right &&
+      rect.right > slotRect.left &&
+      rect.top < slotRect.bottom &&
+      rect.bottom > slotRect.top
+    if (intersects) {
+      return true
+    }
+  }
+  return false
 }
 
 /**

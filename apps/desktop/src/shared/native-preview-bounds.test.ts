@@ -162,6 +162,14 @@ describe('computePreviewSurfaceBounds', () => {
     expect(bounds.clipWidth).toBe(0)
   })
 
+  it('reports visible:false while an open overlay intersects the slot (B3 contract)', () => {
+    const occluded = computePreviewSurfaceBounds({ ...baseInput, overlayOccluded: true })
+    expect(occluded.visible).toBe(false)
+    expect(occluded.clipWidth).toBe(0)
+    const restored = computePreviewSurfaceBounds({ ...baseInput, overlayOccluded: false })
+    expect(restored.visible).toBe(true)
+  })
+
   it('intersects nested clipping ancestors', () => {
     const bounds = computePreviewSurfaceBounds({
       ...baseInput,

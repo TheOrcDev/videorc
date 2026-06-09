@@ -73,6 +73,23 @@ pnpm baseline:evidence:4k30:endurance -- <output-dir>/latest-real-source-evidenc
 The motion and endurance commands request real sources at `3840x2160`, `30fps`, `30000kbps`, and launch the screen motion stimulus so freeze/repeated-frame gates measure moving content. The A/V-sync command uses the same 4K30 output request with the flash/click stimulus; pass `latest-real-source-evidence.json` directly to `pnpm measure:av-sync`.
 Each successful or blocked real-source run writes a sibling `.evidence.json` manifest plus `latest-real-source-evidence.json` in the output directory, with the recording path, baseline report, analyzer reports, startup report, gate verdict, selected sources, and zero-copy/native-preview counters.
 
+The stream-leg A/V sync gate (Studio Shell And Live Control Plan, slice A1) runs two sessions — record-only, then record+stream against a local `ffmpeg -listen` RTMP sink — and measures the flash/click offset on the record-only MKV, the record+stream MKV leg, and the RTMP-received FLV (the platform's view), with drift fitting and H1/H2/H3 hypothesis classification in `stream-av-sync-evidence.json`:
+
+```sh
+pnpm baseline:stream:av-sync -- --gate
+pnpm baseline:stream:av-sync:endurance -- --gate
+```
+
+## Native Preview Placement Contract
+
+The native CAMetalLayer preview is glued to the studio slot (Studio Shell And Live Control Plan, slices B1–B3). The renderer continuously reports the slot rect plus a visible clip rect (slot ∩ clipping ancestors ∩ viewport) and a visibility verdict; the cross-process host window covers exactly the clip rect, ignores all mouse events, is not movable, and hides whenever:
+
+- the slot is fully scrolled out of view,
+- the document is hidden/minimized or the app window loses focus, or
+- any open Electron overlay (command palette, dialog, select menu, tooltip, toast) intersects the slot — overlays must never render underneath the preview. New overlay primitives must either portal under `document.body` with one of the selectors in `preview-stage.tsx` (`OVERLAY_SELECTORS`) or be added to that list.
+
+UI work must keep sidebars/panels outside the studio slot rect (panels push and resize the slot; they never overlap it).
+
 ## Output Profiles
 
 Phase 2 introduces first-class profile IDs for the committed recording/streaming surface:
