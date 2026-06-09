@@ -50,11 +50,12 @@ export function StudioPanelRail({
         {panel === 'layouts' ? (
           <div className="flex flex-col gap-4">
             <LayoutTab embedded />
+            <SourcesTab section="devices" />
             <ScreensTab />
           </div>
         ) : null}
         {panel === 'live' ? <StreamingTab /> : null}
-        {panel === 'audio' ? <SourcesTab /> : null}
+        {panel === 'audio' ? <SourcesTab section="audio" /> : null}
         {panel === 'recording' ? <RecordingTab /> : null}
       </div>
     </aside>

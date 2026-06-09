@@ -11,7 +11,7 @@ import {
   CommandList,
   CommandSeparator
 } from '@/components/ui/command'
-import { WORKSPACE_TABS, useWorkspaceNav } from '@/components/workspace-nav'
+import { STUDIO_PANELS, WORKSPACE_TABS, useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudio } from '@/hooks/use-studio'
 
 /** ⌘K command palette: jump anywhere + run the core session/theme actions. Open state is
@@ -23,7 +23,7 @@ export function CommandPalette({
   open: boolean
   onOpenChange: (open: boolean) => void
 }): ReactElement {
-  const { setActive } = useWorkspaceNav()
+  const { setActive, openStudioPanel } = useWorkspaceNav()
   const { recording, startSession, stopSession } = useStudio()
   const { setTheme } = useTheme()
 
@@ -56,6 +56,21 @@ export function CommandPalette({
             <Gauge className="size-4" />
             Diagnostics
           </CommandItem>
+        </CommandGroup>
+
+        <CommandSeparator />
+
+        <CommandGroup heading="Studio panels">
+          {STUDIO_PANELS.map((panel) => (
+            <CommandItem
+              key={panel.id}
+              value={`Open ${panel.label} panel`}
+              onSelect={() => run(() => openStudioPanel(panel.id))}
+            >
+              <panel.icon className="size-4" />
+              {panel.label}
+            </CommandItem>
+          ))}
         </CommandGroup>
 
         <CommandSeparator />

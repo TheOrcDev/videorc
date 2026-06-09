@@ -27,7 +27,14 @@ const STATUS_TONE: Record<DeviceStatus, StatusTone> = {
   'permission-required': 'warn'
 }
 
-export function SourcesTab(): ReactElement {
+// Panel homes per the studio shell plan (decision 5): the Layouts panel embeds the
+// device pickers (`section="devices"`), the Audio panel embeds the microphone mixer
+// (`section="audio"`).
+export function SourcesTab({
+  section = 'all'
+}: {
+  section?: 'devices' | 'audio' | 'all'
+} = {}): ReactElement {
   const {
     deviceList,
     captureConfig,
@@ -79,8 +86,12 @@ export function SourcesTab(): ReactElement {
     }))
   }
 
+  const showDevices = section !== 'audio'
+  const showAudio = section !== 'devices'
+
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
+    <div className={section === 'all' ? 'grid gap-4 lg:grid-cols-2' : 'flex flex-col gap-4'}>
+      {showDevices ? (
       <PanelSection
         action={
           <Button size="sm" variant="outline" onClick={refreshBackend}>
@@ -88,7 +99,7 @@ export function SourcesTab(): ReactElement {
             Refresh
           </Button>
         }
-        className="lg:col-span-2"
+        className={section === 'all' ? 'lg:col-span-2' : undefined}
         description="Pick what gets captured. Unavailable devices need permission or reconnection."
         icon={Monitor}
         title="Capture sources"
@@ -187,7 +198,9 @@ export function SourcesTab(): ReactElement {
           </div>
         ) : null}
       </PanelSection>
+      ) : null}
 
+      {showAudio ? (
       <PanelSection
         description="Native CoreAudio meter with manual source gain. No automatic processing is applied."
         icon={Waveform}
@@ -310,7 +323,9 @@ export function SourcesTab(): ReactElement {
           {audioMeterLoading ? 'Checking...' : 'Check mic'}
         </Button>
       </PanelSection>
+      ) : null}
 
+      {showDevices ? (
       <PanelSection
         description="All devices discovered by the backend and their permission state."
         icon={Monitor}
@@ -329,6 +344,7 @@ export function SourcesTab(): ReactElement {
           </div>
         )}
       </PanelSection>
+      ) : null}
     </div>
   )
 }
