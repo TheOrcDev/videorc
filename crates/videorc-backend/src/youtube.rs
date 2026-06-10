@@ -353,8 +353,11 @@ pub async fn prepare_youtube_broadcast(
                 ],
             )?)
             .bearer_auth(&request.access_token)
-            // Parameter-only POST: Google's front end rejects body-less POSTs with
-            // 411 Length Required, so send an explicit empty body (Content-Length: 0).
+            // Parameter-only POST: Google's front end rejects requests without a
+            // Content-Length header with 411. reqwest/hyper omit the header for empty
+            // bodies (even `.body("")`), so it must be set explicitly — proven by
+            // tests/content_length_wire.rs.
+            .header(reqwest::header::CONTENT_LENGTH, "0")
             .body("")
             .send()
             .await
@@ -557,7 +560,8 @@ pub async fn transition_youtube_broadcast(
             ],
         )?)
         .bearer_auth(&request.access_token)
-        // Parameter-only POST (see bind): explicit empty body avoids 411.
+        // Parameter-only POST (see bind): Content-Length must be set explicitly.
+        .header(reqwest::header::CONTENT_LENGTH, "0")
         .body("")
         .send()
         .await
