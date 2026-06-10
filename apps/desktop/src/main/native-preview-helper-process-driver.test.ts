@@ -13,6 +13,7 @@ class FakeStream extends EventEmitter {
 }
 
 class FakeChild extends EventEmitter {
+  pid = 7654
   stdin = new FakeStream()
   stdout = new EventEmitter()
   stderr = new EventEmitter()
@@ -57,6 +58,26 @@ describe('native-preview-helper-process-driver', () => {
     child.respond({ hasOverlay: true })
 
     await expect(promise).resolves.toBeNull()
+  })
+
+  it('reports helper process start and exit pids to the owner registry callbacks', async () => {
+    const child = new FakeChild()
+    const started: Array<{ pid: number; label: string }> = []
+    const exited: number[] = []
+    const driver = createNativePreviewHelperProcessDriver({
+      command: 'helper',
+      spawnProcess: () => child as never,
+      onProcessStarted: (pid, label) => started.push({ pid, label }),
+      onProcessExited: (pid) => exited.push(pid)
+    })
+
+    const promise = driver.applyHostCommands([{ kind: 'create', bounds: surfaceBounds() }])
+    child.respond({ hasOverlay: true })
+    await expect(promise).resolves.toBeNull()
+    child.emit('close', 0, null)
+
+    expect(started).toEqual([{ pid: 7654, label: 'native-preview-helper' }])
+    expect(exited).toEqual([7654])
   })
 
   it('normalizes host command bounds before sending them to the helper process', async () => {

@@ -11,8 +11,9 @@ import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 
+import { OwnedProcessRegistry, ownedProcessLedgerPath } from './backend-owned-processes'
 import { createNativePreviewHelperProcessDriver } from './native-preview-helper-process-driver'
 import { loadNativePreviewRealSurfaceDriver } from './native-preview-real-surface-loader'
 import {
@@ -54,6 +55,7 @@ let nativePreviewSurfaceCompositorRequestSerial = 0
 let nativePreviewSurfaceMutationInFlight: Promise<PreviewSurfaceStatus> | null = null
 let nativePreviewSurfaceFramePollingSuppressed = false
 let backendProcess: ChildProcessWithoutNullStreams | null = null
+let ownedProcessRegistry: OwnedProcessRegistry | null = null
 let backendConnection: BackendConnection | null = null
 let smokePreviewMotionServer: HttpServer | null = null
 let smokePreviewCompositorFrameId = 0
@@ -2080,6 +2082,8 @@ function createNativePreviewHelperProcessDriverConfig():
         command: explicitHelperPath,
         cwd: root,
         env,
+        onProcessStarted: recordOwnedProcess,
+        onProcessExited: removeOwnedProcess,
         onLog: logBackend
       })
     }
@@ -2098,6 +2102,8 @@ function createNativePreviewHelperProcessDriverConfig():
         command: helperPath,
         cwd: dirname(helperPath),
         env,
+        onProcessStarted: recordOwnedProcess,
+        onProcessExited: removeOwnedProcess,
         onLog: logBackend
       })
     }
@@ -2109,6 +2115,8 @@ function createNativePreviewHelperProcessDriverConfig():
       args: ['run', '--quiet', '-p', 'videorc-backend', '--bin', 'native_preview_host_helper', '--'],
       cwd: root,
       env,
+      onProcessStarted: recordOwnedProcess,
+      onProcessExited: removeOwnedProcess,
       onLog: logBackend
     })
   }
@@ -2219,6 +2227,31 @@ function workspaceRoot(): string {
   return resolve(app.getAppPath(), '../..')
 }
 
+function processRegistry(): OwnedProcessRegistry {
+  if (!ownedProcessRegistry) {
+    ownedProcessRegistry = new OwnedProcessRegistry({
+      ledgerPath: ownedProcessLedgerPath(app.getPath('userData'), workspaceRoot())
+    })
+  }
+  return ownedProcessRegistry
+}
+
+function recordOwnedProcess(pid: number, label: string): void {
+  try {
+    processRegistry().record(pid, label)
+  } catch (error) {
+    logBackend('warn', `Could not record ${label} process ${pid}: ${errorMessage(error)}`)
+  }
+}
+
+function removeOwnedProcess(pid: number): void {
+  try {
+    processRegistry().remove(pid)
+  } catch (error) {
+    logBackend('warn', `Could not clear owned process ${pid}: ${errorMessage(error)}`)
+  }
+}
+
 function resolveCargoBinary(): string {
   const rustupCargo = join(homedir(), '.cargo', 'bin', 'cargo')
   return existsSync(rustupCargo) ? rustupCargo : 'cargo'
@@ -2248,56 +2281,28 @@ function resolvePackagedFfmpegBinDir(): string | null {
   return existsSync(binary) ? binDir : null
 }
 
-// Single-backend policy: any videorc backend (or its cargo runner / preview
-// helper) alive before THIS instance spawns its own is stale by definition —
-// the app owns exactly one backend. Smoke and probe runs are exempt so they
-// never murder the session they run beside; the 1.5s SIGKILL sweep only
-// touches pids captured BEFORE our own child exists.
+// Single-worktree backend policy: only reap children a previous launch from
+// this same worktree recorded. Never scan command lines; substring process
+// matching can kill cargo builds, editors, or a second worktree.
 function reapStaleBackendProcesses(): void {
-  if (process.platform === 'win32') {
+  let stale: ReturnType<OwnedProcessRegistry['reapStale']>
+  try {
+    stale = processRegistry().reapStale({
+      disabled:
+        Boolean(process.env.VIDEORC_SMOKE_OUTPUT_DIR) ||
+        process.env.VIDEORC_SMOKE_COMMAND_SERVER === '1' ||
+        process.env.VIDEORC_DISABLE_BACKEND_REAP === '1'
+    })
+  } catch (error) {
+    logBackend('warn', `Could not reap stale owned backend processes: ${errorMessage(error)}`)
     return
   }
-  if (
-    process.env.VIDEORC_SMOKE_OUTPUT_DIR ||
-    process.env.VIDEORC_SMOKE_COMMAND_SERVER === '1' ||
-    process.env.VIDEORC_DISABLE_BACKEND_REAP === '1'
-  ) {
-    return
+  if (stale.length > 0) {
+    logBackend(
+      'warn',
+      `Reaping ${stale.length} stale owned backend process(es): ${stale.map((record) => `${record.label}:${record.pid}`).join(', ')}`
+    )
   }
-  const stale = new Set<number>()
-  for (const pattern of ['videorc-backend', 'native_preview_host_helper']) {
-    try {
-      const out = execFileSync('pgrep', ['-f', pattern], { encoding: 'utf8' })
-      for (const line of out.split('\n')) {
-        const pid = Number(line.trim())
-        if (Number.isFinite(pid) && pid > 1 && pid !== process.pid) {
-          stale.add(pid)
-        }
-      }
-    } catch {
-      // pgrep exits non-zero when nothing matches — nothing stale.
-    }
-  }
-  if (stale.size === 0) {
-    return
-  }
-  logBackend('warn', `Reaping ${stale.size} stale backend process(es): ${[...stale].join(', ')}`)
-  for (const pid of stale) {
-    try {
-      process.kill(pid, 'SIGTERM')
-    } catch {
-      // Already gone.
-    }
-  }
-  setTimeout(() => {
-    for (const pid of stale) {
-      try {
-        process.kill(pid, 'SIGKILL')
-      } catch {
-        // Exited gracefully.
-      }
-    }
-  }, 1500)
 }
 
 function startBackend(): void {
@@ -2332,6 +2337,10 @@ function startBackend(): void {
       RUST_LOG: process.env.RUST_LOG ?? 'videorc_backend=info'
     }
   })
+  const backendPid = backendProcess.pid
+  if (typeof backendPid === 'number') {
+    recordOwnedProcess(backendPid, app.isPackaged ? 'videorc-backend' : 'cargo-run-videorc-backend')
+  }
 
   backendProcess.stdout.on('data', (chunk: Buffer) => handleBackendStdout(chunk.toString()))
   backendProcess.stderr.on('data', (chunk: Buffer) => {
@@ -2345,6 +2354,9 @@ function startBackend(): void {
     logBackend('error', `Backend process error: ${error.message}`)
   })
   backendProcess.on('close', (code, signal) => {
+    if (typeof backendPid === 'number') {
+      removeOwnedProcess(backendPid)
+    }
     logBackend('warn', `Backend exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`)
     backendProcess = null
     backendConnection = null

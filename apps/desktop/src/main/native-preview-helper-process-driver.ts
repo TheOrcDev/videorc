@@ -14,7 +14,9 @@ import type {
 } from '../shared/native-preview-host-driver'
 import { normalizePreviewSurfaceBounds } from '../shared/native-preview-bounds'
 
-type HelperChildProcess = Pick<ChildProcessWithoutNullStreams, 'stdin' | 'stdout' | 'stderr' | 'kill' | 'on'>
+type HelperChildProcess = Pick<ChildProcessWithoutNullStreams, 'stdin' | 'stdout' | 'stderr' | 'kill' | 'on'> & {
+  pid?: number
+}
 type HelperSpawn = (
   command: string,
   args: string[],
@@ -33,6 +35,8 @@ export interface NativePreviewHelperProcessDriverOptions {
   now?: () => string
   nowMs?: () => number
   onLog?: (level: 'info' | 'warn' | 'error', message: string) => void
+  onProcessStarted?: (pid: number, label: string) => void
+  onProcessExited?: (pid: number) => void
 }
 
 interface PendingRequest {
@@ -322,11 +326,18 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
       env: this.options.env,
       stdio: 'pipe'
     })
+    const pid = child.pid
     this.child = child
+    if (typeof pid === 'number') {
+      this.options.onProcessStarted?.(pid, 'native-preview-helper')
+    }
     child.stdout.on('data', (chunk: Buffer | string) => this.handleStdout(String(chunk)))
     child.stderr.on('data', (chunk: Buffer | string) => this.handleStderr(String(chunk)))
     child.on('error', (error: Error) => this.rejectAll(`Native preview host helper error: ${error.message}`))
     child.on('close', (code: number | null, signal: string | null) => {
+      if (typeof pid === 'number') {
+        this.options.onProcessExited?.(pid)
+      }
       this.child = null
       this.rejectAll(`Native preview host helper exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`)
     })
