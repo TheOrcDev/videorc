@@ -389,7 +389,7 @@ function ArtifactSection({
   children: ReactNode
 }): ReactElement {
   return (
-    <Collapsible className="rounded-xl border bg-card" defaultOpen={defaultOpen}>
+    <Collapsible className="rounded-xl border border-border" defaultOpen={defaultOpen}>
       <CollapsibleTrigger className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium">
         {title}
       </CollapsibleTrigger>

@@ -29,7 +29,7 @@ export function InspectorSection({
     <Collapsible
       open={open}
       onOpenChange={setOpen}
-      className={cn('rounded-xl border bg-card', className)}
+      className={cn('rounded-xl border border-border', className)}
     >
       <CollapsibleTrigger className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
         {LeadingIcon ? (

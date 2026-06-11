@@ -72,7 +72,7 @@ function SessionRow({
   const filePath = session.mp4Path ?? session.outputPath ?? null
 
   return (
-    <div className="flex flex-col gap-2 rounded-xl border bg-card p-3">
+    <div className="flex flex-col gap-2 rounded-xl border border-border p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 flex-col">
           <span className="truncate text-sm font-semibold">{session.title}</span>

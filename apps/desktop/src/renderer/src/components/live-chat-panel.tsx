@@ -204,7 +204,7 @@ export function LiveChatPanel({
         <div
           ref={feedRef}
           onScroll={handleScroll}
-          className="flex h-full max-h-[28rem] min-h-[8rem] flex-col gap-0.5 overflow-y-auto rounded-md border bg-card/40 p-1.5"
+          className="flex h-full max-h-[28rem] min-h-[8rem] flex-col gap-0.5 overflow-y-auto rounded-lg border border-border p-1.5"
         >
           {hasMessages ? (
             visibleMessages(messages, MAX_RENDERED_LIVE_CHAT_MESSAGES).map((message) => (
