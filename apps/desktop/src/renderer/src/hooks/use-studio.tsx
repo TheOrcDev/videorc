@@ -2807,7 +2807,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             description:
               `If X shows "Something went wrong", add ${result.redirectUri} ` +
               '(plus the 27995 and 37995 port variants) to the callback URLs of ' +
-              "the X developer app — X requires an exact match, so use http and 127.0.0.1, not localhost.",
+              'the X developer app — X requires an exact match, so use http and 127.0.0.1, not localhost.',
             duration: 15000
           })
         } else {
