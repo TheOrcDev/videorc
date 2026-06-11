@@ -141,7 +141,7 @@ export function RecordingTab(): ReactElement {
               {RESOLUTION_PRESETS.map((preset) => (
                 <button
                   aria-pressed={video.width === preset.width && video.height === preset.height}
-                  className="cursor-pointer rounded-xl border bg-card px-3 py-2 text-left text-sm font-medium transition-colors aria-pressed:border-primary aria-pressed:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="cursor-pointer rounded-lg border border-border px-3 py-2 text-left text-sm font-medium transition-colors duration-100 hover:bg-accent aria-pressed:border-ring aria-pressed:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
                   disabled={isSessionActive}
                   key={preset.label}
                   type="button"

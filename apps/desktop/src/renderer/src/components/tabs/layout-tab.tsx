@@ -88,7 +88,7 @@ export function LayoutTab(): ReactElement {
               return (
                 <button
                   aria-pressed={layout.layoutPreset === preset.id}
-                  className="cursor-pointer rounded-xl border bg-card p-3 text-left text-sm font-medium transition-colors aria-pressed:border-primary aria-pressed:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="cursor-pointer rounded-lg border border-border p-3 text-left text-sm font-medium transition-colors duration-100 hover:bg-accent aria-pressed:border-ring aria-pressed:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
                   disabled={disabled}
                   key={preset.id}
                   data-videorc-layout-preset={preset.id}
