@@ -216,8 +216,38 @@ function applyPreviewWindowAspect(window: BrowserWindow): void {
   const ratio = previewWindowAspectRatio()
   window.setAspectRatio(ratio, { width: 0, height: PREVIEW_WINDOW_BAR_HEIGHT })
   window.setMinimumSize(320, Math.round(320 / ratio) + PREVIEW_WINDOW_BAR_HEIGHT)
-  const [width] = window.getContentSize()
-  window.setContentSize(width, Math.round(width / ratio) + PREVIEW_WINDOW_BAR_HEIGHT)
+  conformPreviewWindowToAspect(window)
+}
+
+// setAspectRatio only constrains USER drag-resizes; macOS tiling, third-party
+// window managers, and programmatic setBounds all bypass it and can squeeze the
+// window. This backstop runs on every resize: keep the width and re-derive the
+// video height, falling back to height-derived width when that would overflow
+// the display's work area. Guarded because setContentSize re-emits 'resize'.
+let conformingPreviewWindow = false
+
+function conformPreviewWindowToAspect(window: BrowserWindow): void {
+  if (conformingPreviewWindow || window.isFullScreen()) {
+    return
+  }
+  const ratio = previewWindowAspectRatio()
+  const [contentWidth, contentHeight] = window.getContentSize()
+  let width = contentWidth
+  let height = Math.round(width / ratio) + PREVIEW_WINDOW_BAR_HEIGHT
+  const workAreaHeight = screen.getDisplayMatching(window.getBounds()).workArea.height
+  if (height > workAreaHeight) {
+    height = workAreaHeight
+    width = Math.round((height - PREVIEW_WINDOW_BAR_HEIGHT) * ratio)
+  }
+  if (Math.abs(height - contentHeight) <= 1 && Math.abs(width - contentWidth) <= 1) {
+    return
+  }
+  conformingPreviewWindow = true
+  try {
+    window.setContentSize(width, height)
+  } finally {
+    conformingPreviewWindow = false
+  }
 }
 
 // The preview window's GLOBAL window number (CGWindowID): valid across processes,
@@ -445,6 +475,14 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   applyPreviewWindowAspect(window)
   savePreviewWindowPrefs({ open: true })
 
+  // Re-conform first so any squeeze that escaped the user-resize aspect lock
+  // (tiling, window managers, programmatic setBounds) is corrected before the
+  // placement push below feeds bounds to the native surface.
+  window.on('resize', () => {
+    if (previewWindow === window) {
+      conformPreviewWindowToAspect(window)
+    }
+  })
   // Every placement-affecting event re-feeds the bounds pipeline. macOS emits
   // 'move'/'resize' continuously during a drag, so the surface follows live.
   for (const event of ['move', 'resize', 'show', 'hide', 'minimize', 'restore', 'focus'] as const) {
