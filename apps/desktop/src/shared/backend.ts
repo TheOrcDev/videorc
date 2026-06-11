@@ -1645,6 +1645,10 @@ export interface VideorcApi {
   updateNativePreviewSurfaceCompositor: (
     status: PreviewSurfaceCompositorUpdateParams
   ) => Promise<PreviewSurfaceStatus>
+  // True while the MAIN process pumps presents from its own backend socket;
+  // the renderer pump stays dormant then and resumes only as a fallback.
+  getNativePreviewMainPumpActive: () => Promise<boolean>
+  onNativePreviewMainPumpActive: (callback: (active: boolean) => void) => () => void
   setNativePreviewSurfaceFramePollingSuppressed: (
     suppressed: boolean
   ) => Promise<PreviewSurfaceStatus>

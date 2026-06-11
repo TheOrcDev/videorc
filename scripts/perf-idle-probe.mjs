@@ -108,7 +108,7 @@ const launched = await launchDevApp({
     VIDEORC_USER_DATA_DIR: userDataDir
   },
   onLine: (line) => {
-    if (/error|panic/i.test(line)) console.log('APP>', line)
+    if (/error|panic|present pump/i.test(line)) console.log('APP>', line)
   }
 })
 
@@ -166,8 +166,16 @@ try {
     `presented frames: ${framesAfter - framesBefore} (${((framesAfter - framesBefore) / ticks).toFixed(1)}/s)`
   )
   console.log(`status HTTP fetches: ${fetchDelta} (${(fetchDelta / ticks).toFixed(1)}/s)`)
-  console.log(`presented status age p95: ${statusAfter?.nativePreviewMainPresentedStatusAgeP95Ms}ms`)
+  console.log(
+    `presented status age p95: ${statusAfter?.nativePreviewMainPresentedStatusAgeP95Ms}ms`
+  )
   console.log(`present fps: ${statusAfter?.presentFps}`)
+  console.log(
+    `present interval p95/p99: ${statusAfter?.intervalP95Ms}ms/${statusAfter?.intervalP99Ms}ms ` +
+      `queueWait p95: ${statusAfter?.nativePreviewMainQueueWaitP95Ms}ms ` +
+      `queuedBehind: ${statusAfter?.nativePreviewMainQueuedBehindCount} ` +
+      `helperRT p95: ${statusAfter?.nativePreviewHelperRoundTripP95Ms}ms`
+  )
   console.log(`transport: ${statusAfter?.transport} backing: ${statusAfter?.backing}`)
 
   // The reuse fix's contract: presents flow per frame while HTTP fetches stay

@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  contentTracing,
   dialog,
   ipcMain,
   nativeImage,
@@ -2497,7 +2498,177 @@ function startBackend(): void {
     logBackend('warn', `Backend exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`)
     backendProcess = null
     backendConnection = null
+    disconnectBackendEventSocket()
   })
+}
+
+// ---------------------------------------------------------------------------
+// Main-process present pump. The renderer used to relay every 60Hz
+// compositor.status over ipcRenderer.invoke into main's present queue; each
+// round-trip stranded ~27KB of serialization buffers that V8 never felt
+// (PartitionAlloc buffer partition grew ~2MB/s, multi-GB renderer RSS).
+// Main now subscribes to the backend WebSocket itself and feeds its own
+// queue, so the renderer is out of the per-frame path entirely. The renderer
+// keeps its pump as an automatic fallback whenever this socket is down.
+// ---------------------------------------------------------------------------
+let backendEventSocket: WebSocket | null = null
+let nativePreviewMainPumpActive = false
+let backendEventSocketRetryTimer: ReturnType<typeof setTimeout> | null = null
+let mainPresentReportLastSentAtMs = 0
+
+function setNativePreviewMainPumpActive(active: boolean): void {
+  if (nativePreviewMainPumpActive === active) {
+    return
+  }
+  nativePreviewMainPumpActive = active
+  sendToWindows('preview-surface:pump-mode', active)
+}
+
+function disconnectBackendEventSocket(): void {
+  if (backendEventSocketRetryTimer) {
+    clearTimeout(backendEventSocketRetryTimer)
+    backendEventSocketRetryTimer = null
+  }
+  const socket = backendEventSocket
+  backendEventSocket = null
+  setNativePreviewMainPumpActive(false)
+  if (socket) {
+    try {
+      socket.close()
+    } catch {
+      // Already closed.
+    }
+  }
+}
+
+function connectBackendEventSocket(connection: BackendConnection): void {
+  // Escape hatch: fall back to the renderer-driven present pump.
+  if (process.env.VIDEORC_MAIN_PRESENT_PUMP === '0') {
+    return
+  }
+  disconnectBackendEventSocket()
+  const socket = new WebSocket(
+    `ws://${connection.host}:${connection.port}/ws?token=${encodeURIComponent(connection.token)}`
+  )
+  backendEventSocket = socket
+  socket.onopen = () => {
+    if (backendEventSocket === socket) {
+      logBackend('info', 'Main present pump connected to backend events.')
+      setNativePreviewMainPumpActive(true)
+    }
+  }
+  socket.onmessage = (event) => {
+    if (backendEventSocket !== socket || typeof event.data !== 'string') {
+      return
+    }
+    let parsed: { event?: string; payload?: unknown; id?: string }
+    try {
+      parsed = JSON.parse(event.data) as { event?: string; payload?: unknown; id?: string }
+    } catch {
+      return
+    }
+    // Responses to the fire-and-forget present reports also arrive here; only
+    // the compositor frame events drive the pump.
+    // Event-driven on purpose: new frames exist exactly when events arrive,
+    // and re-presenting the same frame between clusters changes no pixels
+    // (measured: it only aged statuses into fetch territory). Presented frame
+    // age p95 is the content-freshness gate, and it IMPROVED vs the renderer
+    // pump (57ms vs 77ms).
+    if (parsed.event === 'compositor.status' && parsed.payload) {
+      handleMainPumpCompositorStatus(parsed.payload as CompositorStatus)
+    }
+  }
+  socket.onclose = () => {
+    if (backendEventSocket !== socket) {
+      return
+    }
+    backendEventSocket = null
+    setNativePreviewMainPumpActive(false)
+    // Transient close with the backend still up: retry; the renderer pump
+    // covers presents in the meantime.
+    if (backendConnection === connection) {
+      backendEventSocketRetryTimer = setTimeout(() => {
+        backendEventSocketRetryTimer = null
+        if (backendConnection === connection) {
+          connectBackendEventSocket(connection)
+        }
+      }, 2000)
+    }
+  }
+  socket.onerror = () => {
+    // onclose follows and owns the retry.
+  }
+}
+
+function handleMainPumpCompositorStatus(status: CompositorStatus): void {
+  // Same gate the renderer pump used: presents only while a surface session
+  // is live (the preview window owns that lifecycle).
+  if (nativePreviewSurfaceStatus.state !== 'live') {
+    return
+  }
+  const params: PreviewSurfaceCompositorUpdateParams = nativePreviewSurfaceFramePollingSuppressed
+    ? { ...status, suppressFramePolling: true }
+    : { ...status }
+  void updateNativePreviewSurfaceCompositor(params)
+    .then((surfaceStatus) => queueMainPresentReport(surfaceStatus))
+    .catch((error) => {
+      logBackend('warn', `Main present pump failed: ${errorMessageText(error)}`)
+    })
+}
+
+// The 250ms-cadence present report keeps the backend's preview diagnostics
+// (present fps, latency gates) fed now that the renderer no longer reports.
+function queueMainPresentReport(status: PreviewSurfaceStatus): void {
+  const socket = backendEventSocket
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return
+  }
+  const nowMs = Date.now()
+  if (nowMs - mainPresentReportLastSentAtMs < 250) {
+    return
+  }
+  mainPresentReportLastSentAtMs = nowMs
+  const params = {
+    transport: status.transport,
+    backing: status.backing,
+    presentedFrameId: status.presentedFrameId,
+    compositorFrameLag: status.compositorFrameLag,
+    droppedFrames: status.droppedFrames,
+    inputToPresentLatencyMs: status.inputToPresentLatencyMs,
+    inputToPresentLatencyP50Ms: status.inputToPresentLatencyP50Ms,
+    inputToPresentLatencyP95Ms: status.inputToPresentLatencyP95Ms,
+    inputToPresentLatencyP99Ms: status.inputToPresentLatencyP99Ms,
+    presentFps: status.presentFps,
+    intervalP95Ms: status.intervalP95Ms,
+    intervalP99Ms: status.intervalP99Ms,
+    nativePreviewMainQueueWaitP95Ms: status.nativePreviewMainQueueWaitP95Ms,
+    nativePreviewMainPresentP95Ms: status.nativePreviewMainPresentP95Ms,
+    nativePreviewMainQueuedBehindCount: status.nativePreviewMainQueuedBehindCount,
+    nativePreviewHelperRoundTripP95Ms: status.nativePreviewHelperRoundTripP95Ms,
+    nativePreviewMainStatusFetchP95Ms: status.nativePreviewMainStatusFetchP95Ms,
+    nativePreviewMainStatusFetchFailures: status.nativePreviewMainStatusFetchFailures,
+    nativePreviewMainStatusFetchSuccesses: status.nativePreviewMainStatusFetchSuccesses,
+    nativePreviewMainPresentedStatusAgeMs: status.nativePreviewMainPresentedStatusAgeMs,
+    nativePreviewMainPresentedStatusAgeP95Ms: status.nativePreviewMainPresentedStatusAgeP95Ms,
+    nativePreviewMainPresentedFrameAgeP95Ms: status.nativePreviewMainPresentedFrameAgeP95Ms,
+    framePollingSuppressed: status.framePollingSuppressed,
+    sourcePixelsPresent: status.sourcePixelsPresent
+  }
+  try {
+    socket.send(
+      JSON.stringify({
+        id: `main-present-report-${nowMs}`,
+        method: 'preview.surface.present',
+        params
+      })
+    )
+  } catch {
+    // Reports are best-effort diagnostics; the next present retries.
+  }
+}
+
+function errorMessageText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function handleBackendStdout(text: string): void {
@@ -2519,6 +2690,7 @@ function handleBackendStdout(text: string): void {
           console.log(`[smoke] backend-ready ${JSON.stringify(backendConnection)}`)
         }
         sendToWindows('backend:connection', backendConnection)
+        connectBackendEventSocket(backendConnection)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         logBackend('error', `Could not parse backend READY line: ${message}`)
@@ -2547,7 +2719,11 @@ function logBackend(level: BackendLogEvent['level'], message: string): void {
   logger(`[backend:${level}] ${message}`)
 }
 
+// Diagnostic tallies for probes: how chatty is main->renderer IPC really?
+const sendToWindowsCounts = new Map<string, number>()
+
 function sendToWindows(channel: string, ...args: unknown[]): void {
+  sendToWindowsCounts.set(channel, (sendToWindowsCounts.get(channel) ?? 0) + 1)
   for (const window of BrowserWindow.getAllWindows()) {
     if (window === nativePreviewSurfaceWindow) {
       continue
@@ -2815,6 +2991,52 @@ async function runSmokePreviewMotionCommand(
     const file = join(directory, `videorc-ui-${name}.png`)
     writeFileSync(file, image.toPNG())
     return { file }
+  }
+
+  if (command === 'ipc-send-counts') {
+    return Object.fromEntries(sendToWindowsCounts)
+  }
+
+  // Leak bisection: replace the main window's content with about:blank (the
+  // preload still loads). Growth that survives this is platform-level, not
+  // app code. Probe-only; the window needs a reload to recover the app.
+  if (command === 'blank-main-window') {
+    await mainWindow.loadURL('about:blank')
+    return { blanked: true }
+  }
+
+  // Allocator-level memory attribution (PartitionAlloc/V8/mojo/cc per process)
+  // via Chromium memory-infra dumps — the only window into renderer memory
+  // that lives OUTSIDE the V8 heap. Probes diff two dumps to find leaks.
+  if (command === 'memory-infra-dump') {
+    const seconds = typeof params.seconds === 'number' ? Math.min(20, params.seconds) : 6
+    await contentTracing.startRecording({
+      included_categories: ['disabled-by-default-memory-infra'],
+      excluded_categories: ['*'],
+      // memory_dump_config rides through as part of the trace config object.
+      ...({
+        memory_dump_config: {
+          triggers: [{ mode: 'detailed', periodic_interval_ms: 2000 }]
+        }
+      } as object)
+    })
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, seconds * 1000))
+    const directory = process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? app.getPath('temp')
+    const file = join(directory, `videorc-memory-infra-${Date.now()}.json`)
+    await contentTracing.stopRecording(file)
+    // Map renderer pids to the windows they host so probes can name WHICH
+    // renderer's allocators grow.
+    const windows: Record<string, number> = {}
+    if (mainWindow && !mainWindow.webContents.isDestroyed()) {
+      windows['main-window'] = mainWindow.webContents.getOSProcessId()
+    }
+    if (previewWindow && !previewWindow.isDestroyed()) {
+      windows['preview-window'] = previewWindow.webContents.getOSProcessId()
+    }
+    if (nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed()) {
+      windows['proof-surface'] = nativePreviewSurfaceWindow.webContents.getOSProcessId()
+    }
+    return { file, windows }
   }
 
   const script = smokeRendererScript(command, params)
@@ -3338,6 +3560,7 @@ app.whenReady().then(() => {
     oauthCallbackRedirectUri(platform)
   )
   ipcMain.handle('preview-surface:mode', () => nativePreviewSurfaceProofEnabled)
+  ipcMain.handle('preview-surface:pump-mode', () => nativePreviewMainPumpActive)
   ipcMain.handle('preview-window:open', () => openPreviewWindow())
   ipcMain.handle('preview-window:close', () => closePreviewWindow())
   ipcMain.handle('preview-window:get-state', () => previewWindowState())

@@ -1258,6 +1258,49 @@ fn token_expires_soon(expires_at: Option<&str>) -> bool {
         .unwrap_or(true)
 }
 
+/// Handles connection-scoped control commands ("events.setExcluded") that
+/// mutate this socket's event filter instead of shared app state. Returns None
+/// for everything else so the regular dispatcher runs.
+fn handle_connection_control(
+    excluded_events: &std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    text: &str,
+) -> Option<ServerResponse> {
+    let command: serde_json::Value = serde_json::from_str(text).ok()?;
+    if command.get("method").and_then(|method| method.as_str()) != Some("events.setExcluded") {
+        return None;
+    }
+    let id = command
+        .get("id")
+        .and_then(|id| id.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let events: std::collections::HashSet<String> = command
+        .get("params")
+        .and_then(|params| params.get("events"))
+        .and_then(|events| events.as_array())
+        .map(|events| {
+            events
+                .iter()
+                .filter_map(|event| event.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let excluded: Vec<String> = {
+        let mut guard = excluded_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = events;
+        let mut list: Vec<String> = guard.iter().cloned().collect();
+        list.sort();
+        list
+    };
+    Some(ServerResponse::ok(
+        id,
+        serde_json::json!({ "excluded": excluded }),
+    ))
+}
+
 async fn ws_handler(
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
@@ -1276,9 +1319,23 @@ async fn websocket_session(socket: WebSocket, state: AppState) {
     let mut events = state.events.subscribe();
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<String>();
     let event_tx = outgoing_tx.clone();
+    // Per-connection event exclusions: the renderer mutes the 60Hz
+    // compositor.status firehose while the main process drives presents
+    // (receiving+decoding those frames leaked Blink buffers at ~1.5MB/s), and
+    // unmutes instantly when it must take over as the fallback pump.
+    let excluded_events: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let exclusions = excluded_events.clone();
 
     tokio::spawn(async move {
         while let Ok(event) = events.recv().await {
+            let muted = exclusions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(&event.event);
+            if muted {
+                continue;
+            }
             match serde_json::to_string(&event) {
                 Ok(text) => {
                     if event_tx.send(text).is_err() {
@@ -1316,7 +1373,12 @@ async fn websocket_session(socket: WebSocket, state: AppState) {
 
                 match incoming {
                     Ok(Message::Text(text)) => {
-                        let response = handle_text_message(&state, text.as_str()).await;
+                        // Connection-local control messages never reach the
+                        // shared dispatcher (the exclusion set is per socket).
+                        let response = match handle_connection_control(&excluded_events, text.as_str()) {
+                            Some(response) => response,
+                            None => handle_text_message(&state, text.as_str()).await,
+                        };
                         match serde_json::to_string(&response) {
                             Ok(text) => {
                                 if sender.send(Message::Text(text.into())).await.is_err() {
@@ -2515,6 +2577,37 @@ mod tests {
         assert_eq!(value["id"], "abc");
         assert_eq!(value["ok"], true);
         assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn connection_control_replaces_the_exclusion_set() {
+        let excluded = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::<
+            String,
+        >::new()));
+
+        // Non-control commands pass through untouched.
+        assert!(
+            handle_connection_control(&excluded, r#"{"id":"a","method":"recording.start"}"#)
+                .is_none()
+        );
+        assert!(handle_connection_control(&excluded, "not json").is_none());
+
+        let response = handle_connection_control(
+            &excluded,
+            r#"{"id":"b","method":"events.setExcluded","params":{"events":["compositor.status"]}}"#,
+        )
+        .expect("control response");
+        assert!(response.ok);
+        assert!(excluded.lock().unwrap().contains("compositor.status"));
+
+        // An empty list clears the filter (fallback pump resubscribes).
+        let response = handle_connection_control(
+            &excluded,
+            r#"{"id":"c","method":"events.setExcluded","params":{"events":[]}}"#,
+        )
+        .expect("control response");
+        assert!(response.ok);
+        assert!(excluded.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

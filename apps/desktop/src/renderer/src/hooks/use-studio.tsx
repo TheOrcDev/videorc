@@ -595,6 +595,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const previewRequestPending = useRef(false)
   const previewRefreshQueued = useRef(false)
   const previewSurfaceStatusRef = useRef<PreviewSurfaceStatus>(idlePreviewSurfaceStatus())
+  // True while the MAIN process pumps presents itself; the renderer's 60Hz
+  // relay stays dormant then (it leaked IPC serialization buffers at scale).
+  const mainPumpActiveRef = useRef(false)
+  const [mainPumpActive, setMainPumpActive] = useState(false)
   const previewSurfaceStatusCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previewSurfaceStatusLastCommitAtRef = useRef(0)
   const nativePreviewRendererTimingFieldsCacheRef = useRef<{
@@ -979,7 +983,51 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   useEffect(() => {
+    if (!window.videorc?.getNativePreviewMainPumpActive) {
+      return
+    }
+    let cancelled = false
+    void window.videorc.getNativePreviewMainPumpActive().then((active) => {
+      if (!cancelled) {
+        mainPumpActiveRef.current = active === true
+        setMainPumpActive(active === true)
+      }
+    })
+    const unsubscribe = window.videorc.onNativePreviewMainPumpActive?.((active) => {
+      mainPumpActiveRef.current = active === true
+      setMainPumpActive(active === true)
+    })
+    return () => {
+      cancelled = true
+      unsubscribe?.()
+    }
+  }, [])
+
+  // While main pumps presents, the renderer has no use for the per-frame
+  // compositor.status firehose — receiving and decoding it leaked Blink
+  // buffers at ~1.5MB/s. Mute it per connection; unmute the moment this
+  // renderer has to take over as the fallback pump.
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') {
+      return
+    }
+    void client
+      .request('events.setExcluded', {
+        events: mainPumpActive ? ['compositor.status'] : []
+      })
+      .catch(() => {
+        // Older backends without connection controls keep the full stream.
+      })
+  }, [client, wsStatus, mainPumpActive])
+
+  useEffect(() => {
     if (!nativePreviewSurfaceEnabled || !client || wsStatus !== 'connected') {
+      return
+    }
+    // No timer at all while the main process pumps presents: even a dormant
+    // 60Hz setTimeout chain churns measurable renderer memory, and the effect
+    // re-runs to start the fallback pump the moment main's socket drops.
+    if (mainPumpActive) {
       return
     }
 
@@ -988,7 +1036,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (cancelled) {
         return
       }
-      const surfaceLive = previewSurfaceStatusRef.current.state === 'live'
+      // Dormant while the main process pumps presents from its own backend
+      // socket; this 60Hz relay only resumes as the fallback if that drops.
+      const surfaceLive =
+        !mainPumpActiveRef.current && previewSurfaceStatusRef.current.state === 'live'
       if (surfaceLive) {
         const latestStatus = nativePreviewCompositorLatestStatusRef.current
         const pollStartedAt = performance.now()
@@ -1022,7 +1073,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         nativePreviewCompositorPumpTimerRef.current = null
       }
     }
-  }, [client, nativePreviewSurfaceEnabled, queueNativePreviewCompositorPresent, wsStatus])
+  }, [
+    client,
+    mainPumpActive,
+    nativePreviewSurfaceEnabled,
+    queueNativePreviewCompositorPresent,
+    wsStatus
+  ])
 
   const applyPreviewCameraStatus = useCallback((status: PreviewCameraStatus) => {
     previewCameraStatusRef.current = status
@@ -1489,7 +1546,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const status = payload as CompositorStatus
         nativePreviewCompositorLastEventAtRef.current = Date.now()
         nativePreviewCompositorLatestStatusRef.current = status
-        if (isActiveRecordingState(recordingRef.current.state)) {
+        if (mainPumpActiveRef.current || isActiveRecordingState(recordingRef.current.state)) {
           return
         }
         queueNativePreviewCompositorPresent(nextClient, status)

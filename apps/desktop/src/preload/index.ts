@@ -63,6 +63,12 @@ const api: VideorcApi = {
   getOAuthCallbackRedirectUri: (platform) =>
     ipcRenderer.invoke('oauth:callback-redirect-uri', platform),
   getNativePreviewSurfaceMode: () => ipcRenderer.invoke('preview-surface:mode'),
+  getNativePreviewMainPumpActive: () => ipcRenderer.invoke('preview-surface:pump-mode'),
+  onNativePreviewMainPumpActive: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, active: boolean): void => callback(active)
+    ipcRenderer.on('preview-surface:pump-mode', listener)
+    return () => ipcRenderer.removeListener('preview-surface:pump-mode', listener)
+  },
   openPreviewWindow: () => ipcRenderer.invoke('preview-window:open'),
   closePreviewWindow: () => ipcRenderer.invoke('preview-window:close'),
   getPreviewWindowState: () => ipcRenderer.invoke('preview-window:get-state'),
