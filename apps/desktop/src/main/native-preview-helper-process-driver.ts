@@ -335,9 +335,7 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
         const entry = this.pending.get(id)
         if (entry) {
           this.pending.delete(id)
-          entry.reject(
-            new Error(`Native preview host helper write failed: ${errorMessage(error)}`)
-          )
+          entry.reject(new Error(`Native preview host helper write failed: ${errorMessage(error)}`))
         }
       }
       // Writing to a dying helper fails ASYNCHRONOUSLY (EPIPE via the write
