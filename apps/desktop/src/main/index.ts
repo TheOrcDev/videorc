@@ -1832,10 +1832,29 @@ function finiteMetric(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
+// The renderer hands main the backend's own per-frame compositor.status with
+// every present, so it is usually milliseconds old. Re-fetching it over HTTP
+// for EVERY present cost ~60 req/s of main+backend CPU for no freshness gain.
+// Reuse the delivered status while it is demonstrably fresh; fetch only when
+// the renderer's copy lags, which is the case the fetch actually protects.
+const NATIVE_PREVIEW_STATUS_REUSE_MAX_AGE_MS = 34
+
 async function refreshNativePreviewCompositorStatus(
   status: PreviewSurfaceCompositorUpdateParams
 ): Promise<PreviewSurfaceCompositorUpdateParams> {
   if (!backendConnection) {
+    return {
+      ...status,
+      ...nativePreviewMainStatusRefreshFields(status)
+    }
+  }
+
+  const deliveredAgeMs = nativePreviewCompositorStatusAgeMs(status)
+  if (
+    typeof deliveredAgeMs === 'number' &&
+    deliveredAgeMs <= NATIVE_PREVIEW_STATUS_REUSE_MAX_AGE_MS
+  ) {
+    recordNativePreviewStatusAgeSamples(status)
     return {
       ...status,
       ...nativePreviewMainStatusRefreshFields(status)
@@ -1945,6 +1964,15 @@ function recordNativePreviewMainStatusRefresh(
     nativePreviewMainStatusFetchFailures += 1
   }
 
+  recordNativePreviewStatusAgeSamples(status)
+  return nativePreviewMainStatusRefreshFields(status)
+}
+
+// Presented status/frame age feed the freshness gates; they must be recorded
+// for reused statuses too, or a quiet fetch path would blind those gates.
+function recordNativePreviewStatusAgeSamples(
+  status: PreviewSurfaceCompositorUpdateParams | CompositorStatus
+): void {
   const statusAgeMs = nativePreviewCompositorStatusAgeMs(status)
   if (typeof statusAgeMs === 'number') {
     recordNativePreviewTimingSample(nativePreviewMainStatusAgeSamplesMs, statusAgeMs)
@@ -1953,8 +1981,6 @@ function recordNativePreviewMainStatusRefresh(
   if (typeof frameAgeMs === 'number') {
     recordNativePreviewTimingSample(nativePreviewMainStatusFrameAgeSamplesMs, frameAgeMs)
   }
-
-  return nativePreviewMainStatusRefreshFields(status)
 }
 
 function nativePreviewMainStatusRefreshFields(
