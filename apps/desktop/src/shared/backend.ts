@@ -1620,6 +1620,24 @@ export interface PreviewWindowState {
   alwaysOnTop: boolean
 }
 
+// Blurred-wallpaper glass underlay: real window-backdrop blur is unavailable
+// (Electron's vibrancy material renders opaque on current macOS), so the
+// renderer blurs the actual wallpaper as its own bottom layer instead, with
+// main feeding the image and the window/display geometry that keeps it
+// aligned to where the window really sits.
+export interface GlassRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface GlassWallpaperState {
+  imageDataUrl: string
+  window: GlassRect
+  display: GlassRect
+}
+
 export interface VideorcApi {
   getBackendConnection: () => Promise<BackendConnection | null>
   getBackendLogs: () => Promise<BackendLogEvent[]>
@@ -1661,6 +1679,11 @@ export interface VideorcApi {
   onOAuthCallbackUrl: (callback: (callbackUrl: string) => void) => () => void
   onBackendConnection: (callback: (connection: BackendConnection) => void) => () => void
   onBackendLog: (callback: (log: BackendLogEvent) => void) => () => void
+  getGlassWallpaper: () => Promise<GlassWallpaperState | null>
+  onGlassWallpaper: (callback: (state: GlassWallpaperState) => void) => () => void
+  onGlassGeometry: (
+    callback: (geometry: Pick<GlassWallpaperState, 'window' | 'display'>) => void
+  ) => () => void
 }
 
 // --- Recording repair (lag cleanup & repair plan) ---

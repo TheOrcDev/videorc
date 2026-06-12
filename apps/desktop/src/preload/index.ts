@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer, shell } from 'electron'
 import type {
   BackendConnection,
   BackendLogEvent,
+  GlassWallpaperState,
   PreviewWindowState,
   RuntimeInfo,
   SystemPermissionPane,
@@ -118,6 +119,24 @@ const api: VideorcApi = {
     }
     ipcRenderer.on('backend:log', listener)
     return () => ipcRenderer.removeListener('backend:log', listener)
+  },
+  getGlassWallpaper: () => ipcRenderer.invoke('glass:wallpaper:get'),
+  onGlassWallpaper: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: GlassWallpaperState): void => {
+      callback(state)
+    }
+    ipcRenderer.on('glass:wallpaper', listener)
+    return () => ipcRenderer.removeListener('glass:wallpaper', listener)
+  },
+  onGlassGeometry: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      geometry: Pick<GlassWallpaperState, 'window' | 'display'>
+    ): void => {
+      callback(geometry)
+    }
+    ipcRenderer.on('glass:geometry', listener)
+    return () => ipcRenderer.removeListener('glass:geometry', listener)
   }
 }
 

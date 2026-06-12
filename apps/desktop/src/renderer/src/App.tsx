@@ -2,6 +2,7 @@ import { ThemeProvider, useTheme } from 'next-themes'
 import { useEffect, type ReactElement } from 'react'
 
 import { AppShell } from '@/components/app-shell'
+import { GlassWallpaperUnderlay } from '@/components/glass-wallpaper'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { StudioProvider } from '@/hooks/use-studio'
@@ -30,6 +31,7 @@ export function App(): ReactElement {
       storageKey={STORAGE_KEYS.theme}
     >
       <NativeThemeSync />
+      <GlassWallpaperUnderlay />
       <TooltipProvider>
         <StudioProvider>
           <AppShell />

@@ -22,7 +22,7 @@ import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 
 import { OwnedProcessRegistry, ownedProcessLedgerPath } from './backend-owned-processes'
 import { createNativePreviewHelperProcessDriver } from './native-preview-helper-process-driver'
@@ -93,6 +93,79 @@ const glassVibrancyMaterial: GlassVibrancyMaterial =
   glassVibrancyRaw && glassVibrancyRaw !== '0' && glassVibrancyRaw !== '1'
     ? (glassVibrancyRaw as GlassVibrancyMaterial)
     : 'under-window'
+
+// Blurred-wallpaper underlay (the glassmorphism frost): the renderer blurs
+// the actual wallpaper as its bottom layer since the OS material cannot do
+// it here. Fetching uses System Events — the one-time Automation prompt, if
+// denied, degrades cleanly to the plain translucent glass.
+const glassWallpaperEnabled = glassVibrancyEnabled && process.env.VIDEORC_GLASS_WALLPAPER !== '0'
+let glassWallpaperDataUrl: string | null = null
+let glassWallpaperSourcePath: string | null = null
+let glassGeometryTimer: ReturnType<typeof setTimeout> | null = null
+
+function glassGeometry(): { window: Electron.Rectangle; display: Electron.Rectangle } | null {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return null
+  }
+  const bounds = mainWindow.getBounds()
+  return { window: bounds, display: screen.getDisplayMatching(bounds).bounds }
+}
+
+function queueGlassGeometryBroadcast(): void {
+  if (!glassWallpaperEnabled || glassGeometryTimer) {
+    return
+  }
+  glassGeometryTimer = setTimeout(() => {
+    glassGeometryTimer = null
+    const geometry = glassGeometry()
+    if (geometry && glassWallpaperDataUrl) {
+      mainWindow?.webContents.send('glass:geometry', geometry)
+    }
+  }, 40)
+}
+
+function currentWallpaperPath(): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(
+      'osascript',
+      ['-e', 'tell application "System Events" to get picture of current desktop'],
+      { timeout: 3000 },
+      (error, stdout) => resolve(error ? null : stdout.trim() || null)
+    )
+  })
+}
+
+async function refreshGlassWallpaper(): Promise<void> {
+  if (!glassWallpaperEnabled) {
+    return
+  }
+  const wallpaperPath = await currentWallpaperPath()
+  if (!wallpaperPath || (wallpaperPath === glassWallpaperSourcePath && glassWallpaperDataUrl)) {
+    return
+  }
+  try {
+    let image = nativeImage.createFromPath(wallpaperPath)
+    if (image.isEmpty()) {
+      return
+    }
+    // The layer gets a 70px blur anyway; 1800px wide is plenty of detail and
+    // keeps the data URL a few hundred KB instead of tens of MB.
+    if (image.getSize().width > 1800) {
+      image = image.resize({ width: 1800 })
+    }
+    glassWallpaperDataUrl = `data:image/jpeg;base64,${image.toJPEG(72).toString('base64')}`
+    glassWallpaperSourcePath = wallpaperPath
+    const geometry = glassGeometry()
+    if (geometry) {
+      mainWindow?.webContents.send('glass:wallpaper', {
+        imageDataUrl: glassWallpaperDataUrl,
+        ...geometry
+      })
+    }
+  } catch {
+    /* unreadable wallpaper: stay on the plain translucent glass */
+  }
+}
 // Probes and perf harnesses run ALONGSIDE the owner's dev app: an isolated
 // userData gives them their own single-instance lock and preferences instead
 // of dying on the real instance's lock or clobbering its saved state.
@@ -240,6 +313,15 @@ function createWindow(): void {
     }
     mainWindow = null
   })
+
+  if (glassWallpaperEnabled) {
+    mainWindow.on('move', queueGlassGeometryBroadcast)
+    mainWindow.on('resize', queueGlassGeometryBroadcast)
+    // Wallpaper changes have no event; refresh on focus (cheap no-op when the
+    // path is unchanged) and once the renderer is ready to receive it.
+    mainWindow.on('focus', () => void refreshGlassWallpaper())
+    mainWindow.webContents.once('did-finish-load', () => void refreshGlassWallpaper())
+  }
 
   if (backendConnection) {
     mainWindow.webContents.once('did-finish-load', () => {
@@ -3130,6 +3212,10 @@ async function runSmokePreviewMotionCommand(
       const bounds = mainWindow.getBounds()
       mainWindow.setBounds({ ...bounds, width: bounds.width + 1 })
       mainWindow.setBounds(bounds)
+    } else if (lever === 'nudge') {
+      // Probe utility: a real window move, for geometry-tracking checks.
+      const bounds = mainWindow.getBounds()
+      mainWindow.setBounds({ ...bounds, x: bounds.x + 120, y: bounds.y + 60 })
     } else if (lever === 'revibrancy') {
       mainWindow.setVibrancy(null)
       mainWindow.setVibrancy(glassVibrancyMaterial)
@@ -3709,6 +3795,13 @@ app.whenReady().then(() => {
     if (!glassVibrancyEnabled) {
       mainWindow?.setBackgroundColor(theme === 'light' ? '#F5F5F7' : '#1C1C1F')
     }
+  })
+  ipcMain.handle('glass:wallpaper:get', () => {
+    const geometry = glassGeometry()
+    if (!glassWallpaperDataUrl || !geometry) {
+      return null
+    }
+    return { imageDataUrl: glassWallpaperDataUrl, ...geometry }
   })
   ipcMain.handle('preview-window:open', () => openPreviewWindow())
   ipcMain.handle('preview-window:close', () => closePreviewWindow())
