@@ -170,9 +170,16 @@ async function runCell(name, extraEnv, withOverride, pageCss) {
     }
     await smokeCommand(smoke, 'open-backdrop-window')
     await sleep(1200)
-    const { windowId } = await smokeCommand(smoke, 'main-window-id')
+    // REGION capture, not window capture: `screencapture -l` exports the
+    // window's own layer WITH its alpha (nothing behind it), which cannot
+    // show whether the desktop bleeds. -R shoots the real screen pixels.
+    const { bounds } = await smokeCommand(smoke, 'main-window-id')
     const file = `/tmp/videorc-bisect-${name}.png`
-    execFileSync('screencapture', ['-x', '-o', `-l${windowId}`, file])
+    execFileSync('screencapture', [
+      '-x',
+      `-R${bounds.x},${bounds.y},${bounds.width},${bounds.height}`,
+      file
+    ])
     const alpha = await smokeCommand(smoke, 'capture-page-alpha')
     console.log(`shot: ${file}`)
     console.log(`renderer alpha:`, JSON.stringify(alpha))
@@ -184,22 +191,52 @@ async function runCell(name, extraEnv, withOverride, pageCss) {
   }
 }
 
-await runCell('default', {}, false)
-await runCell('cdp-override', {}, true)
-await runCell('transparent-only', { VIDEORC_GLASS_TEST: 'transparent-only' }, false)
-// Does CSS backdrop-filter blur the WINDOW backdrop (the desktop) in a
-// transparent window, or only web content? Decides whether pure-CSS glass
-// can replace the opaque vibrancy material.
-await runCell(
-  'transparent-blur',
-  { VIDEORC_GLASS_TEST: 'transparent-only' },
-  false,
-  `document.body.style.backdropFilter = 'blur(40px) saturate(1.4)'`
-)
-// Do materials transmit at all on this Electron/macOS in LIGHT appearance?
-await runCell(
-  'vibrancy-light',
-  {},
-  false,
-  `localStorage.setItem('videorc.theme', 'light'); document.documentElement.classList.remove('dark'); document.documentElement.classList.add('light'); window.videorc?.setNativeTheme?.('light')`
-)
+const LIGHT_FLIP = `localStorage.setItem('videorc.theme', 'light'); document.documentElement.classList.remove('dark'); document.documentElement.classList.add('light'); window.videorc?.setNativeTheme?.('light')`
+
+const CELLS = {
+  default: () => runCell('default', {}, false),
+  'cdp-override': () => runCell('cdp-override', {}, true),
+  'transparent-only': () =>
+    runCell('transparent-only', { VIDEORC_GLASS_TEST: 'transparent-only' }, false),
+  // Does CSS backdrop-filter blur the WINDOW backdrop (the desktop) in a
+  // transparent window, or only web content? Decides whether pure-CSS glass
+  // can replace the opaque vibrancy material. (Answer: it cannot, and it
+  // kills the alpha pass-through.)
+  'transparent-blur': () =>
+    runCell(
+      'transparent-blur',
+      { VIDEORC_GLASS_TEST: 'transparent-only' },
+      false,
+      `document.body.style.backdropFilter = 'blur(40px) saturate(1.4)'`
+    ),
+  light: () => runCell('light', {}, false, LIGHT_FLIP),
+  // Chromium paints an opaque canvas when the ROOT element's color-scheme is
+  // light, even in a transparent window — next-themes sets that inline style
+  // by default. This cell strips it after the theme flip.
+  'light-noscheme': () =>
+    runCell(
+      'light-noscheme',
+      {},
+      false,
+      `${LIGHT_FLIP}; document.documentElement.style.colorScheme = 'normal'`
+    ),
+  // The user-path reproduction: next-themes puts color-scheme:light inline on
+  // html when the app runs in light theme. Expect opaque (alpha 255).
+  'light-scheme-inline': () =>
+    runCell(
+      'light-scheme-inline',
+      {},
+      false,
+      `${LIGHT_FLIP}; document.documentElement.style.colorScheme = 'light'`
+    )
+}
+
+const requested = process.argv.slice(2)
+const names = requested.length ? requested : Object.keys(CELLS)
+for (const name of names) {
+  if (!CELLS[name]) {
+    console.log(`unknown cell: ${name} (available: ${Object.keys(CELLS).join(', ')})`)
+    continue
+  }
+  await CELLS[name]()
+}
