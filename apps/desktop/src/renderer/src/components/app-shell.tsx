@@ -12,7 +12,6 @@ import { DiagnosticsTab } from '@/components/tabs/diagnostics-tab'
 import { LayoutTab } from '@/components/tabs/layout-tab'
 import { LibraryTab } from '@/components/tabs/library-tab'
 import { RecordingTab } from '@/components/tabs/recording-tab'
-import { ScreensTab } from '@/components/tabs/screens-tab'
 import { SettingsTab } from '@/components/tabs/settings-tab'
 import { SourcesTab } from '@/components/tabs/sources-tab'
 import { StreamingTab } from '@/components/tabs/streaming-tab'
@@ -147,12 +146,7 @@ export function AppShell(): ReactElement {
             <div className="mx-auto w-full max-w-[1600px] px-8 py-6">
               {active === 'studio' ? <StudioTab /> : null}
               {active === 'sources' ? <SourcesTab /> : null}
-              {active === 'layouts' ? (
-                <div className="flex flex-col gap-4">
-                  <LayoutTab />
-                  <ScreensTab />
-                </div>
-              ) : null}
+              {active === 'layouts' ? <LayoutTab /> : null}
               {active === 'live' ? <StreamingTab /> : null}
               {active === 'recording' ? <RecordingTab /> : null}
               {active === 'library' ? <LibraryTab onOpenInAi={openInAi} /> : null}

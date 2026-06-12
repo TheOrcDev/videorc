@@ -58,7 +58,8 @@ export function ScreensTab(): ReactElement {
           </EmptyDescription>
         </Empty>
       ) : (
-        <ScrollArea className="h-[calc(100vh-15rem)] pr-3">
+        // Bounded section: this grid lives inside the Scene page now.
+        <ScrollArea className="max-h-[28rem] overflow-y-auto pr-3">
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {screens.map((screen, index) => (
               <ScreenTile
