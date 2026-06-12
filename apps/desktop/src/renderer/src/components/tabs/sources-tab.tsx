@@ -1,5 +1,6 @@
 import {
   ArrowsClockwise,
+  CaretDown,
   Monitor,
   SpeakerHigh,
   SpeakerSlash,
@@ -12,8 +13,11 @@ import { PanelSection } from '@/components/panel-section'
 import { SourceSelect } from '@/components/source-select'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
 import { Alert, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Empty, EmptyDescription, EmptyTitle } from '@/components/ui/empty'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
@@ -111,6 +115,9 @@ export function SourcesTab(): ReactElement {
     previewScreenStatus
   } = useStudio()
 
+  const problemDeviceCount = deviceList.devices.filter(
+    (device) => device.status !== 'available'
+  ).length
   const captureDevices = deviceList.devices.filter((device) =>
     ['screen', 'window'].includes(device.kind)
   )
@@ -457,11 +464,29 @@ export function SourcesTab(): ReactElement {
             <EmptyDescription>Refresh to query the backend for capture devices.</EmptyDescription>
           </Empty>
         ) : (
-          <div className="flex flex-col gap-1.5">
-            {deviceList.devices.map((device) => (
-              <DiagnosticRow device={device} key={`${device.kind}-${device.id}`} />
-            ))}
-          </div>
+          // Closed by default: this list is forensics, not status — permission
+          // problems already surface in the warnings alert above. The ScrollArea
+          // cap keeps an expanded list from growing the page (ux-ia plan).
+          <Collapsible>
+            <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+              <CaretDown className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+              <span>Device diagnostics · {deviceList.devices.length}</span>
+              {problemDeviceCount > 0 ? (
+                <Badge variant="outline" className="ml-1">
+                  {problemDeviceCount} need attention
+                </Badge>
+              ) : null}
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <ScrollArea className="max-h-72 overflow-y-auto pt-1.5">
+                <div className="flex flex-col gap-1.5 pr-3">
+                  {deviceList.devices.map((device) => (
+                    <DiagnosticRow device={device} key={`${device.kind}-${device.id}`} />
+                  ))}
+                </div>
+              </ScrollArea>
+            </CollapsibleContent>
+          </Collapsible>
         )}
       </PanelSection>
     </div>
