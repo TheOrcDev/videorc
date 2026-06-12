@@ -112,10 +112,9 @@ export function AppShell(): ReactElement {
       {/* hiddenInset hides the OS title bar; this strip is the window's drag
           handle (the traffic lights sit inside it) and the shell pads below. */}
       <div aria-hidden className="fixed inset-x-0 top-0 z-50 h-9 [-webkit-app-region:drag]" />
-      <div
-        className="flex min-h-screen bg-background pt-9 text-foreground"
-        data-videorc-active-tab={active}
-      >
+      {/* No bg here: body already wears the one translucent glass coat, and a
+          second 75% layer would stack to near-opaque and hide the vibrancy. */}
+      <div className="flex min-h-screen pt-9 text-foreground" data-videorc-active-tab={active}>
         <Sidebar
           active={active}
           activeStudioPanel={isStudioPanel(active) ? active : null}

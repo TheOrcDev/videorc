@@ -84,6 +84,8 @@ const nativePreviewFramePollingEnabled = process.env.VIDEORC_SMOKE_PREVIEW_MOTIO
 app.setName('Videorc')
 // Dark glass is the default theme; the renderer re-syncs this on toggle.
 nativeTheme.themeSource = 'dark'
+// True under-window vibrancy is the default glass; =0 is the opt-out.
+const glassVibrancyEnabled = process.env.VIDEORC_GLASS_VIBRANCY !== '0'
 // Probes and perf harnesses run ALONGSIDE the owner's dev app: an isolated
 // userData gives them their own single-instance lock and preferences instead
 // of dying on the real instance's lock or clobbering its saved state.
@@ -167,14 +169,17 @@ function createWindow(): void {
     minWidth: 960,
     minHeight: 660,
     title: 'Videorc',
-    // Glass shell. True under-window vibrancy is OPT-IN
-    // (VIDEORC_GLASS_VIBRANCY=1) until its compositor wedge is fixed: on this
-    // Electron/macOS combo, opening any dialog/palette live on a vibrancy
-    // window halts renderer frame production (DOM keeps running, window shows
-    // only its background; a transparent backgroundColor additionally wedges
-    // on every reload — both bisected 2026-06-12). Without vibrancy the glass
-    // tokens render on an opaque charcoal base, the skill's solid fallback.
-    ...(process.env.VIDEORC_GLASS_VIBRANCY === '1' ? { vibrancy: 'under-window' as const } : {}),
+    // Glass shell. The reference translucency comes from the OS material —
+    // CSS alone cannot blur the desktop behind the window — so under-window
+    // vibrancy is the default and VIDEORC_GLASS_VIBRANCY=0 opts out to the
+    // solid fallback. The 2026-06-12 wedge bisects implicated the synthetic
+    // CDP palette keypress (reproduced without vibrancy too) and an explicit
+    // transparent backgroundColor on reload (left unset here) — not the
+    // material itself. The opt-out paints a theme-matched opaque base so the
+    // 75%-alpha glass tokens don't composite over default white.
+    ...(glassVibrancyEnabled
+      ? { vibrancy: 'under-window' as const }
+      : { backgroundColor: nativeTheme.shouldUseDarkColors ? '#1C1C1F' : '#F5F5F7' }),
     visualEffectState: 'active',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 14, y: 13 },
@@ -3590,6 +3595,10 @@ app.whenReady().then(() => {
   // the blur material always matches the in-app theme (videorc-design).
   ipcMain.handle('app:set-native-theme', (_event, theme: string) => {
     nativeTheme.themeSource = theme === 'light' ? 'light' : 'dark'
+    // The solid-fallback base must follow the theme too (vibrancy ignores it).
+    if (!glassVibrancyEnabled) {
+      mainWindow?.setBackgroundColor(theme === 'light' ? '#F5F5F7' : '#1C1C1F')
+    }
   })
   ipcMain.handle('preview-window:open', () => openPreviewWindow())
   ipcMain.handle('preview-window:close', () => closePreviewWindow())
