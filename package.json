@@ -70,6 +70,7 @@
     "smoke:provider-readiness": "node scripts/smoke-provider-readiness.mjs",
     "smoke:provider-readiness:evidence": "node scripts/smoke-provider-readiness.mjs --markdown",
     "smoke:provider-readiness:strict": "VIDEORC_SMOKE_REQUIRE_PROVIDER_READY=1 node scripts/smoke-provider-readiness.mjs",
+    "support-bundle:verify": "node scripts/verify-support-bundle.mjs",
     "smoke:oauth-guards": "node scripts/smoke-oauth-guards-app.mjs",
     "smoke:live-chat-fake-providers": "node scripts/smoke-live-chat-fake-providers.mjs",
     "smoke:oauth": "node scripts/smoke-oauth-app.mjs",

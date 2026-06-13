@@ -33,7 +33,7 @@ row when done.
 | 015 | Prove real provider livestreaming end to end | P1 | M | 006, 009, 012 | TODO |
 | 016 | Add the open-core entitlement boundary for premium features | P1 | M | 007, 009 | DONE (2026-06-13; free/premium capability model enforced, renderer wired, premium smokes opt in explicitly) |
 | 017 | Add native system audio capture and a mixed audio graph | P1 | L | 006, 007, 014 | TODO |
-| 018 | Add a redacted support bundle and diagnostics export | P1 | M | 007 | IN PROGRESS (Slices A6-A8 backend export and Diagnostics action) |
+| 018 | Add a redacted support bundle and diagnostics export | P1 | M | 007 | IN PROGRESS (Slices A6-A9 export, UI action, and verifier) |
 | 019 | Finish Windows v1 capture and package acceptance | P2 | L | 001, 002, 003, 006, 012 | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) |
@@ -65,7 +65,7 @@ Run this track now while media hardware gates are being arranged.
    - Slice A6: DONE - define bundle schema and redaction helpers.
    - Slice A7: DONE - add backend/main export command.
    - Slice A8: DONE - add Diagnostics export action.
-   - Slice A9: add script verifier.
+   - Slice A9: DONE - add script verifier.
    - Slice A10: document bundle contents/exclusions.
    - Proof gates: `cargo test -p videorc-backend diagnostics`,
      `pnpm --filter @videorc/desktop test`, `pnpm typecheck`, `pnpm lint`,

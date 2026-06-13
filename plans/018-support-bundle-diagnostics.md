@@ -18,7 +18,7 @@
 - **Depends on**: Plan 007
 - **Category**: dx, docs, security
 - **Planned at**: commit `0ea3c66c`, 2026-06-13
-- **Status**: IN PROGRESS (Slices A6-A8 backend export and Diagnostics action)
+- **Status**: IN PROGRESS (Slices A6-A9 export, UI action, and verifier)
 
 ## Why this matters
 
