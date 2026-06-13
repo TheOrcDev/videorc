@@ -876,9 +876,13 @@ pub async fn start_session(
         tokio::spawn(publish_preview_stdout(state.clone(), None, stdout));
     }
 
-    let has_recording_leg = output_path.is_some();
-    let (stream_runtime, slave_positions) =
-        build_stream_runtime(&stream_targets, &skipped_targets, has_recording_leg);
+    let stream_tee_has_recording_leg =
+        output_path.is_some() && !(use_encoder_bridge && encoder_bridge_stream_profile.is_some());
+    let (stream_runtime, slave_positions) = build_stream_runtime(
+        &stream_targets,
+        &skipped_targets,
+        stream_tee_has_recording_leg,
+    );
     if !stream_runtime.is_empty() {
         state.emit_event(
             "stream.targets",
@@ -5513,10 +5517,11 @@ fn stream_targets_from_streaming(streaming: &StreamingSettings) -> Result<Vec<St
     Ok(resolution.ready)
 }
 
-/// The slave index a recording leg occupies: a tee places the MKV (onfail=abort)
-/// first, so stream legs are offset by one when recording, otherwise they start at 0.
-fn tee_slave_offset(has_recording_leg: bool) -> usize {
-    usize::from(has_recording_leg)
+/// The slave index a recording leg occupies when the stream targets share the same
+/// tee as the MKV. Split-output record+stream writes the recording separately, so
+/// its stream tee starts at slave #0 even though local recording is enabled.
+fn tee_slave_offset(stream_tee_has_recording_leg: bool) -> usize {
+    usize::from(stream_tee_has_recording_leg)
 }
 
 /// Builds the initial per-target runtime snapshot — ready destinations as `Live`,
@@ -5526,7 +5531,7 @@ fn tee_slave_offset(has_recording_leg: bool) -> usize {
 fn build_stream_runtime(
     ready: &[StreamTarget],
     skipped: &[SkippedStreamTarget],
-    has_recording_leg: bool,
+    stream_tee_has_recording_leg: bool,
 ) -> (Vec<StreamTargetRuntime>, Vec<Option<usize>>) {
     let mut runtime = Vec::with_capacity(ready.len() + skipped.len());
     for target in ready {
@@ -5550,13 +5555,14 @@ fn build_stream_runtime(
         });
     }
 
-    // Only a tee labels its slaves by index. Two or more legs always tee; a single
-    // stream alongside a recording also tees (MKV onfail=abort + one flv leg), but a
-    // lone stream with no recording is a plain flv output with no per-slave reporting.
-    let tee_used = ready.len() > 1 || (has_recording_leg && !ready.is_empty());
+    // Only a tee labels its slaves by index. Two or more stream legs always tee; a
+    // single stream alongside a shared recording tee also reports slave indexes
+    // (MKV onfail=abort + one flv leg). A lone stream with no recording in that tee
+    // is a plain flv output with no per-slave reporting.
+    let tee_used = ready.len() > 1 || (stream_tee_has_recording_leg && !ready.is_empty());
     let mut slave_positions = Vec::new();
     if tee_used {
-        let offset = tee_slave_offset(has_recording_leg);
+        let offset = tee_slave_offset(stream_tee_has_recording_leg);
         slave_positions = vec![None; ready.len() + offset];
         for position in 0..ready.len() {
             slave_positions[position + offset] = Some(position);
@@ -6463,6 +6469,26 @@ mod tests {
         assert_eq!(slaves.first().copied().flatten(), None);
         assert_eq!(slaves.get(1).copied().flatten(), Some(0));
         assert_eq!(slaves.get(2).copied().flatten(), Some(1));
+    }
+
+    #[test]
+    fn build_stream_runtime_maps_split_output_stream_tee_from_zero() {
+        let streaming = streaming_for(&[
+            (StreamPlatform::Youtube, "rtmp://a.youtube/live2", "yt"),
+            (StreamPlatform::Twitch, "rtmp://live.twitch/app", "tw"),
+            (StreamPlatform::X, "rtmp://x.example/app", "x"),
+            (
+                StreamPlatform::Custom,
+                "rtmp://custom.example/app",
+                "custom",
+            ),
+        ]);
+        let resolution = resolve_stream_targets(&streaming);
+        let (_, slaves) = build_stream_runtime(&resolution.ready, &resolution.skipped, false);
+        assert_eq!(slaves.first().copied().flatten(), Some(0));
+        assert_eq!(slaves.get(1).copied().flatten(), Some(1));
+        assert_eq!(slaves.get(2).copied().flatten(), Some(2));
+        assert_eq!(slaves.get(3).copied().flatten(), Some(3));
     }
 
     #[test]

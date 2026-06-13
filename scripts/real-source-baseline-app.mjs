@@ -140,6 +140,7 @@ async function main() {
       VIDEORC_DISABLE_AUTO_PREVIEW: '1',
       VIDEORC_SMOKE_COMMAND_SERVER: requiresPreviewHostCommandServer ? '1' : '0',
       VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED: requiresPreviewHostCommandServer ? '1' : '0',
+      ...(config.streamEnabled ? { VIDEORC_PREMIUM_FEATURES: '1' } : {}),
       // null means "let the backend's default selector decide" (the honest product
       // path for stream sessions); the app-launcher merges over process.env, so the
       // key must be absent entirely, not undefined.

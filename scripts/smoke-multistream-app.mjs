@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -15,6 +15,9 @@ const repoRoot = resolve(import.meta.dirname, '..')
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-multistream-smoke-${Date.now()}`)
 )
+const userDataDir =
+  process.env.VIDEORC_USER_DATA_DIR ??
+  mkdtempSync(join(tmpdir(), 'videorc-multistream-smoke-user-data-'))
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 const targetCount = Math.min(4, Math.max(1, Number(process.env.VIDEORC_SMOKE_TARGETS ?? 3)))
@@ -338,6 +341,8 @@ function launchAndReadConnection() {
       detached: true,
       env: {
         ...process.env,
+        VIDEORC_PREMIUM_FEATURES: '1',
+        VIDEORC_USER_DATA_DIR: userDataDir,
         VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
       },
       stdio: ['ignore', 'pipe', 'pipe']

@@ -31,7 +31,7 @@ row when done.
 | 013 | Close OBS parity acceptance with evidence and triage | P0 | M | 006 | TODO |
 | 014 | Add guided audio sync calibration and drift gates | P1 | M | 006, 007 | TODO |
 | 015 | Prove real provider livestreaming end to end | P1 | M | 006, 009, 012 | TODO |
-| 016 | Add the open-core entitlement boundary for premium features | P1 | M | 007, 009 | IN PROGRESS (Slice A4 renderer entitlement states) |
+| 016 | Add the open-core entitlement boundary for premium features | P1 | M | 007, 009 | DONE (2026-06-13; free/premium capability model enforced, renderer wired, premium smokes opt in explicitly) |
 | 017 | Add native system audio capture and a mixed audio graph | P1 | L | 006, 007, 014 | TODO |
 | 018 | Add a redacted support bundle and diagnostics export | P1 | M | 007 | TODO |
 | 019 | Finish Windows v1 capture and package acceptance | P2 | L | 001, 002, 003, 006, 012 | TODO |
@@ -49,13 +49,14 @@ view for what to run next.
 
 Run this track now while media hardware gates are being arranged.
 
-1. **Plan 016 - open-core entitlement boundary**
-   - Slice A1: document the free/premium capability matrix.
-   - Slice A2: add backend entitlement snapshot/protocol.
-   - Slice A3: enforce livestreaming and cloud AI server-side.
-   - Slice A4: wire renderer premium/free states from backend data.
-   - Slice A5: update streaming/cloud AI smokes to opt into developer premium.
-   - Proof gates: `cargo test -p videorc-backend entitlement`,
+1. **Plan 016 - open-core entitlement boundary - DONE**
+   - Slice A1: documented the free/premium capability matrix.
+   - Slice A2: added backend entitlement snapshot/protocol.
+   - Slice A3: enforced livestreaming and cloud AI server-side.
+   - Slice A4: wired renderer premium/free states from backend data.
+   - Slice A5: updated streaming smokes to opt into developer premium and
+     stabilized dev smoke isolation.
+   - Proof gates passed: `cargo test -p videorc-backend entitlement`,
      `cargo test -p videorc-backend`, `pnpm --filter @videorc/desktop test`,
      `pnpm typecheck`, `pnpm lint`, `pnpm smoke:dev`,
      `pnpm smoke:multistream`, `pnpm test:scripts`.
@@ -205,8 +206,7 @@ surface area.
   lands, because the fate of the staged live media modules depends on the final
   split-output architecture.
 
-Plan 016 and Plan 018 are the main unblocked stabilizers now. Plan 010 waits on
-Plan 006.
+Plan 018 is the main unblocked stabilizer now. Plan 010 waits on Plan 006.
 
 ### Phase 3 - Close acceptance, not vibes
 
@@ -248,15 +248,15 @@ sandboxed renderer.
 Goal: ship free local recording honestly, and gate premium livestreaming/cloud
 AI in backend-enforced code.
 
-- **P5-S1 Capability matrix**: Execute Plan 016 Step 1. Free/core remains local
+- **P5-S1 Capability matrix - DONE**: Plan 016 Step 1. Free/core remains local
   recording, native preview, source/layout controls, and library. Premium is
   livestreaming and cloud AI.
-- **P5-S2 Entitlement protocol**: Execute Plan 016 Step 2. Backend exposes
+- **P5-S2 Entitlement protocol - DONE**: Plan 016 Step 2. Backend exposes
   deterministic free/premium/developer capabilities.
-- **P5-S3 Backend enforcement**: Execute Plan 016 Step 3. Streaming and cloud
+- **P5-S3 Backend enforcement - DONE**: Plan 016 Step 3. Streaming and cloud
   AI are rejected server-side without entitlement; local recording stays free.
-- **P5-S4 Renderer states and smokes**: Execute Plan 016 Steps 4 and 5. UI reads
-  the backend model; streaming/AI smokes opt into developer premium explicitly.
+- **P5-S4 Renderer states and smokes - DONE**: Plan 016 Steps 4 and 5. UI reads
+  the backend model; streaming smokes opt into developer premium explicitly.
 - **P5-S5 Provider live acceptance**: Execute Plan 015 after Plans 006, 009, and
   012. Prove YouTube/Twitch and any eligible X native path in a packaged app, or
   record exact non-code blockers.

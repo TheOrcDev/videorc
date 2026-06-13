@@ -18,6 +18,7 @@
 - **Depends on**: Plans 007 and 009
 - **Category**: direction, security, tests
 - **Planned at**: commit `0ea3c66c`, 2026-06-13
+- **Status**: DONE (2026-06-13; slices A1-A5 landed and required gates passed)
 
 ## Why this matters
 
