@@ -87,6 +87,17 @@ Unsigned local builds are useful for smoke testing only. The production release 
 pnpm dist:desktop:signed
 ```
 
+Signed distribution first runs a redacted release preflight:
+
+```sh
+pnpm release:preflight:macos
+```
+
+The preflight checks the signing/notarization environment variable names,
+`codesign`, `spctl`, `xcrun notarytool`, `xcrun stapler`, the macOS entitlement
+plist, and the writable release output directory. It reports only present/missing
+status for credential variables; it must not print credential values.
+
 The GitHub Actions workflow at `.github/workflows/ci.yml` runs the same non-packaged local acceptance checks as `pnpm smoke:local-gates` for pushes to `main` and pull requests, split into named steps so hosted-runner failures identify the exact gate.
 
 The release workflow at `.github/workflows/release-macos.yml` installs a smoke-test FFmpeg binary if the runner does not already provide one, runs the same local gates, and then runs `pnpm dist:desktop:signed` for manual dispatches and `v*` tags. The smoke-test FFmpeg install is only for CI verification; packaged releases still use the bundled LGPL-compatible FFmpeg built by `pnpm ffmpeg:build:macos`.

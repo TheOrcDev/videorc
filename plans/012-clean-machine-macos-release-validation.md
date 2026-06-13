@@ -18,6 +18,11 @@
 - **Depends on**: Plans 004, 006, 008, 009, and 011
 - **Category**: dx, security, docs
 - **Planned at**: commit `0ea3c66c`, 2026-06-13
+- **Current status**: IN PROGRESS, 2026-06-13. Step 1 landed as a
+  behavior-free release-preflight slice: `pnpm release:preflight:macos` checks
+  signed-release credentials/tools/paths with redacted output, and
+  `pnpm dist:desktop:signed` runs it before packaging. Artifact validation,
+  workflow validation, and clean-machine release evidence remain pending.
 
 ## Why this matters
 
@@ -220,7 +225,7 @@ Expected:
 
 ## Done criteria
 
-- [ ] Release preflight exists and prints only redacted credential status.
+- [x] Release preflight exists and prints only redacted credential status.
 - [ ] Signed artifact validation exists and checks signature, notarization, and
       Gatekeeper acceptance.
 - [ ] Release workflow runs the new validation.
