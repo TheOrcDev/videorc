@@ -1,64 +1,17 @@
-import { contextBridge, ipcRenderer, shell } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
 
 import type {
   BackendConnection,
   BackendLogEvent,
   GlassWallpaperState,
   PreviewWindowState,
-  RuntimeInfo,
-  SystemPermissionPane,
   VideorcApi
 } from '../shared/backend'
-
-const MACOS_PERMISSION_URLS: Record<SystemPermissionPane, string> = {
-  privacy: 'x-apple.systempreferences:com.apple.preference.security',
-  'screen-recording':
-    'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
-  camera: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Camera',
-  microphone: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'
-}
-
-async function openSystemPermissions(pane: SystemPermissionPane = 'privacy'): Promise<void> {
-  if (process.platform !== 'darwin') {
-    throw new Error('Permission shortcut is only available on macOS.')
-  }
-
-  await shell.openExternal(MACOS_PERMISSION_URLS[pane] ?? MACOS_PERMISSION_URLS.privacy)
-}
-
-function permissionTargetPath(): string {
-  const appMarker = '.app/Contents/MacOS/'
-  const markerIndex = process.execPath.indexOf(appMarker)
-  if (markerIndex === -1) {
-    return process.execPath
-  }
-
-  return process.execPath.slice(0, markerIndex + '.app'.length)
-}
-
-function runtimeInfo(): RuntimeInfo {
-  const targetPath = permissionTargetPath()
-  const isPackaged = !targetPath.endsWith('/Electron.app')
-
-  return {
-    isPackaged,
-    permissionTargetName: isPackaged ? 'Videorc' : 'Electron',
-    permissionTargetPath: targetPath,
-    nativePreviewSurfaceProofEnabled: process.env.VIDEORC_NATIVE_PREVIEW_SURFACE !== '0',
-    previewSmokeMode: process.env.VIDEORC_SMOKE_PREVIEW_MOTION === '1',
-    disableAutoPreview: process.env.VIDEORC_DISABLE_AUTO_PREVIEW === '1',
-    nativePreviewSurfaceStageSuspended: process.env.VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED === '1'
-  }
-}
-
-async function revealPermissionTarget(): Promise<void> {
-  shell.showItemInFolder(permissionTargetPath())
-}
 
 const api: VideorcApi = {
   getBackendConnection: () => ipcRenderer.invoke('backend:get-connection'),
   getBackendLogs: () => ipcRenderer.invoke('backend:get-logs'),
-  getRuntimeInfo: () => Promise.resolve(runtimeInfo()),
+  getRuntimeInfo: () => ipcRenderer.invoke('app:get-runtime-info'),
   pickScreenImage: () => ipcRenderer.invoke('screens:pick-image'),
   openOAuthUrl: (authUrl) => ipcRenderer.invoke('oauth:open-url', authUrl),
   getOAuthCallbackRedirectUri: (platform) =>
@@ -97,8 +50,8 @@ const api: VideorcApi = {
     ipcRenderer.invoke('preview-surface:set-frame-polling-suppressed', suppressed),
   destroyNativePreviewSurface: () => ipcRenderer.invoke('preview-surface:destroy'),
   getNativePreviewSurfaceStatus: () => ipcRenderer.invoke('preview-surface:status'),
-  openSystemPermissions,
-  revealPermissionTarget,
+  openSystemPermissions: (pane) => ipcRenderer.invoke('system:open-permissions', pane),
+  revealPermissionTarget: () => ipcRenderer.invoke('system:reveal-permission-target'),
   onOAuthCallbackUrl: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, callbackUrl: string): void => {
       callback(callbackUrl)

@@ -1,10 +1,15 @@
 import { spawn } from 'node:child_process'
-import { resolve } from 'node:path'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
+const stateRoot = process.env.VIDEORC_SMOKE_STATE_DIR
+  ? resolve(process.env.VIDEORC_SMOKE_STATE_DIR)
+  : mkdtempSync(join(tmpdir(), 'videorc-oauth-guards-'))
 
 let appProcess
 let stopping = false
@@ -289,6 +294,11 @@ function launchAndReadConnection() {
       env: {
         ...process.env,
         VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
+        VIDEORC_USER_DATA_DIR: process.env.VIDEORC_USER_DATA_DIR ?? join(stateRoot, 'user-data'),
+        VIDEORC_DATABASE_PATH:
+          process.env.VIDEORC_DATABASE_PATH ?? join(stateRoot, 'videorc.sqlite'),
+        VIDEORC_SECRETS_PATH:
+          process.env.VIDEORC_SECRETS_PATH ?? join(stateRoot, 'videorc-secrets.json'),
         VIDEORC_YOUTUBE_CLIENT_ID: 'smoke-youtube-client-id',
         VIDEORC_TWITCH_CLIENT_ID: 'smoke-twitch-client-id',
         VIDEORC_X_CLIENT_ID: 'smoke-x-client-id',

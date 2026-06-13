@@ -26,7 +26,7 @@ row when done.
 | 008 | Fix dependency advisory failures and add JS/Rust audit gates | P1 | S-M | - | DONE (2026-06-13; JS prod audit clean after build-only Tailwind tooling moved to dev deps, cargo-audit wired into CI/release) |
 | 009 | Harden stream/OAuth secret storage and legacy key migration | P1 | M | - | DONE (2026-06-13; explicit json-file backend, legacy stream-key migration, redacted persistence, and credential docs landed) |
 | 010 | Reconcile dead-code allowances and future media modules | P2 | S-M | 005, 006 | TODO |
-| 011 | Sandbox the main Electron renderer without breaking preload APIs | P2 | M | 004 | TODO |
+| 011 | Sandbox the main Electron renderer without breaking preload APIs | P2 | M | 004 | DONE (2026-06-13; main renderer sandboxed, privileged preload work moved to main IPC, dev/OAuth/preview/package smokes passed) |
 | 012 | Validate a signed macOS release candidate on a clean machine | P0 | L | 004, 006, 008, 009, 011 | TODO |
 | 013 | Close OBS parity acceptance with evidence and triage | P0 | M | 006 | TODO |
 | 014 | Add guided audio sync calibration and drift gates | P1 | M | 006, 007 | TODO |
@@ -109,8 +109,8 @@ surface area.
 - **P2-S3 Secret storage posture**: Plan 009 is done. Credential storage is
   explicit, legacy renderer-persisted stream keys migrate through the backend,
   and masked hints/delete flows are preserved.
-- **P2-S4 Main renderer sandbox**: Execute Plan 011 after packaged preview is
-  stable. Move privileged preload work to main IPC, then enable `sandbox: true`.
+- **P2-S4 Main renderer sandbox**: Plan 011 is done. Privileged preload work
+  moved to main IPC and the main Studio window now runs with `sandbox: true`.
 - **P2-S5 Dead-code reconciliation**: Execute Plan 010 only after Plan 006
   lands, because the fate of the staged live media modules depends on the final
   split-output architecture.

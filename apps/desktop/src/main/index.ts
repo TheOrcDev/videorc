@@ -29,6 +29,12 @@ import { OwnedProcessRegistry, ownedProcessLedgerPath } from './backend-owned-pr
 import { createNativePreviewHelperProcessDriver } from './native-preview-helper-process-driver'
 import { loadNativePreviewRealSurfaceDriver } from './native-preview-real-surface-loader'
 import {
+  assertPermissionShortcutSupported,
+  buildRuntimeInfo,
+  permissionTargetPath,
+  permissionUrlForPane
+} from './runtime-info'
+import {
   DEFAULT_NATIVE_PREVIEW_MAX_HANDOFF_AGE_MS,
   compositorStatusMetalTargetHandoff,
   nativeCametalLayerStatusMatchesHandoff,
@@ -55,7 +61,8 @@ import type {
   SceneSource,
   SceneTransform,
   StreamScreen,
-  SystemPermissionPane
+  SystemPermissionPane,
+  RuntimeInfo
 } from '../shared/backend'
 
 let mainWindow: BrowserWindow | null = null
@@ -242,14 +249,6 @@ type NativePreviewMainStatusRefreshFields = Pick<
   | 'nativePreviewMainPresentedFrameAgeP95Ms'
 >
 
-const MACOS_PERMISSION_URLS: Record<SystemPermissionPane, string> = {
-  privacy: 'x-apple.systempreferences:com.apple.preference.security',
-  'screen-recording':
-    'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
-  camera: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Camera',
-  microphone: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'
-}
-
 // The platform-specific window chrome (translucency, frame, title-bar style).
 // macOS is the reference glass expression below; off macOS we ship a solid
 // themed base with the native frame in chrome v1 — no OS material or window
@@ -317,7 +316,7 @@ function createWindow(): void {
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: false
@@ -3824,11 +3823,20 @@ function stopBackend(): void {
 }
 
 async function openSystemPermissions(pane: SystemPermissionPane = 'privacy'): Promise<void> {
-  if (process.platform !== 'darwin') {
-    throw new Error('Permission shortcut is only available on macOS.')
-  }
+  assertPermissionShortcutSupported(process.platform)
 
-  await shell.openExternal(MACOS_PERMISSION_URLS[pane] ?? MACOS_PERMISSION_URLS.privacy)
+  await shell.openExternal(permissionUrlForPane(pane))
+}
+
+function runtimeInfo(): RuntimeInfo {
+  return buildRuntimeInfo({
+    execPath: process.execPath,
+    env: process.env
+  })
+}
+
+async function revealPermissionTarget(): Promise<void> {
+  shell.showItemInFolder(permissionTargetPath(process.execPath))
 }
 
 async function pickScreenImage(): Promise<string | null> {
@@ -3899,9 +3907,11 @@ app.whenReady().then(() => {
   registerOAuthCallbackProtocol()
   ipcMain.handle('backend:get-connection', () => backendConnection)
   ipcMain.handle('backend:get-logs', () => backendLogs)
+  ipcMain.handle('app:get-runtime-info', () => runtimeInfo())
   ipcMain.handle('system:open-permissions', (_event, pane?: SystemPermissionPane) =>
     openSystemPermissions(pane)
   )
+  ipcMain.handle('system:reveal-permission-target', () => revealPermissionTarget())
   ipcMain.handle('screens:pick-image', () => pickScreenImage())
   ipcMain.handle('oauth:open-url', (_event, authUrl: string) => openOAuthUrl(authUrl))
   ipcMain.handle('oauth:callback-redirect-uri', (_event, platform?: string) =>
