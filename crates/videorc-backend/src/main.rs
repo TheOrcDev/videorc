@@ -2525,6 +2525,7 @@ async fn backend_health(state: &AppState, ffmpeg_path: &str) -> BackendHealth {
         platform: std::env::consts::OS.to_string(),
         ffmpeg: ffmpeg_status(ffmpeg_path).await,
         database_path: state.database.path().display().to_string(),
+        secret_store_backend: secrets::secret_store_backend_kind().to_string(),
     }
 }
 

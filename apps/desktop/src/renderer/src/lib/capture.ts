@@ -10,6 +10,7 @@ import type {
   SourceSelection,
   StreamingSettings,
   StreamPlatform,
+  StoreManualStreamKeyResult,
   StreamTargetSettings,
   VideoPreset,
   VideoSettings
@@ -31,6 +32,11 @@ export type CaptureConfig = {
   rtmpServerUrl: string
   streamKey: string
   streaming: StreamingSettings
+}
+
+export type LegacyStreamKeyMigrationCandidate = {
+  targetId: string
+  streamKey: string
 }
 
 export type WsStatus = 'waiting' | 'connecting' | 'connected' | 'failed' | 'closed'
@@ -653,6 +659,57 @@ export function bridgeStreamingToLegacy(config: CaptureConfig): CaptureConfig {
   }
 
   return { ...config, streamEnabled: false }
+}
+
+export function legacyStreamKeyMigrationCandidates(
+  config: CaptureConfig
+): LegacyStreamKeyMigrationCandidate[] {
+  const candidates = new Map<string, LegacyStreamKeyMigrationCandidate>()
+  for (const target of config.streaming.targets) {
+    if (target.authMode !== 'manual-rtmp' || target.streamKeySecretRef) {
+      continue
+    }
+    const streamKey = target.streamKey.trim()
+    if (streamKey) {
+      candidates.set(target.id, { targetId: target.id, streamKey })
+    }
+  }
+
+  const legacyKey = config.streamKey.trim()
+  if (!legacyKey) {
+    return [...candidates.values()]
+  }
+  const primary =
+    config.streaming.targets.find((target) => target.platform === config.rtmpPreset) ??
+    config.streaming.targets.find((target) => target.enabled)
+  if (
+    primary &&
+    primary.authMode === 'manual-rtmp' &&
+    !primary.streamKeySecretRef &&
+    !candidates.has(primary.id)
+  ) {
+    candidates.set(primary.id, { targetId: primary.id, streamKey: legacyKey })
+  }
+
+  return [...candidates.values()]
+}
+
+export function applyStoredManualStreamKeyResult(
+  config: CaptureConfig,
+  targetId: string,
+  result: StoreManualStreamKeyResult
+): CaptureConfig {
+  const target = config.streaming.targets.find((item) => item.id === targetId)
+  const streaming = patchPreparedStreamTarget(config.streaming, targetId, {
+    serverUrl: target?.urlMode === 'full-url' ? '' : target?.serverUrl,
+    streamKey: '',
+    streamKeySecretRef: result.streamKeySecretRef,
+    streamKeyPresent: result.streamKeyPresent,
+    streamKeyHint: result.streamKeyHint,
+    previousStreamKeyPresent: result.previousStreamKeyPresent,
+    previousStreamKeyHint: result.previousStreamKeyHint
+  })
+  return bridgeStreamingToLegacy({ ...config, streaming })
 }
 
 export function persistableCaptureConfig(config: CaptureConfig): CaptureConfig {

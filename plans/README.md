@@ -24,7 +24,7 @@ row when done.
 | 006 | Implement true 4K record plus 1080p stream split output | P0 | L | 005 | BLOCKED (2026-06-13; code slices landed, local real-source gates blocked before encoding by 3024x1964 display below 4K and ScreenCaptureKit source discovery timeout) |
 | 007 | Characterize Studio and session orchestration before refactoring | P1 | M | - | DONE (2026-06-13; pure session params, Go Live, native preview present policy helpers and tests landed) |
 | 008 | Fix dependency advisory failures and add JS/Rust audit gates | P1 | S-M | - | DONE (2026-06-13; JS prod audit clean after build-only Tailwind tooling moved to dev deps, cargo-audit wired into CI/release) |
-| 009 | Harden stream/OAuth secret storage and legacy key migration | P1 | M | - | TODO |
+| 009 | Harden stream/OAuth secret storage and legacy key migration | P1 | M | - | DONE (2026-06-13; explicit json-file backend, legacy stream-key migration, redacted persistence, and credential docs landed) |
 | 010 | Reconcile dead-code allowances and future media modules | P2 | S-M | 005, 006 | TODO |
 | 011 | Sandbox the main Electron renderer without breaking preload APIs | P2 | M | 004 | TODO |
 | 012 | Validate a signed macOS release candidate on a clean machine | P0 | L | 004, 006, 008, 009, 011 | TODO |
@@ -106,9 +106,9 @@ surface area.
   policy. No UI redesign.
 - **P2-S2 Dependency/advisory gates**: Execute Plan 008. Clean JS advisories,
   add Rust advisory checks, and wire CI/release gates.
-- **P2-S3 Secret storage posture**: Execute Plan 009. Make credential storage
-  explicit, migrate legacy renderer-persisted stream keys, and preserve masked
-  hints/delete flows.
+- **P2-S3 Secret storage posture**: Plan 009 is done. Credential storage is
+  explicit, legacy renderer-persisted stream keys migrate through the backend,
+  and masked hints/delete flows are preserved.
 - **P2-S4 Main renderer sandbox**: Execute Plan 011 after packaged preview is
   stable. Move privileged preload work to main IPC, then enable `sandbox: true`.
 - **P2-S5 Dead-code reconciliation**: Execute Plan 010 only after Plan 006

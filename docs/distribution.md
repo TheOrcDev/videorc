@@ -175,6 +175,42 @@ pnpm smoke:provider-readiness:strict
 
 The strict run requires OAuth client IDs, Twitch's runtime client secret, eligible YouTube/Twitch test accounts, and validated X native live partner/API access. See [OAuth Live Smoke Runbook](oauth-live-smoke.md) for the full external acceptance workflow.
 
+## Credential Storage
+
+Current release decision: stream keys and OAuth tokens use Videorc's explicit
+owner-only JSON credential store in both development and packaged macOS builds.
+The backend reports this as `json-file` in health diagnostics. A macOS Keychain
+backend is intentionally not the default in this build because unsigned/dev
+rebuilds repeatedly prompt for the login password and make local validation
+unstable.
+
+Default location:
+
+- Development and packaged macOS: `videorc-secrets.json` beside the app's SQLite
+  database in the per-user app-data directory.
+- Unix permissions: the file is written with mode `0600`.
+- Windows/self-hosting: the same JSON model is used; the file relies on the
+  per-user app-data ACL.
+
+Useful overrides:
+
+```sh
+VIDEORC_SECRET_STORE=json-file
+VIDEORC_SECRETS_PATH=/path/to/videorc-secrets.json
+```
+
+`VIDEORC_SECRET_STORE=keychain` is rejected in this build instead of silently
+falling back. Revisit Keychain only after a signed identity can prove stable
+permissions without repeated prompts.
+
+To delete local credentials, disconnect provider accounts in the Streaming tab
+and clear saved manual stream keys. For a full local reset, quit Videorc and
+delete `videorc-secrets.json` from the app-data directory shown beside the
+database path in Settings. Do not commit this file, logs that contain credential
+material, recordings used as secret evidence, or screenshots that show stream
+keys. Diagnostics and health payloads may include masked hints or backend kind;
+they must never include secret values.
+
 ## FFmpeg Strategy
 
 Decision:

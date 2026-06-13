@@ -3,16 +3,30 @@ import { describe, expect, it } from 'vitest'
 import type { SourceSelection } from '../../../shared/backend'
 import type { CaptureConfig } from './capture'
 import {
+  applyStoredManualStreamKeyResult,
+  defaultCaptureConfig,
+  legacyStreamKeyMigrationCandidates,
   normalizeAudioSettings,
   normalizeMicrophoneSyncOffsetMs,
   normalizeVideoSettings,
   parseMicrophoneSyncOffsetInput,
+  persistableCaptureConfig,
   reconcileSourceSelection,
   smokePreviewCompositorCaptureConfig,
   sourceSelectionChangeMessages,
   videoProfileCompatibility,
   videoPresets
 } from './capture'
+
+function captureConfigFixture(): CaptureConfig {
+  return {
+    ...defaultCaptureConfig,
+    streaming: {
+      ...defaultCaptureConfig.streaming,
+      targets: defaultCaptureConfig.streaming.targets.map((target) => ({ ...target }))
+    }
+  }
+}
 
 describe('reconcileSourceSelection', () => {
   // The renderer mounts with an empty deviceList placeholder and the
@@ -201,5 +215,61 @@ describe('videoProfileCompatibility', () => {
         video: videoPresets['record-4k60-experimental']
       }).warning
     ).toContain('experimental')
+  })
+})
+
+describe('legacy stream key migration', () => {
+  it('detects legacy top-level stream keys that need backend storage', () => {
+    const config = captureConfigFixture()
+    config.rtmpPreset = 'twitch'
+    config.streamKey = ' fixture-top-level-key '
+
+    expect(legacyStreamKeyMigrationCandidates(config)).toEqual([
+      { targetId: 'twitch', streamKey: 'fixture-top-level-key' }
+    ])
+  })
+
+  it('detects per-target plaintext keys that do not already have secret refs', () => {
+    const config = captureConfigFixture()
+    config.streaming.targets = config.streaming.targets.map((target) =>
+      target.id === 'youtube'
+        ? { ...target, streamKey: ' fixture-youtube-key ', streamKeyPresent: true }
+        : target
+    )
+
+    expect(legacyStreamKeyMigrationCandidates(config)).toEqual([
+      { targetId: 'youtube', streamKey: 'fixture-youtube-key' }
+    ])
+  })
+
+  it('clears plaintext keys from persisted config after backend store succeeds', () => {
+    const config = captureConfigFixture()
+    config.rtmpPreset = 'youtube'
+    config.streamKey = 'fixture-legacy-key'
+    config.streaming.enabled = true
+    config.streaming.targets = config.streaming.targets.map((target) =>
+      target.id === 'youtube'
+        ? {
+            ...target,
+            enabled: true,
+            streamKey: 'fixture-legacy-key',
+            streamKeyPresent: true
+          }
+        : target
+    )
+
+    const migrated = applyStoredManualStreamKeyResult(config, 'youtube', {
+      streamKeySecretRef: 'stream-target:youtube:manual-stream-key',
+      streamKeyPresent: true,
+      streamKeyHint: '****-key',
+      previousStreamKeyPresent: false
+    })
+    const persisted = persistableCaptureConfig(migrated)
+    const youtube = persisted.streaming.targets.find((target) => target.id === 'youtube')
+
+    expect(migrated.streamKey).toBe('')
+    expect(youtube?.streamKey).toBe('')
+    expect(persisted.streamKey).toBe('')
+    expect(JSON.stringify(persisted)).not.toContain('fixture-legacy-key')
   })
 })

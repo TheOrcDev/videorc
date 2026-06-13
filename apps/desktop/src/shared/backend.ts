@@ -10,6 +10,7 @@ export interface BackendHealth {
   platform: string
   ffmpeg: ToolStatus
   databasePath: string
+  secretStoreBackend: string
 }
 
 export interface ToolStatus {

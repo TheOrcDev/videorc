@@ -56,6 +56,7 @@ pub struct BackendHealth {
     pub platform: String,
     pub ffmpeg: ToolStatus,
     pub database_path: String,
+    pub secret_store_backend: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

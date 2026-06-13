@@ -16,9 +16,11 @@ import { toast } from 'sonner'
 import { BackendClient } from '@/backendClient'
 import { previewSurfaceBoundsChanged } from '../../../shared/native-preview-bounds'
 import {
+  applyStoredManualStreamKeyResult,
   bridgeStreamingToLegacy,
   areEnabledStreamTargetsStartReady,
   defaultSettings,
+  legacyStreamKeyMigrationCandidates,
   loadCaptureConfig,
   loadJson,
   patchPreparedStreamTarget,
@@ -595,6 +597,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     captureConfigRef.current = captureConfig
   }, [captureConfig])
+  const legacyStreamKeyMigrationAttemptedRef = useRef<Set<string>>(new Set())
   const [lastError, setLastError] = useState<string | null>(null)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
   const previewRequestPending = useRef(false)
@@ -3808,22 +3811,48 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const patchManualStreamKeyResult = useCallback(
     (targetId: string, result: StoreManualStreamKeyResult) => {
-      setCaptureConfig((current) => {
-        const target = current.streaming.targets.find((item) => item.id === targetId)
-        const streaming = patchPreparedStreamTarget(current.streaming, targetId, {
-          serverUrl: target?.urlMode === 'full-url' ? '' : target?.serverUrl,
-          streamKey: '',
-          streamKeySecretRef: result.streamKeySecretRef,
-          streamKeyPresent: result.streamKeyPresent,
-          streamKeyHint: result.streamKeyHint,
-          previousStreamKeyPresent: result.previousStreamKeyPresent,
-          previousStreamKeyHint: result.previousStreamKeyHint
-        })
-        return bridgeStreamingToLegacy({ ...current, streaming })
-      })
+      setCaptureConfig((current) => applyStoredManualStreamKeyResult(current, targetId, result))
     },
     []
   )
+
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') {
+      return
+    }
+    const candidates = legacyStreamKeyMigrationCandidates(captureConfig).filter(
+      (candidate) => !legacyStreamKeyMigrationAttemptedRef.current.has(candidate.targetId)
+    )
+    if (candidates.length === 0) {
+      return
+    }
+
+    void (async () => {
+      for (const candidate of candidates) {
+        legacyStreamKeyMigrationAttemptedRef.current.add(candidate.targetId)
+        const label =
+          captureConfigRef.current.streaming.targets.find((item) => item.id === candidate.targetId)
+            ?.label ?? candidate.targetId
+        try {
+          const result = await client.request<StoreManualStreamKeyResult>(
+            'streamTargets.manualKey.store',
+            {
+              targetId: candidate.targetId,
+              streamKey: candidate.streamKey
+            }
+          )
+          patchManualStreamKeyResult(candidate.targetId, result)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          setLastError(`Could not migrate saved ${label} stream key: ${message}`)
+          toast.warning(`Could not migrate ${label} stream key.`, {
+            description:
+              'The key will stay available for this session. Save it again from Streaming settings to remove the legacy local copy.'
+          })
+        }
+      }
+    })()
+  }, [captureConfig, client, patchManualStreamKeyResult, wsStatus])
 
   const saveManualStreamKey = useCallback(
     async (targetId: string, streamKey: string) => {
