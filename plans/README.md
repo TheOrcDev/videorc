@@ -22,7 +22,7 @@ row when done.
 | 004 | Bundle the native CAMetalLayer helper and gate packaged preview | P0 | M | - | DONE (2026-06-13; packaged helper bundled and `pnpm smoke:packaged:native-preview` passes) |
 | 005 | Make platform-safe livestreaming use VideoToolbox by default | P0 | L | - | DONE (2026-06-13; multistream passes; A/V gate blocked locally before encoding by ScreenCaptureKit stream-start timeout) |
 | 006 | Implement true 4K record plus 1080p stream split output | P0 | L | 005 | BLOCKED (2026-06-13; code slices landed, local real-source gates blocked before encoding by 3024x1964 display below 4K and ScreenCaptureKit source discovery timeout) |
-| 007 | Characterize Studio and session orchestration before refactoring | P1 | M | - | TODO |
+| 007 | Characterize Studio and session orchestration before refactoring | P1 | M | - | DONE (2026-06-13; pure session params, Go Live, native preview present policy helpers and tests landed) |
 | 008 | Fix dependency advisory failures and add JS/Rust audit gates | P1 | S-M | - | TODO |
 | 009 | Harden stream/OAuth secret storage and legacy key migration | P1 | M | - | TODO |
 | 010 | Reconcile dead-code allowances and future media modules | P2 | S-M | 005, 006 | TODO |

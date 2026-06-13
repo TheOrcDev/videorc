@@ -8942,6 +8942,54 @@ mod tests {
     }
 
     #[test]
+    fn video_profile_policy_characterizes_plan_006_v1_boundaries() {
+        // Plans 005/006 accepted split-output behavior: 4K local recording may
+        // stream only through an explicit <=1080p output profile, while
+        // stream-only/custom 4K remains blocked for v1.
+        let mut stream_only_4k = base_params(false, true);
+        stream_only_4k.output.video = VideoSettings {
+            preset: VideoPreset::Record4k30,
+            width: 3840,
+            height: 2160,
+            fps: 30,
+            bitrate_kbps: 30_000,
+        };
+        let error = validate_outputs(&stream_only_4k).unwrap_err().to_string();
+        assert!(error.contains("4K livestreaming is not enabled"), "{error}");
+
+        let mut high_bitrate_stream = base_params(false, true);
+        high_bitrate_stream.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: 9000,
+        };
+        let error = validate_outputs(&high_bitrate_stream)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("6000 kbps or lower"), "{error}");
+
+        let mut record_only_4k = base_params(true, false);
+        record_only_4k.output.video = VideoSettings {
+            preset: VideoPreset::Record4k30,
+            width: 3840,
+            height: 2160,
+            fps: 30,
+            bitrate_kbps: 30_000,
+        };
+        validate_outputs(&record_only_4k).unwrap();
+
+        assert_eq!(
+            parse_encoder_bridge_video_output(
+                Some("raw"),
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            ),
+            EncoderBridgeVideoOutput::RawYuv420p
+        );
+    }
+
+    #[test]
     fn accepts_4k_record_with_stream_safe_split_output_profile() {
         let mut params = base_params(true, true);
         params.output.video = VideoSettings {

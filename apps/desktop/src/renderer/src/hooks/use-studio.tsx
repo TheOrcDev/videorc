@@ -38,6 +38,15 @@ import {
   type SetupStep,
   type WsStatus
 } from '@/lib/capture'
+import {
+  decideCancelGoLiveConfirmation,
+  decideContinueGoLiveWithReadyDestinations,
+  decideGoLivePreflight,
+  decideGoLiveStart,
+  decidePreparedGoLiveSetup,
+  type GoLivePartialSetup,
+  type GoLiveSetupFailure
+} from '@/lib/go-live-flow'
 import type {
   AiWorkflowResult,
   AudioMeterResult,
@@ -64,7 +73,6 @@ import type {
   PreviewCameraStatus,
   PreviewScreenStatus,
   PreviewSurfaceBounds,
-  PreviewSurfaceCompositorUpdateParams,
   PreviewSurfacePresentParams,
   PreviewSurfaceSceneUpdateParams,
   PreviewSurfaceStatus,
@@ -110,12 +118,22 @@ import {
   applyLiveChatSnapshot
 } from '@/lib/live-chat-view'
 import {
+  buildNativePreviewCompositorUpdateParams,
+  decideNativePreviewCompositorPresent,
+  nativePreviewDroppedFramesWithSuppressed,
+  pendingCompositorStatusSupersedes,
+  type NativePreviewRendererTimingFields
+} from '@/lib/native-preview-present-policy'
+import { buildStartSessionParams } from '@/lib/session-params'
+import {
   findDevice,
   durationLabel,
   isActiveRecordingState,
   mergeStreamHealth,
   setupChecklist
 } from '@/lib/format'
+
+export type { GoLivePartialSetup, GoLiveSetupFailure } from '@/lib/go-live-flow'
 
 const NATIVE_PREVIEW_SURFACE_PRESENT_REPORT_INTERVAL_MS = 250
 
@@ -150,14 +168,6 @@ function streamingWithTargetPatch(
 }
 const NATIVE_PREVIEW_COMPOSITOR_POLL_INTERVAL_MS = 1000 / 60
 const NATIVE_PREVIEW_COMPOSITOR_TIMING_SAMPLE_LIMIT = 900
-
-type NativePreviewRendererTimingFields = Pick<
-  PreviewSurfaceCompositorUpdateParams,
-  | 'nativePreviewRendererPollIntervalP95Ms'
-  | 'nativePreviewRendererPollRoundTripP95Ms'
-  | 'nativePreviewRendererPresentRoundTripP95Ms'
-  | 'nativePreviewRendererPollInFlightSkips'
->
 
 function recordNativePreviewTimingSample(samples: number[], value: number): void {
   if (!Number.isFinite(value)) {
@@ -343,19 +353,6 @@ export type StudioContextValue = {
   canSampleAudio: boolean
 }
 
-export type GoLiveSetupFailure = {
-  targetId: string
-  platform: StreamTargetSettings['platform']
-  label: string
-  message: string
-}
-
-export type GoLivePartialSetup = {
-  streaming: StreamingSettings
-  failures: GoLiveSetupFailure[]
-  readyLabels: string[]
-}
-
 const StudioContext = createContext<StudioContextValue | null>(null)
 
 const idleDiagnosticStats = (): DiagnosticStats => ({
@@ -485,20 +482,6 @@ const isPreviewSurfaceTransport = (transport: PreviewLiveStatus['transport']): b
   transport === 'native-surface' || transport === 'electron-proof-surface'
 
 type LiveSourceDeviceSwitchPending = 'capture' | 'camera'
-
-function pendingCompositorStatusSupersedes(
-  pending: CompositorStatus | null,
-  current: CompositorStatus,
-  { includeSameRunFrameAdvance }: { includeSameRunFrameAdvance: boolean }
-): boolean {
-  if (!pending) {
-    return false
-  }
-  if (pending.runId && current.runId && pending.runId !== current.runId) {
-    return true
-  }
-  return includeSameRunFrameAdvance && pending.framesRendered > current.framesRendered
-}
 
 const idlePreviewCameraStatus = (): PreviewCameraStatus => ({
   state: 'device-missing',
@@ -688,25 +671,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [streamTargets])
 
   const sessionParams = useMemo<StartSessionParams>(
-    () => ({
-      sources: captureConfig.sources,
-      layout: captureConfig.layout,
-      scene: scene ?? undefined,
-      output: {
-        recordEnabled: captureConfig.recordEnabled,
-        streamEnabled: captureConfig.streamEnabled,
-        outputDirectory: settings.outputDirectory.trim() || undefined,
-        ffmpegPath: settings.ffmpegPath.trim() || undefined,
-        video: captureConfig.video,
-        rtmp: {
-          preset: captureConfig.rtmpPreset,
-          serverUrl: captureConfig.rtmpServerUrl.trim(),
-          streamKey: captureConfig.streamKey.trim()
-        }
-      },
-      audio: captureConfig.audio,
-      streaming: captureConfig.streaming
-    }),
+    () => buildStartSessionParams({ captureConfig, scene, settings }),
     [captureConfig, scene, settings]
   )
 
@@ -917,11 +882,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         typeof window === 'undefined'
           ? undefined
           : window.videorc?.updateNativePreviewSurfaceCompositor
-      if (!nativePreviewSurfaceEnabled || !updateCompositor) {
+      const presentDecision = decideNativePreviewCompositorPresent({
+        nativePreviewSurfaceEnabled,
+        updateCompositorAvailable: Boolean(updateCompositor),
+        recordingState: recordingRef.current.state
+      })
+      if (presentDecision.kind === 'disabled' || !updateCompositor) {
         nativePreviewCompositorPendingRef.current = null
         return
       }
-      if (recordingRef.current.state === 'starting') {
+      if (presentDecision.kind === 'suppress-starting') {
         nativePreviewCompositorPendingRef.current = null
         nativePreviewCompositorSuppressedPresentsRef.current += 1
         return
@@ -938,14 +908,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           while (nativePreviewCompositorPendingRef.current) {
             const nextStatus = nativePreviewCompositorPendingRef.current
             nativePreviewCompositorPendingRef.current = null
-            const suppressFramePolling = isActiveRecordingState(recordingRef.current.state)
-            const updateParams: PreviewSurfaceCompositorUpdateParams = suppressFramePolling
-              ? {
-                  ...nextStatus,
-                  suppressFramePolling: true,
-                  ...nativePreviewRendererTimingStatusFields()
-                }
-              : { ...nextStatus, ...nativePreviewRendererTimingStatusFields() }
+            const updateParams = buildNativePreviewCompositorUpdateParams(
+              nextStatus,
+              recordingRef.current.state,
+              nativePreviewRendererTimingStatusFields()
+            )
             const presentStartedAt = performance.now()
             const surfaceStatus = await updateCompositor(updateParams)
             recordNativePreviewTimingSample(
@@ -963,8 +930,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               nativePreviewCompositorSuppressedPresentsRef.current += 1
               continue
             }
-            const droppedFrames =
-              surfaceStatus.droppedFrames + nativePreviewCompositorSuppressedPresentsRef.current
+            const droppedFrames = nativePreviewDroppedFramesWithSuppressed(
+              surfaceStatus,
+              nativePreviewCompositorSuppressedPresentsRef.current
+            )
             const nextSurfaceStatus: PreviewSurfaceStatus = {
               ...surfaceStatus,
               ...rendererTimingFields,
@@ -3527,7 +3496,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   ])
 
   const startSession = useCallback(async () => {
-    if (captureConfig.streamEnabled) {
+    if (decideGoLiveStart(captureConfig.streamEnabled) === 'open-confirmation') {
       await openGoLiveConfirmation()
       return
     }
@@ -3535,11 +3504,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [captureConfig.streamEnabled, openGoLiveConfirmation, runStartSession])
 
   const cancelGoLiveConfirmation = useCallback(() => {
-    if (goLiveConfirmationPending || startRequestPending) {
+    const decision = decideCancelGoLiveConfirmation({
+      goLiveConfirmationPending,
+      startRequestPending,
+      partialSetup: goLivePartialSetup
+    })
+    if (decision.kind === 'ignore') {
       return
     }
-    if (goLivePartialSetup) {
-      void completePreparedPlatformBroadcasts(goLivePartialSetup.streaming)
+    if (decision.cleanupStreaming) {
+      void completePreparedPlatformBroadcasts(decision.cleanupStreaming)
     }
     setGoLivePartialSetup(null)
     setGoLiveConfirmationOpen(false)
@@ -3577,23 +3551,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       )
       setGoLivePreflight(preflight)
-      if (!preflight.valid) {
+      const preflightDecision = decideGoLivePreflight(preflight)
+      if (preflightDecision.kind === 'blocked') {
         toast.error('Resolve Go Live issues before starting.')
         return
       }
       const setup = await prepareOauthTargetsForGoLive()
-      if (setup.failures.length) {
-        if (!setup.readyLabels.length) {
-          throw new Error('No livestream destinations are ready after platform setup.')
-        }
-        setGoLivePartialSetup(setup)
+      const setupDecision = decidePreparedGoLiveSetup(setup)
+      if (setupDecision.kind === 'no-ready-destinations') {
+        throw new Error('No livestream destinations are ready after platform setup.')
+      }
+      if (setupDecision.kind === 'partial') {
+        setGoLivePartialSetup(setupDecision.setup)
         toast.warning('Some destinations failed setup.', {
           description: 'Continue with the ready destinations or cancel this Go Live.'
         })
         return
       }
       setGoLiveConfirmationOpen(false)
-      await runStartSession(setup.streaming)
+      await runStartSession(setupDecision.streaming)
     } catch (error) {
       reportError(error)
     } finally {
@@ -3611,17 +3587,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   ])
 
   const continueGoLiveWithReadyDestinations = useCallback(async () => {
-    if (!goLivePartialSetup || goLiveConfirmationPending || startRequestPending) {
+    const decision = decideContinueGoLiveWithReadyDestinations({
+      goLiveConfirmationPending,
+      startRequestPending,
+      partialSetup: goLivePartialSetup
+    })
+    if (decision.kind === 'ignore') {
       return
     }
 
     try {
       setLastError(null)
       setGoLiveConfirmationPending(true)
-      const setup = goLivePartialSetup
       setGoLivePartialSetup(null)
       setGoLiveConfirmationOpen(false)
-      await runStartSession(setup.streaming)
+      await runStartSession(decision.streaming)
     } catch (error) {
       reportError(error)
     } finally {
