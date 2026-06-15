@@ -6,14 +6,30 @@ import {
   canApplySlot,
   clearActiveSlot,
   createDefaultRegistry,
+  createImportedAsset,
   defaultBackgroundStyle,
+  importIntoSlot,
+  markSlotStatus,
   reconcileRegistry,
+  removeSlotAsset,
+  renameAsset,
+  setAssetStyle,
   slotDisplayStatus,
   slotName,
   type BackgroundAsset,
   type BackgroundAssetRegistry,
   type BackgroundAssetSlot
 } from './background-assets'
+
+function importedAsset(id: string, name: string): BackgroundAsset {
+  return createImportedAsset({
+    id,
+    name,
+    assetPath: `/managed/${id}.png`,
+    createdAt: '2026-06-15T00:00:00.000Z',
+    updatedAt: '2026-06-15T00:00:00.000Z'
+  })
+}
 
 function readyAsset(id: string, name: string): BackgroundAsset {
   return {
@@ -152,5 +168,104 @@ describe('background asset model', () => {
       expect(reconciled.slots.map((slot) => slot.id)).not.toContain('bg-99')
       expect(reconciled.slots[0].defaultLabel).toBe('Code Demo')
     })
+  })
+})
+
+describe('background asset import and editing', () => {
+  it('creates an imported asset that is ready with default style', () => {
+    const asset = importedAsset('a1', 'Sunset')
+    expect(asset.kind).toBe('imported')
+    expect(asset.status).toBe('ready')
+    expect(asset.thumbnailPath).toBe('/managed/a1.png')
+    expect(asset.styleDefaults).toEqual(defaultBackgroundStyle())
+  })
+
+  it('imports an asset into a slot and marks it ready', () => {
+    const registry = importIntoSlot(createDefaultRegistry(), 'bg-02', importedAsset('a1', 'Sunset'))
+    const slot = slotById(registry, 'bg-02')
+    expect(slot.assetId).toBe('a1')
+    expect(slot.status).toBe('ready')
+    expect(registry.assets.a1?.name).toBe('Sunset')
+  })
+
+  it('drops the previous asset when a slot is replaced', () => {
+    let registry = importIntoSlot(createDefaultRegistry(), 'bg-02', importedAsset('a1', 'First'))
+    registry = importIntoSlot(registry, 'bg-02', importedAsset('a2', 'Second'))
+    expect(registry.assets.a1).toBeUndefined()
+    expect(registry.assets.a2).toBeDefined()
+    expect(slotById(registry, 'bg-02').assetId).toBe('a2')
+  })
+
+  it('renames an asset, ignoring blank or unchanged names', () => {
+    let registry = importIntoSlot(createDefaultRegistry(), 'bg-02', importedAsset('a1', 'Sunset'))
+    registry = renameAsset(registry, 'a1', '  Dawn ')
+    expect(registry.assets.a1?.name).toBe('Dawn')
+    expect(renameAsset(registry, 'a1', '   ')).toBe(registry)
+    expect(renameAsset(registry, 'a1', 'Dawn')).toBe(registry)
+  })
+
+  it('edits asset style defaults without touching untouched fields', () => {
+    let registry = importIntoSlot(createDefaultRegistry(), 'bg-02', importedAsset('a1', 'Sunset'))
+    registry = setAssetStyle(registry, 'a1', { blurPx: 12, fit: 'fit' })
+    expect(registry.assets.a1?.styleDefaults.blurPx).toBe(12)
+    expect(registry.assets.a1?.styleDefaults.fit).toBe('fit')
+    expect(registry.assets.a1?.styleDefaults.scale).toBe(100)
+  })
+
+  it('removes a slot asset and clears the active marker if it was active', () => {
+    let registry = importIntoSlot(createDefaultRegistry(), 'bg-02', importedAsset('a1', 'Sunset'))
+    registry = applySlot(registry, 'bg-02')
+    expect(registry.activeSlotId).toBe('bg-02')
+
+    registry = removeSlotAsset(registry, 'bg-02')
+    expect(registry.assets.a1).toBeUndefined()
+    expect(registry.activeSlotId).toBeNull()
+    const slot = slotById(registry, 'bg-02')
+    expect(slot.assetId).toBeNull()
+    expect(slot.status).toBe('empty')
+  })
+
+  it('marks a missing file without dropping the active selection', () => {
+    let registry = importIntoSlot(createDefaultRegistry(), 'bg-02', importedAsset('a1', 'Sunset'))
+    registry = applySlot(registry, 'bg-02')
+    registry = markSlotStatus(registry, 'bg-02', 'missing-file')
+    expect(registry.activeSlotId).toBe('bg-02')
+    expect(slotDisplayStatus(slotById(registry, 'bg-02'), registry)).toBe('missing-file')
+  })
+})
+
+describe('reconcileRegistry with imported assets', () => {
+  it('round-trips an imported, applied asset through persistence', () => {
+    let registry = importIntoSlot(createDefaultRegistry(), 'bg-02', importedAsset('a1', 'Sunset'))
+    registry = applySlot(registry, 'bg-02')
+
+    const restored = reconcileRegistry(JSON.parse(JSON.stringify(registry)))
+    expect(restored.assets.a1).toBeDefined()
+    expect(slotById(restored, 'bg-02').status).toBe('ready')
+    expect(restored.activeSlotId).toBe('bg-02')
+  })
+
+  it('prunes orphan assets and drops malformed ones', () => {
+    const restored = reconcileRegistry({
+      slots: [],
+      assets: {
+        a1: { id: 'a1', name: 'Orphan', assetPath: '/m/a1.png', styleDefaults: {} },
+        bad: { name: 'No id' }
+      },
+      activeSlotId: null
+    })
+    expect(Object.keys(restored.assets)).toHaveLength(0)
+  })
+
+  it('fills missing style fields from defaults on reload', () => {
+    const restored = reconcileRegistry({
+      slots: [{ id: 'bg-02', assetId: 'a1' }],
+      assets: {
+        a1: { id: 'a1', name: 'Partial', assetPath: '/m/a1.png', styleDefaults: { blurPx: 9 } }
+      },
+      activeSlotId: null
+    })
+    expect(restored.assets.a1?.styleDefaults.blurPx).toBe(9)
+    expect(restored.assets.a1?.styleDefaults.scale).toBe(100)
   })
 })

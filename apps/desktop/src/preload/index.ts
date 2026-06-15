@@ -13,6 +13,7 @@ const api: VideorcApi = {
   getBackendLogs: () => ipcRenderer.invoke('backend:get-logs'),
   getRuntimeInfo: () => ipcRenderer.invoke('app:get-runtime-info'),
   pickScreenImage: () => ipcRenderer.invoke('screens:pick-image'),
+  importBackgroundImage: () => ipcRenderer.invoke('backgrounds:import-image'),
   openOAuthUrl: (authUrl) => ipcRenderer.invoke('oauth:open-url', authUrl),
   getOAuthCallbackRedirectUri: (platform) =>
     ipcRenderer.invoke('oauth:callback-redirect-uri', platform),

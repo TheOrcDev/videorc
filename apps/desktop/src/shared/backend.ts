@@ -1,3 +1,5 @@
+import type { BackgroundImportResult } from './background-import'
+
 export interface BackendConnection {
   host: string
   port: number
@@ -1726,6 +1728,9 @@ export interface VideorcApi {
   getBackendLogs: () => Promise<BackendLogEvent[]>
   getRuntimeInfo: () => Promise<RuntimeInfo>
   pickScreenImage: () => Promise<string | null>
+  // Picks a PNG/JPG/WebP and copies it into app-support storage, returning the
+  // managed asset (Assets Tab plan, slice A4).
+  importBackgroundImage: () => Promise<BackgroundImportResult | null>
   openOAuthUrl: (authUrl: string) => Promise<void>
   getOAuthCallbackRedirectUri: (platform?: string) => Promise<string | null>
   getNativePreviewSurfaceMode: () => Promise<boolean>

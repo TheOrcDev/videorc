@@ -13,7 +13,8 @@ import {
   type BrowserWindowConstructorOptions,
   type NativeImage
 } from 'electron'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import {
   createServer,
   request as httpRequest,
@@ -23,7 +24,7 @@ import {
 } from 'node:http'
 import { createRequire } from 'node:module'
 import { homedir, release } from 'node:os'
-import { delimiter, dirname, join, resolve } from 'node:path'
+import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 
@@ -53,6 +54,12 @@ import {
 } from '../shared/native-preview-host-driver'
 import { normalizePreviewSurfaceBounds } from '../shared/native-preview-bounds'
 import { accountSkippedPreviewFrame } from '../shared/native-preview-latest-wins'
+import {
+  backgroundAssetNameFromPath,
+  isSupportedBackgroundFile,
+  managedBackgroundFileName,
+  type BackgroundImportResult
+} from '../shared/background-import'
 import type {
   BackendConnection,
   BackendLogEvent,
@@ -3951,6 +3958,46 @@ async function pickScreenImage(): Promise<string | null> {
   return result.filePaths[0] ?? null
 }
 
+async function importBackgroundImage(): Promise<BackgroundImportResult | null> {
+  const options: Electron.OpenDialogOptions = {
+    title: 'Import background image',
+    properties: ['openFile'],
+    filters: [
+      {
+        name: 'Images',
+        extensions: ['png', 'jpg', 'jpeg', 'webp']
+      }
+    ]
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+
+  if (result.canceled) {
+    return null
+  }
+  const sourcePath = result.filePaths[0]
+  if (!sourcePath || !isSupportedBackgroundFile(sourcePath)) {
+    return null
+  }
+
+  // Copy into app-support storage and reference the managed copy, never the
+  // user's original path (Assets Tab plan locked decision).
+  const id = randomUUID()
+  const directory = join(app.getPath('userData'), 'background-assets')
+  mkdirSync(directory, { recursive: true })
+  const assetPath = join(directory, managedBackgroundFileName(id, sourcePath))
+  copyFileSync(sourcePath, assetPath)
+
+  return {
+    id,
+    name: backgroundAssetNameFromPath(sourcePath),
+    assetPath,
+    thumbnailPath: assetPath,
+    fileName: basename(sourcePath)
+  }
+}
+
 async function openOAuthUrl(authUrl: string): Promise<void> {
   const parsed = new URL(authUrl)
   if (!['http:', 'https:'].includes(parsed.protocol)) {
@@ -4004,6 +4051,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('system:reveal-permission-target', () => revealPermissionTarget())
   ipcMain.handle('system:reveal-path', (_event, targetPath: string) => revealPath(targetPath))
   ipcMain.handle('screens:pick-image', () => pickScreenImage())
+  ipcMain.handle('backgrounds:import-image', () => importBackgroundImage())
   ipcMain.handle('oauth:open-url', (_event, authUrl: string) => openOAuthUrl(authUrl))
   ipcMain.handle('oauth:callback-redirect-uri', (_event, platform?: string) =>
     oauthCallbackRedirectUri(platform)

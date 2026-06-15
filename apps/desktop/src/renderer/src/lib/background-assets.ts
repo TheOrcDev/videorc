@@ -161,22 +161,236 @@ export function clearActiveSlot(registry: BackgroundAssetRegistry): BackgroundAs
   return registry.activeSlotId === null ? registry : { ...registry, activeSlotId: null }
 }
 
+// Build an imported asset record from the main process's copy result plus the
+// caller's timestamps (kept out of this pure module so it stays deterministic).
+export function createImportedAsset(input: {
+  id: string
+  name: string
+  assetPath: string
+  thumbnailPath?: string
+  createdAt: string
+  updatedAt: string
+  styleDefaults?: BackgroundStyle
+}): BackgroundAsset {
+  return {
+    id: input.id,
+    name: input.name,
+    kind: 'imported',
+    assetPath: input.assetPath,
+    thumbnailPath: input.thumbnailPath ?? input.assetPath,
+    status: 'ready',
+    styleDefaults: input.styleDefaults ?? defaultBackgroundStyle(),
+    createdAt: input.createdAt,
+    updatedAt: input.updatedAt
+  }
+}
+
+// Link an imported asset into a slot, marking it ready. Replacing a slot's asset
+// drops the previous record so the registry can't leak orphaned assets.
+export function importIntoSlot(
+  registry: BackgroundAssetRegistry,
+  slotId: string,
+  asset: BackgroundAsset
+): BackgroundAssetRegistry {
+  const slot = registry.slots.find((entry) => entry.id === slotId)
+  if (!slot) {
+    return registry
+  }
+  const assets: Record<string, BackgroundAsset> = { ...registry.assets }
+  if (slot.assetId && slot.assetId !== asset.id) {
+    delete assets[slot.assetId]
+  }
+  assets[asset.id] = asset
+  return {
+    ...registry,
+    assets,
+    slots: registry.slots.map(
+      (entry): BackgroundAssetSlot =>
+        entry.id === slotId ? { ...entry, assetId: asset.id, status: 'ready' } : entry
+    )
+  }
+}
+
+export function renameAsset(
+  registry: BackgroundAssetRegistry,
+  assetId: string,
+  name: string
+): BackgroundAssetRegistry {
+  const asset = registry.assets[assetId]
+  const trimmed = name.trim()
+  if (!asset || trimmed === '' || trimmed === asset.name) {
+    return registry
+  }
+  return {
+    ...registry,
+    assets: { ...registry.assets, [assetId]: { ...asset, name: trimmed } }
+  }
+}
+
+// Edit asset-level style defaults (Assets owns defaults; Scene overrides come in A5).
+export function setAssetStyle(
+  registry: BackgroundAssetRegistry,
+  assetId: string,
+  patch: Partial<BackgroundStyle>
+): BackgroundAssetRegistry {
+  const asset = registry.assets[assetId]
+  if (!asset) {
+    return registry
+  }
+  return {
+    ...registry,
+    assets: {
+      ...registry.assets,
+      [assetId]: { ...asset, styleDefaults: { ...asset.styleDefaults, ...patch } }
+    }
+  }
+}
+
+// Empty a slot back to a placeholder and drop its asset. Clears the active
+// background if this slot was the active one.
+export function removeSlotAsset(
+  registry: BackgroundAssetRegistry,
+  slotId: string
+): BackgroundAssetRegistry {
+  const slot = registry.slots.find((entry) => entry.id === slotId)
+  if (!slot || !slot.assetId) {
+    return registry
+  }
+  const assets = { ...registry.assets }
+  delete assets[slot.assetId]
+  return {
+    ...registry,
+    assets,
+    activeSlotId: registry.activeSlotId === slotId ? null : registry.activeSlotId,
+    slots: registry.slots.map(
+      (entry): BackgroundAssetSlot =>
+        entry.id === slotId ? { ...entry, assetId: null, status: 'empty' } : entry
+    )
+  }
+}
+
+// Set a slot's intrinsic status — used when an <img> fails to load to surface
+// 'missing-file' without dropping the active selection (A6 records without a
+// background and warns; A4 just shows the state).
+export function markSlotStatus(
+  registry: BackgroundAssetRegistry,
+  slotId: string,
+  status: IntrinsicSlotStatus
+): BackgroundAssetRegistry {
+  const slot = registry.slots.find((entry) => entry.id === slotId)
+  if (!slot || slot.status === status) {
+    return registry
+  }
+  return {
+    ...registry,
+    slots: registry.slots.map(
+      (entry): BackgroundAssetSlot => (entry.id === slotId ? { ...entry, status } : entry)
+    )
+  }
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function normalizeStyle(raw: unknown): BackgroundStyle {
+  const base = defaultBackgroundStyle()
+  if (!raw || typeof raw !== 'object') {
+    return base
+  }
+  const data = raw as Partial<BackgroundStyle>
+  return {
+    fit: data.fit === 'fit' || data.fit === 'stretch' ? data.fit : base.fit,
+    scale: numberOr(data.scale, base.scale),
+    offsetX: numberOr(data.offsetX, base.offsetX),
+    offsetY: numberOr(data.offsetY, base.offsetY),
+    blurPx: numberOr(data.blurPx, base.blurPx),
+    dimPercent: numberOr(data.dimPercent, base.dimPercent),
+    saturationPercent: numberOr(data.saturationPercent, base.saturationPercent),
+    vignettePercent: numberOr(data.vignettePercent, base.vignettePercent)
+  }
+}
+
+function normalizeAsset(raw: unknown): BackgroundAsset | null {
+  if (!raw || typeof raw !== 'object') {
+    return null
+  }
+  const data = raw as Partial<BackgroundAsset>
+  if (typeof data.id !== 'string' || typeof data.assetPath !== 'string') {
+    return null
+  }
+  return {
+    id: data.id,
+    name: typeof data.name === 'string' && data.name.trim() !== '' ? data.name : 'Background',
+    kind: data.kind === 'builtin' || data.kind === 'preset-placeholder' ? data.kind : 'imported',
+    assetPath: data.assetPath,
+    thumbnailPath: typeof data.thumbnailPath === 'string' ? data.thumbnailPath : data.assetPath,
+    status: 'ready',
+    dominantColor: typeof data.dominantColor === 'string' ? data.dominantColor : undefined,
+    styleDefaults: normalizeStyle(data.styleDefaults),
+    createdAt: typeof data.createdAt === 'string' ? data.createdAt : '',
+    updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : ''
+  }
+}
+
 // Rebuild a trustworthy registry from whatever localStorage held. The canonical
 // ten slots always come from code (ids + labels), so a stale or partial store
-// can never drop a slot or resurrect a renamed one. A2 persists only the active
-// selection; import (A4) will extend this to overlay per-slot asset records.
+// can never drop a slot or resurrect a renamed one; only the mutable overlay
+// (imported assets, per-slot link, active selection) is restored, validated, and
+// pruned of orphans. Imported slots reload as 'ready'; a missing managed file is
+// re-detected at runtime (the tile <img> onError), not persisted.
 export function reconcileRegistry(loaded: unknown): BackgroundAssetRegistry {
   const base = createDefaultRegistry()
   if (!loaded || typeof loaded !== 'object') {
     return base
   }
 
-  const data = loaded as Partial<BackgroundAssetRegistry>
+  const data = loaded as { slots?: unknown; assets?: unknown; activeSlotId?: unknown }
+
+  const assets: Record<string, BackgroundAsset> = {}
+  if (data.assets && typeof data.assets === 'object') {
+    for (const [id, raw] of Object.entries(data.assets as Record<string, unknown>)) {
+      const asset = normalizeAsset(raw)
+      if (asset && asset.id === id) {
+        assets[id] = asset
+      }
+    }
+  }
+
+  // slotId -> stored assetId (validated below); the canonical slots themselves
+  // always come from code, never from storage.
+  const storedAssetId = new Map<string, unknown>()
+  if (Array.isArray(data.slots)) {
+    for (const raw of data.slots) {
+      if (raw && typeof raw === 'object') {
+        const slot = raw as { id?: unknown; assetId?: unknown }
+        if (typeof slot.id === 'string') {
+          storedAssetId.set(slot.id, slot.assetId)
+        }
+      }
+    }
+  }
+  const slots = base.slots.map((slot): BackgroundAssetSlot => {
+    const stored = storedAssetId.get(slot.id)
+    const assetId = typeof stored === 'string' && assets[stored] ? stored : null
+    return assetId ? { ...slot, assetId, status: 'ready' } : slot
+  })
+
+  const storedActive = data.activeSlotId
   const activeSlotId =
-    typeof data.activeSlotId === 'string' &&
-    base.slots.some((slot) => slot.id === data.activeSlotId && slot.status === 'ready')
-      ? data.activeSlotId
+    typeof storedActive === 'string' &&
+    slots.some((slot) => slot.id === storedActive && slot.status === 'ready')
+      ? storedActive
       : null
 
-  return { ...base, activeSlotId }
+  // Drop assets no slot references so orphans can't accumulate in storage.
+  const referenced = new Set(slots.map((slot) => slot.assetId).filter(Boolean))
+  const prunedAssets: Record<string, BackgroundAsset> = {}
+  for (const [id, asset] of Object.entries(assets)) {
+    if (referenced.has(id)) {
+      prunedAssets[id] = asset
+    }
+  }
+
+  return { slots, assets: prunedAssets, activeSlotId }
 }
