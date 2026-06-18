@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  BUNDLED_BACKGROUND_MANIFEST,
   backgroundAssetNameFromPath,
   isSupportedBackgroundFile,
   managedBackgroundFileName
@@ -43,5 +44,26 @@ describe('managedBackgroundFileName', () => {
 
   it('falls back to .png for an unsupported source extension', () => {
     expect(managedBackgroundFileName('abc123', 'weird.bmp')).toBe('abc123.png')
+  })
+})
+
+describe('BUNDLED_BACKGROUND_MANIFEST', () => {
+  it('declares the ten built-in backgrounds by stable asset id and webp file', () => {
+    expect(BUNDLED_BACKGROUND_MANIFEST).toHaveLength(10)
+    expect(BUNDLED_BACKGROUND_MANIFEST.map((asset) => asset.id)).toEqual([
+      'builtin-bg-01',
+      'builtin-bg-02',
+      'builtin-bg-03',
+      'builtin-bg-04',
+      'builtin-bg-05',
+      'builtin-bg-06',
+      'builtin-bg-07',
+      'builtin-bg-08',
+      'builtin-bg-09',
+      'builtin-bg-10'
+    ])
+    expect(BUNDLED_BACKGROUND_MANIFEST.every((asset) => asset.fileName.endsWith('.webp'))).toBe(
+      true
+    )
   })
 })

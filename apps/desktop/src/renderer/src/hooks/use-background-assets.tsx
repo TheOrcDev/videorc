@@ -9,7 +9,11 @@ import {
   type SetStateAction
 } from 'react'
 
-import { reconcileRegistry, type BackgroundAssetRegistry } from '@/lib/background-assets'
+import {
+  applyBundledBackgroundAssets,
+  reconcileRegistry,
+  type BackgroundAssetRegistry
+} from '@/lib/background-assets'
 import { STORAGE_KEYS, loadJson } from '@/lib/capture'
 
 type BackgroundAssetsValue = {
@@ -28,6 +32,22 @@ export function BackgroundAssetsProvider({ children }: { children: ReactNode }):
   const [registry, setRegistry] = useState<BackgroundAssetRegistry>(() =>
     reconcileRegistry(loadJson(STORAGE_KEYS.backgroundAssets, null))
   )
+
+  useEffect(() => {
+    let cancelled = false
+    void window.videorc
+      ?.getBundledBackgroundAssets?.()
+      .then((bundledAssets) => {
+        if (cancelled) {
+          return
+        }
+        setRegistry((current) => applyBundledBackgroundAssets(current, bundledAssets))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.backgroundAssets, JSON.stringify(registry))

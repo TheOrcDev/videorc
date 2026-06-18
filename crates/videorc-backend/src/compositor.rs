@@ -29,12 +29,12 @@ use crate::preview_screen::{
     preview_screen_frame_source, try_preview_screen_frame_source,
 };
 use crate::protocol::{
-    CameraFit, CameraShape, CompositorBackend, CompositorSceneSourceFit, CompositorSceneSourceKind,
-    CompositorSceneSourceStatus, CompositorSceneUpdateParams, CompositorSourceKind,
-    CompositorSourceStatus, CompositorState, CompositorStatus, DiagnosticStats, LayoutPreset,
-    LayoutSettings, PreviewCameraState, PreviewScreenSourceKind, PreviewScreenState,
-    PreviewSurfaceState, PreviewSurfaceStatus, PreviewTransport, Scene, SceneSourceKind,
-    SceneTransform, StreamScreen,
+    BackgroundFit, CameraFit, CameraShape, CompositorBackend, CompositorSceneSourceFit,
+    CompositorSceneSourceKind, CompositorSceneSourceStatus, CompositorSceneUpdateParams,
+    CompositorSourceKind, CompositorSourceStatus, CompositorState, CompositorStatus,
+    DiagnosticStats, EffectiveSceneBackground, LayoutPreset, LayoutSettings, PreviewCameraState,
+    PreviewScreenSourceKind, PreviewScreenState, PreviewSurfaceState, PreviewSurfaceStatus,
+    PreviewTransport, Scene, SceneSourceKind, SceneTransform, StreamScreen,
 };
 use crate::state::AppState;
 
@@ -49,6 +49,7 @@ const COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_MISSES: u32 = 1;
 const COMPOSITOR_MISSING_SOURCE_PLACEHOLDER_AFTER: Duration = Duration::from_secs(2);
 const MISSING_SOURCE_PLACEHOLDER_WIDTH: usize = 16;
 const MISSING_SOURCE_PLACEHOLDER_HEIGHT: usize = 9;
+const BACKGROUND_STAGE_MARGIN: f64 = 0.06;
 
 pub type CompositorSlot = std::sync::Arc<tokio::sync::Mutex<CompositorRuntime>>;
 pub type CompositorFrameStore =
@@ -296,6 +297,7 @@ struct CompositorRenderCache {
     stream_frame_store: Option<CompositorFrameStore>,
     snapshot: Option<CompositorSceneSnapshot>,
     active_image_source: Option<CompositorImageSource>,
+    background_image_source: Option<CompositorImageSource>,
 }
 
 impl CompositorRenderCache {
@@ -317,11 +319,23 @@ impl CompositorRenderCache {
             .and_then(|snapshot| snapshot.active_screen.as_ref())
             .and_then(|screen| compositor.image_sources.get(&screen.id))
             .cloned();
+        let background_image_source = compositor
+            .scene
+            .as_ref()
+            .and_then(|snapshot| snapshot.scene.as_ref())
+            .and_then(|scene| scene.background.as_ref())
+            .and_then(|background| {
+                compositor
+                    .image_sources
+                    .get(&background_cache_key(background))
+            })
+            .cloned();
         Self {
             frame_store: compositor.frame_store.clone(),
             stream_frame_store: compositor.stream_frame_store.clone(),
             snapshot: compositor.scene.clone(),
             active_image_source,
+            background_image_source,
         }
     }
 }
@@ -869,6 +883,11 @@ pub async fn update_compositor_scene(
             .active_screen
             .as_ref()
             .map(|screen| compositor.cache_image_source(screen));
+        let _background_image_source = snapshot
+            .scene
+            .as_ref()
+            .and_then(|scene| scene.background.as_ref())
+            .map(|background| compositor.cache_background_image_source(background));
         compositor.status.scene_revision = Some(snapshot.revision);
         compositor.status.scene_id = snapshot.scene.as_ref().map(|scene| scene.id.clone());
         compositor.status.scene_layout = Some(snapshot.layout.clone());
@@ -924,10 +943,37 @@ impl CompositorRuntime {
     }
 
     fn cache_image_source(&mut self, screen: &StreamScreen) -> CompositorImageSource {
-        let path = Path::new(&screen.image_path);
+        self.cache_image_path(
+            &screen.id,
+            &screen.image_path,
+            "Could not read uploaded screen image",
+            "Uploaded screen image file is missing.",
+        )
+    }
+
+    fn cache_background_image_source(
+        &mut self,
+        background: &EffectiveSceneBackground,
+    ) -> CompositorImageSource {
+        self.cache_image_path(
+            &background_cache_key(background),
+            &background.managed_asset_path,
+            "Could not read background image",
+            "Background image file is missing.",
+        )
+    }
+
+    fn cache_image_path(
+        &mut self,
+        cache_key: &str,
+        image_path: &str,
+        read_error_prefix: &str,
+        missing_message: &str,
+    ) -> CompositorImageSource {
+        let path = Path::new(image_path);
         let file_revision = image_file_revision(path);
-        if let Some(cached) = self.image_sources.get(&screen.id)
-            && cached.image_path == screen.image_path
+        if let Some(cached) = self.image_sources.get(cache_key)
+            && cached.image_path == image_path
             && cached.file_revision == file_revision
         {
             return cached.clone();
@@ -938,7 +984,7 @@ impl CompositorRuntime {
                 Ok(image) => {
                     let (width, height) = image.dimensions();
                     CompositorImageSource {
-                        image_path: screen.image_path.clone(),
+                        image_path: image_path.to_string(),
                         file_revision,
                         width: Some(width),
                         height: Some(height),
@@ -948,27 +994,28 @@ impl CompositorRuntime {
                     }
                 }
                 Err(error) => CompositorImageSource {
-                    image_path: screen.image_path.clone(),
+                    image_path: image_path.to_string(),
                     file_revision,
                     width: None,
                     height: None,
                     rgba: None,
                     state: "source-missing".to_string(),
-                    message: Some(format!("Could not read uploaded screen image: {error}")),
+                    message: Some(format!("{read_error_prefix}: {error}")),
                 },
             }
         } else {
             CompositorImageSource {
-                image_path: screen.image_path.clone(),
+                image_path: image_path.to_string(),
                 file_revision,
                 width: None,
                 height: None,
                 rgba: None,
                 state: "source-missing".to_string(),
-                message: Some("Uploaded screen image file is missing.".to_string()),
+                message: Some(missing_message.to_string()),
             }
         };
-        self.image_sources.insert(screen.id.clone(), source.clone());
+        self.image_sources
+            .insert(cache_key.to_string(), source.clone());
         source
     }
 }
@@ -1589,24 +1636,86 @@ fn try_gpu_compose(
     })?;
     let prepare_started_at = Instant::now();
     let snapshot = inputs.snapshot.ok_or("compositor scene unavailable")?;
+    let scene = snapshot.scene.as_ref();
+    let layout = &snapshot.layout;
+    let mut prepared_sources = Vec::new();
+    let background_active = if let Some(scene) = scene {
+        if let Some(background) = scene.background.as_ref() {
+            if let Some((rgba, (image_width, image_height))) = inputs
+                .background_image_source
+                .and_then(|source| source.rgba.as_ref().zip(source.width.zip(source.height)))
+            {
+                let bgra = rgba_to_bgra_bytes(rgba);
+                let (dest, crop) = gpu_source_placement(
+                    image_width,
+                    image_height,
+                    PixelRect {
+                        x: 0,
+                        y: 0,
+                        width: inputs.width,
+                        height: inputs.height,
+                    },
+                    matches!(background.fit, BackgroundFit::Fit),
+                    background_zoom_crop(Some(background)),
+                    inputs.width,
+                    inputs.height,
+                )
+                .ok_or("background source placement failed")?;
+                prepared_sources.push(PreparedGpuSource {
+                    pixels: PreparedGpuSourcePixels::Owned(bgra),
+                    kind: crate::metal_compositor::GpuSourceKind::Image,
+                    iosurface: None,
+                    pixel_buffer: None,
+                    width: image_width as usize,
+                    height: image_height as usize,
+                    dest,
+                    crop,
+                    mirror: false,
+                    circle: false,
+                });
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     if let Some(image) = inputs
         .active_image_source
         .and_then(|source| source.rgba.as_ref().zip(source.width.zip(source.height)))
     {
         let (rgba, (image_width, image_height)) = image;
         let bgra = rgba_to_bgra_bytes(rgba);
-        let sources = [crate::metal_compositor::GpuSource {
+        let (dest, crop) = gpu_source_placement(
+            image_width,
+            image_height,
+            scene_content_rect_pixels(background_active, inputs.width, inputs.height),
+            false,
+            SourceCrop::none(),
+            inputs.width,
+            inputs.height,
+        )
+        .ok_or("cached image placement failed")?;
+        prepared_sources.push(PreparedGpuSource {
+            pixels: PreparedGpuSourcePixels::Owned(bgra),
             kind: crate::metal_compositor::GpuSourceKind::Image,
-            bgra: &bgra,
             iosurface: None,
             pixel_buffer: None,
             width: image_width as usize,
             height: image_height as usize,
-            dest: [0.0, 0.0, 1.0, 1.0],
-            crop: [0.0; 4],
+            dest,
+            crop,
             mirror: false,
             circle: false,
-        }];
+        });
+        let sources = prepared_sources
+            .iter()
+            .map(PreparedGpuSource::as_gpu_source)
+            .collect::<Vec<_>>();
         let prepare_ms = prepare_started_at.elapsed().as_secs_f64() * 1000.0;
         let output = compose_gpu_sources(
             gpu,
@@ -1621,18 +1730,32 @@ fn try_gpu_compose(
     if inputs.active_image_source.is_some() {
         let placeholder =
             missing_source_placeholder_bgra(&SceneSourceKind::Screen, inputs.sequence);
-        let sources = [crate::metal_compositor::GpuSource {
+        let (dest, crop) = gpu_source_placement(
+            placeholder.width as u32,
+            placeholder.height as u32,
+            scene_content_rect_pixels(background_active, inputs.width, inputs.height),
+            false,
+            SourceCrop::none(),
+            inputs.width,
+            inputs.height,
+        )
+        .ok_or("missing screen image placeholder placement failed")?;
+        prepared_sources.push(PreparedGpuSource {
+            pixels: PreparedGpuSourcePixels::Owned(placeholder.bytes),
             kind: crate::metal_compositor::GpuSourceKind::Image,
-            bgra: &placeholder.bytes,
             iosurface: None,
             pixel_buffer: None,
             width: placeholder.width,
             height: placeholder.height,
-            dest: [0.0, 0.0, 1.0, 1.0],
-            crop: [0.0; 4],
+            dest,
+            crop,
             mirror: false,
             circle: false,
-        }];
+        });
+        let sources = prepared_sources
+            .iter()
+            .map(PreparedGpuSource::as_gpu_source)
+            .collect::<Vec<_>>();
         let prepare_ms = prepare_started_at.elapsed().as_secs_f64() * 1000.0;
         let output = compose_gpu_sources(
             gpu,
@@ -1644,17 +1767,13 @@ fn try_gpu_compose(
         .ok_or("Metal compositor failed to render missing screen image placeholder")?;
         return Ok(gpu_compositor_frame(gpu, output, prepare_ms));
     }
-    let scene = snapshot
-        .scene
-        .as_ref()
-        .ok_or("compositor scene unavailable")?;
-    let layout = &snapshot.layout;
-    let mut prepared_sources = Vec::new();
+
+    let scene = scene.ok_or("compositor scene unavailable")?;
     for source in scene.sources.iter().filter(|source| source.visible) {
-        let transform = &source.transform;
-        let rect = scene_source_rect_pixels(transform, inputs.width, inputs.height)
+        let transform = scene_source_render_transform(&source.transform, background_active);
+        let rect = scene_source_rect_pixels(&transform, inputs.width, inputs.height)
             .ok_or("source rectangle is outside compositor bounds")?;
-        let source_crop = source_crop_from_transform(transform);
+        let source_crop = source_crop_from_transform(&transform);
         match source.kind {
             SceneSourceKind::Camera => {
                 if let Some(frame) = inputs
@@ -2111,6 +2230,7 @@ async fn publish_compositor_frame(
     let stream_frame_store = render_cache.stream_frame_store.clone();
     let snapshot = render_cache.snapshot.clone();
     let active_image_source = render_cache.active_image_source.clone();
+    let background_image_source = render_cache.background_image_source.clone();
     let scene_snapshot_ms = scene_snapshot_started_at.elapsed().as_secs_f64() * 1000.0;
     let (camera_frame, camera_frame_fetch_ms) =
         if scene_needs_live_camera_frame(snapshot.as_ref(), active_image_source.as_ref()) {
@@ -2169,6 +2289,7 @@ async fn publish_compositor_frame(
             height,
             snapshot: snapshot.as_ref(),
             active_image_source: active_image_source.as_ref(),
+            background_image_source: background_image_source.as_ref(),
             camera_frame: camera_frame.as_ref().map(|(frame, _layout)| frame),
             screen_frame: screen_frame.as_ref(),
         };
@@ -2217,6 +2338,7 @@ async fn publish_compositor_frame(
             height: stream_output.height.max(1),
             snapshot: snapshot.as_ref(),
             active_image_source: active_image_source.as_ref(),
+            background_image_source: background_image_source.as_ref(),
             camera_frame: camera_frame.as_ref().map(|(frame, _layout)| frame),
             screen_frame: screen_frame.as_ref(),
         };
@@ -2315,6 +2437,7 @@ struct CompositorRenderInputs<'a> {
     height: u32,
     snapshot: Option<&'a CompositorSceneSnapshot>,
     active_image_source: Option<&'a CompositorImageSource>,
+    background_image_source: Option<&'a CompositorImageSource>,
     camera_frame: Option<&'a FrameHandle<PreviewCameraPixelFormat>>,
     screen_frame: Option<&'a FrameHandle<PreviewScreenPixelFormat>>,
 }
@@ -2326,6 +2449,7 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
         height,
         snapshot,
         active_image_source,
+        background_image_source,
         camera_frame,
         screen_frame,
     } = inputs;
@@ -2339,6 +2463,13 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
         render_synthetic_yuv420p_frame(sequence, width, height, bytes);
         return;
     };
+    let background_active = render_scene_background(
+        scene.background.as_ref(),
+        background_image_source,
+        width,
+        height,
+        bytes,
+    );
 
     if let Some(image) = active_image_source
         .and_then(|source| source.rgba.as_ref().zip(source.width.zip(source.height)))
@@ -2354,12 +2485,7 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
             bytes,
             width,
             height,
-            PixelRect {
-                x: 0,
-                y: 0,
-                width,
-                height,
-            },
+            scene_content_rect_pixels(background_active, width, height),
             SourceRenderOptions {
                 crop: SourceCrop::none(),
                 contain: false,
@@ -2373,7 +2499,8 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
 
     let mut rendered_sources = 0_u32;
     for source in scene.sources.iter().filter(|source| source.visible) {
-        let Some(rect) = scene_source_rect_pixels(&source.transform, width, height) else {
+        let transform = scene_source_render_transform(&source.transform, background_active);
+        let Some(rect) = scene_source_rect_pixels(&transform, width, height) else {
             continue;
         };
         let rendered = match source.kind {
@@ -2398,7 +2525,7 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
                         height,
                         rect,
                         SourceRenderOptions {
-                            crop: source_crop_from_transform(&source.transform),
+                            crop: source_crop_from_transform(&transform),
                             contain: false,
                             mirror_x: false,
                             circle_mask: false,
@@ -2417,7 +2544,7 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
                         height,
                         rect,
                         SourceRenderOptions {
-                            crop: source_crop_from_transform(&source.transform),
+                            crop: source_crop_from_transform(&transform),
                             contain: false,
                             mirror_x: false,
                             circle_mask: false,
@@ -2440,7 +2567,7 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
                     height,
                     rect,
                     SourceRenderOptions {
-                        crop: source_crop_from_transform(&source.transform),
+                        crop: source_crop_from_transform(&transform),
                         contain: matches!(snapshot.layout.camera_fit, CameraFit::Fit)
                             && snapshot.layout.camera_zoom <= 100,
                         mirror_x: snapshot.layout.camera_mirror,
@@ -2454,7 +2581,7 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
         }
     }
 
-    if rendered_sources == 0 {
+    if rendered_sources == 0 && !background_active {
         render_synthetic_yuv420p_frame(sequence, width, height, bytes);
     }
 }
@@ -2680,6 +2807,116 @@ struct RgbaSource<'a> {
     width: u32,
     height: u32,
     format: SourcePixelFormat,
+}
+
+fn render_scene_background(
+    background: Option<&EffectiveSceneBackground>,
+    background_image_source: Option<&CompositorImageSource>,
+    width: u32,
+    height: u32,
+    bytes: &mut [u8],
+) -> bool {
+    let Some(background) = background else {
+        return false;
+    };
+    let Some((rgba, (image_width, image_height))) = background_image_source
+        .and_then(|source| source.rgba.as_ref().zip(source.width.zip(source.height)))
+    else {
+        return false;
+    };
+    blit_rgba_to_yuv420p(
+        &RgbaSource {
+            bytes: rgba,
+            width: image_width,
+            height: image_height,
+            format: SourcePixelFormat::Rgba,
+        },
+        bytes,
+        width,
+        height,
+        PixelRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+        SourceRenderOptions {
+            crop: background_zoom_crop(Some(background)),
+            contain: matches!(background.fit, BackgroundFit::Fit),
+            mirror_x: false,
+            circle_mask: false,
+        },
+    )
+}
+
+fn background_zoom_crop(background: Option<&EffectiveSceneBackground>) -> SourceCrop {
+    let Some(background) = background else {
+        return SourceCrop::none();
+    };
+    let scale = background.scale.clamp(100.0, 200.0);
+    if scale <= 100.0 {
+        return SourceCrop::none();
+    }
+    let total_crop = 1.0 - (100.0 / scale);
+    let crop_x = (background.offset_x.clamp(-100.0, 100.0) / 200.0) * total_crop;
+    let crop_y = (background.offset_y.clamp(-100.0, 100.0) / 200.0) * total_crop;
+    SourceCrop {
+        left: ((total_crop / 2.0) + crop_x).clamp(0.0, 0.95),
+        right: ((total_crop / 2.0) - crop_x).clamp(0.0, 0.95),
+        top: ((total_crop / 2.0) + crop_y).clamp(0.0, 0.95),
+        bottom: ((total_crop / 2.0) - crop_y).clamp(0.0, 0.95),
+    }
+}
+
+fn scene_content_rect_pixels(background_active: bool, width: u32, height: u32) -> PixelRect {
+    if !background_active {
+        return PixelRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+    }
+    scene_source_rect_pixels(
+        &SceneTransform {
+            x: BACKGROUND_STAGE_MARGIN,
+            y: BACKGROUND_STAGE_MARGIN,
+            width: 1.0 - (BACKGROUND_STAGE_MARGIN * 2.0),
+            height: 1.0 - (BACKGROUND_STAGE_MARGIN * 2.0),
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        },
+        width,
+        height,
+    )
+    .unwrap_or(PixelRect {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    })
+}
+
+fn scene_source_render_transform(
+    transform: &SceneTransform,
+    background_active: bool,
+) -> SceneTransform {
+    if !background_active {
+        return transform.clone();
+    }
+    let stage_scale = 1.0 - (BACKGROUND_STAGE_MARGIN * 2.0);
+    SceneTransform {
+        x: BACKGROUND_STAGE_MARGIN + (transform.x * stage_scale),
+        y: BACKGROUND_STAGE_MARGIN + (transform.y * stage_scale),
+        width: transform.width * stage_scale,
+        height: transform.height * stage_scale,
+        crop_left: transform.crop_left,
+        crop_top: transform.crop_top,
+        crop_right: transform.crop_right,
+        crop_bottom: transform.crop_bottom,
+    }
 }
 
 fn scene_source_rect_pixels(
@@ -3143,6 +3380,10 @@ fn image_file_revision(path: &Path) -> Option<String> {
     Some(format!("{}:{modified_ms}", metadata.len()))
 }
 
+fn background_cache_key(background: &EffectiveSceneBackground) -> String {
+    format!("background:{}", background.asset_id)
+}
+
 fn compositor_scene_source_kind(kind: &SceneSourceKind) -> CompositorSceneSourceKind {
     match kind {
         SceneSourceKind::Screen => CompositorSceneSourceKind::Screen,
@@ -3226,6 +3467,10 @@ mod tests {
 
     fn fp(camera: Option<u64>, screen: Option<u64>) -> SourceFrameFingerprint {
         SourceFrameFingerprint { camera, screen }
+    }
+
+    fn y_at(bytes: &[u8], width: u32, x: u32, y: u32) -> u8 {
+        bytes[y as usize * width as usize + x as usize]
     }
 
     #[test]
@@ -3721,6 +3966,7 @@ mod tests {
                 height: 4,
                 snapshot: Some(&snapshot),
                 active_image_source: None,
+                background_image_source: None,
                 camera_frame: None,
                 screen_frame: None,
             },
@@ -3735,6 +3981,7 @@ mod tests {
                 height: 4,
                 snapshot: Some(&snapshot),
                 active_image_source: None,
+                background_image_source: None,
                 camera_frame: None,
                 screen_frame: None,
             },
@@ -3817,6 +4064,7 @@ mod tests {
                 height: 4,
                 snapshot: Some(&snapshot),
                 active_image_source: None,
+                background_image_source: None,
                 camera_frame: None,
                 screen_frame: None,
             },
@@ -3897,6 +4145,7 @@ mod tests {
                 height: 4,
                 snapshot: Some(&snapshot),
                 active_image_source: None,
+                background_image_source: None,
                 camera_frame: Some(&camera_frame),
                 screen_frame: Some(&screen_frame),
             },
@@ -3907,6 +4156,91 @@ mod tests {
         assert_eq!(output.yuv.len(), raw_yuv420p_len(10, 4));
         assert!(output.pixel_format.has_metal_iosurface_target());
         assert!(output.timings.source_texture_ms >= 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_compose_background_under_inset_screen_target_or_skips() {
+        let Some(mut gpu) = new_gpu_compositor() else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.layout_preset = LayoutPreset::ScreenOnly;
+        let mut scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            sources: SourceSelection {
+                screen_id: Some("screen-1".to_string()),
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: layout.clone(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width: 100,
+                height: 100,
+                fps: 30,
+                bitrate_kbps: 2000,
+            }),
+        });
+        scene.background = Some(EffectiveSceneBackground {
+            asset_id: "builtin-bg-01".to_string(),
+            managed_asset_path: "/managed/code-demo.webp".to_string(),
+            fit: BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+        });
+        let snapshot = CompositorSceneSnapshot {
+            revision: 1,
+            scene: Some(scene),
+            layout,
+            active_screen: None,
+        };
+        let background_image_source = CompositorImageSource {
+            image_path: "code-demo.webp".to_string(),
+            file_revision: None,
+            width: Some(2),
+            height: Some(2),
+            rgba: Some(Arc::new([255, 0, 0, 255].repeat(4))),
+            state: "live".to_string(),
+            message: None,
+        };
+        let screen_frame = Arc::new(crate::frame_store::StoredFrame {
+            sequence: 1,
+            width: 100,
+            height: 100,
+            pixel_format: PreviewScreenPixelFormat::Bgra8,
+            metadata: (),
+            bytes: [255, 0, 0, 255].repeat(100 * 100),
+            source_iosurface: None,
+            source_pixel_buffer: None,
+            captured_at: Instant::now(),
+        });
+
+        let frame = try_gpu_compose(
+            Some(&mut gpu),
+            &CompositorRenderInputs {
+                sequence: 1,
+                width: 100,
+                height: 100,
+                snapshot: Some(&snapshot),
+                active_image_source: None,
+                background_image_source: Some(&background_image_source),
+                camera_frame: None,
+                screen_frame: Some(&screen_frame),
+            },
+            false,
+        )
+        .expect("background + screen target should render on Metal");
+
+        assert!(frame.pixel_format.has_metal_iosurface_target());
+        assert!(frame.export_handle.has_metal_iosurface_target());
     }
 
     #[cfg(target_os = "macos")]
@@ -4108,6 +4442,7 @@ mod tests {
                 height: 4,
                 snapshot: Some(&snapshot),
                 active_image_source: None,
+                background_image_source: None,
                 camera_frame: None,
                 screen_frame: None,
             },
@@ -4153,6 +4488,7 @@ mod tests {
                 height: 4,
                 snapshot: Some(&snapshot),
                 active_image_source: Some(&active_image_source),
+                background_image_source: None,
                 camera_frame: None,
                 screen_frame: None,
             },
@@ -5005,6 +5341,7 @@ mod tests {
                 height: 4,
                 snapshot: Some(&snapshot),
                 active_image_source: Some(&active_image_source),
+                background_image_source: None,
                 camera_frame: None,
                 screen_frame: None,
             },
@@ -5017,6 +5354,87 @@ mod tests {
         assert_eq!(bytes[0], red_y);
         assert_eq!(bytes[y_len], red_u);
         assert_eq!(bytes[y_len + uv_len], red_v);
+    }
+
+    #[test]
+    fn selected_background_renders_behind_inset_screen_source() {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.layout_preset = LayoutPreset::ScreenOnly;
+        let mut scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            sources: crate::protocol::SourceSelection {
+                screen_id: Some("screen:screencapturekit:1".to_string()),
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: layout.clone(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width: 100,
+                height: 100,
+                fps: 30,
+                bitrate_kbps: 2000,
+            }),
+        });
+        scene.background = Some(EffectiveSceneBackground {
+            asset_id: "builtin-bg-01".to_string(),
+            managed_asset_path: "/managed/code-demo.webp".to_string(),
+            fit: BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+        });
+        let snapshot = CompositorSceneSnapshot {
+            revision: 1,
+            scene: Some(scene),
+            layout,
+            active_screen: None,
+        };
+        let background_image_source = CompositorImageSource {
+            image_path: "code-demo.webp".to_string(),
+            file_revision: None,
+            width: Some(2),
+            height: Some(2),
+            rgba: Some(Arc::new([255, 0, 0, 255].repeat(4))),
+            state: "live".to_string(),
+            message: None,
+        };
+        let screen_frame = Arc::new(crate::frame_store::StoredFrame {
+            sequence: 1,
+            width: 100,
+            height: 100,
+            pixel_format: PreviewScreenPixelFormat::Bgra8,
+            metadata: (),
+            bytes: [255, 0, 0, 255].repeat(100 * 100),
+            source_iosurface: None,
+            source_pixel_buffer: None,
+            captured_at: Instant::now(),
+        });
+        let mut bytes = vec![0; raw_yuv420p_len(100, 100)];
+
+        render_compositor_yuv420p_frame(
+            CompositorRenderInputs {
+                sequence: 1,
+                width: 100,
+                height: 100,
+                snapshot: Some(&snapshot),
+                active_image_source: None,
+                background_image_source: Some(&background_image_source),
+                camera_frame: None,
+                screen_frame: Some(&screen_frame),
+            },
+            &mut bytes,
+        );
+
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
+        let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        assert_eq!(y_at(&bytes, 100, 0, 0), red_y);
+        assert_eq!(y_at(&bytes, 100, 50, 50), blue_y);
     }
 
     #[test]
@@ -5067,6 +5485,7 @@ mod tests {
                 height: 4,
                 snapshot: Some(&snapshot),
                 active_image_source: None,
+                background_image_source: None,
                 camera_frame: Some(&camera_frame),
                 screen_frame: None,
             },

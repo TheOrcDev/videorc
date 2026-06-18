@@ -17,6 +17,19 @@ export type BackgroundImportResult = {
   fileName: string
 }
 
+export const BUNDLED_BACKGROUND_MANIFEST = [
+  { id: 'builtin-bg-01', name: 'Code Demo', fileName: 'code-demo.webp' },
+  { id: 'builtin-bg-02', name: 'Product Launch', fileName: 'product-launch.webp' },
+  { id: 'builtin-bg-03', name: 'Tutorial', fileName: 'tutorial.webp' },
+  { id: 'builtin-bg-04', name: 'Livestream', fileName: 'livestream.webp' },
+  { id: 'builtin-bg-05', name: 'Minimal Desk', fileName: 'minimal-desk.webp' },
+  { id: 'builtin-bg-06', name: 'Podcast', fileName: 'podcast.webp' },
+  { id: 'builtin-bg-07', name: 'Webinar', fileName: 'webinar.webp' },
+  { id: 'builtin-bg-08', name: 'Dark Mode', fileName: 'dark-mode.webp' },
+  { id: 'builtin-bg-09', name: 'Light Mode', fileName: 'light-mode.webp' },
+  { id: 'builtin-bg-10', name: 'Focus', fileName: 'focus.webp' }
+] as const
+
 function extensionOf(path: string): string {
   const base = path.split(/[\\/]/).pop() ?? ''
   const dot = base.lastIndexOf('.')

@@ -20,6 +20,10 @@ files:
 extraResources:
   - from: src/renderer/src/assets/videorc-logo.png
     to: videorc-logo.png
+  - from: src/renderer/src/assets/backgrounds
+    to: background-assets/bundled
+    filter:
+      - '*.webp'
 
 mac:
   category: public.app-category.video

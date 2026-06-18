@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   BACKGROUND_SLOT_COUNT,
+  applyBundledBackgroundAssets,
   applySlot,
   canApplySlot,
   clearActiveSlot,
@@ -73,7 +74,7 @@ function slotById(registry: BackgroundAssetRegistry, id: string): BackgroundAsse
 }
 
 describe('background asset model', () => {
-  it('creates exactly ten empty placeholder slots with the locked ids and labels', () => {
+  it('creates exactly ten ready bundled preset slots with the locked ids and labels', () => {
     const registry = createDefaultRegistry()
     expect(BACKGROUND_SLOT_COUNT).toBe(10)
     expect(registry.slots).toHaveLength(10)
@@ -101,25 +102,48 @@ describe('background asset model', () => {
       'Light Mode',
       'Focus'
     ])
-    expect(registry.slots.every((slot) => slot.assetId === null && slot.status === 'empty')).toBe(
-      true
-    )
+    expect(registry.slots.every((slot) => slot.assetId?.startsWith('builtin-bg-'))).toBe(true)
+    expect(registry.slots.every((slot) => slot.status === 'ready')).toBe(true)
+    expect(Object.keys(registry.assets)).toHaveLength(10)
+    expect(registry.assets['builtin-bg-01']?.kind).toBe('builtin')
+    expect(registry.assets['builtin-bg-01']?.assetPath).toContain('code-demo')
     expect(registry.activeSlotId).toBeNull()
-    expect(registry.assets).toEqual({})
   })
 
-  it('names a placeholder by its label and an imported slot by its asset name', () => {
-    const placeholder = createDefaultRegistry()
-    expect(slotName(slotById(placeholder, 'bg-03'), placeholder)).toBe('Tutorial')
+  it('names a bundled slot by its asset name and an imported slot by its asset name', () => {
+    const preset = createDefaultRegistry()
+    expect(slotName(slotById(preset, 'bg-03'), preset)).toBe('Tutorial')
 
-    const ready = withReadySlot(placeholder, 'bg-03', readyAsset('asset-1', 'Sunset Ridge'))
+    const ready = withReadySlot(preset, 'bg-03', readyAsset('asset-1', 'Sunset Ridge'))
     expect(slotName(slotById(ready, 'bg-03'), ready)).toBe('Sunset Ridge')
   })
 
-  it('only lets ready slots be applied', () => {
+  it('lets bundled and imported ready slots be applied', () => {
     const ready = withReadySlot(createDefaultRegistry(), 'bg-03', readyAsset('asset-1', 'Sunset'))
-    expect(canApplySlot(slotById(ready, 'bg-01'))).toBe(false)
+    expect(canApplySlot(slotById(ready, 'bg-01'))).toBe(true)
     expect(canApplySlot(slotById(ready, 'bg-03'))).toBe(true)
+  })
+
+  it('replaces bundled preset URLs with native-readable file paths when Electron resolves them', () => {
+    const registry = createDefaultRegistry()
+    const resolved = applyBundledBackgroundAssets(registry, [
+      {
+        id: 'builtin-bg-01',
+        name: 'Code Demo',
+        assetPath:
+          '/Applications/Videorc.app/Contents/Resources/background-assets/bundled/code-demo.webp',
+        thumbnailPath:
+          '/Applications/Videorc.app/Contents/Resources/background-assets/bundled/code-demo.webp',
+        fileName: 'code-demo.webp'
+      }
+    ])
+
+    expect(resolved.assets['builtin-bg-01']?.assetPath).toContain(
+      '/Resources/background-assets/bundled/code-demo.webp'
+    )
+    expect(resolved.assets['builtin-bg-02']?.assetPath).toBe(
+      registry.assets['builtin-bg-02']?.assetPath
+    )
   })
 
   it('derives active state from the registry, not from selection', () => {
@@ -132,8 +156,8 @@ describe('background asset model', () => {
     expect(slotDisplayStatus(slotById(applied, 'bg-03'), applied)).toBe('active')
   })
 
-  it('refuses to apply an empty placeholder slot', () => {
-    const registry = createDefaultRegistry()
+  it('refuses to apply an emptied slot', () => {
+    const registry = removeSlotAsset(createDefaultRegistry(), 'bg-01')
     expect(applySlot(registry, 'bg-01')).toBe(registry)
     expect(applySlot(registry, 'bg-01').activeSlotId).toBeNull()
   })
@@ -158,9 +182,7 @@ describe('background asset model', () => {
       expect(reconcileRegistry(42).slots.map((slot) => slot.id)).toContain('bg-10')
     })
 
-    it('drops an active selection that does not point at a ready slot', () => {
-      // bg-01 is an empty placeholder, so a persisted active pointing at it is stale.
-      expect(reconcileRegistry({ activeSlotId: 'bg-01' }).activeSlotId).toBeNull()
+    it('drops an active selection that does not point at a known ready slot', () => {
       expect(reconcileRegistry({ activeSlotId: 'does-not-exist' }).activeSlotId).toBeNull()
     })
 
@@ -171,6 +193,28 @@ describe('background asset model', () => {
       expect(reconciled.slots).toHaveLength(10)
       expect(reconciled.slots.map((slot) => slot.id)).not.toContain('bg-99')
       expect(reconciled.slots[0].defaultLabel).toBe('Code Demo')
+      expect(reconciled.slots[0].status).toBe('ready')
+    })
+
+    it('seeds bundled presets into old empty registries', () => {
+      const reconciled = reconcileRegistry({
+        slots: [{ id: 'bg-01', assetId: null, status: 'empty' }],
+        assets: {},
+        activeSlotId: null
+      })
+      expect(slotById(reconciled, 'bg-01').status).toBe('ready')
+      expect(slotById(reconciled, 'bg-01').assetId).toBe('builtin-bg-01')
+    })
+
+    it('preserves explicitly removed slots after the bundled preset version is current', () => {
+      const reconciled = reconcileRegistry({
+        bundledPresetVersion: 1,
+        slots: [{ id: 'bg-01', assetId: null, status: 'empty' }],
+        assets: {},
+        activeSlotId: null
+      })
+      expect(slotById(reconciled, 'bg-01').status).toBe('empty')
+      expect(slotById(reconciled, 'bg-01').assetId).toBeNull()
     })
   })
 })
@@ -251,6 +295,7 @@ describe('reconcileRegistry with imported assets', () => {
 
   it('prunes orphan assets and drops malformed ones', () => {
     const restored = reconcileRegistry({
+      bundledPresetVersion: 1,
       slots: [],
       assets: {
         a1: { id: 'a1', name: 'Orphan', assetPath: '/m/a1.png', styleDefaults: {} },

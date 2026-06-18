@@ -1,11 +1,25 @@
 // Background assets domain model (Assets Tab plan, slice A2).
 //
 // Assets owns reusable background material; Scene owns which one is active. This
-// slice ships ten curated placeholder slots only — image import (A4),
-// Scene.background wiring (A5), and compositor output (A6) come later. Kept as
-// pure data + helpers (no React, no storage) so the registry logic is
-// unit-testable in isolation.
+// registry ships ten bundled preset backgrounds, then lets users replace slots
+// with imported app-support copies. Kept as pure data + helpers (no React, no
+// storage) so the registry logic is unit-testable in isolation.
 
+import codeDemoUrl from '../assets/backgrounds/code-demo.webp'
+import darkModeUrl from '../assets/backgrounds/dark-mode.webp'
+import focusUrl from '../assets/backgrounds/focus.webp'
+import lightModeUrl from '../assets/backgrounds/light-mode.webp'
+import livestreamUrl from '../assets/backgrounds/livestream.webp'
+import minimalDeskUrl from '../assets/backgrounds/minimal-desk.webp'
+import podcastUrl from '../assets/backgrounds/podcast.webp'
+import productLaunchUrl from '../assets/backgrounds/product-launch.webp'
+import tutorialUrl from '../assets/backgrounds/tutorial.webp'
+import webinarUrl from '../assets/backgrounds/webinar.webp'
+
+import {
+  BUNDLED_BACKGROUND_MANIFEST,
+  type BackgroundImportResult
+} from '../../../shared/background-import'
 import type { EffectiveSceneBackground } from './backend'
 
 export type BackgroundAssetSlotStatus =
@@ -67,21 +81,24 @@ export type BackgroundAssetRegistry = {
   // Per-scene overrides on the active background's asset defaults (A5). A present
   // field shadows the asset default; an absent field inherits it.
   sceneOverrides: BackgroundStyleOverrides
+  // Used to seed bundled presets into older localStorage registries exactly once.
+  bundledPresetVersion: number
 }
 
 // The ten initial slots: stable ids the protocol/scene will reference, plus the
 // locked creator/use-case labels.
-const SLOT_DEFS: readonly { id: string; label: string }[] = [
-  { id: 'bg-01', label: 'Code Demo' },
-  { id: 'bg-02', label: 'Product Launch' },
-  { id: 'bg-03', label: 'Tutorial' },
-  { id: 'bg-04', label: 'Livestream' },
-  { id: 'bg-05', label: 'Minimal Desk' },
-  { id: 'bg-06', label: 'Podcast' },
-  { id: 'bg-07', label: 'Webinar' },
-  { id: 'bg-08', label: 'Dark Mode' },
-  { id: 'bg-09', label: 'Light Mode' },
-  { id: 'bg-10', label: 'Focus' }
+const BUNDLED_PRESET_VERSION = 1
+const SLOT_DEFS: readonly { id: string; label: string; assetUrl: string }[] = [
+  { id: 'bg-01', label: BUNDLED_BACKGROUND_MANIFEST[0].name, assetUrl: codeDemoUrl },
+  { id: 'bg-02', label: BUNDLED_BACKGROUND_MANIFEST[1].name, assetUrl: productLaunchUrl },
+  { id: 'bg-03', label: BUNDLED_BACKGROUND_MANIFEST[2].name, assetUrl: tutorialUrl },
+  { id: 'bg-04', label: BUNDLED_BACKGROUND_MANIFEST[3].name, assetUrl: livestreamUrl },
+  { id: 'bg-05', label: BUNDLED_BACKGROUND_MANIFEST[4].name, assetUrl: minimalDeskUrl },
+  { id: 'bg-06', label: BUNDLED_BACKGROUND_MANIFEST[5].name, assetUrl: podcastUrl },
+  { id: 'bg-07', label: BUNDLED_BACKGROUND_MANIFEST[6].name, assetUrl: webinarUrl },
+  { id: 'bg-08', label: BUNDLED_BACKGROUND_MANIFEST[7].name, assetUrl: darkModeUrl },
+  { id: 'bg-09', label: BUNDLED_BACKGROUND_MANIFEST[8].name, assetUrl: lightModeUrl },
+  { id: 'bg-10', label: BUNDLED_BACKGROUND_MANIFEST[9].name, assetUrl: focusUrl }
 ]
 
 export const BACKGROUND_SLOT_COUNT = SLOT_DEFS.length
@@ -126,17 +143,42 @@ export function createDefaultBackgroundSlots(): BackgroundAssetSlot[] {
   return SLOT_DEFS.map((def) => ({
     id: def.id,
     defaultLabel: def.label,
-    assetId: null,
-    status: 'empty'
+    assetId: builtinAssetId(def.id),
+    status: 'ready'
   }))
 }
 
 export function createDefaultRegistry(): BackgroundAssetRegistry {
+  const assets = Object.fromEntries(
+    SLOT_DEFS.map((def) => {
+      const asset = createBuiltinAsset(def)
+      return [asset.id, asset]
+    })
+  )
   return {
     slots: createDefaultBackgroundSlots(),
-    assets: {},
+    assets,
     activeSlotId: null,
-    sceneOverrides: {}
+    sceneOverrides: {},
+    bundledPresetVersion: BUNDLED_PRESET_VERSION
+  }
+}
+
+function builtinAssetId(slotId: string): string {
+  return `builtin-${slotId}`
+}
+
+function createBuiltinAsset(def: (typeof SLOT_DEFS)[number]): BackgroundAsset {
+  return {
+    id: builtinAssetId(def.id),
+    name: def.label,
+    kind: 'builtin',
+    assetPath: def.assetUrl,
+    thumbnailPath: def.assetUrl,
+    status: 'ready',
+    styleDefaults: defaultBackgroundStyle(),
+    createdAt: '2026-06-15T00:00:00.000Z',
+    updatedAt: '2026-06-15T00:00:00.000Z'
   }
 }
 
@@ -164,9 +206,6 @@ export function slotDisplayStatus(
   return slot.status
 }
 
-// A slot can be applied only when it holds a usable image. Every A2 slot is an
-// empty placeholder, so Apply stays disabled until import (A4) marks a slot
-// 'ready'.
 export function canApplySlot(slot: BackgroundAssetSlot): boolean {
   return slot.status === 'ready'
 }
@@ -188,6 +227,37 @@ export function applySlot(
 // allowed.
 export function clearActiveSlot(registry: BackgroundAssetRegistry): BackgroundAssetRegistry {
   return registry.activeSlotId === null ? registry : { ...registry, activeSlotId: null }
+}
+
+export function applyBundledBackgroundAssets(
+  registry: BackgroundAssetRegistry,
+  bundledAssets: readonly BackgroundImportResult[]
+): BackgroundAssetRegistry {
+  const byId = new Map(bundledAssets.map((asset) => [asset.id, asset]))
+  let changed = false
+  const assets: Record<string, BackgroundAsset> = { ...registry.assets }
+
+  for (const def of SLOT_DEFS) {
+    const assetId = builtinAssetId(def.id)
+    const current = assets[assetId]
+    const resolved = byId.get(assetId)
+    if (!current || current.kind !== 'builtin' || !resolved?.assetPath) {
+      continue
+    }
+    const thumbnailPath = resolved.thumbnailPath || resolved.assetPath
+    if (current.assetPath === resolved.assetPath && current.thumbnailPath === thumbnailPath) {
+      continue
+    }
+    changed = true
+    assets[assetId] = {
+      ...current,
+      assetPath: resolved.assetPath,
+      thumbnailPath,
+      updatedAt: current.updatedAt
+    }
+  }
+
+  return changed ? { ...registry, assets } : registry
 }
 
 // Build an imported asset record from the main process's copy result plus the
@@ -379,13 +449,16 @@ export function reconcileRegistry(loaded: unknown): BackgroundAssetRegistry {
     assets?: unknown
     activeSlotId?: unknown
     sceneOverrides?: unknown
+    bundledPresetVersion?: unknown
   }
+  const hasCurrentBundledPresets = data.bundledPresetVersion === BUNDLED_PRESET_VERSION
 
-  const assets: Record<string, BackgroundAsset> = {}
+  const assets: Record<string, BackgroundAsset> = { ...base.assets }
   if (data.assets && typeof data.assets === 'object') {
     for (const [id, raw] of Object.entries(data.assets as Record<string, unknown>)) {
       const asset = normalizeAsset(raw)
-      if (asset && asset.id === id) {
+      // Built-in assets always come from this build so hashed bundle URLs stay fresh.
+      if (asset && asset.id === id && asset.kind !== 'builtin') {
         assets[id] = asset
       }
     }
@@ -406,8 +479,15 @@ export function reconcileRegistry(loaded: unknown): BackgroundAssetRegistry {
   }
   const slots = base.slots.map((slot): BackgroundAssetSlot => {
     const stored = storedAssetId.get(slot.id)
-    const assetId = typeof stored === 'string' && assets[stored] ? stored : null
-    return assetId ? { ...slot, assetId, status: 'ready' } : slot
+    const assetId =
+      typeof stored === 'string' && assets[stored]
+        ? stored
+        : hasCurrentBundledPresets
+          ? null
+          : slot.assetId
+    return assetId
+      ? { ...slot, assetId, status: 'ready' }
+      : { ...slot, assetId: null, status: 'empty' }
   })
 
   const storedActive = data.activeSlotId
@@ -430,7 +510,8 @@ export function reconcileRegistry(loaded: unknown): BackgroundAssetRegistry {
     slots,
     assets: prunedAssets,
     activeSlotId,
-    sceneOverrides: normalizeOverrides(data.sceneOverrides)
+    sceneOverrides: normalizeOverrides(data.sceneOverrides),
+    bundledPresetVersion: BUNDLED_PRESET_VERSION
   }
 }
 

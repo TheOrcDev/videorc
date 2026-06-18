@@ -58,7 +58,17 @@ const FIT_OPTIONS: { value: BackgroundFit; label: string }[] = [
   { value: 'stretch', label: 'Stretch' }
 ]
 
-function fileUrl(path: string): string {
+function imageUrl(path: string): string {
+  if (
+    /^(blob|data|file|https?):/.test(path) ||
+    path.startsWith('/assets/') ||
+    path.startsWith('/src/') ||
+    path.startsWith('./') ||
+    path.startsWith('../') ||
+    (!path.startsWith('/') && !/^[A-Za-z]:/.test(path))
+  ) {
+    return path
+  }
   const normalized = path.replace(/\\/g, '/')
   const prefix = /^[A-Za-z]:/.test(normalized) ? 'file:///' : 'file://'
   return `${prefix}${encodeURI(normalized)}`
@@ -129,9 +139,8 @@ export function AssetsTab(): ReactElement {
       <div className="flex flex-col gap-1">
         <h1 className="text-xl font-semibold tracking-tight">Assets</h1>
         <p className="max-w-2xl text-sm text-muted-foreground">
-          Reusable background presets for your scenes. Import an image into a slot, tune its
-          defaults, then apply it as the active scene background. Scene keeps any per-scene
-          overrides.
+          Reusable background presets for your scenes. Click a ready preset to apply it, replace
+          slots with imported images, and tune defaults before Scene adds any per-scene overrides.
         </p>
       </div>
 
@@ -160,7 +169,10 @@ export function AssetsTab(): ReactElement {
                   slot={slot}
                   registry={registry}
                   selected={slot.id === selectedSlotId}
-                  onSelect={() => setSelectedSlotId(slot.id)}
+                  onSelect={() => {
+                    setSelectedSlotId(slot.id)
+                    setRegistry((current) => applySlot(current, slot.id))
+                  }}
                   onMissing={() => markMissing(slot.id)}
                 />
               ))}
@@ -224,7 +236,7 @@ function PresetTile({
         <img
           alt=""
           className="absolute inset-0 size-full object-cover"
-          src={fileUrl(imageSrc)}
+          src={imageUrl(imageSrc)}
           onError={onMissing}
         />
       ) : (
@@ -327,7 +339,7 @@ function BackgroundInspector({
           <img
             alt=""
             className="size-full object-cover"
-            src={fileUrl(asset.assetPath)}
+            src={imageUrl(asset.assetPath)}
             onError={() => onMissing(slot.id)}
           />
         )}
@@ -399,7 +411,7 @@ function BackgroundInspector({
           Replace
         </Button>
         <Button
-          disabled={!asset.assetPath}
+          disabled={asset.kind !== 'imported' || !asset.assetPath}
           size="sm"
           variant="outline"
           onClick={() => {
@@ -440,7 +452,7 @@ function CurrentSceneBackground({
             <img
               alt=""
               className="size-full object-cover"
-              src={fileUrl(sceneSrc)}
+              src={imageUrl(sceneSrc)}
               onError={() => onMissing(activeSlot.id)}
             />
           ) : (

@@ -55,6 +55,7 @@ import {
 import { normalizePreviewSurfaceBounds } from '../shared/native-preview-bounds'
 import { accountSkippedPreviewFrame } from '../shared/native-preview-latest-wins'
 import {
+  BUNDLED_BACKGROUND_MANIFEST,
   backgroundAssetNameFromPath,
   isSupportedBackgroundFile,
   managedBackgroundFileName,
@@ -3998,6 +3999,26 @@ async function importBackgroundImage(): Promise<BackgroundImportResult | null> {
   }
 }
 
+function bundledBackgroundDirectory(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'background-assets', 'bundled')
+    : resolve(workspaceRoot(), 'apps/desktop/src/renderer/src/assets/backgrounds')
+}
+
+function bundledBackgroundAssets(): BackgroundImportResult[] {
+  const directory = bundledBackgroundDirectory()
+  return BUNDLED_BACKGROUND_MANIFEST.map((asset) => {
+    const assetPath = join(directory, asset.fileName)
+    return {
+      id: asset.id,
+      name: asset.name,
+      assetPath,
+      thumbnailPath: assetPath,
+      fileName: asset.fileName
+    }
+  }).filter((asset) => existsSync(asset.assetPath))
+}
+
 async function openOAuthUrl(authUrl: string): Promise<void> {
   const parsed = new URL(authUrl)
   if (!['http:', 'https:'].includes(parsed.protocol)) {
@@ -4052,6 +4073,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('system:reveal-path', (_event, targetPath: string) => revealPath(targetPath))
   ipcMain.handle('screens:pick-image', () => pickScreenImage())
   ipcMain.handle('backgrounds:import-image', () => importBackgroundImage())
+  ipcMain.handle('backgrounds:bundled-assets', () => bundledBackgroundAssets())
   ipcMain.handle('oauth:open-url', (_event, authUrl: string) => openOAuthUrl(authUrl))
   ipcMain.handle('oauth:callback-redirect-uri', (_event, platform?: string) =>
     oauthCallbackRedirectUri(platform)
