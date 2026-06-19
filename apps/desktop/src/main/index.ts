@@ -87,7 +87,7 @@ let mainWindow: BrowserWindow | null = null
 let nativePreviewSurfaceWindow: BrowserWindow | null = null
 let notesWindow: BrowserWindow | null = null
 let notesWindowLastFrame: Electron.Rectangle | null = null
-let notesWindowAlwaysOnTop = true
+let notesWindowAlwaysOnTop = false
 let notesWindowClosing = false
 let notesWindowContentProtected = false
 let nativePreviewSurfaceStatus: PreviewSurfaceStatus = idleNativePreviewSurfaceStatus()
@@ -577,6 +577,7 @@ function restorePreviewWindowOnLaunch(): void {
 type NotesWindowPrefs = {
   frame?: Electron.Rectangle
   alwaysOnTop?: boolean
+  alwaysOnTopPreferenceVersion?: number
   open?: boolean
   text?: string
   fontScale?: NotesFontScale
@@ -611,6 +612,10 @@ function defaultNotesDocument(prefs = loadNotesWindowPrefs()): NotesDocument {
     fontScale: isNotesFontScale(prefs.fontScale) ? prefs.fontScale : 'md',
     updatedAt: new Date().toISOString()
   }
+}
+
+function notesWindowAlwaysOnTopPreference(prefs: NotesWindowPrefs): boolean {
+  return prefs.alwaysOnTopPreferenceVersion === 2 && prefs.alwaysOnTop === true
 }
 
 function isNotesFontScale(value: unknown): value is NotesFontScale {
@@ -855,7 +860,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   })
   notesWindowClosing = false
   notesWindow = window
-  notesWindowAlwaysOnTop = prefs.alwaysOnTop ?? true
+  notesWindowAlwaysOnTop = notesWindowAlwaysOnTopPreference(prefs)
   notesWindowContentProtected = false
   try {
     window.setContentProtection(true)
@@ -866,7 +871,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   if (notesWindowAlwaysOnTop) {
     window.setAlwaysOnTop(true, 'floating')
   }
-  saveNotesWindowPrefs({ open: true, alwaysOnTop: notesWindowAlwaysOnTop })
+  saveNotesWindowPrefs({ open: true })
 
   for (const event of ['move', 'resize', 'show', 'hide', 'minimize', 'restore', 'focus'] as const) {
     window.on(event as 'move', () => {
@@ -922,7 +927,7 @@ function setNotesWindowAlwaysOnTop(alwaysOnTop: boolean): NotesWindowState {
   if (notesWindow && !notesWindow.isDestroyed()) {
     notesWindow.setAlwaysOnTop(alwaysOnTop, 'floating')
   }
-  saveNotesWindowPrefs({ alwaysOnTop })
+  saveNotesWindowPrefs({ alwaysOnTop, alwaysOnTopPreferenceVersion: 2 })
   emitNotesWindowState()
   return notesWindowState()
 }

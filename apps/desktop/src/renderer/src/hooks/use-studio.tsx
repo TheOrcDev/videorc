@@ -522,7 +522,7 @@ const idleNotesWindowState = (): NotesWindowState => ({
   open: false,
   visible: false,
   bounds: null,
-  alwaysOnTop: true,
+  alwaysOnTop: false,
   protected: false,
   enabled: false,
   message: 'Notes window is disabled by VIDEORC_NOTES_WINDOW=0.'
