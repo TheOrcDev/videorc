@@ -2366,6 +2366,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (nativePreviewSurfaceEnabled) {
       const cameraStatus = await ensureNativePreviewCamera()
       const screenStatus = await ensureNativePreviewScreen()
+      const permissionStatus =
+        screenStatus.state === 'permission-needed'
+          ? screenStatus
+          : cameraStatus.state === 'permission-needed'
+            ? cameraStatus
+            : null
+      if (permissionStatus) {
+        setPreviewLoading(false)
+        setPreviewUrl(null)
+        setPreviewLiveStatus({
+          state: 'unavailable',
+          source: 'unavailable',
+          transport: 'unavailable',
+          message:
+            permissionStatus.message ?? 'macOS permission is required before preview can run.'
+        })
+        return
+      }
       const activeSourceStatus = screenStatus.state === 'live' ? screenStatus : cameraStatus
       setPreviewLoading(false)
       setPreviewUrl(null)

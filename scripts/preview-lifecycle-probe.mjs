@@ -56,6 +56,7 @@ async function main() {
     await toggleOpen(`cycle ${cycle}: toggle open`)
     if (cycle === 1) {
       await assertStaleDestroyIgnored('cycle 1: stale destroy is ignored')
+      await assertPermissionRequiredStopsSurface('cycle 1: permission-required stops presentation')
     }
     await toggleClosed(`cycle ${cycle}: toggle close`)
     if (cycle === 1 || cycle === cycles || cycle % 10 === 0) {
@@ -180,6 +181,66 @@ async function assertStaleDestroyIgnored(label) {
   assertProbe(after.ok, `${label}: current surface survived old generation destroy`, after.last)
 }
 
+async function assertPermissionRequiredStopsSurface(label) {
+  const currentGeneration = lastSupervisorGeneration
+  const before = await smokeCommand('preview-window-state')
+  assertProbe(
+    before.open === true && before.contentBounds,
+    `${label}: preview is open before permission report`,
+    before
+  )
+  const permission = await smokeCommand('preview-window-report-permission-required', {
+    permissionStatus: 'screen-recording-required',
+    message: 'Screen Recording permission is required for this source.',
+    generation: currentGeneration
+  })
+  assertProbe(
+    permission.supervisor?.lifecycleState === 'permission-required',
+    `${label}: supervisor reports permission-required`,
+    permission
+  )
+  assertProbe(
+    permission.supervisor?.permissionStatus === 'screen-recording-required',
+    `${label}: supervisor reports the screen-recording permission target`,
+    permission
+  )
+
+  const blocked = await waitForState(
+    (candidate) =>
+      candidate.open === true &&
+      candidate.supervisor?.lifecycleState === 'permission-required' &&
+      candidate.supervisor?.surfaceRequested === false &&
+      candidate.supervisor?.surfaceActive === false &&
+      candidate.supervisor?.permissionStatus === 'screen-recording-required' &&
+      candidate.surface.exists === false &&
+      candidate.framePollingSuppressedFlag === true,
+    8000
+  )
+  assertProbe(
+    blocked.ok,
+    `${label}: surface is torn down and frame polling is suppressed`,
+    blocked.last
+  )
+
+  await smokeCommand('apply-native-preview-host-commands', {
+    commands: [{ kind: 'create', bounds: previewSurfaceBoundsFromState(blocked.last) }],
+    generation: currentGeneration
+  })
+  const afterReviveAttempt = await waitForState(
+    (candidate) =>
+      candidate.open === true &&
+      candidate.supervisor?.lifecycleState === 'permission-required' &&
+      candidate.surface.exists === false &&
+      candidate.framePollingSuppressedFlag === true,
+    2000
+  )
+  assertProbe(
+    afterReviveAttempt.ok,
+    `${label}: same-generation create is ignored while permission is required`,
+    afterReviveAttempt.last
+  )
+}
+
 async function ensureClosed(label) {
   const state = await smokeCommand('preview-window-state')
   lastSupervisorGeneration = supervisorGeneration(state)
@@ -246,6 +307,20 @@ function supervisorGeneration(state) {
   const generation = state?.supervisor?.generation
   assertProbe(Number.isInteger(generation), 'preview state includes a supervisor generation', state)
   return generation
+}
+
+function previewSurfaceBoundsFromState(state) {
+  const contentBounds = state?.contentBounds
+  assertProbe(contentBounds, 'preview state includes content bounds', state)
+  return {
+    screenX: contentBounds.x,
+    screenY: contentBounds.y,
+    width: contentBounds.width,
+    height: contentBounds.height,
+    scaleFactor: state.scaleFactor,
+    screenHeight: state.screenHeight,
+    visible: true
+  }
 }
 
 function positiveInteger(raw, fallback) {

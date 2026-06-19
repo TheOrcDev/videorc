@@ -962,6 +962,18 @@ function previewWindowSurfaceGenerationIsCurrent(generation: number): boolean {
   return generation === previewWindowSurfaceGeneration()
 }
 
+function previewSurfacePresentationAllowed(generation = previewWindowSurfaceGeneration()): boolean {
+  if (!previewWindowIsOpenForSurface() || !previewWindowSurfaceGenerationIsCurrent(generation)) {
+    return false
+  }
+  const lifecycleState = previewSupervisor.snapshot().lifecycleState
+  return (
+    lifecycleState !== 'permission-required' &&
+    lifecycleState !== 'closing' &&
+    lifecycleState !== 'closed'
+  )
+}
+
 type PreviewWindowState = {
   open: boolean
   visible: boolean
@@ -1055,7 +1067,7 @@ function nativePreviewSurfaceWindowExists(): boolean {
 }
 
 function nativePreviewSurfaceNeedsPlacementReconcile(): boolean {
-  if (!previewWindowIsOpenForSurface() || !previewWindowSurfaceBounds()) {
+  if (!previewSurfacePresentationAllowed() || !previewWindowSurfaceBounds()) {
     return false
   }
   return (
@@ -1241,11 +1253,14 @@ function reportPreviewPermissionRequired(
   message: string | undefined,
   generation = previewWindowSurfaceGeneration()
 ): PreviewWindowState {
-  previewSupervisor.permissionRequired({
+  const state = previewSupervisor.permissionRequired({
     generation,
     permissionStatus,
     message
   })
+  if (state.lifecycleState === 'permission-required' && state.generation === generation) {
+    destroyNativePreviewSurfaceForBlockedPresentation(generation)
+  }
   emitPreviewWindowState()
   return previewWindowState()
 }
@@ -2071,6 +2086,9 @@ async function createNativePreviewSurface(
     nativePreviewSurfaceStatus = idleNativePreviewSurfaceStatus('Preview window is closed.')
     return nativePreviewSurfaceStatus
   }
+  if (!previewSurfacePresentationAllowed(generation)) {
+    return destroyNativePreviewSurfaceForBlockedPresentation(generation)
+  }
   if (!nativePreviewSurfaceProofEnabled) {
     nativePreviewSurfaceStatus = idleNativePreviewSurfaceStatus(
       'Native preview surface proof mode is disabled.'
@@ -2083,6 +2101,9 @@ async function createNativePreviewSurface(
   }
 
   previewSupervisor.requestSurface()
+  if (!previewSurfacePresentationAllowed(generation)) {
+    return destroyNativePreviewSurfaceForBlockedPresentation(generation)
+  }
   const placement = surfaceWindowPlacement(bounds)
   const rect = placement.rect
   if (!nativePreviewSurfaceWindow || nativePreviewSurfaceWindow.isDestroyed()) {
@@ -2151,6 +2172,9 @@ async function updateNativePreviewSurfaceBounds(
   bounds = normalizePreviewSurfaceBounds(bounds)
   if (!previewWindowSurfaceGenerationIsCurrent(generation)) {
     return nativePreviewSurfaceStatus
+  }
+  if (!previewSurfacePresentationAllowed(generation)) {
+    return destroyNativePreviewSurfaceForBlockedPresentation(generation)
   }
   if (!nativePreviewSurfaceWindow || nativePreviewSurfaceWindow.isDestroyed()) {
     // Never resurrect a torn-down surface just to hide it: after the detached
@@ -2223,6 +2247,9 @@ async function applyNativePreviewHostCommands(
     if (commands.length === 0) {
       return nativePreviewSurfaceStatus
     }
+  }
+  if (!previewSurfacePresentationAllowed(generation)) {
+    return destroyNativePreviewSurfaceForBlockedPresentation(generation)
   }
   // Every bounds command carries the Electron preview window's global number so
   // the native surface stacks as one app with it (normal level; floating only
@@ -2382,8 +2409,8 @@ async function updateNativePreviewSurfaceCompositor(
   status: PreviewSurfaceCompositorUpdateParams
 ): Promise<PreviewSurfaceStatus> {
   await waitForNativePreviewSurfaceMutation()
-  if (!previewWindowIsOpenForSurface()) {
-    return destroyNativePreviewSurface()
+  if (!previewSurfacePresentationAllowed()) {
+    return destroyNativePreviewSurfaceForBlockedPresentation()
   }
   const requestSerial = ++nativePreviewSurfaceCompositorRequestSerial
   let queueWaitMs = 0
@@ -2997,6 +3024,20 @@ function destroyNativePreviewSurface(
   }
   nativePreviewSurfaceWindow = null
   nativePreviewSurfaceStatus = idleNativePreviewSurfaceStatus()
+  return nativePreviewSurfaceStatus
+}
+
+function destroyNativePreviewSurfaceForBlockedPresentation(
+  generation = previewWindowSurfaceGeneration()
+): PreviewSurfaceStatus {
+  nativePreviewSurfaceFramePollingSuppressed = true
+  const status = destroyNativePreviewSurface(generation)
+  nativePreviewSurfaceStatus = {
+    ...status,
+    framePollingSuppressed: true,
+    sourcePixelsPresent: false,
+    message: 'Native preview presentation is blocked by the current preview lifecycle state.'
+  }
   return nativePreviewSurfaceStatus
 }
 
@@ -3994,6 +4035,14 @@ async function runSmokePreviewMotionCommand(
 
   if (command === 'preview-window-toggle') {
     return togglePreviewWindow()
+  }
+
+  if (command === 'preview-window-report-permission-required') {
+    return reportPreviewPermissionRequired(
+      previewPermissionStatusFromIpc(params.permissionStatus),
+      typeof params.message === 'string' ? params.message : undefined,
+      previewSurfaceGenerationFromIpc(params.generation)
+    )
   }
 
   if (command === 'preview-window-set-bounds') {
