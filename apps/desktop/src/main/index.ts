@@ -2536,12 +2536,15 @@ async function setNativePreviewSurfaceFramePollingSuppressed(
     resetNativePreviewMainHandoffMetrics()
     nativePreviewRealSurfaceDriver?.resetMetrics?.()
   }
-  if (nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed()) {
-    await waitForNativePreviewSurfaceScript()
-    await nativePreviewSurfaceWindow.webContents.executeJavaScript(
-      `window.__videorcSetFramePollingSuppressed?.(${suppressed ? 'true' : 'false'})`,
-      true
-    )
+  const surfaceWindow = nativePreviewSurfaceWindow
+  if (surfaceWindow && !surfaceWindow.isDestroyed()) {
+    await waitForNativePreviewSurfaceScript(surfaceWindow)
+    if (!surfaceWindow.isDestroyed() && nativePreviewSurfaceWindow === surfaceWindow) {
+      await surfaceWindow.webContents.executeJavaScript(
+        `window.__videorcSetFramePollingSuppressed?.(${suppressed ? 'true' : 'false'})`,
+        true
+      )
+    }
   }
   nativePreviewSurfaceStatus = {
     ...nativePreviewSurfaceStatus,
@@ -2820,15 +2823,21 @@ function computeTimingPercentile(values: number[], percentileRank: number): numb
   return sorted[index]
 }
 
-async function waitForNativePreviewSurfaceScript(timeoutMs = 5000): Promise<void> {
-  if (!nativePreviewSurfaceWindow || nativePreviewSurfaceWindow.isDestroyed()) {
+async function waitForNativePreviewSurfaceScript(
+  surfaceWindow: BrowserWindow | null = nativePreviewSurfaceWindow,
+  timeoutMs = 5000
+): Promise<void> {
+  if (!surfaceWindow || surfaceWindow.isDestroyed()) {
     return
   }
   const deadline = Date.now() + timeoutMs
   let lastState: unknown = null
   while (Date.now() < deadline) {
     try {
-      lastState = await nativePreviewSurfaceWindow.webContents.executeJavaScript(
+      if (surfaceWindow.isDestroyed()) {
+        return
+      }
+      lastState = await surfaceWindow.webContents.executeJavaScript(
         'typeof window.__videorcSetPreviewScene',
         true
       )

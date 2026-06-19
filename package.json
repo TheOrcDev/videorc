@@ -57,6 +57,7 @@
     "smoke:start-labels": "node scripts/smoke-start-labels.mjs",
     "smoke:preview-motion": "node scripts/smoke-preview-motion-app.mjs",
     "probe:preview-window": "node scripts/preview-window-probe.mjs",
+    "probe:preview-lifecycle": "node scripts/preview-lifecycle-probe.mjs",
     "smoke:preview-surface": "node scripts/smoke-preview-surface-app.mjs",
     "smoke:preview-endurance": "VIDEORC_SMOKE_TIMEOUT_MS=720000 VIDEORC_PREVIEW_SURFACE_SAMPLE_MS=600000 node scripts/smoke-preview-surface-app.mjs",
     "smoke:preview-performance": "node scripts/smoke-preview-performance-app.mjs",
