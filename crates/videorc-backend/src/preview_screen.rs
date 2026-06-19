@@ -31,11 +31,14 @@ const PREVIEW_SCREEN_MAX_PRODUCTION_CAPTURE_HEIGHT: u32 = 2160;
 const PREVIEW_SCREEN_CAPTURE_QUEUE_DEPTH: u32 = 3;
 const PREVIEW_SCREEN_TIMING_WINDOW: usize = 180;
 const SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(12);
+const SCREEN_CAPTUREKIT_DISCOVERY_ATTEMPTS: u32 = 2;
 const SCREEN_CAPTUREKIT_STREAM_START_TIMEOUT: Duration = Duration::from_secs(30);
 const SCREEN_CAPTURE_CPU_COPY_ENV: &str = "VIDEORC_SCREEN_CAPTURE_CPU_COPY";
+const SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT_MESSAGE: &str = "ScreenCaptureKit source discovery timed out after Screen Recording permission preflight passed.";
 
 fn native_screen_preview_thread_startup_timeout() -> Duration {
     SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT
+        .saturating_mul(SCREEN_CAPTUREKIT_DISCOVERY_ATTEMPTS)
         .saturating_add(SCREEN_CAPTUREKIT_STREAM_START_TIMEOUT)
         .saturating_add(Duration::from_secs(5))
 }
@@ -97,8 +100,16 @@ pub struct PreviewScreenRuntime {
     pub status: PreviewScreenStatus,
     run_id: Option<String>,
     source_key: Option<SourceKey>,
+    starting: Option<PreviewScreenStartKey>,
     active: Option<NativeScreenPreviewThread>,
     poll_task: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewScreenStartKey {
+    source_key: SourceKey,
+    video: VideoSettings,
+    target_fps: u32,
 }
 
 #[derive(Debug)]
@@ -240,6 +251,7 @@ pub fn initial_preview_screen_state() -> PreviewScreenRuntime {
         status: idle_status(Some("Native screen preview is not running.".to_string())),
         run_id: None,
         source_key: None,
+        starting: None,
         active: None,
         poll_task: None,
     }
@@ -267,6 +279,11 @@ pub async fn start_preview_screen(
     // old name heuristic.
     let exclude_current_process_windows = false;
     let source_key = source_key_for_source(&source);
+    let start_key = PreviewScreenStartKey {
+        source_key: source_key.clone(),
+        video: params.video.clone(),
+        target_fps,
+    };
     let existing_source_key = current_screen_source_key(&state).await;
     if existing_source_key.as_ref() != Some(&source_key) {
         let keep_alive = release_current_preview_screen_source(&state).await;
@@ -295,23 +312,6 @@ pub async fn start_preview_screen(
         return status;
     }
 
-    stop_current_screen(&state).await;
-
-    let run_id = Uuid::new_v4().to_string();
-    let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
-    let (stop_tx, stop_rx) = std_mpsc::channel();
-    let (startup_tx, startup_rx) = std_mpsc::channel();
-    let thread_shared = Arc::clone(&shared);
-    let thread_config = NativeScreenPreviewConfig {
-        source_id: source.source_id.clone(),
-        source_kind: source.source_kind.clone(),
-        display_id: source.display_id,
-        window_id: source.window_id,
-        video: params.video.clone(),
-        include_cursor,
-        exclude_current_process_windows,
-    };
-
     let starting = PreviewScreenStatus {
         state: PreviewScreenState::Starting,
         source_id: Some(source.source_id.clone()),
@@ -336,7 +336,26 @@ pub async fn start_preview_screen(
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Starting native screen preview.".to_string()),
     };
-    set_screen_status(&state, starting).await;
+    if begin_screen_start(&state, start_key.clone(), starting).await {
+        return wait_for_screen_start(&state, &start_key).await;
+    }
+
+    stop_current_screen_for_restart(&state).await;
+
+    let run_id = Uuid::new_v4().to_string();
+    let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+    let (stop_tx, stop_rx) = std_mpsc::channel();
+    let (startup_tx, startup_rx) = std_mpsc::channel();
+    let thread_shared = Arc::clone(&shared);
+    let thread_config = NativeScreenPreviewConfig {
+        source_id: source.source_id.clone(),
+        source_kind: source.source_kind.clone(),
+        display_id: source.display_id,
+        window_id: source.window_id,
+        video: params.video.clone(),
+        include_cursor,
+        exclude_current_process_windows,
+    };
 
     let join_handle = thread::Builder::new()
         .name("videorc-preview-screen".to_string())
@@ -355,6 +374,7 @@ pub async fn start_preview_screen(
                 exclude_current_process_windows,
                 format!("Could not start screen preview thread: {error}"),
             );
+            clear_screen_start(&state, &start_key).await;
             acquire_preview_screen_source(
                 &state,
                 source_key,
@@ -453,6 +473,7 @@ pub async fn start_preview_screen(
                 slot.status = status.clone();
                 slot.run_id = Some(run_id);
                 slot.source_key = Some(source_key.clone());
+                slot.starting = None;
                 slot.active = Some(NativeScreenPreviewThread {
                     stop_tx,
                     join_handle: Some(join_handle),
@@ -794,6 +815,7 @@ async fn set_screen_status(state: &AppState, status: PreviewScreenStatus) {
         slot.status = status.clone();
         slot.run_id = None;
         slot.source_key = source_key_from_status(&status);
+        slot.starting = None;
     }
     {
         let mut diagnostics = state.diagnostics.lock().await;
@@ -803,10 +825,21 @@ async fn set_screen_status(state: &AppState, status: PreviewScreenStatus) {
 }
 
 async fn stop_current_screen(state: &AppState) {
+    stop_current_screen_inner(state, true).await;
+}
+
+async fn stop_current_screen_for_restart(state: &AppState) {
+    stop_current_screen_inner(state, false).await;
+}
+
+async fn stop_current_screen_inner(state: &AppState, clear_starting: bool) {
     let (previous, poll_task) = {
         let mut slot = state.preview_screen.lock().await;
         slot.run_id = None;
-        slot.source_key = None;
+        if clear_starting {
+            slot.source_key = None;
+            slot.starting = None;
+        }
         (slot.active.take(), slot.poll_task.take())
     };
 
@@ -819,6 +852,59 @@ async fn stop_current_screen(state: &AppState) {
         if let Some(join_handle) = previous.join_handle.take() {
             let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
         }
+    }
+}
+
+async fn begin_screen_start(
+    state: &AppState,
+    start_key: PreviewScreenStartKey,
+    status: PreviewScreenStatus,
+) -> bool {
+    let mut slot = state.preview_screen.lock().await;
+    if slot.starting.as_ref() == Some(&start_key) {
+        return true;
+    }
+    slot.status = status.clone();
+    slot.run_id = None;
+    slot.source_key = Some(start_key.source_key.clone());
+    slot.starting = Some(start_key);
+    drop(slot);
+
+    {
+        let mut diagnostics = state.diagnostics.lock().await;
+        *diagnostics = apply_preview_screen_source_stats(diagnostics.clone(), &status);
+    }
+    state.emit_event("preview.screen.status", status);
+    false
+}
+
+async fn wait_for_screen_start(
+    state: &AppState,
+    start_key: &PreviewScreenStartKey,
+) -> PreviewScreenStatus {
+    let timeout =
+        native_screen_preview_thread_startup_timeout().saturating_add(Duration::from_secs(1));
+    let started_at = Instant::now();
+    loop {
+        let (still_starting, status) = {
+            let slot = state.preview_screen.lock().await;
+            (
+                slot.starting.as_ref() == Some(start_key)
+                    && matches!(slot.status.state, PreviewScreenState::Starting),
+                slot.status.clone(),
+            )
+        };
+        if !still_starting || started_at.elapsed() >= timeout {
+            return status;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn clear_screen_start(state: &AppState, start_key: &PreviewScreenStartKey) {
+    let mut slot = state.preview_screen.lock().await;
+    if slot.starting.as_ref() == Some(start_key) {
+        slot.starting = None;
     }
 }
 
@@ -871,21 +957,11 @@ async fn reuse_current_screen_source(
     if !can_reuse {
         return None;
     }
-    if matches!(slot.status.state, PreviewScreenState::Live)
-        && !screen_status_has_renderable_frame(&slot.status)
-    {
-        return None;
-    }
-
     let mut status = slot.status.clone();
     status.updated_at = Utc::now().to_rfc3339();
     status.message = Some("Native screen preview source reused.".to_string());
     slot.status = status.clone();
     Some(status)
-}
-
-fn screen_status_has_renderable_frame(status: &PreviewScreenStatus) -> bool {
-    status.frames_captured > 0 && status.sequence.is_some()
 }
 
 async fn poll_screen_metrics(
@@ -1317,16 +1393,6 @@ mod macos {
                 })?;
         }
         let start_handler = start_capture(&stream, &shared);
-        if let Err(error) = wait_for_first_frame(&shared, SCREEN_CAPTUREKIT_STREAM_START_TIMEOUT) {
-            stop_stream(&stream);
-            unsafe {
-                let _ = stream.removeStreamOutput_type_error(
-                    ProtocolObject::from_ref(&*delegate),
-                    SCStreamOutputType::Screen,
-                );
-            }
-            return Err(error);
-        }
 
         let selected_fps = f64::from(capture_request.requested_fps);
         let message = Some(format!(
@@ -1446,6 +1512,34 @@ mod macos {
     }
 
     fn load_shareable_content() -> Result<Retained<SCShareableContent>, NativeScreenStartup> {
+        let mut timed_out = false;
+        for attempt in 1..=SCREEN_CAPTUREKIT_DISCOVERY_ATTEMPTS {
+            match load_shareable_content_once() {
+                Ok(content) => return Ok(content),
+                Err(NativeScreenStartup::Failed(message))
+                    if message == SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT_MESSAGE =>
+                {
+                    timed_out = true;
+                    if attempt < SCREEN_CAPTUREKIT_DISCOVERY_ATTEMPTS {
+                        thread::sleep(Duration::from_millis(150));
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        if timed_out {
+            return Err(NativeScreenStartup::Failed(format!(
+                "{SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT_MESSAGE} Retried {SCREEN_CAPTUREKIT_DISCOVERY_ATTEMPTS} times."
+            )));
+        }
+
+        Err(NativeScreenStartup::Failed(
+            SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT_MESSAGE.to_string(),
+        ))
+    }
+
+    fn load_shareable_content_once() -> Result<Retained<SCShareableContent>, NativeScreenStartup> {
         enum ShareableContentResult {
             Content(usize),
             Error(String),
@@ -1495,7 +1589,7 @@ mod macos {
                 }
             }
             Err(_) => Err(NativeScreenStartup::Failed(
-                "ScreenCaptureKit source discovery timed out after Screen Recording permission preflight passed.".to_string(),
+                SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT_MESSAGE.to_string(),
             )),
         }
     }
@@ -1542,33 +1636,6 @@ mod macos {
             stream.startCaptureWithCompletionHandler(Some(&handler));
         }
         handler
-    }
-
-    fn wait_for_first_frame(
-        shared: &Arc<StdMutex<PreviewScreenShared>>,
-        timeout: Duration,
-    ) -> Result<(), NativeScreenStartup> {
-        let started_at = Instant::now();
-        loop {
-            {
-                let guard = shared
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if guard.frames_captured > 0 {
-                    return Ok(());
-                }
-                if let Some(error) = guard.last_error.clone() {
-                    return Err(NativeScreenStartup::Failed(error));
-                }
-            }
-            if started_at.elapsed() >= timeout {
-                return Err(NativeScreenStartup::Failed(format!(
-                    "ScreenCaptureKit stream started but did not deliver a frame within {:.0}s.",
-                    timeout.as_secs_f64()
-                )));
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
     }
 
     fn screen_capture_permission_message() -> String {
@@ -2082,6 +2149,83 @@ mod tests {
         assert!(timeout > Duration::from_secs(5));
     }
 
+    #[tokio::test]
+    async fn duplicate_screen_start_waits_for_in_flight_start() {
+        let state = test_state();
+        let video = test_video();
+        let source_key = SourceKey::screen("screen:screencapturekit:5");
+        let start_key = PreviewScreenStartKey {
+            source_key: source_key.clone(),
+            video: video.clone(),
+            target_fps: video.fps,
+        };
+        let starting = PreviewScreenStatus {
+            state: PreviewScreenState::Starting,
+            source_id: Some(source_key.id.clone()),
+            source_kind: Some(PreviewScreenSourceKind::Screen),
+            target_fps: video.fps,
+            width: None,
+            height: None,
+            native_width: None,
+            native_height: None,
+            requested_width: None,
+            requested_height: None,
+            actual_width: None,
+            actual_height: None,
+            iosurface_available: None,
+            source_fps: None,
+            frame_age_ms: None,
+            frames_captured: 0,
+            dropped_frames: 0,
+            sequence: None,
+            include_cursor: true,
+            exclude_current_process_windows: false,
+            updated_at: Utc::now().to_rfc3339(),
+            message: Some("Starting native screen preview.".to_string()),
+        };
+
+        assert!(!begin_screen_start(&state, start_key.clone(), starting.clone()).await);
+        assert!(begin_screen_start(&state, start_key.clone(), starting).await);
+
+        let waiter_state = state.clone();
+        let waiter_key = start_key.clone();
+        let waiter =
+            tokio::spawn(async move { wait_for_screen_start(&waiter_state, &waiter_key).await });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let live = PreviewScreenStatus {
+            state: PreviewScreenState::Live,
+            source_id: Some(source_key.id.clone()),
+            source_kind: Some(PreviewScreenSourceKind::Screen),
+            target_fps: video.fps,
+            width: Some(video.width),
+            height: Some(video.height),
+            native_width: Some(video.width),
+            native_height: Some(video.height),
+            requested_width: Some(video.width),
+            requested_height: Some(video.height),
+            actual_width: Some(video.width),
+            actual_height: Some(video.height),
+            iosurface_available: Some(true),
+            source_fps: Some(f64::from(video.fps)),
+            frame_age_ms: Some(1),
+            frames_captured: 1,
+            dropped_frames: 0,
+            sequence: Some(1),
+            include_cursor: true,
+            exclude_current_process_windows: false,
+            updated_at: Utc::now().to_rfc3339(),
+            message: Some("Native screen preview source reused.".to_string()),
+        };
+        set_screen_status(&state, live.clone()).await;
+
+        let waited = waiter.await.expect("waiter task");
+        assert_eq!(waited.state, PreviewScreenState::Live);
+        assert_eq!(waited.frames_captured, 1);
+        assert_eq!(waited.sequence, Some(1));
+        assert!(state.preview_screen.lock().await.starting.is_none());
+    }
+
     #[test]
     fn window_capture_request_preserves_cursor_and_fit_policy() {
         let video = test_video_with_dimensions(3840, 2160);
@@ -2207,52 +2351,5 @@ mod tests {
             status.message.as_deref(),
             Some("Native screen preview source reused.")
         );
-    }
-
-    #[tokio::test]
-    async fn same_screen_source_reuse_rejects_live_status_without_frames() {
-        let state = test_state();
-        let source_key = SourceKey::screen("screen:screencapturekit:5");
-        let (stop_tx, _stop_rx) = std_mpsc::channel();
-        let video = test_video();
-        {
-            let mut slot = state.preview_screen.lock().await;
-            slot.source_key = Some(source_key.clone());
-            slot.run_id = Some("run-1".to_string());
-            slot.status = PreviewScreenStatus {
-                state: PreviewScreenState::Live,
-                source_id: Some(source_key.id.clone()),
-                source_kind: Some(PreviewScreenSourceKind::Screen),
-                target_fps: video.fps,
-                width: Some(video.width),
-                height: Some(video.height),
-                native_width: Some(video.width),
-                native_height: Some(video.height),
-                requested_width: Some(video.width),
-                requested_height: Some(video.height),
-                actual_width: None,
-                actual_height: None,
-                iosurface_available: None,
-                source_fps: Some(f64::from(video.fps)),
-                frame_age_ms: None,
-                frames_captured: 0,
-                dropped_frames: 0,
-                sequence: None,
-                include_cursor: true,
-                exclude_current_process_windows: true,
-                updated_at: Utc::now().to_rfc3339(),
-                message: Some("Live without frames".to_string()),
-            };
-            slot.active = Some(NativeScreenPreviewThread {
-                stop_tx,
-                join_handle: None,
-                shared: Arc::new(StdMutex::new(PreviewScreenShared::default())),
-                video: video.clone(),
-            });
-        }
-
-        let status = reuse_current_screen_source(&state, &source_key, &video, video.fps).await;
-
-        assert!(status.is_none());
     }
 }

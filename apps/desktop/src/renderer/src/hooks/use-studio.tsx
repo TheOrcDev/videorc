@@ -513,9 +513,6 @@ const idlePreviewScreenStatus = (): PreviewScreenStatus => ({
   message: 'Native screen preview is not running.'
 })
 
-const previewScreenStatusHasRenderableFrame = (status: PreviewScreenStatus): boolean =>
-  status.framesCaptured > 0 && status.sequence != null
-
 export function useStudio(): StudioContextValue {
   const value = useContext(StudioContext)
   if (!value) {
@@ -2252,8 +2249,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nativePreviewScreenKeyRef.current === key &&
       current.sourceId === sourceId &&
       current.sourceKind === sourceKind &&
-      (current.state === 'starting' ||
-        (current.state === 'live' && previewScreenStatusHasRenderableFrame(current)))
+      (current.state === 'starting' || current.state === 'live')
     ) {
       return current
     }
@@ -2263,11 +2259,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       video: captureConfig.video
     })
     nativePreviewScreenKeyRef.current =
-      status.state === 'failed' ||
-      status.state === 'source-missing' ||
-      (status.state === 'live' && !previewScreenStatusHasRenderableFrame(status))
-        ? null
-        : key
+      status.state === 'failed' || status.state === 'source-missing' ? null : key
     applyPreviewScreenStatus(status)
     return status
   }, [

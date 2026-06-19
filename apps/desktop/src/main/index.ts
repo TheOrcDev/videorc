@@ -412,6 +412,7 @@ function createWindow(): void {
 let previewWindow: BrowserWindow | null = null
 let previewWindowLastFrame: Electron.Rectangle | null = null
 let previewWindowAlwaysOnTop = false
+let previewWindowClosing = false
 // The visible drag bar at the top of the preview window; the native video covers
 // the content BELOW it, and the aspect lock applies to that video region only.
 const PREVIEW_WINDOW_BAR_HEIGHT = 28
@@ -466,10 +467,11 @@ function conformPreviewWindowToAspect(window: BrowserWindow): void {
 // The preview window's GLOBAL window number (CGWindowID): valid across processes,
 // so the native helper can order its surface directly above this window.
 function previewWindowGlobalId(): number | undefined {
-  if (!previewWindow || previewWindow.isDestroyed()) {
+  const window = previewWindow
+  if (!previewWindowIsOpenForSurface() || !window) {
     return undefined
   }
-  const match = /^window:(\d+):/.exec(previewWindow.getMediaSourceId())
+  const match = /^window:(\d+):/.exec(window.getMediaSourceId())
   const id = match ? Number(match[1]) : Number.NaN
   return Number.isFinite(id) && id > 0 ? id : undefined
 }
@@ -552,6 +554,10 @@ app.on('browser-window-focus', () => {
   void setNativePreviewSurfacesVisible(true)
 })
 
+function previewWindowIsOpenForSurface(): boolean {
+  return Boolean(previewWindow && !previewWindow.isDestroyed() && !previewWindowClosing)
+}
+
 type PreviewWindowState = {
   open: boolean
   visible: boolean
@@ -565,7 +571,7 @@ type PreviewWindowState = {
 
 function previewWindowState(): PreviewWindowState {
   const window = previewWindow
-  const open = Boolean(window && !window.isDestroyed())
+  const open = previewWindowIsOpenForSurface()
   // The VIDEO region: window content minus the drag bar. Everything downstream
   // (surface placement, probe asserts) follows this rect.
   const contentBounds = open ? previewWindowVideoBounds(window!) : null
@@ -598,6 +604,9 @@ function previewWindowSurfaceBounds(visibleOverride?: boolean): PreviewSurfaceBo
 }
 
 function emitPreviewWindowState(): void {
+  if (appIsQuitting) {
+    return
+  }
   if (mainWindow && !mainWindow.webContents.isDestroyed()) {
     try {
       mainWindow.webContents.send('preview-window:state', previewWindowState())
@@ -660,12 +669,13 @@ const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><s
 </body></html>`
 
 async function openPreviewWindow(): Promise<PreviewWindowState> {
-  if (previewWindow && !previewWindow.isDestroyed()) {
-    if (previewWindow.isMinimized()) {
-      previewWindow.restore()
+  const existingWindow = previewWindow
+  if (previewWindowIsOpenForSurface() && existingWindow) {
+    if (existingWindow.isMinimized()) {
+      existingWindow.restore()
     }
-    previewWindow.show()
-    previewWindow.focus()
+    existingWindow.show()
+    existingWindow.focus()
     emitPreviewWindowState()
     return previewWindowState()
   }
@@ -694,6 +704,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
       backgroundThrottling: false
     }
   })
+  previewWindowClosing = false
   previewWindow = window
   previewWindowAlwaysOnTop = prefs.alwaysOnTop === true
   if (previewWindowAlwaysOnTop) {
@@ -722,6 +733,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   }
   window.on('close', () => {
     if (previewWindow === window) {
+      previewWindowClosing = true
       previewWindowLastFrame = window.getBounds()
       savePreviewWindowPrefs({ frame: previewWindowLastFrame, open: false })
     }
@@ -729,6 +741,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   window.on('closed', () => {
     if (previewWindow === window) {
       previewWindow = null
+      previewWindowClosing = false
       // Host teardown happens here, renderer-independent (the renderer's own
       // teardown adds the backend session destroy when its state event lands).
       void setNativePreviewSurfaceFramePollingSuppressed(true)
@@ -748,6 +761,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
 
 function closePreviewWindow(): PreviewWindowState {
   if (previewWindow && !previewWindow.isDestroyed()) {
+    previewWindowClosing = true
     previewWindow.close()
   }
   return previewWindowState()
@@ -1441,6 +1455,9 @@ async function createNativePreviewSurfaceWindow(): Promise<void> {
     if (!mainWindow || mainWindow.isDestroyed()) {
       throw new Error('Main window is not ready for native preview surface.')
     }
+    if (!previewWindowIsOpenForSurface()) {
+      return
+    }
 
     const surfaceWindow = new BrowserWindow({
       // The fallback surface is a child of the preview window: it stacks above
@@ -1475,6 +1492,15 @@ async function createNativePreviewSurfaceWindow(): Promise<void> {
     })
 
     try {
+      if (!previewWindowIsOpenForSurface()) {
+        if (nativePreviewSurfaceWindow === surfaceWindow) {
+          nativePreviewSurfaceWindow = null
+        }
+        if (!surfaceWindow.isDestroyed()) {
+          surfaceWindow.destroy()
+        }
+        return
+      }
       await loadNativePreviewSurfaceHtml(surfaceWindow)
       if (nativePreviewSurfaceFramePollingSuppressed) {
         await waitForNativePreviewSurfaceScript()
@@ -1514,7 +1540,7 @@ async function createNativePreviewSurface(
 ): Promise<PreviewSurfaceStatus> {
   bounds = normalizePreviewSurfaceBounds(bounds)
   // The direct IPC path must not create a surface while the preview window is closed.
-  if (!previewWindow || previewWindow.isDestroyed()) {
+  if (!previewWindowIsOpenForSurface()) {
     nativePreviewSurfaceStatus = idleNativePreviewSurfaceStatus('Preview window is closed.')
     return nativePreviewSurfaceStatus
   }
@@ -1535,6 +1561,10 @@ async function createNativePreviewSurface(
     await createNativePreviewSurfaceWindow()
   }
 
+  if (!previewWindowIsOpenForSurface()) {
+    nativePreviewSurfaceStatus = idleNativePreviewSurfaceStatus('Preview window is closed.')
+    return nativePreviewSurfaceStatus
+  }
   if (!nativePreviewSurfaceWindow || nativePreviewSurfaceWindow.isDestroyed()) {
     throw new Error('Native preview surface window closed before it could be positioned.')
   }
@@ -1628,7 +1658,7 @@ async function applyNativePreviewHostCommands(
   // No preview window, no surface — period. A renderer holding a stale window
   // state (IPC events race the close) must not resurrect the hosts main just
   // tore down; only destroys pass while the window is closed.
-  if (!previewWindow || previewWindow.isDestroyed()) {
+  if (!previewWindowIsOpenForSurface()) {
     commands = commands.filter((command) => command.kind === 'destroy')
     if (commands.length === 0) {
       return nativePreviewSurfaceStatus
@@ -1649,6 +1679,9 @@ async function applyNativePreviewHostCommands(
     )
   }
   await applyNativePreviewRealSurfaceHostCommands(commands)
+  if (!previewWindowIsOpenForSurface()) {
+    return destroyNativePreviewSurface()
+  }
   let status = nativePreviewSurfaceStatus
   for (const command of commands) {
     if (command.kind === 'destroy') {
@@ -1777,6 +1810,9 @@ async function updateNativePreviewSurfaceCompositor(
   status: PreviewSurfaceCompositorUpdateParams
 ): Promise<PreviewSurfaceStatus> {
   await waitForNativePreviewSurfaceMutation()
+  if (!previewWindowIsOpenForSurface()) {
+    return destroyNativePreviewSurface()
+  }
   const requestSerial = ++nativePreviewSurfaceCompositorRequestSerial
   let queueWaitMs = 0
   if (nativePreviewSurfaceCompositorUpdateInFlight) {
@@ -2887,7 +2923,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
 function handleMainPumpCompositorStatus(status: CompositorStatus): void {
   // Same gate the renderer pump used: presents only while a surface session
   // is live (the preview window owns that lifecycle).
-  if (nativePreviewSurfaceStatus.state !== 'live') {
+  if (!previewWindowIsOpenForSurface() || nativePreviewSurfaceStatus.state !== 'live') {
     return
   }
   const params: PreviewSurfaceCompositorUpdateParams = nativePreviewSurfaceFramePollingSuppressed
