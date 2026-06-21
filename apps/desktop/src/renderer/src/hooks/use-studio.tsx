@@ -49,6 +49,10 @@ import {
   type GoLivePartialSetup,
   type GoLiveSetupFailure
 } from '@/lib/go-live-flow'
+import {
+  isYouTubeChannelAuthFailure,
+  shouldAutoRefreshYouTubeChannels
+} from '@/lib/youtube-channels'
 import type {
   AiWorkflowResult,
   AudioMeterResult,
@@ -1295,14 +1299,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client, reportError, validatePlatformAccountsForClient])
 
   const refreshYouTubeChannels = useCallback(
-    async (accountId?: string) => {
+    async (accountId?: string, options: { background?: boolean } = {}) => {
       if (!client) {
         setYoutubeChannels([])
         return
       }
 
       try {
-        setLastError(null)
+        if (!options.background) {
+          setLastError(null)
+        }
         setYoutubeChannelsLoading(true)
         const result = await client.request<{ channels: YouTubeChannel[] }>(
           'platformAccounts.youtube.channels',
@@ -1313,6 +1319,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setYoutubeChannels(result.channels)
       } catch (error) {
         setYoutubeChannels([])
+        if (options.background && isYouTubeChannelAuthFailure(error)) {
+          return
+        }
         reportError(error)
       } finally {
         setYoutubeChannelsLoading(false)
@@ -1381,12 +1390,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   useEffect(() => {
     const account = platformAccounts.find((item) => item.platform === 'youtube')
-    if (!account) {
+    if (!account || !shouldAutoRefreshYouTubeChannels(account, platformAccountValidations)) {
       setYoutubeChannels([])
       return
     }
-    void refreshYouTubeChannels(account.accountId)
-  }, [platformAccounts, refreshYouTubeChannels])
+    void refreshYouTubeChannels(account.accountId, { background: true })
+  }, [platformAccountValidations, platformAccounts, refreshYouTubeChannels])
 
   const searchTwitchCategories = useCallback(
     async (query: string) => {
