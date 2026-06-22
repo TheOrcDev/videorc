@@ -54,7 +54,6 @@ export function hasSelectedCameraSource(sources: SourceSelection): boolean {
 export function hasSelectedScreenSource(sources: SourceSelection): boolean {
   return Boolean(
     isNativeScreenSourceId(sources.screenId) ||
-    isAvFoundationScreenSourceId(sources.screenId) ||
     isNativeWindowSourceId(sources.windowId) ||
     sources.testPattern
   )
@@ -615,9 +614,14 @@ export function loadCaptureConfig(): CaptureConfig {
 export function smokePreviewCompositorCaptureConfig(
   config: Pick<CaptureConfig, 'sources' | 'layout' | 'video'>
 ): Pick<CaptureConfig, 'sources' | 'layout' | 'video'> {
+  const includeCamera =
+    layoutPresetNeedsCamera(config.layout.layoutPreset) ||
+    (config.layout.layoutPreset === 'screen-camera' && Boolean(config.sources.cameraId))
   return {
     ...config,
     sources: {
+      cameraId: includeCamera ? 'camera:synthetic-preview-smoke' : undefined,
+      cameraName: includeCamera ? 'Synthetic preview camera' : undefined,
       microphoneId: config.sources.microphoneId,
       microphoneName: config.sources.microphoneName,
       testPattern: true

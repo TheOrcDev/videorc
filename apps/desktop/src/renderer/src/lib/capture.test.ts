@@ -311,15 +311,92 @@ describe('ScreenCaptureKit capture device filtering', () => {
 })
 
 describe('smokePreviewCompositorCaptureConfig', () => {
-  it('uses a renderable test-pattern source instead of stopped real preview sources', () => {
+  const config: Pick<CaptureConfig, 'sources' | 'layout' | 'video'> = {
+    sources: {
+      screenId: 'screen:1',
+      screenName: 'Display',
+      windowId: 'window:1',
+      windowName: 'App',
+      cameraId: 'camera:1',
+      cameraName: 'Camera',
+      microphoneId: 'microphone:1',
+      microphoneName: 'Microphone'
+    },
+    layout: {
+      layoutPreset: 'screen-camera',
+      cameraTransformMode: 'preset',
+      cameraTransform: null,
+      cameraCorner: 'bottom-right',
+      cameraSize: 'medium',
+      cameraShape: 'rectangle',
+      cameraMargin: 32,
+      cameraFit: 'fill',
+      cameraMirror: false,
+      cameraZoom: 100,
+      cameraOffsetX: 0,
+      cameraOffsetY: 0,
+      sideBySideSplit: '70-30',
+      sideBySideCameraSide: 'right'
+    },
+    video: {
+      preset: 'tutorial-1440p30',
+      width: 2560,
+      height: 1440,
+      fps: 30,
+      bitrateKbps: 8000
+    }
+  }
+
+  it('uses renderable synthetic sources instead of stopped real preview sources', () => {
+    expect(smokePreviewCompositorCaptureConfig(config)).toEqual({
+      ...config,
+      sources: {
+        cameraId: 'camera:synthetic-preview-smoke',
+        cameraName: 'Synthetic preview camera',
+        microphoneId: 'microphone:1',
+        microphoneName: 'Microphone',
+        testPattern: true
+      }
+    })
+  })
+
+  it('does not add a synthetic camera to screen-only smoke layouts', () => {
+    expect(
+      smokePreviewCompositorCaptureConfig({
+        ...config,
+        layout: { ...config.layout, layoutPreset: 'screen-only' }
+      }).sources
+    ).toEqual({
+      cameraId: undefined,
+      cameraName: undefined,
+      microphoneId: 'microphone:1',
+      microphoneName: 'Microphone',
+      testPattern: true
+    })
+  })
+
+  it('adds a synthetic camera to camera-required smoke layouts', () => {
+    expect(
+      smokePreviewCompositorCaptureConfig({
+        ...config,
+        layout: { ...config.layout, layoutPreset: 'camera-only' }
+      }).sources.cameraId
+    ).toBe('camera:synthetic-preview-smoke')
+    expect(
+      smokePreviewCompositorCaptureConfig({
+        ...config,
+        layout: { ...config.layout, layoutPreset: 'side-by-side' }
+      }).sources.cameraId
+    ).toBe('camera:synthetic-preview-smoke')
+  })
+
+  it('allows screen-camera smoke layouts to omit the camera when none is selected', () => {
     const config: Pick<CaptureConfig, 'sources' | 'layout' | 'video'> = {
       sources: {
         screenId: 'screen:1',
         screenName: 'Display',
         windowId: 'window:1',
         windowName: 'App',
-        cameraId: 'camera:1',
-        cameraName: 'Camera',
         microphoneId: 'microphone:1',
         microphoneName: 'Microphone'
       },
@@ -351,6 +428,8 @@ describe('smokePreviewCompositorCaptureConfig', () => {
     expect(smokePreviewCompositorCaptureConfig(config)).toEqual({
       ...config,
       sources: {
+        cameraId: undefined,
+        cameraName: undefined,
         microphoneId: 'microphone:1',
         microphoneName: 'Microphone',
         testPattern: true
@@ -374,11 +453,11 @@ describe('layout preset source requirements', () => {
     expect(layoutPresetNeedsCamera('screen-only')).toBe(false)
   })
 
-  it('treats native screen, native window, avfoundation fallback, and test pattern as screen-capable sources', () => {
+  it('treats only native screen/window sources and test pattern as screen-capable for layouts', () => {
     expect(hasSelectedScreenSource({ screenId: 'screen:screencapturekit:1' })).toBe(true)
     expect(hasSelectedScreenSource({ windowId: 'window:screencapturekit:1' })).toBe(true)
     expect(hasSelectedScreenSource({ testPattern: true })).toBe(true)
-    expect(hasSelectedScreenSource({ screenId: 'screen:avfoundation:7' })).toBe(true)
+    expect(hasSelectedScreenSource({ screenId: 'screen:avfoundation:7' })).toBe(false)
     expect(hasSelectedScreenSource({ cameraId: 'camera:1' })).toBe(false)
   })
 
