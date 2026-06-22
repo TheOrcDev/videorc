@@ -182,6 +182,30 @@ Check the remote repository without printing secret values:
 pnpm release:secrets:macos
 ```
 
+## Beta Download Rollback
+
+The web download route fails closed when no valid release manifest is available.
+Use that behavior for rollback instead of deleting release artifacts immediately.
+
+If a beta fails before clean-machine acceptance:
+
+- Leave the production web environment pointed at the previous accepted manifest,
+  or leave download storage disabled.
+- Keep the newly uploaded DMG, checksum sidecar, and `release.json` in private
+  storage for investigation.
+- Cut a replacement beta such as `0.9.0-beta.2` rather than mutating the
+  rejected `0.9.0-beta.1` manifest.
+
+If a beta has already been exposed on Videorc Web:
+
+- Set `VIDEORC_DOWNLOAD_STORAGE_PROVIDER=none` and redeploy the web app to stop
+  issuing signed download URLs immediately.
+- Or change `VIDEORC_DOWNLOAD_MANIFEST_OBJECT_KEY` back to the last accepted
+  `releases/macos/<releaseId>/release.json` and redeploy.
+- Confirm anonymous requests still return `401`, signed-in requests no longer
+  receive the bad release URL, and `/account/download` shows the expected
+  fallback or previous release metadata.
+
 A distributable macOS build still needs:
 
 - Apple Developer account and Team ID
