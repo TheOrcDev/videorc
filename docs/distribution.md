@@ -122,6 +122,7 @@ Publish the signed DMG, checksum sidecar, and `release.json` to private
 S3-compatible download storage after validation:
 
 ```sh
+pnpm release:upload:preflight:macos
 pnpm release:upload:macos
 ```
 
@@ -141,7 +142,9 @@ It uploads to `releases/macos/<releaseId>/` unless
 signed `HEAD` request. Use `VIDEORC_RELEASE_UPLOAD_S3_*` names to separate CI
 upload credentials from the web download signer, or
 `VIDEORC_RELEASE_UPLOAD_SKIP_VERIFY=1` only when the storage provider does not
-support `HEAD`.
+support `HEAD`. The release workflow runs `pnpm release:upload:preflight:macos`
+before the expensive build and notarization steps so missing private-storage
+credentials fail early.
 
 The validator runs `codesign --verify`, `codesign -dv`, Gatekeeper assessment via
 `spctl`, and `xcrun stapler validate`. It redacts repository and home-directory

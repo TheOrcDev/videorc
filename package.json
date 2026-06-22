@@ -25,6 +25,7 @@
     "package:preflight:windows": "node scripts/preflight-windows-package.mjs",
     "release:preflight:macos": "node scripts/preflight-macos-release.mjs",
     "release:secrets:macos": "node scripts/check-macos-release-secrets.mjs",
+    "release:upload:preflight:macos": "node scripts/preflight-macos-release-upload.mjs",
     "release:validate:macos": "node scripts/validate-macos-release-artifact.mjs",
     "release:manifest:macos": "node scripts/generate-macos-beta-manifest.mjs",
     "release:upload:macos": "node scripts/upload-macos-beta-release.mjs",

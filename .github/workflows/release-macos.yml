@@ -69,6 +69,17 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      - name: Check private download storage prerequisites
+        run: pnpm release:upload:preflight:macos
+        env:
+          VIDEORC_DOWNLOAD_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_DOWNLOAD_S3_ACCESS_KEY_ID }}
+          VIDEORC_DOWNLOAD_S3_BUCKET: ${{ secrets.VIDEORC_DOWNLOAD_S3_BUCKET }}
+          VIDEORC_DOWNLOAD_S3_ENDPOINT_URL: ${{ secrets.VIDEORC_DOWNLOAD_S3_ENDPOINT_URL }}
+          VIDEORC_DOWNLOAD_S3_FORCE_PATH_STYLE: ${{ secrets.VIDEORC_DOWNLOAD_S3_FORCE_PATH_STYLE }}
+          VIDEORC_DOWNLOAD_S3_REGION: ${{ secrets.VIDEORC_DOWNLOAD_S3_REGION }}
+          VIDEORC_DOWNLOAD_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_DOWNLOAD_S3_SECRET_ACCESS_KEY }}
+          VIDEORC_DOWNLOAD_S3_SESSION_TOKEN: ${{ secrets.VIDEORC_DOWNLOAD_S3_SESSION_TOKEN }}
+
       - name: Ensure smoke-test FFmpeg
         run: |
           if ! command -v ffmpeg >/dev/null 2>&1; then
