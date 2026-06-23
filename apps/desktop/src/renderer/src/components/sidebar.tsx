@@ -14,7 +14,6 @@ import {
   type StudioPanel,
   type WorkspaceTab
 } from '@/components/workspace-nav'
-import { SIGNED_OUT_ACCOUNT } from '@/lib/account'
 import type { EntitlementTier } from '@/lib/backend'
 import { cn } from '@/lib/utils'
 
@@ -191,7 +190,6 @@ export function Sidebar({
         {/* Videorc product-account control. Backend status is secondary (a small
             dot on the trigger + the Health row); Health stays reachable here. */}
         <AccountMenu
-          account={SIGNED_OUT_ACCOUNT}
           tier={accountTier}
           statusTone={statusTone}
           statusLabel={statusLabel}

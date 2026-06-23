@@ -10,12 +10,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
+import { useVideorcAccount } from '@/hooks/use-account'
 import {
   accountDisplayName,
   entitlementTierLabel,
   isSignOutDisabled,
-  isSignedIn,
-  type VideorcAccount
+  isSignedIn
 } from '@/lib/account'
 import type { EntitlementTier } from '@/lib/backend'
 import { VIDEORC_WEB_LINKS, openVideorcWebLink } from '@/lib/videorc-web-links'
@@ -25,7 +25,6 @@ import { VIDEORC_WEB_LINKS, openVideorcWebLink } from '@/lib/videorc-web-links'
 // status stays as secondary metadata (a small dot on the trigger + the Health
 // row). No platform accounts appear here, and no username is fabricated.
 export function AccountMenu({
-  account,
   tier,
   statusTone,
   statusLabel,
@@ -33,7 +32,6 @@ export function AccountMenu({
   onOpenHealth,
   onOpenSettings
 }: {
-  account: VideorcAccount
   tier: EntitlementTier | null
   statusTone: StatusDotTone
   statusLabel: string
@@ -41,6 +39,7 @@ export function AccountMenu({
   onOpenHealth: () => void
   onOpenSettings: () => void
 }): ReactElement {
+  const { account, signIn, openAccount, signOut } = useVideorcAccount()
   const signedIn = isSignedIn(account)
   const displayName = accountDisplayName(account)
   const tierLabel = entitlementTierLabel(tier)
@@ -77,17 +76,21 @@ export function AccountMenu({
 
         {signedIn ? (
           <>
-            <DropdownMenuItem onSelect={() => openVideorcWebLink(VIDEORC_WEB_LINKS.account)}>
+            <DropdownMenuItem onSelect={openAccount}>
               <UserCircle />
               Account
             </DropdownMenuItem>
-            <DropdownMenuItem disabled={isSignOutDisabled(account, live)} variant="destructive">
+            <DropdownMenuItem
+              disabled={isSignOutDisabled(account, live)}
+              variant="destructive"
+              onSelect={signOut}
+            >
               <SignOut />
               Sign out
             </DropdownMenuItem>
           </>
         ) : (
-          <DropdownMenuItem onSelect={() => openVideorcWebLink(VIDEORC_WEB_LINKS.login)}>
+          <DropdownMenuItem onSelect={signIn}>
             <SignIn />
             Sign in
           </DropdownMenuItem>
