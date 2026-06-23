@@ -432,7 +432,11 @@ impl Database {
                 avatar_url = excluded.avatar_url,
                 scopes_json = excluded.scopes_json,
                 token_secret_ref = excluded.token_secret_ref,
-                refresh_token_secret_ref = excluded.refresh_token_secret_ref,
+                refresh_token_secret_ref = CASE
+                    WHEN excluded.refresh_token_secret_ref IS NOT NULL THEN excluded.refresh_token_secret_ref
+                    WHEN platform_accounts.account_id = excluded.account_id THEN platform_accounts.refresh_token_secret_ref
+                    ELSE NULL
+                END,
                 stream_key_secret_ref = excluded.stream_key_secret_ref,
                 expires_at = excluded.expires_at,
                 updated_at = excluded.updated_at,
@@ -1841,6 +1845,89 @@ mod tests {
             ]
         );
         assert!(database.list_platform_accounts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn platform_account_reconnect_preserves_refresh_token_for_same_account() {
+        let database = test_database();
+        database
+            .upsert_platform_account(UpsertPlatformAccount {
+                platform: StreamPlatform::Youtube,
+                account_id: "channel-123".to_string(),
+                account_label: "Main Channel".to_string(),
+                account_handle: Some("@main".to_string()),
+                avatar_url: None,
+                scopes: vec!["youtube.force-ssl".to_string()],
+                token_secret_ref: Some("platform:youtube:oauth:access".to_string()),
+                refresh_token_secret_ref: Some("platform:youtube:oauth:refresh".to_string()),
+                stream_key_secret_ref: None,
+                expires_at: None,
+                status: PlatformAccountStatus::Connected,
+            })
+            .unwrap();
+
+        let reconnected = database
+            .upsert_platform_account(UpsertPlatformAccount {
+                platform: StreamPlatform::Youtube,
+                account_id: "channel-123".to_string(),
+                account_label: "Main Channel".to_string(),
+                account_handle: Some("@main".to_string()),
+                avatar_url: Some("https://example.test/avatar.png".to_string()),
+                scopes: vec!["youtube.force-ssl".to_string()],
+                token_secret_ref: Some("platform:youtube:oauth:access".to_string()),
+                refresh_token_secret_ref: None,
+                stream_key_secret_ref: None,
+                expires_at: None,
+                status: PlatformAccountStatus::Connected,
+            })
+            .unwrap();
+
+        assert!(reconnected.refresh_token_present);
+        let credentials = database.list_platform_account_credentials().unwrap();
+        assert_eq!(
+            credentials[0].refresh_token_secret_ref.as_deref(),
+            Some("platform:youtube:oauth:refresh")
+        );
+    }
+
+    #[test]
+    fn platform_account_reconnect_without_refresh_token_clears_other_account_token() {
+        let database = test_database();
+        database
+            .upsert_platform_account(UpsertPlatformAccount {
+                platform: StreamPlatform::Youtube,
+                account_id: "channel-123".to_string(),
+                account_label: "Main Channel".to_string(),
+                account_handle: Some("@main".to_string()),
+                avatar_url: None,
+                scopes: vec!["youtube.force-ssl".to_string()],
+                token_secret_ref: Some("platform:youtube:oauth:access".to_string()),
+                refresh_token_secret_ref: Some("platform:youtube:oauth:refresh".to_string()),
+                stream_key_secret_ref: None,
+                expires_at: None,
+                status: PlatformAccountStatus::Connected,
+            })
+            .unwrap();
+
+        let switched = database
+            .upsert_platform_account(UpsertPlatformAccount {
+                platform: StreamPlatform::Youtube,
+                account_id: "channel-456".to_string(),
+                account_label: "Brand Channel".to_string(),
+                account_handle: Some("@brand".to_string()),
+                avatar_url: None,
+                scopes: vec!["youtube.force-ssl".to_string()],
+                token_secret_ref: Some("platform:youtube:oauth:access".to_string()),
+                refresh_token_secret_ref: None,
+                stream_key_secret_ref: None,
+                expires_at: None,
+                status: PlatformAccountStatus::Connected,
+            })
+            .unwrap();
+
+        assert!(!switched.refresh_token_present);
+        let credentials = database.list_platform_account_credentials().unwrap();
+        assert_eq!(credentials[0].refresh_token_secret_ref, None);
     }
 
     #[test]

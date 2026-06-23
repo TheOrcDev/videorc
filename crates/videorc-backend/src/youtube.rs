@@ -835,6 +835,16 @@ async fn require_youtube_success(
     anyhow::bail!("{action} ({status}): {}", youtube_error_detail(&body));
 }
 
+pub fn is_youtube_auth_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("401 unauthorized")
+        || message.contains("401 unauthenticated")
+        || message.contains("(401")
+        || message.contains("invalid credentials")
+        || message.contains("autherror")
+        || message.contains("unauthenticated")
+}
+
 fn youtube_error_detail(body: &str) -> String {
     #[derive(Deserialize)]
     struct GoogleErrorEnvelope {
@@ -1751,6 +1761,22 @@ mod tests {
             "<html>boom</html>"
         );
         assert_eq!(youtube_error_detail("  "), "no error body");
+    }
+
+    #[test]
+    fn detects_youtube_access_token_auth_errors() {
+        assert!(is_youtube_auth_error(&anyhow::anyhow!(
+            "YouTube channel list request failed (401 Unauthorized): authError: Invalid Credentials"
+        )));
+        assert!(is_youtube_auth_error(&anyhow::anyhow!(
+            "YouTube broadcast status request failed (401 Unauthorized): UNAUTHENTICATED: Request had invalid authentication credentials."
+        )));
+        assert!(!is_youtube_auth_error(&anyhow::anyhow!(
+            "YouTube broadcast transition failed (403 Forbidden): invalidTransition: Invalid transition"
+        )));
+        assert!(!is_youtube_auth_error(&anyhow::anyhow!(
+            "YouTube profile lookup failed with HTTP 403 Forbidden: quotaExceeded: quota exhausted"
+        )));
     }
 
     #[test]
