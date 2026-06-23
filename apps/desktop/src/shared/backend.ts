@@ -1012,8 +1012,8 @@ export interface CompositorStatus {
   message?: string
 }
 
-export type PreviewSurfaceSceneLayerKind = SceneSourceKind | 'screen-image'
-export type PreviewSurfaceSceneLayerFit = 'contain' | 'cover'
+export type PreviewSurfaceSceneLayerKind = SceneSourceKind | 'screen-image' | 'background'
+export type PreviewSurfaceSceneLayerFit = 'contain' | 'cover' | 'fill'
 
 export interface PreviewSurfaceSceneLayer {
   id: string

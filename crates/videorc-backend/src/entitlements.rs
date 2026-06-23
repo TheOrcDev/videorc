@@ -30,15 +30,32 @@ const MULTISTREAMING_DISABLED_REASON: &str =
     "Multistreaming requires Videorc Premium. Basic can stream to one destination at HD.";
 const CLOUD_AI_DISABLED_REASON: &str = "Cloud AI is a Videorc Premium feature. Set VIDEORC_PREMIUM_FEATURES=1 for local developer testing.";
 const DEVELOPER_OVERRIDE_REASON: &str = "Enabled by VIDEORC_PREMIUM_FEATURES=1.";
+const DEV_BUILD_OVERRIDE_REASON: &str = "Enabled by Videorc debug/dev backend build.";
 
 pub fn current_entitlements() -> EntitlementsSnapshot {
     let value = std::env::var(PREMIUM_FEATURES_ENV_VAR).ok();
-    entitlements_from_env_value(value.as_deref())
+    current_entitlements_from_env_value(value.as_deref(), cfg!(debug_assertions))
 }
 
+fn current_entitlements_from_env_value(
+    value: Option<&str>,
+    dev_build: bool,
+) -> EntitlementsSnapshot {
+    if premium_override_enabled(value) {
+        return developer_entitlements(DEVELOPER_OVERRIDE_REASON);
+    }
+
+    if dev_build {
+        return developer_entitlements(DEV_BUILD_OVERRIDE_REASON);
+    }
+
+    basic_entitlements()
+}
+
+#[cfg(test)]
 pub fn entitlements_from_env_value(value: Option<&str>) -> EntitlementsSnapshot {
     if premium_override_enabled(value) {
-        return developer_entitlements();
+        return developer_entitlements(DEVELOPER_OVERRIDE_REASON);
     }
 
     basic_entitlements()
@@ -89,13 +106,13 @@ pub fn premium_entitlements(source: EntitlementSource) -> EntitlementsSnapshot {
     }
 }
 
-fn developer_entitlements() -> EntitlementsSnapshot {
+fn developer_entitlements(reason: &str) -> EntitlementsSnapshot {
     let mut snapshot = premium_entitlements(EntitlementSource::EnvOverride);
     snapshot.tier = EntitlementTier::Developer;
     snapshot.limits = developer_limits();
     for capability in &mut snapshot.capabilities {
         capability.state = EntitlementState::DeveloperOverride;
-        capability.reason = Some(DEVELOPER_OVERRIDE_REASON.to_string());
+        capability.reason = Some(reason.to_string());
     }
     snapshot
 }
@@ -281,6 +298,33 @@ mod tests {
         assert_eq!(snapshot.limits.streaming.max_width, 3840);
         assert_eq!(snapshot.limits.streaming.max_height, 2160);
         assert_eq!(snapshot.limits.streaming.max_bitrate_kbps, 30_000);
+    }
+
+    #[test]
+    fn current_entitlements_enable_developer_features_for_dev_builds_without_env() {
+        let snapshot = current_entitlements_from_env_value(None, true);
+
+        assert_eq!(snapshot.tier, EntitlementTier::Developer);
+        assert_eq!(snapshot.source, EntitlementSource::EnvOverride);
+        assert!(feature_entitled(&snapshot, FeatureId::Multistreaming));
+        assert!(feature_entitled(&snapshot, FeatureId::CloudAi));
+        assert_eq!(snapshot.limits.streaming.max_destinations, 3);
+        assert_eq!(
+            capability(&snapshot, FeatureId::Multistreaming)
+                .expect("multistreaming capability")
+                .reason
+                .as_deref(),
+            Some(DEV_BUILD_OVERRIDE_REASON)
+        );
+    }
+
+    #[test]
+    fn current_entitlements_keep_release_builds_basic_without_env() {
+        let snapshot = current_entitlements_from_env_value(None, false);
+
+        assert_eq!(snapshot.tier, EntitlementTier::Basic);
+        assert_eq!(snapshot.source, EntitlementSource::LocalDefault);
+        assert!(!feature_entitled(&snapshot, FeatureId::Multistreaming));
     }
 
     #[test]

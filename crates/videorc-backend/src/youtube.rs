@@ -295,6 +295,12 @@ pub async fn prepare_youtube_broadcast(
             "contentDetails": {
                 "enableAutoStart": true,
                 "enableAutoStop": true,
+                // The API defaults monitor streams to enabled. With a monitor stream
+                // enabled, YouTube rejects direct ready -> live transitions; our Go
+                // Live flow waits for active ingest, then transitions directly live.
+                "monitorStream": {
+                    "enableMonitorStream": false,
+                },
                 // YouTube defaults to "normal" latency (30-60s by design). Low keeps
                 // every feature at ~10-15s glass-to-glass; ultraLow restricts
                 // resolutions and is deliberately not the default here.
@@ -1072,6 +1078,10 @@ mod tests {
         // Low latency is the product default: YouTube's "normal" mode buffers 30-60s.
         assert_eq!(logs[0].body["contentDetails"]["latencyPreference"], "low");
         assert_eq!(logs[0].body["contentDetails"]["enableAutoStart"], true);
+        assert_eq!(
+            logs[0].body["contentDetails"]["monitorStream"]["enableMonitorStream"],
+            false
+        );
         assert_eq!(logs[0].body["snippet"]["title"], "YouTube title");
         assert_eq!(
             logs[0].body["snippet"]["description"],

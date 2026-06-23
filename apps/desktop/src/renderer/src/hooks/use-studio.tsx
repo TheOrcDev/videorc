@@ -3009,6 +3009,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       layout: captureConfig.layout,
       activeScreen: activeScreen ?? null
     }
+
+    const previewSceneStatus = await window.videorc.updateNativePreviewSurfaceScene(params)
+    if (revision !== nativePreviewSurfaceSceneRevisionRef.current) {
+      return
+    }
+    applyPreviewSurfaceStatus({
+      ...previewSceneStatus,
+      framesRendered: Math.max(
+        previewSceneStatus.framesRendered,
+        previewSurfaceStatusRef.current.framesRendered
+      )
+    })
+
     if (client && wsStatus === 'connected') {
       const compositorParams: CompositorSceneUpdateParams = params
       const compositorStatus = await client.request<CompositorStatus>(
@@ -3024,14 +3037,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
       if (!compositorStatusHasRenderedSceneRevision(renderedStatus, revision)) {
-        const status = await window.videorc.updateNativePreviewSurfaceScene(params)
-        applyPreviewSurfaceStatus({
-          ...status,
-          framesRendered: Math.max(
-            status.framesRendered,
-            previewSurfaceStatusRef.current.framesRendered
-          )
-        })
         return
       }
       if (window.videorc.updateNativePreviewSurfaceCompositor) {
@@ -3046,14 +3051,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
     }
-    const status = await window.videorc.updateNativePreviewSurfaceScene(params)
-    applyPreviewSurfaceStatus({
-      ...status,
-      framesRendered: Math.max(
-        status.framesRendered,
-        previewSurfaceStatusRef.current.framesRendered
-      )
-    })
   }, [
     activeScreen,
     applyPreviewSurfaceStatus,

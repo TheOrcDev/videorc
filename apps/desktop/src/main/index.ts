@@ -116,6 +116,7 @@ let nativePreviewSurfaceScene: PreviewSurfaceSceneState | null = null
 let stdoutBuffer = ''
 let appIsQuitting = false
 let appIcon: NativeImage | null | undefined
+const PREVIEW_BACKGROUND_STAGE_MARGIN = 0.1
 const backendLogs: BackendLogEvent[] = []
 const pendingOAuthCallbackUrls: string[] = []
 const OAUTH_CALLBACK_PROTOCOL = 'videorc'
@@ -1381,6 +1382,53 @@ function fullFrameTransform(): SceneTransform {
   }
 }
 
+function insetTransformForBackground(transform: SceneTransform): SceneTransform {
+  const stageScale = 1 - PREVIEW_BACKGROUND_STAGE_MARGIN * 2
+  return {
+    ...transform,
+    x: PREVIEW_BACKGROUND_STAGE_MARGIN + transform.x * stageScale,
+    y: PREVIEW_BACKGROUND_STAGE_MARGIN + transform.y * stageScale,
+    width: transform.width * stageScale,
+    height: transform.height * stageScale
+  }
+}
+
+function transformForPreviewBackground(
+  transform: SceneTransform,
+  backgroundActive: boolean
+): SceneTransform {
+  return backgroundActive ? insetTransformForBackground(transform) : transform
+}
+
+function previewBackgroundLayer(
+  scene: PreviewSurfaceSceneUpdateParams['scene']
+): PreviewSurfaceSceneLayer | null {
+  const background = scene?.background
+  const managedAssetPath = background?.managedAssetPath?.trim()
+  if (!background || !managedAssetPath) {
+    return null
+  }
+
+  return {
+    id: `background:${background.assetId}`,
+    name: 'Scene background',
+    kind: 'background',
+    transform: fullFrameTransform(),
+    visible: true,
+    imageUrl: fileUrlFromPath(managedAssetPath),
+    fit: background.fit === 'fit' ? 'contain' : background.fit === 'stretch' ? 'fill' : 'cover',
+    mirror: false
+  }
+}
+
+function existingPreviewBackgroundLayer(): PreviewSurfaceSceneLayer | null {
+  return (
+    nativePreviewSurfaceScene?.sources.find(
+      (layer) => layer.kind === 'background' && Boolean(layer.imageUrl)
+    ) ?? null
+  )
+}
+
 function previewLayerFit(source: SceneSource, layout: LayoutSettings): 'contain' | 'cover' {
   if (source.kind === 'camera') {
     return layout.cameraFit === 'fit' ? 'contain' : 'cover'
@@ -1436,17 +1484,24 @@ function previewLayerFrameUrl(source: SceneSource): string | undefined {
 function buildPreviewSurfaceScene(
   params: PreviewSurfaceSceneUpdateParams
 ): PreviewSurfaceSceneState {
-  const layers: PreviewSurfaceSceneLayer[] = (params.scene?.sources ?? []).map((source) => ({
-    id: source.id,
-    name: source.name,
-    kind: source.kind,
-    transform: source.transform,
-    visible: source.visible,
-    frameUrl: nativePreviewSurfaceFramePollingSuppressed ? undefined : previewLayerFrameUrl(source),
-    fit: previewLayerFit(source, params.layout),
-    mirror: source.kind === 'camera' ? params.layout.cameraMirror : false,
-    shape: previewLayerShape(source, params.layout)
-  }))
+  const backgroundLayer = previewBackgroundLayer(params.scene)
+  const backgroundActive = Boolean(backgroundLayer)
+  const layers: PreviewSurfaceSceneLayer[] = [
+    ...(backgroundLayer ? [backgroundLayer] : []),
+    ...(params.scene?.sources ?? []).map((source) => ({
+      id: source.id,
+      name: source.name,
+      kind: source.kind,
+      transform: transformForPreviewBackground(source.transform, backgroundActive),
+      visible: source.visible,
+      frameUrl: nativePreviewSurfaceFramePollingSuppressed
+        ? undefined
+        : previewLayerFrameUrl(source),
+      fit: previewLayerFit(source, params.layout),
+      mirror: source.kind === 'camera' ? params.layout.cameraMirror : false,
+      shape: previewLayerShape(source, params.layout)
+    }))
+  ]
 
   const activeScreen: StreamScreen | null | undefined = params.activeScreen
   if (activeScreen?.status === 'ready') {
@@ -1454,7 +1509,7 @@ function buildPreviewSurfaceScene(
       id: `screen-image:${activeScreen.id}`,
       name: activeScreen.name,
       kind: 'screen-image',
-      transform: fullFrameTransform(),
+      transform: transformForPreviewBackground(fullFrameTransform(), backgroundActive),
       visible: true,
       imageUrl: fileUrlFromPath(activeScreen.imagePath),
       fit: 'cover',
@@ -1480,21 +1535,26 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
   }
   const suppressFramePolling =
     nativePreviewSurfaceFramePollingSuppressed || status.suppressFramePolling === true
-  const layers: PreviewSurfaceSceneLayer[] = (status.sceneSources ?? []).map((source) => ({
-    id: source.id,
-    name: source.name,
-    kind: source.kind,
-    transform: source.transform,
-    visible: source.visible,
-    frameUrl: suppressFramePolling ? undefined : compositorLayerFrameUrl(source),
-    imageUrl:
-      source.kind === 'screen-image' && source.state !== 'source-missing' && source.imagePath
-        ? fileUrlFromPath(source.imagePath)
-        : undefined,
-    fit: source.fit,
-    mirror: source.mirror,
-    shape: source.shape
-  }))
+  const backgroundLayer = existingPreviewBackgroundLayer()
+  const backgroundActive = Boolean(backgroundLayer)
+  const layers: PreviewSurfaceSceneLayer[] = [
+    ...(backgroundLayer ? [backgroundLayer] : []),
+    ...(status.sceneSources ?? []).map((source) => ({
+      id: source.id,
+      name: source.name,
+      kind: source.kind,
+      transform: transformForPreviewBackground(source.transform, backgroundActive),
+      visible: source.visible,
+      frameUrl: suppressFramePolling ? undefined : compositorLayerFrameUrl(source),
+      imageUrl:
+        source.kind === 'screen-image' && source.state !== 'source-missing' && source.imagePath
+          ? fileUrlFromPath(source.imagePath)
+          : undefined,
+      fit: source.fit,
+      mirror: source.mirror,
+      shape: source.shape
+    }))
+  ]
 
   return {
     revision: status.sceneRevision,
@@ -1761,13 +1821,15 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           element.style.width = percent(transform.width || 0);
           element.style.height = percent(transform.height || 0);
           element.style.borderRadius = layer.shape === 'circle' ? '9999px' : '0';
+          element.style.zIndex = layer.kind === 'background' ? '0' : '1';
 
           const crop = cropStyle(transform);
           image.style.left = crop.left;
           image.style.top = crop.top;
           image.style.width = crop.width;
           image.style.height = crop.height;
-          image.style.objectFit = layer.fit === 'cover' ? 'cover' : 'contain';
+          image.style.objectFit =
+            layer.fit === 'cover' ? 'cover' : layer.fit === 'fill' ? 'fill' : 'contain';
           image.style.transform = layer.mirror ? 'scaleX(-1)' : 'none';
 
           if (layer.kind === 'test-pattern') {
@@ -3950,6 +4012,43 @@ async function runSmokePreviewMotionCommand(
     }
   }
 
+  if (command === 'exercise-native-preview-scene-background') {
+    if (!nativePreviewSurfaceWindow || nativePreviewSurfaceWindow.webContents.isDestroyed()) {
+      throw new Error('Native preview surface is not ready for background scene exercise.')
+    }
+    const params = smokePreviewSceneParams(11, 0.24, { background: true })
+    await updateNativePreviewSurfaceScene(params)
+    const finalStatus = smokeCompositorStatusFromSceneParams(params)
+    const status = await updateNativePreviewSurfaceCompositor(finalStatus)
+    const result = await nativePreviewSurfaceWindow.webContents.executeJavaScript(
+      `window.__videorcSetCompositorStatus?.(${jsonForInlineScript(finalStatus)});window.__videorcPresentNativePreviewNow?.();(() => {
+        const background = document.querySelector('[data-layer-id="background:builtin-bg-01"]');
+        const screen = document.querySelector('[data-layer-id="source:test-pattern"]');
+        const image = background?.querySelector('img');
+        return {
+          backgroundLayer: Boolean(background),
+          backgroundLeft: background?.style.left ?? null,
+          backgroundTop: background?.style.top ?? null,
+          backgroundWidth: background?.style.width ?? null,
+          backgroundHeight: background?.style.height ?? null,
+          backgroundZIndex: background?.style.zIndex ?? null,
+          backgroundObjectFit: image?.style.objectFit ?? null,
+          screenLeft: screen?.style.left ?? null,
+          screenTop: screen?.style.top ?? null,
+          screenWidth: screen?.style.width ?? null,
+          screenHeight: screen?.style.height ?? null,
+          screenZIndex: screen?.style.zIndex ?? null,
+          layerCount: document.querySelectorAll('.scene-layer').length
+        };
+      })()`,
+      true
+    )
+    return {
+      ...result,
+      status
+    }
+  }
+
   if (command === 'exercise-native-preview-scene-after-surface-loss') {
     if (!previewWindowIsOpenForSurface()) {
       throw new Error('Preview window is not open for scene reattach exercise.')
@@ -4396,7 +4495,8 @@ function nativePreviewSurfaceStatusMetrics(status: PreviewSurfaceStatus): Record
 
 function smokePreviewSceneParams(
   revision: number,
-  cameraX: number
+  cameraX: number,
+  options: { background?: boolean } = {}
 ): PreviewSurfaceSceneUpdateParams {
   const cameraTransform: SceneTransform = {
     x: cameraX,
@@ -4430,6 +4530,7 @@ function smokePreviewSceneParams(
     sideBySideCameraSide: 'right'
   }
   const baseTransform = fullFrameTransform()
+  const backgroundAsset = bundledBackgroundAssets()[0]
   return {
     revision,
     layout,
@@ -4457,7 +4558,22 @@ function smokePreviewSceneParams(
           visible: true,
           locked: false
         }
-      ]
+      ],
+      background:
+        options.background && backgroundAsset
+          ? {
+              assetId: backgroundAsset.id,
+              managedAssetPath: backgroundAsset.assetPath,
+              fit: 'fill',
+              scale: 100,
+              offsetX: 0,
+              offsetY: 0,
+              blurPx: 0,
+              dimPercent: 0,
+              saturationPercent: 100,
+              vignettePercent: 0
+            }
+          : undefined
     }
   }
 }

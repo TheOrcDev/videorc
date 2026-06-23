@@ -97,6 +97,11 @@ async function runPreviewSurfaceSmoke(connection, smoke) {
     assertNativePreviewBadge(badges)
     const sceneExercise = await smokeCommand(smoke, 'exercise-native-preview-scene')
     assertSceneExercise(sceneExercise)
+    const backgroundSceneExercise = await smokeCommand(
+      smoke,
+      'exercise-native-preview-scene-background'
+    )
+    assertBackgroundSceneExercise(backgroundSceneExercise)
     const sceneReattach = await smokeCommand(
       smoke,
       'exercise-native-preview-scene-after-surface-loss'
@@ -406,6 +411,52 @@ function assertSceneExercise(result) {
   if ((result.updateLatencyMs ?? Number.POSITIVE_INFINITY) > 50) {
     throw new Error(
       `Native preview scene update took ${format(result.updateLatencyMs)}ms, expected <= 50ms.`
+    )
+  }
+}
+
+function assertBackgroundSceneExercise(result) {
+  if (result.status?.state !== 'live') {
+    throw new Error(
+      `Native preview background scene status is ${result.status?.state}, expected live: ${JSON.stringify(result)}`
+    )
+  }
+  if (result.backgroundLayer !== true) {
+    throw new Error(`Native preview background layer was missing: ${JSON.stringify(result)}`)
+  }
+  if (
+    result.backgroundLeft !== '0%' ||
+    result.backgroundTop !== '0%' ||
+    result.backgroundWidth !== '100%' ||
+    result.backgroundHeight !== '100%'
+  ) {
+    throw new Error(
+      `Native preview background layer did not fill the frame: ${JSON.stringify(result)}`
+    )
+  }
+  if (result.backgroundZIndex !== '0' || result.screenZIndex !== '1') {
+    throw new Error(
+      `Native preview background/source stacking was wrong: ${JSON.stringify(result)}`
+    )
+  }
+  if (result.backgroundObjectFit !== 'cover') {
+    throw new Error(
+      `Native preview background object-fit was ${result.backgroundObjectFit}, expected cover.`
+    )
+  }
+  if (
+    result.screenLeft !== '10%' ||
+    result.screenTop !== '10%' ||
+    result.screenWidth !== '80%' ||
+    result.screenHeight !== '80%'
+  ) {
+    throw new Error(
+      `Native preview screen source was not inset to the 80% stage: ${JSON.stringify(result)}`
+    )
+  }
+  if ((result.layerCount ?? 0) < 3) {
+    throw new Error(
+      `Native preview background scene rendered ${result.layerCount ?? 0} layer(s), expected at least 3.`
     )
   }
 }
