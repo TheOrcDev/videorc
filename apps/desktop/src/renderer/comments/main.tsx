@@ -1,8 +1,9 @@
-import React from 'react'
+import React, { useEffect, useState, type ReactElement } from 'react'
 import ReactDOM from 'react-dom/client'
 
 import { CommentsReader } from '@/components/comments-reader'
 import { AppErrorBoundary } from '@/components/error-boundary'
+import type { LiveChatSnapshot } from '@/lib/backend'
 import { emptyLiveChatSnapshot } from '@/lib/live-chat-view'
 import '@/styles.css'
 
@@ -24,11 +25,29 @@ if (import.meta.env.DEV && localStorage.getItem('videorc.reactPerfTrack') !== '1
   }
 }
 
-// C2 seeds an empty reader; C3 wires the live snapshot through the IPC relay.
+// The window's data comes from the main renderer through the main-process relay
+// (C3): seed from the cached snapshot, then follow live pushes; Clear routes back.
+function CommentsWindowApp(): ReactElement {
+  const [snapshot, setSnapshot] = useState<LiveChatSnapshot>(() =>
+    emptyLiveChatSnapshot(new Date().toISOString())
+  )
+  useEffect(() => {
+    void window.videorc
+      ?.getCommentsSnapshot?.()
+      .then((initial) => initial && setSnapshot(initial))
+      .catch(() => {})
+    const off = window.videorc?.onCommentsSnapshot?.((next) => setSnapshot(next))
+    return () => off?.()
+  }, [])
+  return (
+    <CommentsReader snapshot={snapshot} onClear={() => void window.videorc?.clearComments?.()} />
+  )
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <AppErrorBoundary>
-      <CommentsReader snapshot={emptyLiveChatSnapshot(new Date().toISOString())} />
+      <CommentsWindowApp />
     </AppErrorBoundary>
   </React.StrictMode>
 )

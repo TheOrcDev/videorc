@@ -5,6 +5,7 @@ import type {
   BackendLogEvent,
   CommentsWindowState,
   GlassWallpaperState,
+  LiveChatSnapshot,
   NotesDocument,
   NotesWindowState,
   PreviewWindowState,
@@ -75,6 +76,20 @@ const api: VideorcApi = {
       callback(state)
     ipcRenderer.on('comments-window:state', listener)
     return () => ipcRenderer.removeListener('comments-window:state', listener)
+  },
+  pushCommentsSnapshot: (snapshot) => ipcRenderer.invoke('comments-window:push-snapshot', snapshot),
+  getCommentsSnapshot: () => ipcRenderer.invoke('comments-window:get-snapshot'),
+  onCommentsSnapshot: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, snapshot: LiveChatSnapshot): void =>
+      callback(snapshot)
+    ipcRenderer.on('comments-window:snapshot', listener)
+    return () => ipcRenderer.removeListener('comments-window:snapshot', listener)
+  },
+  clearComments: () => ipcRenderer.invoke('comments-window:clear'),
+  onCommentsClearRequest: (callback) => {
+    const listener = (): void => callback()
+    ipcRenderer.on('comments-window:clear-request', listener)
+    return () => ipcRenderer.removeListener('comments-window:clear-request', listener)
   },
   createNativePreviewSurface: (bounds, generation) =>
     ipcRenderer.invoke('preview-surface:create', bounds, generation),

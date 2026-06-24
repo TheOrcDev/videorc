@@ -71,6 +71,7 @@ import type {
   CommentsWindowState,
   CompositorStatus,
   LayoutSettings,
+  LiveChatSnapshot,
   NativePreviewHostCommand,
   NotesDocument,
   NotesFontScale,
@@ -101,6 +102,7 @@ let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
 let commentsWindowClosing = false
+let latestCommentsSnapshot: LiveChatSnapshot | null = null
 let nativePreviewSurfaceStatus: PreviewSurfaceStatus = idleNativePreviewSurfaceStatus()
 let nativePreviewSurfaceCompositorUpdateInFlight: Promise<PreviewSurfaceStatus> | null = null
 let nativePreviewSurfaceCompositorRequestSerial = 0
@@ -5640,6 +5642,21 @@ app.whenReady().then(async () => {
   ipcMain.handle('comments-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setCommentsWindowAlwaysOnTop(Boolean(alwaysOnTop))
   )
+  // Relay (C3): the main renderer owns the single WS client and pushes each
+  // live-chat snapshot through here to the window; the window's Clear routes
+  // back to the main renderer. Last snapshot is cached for the window's first paint.
+  ipcMain.handle('comments-window:push-snapshot', (_event, snapshot: LiveChatSnapshot) => {
+    latestCommentsSnapshot = snapshot
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
+      commentsWindow.webContents.send('comments-window:snapshot', snapshot)
+    }
+  })
+  ipcMain.handle('comments-window:get-snapshot', () => latestCommentsSnapshot)
+  ipcMain.handle('comments-window:clear', () => {
+    if (mainWindow && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('comments-window:clear-request')
+    }
+  })
   ipcMain.handle('preview-surface:create', (_event, bounds: PreviewSurfaceBounds, generation) => {
     const requestedGeneration = previewSurfaceGenerationFromIpc(generation)
     return runNativePreviewSurfaceMutation(() =>

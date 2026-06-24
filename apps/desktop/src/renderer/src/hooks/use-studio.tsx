@@ -780,6 +780,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!client) return
     await client.request('liveChat.clearLocal')
   }, [client])
+  // Relay the live-chat feed to the detached Comments window (C3). The main
+  // renderer owns the single WS client, so it forwards each snapshot through the
+  // main process to the window and handles the window's Clear. (Owner-picked
+  // relay — the feed pauses if this window is closed; accepted tradeoff.)
+  const [commentsWindowOpen, setCommentsWindowOpen] = useState(false)
+  useEffect(() => {
+    const offState = window.videorc?.onCommentsWindowState?.((state) => {
+      setCommentsWindowOpen(state.open)
+    })
+    const offClear = window.videorc?.onCommentsClearRequest?.(() => {
+      void clearLiveChat()
+    })
+    void window.videorc
+      ?.getCommentsWindowState?.()
+      .then((state) => state && setCommentsWindowOpen(state.open))
+      .catch(() => {})
+    return () => {
+      offState?.()
+      offClear?.()
+    }
+  }, [clearLiveChat])
+  useEffect(() => {
+    if (commentsWindowOpen) {
+      void window.videorc?.pushCommentsSnapshot?.(liveChatSnapshot)
+    }
+  }, [commentsWindowOpen, liveChatSnapshot])
   const [streamMetadataDraft, setStreamMetadataDraft] = useState<StreamMetadataDraft | null>(null)
   const [streamMetadataValidation, setStreamMetadataValidation] =
     useState<StreamMetadataValidation | null>(null)

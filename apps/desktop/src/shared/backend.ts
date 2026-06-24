@@ -1869,6 +1869,11 @@ export interface VideorcApi {
   getCommentsWindowState: () => Promise<CommentsWindowState>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<CommentsWindowState>
   onCommentsWindowState: (callback: (state: CommentsWindowState) => void) => () => void
+  pushCommentsSnapshot: (snapshot: LiveChatSnapshot) => Promise<void>
+  getCommentsSnapshot: () => Promise<LiveChatSnapshot | null>
+  onCommentsSnapshot: (callback: (snapshot: LiveChatSnapshot) => void) => () => void
+  clearComments: () => Promise<void>
+  onCommentsClearRequest: (callback: () => void) => () => void
   createNativePreviewSurface: (
     bounds: PreviewSurfaceBounds,
     generation?: number
