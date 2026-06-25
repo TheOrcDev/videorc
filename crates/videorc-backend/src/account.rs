@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::protocol::{AccountStatus, VideorcAccountSnapshot};
 use crate::secrets;
-use crate::videorc_api::{VerifiedSession, VideorcApiClient};
+use crate::videorc_api::{SessionRefresh, SessionStatus, VerifiedSession, VideorcApiClient};
 
 // Real web auth: complete_sign_in exchanges the deep-link one-time token with
 // videorc-web for a durable session token (stored in the secrets file) and the
@@ -85,16 +85,15 @@ async fn exchange_one_time_token(one_time_token: &str) -> Result<VideorcAccountS
 }
 
 fn signed_in_from_verified(verified: &VerifiedSession) -> VideorcAccountSnapshot {
+    snapshot_from_identity(verified.name.clone(), verified.email.clone())
+}
+
+fn snapshot_from_identity(name: Option<String>, email: String) -> VideorcAccountSnapshot {
     VideorcAccountSnapshot {
         status: AccountStatus::SignedIn,
-        username: Some(
-            verified
-                .name
-                .clone()
-                .unwrap_or_else(|| verified.email.clone()),
-        ),
-        display_name: verified.name.clone(),
-        email: Some(verified.email.clone()),
+        username: Some(name.clone().unwrap_or_else(|| email.clone())),
+        display_name: name,
+        email: Some(email),
     }
 }
 
@@ -119,6 +118,50 @@ pub fn restore_persisted_account() -> Option<VideorcAccountSnapshot> {
 pub fn clear_persisted_account() {
     let _ = secrets::delete_secret(SESSION_TOKEN_SECRET);
     let _ = secrets::delete_secret(ACCOUNT_SNAPSHOT_SECRET);
+}
+
+// Read the stored durable session token (for Bearer-authed Videorc API calls).
+pub fn stored_session_token() -> Option<String> {
+    secrets::try_get_secret(SESSION_TOKEN_SECRET)
+        .ok()
+        .flatten()
+        .filter(|token| !token.trim().is_empty())
+}
+
+// Validate the stored token against videorc-web and refresh the cached identity.
+// A dead token (401 / no session) signs the user out; a transient network error
+// keeps the cached account. A rotated token is persisted to avoid a future 401.
+pub async fn refresh_account() -> VideorcAccountSnapshot {
+    let Some(token) = stored_session_token() else {
+        return signed_out_account();
+    };
+    let client = match VideorcApiClient::new() {
+        Ok(client) => client,
+        Err(_) => return restore_persisted_account().unwrap_or_else(signed_out_account),
+    };
+    match client.get_session(&token).await {
+        Ok(refresh) => apply_session_refresh(token, refresh),
+        Err(error) => {
+            // Transient failure — keep the cached account rather than signing out.
+            eprintln!("videorc session check failed: {error:#}");
+            restore_persisted_account().unwrap_or_else(signed_out_account)
+        }
+    }
+}
+
+fn apply_session_refresh(current_token: String, refresh: SessionRefresh) -> VideorcAccountSnapshot {
+    match refresh.status {
+        SessionStatus::Unauthorized => {
+            clear_persisted_account();
+            signed_out_account()
+        }
+        SessionStatus::Active { name, email } => {
+            let snapshot = snapshot_from_identity(name, email);
+            let token = refresh.rotated_token.unwrap_or(current_token);
+            let _ = persist_account(&token, &snapshot);
+            snapshot
+        }
+    }
 }
 
 fn signed_in_mock(username: &str) -> VideorcAccountSnapshot {

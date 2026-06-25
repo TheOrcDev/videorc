@@ -1675,6 +1675,11 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             *state.account_session.lock().await = Some(resolved.clone());
             ServerResponse::ok(command.id, resolved)
         }
+        "account.refresh" => {
+            let resolved = account::refresh_account().await;
+            *state.account_session.lock().await = Some(resolved.clone());
+            ServerResponse::ok(command.id, resolved)
+        }
         "entitlements.get" => ServerResponse::ok(command.id, entitlements::current_entitlements()),
         "devices.list" => {
             let ffmpeg_path = resolve_ffmpeg_path_ref(

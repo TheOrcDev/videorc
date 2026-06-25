@@ -39,6 +39,19 @@ pub struct VerifiedSession {
     pub email: String,
 }
 
+/// The outcome of validating the stored Bearer token via `/api/auth/get-session`.
+pub struct SessionRefresh {
+    pub status: SessionStatus,
+    /// A rotated session token from the `set-auth-token` header, if the server
+    /// refreshed it on this request.
+    pub rotated_token: Option<String>,
+}
+
+pub enum SessionStatus {
+    Active { name: Option<String>, email: String },
+    Unauthorized,
+}
+
 /// A thin client over the Videorc web API.
 #[derive(Clone)]
 pub struct VideorcApiClient {
@@ -87,6 +100,54 @@ impl VideorcApiClient {
             email: body.user.email,
         })
     }
+
+    /// Validate the stored Bearer token and fetch the current account identity.
+    /// A rotated token is captured from the `set-auth-token` response header (the
+    /// bearer plugin emits it when the session token is refreshed) so callers can
+    /// persist it and avoid a future 401.
+    pub async fn get_session(&self, bearer_token: &str) -> Result<SessionRefresh> {
+        let response = self
+            .http
+            .get(self.endpoint("/api/auth/get-session"))
+            .bearer_auth(bearer_token)
+            .send()
+            .await
+            .context("Could not reach the Videorc session service.")?;
+
+        let rotated_token = response
+            .headers()
+            .get("set-auth-token")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(SessionRefresh {
+                status: SessionStatus::Unauthorized,
+                rotated_token,
+            });
+        }
+        if !response.status().is_success() {
+            bail!("Session check failed ({}).", response.status());
+        }
+
+        // get-session returns the session object, or null once the token is dead.
+        let body: Option<GetSessionResponse> = response
+            .json()
+            .await
+            .context("Could not read the session response.")?;
+
+        let status = match body {
+            Some(session) => SessionStatus::Active {
+                name: session.user.name,
+                email: session.user.email,
+            },
+            None => SessionStatus::Unauthorized,
+        };
+        Ok(SessionRefresh {
+            status,
+            rotated_token,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -105,6 +166,11 @@ struct VerifyUser {
     #[serde(default)]
     name: Option<String>,
     email: String,
+}
+
+#[derive(Deserialize)]
+struct GetSessionResponse {
+    user: VerifyUser,
 }
 
 #[cfg(test)]
