@@ -488,8 +488,16 @@ pub async fn commit_scene_with_layout(
     layout: crate::protocol::LayoutSettings,
     message: Option<String>,
 ) -> Result<SceneCommitStatus> {
-    if let Err(message) = validate_scene_background(scene) {
-        bail!(message);
+    // An unreadable background must DEGRADE, never kill the commit: failing here
+    // took the whole preview down with it (every builtin .webp background before
+    // webp decode support — the app sat on "Waiting for the app to commit its
+    // scene" forever). The compositor already renders a placeholder + message
+    // for undecodable images, and recording start keeps its own strict
+    // validate_scene_background gate.
+    if let Err(background_warning) = validate_scene_background(scene) {
+        tracing::warn!(
+            "Committing scene with unreadable background (degraded render): {background_warning}"
+        );
     }
 
     {

@@ -771,6 +771,26 @@ mod tests {
     }
 
     #[test]
+    fn validate_scene_background_accepts_bundled_webp() {
+        // The exact asset class that shipped broken: the builtin background
+        // library is .webp, and the image crate was built png-only — every
+        // builtin background failed validation and killed the scene commit
+        // ("Waiting for the app to commit its scene", 2026-07-01).
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/desktop/src/renderer/src/assets/backgrounds/light-mode.webp");
+        assert!(
+            path.is_file(),
+            "bundled webp fixture missing: {}",
+            path.display()
+        );
+
+        let mut scene = scene_from_capture_config(base_params());
+        scene.background = Some(test_background(path.display().to_string()));
+
+        assert_eq!(validate_scene_background(&scene), Ok(()));
+    }
+
+    #[test]
     fn real_screen_source_wins_over_stale_test_pattern_flag() {
         let mut params = base_params();
         params.sources.test_pattern = true;

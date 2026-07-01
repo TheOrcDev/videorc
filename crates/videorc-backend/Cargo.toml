@@ -9,7 +9,11 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
-image = { version = "0.25", default-features = false, features = ["png"] }
+# png for screenshots/assets, webp for the BUNDLED background library
+# (background-assets/bundled/*.webp), jpeg for user-imported backgrounds — the
+# importer accepts PNG/JPG/WebP, so the backend must decode all three (pure-Rust
+# decoders; no native deps, Windows cross-check safe).
+image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg"] }
 libc = "0.2"
 rayon = "1"
 reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls"], default-features = false }
