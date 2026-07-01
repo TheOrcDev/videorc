@@ -19,6 +19,7 @@ import {
   parseSignalstatsYavg,
   recommendMicrophoneSyncOffsetMs
 } from './av-sync.mjs'
+import { ffmpegAvailable } from './ffmpeg-available.mjs'
 
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 
@@ -195,7 +196,7 @@ function generate(outputPath, opts) {
   })
 }
 
-describe('measureAvSync (integration)', () => {
+describe('measureAvSync (integration)', { skip: ffmpegAvailable(ffmpegPath) ? false : 'ffmpeg not installed' }, () => {
   let dir
   let aligned
   let offset

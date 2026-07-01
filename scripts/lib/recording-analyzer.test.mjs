@@ -39,6 +39,7 @@ import {
   parseSilencedetect,
   renderMarkdownReport,
 } from './recording-analyzer.mjs'
+import { ffmpegAvailable } from './ffmpeg-available.mjs'
 
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
@@ -367,7 +368,7 @@ function generate(args) {
   })
 }
 
-describe('analyzeRecording (integration)', () => {
+describe('analyzeRecording (integration)', { skip: ffmpegAvailable(ffmpegPath) ? false : 'ffmpeg not installed' }, () => {
   let dir
   let clean
   let midfreeze
