@@ -28,9 +28,9 @@ use crate::capture_input::{
     microphone_channels,
 };
 use crate::compositor::{
-    BACKGROUND_STAGE_MARGIN, CompositorAuxiliaryOutput, CompositorStartParams,
-    CompositorStartupBarrierParams, CompositorStartupBarrierResult,
-    CompositorStartupSourceRequirements, compositor_frame_store, compositor_stream_frame_store,
+    CompositorAuxiliaryOutput, CompositorStartParams, CompositorStartupBarrierParams,
+    CompositorStartupBarrierResult, CompositorStartupSourceRequirements,
+    background_stage_margin, compositor_frame_store, compositor_stream_frame_store,
     start_synthetic_compositor, update_compositor_scene, wait_for_compositor_startup_frames,
 };
 use crate::devices::{
@@ -4789,7 +4789,8 @@ fn scene_video_filter(
     };
     let mut canvas_label = "scene_canvas0".to_string();
     let mut layer_index = 0usize;
-    let background_active = background.is_some();
+    // Stage inset sized by the background's visibility setting (0 = full canvas).
+    let stage_margin = background_stage_margin(background);
 
     for source in scene.sources.iter().filter(|source| source.visible) {
         let Some(input_index) = scene_source_input_index(&source.kind, capture, input_layout)
@@ -4797,7 +4798,7 @@ fn scene_video_filter(
             continue;
         };
         let transform =
-            scene_source_render_transform(&source.transform, &source.kind, background_active);
+            scene_source_render_transform(&source.transform, &source.kind, stage_margin);
         let Some((x, y, layer_width, layer_height)) =
             scene_source_rect_pixels(&transform, width, height)
         else {
@@ -4858,15 +4859,15 @@ fn scene_background_fit_filter(fit: &BackgroundFit, width: u32, height: u32) -> 
 fn scene_source_render_transform(
     transform: &SceneTransform,
     source_kind: &SceneSourceKind,
-    background_active: bool,
+    stage_margin: f64,
 ) -> SceneTransform {
-    if !background_active || !scene_source_uses_background_stage(source_kind) {
+    if stage_margin <= 0.0 || !scene_source_uses_background_stage(source_kind) {
         return transform.clone();
     }
-    let stage_scale = 1.0 - (BACKGROUND_STAGE_MARGIN * 2.0);
+    let stage_scale = 1.0 - (stage_margin * 2.0);
     SceneTransform {
-        x: BACKGROUND_STAGE_MARGIN + (transform.x * stage_scale),
-        y: BACKGROUND_STAGE_MARGIN + (transform.y * stage_scale),
+        x: stage_margin + (transform.x * stage_scale),
+        y: stage_margin + (transform.y * stage_scale),
         width: transform.width * stage_scale,
         height: transform.height * stage_scale,
         crop_left: transform.crop_left,
@@ -8675,6 +8676,7 @@ mod tests {
             dim_percent: 0.0,
             saturation_percent: 100.0,
             vignette_percent: 0.0,
+            visibility_percent: 20.0,
         });
         params.scene = Some(scene);
 

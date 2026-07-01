@@ -22,10 +22,17 @@ Keep this skill thin: point there, don't duplicate it.
 
 ## Steps
 
-### 1. Bump the version — commit + push
+### 1. Bump the version + write the changelog entry — commit + push
 electron-updater compares `apps/desktop/package.json` `version` against the
 installed app, so a strictly higher version is what triggers the update. Bump it
-(e.g. 0.9.0 → 0.9.1), commit, push.
+(e.g. 0.9.0 → 0.9.1).
+
+Write `changelog/<releaseId>.md` (user-facing entry; format + voice rules in
+`changelog/README.md`) and run `pnpm changelog:check`. Both
+`release:validate:macos` and `release:upload:macos` **fail closed without it**
+(emergency escape: `VIDEORC_RELEASE_SKIP_CHANGELOG=1`). The upload publishes the
+compiled changelog to R2 `changelog/changelog.json` for the website and in-app
+"What's new". Commit, push.
 
 ### 2–5. Build → validate → upload → verify (run in the background)
 The build (Rust backend + electron-builder + **notarization**) is long and

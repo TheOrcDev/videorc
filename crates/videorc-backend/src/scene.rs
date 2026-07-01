@@ -567,6 +567,7 @@ mod tests {
             dim_percent: 0.0,
             saturation_percent: 100.0,
             vignette_percent: 0.0,
+            visibility_percent: 20.0,
         }
     }
 

@@ -56,6 +56,7 @@ export async function buildReleaseUploadPlan({
   manifest,
   manifestPath,
   releaseDir,
+  changelogJsonPath = null,
   env = process.env
 }) {
   const releaseId = requireManifestString(manifest, 'releaseId')
@@ -89,6 +90,12 @@ export async function buildReleaseUploadPlan({
       `latest-mac.yml references ${referencedZip} but the release dmg implies ${zipFilename}. Remove stale artifacts and rebuild.`
     )
   }
+
+  // Public changelog: a STABLE prefix like the update feed, overwritten each
+  // release — consumed by videorc-web (/changelog) and the desktop What's New.
+  const changelogPrefix = normalizeObjectPrefix(
+    nonEmpty(env.VIDEORC_RELEASE_CHANGELOG_PREFIX) ?? 'changelog'
+  )
 
   const artifacts = [
     {
@@ -128,6 +135,15 @@ export async function buildReleaseUploadPlan({
       path: join(releaseDir, blockmapFilename)
     }
   ]
+
+  if (changelogJsonPath) {
+    artifacts.push({
+      contentType: contentTypeFor('changelog.json'),
+      label: 'changelog',
+      objectKey: `${changelogPrefix}/changelog.json`,
+      path: changelogJsonPath
+    })
+  }
 
   return {
     artifacts: await Promise.all(

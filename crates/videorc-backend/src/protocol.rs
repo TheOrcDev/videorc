@@ -471,6 +471,19 @@ pub struct EffectiveSceneBackground {
     pub dim_percent: f64,
     pub saturation_percent: f64,
     pub vignette_percent: f64,
+    /// How much of the screen the background ring occupies (0–40): the stage
+    /// margin per side is `visibility_percent / 200`. 0 keeps the recording
+    /// full-canvas (the asset only fills letterbox gaps); 20 is the classic 80%
+    /// stage. Serde-defaulted so older renderers/persisted scenes keep the
+    /// classic look.
+    #[serde(default = "default_background_visibility_percent")]
+    pub visibility_percent: f64,
+}
+
+pub const DEFAULT_BACKGROUND_VISIBILITY_PERCENT: f64 = 20.0;
+
+fn default_background_visibility_percent() -> f64 {
+    DEFAULT_BACKGROUND_VISIBILITY_PERCENT
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2488,6 +2501,7 @@ mod tests {
                 dim_percent: 20.0,
                 saturation_percent: 110.0,
                 vignette_percent: 30.0,
+            visibility_percent: 20.0,
             }),
             ..plain
         };
@@ -2539,6 +2553,7 @@ mod tests {
                 dim_percent: 0.0,
                 saturation_percent: 100.0,
                 vignette_percent: 0.0,
+            visibility_percent: 20.0,
             }),
             protected_overlay_window_ids: Vec::new(),
         };

@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 
 import { createReadStream } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import {
+  buildChangelogJson,
+  loadChangelogEntries,
+  requireChangelogEntryForRelease
+} from './lib/changelog.mjs'
 import {
   buildReleaseUploadPlan,
   buildSignedS3Request,
@@ -21,7 +26,9 @@ async function main() {
   const releaseDir = resolve(process.env.VIDEORC_RELEASE_DIR ?? dirname(manifestPath))
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
   const config = getReleaseUploadS3Config()
+  const changelogJsonPath = await prepareChangelogUpload(manifest.releaseId)
   const plan = await buildReleaseUploadPlan({
+    changelogJsonPath,
     manifest,
     manifestPath,
     releaseDir
@@ -46,6 +53,41 @@ async function main() {
   }
 
   console.log('macos-beta-release-upload: PASS')
+}
+
+// Fail-closed: a release cannot ship without a user-facing changelog entry for
+// its releaseId. VIDEORC_RELEASE_SKIP_CHANGELOG=1 is the emergency escape — it
+// warns loudly and still publishes whatever entries DO validate.
+async function prepareChangelogUpload(releaseId) {
+  const skip = envFlag(process.env.VIDEORC_RELEASE_SKIP_CHANGELOG)
+  let entries
+  try {
+    entries = await loadChangelogEntries(join(repoRoot, 'changelog'))
+  } catch (error) {
+    if (!skip) {
+      throw error
+    }
+    console.warn(
+      `macos-beta-release-upload: WARNING changelog invalid and VIDEORC_RELEASE_SKIP_CHANGELOG is set — shipping WITHOUT a changelog update (${error.message})`
+    )
+    return null
+  }
+
+  const { skipped } = requireChangelogEntryForRelease(entries, releaseId, { skip })
+  if (skipped) {
+    console.warn(
+      `macos-beta-release-upload: WARNING no changelog entry for ${releaseId} and VIDEORC_RELEASE_SKIP_CHANGELOG is set — the website and What's New will not show this release`
+    )
+  }
+
+  const outPath = join(repoRoot, 'dist', 'changelog', 'changelog.json')
+  const document = buildChangelogJson(entries, { generatedAt: new Date().toISOString() })
+  await mkdir(dirname(outPath), { recursive: true })
+  await writeFile(outPath, `${JSON.stringify(document, null, 2)}\n`)
+  console.log(
+    `macos-beta-release-upload: changelog compiled (${entries.length} entries, latest ${entries[0].version})`
+  )
+  return outPath
 }
 
 async function uploadArtifact({ artifact, config }) {

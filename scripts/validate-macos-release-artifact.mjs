@@ -7,6 +7,13 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { readFile } from 'node:fs/promises'
+
+import {
+  findChangelogEntry,
+  findChangelogEntryForPackageVersion,
+  loadChangelogEntries
+} from './lib/changelog.mjs'
 import {
   artifactKindFromPath,
   buildMacosReleaseArtifactChecks,
@@ -22,6 +29,10 @@ const releaseDir = join(repoRoot, 'apps', 'desktop', 'release')
 async function main() {
   if (process.platform !== 'darwin') {
     throw new Error('macOS release artifact validation must run on macOS.')
+  }
+
+  if (!(await validateChangelogGate())) {
+    process.exit(1)
   }
 
   const artifactPaths =
@@ -40,6 +51,66 @@ async function main() {
   }
 
   process.exit(allPassed ? 0 : 1)
+}
+
+// Fail-closed changelog gate: the release being validated must have a valid
+// user-facing entry under changelog/. Resolves the releaseId from the release
+// manifest when present (release:manifest:macos runs before this), otherwise
+// falls back to the desktop package version. VIDEORC_RELEASE_SKIP_CHANGELOG=1
+// downgrades a missing entry to a loud warning.
+async function validateChangelogGate() {
+  const skip = ['1', 'true', 'yes', 'on'].includes(
+    process.env.VIDEORC_RELEASE_SKIP_CHANGELOG?.trim().toLowerCase() ?? ''
+  )
+
+  let entries
+  try {
+    entries = await loadChangelogEntries(join(repoRoot, 'changelog'))
+  } catch (error) {
+    const message = `changelog entries failed validation: ${error.message}`
+    if (!skip) {
+      console.error(`macos-release-artifact: FAIL changelog`)
+      console.error(`[fail] ${message}`)
+      return false
+    }
+    console.warn(`[warn] ${message} (VIDEORC_RELEASE_SKIP_CHANGELOG set)`)
+    return true
+  }
+
+  const releaseId = await resolveReleaseId()
+  const entry = releaseId.exact
+    ? findChangelogEntry(entries, releaseId.value)
+    : findChangelogEntryForPackageVersion(entries, releaseId.value)
+  if (entry) {
+    console.log(`[ok] changelog entry ${entry.version} (${entry.title})`)
+    return true
+  }
+
+  const message =
+    `no changelog entry for ${releaseId.value}: write changelog/<releaseId>.md ` +
+    '(see changelog/README.md) or set VIDEORC_RELEASE_SKIP_CHANGELOG=1'
+  if (!skip) {
+    console.error('macos-release-artifact: FAIL changelog')
+    console.error(`[fail] ${message}`)
+    return false
+  }
+  console.warn(`[warn] ${message} (skipping)`)
+  return true
+}
+
+async function resolveReleaseId() {
+  try {
+    const manifest = JSON.parse(await readFile(join(releaseDir, 'release.json'), 'utf8'))
+    if (typeof manifest.releaseId === 'string' && manifest.releaseId.trim()) {
+      return { exact: true, value: manifest.releaseId.trim() }
+    }
+  } catch {
+    // No manifest yet — fall back to the desktop package version below.
+  }
+  const desktopPackage = JSON.parse(
+    await readFile(join(repoRoot, 'apps', 'desktop', 'package.json'), 'utf8')
+  )
+  return { exact: false, value: desktopPackage.version }
 }
 
 async function discoverLatestArtifacts() {

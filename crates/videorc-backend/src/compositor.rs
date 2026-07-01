@@ -49,7 +49,14 @@ const COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_MISSES: u32 = 1;
 const COMPOSITOR_MISSING_SOURCE_PLACEHOLDER_AFTER: Duration = Duration::from_secs(2);
 const MISSING_SOURCE_PLACEHOLDER_WIDTH: usize = 16;
 const MISSING_SOURCE_PLACEHOLDER_HEIGHT: usize = 9;
-pub(crate) const BACKGROUND_STAGE_MARGIN: f64 = 0.10;
+// Stage margin per side for a scene background: `visibility_percent / 200`, so
+// the default visibility of 20 yields the classic 0.10 margin (80% stage) and
+// 0 keeps the recording full-canvas (the asset only fills letterbox gaps).
+pub(crate) fn background_stage_margin(background: Option<&EffectiveSceneBackground>) -> f64 {
+    background
+        .map(|background| (background.visibility_percent / 200.0).clamp(0.0, 0.20))
+        .unwrap_or(0.0)
+}
 
 pub type CompositorSlot = std::sync::Arc<tokio::sync::Mutex<CompositorRuntime>>;
 pub type CompositorFrameStore =
@@ -1739,6 +1746,13 @@ fn try_gpu_compose(
     } else {
         false
     };
+    // The stage inset only applies while the background actually rendered; its
+    // size comes from the background's visibility setting (0 = full canvas).
+    let stage_margin = if background_active {
+        background_stage_margin(scene.and_then(|scene| scene.background.as_ref()))
+    } else {
+        0.0
+    };
 
     if let Some(image) = inputs
         .active_image_source
@@ -1750,7 +1764,7 @@ fn try_gpu_compose(
         let (dest, crop) = gpu_source_placement(
             image_width,
             image_height,
-            scene_content_rect_pixels(background_active, inputs.width, inputs.height),
+            scene_content_rect_pixels(stage_margin, inputs.width, inputs.height),
             matches!(
                 compositor_scene_source_fit(&SceneSourceKind::Screen, layout),
                 CompositorSceneSourceFit::Contain
@@ -1793,7 +1807,7 @@ fn try_gpu_compose(
         let (dest, crop) = gpu_source_placement(
             placeholder.width as u32,
             placeholder.height as u32,
-            scene_content_rect_pixels(background_active, inputs.width, inputs.height),
+            scene_content_rect_pixels(stage_margin, inputs.width, inputs.height),
             matches!(
                 compositor_scene_source_fit(&SceneSourceKind::Screen, layout),
                 CompositorSceneSourceFit::Contain
@@ -1834,7 +1848,7 @@ fn try_gpu_compose(
     let scene = scene.ok_or("compositor scene unavailable")?;
     for source in scene.sources.iter().filter(|source| source.visible) {
         let transform =
-            scene_source_render_transform(&source.transform, &source.kind, background_active);
+            scene_source_render_transform(&source.transform, &source.kind, stage_margin);
         let rect = scene_source_rect_pixels(&transform, inputs.width, inputs.height)
             .ok_or("source rectangle is outside compositor bounds")?;
         let source_crop = source_crop_from_transform(&transform);
@@ -2555,6 +2569,13 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
         height,
         bytes,
     );
+    // Stage inset only while the background actually rendered; sized by the
+    // background's visibility setting (0 = full canvas).
+    let stage_margin = if background_active {
+        background_stage_margin(scene.background.as_ref())
+    } else {
+        0.0
+    };
 
     if let Some(image) = active_image_source
         .and_then(|source| source.rgba.as_ref().zip(source.width.zip(source.height)))
@@ -2570,7 +2591,7 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
             bytes,
             width,
             height,
-            scene_content_rect_pixels(background_active, width, height),
+            scene_content_rect_pixels(stage_margin, width, height),
             SourceRenderOptions {
                 crop: SourceCrop::none(),
                 // Screen-image stand-ins are screen-like: contain, never crop.
@@ -2589,7 +2610,7 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
     let mut rendered_sources = 0_u32;
     for source in scene.sources.iter().filter(|source| source.visible) {
         let transform =
-            scene_source_render_transform(&source.transform, &source.kind, background_active);
+            scene_source_render_transform(&source.transform, &source.kind, stage_margin);
         let Some(rect) = scene_source_rect_pixels(&transform, width, height) else {
             continue;
         };
@@ -2974,8 +2995,8 @@ fn background_zoom_crop(background: Option<&EffectiveSceneBackground>) -> Source
     }
 }
 
-fn scene_content_rect_pixels(background_active: bool, width: u32, height: u32) -> PixelRect {
-    if !background_active {
+fn scene_content_rect_pixels(stage_margin: f64, width: u32, height: u32) -> PixelRect {
+    if stage_margin <= 0.0 {
         return PixelRect {
             x: 0,
             y: 0,
@@ -2985,10 +3006,10 @@ fn scene_content_rect_pixels(background_active: bool, width: u32, height: u32) -
     }
     scene_source_rect_pixels(
         &SceneTransform {
-            x: BACKGROUND_STAGE_MARGIN,
-            y: BACKGROUND_STAGE_MARGIN,
-            width: 1.0 - (BACKGROUND_STAGE_MARGIN * 2.0),
-            height: 1.0 - (BACKGROUND_STAGE_MARGIN * 2.0),
+            x: stage_margin,
+            y: stage_margin,
+            width: 1.0 - (stage_margin * 2.0),
+            height: 1.0 - (stage_margin * 2.0),
             crop_left: 0.0,
             crop_top: 0.0,
             crop_right: 0.0,
@@ -3008,15 +3029,15 @@ fn scene_content_rect_pixels(background_active: bool, width: u32, height: u32) -
 fn scene_source_render_transform(
     transform: &SceneTransform,
     source_kind: &SceneSourceKind,
-    background_active: bool,
+    stage_margin: f64,
 ) -> SceneTransform {
-    if !background_active || !scene_source_uses_background_stage(source_kind) {
+    if stage_margin <= 0.0 || !scene_source_uses_background_stage(source_kind) {
         return transform.clone();
     }
-    let stage_scale = 1.0 - (BACKGROUND_STAGE_MARGIN * 2.0);
+    let stage_scale = 1.0 - (stage_margin * 2.0);
     SceneTransform {
-        x: BACKGROUND_STAGE_MARGIN + (transform.x * stage_scale),
-        y: BACKGROUND_STAGE_MARGIN + (transform.y * stage_scale),
+        x: stage_margin + (transform.x * stage_scale),
+        y: stage_margin + (transform.y * stage_scale),
         width: transform.width * stage_scale,
         height: transform.height * stage_scale,
         crop_left: transform.crop_left,
@@ -4331,6 +4352,7 @@ mod tests {
             dim_percent: 0.0,
             saturation_percent: 100.0,
             vignette_percent: 0.0,
+            visibility_percent: 20.0,
         });
         let snapshot = CompositorSceneSnapshot {
             revision: 1,
@@ -5709,6 +5731,7 @@ mod tests {
             dim_percent: 0.0,
             saturation_percent: 100.0,
             vignette_percent: 0.0,
+            visibility_percent: 20.0,
         });
         let snapshot = CompositorSceneSnapshot {
             revision: 1,
@@ -5776,7 +5799,7 @@ mod tests {
                 crop_bottom: 0.0,
             },
             &SceneSourceKind::Screen,
-            true,
+            0.10,
         );
 
         assert_close(full_frame.x, 0.10);
@@ -5796,7 +5819,7 @@ mod tests {
                 crop_bottom: 0.0,
             },
             &SceneSourceKind::Camera,
-            true,
+            0.10,
         );
 
         assert_close(camera.x, 0.75);
@@ -5816,7 +5839,7 @@ mod tests {
                 crop_bottom: 0.0,
             },
             &SceneSourceKind::TestPattern,
-            true,
+            0.10,
         );
 
         assert_close(test_pattern.x, 0.10);

@@ -171,6 +171,40 @@ describe('release S3 upload plan', () => {
     )
   })
 
+  it('appends the compiled changelog to a stable prefix when a path is provided', async () => {
+    const { releaseDir, manifestPath } = await seedReleaseDir()
+    const changelogJsonPath = join(releaseDir, 'changelog.json')
+    await writeFile(changelogJsonPath, '{"entries":[]}')
+
+    const plan = await buildReleaseUploadPlan({
+      changelogJsonPath,
+      env: {},
+      manifest,
+      manifestPath,
+      releaseDir
+    })
+
+    assert.deepEqual(
+      plan.artifacts.at(-1),
+      {
+        contentType: 'application/json',
+        label: 'changelog',
+        objectKey: 'changelog/changelog.json',
+        path: changelogJsonPath,
+        sizeBytes: Buffer.byteLength('{"entries":[]}')
+      }
+    )
+
+    const prefixed = await buildReleaseUploadPlan({
+      changelogJsonPath,
+      env: { VIDEORC_RELEASE_CHANGELOG_PREFIX: ' public/changelog/ ' },
+      manifest,
+      manifestPath,
+      releaseDir
+    })
+    assert.equal(prefixed.artifacts.at(-1)?.objectKey, 'public/changelog/changelog.json')
+  })
+
   it('allows explicit archive and feed prefixes', async () => {
     const { releaseDir, manifestPath } = await seedReleaseDir()
 

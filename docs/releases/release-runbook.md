@@ -52,8 +52,11 @@ checker (`VIDEORC_ENABLE_AUTO_UPDATE=1`) — read the feed.
 ```sh
 cd ~/projects/videogre
 
-# 1. Bump the version (the update key) and commit.
+# 1. Bump the version (the update key), write the changelog entry, and commit.
 #    Edit apps/desktop/package.json -> "version": "0.9.1"
+#    Write changelog/<releaseId>.md (user-facing; see changelog/README.md) —
+#    validate + upload both FAIL without it (escape: VIDEORC_RELEASE_SKIP_CHANGELOG=1).
+pnpm changelog:check
 git commit -am "Release: bump desktop to 0.9.1"
 
 # 2. Build + sign + notarize + staple, WITH the update feed, + write release.json.
@@ -71,10 +74,15 @@ set -a; . <(grep -E '^[[:space:]]*VIDEORC_DOWNLOAD_S3_' ~/projects/videorcweb/.e
 export VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL="https://<account-id>.r2.cloudflarestorage.com"
 pnpm release:upload:preflight:macos
 pnpm release:upload:macos       # uploads dmg + sha + release.json + latest-mac.yml + zip + blockmap
+                                # + the compiled changelog -> changelog/changelog.json
 ```
 
-`release:upload:macos` fails closed if the feed files are missing or
-`latest-mac.yml` points at a stale zip, so a broken feed never publishes.
+`release:upload:macos` fails closed if the feed files are missing,
+`latest-mac.yml` points at a stale zip, or there is no valid
+`changelog/<releaseId>.md` entry — so a broken feed or an unannounced release
+never publishes. The changelog JSON feeds videorc-web `/changelog` and the
+desktop "What's new"; `VIDEORC_RELEASE_SKIP_CHANGELOG=1` is the loud emergency
+escape.
 
 ## Verify (always follow the redirect to R2)
 

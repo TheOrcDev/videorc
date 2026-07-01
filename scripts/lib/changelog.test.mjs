@@ -7,8 +7,11 @@ import { describe, it } from 'node:test'
 import {
   buildChangelogJson,
   compareVersions,
+  findChangelogEntry,
+  findChangelogEntryForPackageVersion,
   loadChangelogEntries,
   parseChangelogEntry,
+  requireChangelogEntryForRelease,
   sortEntriesNewestFirst
 } from './changelog.mjs'
 
@@ -119,6 +122,41 @@ describe('version + date ordering', () => {
     assert.deepEqual(
       sortEntriesNewestFirst(entries).map((entry) => entry.version),
       ['0.9.2-beta.1', '0.9.1-beta.1', '0.9.0-beta.1']
+    )
+  })
+})
+
+describe('release gate lookups', () => {
+  const entries = [
+    { version: '0.9.2-beta.1', date: '2026-07-01' },
+    { version: '0.9.1-beta.1', date: '2026-07-01' },
+    { version: '1.0.0', date: '2026-08-01' }
+  ]
+
+  it('finds an entry by exact releaseId', () => {
+    assert.equal(findChangelogEntry(entries, '0.9.2-beta.1')?.version, '0.9.2-beta.1')
+    assert.equal(findChangelogEntry(entries, '0.9.3-beta.1'), null)
+  })
+
+  it('matches a bare package version to its own pre-releases only', () => {
+    assert.equal(findChangelogEntryForPackageVersion(entries, '0.9.2')?.version, '0.9.2-beta.1')
+    assert.equal(findChangelogEntryForPackageVersion(entries, '1.0.0')?.version, '1.0.0')
+    assert.equal(findChangelogEntryForPackageVersion(entries, '0.9'), null)
+    assert.equal(findChangelogEntryForPackageVersion(entries, '0.9.3'), null)
+  })
+
+  it('fails closed on a missing entry unless skip is set', () => {
+    assert.throws(
+      () => requireChangelogEntryForRelease(entries, '0.9.3-beta.1'),
+      /No changelog entry for release 0\.9\.3-beta\.1.*VIDEORC_RELEASE_SKIP_CHANGELOG/s
+    )
+    assert.deepEqual(requireChangelogEntryForRelease(entries, '0.9.3-beta.1', { skip: true }), {
+      entry: null,
+      skipped: true
+    })
+    assert.equal(
+      requireChangelogEntryForRelease(entries, '0.9.2-beta.1').entry.version,
+      '0.9.2-beta.1'
     )
   })
 })

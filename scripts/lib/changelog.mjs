@@ -101,6 +101,33 @@ export function buildChangelogJson(entries, { generatedAt }) {
   }
 }
 
+export function findChangelogEntry(entries, releaseId) {
+  return entries.find((entry) => entry.version === releaseId) ?? null
+}
+
+// package.json carries the bare version (0.9.2) while entries carry the full
+// releaseId (0.9.2-beta.1); a bare version matches its own pre-releases too.
+export function findChangelogEntryForPackageVersion(entries, packageVersion) {
+  return (
+    entries.find(
+      (entry) =>
+        entry.version === packageVersion || entry.version.startsWith(`${packageVersion}-`)
+    ) ?? null
+  )
+}
+
+export function requireChangelogEntryForRelease(entries, releaseId, { skip = false } = {}) {
+  const entry = findChangelogEntry(entries, releaseId)
+  if (!entry && !skip) {
+    throw new Error(
+      `No changelog entry for release ${releaseId}. Write the user-facing entry at ` +
+        `changelog/${releaseId}.md (see changelog/README.md), or set ` +
+        'VIDEORC_RELEASE_SKIP_CHANGELOG=1 to ship without one.'
+    )
+  }
+  return { entry, skipped: !entry }
+}
+
 export function sortEntriesNewestFirst(entries) {
   return [...entries].sort((left, right) => {
     if (left.date !== right.date) {
