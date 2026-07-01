@@ -283,6 +283,10 @@ export interface EffectiveSceneBackground {
   dimPercent: number
   saturationPercent: number
   vignettePercent: number
+  // How much of the screen the background ring occupies (0–40): stage margin
+  // per side = visibilityPercent / 200. 0 keeps the recording full-canvas;
+  // 20 is the classic 80% stage. Backend serde-defaults absent values to 20.
+  visibilityPercent: number
 }
 
 export interface Scene {

@@ -5510,7 +5510,8 @@ function smokePreviewSceneParams(
               blurPx: 0,
               dimPercent: 0,
               saturationPercent: 100,
-              vignettePercent: 0
+              vignettePercent: 0,
+              visibilityPercent: 20
             }
           : undefined
     }

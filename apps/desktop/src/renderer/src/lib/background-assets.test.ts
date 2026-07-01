@@ -387,8 +387,30 @@ describe('effective scene background and overrides', () => {
       blurPx: 0,
       dimPercent: 0,
       saturationPercent: 100,
-      vignettePercent: 0
+      vignettePercent: 0,
+      visibilityPercent: 20
     })
+  })
+
+  it('carries a visibility override into the effective background', () => {
+    let registry = importIntoSlot(createDefaultRegistry(), 'bg-02', importedAsset('a1', 'Sunset'))
+    registry = applySlot(registry, 'bg-02')
+    registry = setSceneOverride(registry, { visibilityPercent: 0 })
+
+    // 0 keeps the recording full-canvas; the backend maps this to a zero stage margin.
+    expect(effectiveSceneBackground(registry)?.visibilityPercent).toBe(0)
+  })
+
+  it('defaults visibility for registries persisted before the slider existed', () => {
+    const registry = importIntoSlot(createDefaultRegistry(), 'bg-02', importedAsset('a1', 'Sunset'))
+    const stored = JSON.parse(JSON.stringify(registry)) as {
+      assets: Record<string, { styleDefaults: Record<string, unknown> }>
+    }
+    // Simulate a registry saved by an older build: no visibilityPercent field.
+    delete stored.assets['a1'].styleDefaults.visibilityPercent
+
+    const reconciled = reconcileRegistry(stored)
+    expect(reconciled.assets['a1']?.styleDefaults.visibilityPercent).toBe(20)
   })
 
   it('does not resolve a missing active slot into the scene background', () => {

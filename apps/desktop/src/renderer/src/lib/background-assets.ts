@@ -45,6 +45,9 @@ export type BackgroundStyle = {
   dimPercent: number
   saturationPercent: number
   vignettePercent: number
+  // How much of the screen the background occupies behind the recording (0-40):
+  // 0 keeps the recording full-canvas, 20 is the classic 80% stage.
+  visibilityPercent: number
 }
 
 export type BackgroundStyleOverrides = Partial<BackgroundStyle>
@@ -117,6 +120,7 @@ export const BACKGROUND_STYLE_FIELDS: readonly {
   suffix?: string
   bipolar?: boolean
 }[] = [
+  { key: 'visibilityPercent', label: 'Visibility', min: 0, max: 40, suffix: '%' },
   { key: 'scale', label: 'Scale', min: 50, max: 200, suffix: '%' },
   { key: 'offsetX', label: 'Pan X', min: -100, max: 100, bipolar: true },
   { key: 'offsetY', label: 'Pan Y', min: -100, max: 100, bipolar: true },
@@ -135,7 +139,8 @@ export function defaultBackgroundStyle(): BackgroundStyle {
     blurPx: 0,
     dimPercent: 0,
     saturationPercent: 100,
-    vignettePercent: 0
+    vignettePercent: 0,
+    visibilityPercent: 20
   }
 }
 
@@ -458,7 +463,8 @@ function normalizeStyle(raw: unknown): BackgroundStyle {
     blurPx: numberOr(data.blurPx, base.blurPx),
     dimPercent: numberOr(data.dimPercent, base.dimPercent),
     saturationPercent: numberOr(data.saturationPercent, base.saturationPercent),
-    vignettePercent: numberOr(data.vignettePercent, base.vignettePercent)
+    vignettePercent: numberOr(data.vignettePercent, base.vignettePercent),
+    visibilityPercent: numberOr(data.visibilityPercent, base.visibilityPercent)
   }
 }
 
@@ -619,7 +625,8 @@ export function effectiveSceneBackground(
     blurPx: style.blurPx,
     dimPercent: style.dimPercent,
     saturationPercent: style.saturationPercent,
-    vignettePercent: style.vignettePercent
+    vignettePercent: style.vignettePercent,
+    visibilityPercent: style.visibilityPercent
   }
 }
 

@@ -484,7 +484,8 @@ function CurrentSceneBackground({
             <>
               <p className="truncate font-medium">{slotName(activeSlot, registry)}</p>
               <p className="text-xs text-muted-foreground">
-                Applied to the active scene — the recording sits on an inset stage over it.
+                Applied to the active scene — the Visibility style sets how much shows behind the
+                recording (0% keeps the recording full-size).
               </p>
             </>
           ) : missing ? (
