@@ -1,3 +1,4 @@
+import { ChatCircle } from '@phosphor-icons/react'
 import { useCallback, useEffect, useState, type ReactElement } from 'react'
 
 import { CommandPalette } from '@/components/command-palette'
@@ -42,7 +43,11 @@ export function AppShell(): ReactElement {
     togglePreviewWindow,
     notesWindow,
     openNotesWindow,
-    closeNotesWindow
+    closeNotesWindow,
+    commentsWindow,
+    openCommentsWindow,
+    closeCommentsWindow,
+    toggleCommentsWindow
   } = useStudio()
   const [active, setActive] = useState<WorkspaceTab>('studio')
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
@@ -102,9 +107,14 @@ export function AppShell(): ReactElement {
           void openNotesWindow()
         }
       }
-      if (event.key.toLowerCase() === 'j' && event.shiftKey && (event.metaKey || event.ctrlKey)) {
+      if (
+        runtimeInfo?.commentsWindowEnabled &&
+        event.key.toLowerCase() === 'j' &&
+        event.shiftKey &&
+        (event.metaKey || event.ctrlKey)
+      ) {
         event.preventDefault()
-        void window.videorc?.toggleCommentsWindow?.()
+        void toggleCommentsWindow()
       }
     }
     document.addEventListener('keydown', onKeyDown)
@@ -113,7 +123,9 @@ export function AppShell(): ReactElement {
     closeNotesWindow,
     notesWindow.open,
     openNotesWindow,
+    runtimeInfo?.commentsWindowEnabled,
     runtimeInfo?.notesWindowEnabled,
+    toggleCommentsWindow,
     togglePreviewWindow
   ])
 
@@ -240,6 +252,26 @@ export function AppShell(): ReactElement {
                     <Kbd>⌘</Kbd>
                     <Kbd>⇧</Kbd>
                     <Kbd>N</Kbd>
+                  </KbdGroup>
+                </Button>
+              </>
+            ) : null}
+            {runtimeInfo?.commentsWindowEnabled ? (
+              <>
+                <FooterActionDivider />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() =>
+                    commentsWindow.open ? void closeCommentsWindow() : void openCommentsWindow()
+                  }
+                >
+                  <ChatCircle data-icon="inline-start" />
+                  {commentsWindow.open ? 'Close Comments' : 'Open Comments'}
+                  <KbdGroup>
+                    <Kbd>⌘</Kbd>
+                    <Kbd>⇧</Kbd>
+                    <Kbd>J</Kbd>
                   </KbdGroup>
                 </Button>
               </>

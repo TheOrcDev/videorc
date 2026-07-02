@@ -765,9 +765,11 @@ const idlePreviewSupervisorState = (): PreviewSupervisorState => ({
 async function currentProtectedOverlayWindowIds(): Promise<number[]> {
   const latestNotesWindow = await window.videorc?.getNotesWindowState?.().catch(() => null)
   const latestCommentsWindow = await window.videorc?.getCommentsWindowState?.().catch(() => null)
+  const latestCaptionsWindow = await window.videorc?.getCaptionsWindowState?.().catch(() => null)
   return protectedOverlayWindowIdsFromOverlayWindows(
     latestNotesWindow ?? idleNotesWindowState(),
-    latestCommentsWindow ?? idleCommentsWindowState()
+    latestCommentsWindow ?? idleCommentsWindowState(),
+    latestCaptionsWindow ?? idleCaptionsWindowState()
   )
 }
 
@@ -2117,9 +2119,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('liveChat.cleared', (payload) =>
         setLiveChatSnapshot(applyLiveChatSnapshot(payload as LiveChatSnapshot))
       ),
-      nextClient.on('captions.status', (payload) =>
-        setCaptionsStatus(payload as CaptionsStatus)
-      ),
+      nextClient.on('captions.status', (payload) => setCaptionsStatus(payload as CaptionsStatus)),
       nextClient.on('captions.update', (payload) =>
         setCaptionLines((current) => appendCaptionLine(current, payload as CaptionsUpdate))
       ),
@@ -4936,8 +4936,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ? startBlockedReason
       : null
   const visibleDeviceList = useMemo(
-    () => deviceListWithoutProtectedOverlayWindows(deviceList, notesWindow, commentsWindow),
-    [deviceList, notesWindow, commentsWindow]
+    () =>
+      deviceListWithoutProtectedOverlayWindows(
+        deviceList,
+        notesWindow,
+        commentsWindow,
+        captionsWindow
+      ),
+    [deviceList, notesWindow, commentsWindow, captionsWindow]
   )
   const selectedCaptureDevice = findDevice(
     visibleDeviceList.devices,

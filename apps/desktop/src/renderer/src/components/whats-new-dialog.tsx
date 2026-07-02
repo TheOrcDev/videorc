@@ -46,7 +46,10 @@ export function WhatsNewDialog({
         <ul className="flex flex-col gap-2.5">
           {entry.highlights.map((highlight) => (
             <li key={highlight} className="flex gap-2.5 text-sm text-muted-foreground">
-              <span aria-hidden="true" className="mt-2 size-1 shrink-0 rounded-full bg-foreground" />
+              <span
+                aria-hidden="true"
+                className="mt-2 size-1 shrink-0 rounded-full bg-foreground"
+              />
               <span>{highlight}</span>
             </li>
           ))}

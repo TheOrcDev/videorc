@@ -74,7 +74,9 @@ describe('runtime info helpers', () => {
         VIDEORC_DISABLE_AUTO_PREVIEW: '1',
         VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED: '1',
         VIDEORC_NOTES_WINDOW: '1',
-        VIDEORC_NOTES_RECORDING_OVERLAY: '1'
+        VIDEORC_NOTES_RECORDING_OVERLAY: '1',
+        VIDEORC_COMMENTS_WINDOW: '1',
+        VIDEORC_COMMENTS_RECORDING_OVERLAY: '1'
       }
     })
 
@@ -85,13 +87,15 @@ describe('runtime info helpers', () => {
       nativePreviewSurfaceProofEnabled: false,
       notesWindowEnabled: true,
       notesWindowRecordingOverlayAllowed: true,
+      commentsWindowEnabled: true,
+      commentsWindowRecordingOverlayAllowed: true,
       previewSmokeMode: true,
       disableAutoPreview: true,
       nativePreviewSurfaceStageSuspended: true
     })
   })
 
-  it('enables Notes and recording overlay by default after the artifact gate', () => {
+  it('enables Notes, Comments, and recording overlays by default after artifact gates', () => {
     const info = buildRuntimeInfo({
       appVersion: '9.9.9-test',
       execPath: '/Applications/Videorc.app/Contents/MacOS/Videorc',
@@ -100,23 +104,29 @@ describe('runtime info helpers', () => {
 
     expect(info).toMatchObject({
       notesWindowEnabled: true,
-      notesWindowRecordingOverlayAllowed: true
+      notesWindowRecordingOverlayAllowed: true,
+      commentsWindowEnabled: true,
+      commentsWindowRecordingOverlayAllowed: true
     })
   })
 
-  it('allows Notes and recording overlay to be disabled by env kill switches', () => {
+  it('allows Notes, Comments, and recording overlays to be disabled by env kill switches', () => {
     const info = buildRuntimeInfo({
       appVersion: '9.9.9-test',
       execPath: '/Applications/Videorc.app/Contents/MacOS/Videorc',
       env: {
         VIDEORC_NOTES_WINDOW: '0',
-        VIDEORC_NOTES_RECORDING_OVERLAY: '0'
+        VIDEORC_NOTES_RECORDING_OVERLAY: '0',
+        VIDEORC_COMMENTS_WINDOW: '0',
+        VIDEORC_COMMENTS_RECORDING_OVERLAY: '0'
       }
     })
 
     expect(info).toMatchObject({
       notesWindowEnabled: false,
-      notesWindowRecordingOverlayAllowed: false
+      notesWindowRecordingOverlayAllowed: false,
+      commentsWindowEnabled: false,
+      commentsWindowRecordingOverlayAllowed: false
     })
   })
 

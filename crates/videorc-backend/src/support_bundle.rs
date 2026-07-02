@@ -577,6 +577,7 @@ mod tests {
                 ),
                 created_at: "2026-06-13T00:00:01Z".to_string(),
             }],
+            comment_count: 0,
         };
 
         let (sessions, summary) = redact_sessions(vec![session]);

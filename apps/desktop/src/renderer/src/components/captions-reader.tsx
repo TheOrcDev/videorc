@@ -65,7 +65,9 @@ export function CaptionsReader({
             <p
               className={cn(
                 'text-2xl leading-snug',
-                index === recent.length - 1 ? 'font-medium text-foreground' : 'text-muted-foreground'
+                index === recent.length - 1
+                  ? 'font-medium text-foreground'
+                  : 'text-muted-foreground'
               )}
               key={`${line.sessionClientId}-${line.seq}`}
             >

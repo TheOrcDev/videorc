@@ -1,5 +1,6 @@
 import {
   ArrowCounterClockwise,
+  ChatCircle,
   CheckCircle,
   CircleNotch,
   DotsThree,
@@ -74,6 +75,7 @@ function SessionRow({
   session: SessionSummary
   onOpenInAi: () => void
 }): ReactElement {
+  const { openSessionCommentsWindow } = useStudio()
   const filePath = session.mp4Path ?? session.outputPath ?? null
   const format = session.mp4Path
     ? 'MP4'
@@ -100,6 +102,11 @@ function SessionRow({
         {session.aiArtifacts.length ? (
           <Badge variant="secondary">{session.aiArtifacts.length} AI</Badge>
         ) : null}
+        {session.commentCount ? (
+          <Badge variant="secondary">
+            {session.commentCount} {session.commentCount === 1 ? 'comment' : 'comments'}
+          </Badge>
+        ) : null}
       </div>
       <p
         className="truncate rounded-row bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-muted-foreground"
@@ -115,6 +122,16 @@ function SessionRow({
             <Sparkle data-icon="inline-start" weight="fill" />
             Open in AI
           </Button>
+          {session.commentCount ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void openSessionCommentsWindow(session.id)}
+            >
+              <ChatCircle data-icon="inline-start" />
+              Open Comments
+            </Button>
+          ) : null}
         </div>
       )}
     </div>
@@ -136,8 +153,15 @@ function SessionActions({
   session: SessionSummary
   onOpenInAi: () => void
 }): ReactElement {
-  const { assessRecording, repairRecording, restoreRecording, recording, wsStatus, remuxSession } =
-    useStudio()
+  const {
+    assessRecording,
+    repairRecording,
+    restoreRecording,
+    recording,
+    wsStatus,
+    remuxSession,
+    openSessionCommentsWindow
+  } = useStudio()
   const [phase, setPhase] = useState<RepairPhase>('idle')
   const [assessment, setAssessment] = useState<FileAssessment | null>(null)
   const [result, setResult] = useState<GateStatus | null>(null)
@@ -151,6 +175,7 @@ function SessionActions({
   const canExportMp4 = Boolean(
     session.status === 'completed' && session.outputPath?.endsWith('.mkv') && !session.mp4Path
   )
+  const canOpenComments = session.commentCount > 0
   const quality = recordingQualityState({
     qualityStatus: session.qualityStatus,
     assessment,
@@ -258,6 +283,13 @@ function SessionActions({
               >
                 <FileVideo />
                 Export MP4
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={!canOpenComments || busy || disconnected}
+                onClick={() => void openSessionCommentsWindow(session.id)}
+              >
+                <ChatCircle />
+                Open Comments
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem disabled={busy || captureProtected} onClick={() => void runCheck()}>

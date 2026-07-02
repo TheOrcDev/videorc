@@ -35,6 +35,7 @@ import { useStudio } from '@/hooks/use-studio'
 import { videoProfileCompatibility } from '@/lib/capture'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
+import { liveChatRailAvailable, shouldAutoOpenLiveChatRail } from '@/lib/live-chat-surface'
 import { studioHealth } from '@/lib/studio-health'
 import { sessionStatusLabel, sessionStatusTone } from '@/lib/studio-session-view'
 
@@ -106,36 +107,42 @@ export function StudioTab(): ReactElement {
             ? (health.ffmpeg.message ?? 'FFmpeg is not available.')
             : null
 
-  // Live-only chat rail (ux-ia plan, slice 6): exists ONLY while streaming.
-  // Auto-opens once when chat providers attach; ⌘J toggles; state resets when
-  // the session ends — off-air the Studio has no chat surface.
-  const streamingActive = recording.state === 'streaming'
+  // Live chat rail: live while streaming, retained after stop while the in-memory
+  // transcript still has comments. It clears once the local chat view is cleared.
   const chatProvidersAttached = studio.liveChatSnapshot.providers.length > 0
+  const chatRailAvailable = liveChatRailAvailable(recording.state, studio.liveChatSnapshot)
   const [chatRailOpen, setChatRailOpen] = useState(false)
   const chatAutoOpened = useRef(false)
   useEffect(() => {
-    if (!streamingActive) {
+    if (!chatRailAvailable) {
       chatAutoOpened.current = false
       setChatRailOpen(false)
       return
     }
-    if (chatProvidersAttached && !chatAutoOpened.current) {
+    if (
+      shouldAutoOpenLiveChatRail({
+        alreadyAutoOpened: chatAutoOpened.current,
+        providersAttached: chatProvidersAttached,
+        recordingState: recording.state,
+        snapshot: studio.liveChatSnapshot
+      })
+    ) {
       chatAutoOpened.current = true
       setChatRailOpen(true)
     }
-  }, [streamingActive, chatProvidersAttached])
+  }, [chatRailAvailable, chatProvidersAttached, recording.state, studio.liveChatSnapshot])
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key.toLowerCase() === 'j' && !event.shiftKey && (event.metaKey || event.ctrlKey)) {
         event.preventDefault()
-        if (streamingActive) {
+        if (chatRailAvailable) {
           setChatRailOpen((value) => !value)
         }
       }
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [streamingActive])
+  }, [chatRailAvailable])
 
   // Two-button start: set the intended mode, then start on the next render so startSession
   // sees the updated streamEnabled (record vs go-live) instead of a stale closure value.
@@ -292,7 +299,7 @@ export function StudioTab(): ReactElement {
         </PageStack>
       </div>
 
-      {chatRailOpen && streamingActive ? (
+      {chatRailOpen && chatRailAvailable ? (
         <LiveChatRail
           snapshot={studio.liveChatSnapshot}
           windowOpen={studio.commentsWindow.open}

@@ -51,6 +51,27 @@ async function main() {
 
   const opened = await smokeCommand('comments-window-open')
   assertProbe(opened.open === true, 'open: comments window reports open', JSON.stringify(opened))
+  assertProbe(
+    opened.protected === true,
+    'protection: comments window reports content protection enabled',
+    JSON.stringify(opened)
+  )
+
+  await smokeCommand('comments-window-push-snapshot', { snapshot: fixtureSnapshot() })
+  const reader = await waitFor(
+    () => smokeCommand('comments-window-reader-state'),
+    (s) =>
+      s.open &&
+      s.messageCount === 2 &&
+      s.text.includes('Probe Viewer') &&
+      s.text.includes('Saved transcript hello'),
+    8000
+  )
+  assertProbe(
+    reader.ok,
+    'reader: pushed saved transcript renders in the detached window',
+    JSON.stringify(reader.last)
+  )
 
   await smokeCommand('comments-window-set-bounds', { x: 200, y: 140, width: 420, height: 640 })
   const placed = await waitFor(
@@ -86,7 +107,9 @@ async function main() {
 
   console.log('\n=== Comments window probe summary ===')
   if (failures.length === 0) {
-    console.log('PASS — open, move, toggle-close, and toggle-reopen with frame persistence.')
+    console.log(
+      'PASS — open, content protection, seeded transcript rendering, toggle, and frame persistence.'
+    )
     return 0
   }
   for (const failure of failures) console.log(`FAIL: ${failure}`)
@@ -123,6 +146,47 @@ function assertProbe(condition, label, detail) {
   } else {
     console.log(`FAIL ${label} — ${detail}`)
     failures.push(`${label} — ${detail}`)
+  }
+}
+
+function fixtureSnapshot() {
+  return {
+    sessionId: 'comments-window-probe-session',
+    providers: [],
+    messages: [
+      {
+        id: 'youtube:probe-1',
+        providerMessageId: 'probe-1',
+        platform: 'youtube',
+        sessionId: 'comments-window-probe-session',
+        authorName: 'Probe Viewer',
+        authorBadges: [],
+        authorRoles: [],
+        publishedAt: '2026-07-02T00:00:01Z',
+        receivedAt: '2026-07-02T00:00:02Z',
+        messageText: 'Saved transcript hello',
+        fragments: [{ type: 'text', text: 'Saved transcript hello' }],
+        eventType: 'message',
+        isDeleted: false
+      },
+      {
+        id: 'twitch:probe-2',
+        providerMessageId: 'probe-2',
+        platform: 'twitch',
+        sessionId: 'comments-window-probe-session',
+        authorName: 'Second Viewer',
+        authorBadges: [],
+        authorRoles: [],
+        publishedAt: '2026-07-02T00:00:03Z',
+        receivedAt: '2026-07-02T00:00:04Z',
+        messageText: 'Another saved comment',
+        fragments: [{ type: 'text', text: 'Another saved comment' }],
+        eventType: 'message',
+        isDeleted: false
+      }
+    ],
+    unreadCount: 2,
+    updatedAt: '2026-07-02T00:00:05Z'
   }
 }
 

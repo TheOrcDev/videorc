@@ -113,6 +113,7 @@ let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
 let commentsWindowClosing = false
+let commentsWindowContentProtected = false
 let latestCommentsSnapshot: LiveChatSnapshot | null = null
 let captionsWindow: BrowserWindow | null = null
 let captionsWindowLastFrame: Electron.Rectangle | null = null
@@ -439,10 +440,7 @@ async function runFirstFrameWatchdogTick(): Promise<void> {
       case 'heal':
         setFirstFrameStatus('healing', assessment.reason)
         updatePreviewWindowWaitDetail(assessment.reason)
-        logBackend(
-          'info',
-          `[first-frame] healing: ${assessment.action} — ${assessment.reason}`
-        )
+        logBackend('info', `[first-frame] healing: ${assessment.action} — ${assessment.reason}`)
         runFirstFrameHealingAction(assessment.action, compositor)
         return
       case 'fallback':
@@ -1266,9 +1264,9 @@ function restoreNotesWindowOnLaunch(): void {
 
 // --- Detached Comments window -------------------------------------------------
 // A read-only live-chat reader in its own OS window (the comments plan's
-// "detachable second-monitor chat window"), mirroring the Notes window. This
-// slice (C1) is the shell + prefs; the React reader (C2) and live data relay
-// (C3) arrive next. Plain window — no native surface, no content protection.
+// "detachable second-monitor chat window"), mirroring the Notes window. Plain
+// BrowserWindow — no native surface, but content-protected so it can be kept
+// open during recording/livestreaming without appearing in captured output.
 type CommentsWindowPrefs = {
   frame?: Electron.Rectangle
   alwaysOnTop?: boolean
@@ -1329,9 +1327,7 @@ function commentsWindowState(message?: string): CommentsWindowState {
     bounds: open ? window!.getBounds() : null,
     windowId: commentsWindowGlobalId(),
     alwaysOnTop: commentsWindowAlwaysOnTop,
-    // Content protection for the comments window is being wired in a parallel
-    // change; false keeps the committed type satisfied until it lands.
-    protected: false,
+    protected: open ? commentsWindowContentProtected : false,
     enabled: commentsWindowFeatureEnabled,
     message:
       message ??
@@ -1347,7 +1343,12 @@ function emitCommentsWindowState(message?: string): void {
   }
   const state = commentsWindowState(message)
   for (const window of [mainWindow, commentsWindow]) {
-    if (window && !window.webContents.isDestroyed()) {
+    if (
+      window &&
+      !window.isDestroyed() &&
+      !window.webContents.isDestroyed() &&
+      (window !== commentsWindow || !commentsWindowClosing)
+    ) {
       try {
         window.webContents.send('comments-window:state', state)
       } catch (error) {
@@ -1398,6 +1399,13 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
   })
   commentsWindowClosing = false
   commentsWindow = window
+  commentsWindowContentProtected = false
+  try {
+    window.setContentProtection(true)
+    commentsWindowContentProtected = true
+  } catch (error) {
+    safeConsole.warn('Comments window content protection could not be enabled:', error)
+  }
   commentsWindowAlwaysOnTop = commentsWindowAlwaysOnTopPreference(prefs)
   if (commentsWindowAlwaysOnTop) {
     applyNotesWindowAlwaysOnTop(window, true)
@@ -1422,6 +1430,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     if (commentsWindow === window) {
       commentsWindow = null
       commentsWindowClosing = false
+      commentsWindowContentProtected = false
       emitCommentsWindowState()
     }
   })
@@ -5293,6 +5302,30 @@ async function runSmokePreviewMotionCommand(
 
   if (command === 'comments-window-state') {
     return commentsWindowState()
+  }
+
+  if (command === 'comments-window-push-snapshot') {
+    latestCommentsSnapshot = params.snapshot as LiveChatSnapshot
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
+      commentsWindow.webContents.send('comments-window:snapshot', latestCommentsSnapshot)
+    }
+    return latestCommentsSnapshot
+  }
+
+  if (command === 'comments-window-reader-state') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      return { open: false, text: '', messageCount: 0 }
+    }
+    const rendered = await window.webContents.executeJavaScript(
+      `({
+        open: true,
+        text: document.body.innerText,
+        messageCount: document.querySelectorAll('li').length
+      })`,
+      true
+    )
+    return rendered
   }
 
   if (command === 'notes-window-save-document') {

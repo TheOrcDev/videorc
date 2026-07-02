@@ -332,9 +332,7 @@ function LiveCaptionsSection(): ReactElement {
         {locked ? (
           <div className="flex flex-wrap items-center gap-2 border-l-2 border-warning/50 pl-3 text-xs text-warning-foreground dark:text-warning">
             <WarningCircle className="size-3.5 shrink-0" weight="fill" />
-            <span className="min-w-0 flex-1">
-              {gate.allowed ? null : gate.reason}
-            </span>
+            <span className="min-w-0 flex-1">{gate.allowed ? null : gate.reason}</span>
             {!gate.allowed && gate.upgradeUrl ? (
               <Button
                 className="h-auto px-0 text-xs"
@@ -348,8 +346,8 @@ function LiveCaptionsSection(): ReactElement {
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">
-            While enabled, your microphone audio is sent to xAI through the Videorc AI gateway
-            for transcription. Captions appear a few seconds behind speech.
+            While enabled, your microphone audio is sent to xAI through the Videorc AI gateway for
+            transcription. Captions appear a few seconds behind speech.
           </p>
         )}
         {captionsStatus.state === 'error' && captionsStatus.message ? (

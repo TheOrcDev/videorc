@@ -43,6 +43,7 @@ export function CommentsReader({
   onToggleAlwaysOnTop?: () => void
 }): ReactElement {
   const messages = sortMessagesChronological(snapshot.messages)
+  const savedTranscript = messages.length > 0 && snapshot.providers.length === 0
   const feedRef = useRef<HTMLDivElement>(null)
   const [pinned, setPinned] = useState(true)
   const [unread, setUnread] = useState(0)
@@ -79,7 +80,9 @@ export function CommentsReader({
       {/* The whole drag bar moves the window (hiddenInset titlebar); the
           controls opt back out of the drag region. */}
       <header className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-3 [-webkit-app-region:drag]">
-        <span className="text-xs font-medium text-subtle">Live chat</span>
+        <span className="text-xs font-medium text-subtle">
+          {savedTranscript ? 'Saved comments' : 'Comments'}
+        </span>
         <div className="flex items-center gap-0.5">
           {onToggleAlwaysOnTop ? (
             <Button

@@ -1990,6 +1990,13 @@ pub struct SessionSummary {
     pub health_events: Vec<HealthEvent>,
     pub session_logs: Vec<SessionLogEntry>,
     pub ai_artifacts: Vec<AiArtifact>,
+    pub comment_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCommentsListParams {
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

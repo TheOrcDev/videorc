@@ -31,13 +31,19 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void
 }): ReactElement {
   const { setActive, openStudioPanel } = useWorkspaceNav()
-  const { recording, startSession, stopSession, commentsWindow, toggleCommentsWindow } =
-    useStudio()
+  const {
+    recording,
+    runtimeInfo,
+    startSession,
+    stopSession,
+    commentsWindow,
+    toggleCommentsWindow
+  } = useStudio()
   const { setTheme } = useTheme()
 
-  const run = (action: () => void): void => {
+  const run = (action: () => void | Promise<void>): void => {
     onOpenChange(false)
-    action()
+    void action()
   }
 
   const live = recording.state === 'recording' || recording.state === 'streaming'
@@ -115,16 +121,18 @@ export function CommandPalette({
               Start session
             </CommandItem>
           )}
-          <CommandItem
-            value="Toggle comments window"
-            onSelect={() => run(() => toggleCommentsWindow())}
-          >
-            <ChatCircle className="size-4" />
-            {commentsWindow.open ? 'Close comments window' : 'Open comments window'}
-            <CommandShortcut className="tracking-normal">
-              <Kbd>⌘⇧J</Kbd>
-            </CommandShortcut>
-          </CommandItem>
+          {runtimeInfo?.commentsWindowEnabled ? (
+            <CommandItem
+              value="Toggle comments window"
+              onSelect={() => run(() => toggleCommentsWindow())}
+            >
+              <ChatCircle className="size-4" />
+              {commentsWindow.open ? 'Close comments window' : 'Open comments window'}
+              <CommandShortcut className="tracking-normal">
+                <Kbd>⌘⇧J</Kbd>
+              </CommandShortcut>
+            </CommandItem>
+          ) : null}
         </CommandGroup>
 
         <CommandSeparator />

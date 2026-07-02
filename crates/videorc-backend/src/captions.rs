@@ -392,7 +392,10 @@ mod tests {
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..16], b"WAVEfmt ");
         assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1); // channels
-        assert_eq!(u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]), 16_000);
+        assert_eq!(
+            u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]),
+            16_000
+        );
         assert_eq!(u16::from_le_bytes([wav[34], wav[35]]), 16); // bits/sample
         assert_eq!(u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]), 6); // data bytes
         assert_eq!(wav.len(), 44 + 6);

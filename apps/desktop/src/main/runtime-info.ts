@@ -22,6 +22,8 @@ export interface RuntimeInfoInput {
       | 'VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED'
       | 'VIDEORC_NOTES_WINDOW'
       | 'VIDEORC_NOTES_RECORDING_OVERLAY'
+      | 'VIDEORC_COMMENTS_WINDOW'
+      | 'VIDEORC_COMMENTS_RECORDING_OVERLAY'
     >
   >
 }
@@ -75,6 +77,9 @@ export function buildRuntimeInfo({
     notesWindowEnabled: env.VIDEORC_NOTES_WINDOW !== '0',
     notesWindowRecordingOverlayAllowed:
       env.VIDEORC_NOTES_WINDOW !== '0' && env.VIDEORC_NOTES_RECORDING_OVERLAY !== '0',
+    commentsWindowEnabled: env.VIDEORC_COMMENTS_WINDOW !== '0',
+    commentsWindowRecordingOverlayAllowed:
+      env.VIDEORC_COMMENTS_WINDOW !== '0' && env.VIDEORC_COMMENTS_RECORDING_OVERLAY !== '0',
     previewSmokeMode: env.VIDEORC_SMOKE_PREVIEW_MOTION === '1',
     disableAutoPreview: env.VIDEORC_DISABLE_AUTO_PREVIEW === '1',
     nativePreviewSurfaceStageSuspended: env.VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED === '1'

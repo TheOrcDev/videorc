@@ -86,7 +86,8 @@ describe('fetchChangelogEntries', () => {
   it('distinguishes a good empty answer from a failure', async () => {
     expect(
       await fetchChangelogEntries({
-        fetchImpl: (async () => new Response(JSON.stringify({ entries: [] }), { status: 200 })) as typeof fetch
+        fetchImpl: (async () =>
+          new Response(JSON.stringify({ entries: [] }), { status: 200 })) as typeof fetch
       })
     ).toEqual([])
   })

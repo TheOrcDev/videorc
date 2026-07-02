@@ -2,8 +2,8 @@ mod account;
 mod ai;
 mod audio;
 mod camera_capture;
-mod capture_input;
 mod captions;
+mod capture_input;
 mod color;
 mod compositor;
 mod compositor_synthetic;
@@ -1697,7 +1697,9 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             }
         }
         "captions.stop" => ServerResponse::ok(command.id, captions::stop_captions(state).await),
-        "captions.status.get" => ServerResponse::ok(command.id, captions::captions_status(state).await),
+        "captions.status.get" => {
+            ServerResponse::ok(command.id, captions::captions_status(state).await)
+        }
         "ai.capabilities.get" => match get_ai_capabilities().await {
             Ok(capabilities) => ServerResponse::ok(command.id, capabilities),
             Err(error) => {

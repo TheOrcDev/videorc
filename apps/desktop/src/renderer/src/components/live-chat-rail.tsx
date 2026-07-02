@@ -6,8 +6,8 @@ import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import type { LiveChatSnapshot } from '../../../shared/backend'
 
-// The live-only chat rail (ux-ia plan, slice 6): chat exists ONLY while a
-// streaming session runs — off-air the Studio has no chat surface at all.
+// The chat rail is live while streaming and can stay mounted after stop while
+// the retained in-memory transcript has comments.
 // When the detached Comments window is open the feed lives there (one live
 // feed at a time, mirroring how the preview detaches); the rail shows a
 // bring-back placeholder.
@@ -22,7 +22,7 @@ export function LiveChatRail({
   onClearLocal: () => void
   onClose: () => void
   windowOpen: boolean
-  onPopOut: () => void
+  onPopOut: () => void | Promise<void>
 }): ReactElement {
   return (
     <aside className="flex w-80 shrink-0 flex-col gap-3 rounded-panel border bg-muted/20 p-4">
@@ -36,7 +36,7 @@ export function LiveChatRail({
           className="size-7"
           size="icon"
           variant="ghost"
-          onClick={onPopOut}
+          onClick={() => void onPopOut()}
         >
           <ArrowSquareOut className="size-4" />
         </Button>
@@ -54,7 +54,7 @@ export function LiveChatRail({
         <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-row border border-dashed bg-muted/20 px-4 py-8 text-center">
           <ArrowSquareOut className="size-5 text-muted-foreground" weight="duotone" />
           <p className="text-sm text-muted-foreground">Comments are open in a separate window.</p>
-          <Button size="sm" variant="outline" onClick={onPopOut}>
+          <Button size="sm" variant="outline" onClick={() => void onPopOut()}>
             Bring back into the app
           </Button>
         </div>

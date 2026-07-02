@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::diagnostics::permission_pane_for_log;
+use crate::live_chat::{LiveChatEventType, LiveChatMessage, LiveChatMessageFragment};
 use crate::protocol::{
     AiArtifact, AiArtifactKind, AiArtifactStatus, DiagnosticStats, HealthEvent, HealthLevel,
     LayoutSettings, OutputSettings, SessionLogEntry, SessionSummary, SourceSelection, StreamScreen,
@@ -164,6 +165,70 @@ impl Database {
             .optional()?
             .flatten();
         Ok(path)
+    }
+
+    pub fn save_live_chat_message(&self, message: &LiveChatMessage) -> Result<()> {
+        let conn = self.lock()?;
+        let session_exists = conn
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![message.session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !session_exists {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO live_chat_messages (
+                id, session_id, provider_message_id, platform, target_id, author_id,
+                author_name, author_avatar_url, author_badges_json, author_roles_json,
+                published_at, received_at, message_text, fragments_json, event_type,
+                amount_text, is_deleted, raw_provider_type
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+             ON CONFLICT(id) DO UPDATE SET
+                target_id = excluded.target_id,
+                author_id = excluded.author_id,
+                author_name = excluded.author_name,
+                author_avatar_url = excluded.author_avatar_url,
+                author_badges_json = excluded.author_badges_json,
+                author_roles_json = excluded.author_roles_json,
+                published_at = excluded.published_at,
+                received_at = excluded.received_at,
+                message_text = excluded.message_text,
+                fragments_json = excluded.fragments_json,
+                event_type = excluded.event_type,
+                amount_text = excluded.amount_text,
+                is_deleted = excluded.is_deleted,
+                raw_provider_type = excluded.raw_provider_type",
+            params![
+                message.id,
+                message.session_id,
+                message.provider_message_id,
+                stream_platform_id(message.platform),
+                message.target_id,
+                message.author_id,
+                message.author_name,
+                message.author_avatar_url,
+                serde_json::to_string(&message.author_badges)?,
+                serde_json::to_string(&message.author_roles)?,
+                message.published_at,
+                message.received_at,
+                message.message_text,
+                serde_json::to_string(&message.fragments)?,
+                serde_json::to_string(&message.event_type)?,
+                message.amount_text,
+                message.is_deleted,
+                message.raw_provider_type,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_live_chat_messages(&self, session_id: &str) -> Result<Vec<LiveChatMessage>> {
+        let conn = self.lock()?;
+        self.live_chat_messages_for_session_locked(&conn, session_id)
     }
 
     pub fn save_ai_artifact(
@@ -347,6 +412,7 @@ impl Database {
                 health_events: self.health_events_for_session_locked(&conn, &id)?,
                 session_logs: self.session_logs_for_session_locked(&conn, &id)?,
                 ai_artifacts: self.ai_artifacts_for_session_locked(&conn, &id)?,
+                comment_count: self.live_chat_message_count_for_session_locked(&conn, &id)?,
                 quality_status: self.latest_quality_status_for_session_locked(
                     &conn,
                     output_path.as_deref(),
@@ -955,6 +1021,31 @@ impl Database {
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS live_chat_messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                provider_message_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                target_id TEXT,
+                author_id TEXT,
+                author_name TEXT NOT NULL,
+                author_avatar_url TEXT,
+                author_badges_json TEXT NOT NULL,
+                author_roles_json TEXT NOT NULL,
+                published_at TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                message_text TEXT NOT NULL,
+                fragments_json TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                amount_text TEXT,
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                raw_provider_type TEXT,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_live_chat_messages_session_received
+                ON live_chat_messages(session_id, received_at, id);
+
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value_json TEXT NOT NULL,
@@ -1076,6 +1167,66 @@ impl Database {
                     .unwrap_or_else(|_| serde_json::json!({})),
                 file_path: row.get(5)?,
                 created_at: row.get(6)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn live_chat_message_count_for_session_locked(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+    ) -> Result<u64> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM live_chat_messages WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
+
+    fn live_chat_messages_for_session_locked(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+    ) -> Result<Vec<LiveChatMessage>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, provider_message_id, platform, target_id, author_id,
+                    author_name, author_avatar_url, author_badges_json, author_roles_json,
+                    published_at, received_at, message_text, fragments_json, event_type,
+                    amount_text, is_deleted, raw_provider_type
+             FROM live_chat_messages
+             WHERE session_id = ?1
+             ORDER BY received_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            let platform_id: String = row.get(3)?;
+            let author_badges_json: String = row.get(8)?;
+            let author_roles_json: String = row.get(9)?;
+            let fragments_json: String = row.get(13)?;
+            let event_type_json: String = row.get(14)?;
+            Ok(LiveChatMessage {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                provider_message_id: row.get(2)?,
+                platform: stream_platform_from_id(&platform_id).unwrap_or(StreamPlatform::Custom),
+                target_id: row.get(4)?,
+                author_id: row.get(5)?,
+                author_name: row.get(6)?,
+                author_avatar_url: row.get(7)?,
+                author_badges: serde_json::from_str(&author_badges_json).unwrap_or_default(),
+                author_roles: serde_json::from_str(&author_roles_json).unwrap_or_default(),
+                published_at: row.get(10)?,
+                received_at: row.get(11)?,
+                message_text: row.get(12)?,
+                fragments: serde_json::from_str::<Vec<LiveChatMessageFragment>>(&fragments_json)
+                    .unwrap_or_default(),
+                event_type: serde_json::from_str::<LiveChatEventType>(&event_type_json)
+                    .unwrap_or(LiveChatEventType::Message),
+                amount_text: row.get(15)?,
+                is_deleted: row.get(16)?,
+                raw_provider_type: row.get(17)?,
             })
         })?;
 
@@ -1419,6 +1570,9 @@ fn title_case_word(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::live_chat::{
+        LiveChatEventType, LiveChatMessage, LiveChatMessageFragment, live_chat_message_id,
+    };
     use crate::protocol::{
         CameraCorner, CameraFit, CameraShape, CameraSize, CameraTransformMode, LayoutPreset,
         OutputSettings, PermissionPane, RtmpPreset, RtmpSettings, SideBySideCameraSide,
@@ -1506,6 +1660,34 @@ mod tests {
                     stream_key: String::new(),
                 },
             },
+        }
+    }
+
+    fn sample_live_chat_message(session_id: &str, seq: u32) -> LiveChatMessage {
+        let provider_message_id = format!("provider-{seq}");
+        LiveChatMessage {
+            id: live_chat_message_id(StreamPlatform::Youtube, &provider_message_id),
+            provider_message_id,
+            platform: StreamPlatform::Youtube,
+            target_id: Some("target-youtube".to_string()),
+            session_id: session_id.to_string(),
+            author_id: Some(format!("author-{seq}")),
+            author_name: format!("Viewer {seq}"),
+            author_avatar_url: None,
+            author_badges: vec!["member".to_string()],
+            author_roles: Vec::new(),
+            published_at: format!("2026-06-06T00:00:0{seq}Z"),
+            received_at: format!("2026-06-06T00:00:1{seq}Z"),
+            message_text: format!("hello {seq}"),
+            fragments: vec![LiveChatMessageFragment {
+                fragment_type: "text".to_string(),
+                text: format!("hello {seq}"),
+                image_url: None,
+            }],
+            event_type: LiveChatEventType::Message,
+            amount_text: None,
+            is_deleted: false,
+            raw_provider_type: Some("textMessageEvent".to_string()),
         }
     }
 
@@ -1611,6 +1793,38 @@ mod tests {
             session.session_logs[0].source_id.as_deref(),
             Some("screen:avfoundation:1")
         );
+    }
+
+    #[test]
+    fn live_chat_messages_round_trip_and_count_on_session_summary() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-1"))
+            .unwrap();
+
+        database
+            .save_live_chat_message(&sample_live_chat_message("missing-session", 9))
+            .unwrap();
+        database
+            .save_live_chat_message(&sample_live_chat_message("session-1", 1))
+            .unwrap();
+        let mut updated = sample_live_chat_message("session-1", 1);
+        updated.message_text = "edited/deleted text".to_string();
+        updated.is_deleted = true;
+        database.save_live_chat_message(&updated).unwrap();
+        database
+            .save_live_chat_message(&sample_live_chat_message("session-1", 2))
+            .unwrap();
+
+        let sessions = database.list_sessions(1).unwrap();
+        assert_eq!(sessions[0].comment_count, 2);
+
+        let messages = database.list_live_chat_messages("session-1").unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].id, "youtube:provider-1");
+        assert_eq!(messages[0].message_text, "edited/deleted text");
+        assert!(messages[0].is_deleted);
+        assert_eq!(messages[1].fragments[0].text, "hello 2");
     }
 
     #[test]

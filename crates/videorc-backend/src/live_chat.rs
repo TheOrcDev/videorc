@@ -439,7 +439,7 @@ impl LiveChatCoordinator {
     }
 
     /// Abort connector tasks and mark every connected provider `ended`. The transcript is
-    /// retained so the panel keeps showing it until the local view is cleared.
+    /// retained so the app can keep showing it until the local view is cleared.
     pub fn stop_session(&mut self) {
         self.abort_tasks();
         for provider in &mut self.providers {
@@ -695,6 +695,15 @@ pub(crate) async fn deliver_message(state: &AppState, message: LiveChatMessage) 
         coordinator.ingest(message.clone())
     };
     if outcome == IngestOutcome::New {
+        if let Err(error) = state.database.save_live_chat_message(&message) {
+            state.emit_log(
+                "warn",
+                format!(
+                    "Could not persist live chat message {}: {error}",
+                    message.id
+                ),
+            );
+        }
         state.emit_event("liveChat.message", message);
     }
 }
@@ -903,6 +912,14 @@ mod tests {
             LiveChatProviderConnectionState::Ended
         );
         assert_eq!(snapshot.messages.len(), 1);
+
+        coordinator.clear_local();
+        assert!(
+            coordinator
+                .snapshot("later".to_string())
+                .messages
+                .is_empty()
+        );
     }
 
     #[test]
@@ -915,7 +932,7 @@ mod tests {
 
     #[test]
     fn twitch_without_user_read_chat_needs_reconnect() {
-        // The current real Twitch scope set (no user:read:chat) before the connector slice.
+        // The current real Twitch scope set lacks user:read:chat until the account reconnects.
         let account = account(
             StreamPlatform::Twitch,
             &["channel:manage:broadcast", "channel:read:stream_key"],
