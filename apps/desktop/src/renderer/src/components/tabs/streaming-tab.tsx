@@ -286,7 +286,8 @@ function LiveCaptionsSection(): ReactElement {
     startCaptions,
     stopCaptions,
     captionsWindow,
-    toggleCaptionsWindow
+    toggleCaptionsWindow,
+    isSessionActive
   } = useStudio()
   const [pending, setPending] = useState(false)
   const gate = cloudAiUploadGate(entitlements)
@@ -359,7 +360,11 @@ function LiveCaptionsSection(): ReactElement {
         {active || lines.length > 0 ? (
           <div aria-live="polite" className="flex min-h-16 flex-col justify-end gap-1.5">
             {lines.length === 0 ? (
-              <span className="text-sm text-muted-foreground">Listening…</span>
+              <span className="text-sm text-muted-foreground">
+                {isSessionActive
+                  ? 'Listening…'
+                  : 'Start recording or go live — captions transcribe your microphone during a session.'}
+              </span>
             ) : (
               lines.map((line) => (
                 <p className="text-sm leading-6 text-foreground" key={line.seq}>

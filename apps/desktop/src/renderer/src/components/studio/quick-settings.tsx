@@ -1,5 +1,6 @@
 import {
   CaretDown,
+  ClosedCaptioning,
   Layout as LayoutIcon,
   Microphone,
   Monitor,
@@ -8,7 +9,8 @@ import {
   SpeakerSlash,
   type Icon
 } from '@phosphor-icons/react'
-import type { ReactElement, ReactNode } from 'react'
+import { useState, type ReactElement, type ReactNode } from 'react'
+import { toast } from 'sonner'
 
 import { SourceSelect } from '@/components/source-select'
 import { Button } from '@/components/ui/button'
@@ -21,9 +23,11 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
+import { Switch } from '@/components/ui/switch'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudio } from '@/hooks/use-studio'
 import type { LayoutPreset } from '@/lib/backend'
+import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import {
   buildCameraSources,
   buildCaptureSources,
@@ -79,9 +83,32 @@ export function QuickSettings(): ReactElement {
     applyCameraPreset,
     patchVideo,
     layoutSwitchPending,
-    isSessionActive
+    isSessionActive,
+    entitlements,
+    captionsStatus,
+    startCaptions,
+    stopCaptions
   } = useStudio()
   const { openStudioPanel } = useWorkspaceNav()
+  const [captionsPending, setCaptionsPending] = useState(false)
+  const captionsGate = cloudAiUploadGate(entitlements)
+  const captionsLive = captionsStatus.state === 'live'
+  const toggleCaptions = async (next: boolean): Promise<void> => {
+    setCaptionsPending(true)
+    try {
+      if (next) {
+        await startCaptions()
+      } else {
+        await stopCaptions()
+      }
+    } catch (error) {
+      toast.error('Live captions', {
+        description: error instanceof Error ? error.message : 'Could not update live captions.'
+      })
+    } finally {
+      setCaptionsPending(false)
+    }
+  }
 
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
@@ -102,7 +129,7 @@ export function QuickSettings(): ReactElement {
   ].join(' · ')
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
       {/* SOURCE — screen + camera, edited off-air; full picker on Sources. */}
       <QuickCard icon={Monitor} label="Source">
         <Popover>
@@ -252,6 +279,33 @@ export function QuickSettings(): ReactElement {
             ))}
           </SelectContent>
         </Select>
+      </QuickCard>
+
+      {/* CAPTIONS — live-safe premium toggle mirroring the Streaming tab's
+          Live captions section (the config home, incl. the consent copy). */}
+      <QuickCard icon={ClosedCaptioning} label="Captions">
+        <div className="flex items-center justify-between gap-2 rounded-row border bg-background px-2.5 py-1.5">
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">
+            {captionsLive
+              ? isSessionActive
+                ? 'Live'
+                : 'Waiting for session'
+              : captionsGate.allowed
+                ? 'Off'
+                : 'Premium'}
+          </span>
+          <Switch
+            aria-label="Enable live captions"
+            checked={captionsLive}
+            disabled={captionsPending || (!captionsLive && !captionsGate.allowed)}
+            onCheckedChange={(next) => void toggleCaptions(next)}
+          />
+        </div>
+        {captionsLive && !isSessionActive ? (
+          <span className="text-xs text-muted-foreground">
+            Start recording or go live — captions transcribe your mic during a session.
+          </span>
+        ) : null}
       </QuickCard>
     </div>
   )
