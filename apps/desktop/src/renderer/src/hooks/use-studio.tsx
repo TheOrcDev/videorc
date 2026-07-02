@@ -67,6 +67,7 @@ import type {
   BackendConnection,
   BackendHealth,
   BackendLogEvent,
+  CommentsWindowState,
   CompositorStatus,
   DiagnosticStats,
   Device,
@@ -82,6 +83,8 @@ import type {
   LiveLayoutApplyStatus,
   LiveChatMessage,
   LiveChatProviderState,
+  CaptionsStatus,
+  CaptionsUpdate,
   LiveChatSnapshot,
   NativePreviewHostCommand,
   NotesWindowState,
@@ -132,6 +135,7 @@ import type {
   YouTubeStreamStatusResult
 } from '@/lib/backend'
 import { createEmptyLiveChatSnapshot } from '@/lib/backend'
+import { appendCaptionLine } from '@/lib/captions-ui'
 import { goLiveEntitlementGate, videoProfileEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import {
@@ -163,6 +167,10 @@ import {
   mergeStreamHealth,
   setupChecklist
 } from '@/lib/format'
+import {
+  deviceListWithoutProtectedOverlayWindows,
+  protectedOverlayWindowIdsFromOverlayWindows
+} from '@/lib/protected-overlay-windows'
 
 export type { GoLivePartialSetup, GoLiveSetupFailure } from '@/lib/go-live-flow'
 
@@ -326,10 +334,17 @@ export type StudioContextValue = {
   liveChatSnapshot: LiveChatSnapshot
   /** Clear the local chat view (calls liveChat.clearLocal; not platform messages). */
   clearLiveChat: () => Promise<void>
-  /** Whether the detached Comments window is currently open. */
-  commentsWindowOpen: boolean
-  /** Open/close the detached Comments window (the rail "pop out", ⌘⇧J, palette). */
-  toggleCommentsWindow: () => void
+  /** Live captions (premium cloud AI): status + transcript lines from captions.* events. */
+  captionsStatus: CaptionsStatus
+  captionLines: CaptionsUpdate[]
+  startCaptions: () => Promise<void>
+  stopCaptions: () => Promise<void>
+  commentsWindow: CommentsWindowState
+  openCommentsWindow: () => Promise<void>
+  closeCommentsWindow: () => Promise<void>
+  toggleCommentsWindow: () => Promise<void>
+  setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<void>
+  openSessionCommentsWindow: (sessionId: string) => Promise<void>
   streamMetadataDraft: StreamMetadataDraft | null
   streamMetadataValidation: StreamMetadataValidation | null
   goLivePreflight: GoLivePreflight | null
@@ -710,6 +725,16 @@ const idleNotesWindowState = (): NotesWindowState => ({
   message: 'Notes window is disabled by VIDEORC_NOTES_WINDOW=0.'
 })
 
+const idleCommentsWindowState = (): CommentsWindowState => ({
+  open: false,
+  visible: false,
+  bounds: null,
+  alwaysOnTop: false,
+  protected: false,
+  enabled: false,
+  message: 'Comments window is disabled by VIDEORC_COMMENTS_WINDOW=0.'
+})
+
 const idlePreviewSupervisorState = (): PreviewSupervisorState => ({
   lifecycleState: 'closed',
   generation: 0,
@@ -723,28 +748,13 @@ const idlePreviewSupervisorState = (): PreviewSupervisorState => ({
   updatedAt: new Date(0).toISOString()
 })
 
-function protectedOverlayWindowIdsFromNotesWindow(
-  notesWindow: Pick<NotesWindowState, 'open' | 'windowId'>
-): number[] {
-  return notesWindow.open && typeof notesWindow.windowId === 'number' ? [notesWindow.windowId] : []
-}
-
-function deviceListWithoutNotesWindow(
-  deviceList: DeviceList,
-  notesWindow: Pick<NotesWindowState, 'open' | 'windowId'>
-): DeviceList {
-  const protectedWindowIds = protectedOverlayWindowIdsFromNotesWindow(notesWindow)
-  if (protectedWindowIds.length === 0) {
-    return deviceList
-  }
-  const protectedIds = new Set(protectedWindowIds.map((id) => `window:screencapturekit:${id}`))
-  const devices = deviceList.devices.filter((device) => !protectedIds.has(device.id))
-  return devices.length === deviceList.devices.length ? deviceList : { ...deviceList, devices }
-}
-
 async function currentProtectedOverlayWindowIds(): Promise<number[]> {
   const latestNotesWindow = await window.videorc?.getNotesWindowState?.().catch(() => null)
-  return protectedOverlayWindowIdsFromNotesWindow(latestNotesWindow ?? idleNotesWindowState())
+  const latestCommentsWindow = await window.videorc?.getCommentsWindowState?.().catch(() => null)
+  return protectedOverlayWindowIdsFromOverlayWindows(
+    latestNotesWindow ?? idleNotesWindowState(),
+    latestCommentsWindow ?? idleCommentsWindowState()
+  )
 }
 
 export function useStudio(): StudioContextValue {
@@ -801,7 +811,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [twitchCategorySearchPending, setTwitchCategorySearchPending] = useState(false)
   const [xNativeCapability, setXNativeCapability] = useState<XNativeLiveCapability | null>(null)
   const [xNativeCapabilityLoading, setXNativeCapabilityLoading] = useState(false)
-  // Read-only, ephemeral chat store: never persisted; driven by liveChat.* websocket events.
+  // Read-only live chat store: persisted by the backend when available, live-updated by
+  // liveChat.* websocket events, and mirrored to the detached Comments window cache.
   const [liveChatSnapshot, setLiveChatSnapshot] = useState<LiveChatSnapshot>(() =>
     createEmptyLiveChatSnapshot(new Date().toISOString())
   )
@@ -809,35 +820,98 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!client) return
     await client.request('liveChat.clearLocal')
   }, [client])
-  // Relay the live-chat feed to the detached Comments window (C3). The main
-  // renderer owns the single WS client, so it forwards each snapshot through the
-  // main process to the window and handles the window's Clear. (Owner-picked
-  // relay — the feed pauses if this window is closed; accepted tradeoff.)
-  const [commentsWindowOpen, setCommentsWindowOpen] = useState(false)
+  // Live captions: status + transcript driven by captions.* events; the mic
+  // audio itself never reaches the renderer (the Rust backend uploads chunks).
+  const [captionsStatus, setCaptionsStatus] = useState<CaptionsStatus>({ state: 'idle' })
+  const [captionLines, setCaptionLines] = useState<CaptionsUpdate[]>([])
+  const startCaptions = useCallback(async () => {
+    if (!client) return
+    setCaptionLines([])
+    const status = await client.request<CaptionsStatus>('captions.start')
+    setCaptionsStatus(status)
+  }, [client])
+  const stopCaptions = useCallback(async () => {
+    if (!client) return
+    const status = await client.request<CaptionsStatus>('captions.stop')
+    setCaptionsStatus(status)
+  }, [client])
+  const [commentsWindow, setCommentsWindow] = useState<CommentsWindowState>(idleCommentsWindowState)
   useEffect(() => {
-    const offState = window.videorc?.onCommentsWindowState?.((state) => {
-      setCommentsWindowOpen(state.open)
-    })
+    let cancelled = false
+    const reconcile = async (): Promise<void> => {
+      const fresh = await window.videorc?.getCommentsWindowState?.()
+      if (!fresh || cancelled) {
+        return
+      }
+      setCommentsWindow((current) =>
+        JSON.stringify(current) === JSON.stringify(fresh) ? current : fresh
+      )
+    }
+    void reconcile()
+    const offState = window.videorc?.onCommentsWindowState?.((state) => setCommentsWindow(state))
     const offClear = window.videorc?.onCommentsClearRequest?.(() => {
       void clearLiveChat()
     })
-    void window.videorc
-      ?.getCommentsWindowState?.()
-      .then((state) => state && setCommentsWindowOpen(state.open))
-      .catch(() => {})
     return () => {
+      cancelled = true
       offState?.()
       offClear?.()
     }
   }, [clearLiveChat])
   useEffect(() => {
-    if (commentsWindowOpen) {
-      void window.videorc?.pushCommentsSnapshot?.(liveChatSnapshot)
+    void window.videorc?.pushCommentsSnapshot?.(liveChatSnapshot)
+  }, [liveChatSnapshot])
+  const refreshLiveChatSnapshotForComments = useCallback(async (): Promise<void> => {
+    if (!client) {
+      return
     }
-  }, [commentsWindowOpen, liveChatSnapshot])
-  const toggleCommentsWindow = useCallback(() => {
-    void window.videorc?.toggleCommentsWindow?.()
+    const snapshot = await client.request<LiveChatSnapshot>('liveChat.status')
+    const next = applyLiveChatSnapshot(snapshot)
+    setLiveChatSnapshot(next)
+    await window.videorc?.pushCommentsSnapshot?.(next)
+  }, [client])
+  const openCommentsWindow = useCallback(async () => {
+    await refreshLiveChatSnapshotForComments().catch(() => {})
+    await window.videorc?.openCommentsWindow?.()
+    await refreshLiveChatSnapshotForComments().catch(() => {})
+  }, [refreshLiveChatSnapshotForComments])
+  const closeCommentsWindow = useCallback(async () => {
+    await window.videorc?.closeCommentsWindow?.()
   }, [])
+  const toggleCommentsWindow = useCallback(async () => {
+    await refreshLiveChatSnapshotForComments().catch(() => {})
+    await window.videorc?.toggleCommentsWindow?.()
+    await refreshLiveChatSnapshotForComments().catch(() => {})
+  }, [refreshLiveChatSnapshotForComments])
+  const setCommentsWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
+    await window.videorc?.setCommentsWindowAlwaysOnTop?.(alwaysOnTop)
+  }, [])
+  const openSessionCommentsWindow = useCallback(
+    async (sessionId: string) => {
+      if (!client) {
+        toast.error('Backend socket is not connected.')
+        return
+      }
+      try {
+        const messages = await client.request<LiveChatMessage[]>('sessions.comments.list', {
+          sessionId
+        })
+        const snapshot = applyLiveChatSnapshot({
+          sessionId,
+          providers: [],
+          messages,
+          unreadCount: messages.length,
+          updatedAt: new Date().toISOString()
+        })
+        await window.videorc?.pushCommentsSnapshot?.(snapshot)
+        await window.videorc?.openCommentsWindow?.()
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Could not open saved comments.'
+        toast.error(message)
+      }
+    },
+    [client]
+  )
   const [streamMetadataDraft, setStreamMetadataDraft] = useState<StreamMetadataDraft | null>(null)
   const [streamMetadataValidation, setStreamMetadataValidation] =
     useState<StreamMetadataValidation | null>(null)
@@ -1990,6 +2064,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ),
       nextClient.on('liveChat.cleared', (payload) =>
         setLiveChatSnapshot(applyLiveChatSnapshot(payload as LiveChatSnapshot))
+      ),
+      nextClient.on('captions.status', (payload) =>
+        setCaptionsStatus(payload as CaptionsStatus)
+      ),
+      nextClient.on('captions.update', (payload) =>
+        setCaptionLines((current) => appendCaptionLine(current, payload as CaptionsUpdate))
       ),
       nextClient.on('streamTargets.metadata.changed', (payload) => {
         const draft = payload as StreamMetadataDraft
@@ -3185,6 +3265,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       })
     })
   }, [notesWindow.open, recording.state, runtimeInfo?.notesWindowRecordingOverlayAllowed])
+
+  useEffect(() => {
+    if (
+      !commentsWindow.open ||
+      commentsWindow.protected ||
+      !isActiveRecordingState(recording.state) ||
+      runtimeInfo?.commentsWindowRecordingOverlayAllowed
+    ) {
+      return
+    }
+    void window.videorc?.closeCommentsWindow?.().then(() => {
+      toast.warning('Comments closed for this recording', {
+        description:
+          'Comments window protection is unavailable and recording overlay capture is disabled by VIDEORC_COMMENTS_RECORDING_OVERLAY=0.'
+      })
+    })
+  }, [
+    commentsWindow.open,
+    commentsWindow.protected,
+    recording.state,
+    runtimeInfo?.commentsWindowRecordingOverlayAllowed
+  ])
 
   useEffect(() => {
     const current = previewScreenStatusRef.current
@@ -4782,8 +4884,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ? startBlockedReason
       : null
   const visibleDeviceList = useMemo(
-    () => deviceListWithoutNotesWindow(deviceList, notesWindow),
-    [deviceList, notesWindow]
+    () => deviceListWithoutProtectedOverlayWindows(deviceList, notesWindow, commentsWindow),
+    [deviceList, notesWindow, commentsWindow]
   )
   const selectedCaptureDevice = findDevice(
     visibleDeviceList.devices,
@@ -4908,8 +5010,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       xNativeCapabilityLoading,
       liveChatSnapshot,
       clearLiveChat,
-      commentsWindowOpen,
+      captionsStatus,
+      captionLines,
+      startCaptions,
+      stopCaptions,
+      commentsWindow,
+      openCommentsWindow,
+      closeCommentsWindow,
       toggleCommentsWindow,
+      setCommentsWindowAlwaysOnTop,
+      openSessionCommentsWindow,
       streamMetadataDraft,
       streamMetadataValidation,
       goLivePreflight,
@@ -5058,8 +5168,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       xNativeCapabilityLoading,
       liveChatSnapshot,
       clearLiveChat,
-      commentsWindowOpen,
+      captionsStatus,
+      captionLines,
+      startCaptions,
+      stopCaptions,
+      commentsWindow,
+      openCommentsWindow,
+      closeCommentsWindow,
       toggleCommentsWindow,
+      setCommentsWindowAlwaysOnTop,
+      openSessionCommentsWindow,
       streamMetadataDraft,
       streamMetadataValidation,
       goLivePreflight,

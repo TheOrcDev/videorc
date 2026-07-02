@@ -1873,6 +1873,11 @@ export interface SessionSummary {
   healthEvents: HealthEvent[]
   sessionLogs: SessionLogEntry[]
   aiArtifacts: AiArtifact[]
+  commentCount: number
+}
+
+export interface SessionCommentsListParams {
+  sessionId: string
 }
 
 export type StreamScreenStatus = 'ready' | 'missing'
@@ -1917,6 +1922,8 @@ export interface RuntimeInfo {
   nativePreviewSurfaceProofEnabled: boolean
   notesWindowEnabled?: boolean
   notesWindowRecordingOverlayAllowed?: boolean
+  commentsWindowEnabled?: boolean
+  commentsWindowRecordingOverlayAllowed?: boolean
   previewSmokeMode?: boolean
   disableAutoPreview?: boolean
   nativePreviewSurfaceStageSuspended?: boolean
@@ -1996,6 +2003,7 @@ export interface CommentsWindowState {
   bounds: { x: number; y: number; width: number; height: number } | null
   windowId?: number
   alwaysOnTop: boolean
+  protected: boolean
   enabled: boolean
   message?: string
 }
@@ -2292,4 +2300,22 @@ export function createEmptyLiveChatSnapshot(updatedAt: string): LiveChatSnapshot
     unreadCount: 0,
     updatedAt
   }
+}
+
+// Live captions (captions.* RPCs + events; premium cloud-AI feature).
+export type CaptionsState = 'idle' | 'live' | 'error'
+
+export interface CaptionsStatus {
+  state: CaptionsState
+  message?: string
+  remainingSeconds?: number
+  sessionClientId?: string
+}
+
+export interface CaptionsUpdate {
+  sessionClientId: string
+  seq: number
+  text: string
+  chunkSeconds: number
+  remainingSeconds?: number
 }

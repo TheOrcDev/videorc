@@ -4,6 +4,7 @@ import {
   Broadcast,
   CaretDown,
   CheckCircle,
+  ClosedCaptioning,
   FloppyDisk,
   Gauge,
   LinkSimple,
@@ -18,6 +19,7 @@ import {
   type Icon
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useState, type ReactElement } from 'react'
+import { toast } from 'sonner'
 
 import { ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
@@ -68,7 +70,12 @@ import {
   streamOutputVideoSettings,
   videoProfileCompatibility
 } from '@/lib/capture'
-import { streamingDestinationEnableGate, type EntitlementUiGate } from '@/lib/entitlement-ui'
+import { captionStripLines } from '@/lib/captions-ui'
+import {
+  cloudAiUploadGate,
+  streamingDestinationEnableGate,
+  type EntitlementUiGate
+} from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { streamKeyPlatformMismatch, streamKeyTailHint } from '@/lib/stream-key-format'
 import { cn } from '@/lib/utils'
@@ -260,8 +267,104 @@ export function StreamingTab(): ReactElement {
           streamVideo={streamVideo}
           targets={streaming.targets}
         />
+        <LiveCaptionsSection />
       </div>
     </div>
+  )
+}
+
+/**
+ * Live captions (premium cloud AI): real-time mic speech-to-text via the
+ * Videorc AI gateway. The Rust backend uploads ~3s mic chunks while enabled —
+ * the consent line below states that plainly (AI privacy tone).
+ */
+function LiveCaptionsSection(): ReactElement {
+  const { entitlements, captionsStatus, captionLines, startCaptions, stopCaptions } = useStudio()
+  const [pending, setPending] = useState(false)
+  const gate = cloudAiUploadGate(entitlements)
+  const active = captionsStatus.state === 'live'
+  const locked = !active && !gate.allowed
+  const lines = captionStripLines(captionLines)
+
+  const toggleCaptions = async (next: boolean): Promise<void> => {
+    setPending(true)
+    try {
+      if (next) {
+        await startCaptions()
+      } else {
+        await stopCaptions()
+      }
+    } catch (error) {
+      toast.error('Live captions', {
+        description: error instanceof Error ? error.message : 'Could not update live captions.'
+      })
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <PanelSection
+      description="Real-time speech-to-text from your microphone while you record or stream."
+      icon={ClosedCaptioning}
+      title="Live captions"
+    >
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-sm text-muted-foreground">
+            {active ? 'Captions are live' : 'Captions are off'}
+          </span>
+          <Switch
+            aria-label="Enable live captions"
+            checked={active}
+            disabled={pending || locked}
+            onCheckedChange={(next) => void toggleCaptions(next)}
+          />
+        </div>
+        {locked ? (
+          <div className="flex flex-wrap items-center gap-2 border-l-2 border-warning/50 pl-3 text-xs text-warning-foreground dark:text-warning">
+            <WarningCircle className="size-3.5 shrink-0" weight="fill" />
+            <span className="min-w-0 flex-1">
+              {gate.allowed ? null : gate.reason}
+            </span>
+            {!gate.allowed && gate.upgradeUrl ? (
+              <Button
+                className="h-auto px-0 text-xs"
+                size="xs"
+                variant="link"
+                onClick={() => openExternalUrl(gate.upgradeUrl as string)}
+              >
+                View Premium
+              </Button>
+            ) : null}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            While enabled, your microphone audio is sent to xAI through the Videorc AI gateway
+            for transcription. Captions appear a few seconds behind speech.
+          </p>
+        )}
+        {captionsStatus.state === 'error' && captionsStatus.message ? (
+          <div className="flex items-start gap-2 border-l-2 border-warning/50 pl-3 text-xs text-warning-foreground dark:text-warning">
+            <WarningCircle className="mt-0.5 size-3.5 shrink-0" weight="fill" />
+            <span>{captionsStatus.message}</span>
+          </div>
+        ) : null}
+        {active || lines.length > 0 ? (
+          <div aria-live="polite" className="flex min-h-16 flex-col justify-end gap-1.5">
+            {lines.length === 0 ? (
+              <span className="text-sm text-muted-foreground">Listening…</span>
+            ) : (
+              lines.map((line) => (
+                <p className="text-sm leading-6 text-foreground" key={line.seq}>
+                  {line.text}
+                </p>
+              ))
+            )}
+          </div>
+        ) : null}
+      </div>
+    </PanelSection>
   )
 }
 
