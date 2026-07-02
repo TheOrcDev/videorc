@@ -18,7 +18,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
-import { Field, FieldContent, FieldDescription, FieldLabel } from '@/components/ui/field'
+import { Field, FieldContent, FieldLabel } from '@/components/ui/field'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   Select,
@@ -147,62 +147,58 @@ export function AiTab({
             {selected ? <SessionActions session={selected} /> : null}
           </PanelSection>
 
-          <PanelSection icon={ShieldCheck} title="Cloud AI consent">
-            <Alert variant="warning">
-              <ShieldCheck weight="fill" />
-              <AlertTitle>Recordings stay local by default</AlertTitle>
-              <AlertDescription>
-                Without consent, Videorc only extracts local audio. With consent, signed-in cloud AI
-                runs through Videorc and stores returned artifacts locally with each session.
-              </AlertDescription>
-            </Alert>
-            <Alert variant={cloudAi.ready ? 'success' : 'warning'}>
-              {cloudAi.ready ? <ShieldCheck weight="fill" /> : <Warning weight="fill" />}
-              <AlertTitle>{cloudAi.title}</AlertTitle>
-              <AlertDescription>
-                <p>{cloudAi.description}</p>
-                {cloudAi.inputModeLabels.length ? (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {cloudAi.inputModeLabels.map((label) => (
-                      <Badge key={label} variant={cloudAi.ready ? 'success' : 'secondary'}>
-                        {label}
-                      </Badge>
-                    ))}
-                    {cloudAi.quotaLabel ? (
-                      <Badge variant="outline">{cloudAi.quotaLabel}</Badge>
-                    ) : null}
-                  </div>
-                ) : null}
-                {cloudAi.state === 'premium-required' ? (
-                  <div className="mt-2 flex">
-                    <Button
-                      className="w-fit"
-                      size="xs"
-                      variant="outline"
-                      onClick={() => openExternalUrl(VIDEORC_PREMIUM_URL)}
-                    >
-                      View Premium
-                    </Button>
-                  </div>
-                ) : null}
-              </AlertDescription>
-            </Alert>
-            <Field orientation="horizontal">
-              <FieldContent>
-                <FieldLabel htmlFor="ai-consent">Allow cloud upload</FieldLabel>
-                <FieldDescription>
-                  {cloudAi.ready
-                    ? 'Upload extracted audio for cloud transcription, summaries, chapters, highlights, and suggestions.'
-                    : `${cloudAi.description} Local audio extraction still works without upload.`}
-                </FieldDescription>
-              </FieldContent>
-              <Switch
-                checked={aiConsent && cloudAi.ready}
-                disabled={!cloudAi.ready}
-                id="ai-consent"
-                onCheckedChange={setAiConsent}
-              />
-            </Field>
+          {/* D3: consent + quota as pipeline step 0 — one state-aware card with
+              a single next action, instead of a two-alert wall. */}
+          <PanelSection icon={ShieldCheck} title="Cloud AI — step 0">
+            <div
+              className={
+                'flex flex-col gap-2 rounded-row border p-3 ' +
+                (cloudAi.ready && aiConsent
+                  ? 'border-success/40 bg-success/5'
+                  : 'border-border bg-muted/20')
+              }
+            >
+              <div className="flex items-center gap-2">
+                <ShieldCheck
+                  className={cloudAi.ready && aiConsent ? 'text-success' : 'text-muted-foreground'}
+                  weight="fill"
+                />
+                <span className="flex-1 text-sm font-medium">
+                  {cloudAi.ready && aiConsent
+                    ? 'Cloud AI enabled for new runs'
+                    : cloudAi.ready
+                      ? 'One switch away'
+                      : cloudAi.title}
+                </span>
+                {cloudAi.quotaLabel ? <Badge variant="outline">{cloudAi.quotaLabel}</Badge> : null}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {cloudAi.ready
+                  ? 'Recordings stay local; with consent, extracted audio uploads for transcription and the artifacts land back in your library.'
+                  : `${cloudAi.description} Local audio extraction always works without upload.`}
+              </p>
+              {cloudAi.state === 'premium-required' ? (
+                <Button
+                  className="w-fit"
+                  size="xs"
+                  variant="outline"
+                  onClick={() => openExternalUrl(VIDEORC_PREMIUM_URL)}
+                >
+                  View Premium
+                </Button>
+              ) : null}
+              <Field orientation="horizontal">
+                <FieldContent>
+                  <FieldLabel htmlFor="ai-consent">Allow cloud upload</FieldLabel>
+                </FieldContent>
+                <Switch
+                  checked={aiConsent && cloudAi.ready}
+                  disabled={!cloudAi.ready}
+                  id="ai-consent"
+                  onCheckedChange={setAiConsent}
+                />
+              </Field>
+            </div>
           </PanelSection>
         </div>
 
