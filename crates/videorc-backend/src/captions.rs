@@ -427,7 +427,6 @@ pub async fn begin_caption_cue_render(
             ffmpeg_path: ffmpeg_path.to_string(),
             recording_path: recording_path.to_path_buf(),
             frames_dir: frames_dir.clone(),
-            canvas,
             cues: cues.clone(),
             expected,
             received: std::collections::BTreeSet::new(),
@@ -820,7 +819,6 @@ pub struct PendingCueRender {
     pub ffmpeg_path: String,
     pub recording_path: std::path::PathBuf,
     pub frames_dir: std::path::PathBuf,
-    pub canvas: (u32, u32),
     pub cues: Vec<CaptionCue>,
     pub expected: std::collections::BTreeSet<u64>,
     pub received: std::collections::BTreeSet<u64>,
@@ -1067,6 +1065,7 @@ async fn run_realtime_caption_session(session: &mut CaptionSession) -> RealtimeO
         };
         first_attempt = false;
         backoff = None;
+        tracing::info!("Streaming captions connected ({}).", token.model);
 
         let configure = serde_json::json!({
             "type": "session.update",
@@ -1101,8 +1100,19 @@ async fn run_realtime_caption_session(session: &mut CaptionSession) -> RealtimeO
         )
         .await;
 
-        // Refresh well before the ≤300s token expires; report usage each minute.
-        let refresh_at = tokio::time::Instant::now() + std::time::Duration::from_secs(240);
+        // Refresh well before the token expires (60s of headroom against the
+        // server-reported expiry, else 240s for the ≤300s default TTL).
+        let refresh_in = token
+            .expires_at
+            .map(|expires_at| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|since| since.as_secs())
+                    .unwrap_or(0);
+                expires_at.saturating_sub(now).saturating_sub(60).clamp(30, 600)
+            })
+            .unwrap_or(240);
+        let refresh_at = tokio::time::Instant::now() + std::time::Duration::from_secs(refresh_in);
         let mut report_tick = tokio::time::interval(std::time::Duration::from_secs(60));
         report_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         report_tick.reset();
