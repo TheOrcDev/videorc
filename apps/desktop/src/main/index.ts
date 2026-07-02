@@ -15,6 +15,7 @@ import {
 } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { constants as fsConstants, promises as fsPromises } from 'node:fs'
 import {
   createServer,
   request as httpRequest,
@@ -6415,6 +6416,76 @@ async function pickScreenImage(): Promise<string | null> {
   return result.filePaths[0] ?? null
 }
 
+// Native directory picker + directory facts for the Settings output-directory
+// row (ST2): Browse, exists/writable validation, create-on-demand, free space.
+async function pickDirectoryPath(): Promise<string | null> {
+  const options: Electron.OpenDialogOptions = {
+    title: 'Choose output directory',
+    properties: ['openDirectory', 'createDirectory']
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+
+  if (result.canceled) {
+    return null
+  }
+
+  return result.filePaths[0] ?? null
+}
+
+interface DirectoryFacts {
+  exists: boolean
+  writable: boolean
+  freeBytes: number | null
+}
+
+function expandHomePath(raw: string): string {
+  const trimmed = raw.trim()
+  if (trimmed === '~') {
+    return homedir()
+  }
+  if (trimmed.startsWith('~/')) {
+    return join(homedir(), trimmed.slice(2))
+  }
+  return trimmed
+}
+
+async function checkDirectoryFacts(rawPath: string): Promise<DirectoryFacts> {
+  const path = expandHomePath(rawPath)
+  if (!path) {
+    return { exists: false, writable: false, freeBytes: null }
+  }
+  const facts: DirectoryFacts = { exists: false, writable: false, freeBytes: null }
+  try {
+    const stats = await fsPromises.stat(path)
+    facts.exists = stats.isDirectory()
+  } catch {
+    facts.exists = false
+  }
+  if (facts.exists) {
+    try {
+      await fsPromises.access(path, fsConstants.W_OK)
+      facts.writable = true
+    } catch {
+      facts.writable = false
+    }
+    try {
+      const stat = await fsPromises.statfs(path)
+      facts.freeBytes = Number(stat.bavail) * Number(stat.bsize)
+    } catch {
+      facts.freeBytes = null
+    }
+  }
+  return facts
+}
+
+async function createDirectoryAt(rawPath: string): Promise<DirectoryFacts> {
+  const path = expandHomePath(rawPath)
+  await fsPromises.mkdir(path, { recursive: true })
+  return checkDirectoryFacts(path)
+}
+
 // Generic native open-file dialog returning the chosen path (e.g. "Locate
 // FFmpeg…" in Settings). No filters — the FFmpeg binary has no extension.
 async function pickFilePath(): Promise<string | null> {
@@ -6549,6 +6620,9 @@ app.whenReady().then(async () => {
   ipcMain.handle('system:reveal-path', (_event, targetPath: string) => revealPath(targetPath))
   ipcMain.handle('screens:pick-image', () => pickScreenImage())
   ipcMain.handle('system:pick-file', () => pickFilePath())
+  ipcMain.handle('system:pick-directory', () => pickDirectoryPath())
+  ipcMain.handle('system:check-directory', (_event, path: string) => checkDirectoryFacts(path))
+  ipcMain.handle('system:create-directory', (_event, path: string) => createDirectoryAt(path))
   ipcMain.handle('backgrounds:import-image', () => importBackgroundImage())
   ipcMain.handle('backgrounds:bundled-assets', () => bundledBackgroundAssets())
   ipcMain.handle('oauth:open-url', (_event, authUrl: string) => openOAuthUrl(authUrl))

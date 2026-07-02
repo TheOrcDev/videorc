@@ -175,6 +175,13 @@ export interface BackendLogEvent {
 
 // F-014 supervisor lifecycle: emitted by main when the backend process dies
 // and the supervisor restarts it (or gives up).
+// Settings output-directory validation (ST2).
+export interface DirectoryFacts {
+  exists: boolean
+  writable: boolean
+  freeBytes: number | null
+}
+
 export interface BackendLifecycleEvent {
   state: 'running' | 'restarting' | 'failed'
   code?: number | null
@@ -2092,6 +2099,9 @@ export interface VideorcApi {
   pickScreenImage: () => Promise<string | null>
   /** Pick any file via a native open dialog; returns its path or null. */
   pickFile: () => Promise<string | null>
+  pickDirectory: () => Promise<string | null>
+  checkDirectory: (path: string) => Promise<DirectoryFacts>
+  createDirectory: (path: string) => Promise<DirectoryFacts>
   // Picks a PNG/JPG/WebP and copies it into app-support storage, returning the
   // managed asset (Assets Tab plan, slice A4).
   importBackgroundImage: () => Promise<BackgroundImportResult | null>

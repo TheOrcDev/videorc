@@ -1,6 +1,8 @@
 import {
   ArrowClockwise,
   Broadcast,
+  Eye,
+  FolderPlus,
   Bug,
   CaretDown,
   CheckCircle,
@@ -16,7 +18,7 @@ import {
   Warning
 } from '@phosphor-icons/react'
 import { useTheme } from 'next-themes'
-import type { ReactElement } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 
 import { NavigableRow } from '@/components/navigable-row'
 import { ConfigGrid } from '@/components/page'
@@ -29,7 +31,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudio } from '@/hooks/use-studio'
 import { useUpdater } from '@/hooks/use-updater'
-import type { SystemPermissionPane, UpdateStatus } from '@/lib/backend'
+import type { DirectoryFacts, SystemPermissionPane, UpdateStatus } from '@/lib/backend'
 import { isActiveRecordingState } from '@/lib/format'
 import { recordingQuality, streamingSummary } from '@/lib/studio-session-view'
 import { isUpdateInstallable } from '@/lib/update-ui'
@@ -64,6 +66,46 @@ export function SettingsTab({
     }
   }
 
+  // ST2: validate the output directory as it changes — a typo here used to
+  // fail silently at record time. Blank means the platform default.
+  const [directoryFacts, setDirectoryFacts] = useState<DirectoryFacts | null>(null)
+  const outputDirectory = settings.outputDirectory.trim()
+  useEffect(() => {
+    if (!outputDirectory || !window.videorc?.checkDirectory) {
+      setDirectoryFacts(null)
+      return
+    }
+    let cancelled = false
+    const timer = setTimeout(() => {
+      void window.videorc?.checkDirectory?.(outputDirectory).then((facts) => {
+        if (!cancelled) {
+          setDirectoryFacts(facts)
+        }
+      })
+    }, 350)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [outputDirectory])
+
+  const browseOutputDirectory = async (): Promise<void> => {
+    const path = await window.videorc?.pickDirectory?.()
+    if (path) {
+      setSettings((current) => ({ ...current, outputDirectory: path }))
+    }
+  }
+
+  const createOutputDirectory = async (): Promise<void> => {
+    if (!outputDirectory) {
+      return
+    }
+    const facts = await window.videorc?.createDirectory?.(outputDirectory)
+    if (facts) {
+      setDirectoryFacts(facts)
+    }
+  }
+
   return (
     <ConfigGrid>
       <PanelSection
@@ -74,14 +116,61 @@ export function SettingsTab({
         <FieldGroup>
           <Field>
             <FieldLabel htmlFor="output-directory">Output directory</FieldLabel>
-            <Input
-              id="output-directory"
-              placeholder="~/Movies/Videorc/Recordings"
-              value={settings.outputDirectory}
-              onChange={(event) =>
-                setSettings((current) => ({ ...current, outputDirectory: event.target.value }))
-              }
-            />
+            <div className="flex gap-2">
+              <Input
+                id="output-directory"
+                className="min-w-0 flex-1"
+                placeholder="~/Movies/Videorc/Recordings"
+                value={settings.outputDirectory}
+                onChange={(event) =>
+                  setSettings((current) => ({ ...current, outputDirectory: event.target.value }))
+                }
+              />
+              <Button size="sm" variant="outline" onClick={() => void browseOutputDirectory()}>
+                <FolderOpen data-icon="inline-start" />
+                Browse
+              </Button>
+              <Button
+                disabled={!directoryFacts?.exists}
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  if (outputDirectory) {
+                    void window.videorc?.revealPath?.(outputDirectory)
+                  }
+                }}
+              >
+                <Eye data-icon="inline-start" />
+                Reveal
+              </Button>
+            </div>
+            {!outputDirectory ? (
+              <p className="text-xs text-muted-foreground">
+                Blank uses the default: ~/Movies/Videorc/Recordings.
+              </p>
+            ) : directoryFacts && !directoryFacts.exists ? (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-warning">
+                <Warning className="size-3.5 shrink-0" weight="fill" />
+                <span>This folder does not exist yet.</span>
+                <Button size="xs" variant="outline" onClick={() => void createOutputDirectory()}>
+                  <FolderPlus data-icon="inline-start" />
+                  Create folder
+                </Button>
+              </div>
+            ) : directoryFacts && !directoryFacts.writable ? (
+              <p className="flex items-center gap-1.5 text-xs text-warning">
+                <Warning className="size-3.5 shrink-0" weight="fill" />
+                This folder is not writable — recordings will fail to save here.
+              </p>
+            ) : directoryFacts ? (
+              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <CheckCircle className="size-3.5 shrink-0 text-success" weight="fill" />
+                Folder writable
+                {typeof directoryFacts.freeBytes === 'number'
+                  ? ` · ${formatFreeSpace(directoryFacts.freeBytes)} free`
+                  : ''}
+              </p>
+            ) : null}
           </Field>
         </FieldGroup>
 
@@ -381,3 +470,14 @@ const PERMISSION_SHORTCUTS: Array<{ label: string; pane: SystemPermissionPane }>
   { label: 'Camera', pane: 'camera' },
   { label: 'Microphone', pane: 'microphone' }
 ]
+
+function formatFreeSpace(bytes: number): string {
+  const gb = bytes / 1024 ** 3
+  if (gb >= 100) {
+    return `${Math.round(gb)} GB`
+  }
+  if (gb >= 1) {
+    return `${gb.toFixed(1)} GB`
+  }
+  return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`
+}
