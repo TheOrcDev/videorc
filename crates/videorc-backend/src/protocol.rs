@@ -741,6 +741,17 @@ pub struct StartSessionParams {
     pub audio: AudioSettings,
     #[serde(default)]
     pub streaming: Option<StreamingSettings>,
+    #[serde(default)]
+    pub captions: Option<CaptionsSessionParams>,
+}
+
+/// Live-caption burn-in intent for this session (the bar itself arrives via
+/// captions.overlay.set; this only shapes output legs — see burn-in plan A0).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionsSessionParams {
+    #[serde(default)]
+    pub burn_in_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

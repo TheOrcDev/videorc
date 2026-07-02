@@ -136,6 +136,7 @@ import type {
   YouTubeStreamStatusResult
 } from '@/lib/backend'
 import { createEmptyLiveChatSnapshot } from '@/lib/backend'
+import { renderCaptionOverlayPng } from '@/lib/caption-overlay'
 import { appendCaptionLine } from '@/lib/captions-ui'
 import { goLiveEntitlementGate, videoProfileEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
@@ -3640,6 +3641,68 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setAiConsent(false)
     }
   }, [aiConsent, currentCloudAiReadiness.ready])
+
+  // Burn-in driver: rasterize the newest caption line at the stream output
+  // width and push it to the backend overlay (stream leg only, A0). Cleared
+  // whenever burn-in/captions/session stop so the next session never starts
+  // with a stale bar.
+  const captionOverlayBusy = useRef(false)
+  const captionOverlayPushedSeq = useRef<number | null>(null)
+  useEffect(() => {
+    if (!client) {
+      return
+    }
+    const burnIn = captureConfig.captions.burnInEnabled
+    const latest = captionLines.at(-1)
+    if (!burnIn || captionsStatus.state !== 'live' || !isSessionActive) {
+      if (captionOverlayPushedSeq.current !== null) {
+        captionOverlayPushedSeq.current = null
+        void client.request('captions.overlay.clear').catch(() => {})
+      }
+      return
+    }
+    if (!latest || captionOverlayBusy.current || captionOverlayPushedSeq.current === latest.seq) {
+      return
+    }
+    captionOverlayBusy.current = true
+    const streamVideo = streamOutputVideoSettings(
+      captureConfig.video,
+      captureConfig.streamEnabled ? captureConfig.streaming : undefined
+    )
+    void renderCaptionOverlayPng({
+      text: latest.text,
+      canvasWidth: streamVideo.width,
+      textSize: captureConfig.captions.textSize
+    })
+      .then((pngBase64) => {
+        if (!pngBase64) {
+          return
+        }
+        return client
+          .request('captions.overlay.set', {
+            pngBase64,
+            position: captureConfig.captions.position
+          })
+          .then(() => {
+            captionOverlayPushedSeq.current = latest.seq
+          })
+      })
+      .catch(() => {
+        // Overlay pushes are best-effort; the next caption line retries.
+      })
+      .finally(() => {
+        captionOverlayBusy.current = false
+      })
+  }, [
+    client,
+    captionLines,
+    captionsStatus.state,
+    isSessionActive,
+    captureConfig.captions,
+    captureConfig.video,
+    captureConfig.streamEnabled,
+    captureConfig.streaming
+  ])
 
   const renameScreen = useCallback(
     async (screenId: string, name: string) => {

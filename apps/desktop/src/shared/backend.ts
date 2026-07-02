@@ -878,6 +878,12 @@ export interface StartSessionParams {
   output: OutputSettings
   audio?: AudioSettings
   streaming?: StreamingSettings
+  captions?: CaptionsSessionParams
+}
+
+/** Burn-in intent for the session (shapes output legs; see burn-in plan A0). */
+export interface CaptionsSessionParams {
+  burnInEnabled: boolean
 }
 
 export interface AudioSettings {

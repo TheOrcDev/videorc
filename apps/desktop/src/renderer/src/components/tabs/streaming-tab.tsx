@@ -287,13 +287,21 @@ function LiveCaptionsSection(): ReactElement {
     stopCaptions,
     captionsWindow,
     toggleCaptionsWindow,
-    isSessionActive
+    isSessionActive,
+    captureConfig,
+    setCaptureConfig
   } = useStudio()
   const [pending, setPending] = useState(false)
   const gate = cloudAiUploadGate(entitlements)
   const active = captionsStatus.state === 'live'
   const locked = !active && !gate.allowed
   const lines = captionStripLines(captionLines)
+  const captions = captureConfig.captions
+  const patchCaptions = (patch: Partial<typeof captions>): void =>
+    setCaptureConfig((current) => ({
+      ...current,
+      captions: { ...current.captions, ...patch }
+    }))
 
   const toggleCaptions = async (next: boolean): Promise<void> => {
     setPending(true)
@@ -356,6 +364,56 @@ function LiveCaptionsSection(): ReactElement {
             <WarningCircle className="mt-0.5 size-3.5 shrink-0" weight="fill" />
             <span>{captionsStatus.message}</span>
           </div>
+        ) : null}
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-sm text-muted-foreground">Show captions on stream</span>
+          <Switch
+            aria-label="Burn captions into the stream"
+            checked={captions.burnInEnabled}
+            disabled={locked}
+            onCheckedChange={(next) => patchCaptions({ burnInEnabled: next })}
+          />
+        </div>
+        {captions.burnInEnabled ? (
+          <>
+            <p className="text-xs text-muted-foreground">
+              Viewers see a caption bar burned into the stream, a few seconds behind speech. Your
+              recording stays clean and gets a perfectly-synced captioned copy after the session.
+            </p>
+            <div className="flex flex-wrap items-center gap-4">
+              <ToggleGroup
+                aria-label="Caption position"
+                size="sm"
+                type="single"
+                value={captions.position}
+                variant="outline"
+                onValueChange={(value) => {
+                  if (value === 'top' || value === 'bottom') {
+                    patchCaptions({ position: value })
+                  }
+                }}
+              >
+                <ToggleGroupItem value="bottom">Bottom</ToggleGroupItem>
+                <ToggleGroupItem value="top">Top</ToggleGroupItem>
+              </ToggleGroup>
+              <ToggleGroup
+                aria-label="Caption text size"
+                size="sm"
+                type="single"
+                value={captions.textSize}
+                variant="outline"
+                onValueChange={(value) => {
+                  if (value === 's' || value === 'm' || value === 'l') {
+                    patchCaptions({ textSize: value })
+                  }
+                }}
+              >
+                <ToggleGroupItem value="s">S</ToggleGroupItem>
+                <ToggleGroupItem value="m">M</ToggleGroupItem>
+                <ToggleGroupItem value="l">L</ToggleGroupItem>
+              </ToggleGroup>
+            </div>
+          </>
         ) : null}
         {active || lines.length > 0 ? (
           <div aria-live="polite" className="flex min-h-16 flex-col justify-end gap-1.5">

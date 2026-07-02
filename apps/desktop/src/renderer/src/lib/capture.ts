@@ -21,6 +21,13 @@ export type SettingsState = {
   ffmpegPath: string
 }
 
+export type CaptionsCaptureSettings = {
+  /** Burn the live caption bar into the STREAM leg (recordings stay clean). */
+  burnInEnabled: boolean
+  position: 'top' | 'bottom'
+  textSize: 's' | 'm' | 'l'
+}
+
 export type CaptureConfig = {
   sources: SourceSelection
   layout: LayoutSettings
@@ -32,6 +39,7 @@ export type CaptureConfig = {
   rtmpServerUrl: string
   streamKey: string
   streaming: StreamingSettings
+  captions: CaptionsCaptureSettings
 }
 
 export type LegacyStreamKeyMigrationCandidate = {
@@ -406,7 +414,25 @@ export const defaultCaptureConfig: CaptureConfig = {
   rtmpPreset: 'youtube',
   rtmpServerUrl: rtmpDefaults.youtube,
   streamKey: '',
-  streaming: defaultStreamingSettings()
+  streaming: defaultStreamingSettings(),
+  captions: defaultCaptionsCaptureSettings()
+}
+
+export function defaultCaptionsCaptureSettings(): CaptionsCaptureSettings {
+  return { burnInEnabled: false, position: 'bottom', textSize: 'm' }
+}
+
+export function normalizeCaptionsCaptureSettings(
+  loaded: Partial<CaptionsCaptureSettings> | undefined
+): CaptionsCaptureSettings {
+  const defaults = defaultCaptionsCaptureSettings()
+  return {
+    burnInEnabled:
+      typeof loaded?.burnInEnabled === 'boolean' ? loaded.burnInEnabled : defaults.burnInEnabled,
+    position: loaded?.position === 'top' ? 'top' : defaults.position,
+    textSize:
+      loaded?.textSize === 's' || loaded?.textSize === 'l' ? loaded.textSize : defaults.textSize
+  }
 }
 
 export function loadJson<T>(key: string, fallback: T): T {
@@ -447,7 +473,8 @@ export function loadCaptureConfig(): CaptureConfig {
     rtmpPreset: loaded.rtmpPreset ?? defaultCaptureConfig.rtmpPreset,
     rtmpServerUrl: loaded.rtmpServerUrl ?? defaultCaptureConfig.rtmpServerUrl,
     streamKey: loaded.streamKey ?? defaultCaptureConfig.streamKey,
-    streaming: migrateStreamingSettings(loaded)
+    streaming: migrateStreamingSettings(loaded),
+    captions: normalizeCaptionsCaptureSettings(loaded.captions)
   }
 }
 

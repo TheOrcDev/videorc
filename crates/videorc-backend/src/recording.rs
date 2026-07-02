@@ -510,6 +510,22 @@ pub async fn start_session(
     } else {
         None
     };
+    // Burn-in needs a stream leg it can own: the auxiliary render (record +
+    // stream) or the primary render (stream-only). Outside those shapes the
+    // captions stay UI-only — say so instead of silently skipping pixels.
+    if captions_burn_in_requested(&params)
+        && params.output.stream_enabled
+        && params.output.record_enabled
+        && encoder_bridge_stream_output.is_none()
+    {
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Warn,
+            "captions-burn-in-unavailable",
+            "Caption burn-in is unavailable for this session's encoder path; captions stay on-screen only.",
+        );
+    }
     let encoder_bridge_resolved_stream_profile =
         if use_encoder_bridge && params.output.stream_enabled {
             match encoder_bridge_stream_output {
@@ -589,9 +605,12 @@ pub async fn start_session(
                     EncoderBridgeVideoOutput::RawYuv420p
                 ),
                 stream_output: encoder_bridge_stream_output,
-                // Wired by the burn-in slice A4: true only for stream-only
-                // sessions (the primary render IS the stream there).
-                caption_overlay_on_primary: false,
+                // Stream-only sessions have no recording consuming the primary
+                // leg — the primary render IS the stream, so the caption bar
+                // may composite into it (A0 verdict).
+                caption_overlay_on_primary: captions_burn_in_requested(&params)
+                    && params.output.stream_enabled
+                    && !params.output.record_enabled,
             },
         )
         .await;
@@ -1246,6 +1265,7 @@ pub async fn create_preview_snapshot(
         sources: params.sources,
         layout: params.layout,
         scene: None,
+        captions: None,
         output: crate::protocol::OutputSettings {
             record_enabled: true,
             stream_enabled: false,
@@ -1533,6 +1553,7 @@ fn live_preview_session_params(
         sources: params.sources,
         layout: params.layout,
         scene: None,
+        captions: None,
         output: crate::protocol::OutputSettings {
             record_enabled: true,
             stream_enabled: false,
@@ -5461,6 +5482,13 @@ fn resolve_split_output_profiles(params: &StartSessionParams) -> Result<SplitOut
     Ok(SplitOutputProfiles { recording, stream })
 }
 
+fn captions_burn_in_requested(params: &StartSessionParams) -> bool {
+    params
+        .captions
+        .as_ref()
+        .is_some_and(|captions| captions.burn_in_enabled)
+}
+
 fn recording_compositor_stream_output(
     params: &StartSessionParams,
     video_output: EncoderBridgeVideoOutput,
@@ -5478,6 +5506,17 @@ fn recording_compositor_stream_output(
     let recording = &params.output.video;
     let companion_outputs = companion_stream_outputs_for_recording(params, recording)?;
     if companion_outputs.is_empty() {
+        // Caption burn-in targets the stream leg only; when the stream shares
+        // the recording profile it would share the recording's frames too, so
+        // burn-in FORCES a same-profile auxiliary leg (A0 verdict) to keep the
+        // recording clean. Costs one extra render per frame while enabled.
+        if captions_burn_in_requested(params) {
+            return Ok(Some(CompositorAuxiliaryOutput {
+                width: recording.width,
+                height: recording.height,
+                publish_yuv_frames: false,
+            }));
+        }
         return Ok(None);
     }
     if companion_outputs.len() > 1 {
@@ -6481,6 +6520,7 @@ mod tests {
 
     fn base_params(record_enabled: bool, stream_enabled: bool) -> StartSessionParams {
         StartSessionParams {
+            captions: None,
             sources: SourceSelection {
                 screen_id: Some("screen:avfoundation:3".to_string()),
                 window_id: None,
@@ -9841,6 +9881,39 @@ mod tests {
             Some(CompositorAuxiliaryOutput {
                 width: 1920,
                 height: 1080,
+                publish_yuv_frames: false,
+            })
+        );
+    }
+
+    #[test]
+    fn caption_burn_in_forces_a_same_profile_stream_leg() {
+        // Same-profile record+stream normally shares frames (no aux leg);
+        // burn-in must force a separate stream leg so the recording stays clean.
+        // No StreamingSettings → the stream output IS the recording profile.
+        let mut params = base_params(true, true);
+        params.streaming = None;
+
+        let without_burn_in = recording_compositor_stream_output(
+            &params,
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+        )
+        .unwrap();
+        assert_eq!(without_burn_in, None);
+
+        params.captions = Some(crate::protocol::CaptionsSessionParams {
+            burn_in_enabled: true,
+        });
+        let with_burn_in = recording_compositor_stream_output(
+            &params,
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+        )
+        .unwrap();
+        assert_eq!(
+            with_burn_in,
+            Some(CompositorAuxiliaryOutput {
+                width: params.output.video.width,
+                height: params.output.video.height,
                 publish_yuv_frames: false,
             })
         );

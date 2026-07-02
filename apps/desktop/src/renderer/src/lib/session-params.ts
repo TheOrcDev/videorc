@@ -30,6 +30,7 @@ export function buildStartSessionParams(input: {
       }
     },
     audio: captureConfig.audio,
-    streaming: captureConfig.streaming
+    streaming: captureConfig.streaming,
+    captions: { burnInEnabled: captureConfig.captions.burnInEnabled }
   }
 }
