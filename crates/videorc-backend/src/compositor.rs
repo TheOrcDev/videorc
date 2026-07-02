@@ -194,6 +194,10 @@ pub struct CompositorStartParams {
     pub height: u32,
     pub publish_yuv_frames: bool,
     pub stream_output: Option<CompositorAuxiliaryOutput>,
+    /// Stream-only sessions have no auxiliary leg — the primary render IS the
+    /// stream, so the caption overlay applies to it. Never set while a
+    /// recording consumes the primary leg (recordings stay clean).
+    pub caption_overlay_on_primary: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +215,7 @@ struct CompositorRenderLoopParams {
     height: u32,
     publish_yuv_frames: bool,
     stream_output: Option<CompositorAuxiliaryOutput>,
+    caption_overlay_on_primary: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -641,6 +646,7 @@ pub async fn start_synthetic_compositor(
             height: status.height,
             publish_yuv_frames: params.publish_yuv_frames,
             stream_output: params.stream_output,
+            caption_overlay_on_primary: params.caption_overlay_on_primary,
         },
         stop_rx,
     );
@@ -1123,6 +1129,7 @@ async fn run_synthetic_compositor_loop(
         height,
         publish_yuv_frames,
         stream_output,
+        caption_overlay_on_primary,
     } = params;
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
     let mut ticker = tokio::time::interval(frame_interval);
@@ -1210,6 +1217,7 @@ async fn run_synthetic_compositor_loop(
                         publish_yuv_frames,
                         stream_output,
                         stream_gpu_compositor.as_mut(),
+                        caption_overlay_on_primary,
                     )
                         .await;
                 let fallback_frame_age_ms = published.fallback_frame_age_ms;
@@ -1690,6 +1698,11 @@ fn try_gpu_compose(
     inputs: &CompositorRenderInputs<'_>,
     publish_yuv_frame: bool,
 ) -> Result<GpuCompositorFrame, String> {
+    if inputs.caption_overlay.is_some() {
+        // The caption bar is composited by the CPU renderer only (v1); force
+        // the CPU path for legs that carry it.
+        return Err("caption overlay requires the CPU compositor".to_string());
+    }
     let gpu = gpu.ok_or_else(|| {
         if metal_compositor_enabled() {
             "Metal compositor unavailable"
@@ -2309,6 +2322,7 @@ async fn publish_compositor_frame(
     publish_yuv_frame: bool,
     stream_output: Option<CompositorAuxiliaryOutput>,
     stream_gpu: Option<&mut GpuCompositor>,
+    caption_overlay_on_primary: bool,
 ) -> CompositorPublishResult {
     let source_fetch_started_at = Instant::now();
     let scene_snapshot_started_at = Instant::now();
@@ -2368,6 +2382,9 @@ async fn publish_compositor_frame(
     let mut pixel_format = CompositorPixelFormat::yuv420p_cpu_buffer();
     let mut export_handle = CompositorFrameExportHandle::default();
     let metal_target_handoff;
+    // One overlay snapshot per frame (Arc clone); the stream leg always
+    // carries it, the primary leg only for stream-only sessions (A0 verdict).
+    let caption_overlay = crate::captions::current_caption_overlay(&state.caption_overlay);
     let mut bytes;
     {
         let inputs = CompositorRenderInputs {
@@ -2379,6 +2396,11 @@ async fn publish_compositor_frame(
             background_image_source: background_image_source.as_ref(),
             camera_frame: camera_frame.as_ref().map(|(frame, _layout)| frame),
             screen_frame: screen_frame.as_ref(),
+            caption_overlay: if caption_overlay_on_primary {
+                caption_overlay.as_ref()
+            } else {
+                None
+            },
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
         match try_gpu_compose(gpu, &inputs, publish_yuv_frame) {
@@ -2428,6 +2450,8 @@ async fn publish_compositor_frame(
             background_image_source: background_image_source.as_ref(),
             camera_frame: camera_frame.as_ref().map(|(frame, _layout)| frame),
             screen_frame: screen_frame.as_ref(),
+            // The auxiliary leg IS the stream — captions always ride it.
+            caption_overlay: caption_overlay.as_ref(),
         };
         publish_auxiliary_compositor_frame(
             sequence,
@@ -2539,9 +2563,22 @@ struct CompositorRenderInputs<'a> {
     background_image_source: Option<&'a CompositorImageSource>,
     camera_frame: Option<&'a FrameHandle<PreviewCameraPixelFormat>>,
     screen_frame: Option<&'a FrameHandle<PreviewScreenPixelFormat>>,
+    /// Burn-in caption bar composited topmost into THIS render (stream leg,
+    /// or the primary render for stream-only sessions). None = no captions.
+    caption_overlay: Option<&'a crate::captions::CaptionOverlay>,
 }
 
+/// Full frame render: the scene, then the caption overlay topmost — applied
+/// here (not in the scene renderer) so every scene early-return path still
+/// gets captions.
 fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &mut [u8]) {
+    render_compositor_yuv420p_scene(inputs, bytes);
+    if let Some(overlay) = inputs.caption_overlay {
+        composite_caption_overlay(overlay, inputs.width, inputs.height, bytes);
+    }
+}
+
+fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &mut [u8]) {
     let CompositorRenderInputs {
         sequence,
         width,
@@ -2551,6 +2588,7 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
         background_image_source,
         camera_frame,
         screen_frame,
+        caption_overlay: _,
     } = inputs;
     fill_yuv420p(bytes, width, height, 16, 128, 128);
 
@@ -3161,6 +3199,101 @@ fn render_synthetic_source_rect(
             circle_mask: false,
         },
     );
+}
+
+/// Vertical safe margin for the caption bar, as a fraction of canvas height.
+const CAPTION_OVERLAY_MARGIN: f64 = 0.04;
+
+/// Alpha-composite the caption bar over a YUV420p frame — the one true
+/// alpha-blending blit (scene blits are binary: alpha<16 skip, else write).
+/// The bar is pre-rendered at the leg's output width; wider bars are
+/// center-cropped (bar edges are padding), never scaled.
+fn composite_caption_overlay(
+    overlay: &crate::captions::CaptionOverlay,
+    canvas_width: u32,
+    canvas_height: u32,
+    dest: &mut [u8],
+) {
+    let canvas_width = canvas_width.max(1) as usize;
+    let canvas_height = canvas_height.max(1) as usize;
+    if dest.len() < raw_yuv420p_len(canvas_width as u32, canvas_height as u32) {
+        return;
+    }
+    let overlay_width = overlay.width as usize;
+    let overlay_height = overlay.height as usize;
+    if overlay.rgba.len() < overlay_width * overlay_height * 4 {
+        return;
+    }
+
+    let draw_width = overlay_width.min(canvas_width);
+    let draw_height = overlay_height.min(canvas_height);
+    // Center-crop horizontally when the bar is wider than this leg's canvas.
+    let source_left = (overlay_width - draw_width) / 2;
+    let dest_left = (canvas_width - draw_width) / 2;
+    let margin = ((canvas_height as f64) * CAPTION_OVERLAY_MARGIN).round() as usize;
+    let dest_top = match overlay.position {
+        crate::captions::CaptionOverlayPosition::Top => margin.min(canvas_height - draw_height),
+        crate::captions::CaptionOverlayPosition::Bottom => {
+            canvas_height.saturating_sub(draw_height + margin)
+        }
+    };
+
+    let y_len = canvas_width * canvas_height;
+    let uv_width = canvas_width.div_ceil(2);
+    let uv_height = canvas_height.div_ceil(2);
+    let u_start = y_len;
+    let v_start = y_len + uv_width * uv_height;
+
+    let overlay_pixel = |x: usize, y: usize| -> (u8, u8, u8, u8) {
+        let index = (y * overlay_width + x) * 4;
+        (
+            overlay.rgba[index],
+            overlay.rgba[index + 1],
+            overlay.rgba[index + 2],
+            overlay.rgba[index + 3],
+        )
+    };
+    let blend = |src: u8, dst: u8, alpha: u16| -> u8 {
+        ((u16::from(src) * alpha + u16::from(dst) * (255 - alpha)) / 255) as u8
+    };
+
+    for row in 0..draw_height {
+        let dest_y = dest_top + row;
+        for column in 0..draw_width {
+            let dest_x = dest_left + column;
+            let (r, g, b, a) = overlay_pixel(source_left + column, row);
+            if a == 0 {
+                continue;
+            }
+            let (y_value, _, _) = rgb_to_yuv(r, g, b);
+            let index = dest_y * canvas_width + dest_x;
+            dest[index] = blend(y_value, dest[index], u16::from(a));
+        }
+    }
+
+    // Chroma at half resolution: blend using the top-left pixel of each 2x2
+    // block (same sampling the binary blit uses).
+    let uv_top = dest_top / 2;
+    let uv_bottom = (dest_top + draw_height).div_ceil(2).min(uv_height);
+    let uv_left = dest_left / 2;
+    let uv_right = (dest_left + draw_width).div_ceil(2).min(uv_width);
+    for uv_y in uv_top..uv_bottom {
+        for uv_x in uv_left..uv_right {
+            let sample_x = (uv_x * 2).max(dest_left).min(dest_left + draw_width - 1);
+            let sample_y = (uv_y * 2).max(dest_top).min(dest_top + draw_height - 1);
+            let (r, g, b, a) = overlay_pixel(
+                source_left + (sample_x - dest_left),
+                sample_y - dest_top,
+            );
+            if a == 0 {
+                continue;
+            }
+            let (_, u_value, v_value) = rgb_to_yuv(r, g, b);
+            let uv_index = uv_y * uv_width + uv_x;
+            dest[u_start + uv_index] = blend(u_value, dest[u_start + uv_index], u16::from(a));
+            dest[v_start + uv_index] = blend(v_value, dest[v_start + uv_index], u16::from(a));
+        }
+    }
 }
 
 fn blit_rgba_to_yuv420p(
@@ -4120,6 +4253,7 @@ mod tests {
                 background_image_source: None,
                 camera_frame: None,
                 screen_frame: None,
+                caption_overlay: None,
             },
             true,
         )
@@ -4135,6 +4269,7 @@ mod tests {
                 background_image_source: None,
                 camera_frame: None,
                 screen_frame: None,
+                caption_overlay: None,
             },
             true,
         )
@@ -4220,6 +4355,7 @@ mod tests {
                 background_image_source: None,
                 camera_frame: None,
                 screen_frame: None,
+                caption_overlay: None,
             },
             true,
         )
@@ -4303,6 +4439,7 @@ mod tests {
                 background_image_source: None,
                 camera_frame: Some(&camera_frame),
                 screen_frame: Some(&screen_frame),
+                caption_overlay: None,
             },
             true,
         )
@@ -4392,6 +4529,7 @@ mod tests {
                 background_image_source: Some(&background_image_source),
                 camera_frame: None,
                 screen_frame: Some(&screen_frame),
+                caption_overlay: None,
             },
             false,
         )
@@ -4453,6 +4591,7 @@ mod tests {
             true,
             None,
             None,
+            false,
         )
         .await;
         if result.compositor_backend != CompositorBackend::Metal {
@@ -4534,6 +4673,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         )
         .await;
         if result.compositor_backend != CompositorBackend::Metal {
@@ -4611,6 +4751,7 @@ mod tests {
                 background_image_source: None,
                 camera_frame: None,
                 screen_frame: None,
+                caption_overlay: None,
             },
             true,
         ) {
@@ -4657,6 +4798,7 @@ mod tests {
                 background_image_source: None,
                 camera_frame: None,
                 screen_frame: None,
+                caption_overlay: None,
             },
             true,
         ) {
@@ -4878,6 +5020,7 @@ mod tests {
                 height: 360,
                 publish_yuv_frames: true,
                 stream_output: None,
+                caption_overlay_on_primary: false,
             },
         )
         .await;
@@ -4928,6 +5071,7 @@ mod tests {
                     height: 180,
                     publish_yuv_frames: true,
                 }),
+                caption_overlay_on_primary: false,
             },
         )
         .await;
@@ -5060,6 +5204,7 @@ mod tests {
                 publish_yuv_frames: false,
             }),
             Some(&mut stream_gpu),
+            false,
         )
         .await;
         if result.compositor_backend != CompositorBackend::Metal {
@@ -5438,6 +5583,7 @@ mod tests {
                 height: 1080,
                 publish_yuv_frames: true,
                 stream_output: None,
+                caption_overlay_on_primary: false,
             },
         )
         .await;
@@ -5458,6 +5604,7 @@ mod tests {
                 height: 395,
                 publish_yuv_frames: true,
                 stream_output: None,
+                caption_overlay_on_primary: false,
             },
         )
         .await;
@@ -5488,6 +5635,7 @@ mod tests {
                 height: 1080,
                 publish_yuv_frames: true,
                 stream_output: None,
+                caption_overlay_on_primary: false,
             },
         )
         .await;
@@ -5685,6 +5833,7 @@ mod tests {
                 background_image_source: None,
                 camera_frame: None,
                 screen_frame: None,
+                caption_overlay: None,
             },
             &mut bytes,
         );
@@ -5695,6 +5844,170 @@ mod tests {
         assert_eq!(bytes[0], red_y);
         assert_eq!(bytes[y_len], red_u);
         assert_eq!(bytes[y_len + uv_len], red_v);
+    }
+
+    fn test_caption_overlay(
+        width: u32,
+        height: u32,
+        rgba_pixel: [u8; 4],
+        position: crate::captions::CaptionOverlayPosition,
+    ) -> crate::captions::CaptionOverlay {
+        crate::captions::CaptionOverlay {
+            rgba: std::sync::Arc::new(
+                std::iter::repeat_n(rgba_pixel, (width * height) as usize)
+                    .flatten()
+                    .collect(),
+            ),
+            width,
+            height,
+            position,
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn caption_overlay_composites_only_on_the_carrying_leg() {
+        let (canvas_w, canvas_h) = (32_u32, 16_u32);
+        let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        let mut with_overlay = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        let overlay = test_caption_overlay(
+            8,
+            4,
+            [255, 255, 255, 255],
+            crate::captions::CaptionOverlayPosition::Bottom,
+        );
+
+        fn inputs<'a>(
+            canvas_w: u32,
+            canvas_h: u32,
+            caption: Option<&'a crate::captions::CaptionOverlay>,
+        ) -> CompositorRenderInputs<'a> {
+            CompositorRenderInputs {
+                sequence: 1,
+                width: canvas_w,
+                height: canvas_h,
+                snapshot: None,
+                active_image_source: None,
+                background_image_source: None,
+                camera_frame: None,
+                screen_frame: None,
+                caption_overlay: caption,
+            }
+        }
+        render_compositor_yuv420p_frame(inputs(canvas_w, canvas_h, None), &mut baseline);
+        render_compositor_yuv420p_frame(
+            inputs(canvas_w, canvas_h, Some(&overlay)),
+            &mut with_overlay,
+        );
+
+        // margin = round(16 * 0.04) = 1; bar 8x4 → rows 11..15, columns 12..20.
+        let (white_y, _, _) = rgb_to_yuv(255, 255, 255);
+        let bar_index = 12 * canvas_w as usize + 16;
+        assert_eq!(with_overlay[bar_index], white_y);
+        assert_ne!(with_overlay[bar_index], baseline[bar_index]);
+        // Outside the bar the frame is untouched (top-left corner).
+        assert_eq!(with_overlay[0], baseline[0]);
+        // A leg without the overlay renders identically to the baseline.
+        let mut clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_frame(inputs(canvas_w, canvas_h, None), &mut clean);
+        assert_eq!(clean, baseline);
+    }
+
+    #[test]
+    fn caption_overlay_alpha_blends_over_the_frame() {
+        let (canvas_w, canvas_h) = (16_u32, 8_u32);
+        let mut bytes = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        let overlay = test_caption_overlay(
+            4,
+            2,
+            [255, 255, 255, 128],
+            crate::captions::CaptionOverlayPosition::Bottom,
+        );
+        render_compositor_yuv420p_frame(
+            CompositorRenderInputs {
+                sequence: 1,
+                width: canvas_w,
+                height: canvas_h,
+                snapshot: None,
+                active_image_source: None,
+                background_image_source: None,
+                camera_frame: None,
+                screen_frame: None,
+                caption_overlay: Some(&overlay),
+            },
+            &mut bytes,
+        );
+        // Synthetic frame varies; recompute what the blend should produce from
+        // a fresh scene-only render of the same inputs.
+        let mut scene_only = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_scene(
+            CompositorRenderInputs {
+                sequence: 1,
+                width: canvas_w,
+                height: canvas_h,
+                snapshot: None,
+                active_image_source: None,
+                background_image_source: None,
+                camera_frame: None,
+                screen_frame: None,
+                caption_overlay: None,
+            },
+            &mut scene_only,
+        );
+        // margin = round(8 * 0.04) = 0; bar rows 6..8, columns 6..10.
+        let index = 6 * canvas_w as usize + 7;
+        let (white_y, _, _) = rgb_to_yuv(255, 255, 255);
+        let expected =
+            ((u16::from(white_y) * 128 + u16::from(scene_only[index]) * 127) / 255) as u8;
+        assert_eq!(bytes[index], expected);
+    }
+
+    #[test]
+    fn caption_overlay_top_position_and_wide_bar_center_crop() {
+        let (canvas_w, canvas_h) = (32_u32, 16_u32);
+        let mut bytes = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        // Wider than the canvas: center-cropped, never scaled.
+        let overlay = test_caption_overlay(
+            40,
+            4,
+            [255, 255, 255, 255],
+            crate::captions::CaptionOverlayPosition::Top,
+        );
+        render_compositor_yuv420p_frame(
+            CompositorRenderInputs {
+                sequence: 1,
+                width: canvas_w,
+                height: canvas_h,
+                snapshot: None,
+                active_image_source: None,
+                background_image_source: None,
+                camera_frame: None,
+                screen_frame: None,
+                caption_overlay: Some(&overlay),
+            },
+            &mut bytes,
+        );
+        let (white_y, _, _) = rgb_to_yuv(255, 255, 255);
+        // margin = 1 → rows 1..5 across the full width.
+        assert_eq!(bytes[2 * canvas_w as usize], white_y);
+        assert_eq!(bytes[2 * canvas_w as usize + 31], white_y);
+        // Row 0 (above the margin) untouched by the bar.
+        let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_scene(
+            CompositorRenderInputs {
+                sequence: 1,
+                width: canvas_w,
+                height: canvas_h,
+                snapshot: None,
+                active_image_source: None,
+                background_image_source: None,
+                camera_frame: None,
+                screen_frame: None,
+                caption_overlay: None,
+            },
+            &mut baseline,
+        );
+        assert_eq!(bytes[0], baseline[0]);
     }
 
     #[test]
@@ -5771,6 +6084,7 @@ mod tests {
                 background_image_source: Some(&background_image_source),
                 camera_frame: None,
                 screen_frame: Some(&screen_frame),
+                caption_overlay: None,
             },
             &mut bytes,
         );
@@ -5965,6 +6279,7 @@ mod tests {
                 background_image_source: None,
                 camera_frame: Some(&camera_frame),
                 screen_frame: None,
+                caption_overlay: None,
             },
             &mut bytes,
         );
@@ -6038,6 +6353,7 @@ mod tests {
             true,
             None,
             None,
+            false,
         )
         .await;
 

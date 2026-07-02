@@ -589,6 +589,9 @@ pub async fn start_session(
                     EncoderBridgeVideoOutput::RawYuv420p
                 ),
                 stream_output: encoder_bridge_stream_output,
+                // Wired by the burn-in slice A4: true only for stream-only
+                // sessions (the primary render IS the stream there).
+                caption_overlay_on_primary: false,
             },
         )
         .await;
