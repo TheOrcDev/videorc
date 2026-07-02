@@ -1,5 +1,6 @@
 import {
   Brain,
+  CopySimple,
   Crosshair,
   DownloadSimple,
   Lightning,
@@ -11,6 +12,7 @@ import {
   type Icon
 } from '@phosphor-icons/react'
 import { useEffect, type ReactElement, type ReactNode } from 'react'
+import { toast } from 'sonner'
 
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -47,7 +49,7 @@ import {
   objectField
 } from '@/lib/format'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
-import { PUBLISH_PIPELINE } from '@/lib/publish-pipeline'
+import { PUBLISH_PACK_CONTENTS, PUBLISH_PIPELINE, composeYouTubeDescription } from '@/lib/publish-pipeline'
 
 export function AiTab({
   selectedSessionId,
@@ -357,6 +359,14 @@ function ArtifactView({ session }: { session: SessionSummary }): ReactElement {
     ) : null
   }
 
+  const copyActionsFor = copyActionsForArtifacts({
+    title,
+    description,
+    summary: summary ? artifactText(summary) : '',
+    transcript: transcript ? artifactText(transcript) : '',
+    chapterItems
+  })
+
   const labHasContent =
     smartZoomItems.length > 0 ||
     noiseCleanupItems.length > 0 ||
@@ -389,6 +399,21 @@ function ArtifactView({ session }: { session: SessionSummary }): ReactElement {
                   <p className="text-xs italic text-muted-foreground/60">{step.example}</p>
                 </div>
               )}
+              {content ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {copyActionsFor(step.kind).map((action) => (
+                    <Button
+                      key={action.label}
+                      size="xs"
+                      variant="outline"
+                      onClick={() => void copyToClipboard(action.text(), action.label)}
+                    >
+                      <CopySimple data-icon="inline-start" />
+                      {action.label}
+                    </Button>
+                  ))}
+                </div>
+              ) : null}
             </div>
           )
         })}
@@ -467,9 +492,94 @@ function ArtifactView({ session }: { session: SessionSummary }): ReactElement {
         ) : null}
           </CollapsibleContent>
         </Collapsible>
+
+        {/* D4: the finale — what the pack bundles, plus the single most useful
+            one-click in the tab. */}
+        <div className="flex flex-col gap-2 rounded-panel border border-primary/30 bg-primary/5 p-3">
+          <div className="flex items-center gap-2">
+            <DownloadSimple className="text-primary" weight="duotone" />
+            <span className="flex-1 text-sm font-semibold">Publish pack</span>
+          </div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {PUBLISH_PACK_CONTENTS.map((entry) => {
+              const present = Boolean(latestArtifact(session, entry.kind))
+              return (
+                <span
+                  key={entry.file}
+                  className={
+                    'flex items-center gap-1 text-xs ' +
+                    (present ? 'text-foreground' : 'text-muted-foreground/50')
+                  }
+                >
+                  {present ? '✓' : '·'} {entry.file}
+                </span>
+              )
+            })}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              disabled={!title && !description && !chapterItems.length}
+              size="sm"
+              onClick={() =>
+                void copyToClipboard(
+                  composeYouTubeDescription({ description, chapters: chapterItems }),
+                  'YouTube description'
+                )
+              }
+            >
+              <CopySimple data-icon="inline-start" />
+              Copy YouTube description
+            </Button>
+          </div>
+        </div>
       </div>
     </ScrollArea>
   )
+}
+
+// D4: per-artifact copy actions, computed against the rendered artifacts.
+function copyActionsForArtifacts({
+  title,
+  description,
+  summary,
+  transcript,
+  chapterItems
+}: {
+  title: string
+  description: string
+  summary: string
+  transcript: string
+  chapterItems: { timestamp: string; title: string }[]
+}): (kind: string) => { label: string; text: () => string }[] {
+  return (kind: string) => {
+    switch (kind) {
+      case 'title-description':
+        return [
+          { label: 'Copy title', text: () => title },
+          { label: 'Copy description', text: () => description }
+        ].filter((action) => action.text())
+      case 'summary':
+        return summary ? [{ label: 'Copy summary', text: () => summary }] : []
+      case 'chapters':
+        return chapterItems.length
+          ? [
+              {
+                label: 'Copy YouTube chapters',
+                text: () => chapterItems.map((c) => `${c.timestamp} ${c.title}`).join('\n')
+              }
+            ]
+          : []
+      case 'transcript':
+        return transcript ? [{ label: 'Copy transcript', text: () => transcript }] : []
+      default:
+        return []
+    }
+  }
+}
+
+async function copyToClipboard(text: string, label: string): Promise<void> {
+  await navigator.clipboard.writeText(text)
+  toast.success(`${label} copied.`)
 }
 
 function ArtifactProblem({ artifact }: { artifact: AiArtifact }): ReactElement {

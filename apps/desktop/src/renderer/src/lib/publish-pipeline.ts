@@ -65,3 +65,21 @@ export const PUBLISH_PACK_CONTENTS: readonly { file: string; kind: AiArtifactKin
   { file: 'summary.md', kind: 'summary' },
   { file: 'transcript.txt', kind: 'transcript' }
 ] as const
+
+/** The one-click most users came for: a paste-ready YouTube description. */
+export function composeYouTubeDescription({
+  description,
+  chapters
+}: {
+  description: string
+  chapters: { timestamp: string; title: string }[]
+}): string {
+  const parts: string[] = []
+  if (description.trim()) {
+    parts.push(description.trim())
+  }
+  if (chapters.length) {
+    parts.push(['Chapters:', ...chapters.map((c) => `${c.timestamp} ${c.title}`)].join('\n'))
+  }
+  return parts.join('\n\n')
+}
