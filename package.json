@@ -44,6 +44,8 @@
     "analyze:recording": "node scripts/analyze-recording.mjs",
     "analyze:startup": "node scripts/analyze-startup-resolution.mjs",
     "probe:video-understanding": "node scripts/video-understanding-probe.mjs",
+    "ui:driver": "node scripts/ui-driver.mjs",
+    "ui:cmd": "node scripts/ui-cmd.mjs",
     "test:analyzer": "node --test scripts/lib/recording-analyzer.test.mjs",
     "test:scripts": "node --test scripts/lib/*.test.mjs",
     "baseline:real-source": "node scripts/real-source-baseline-app.mjs",
