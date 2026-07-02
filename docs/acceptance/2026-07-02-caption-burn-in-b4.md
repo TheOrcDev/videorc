@@ -27,20 +27,19 @@ local gates PROVED versus what still needs a by-eye pass with a live session.
 - **Burn command shape**: validated against a synthesized clip **except** the
   ass filter itself — see the gap below.
 
-## Environmental gap (explicit follow-up decision)
+## Environmental gap — RESOLVED 2026-07-02 (R-plan, commit `9af61c16`)
 
-**No ffmpeg on this machine (or in the app bundle) has libass**: the bundled
-build is deliberately dependency-free LGPL (`build-ffmpeg-macos.sh`, no
-`--enable-libass`) and this machine's homebrew 8.1.1 is also built without it.
-The burn job preflights `-filters` for `ass` and degrades to SRT-only with a
-`captions-burn-unsupported` health warning — behavior verified by code review,
-not runtime. **The captioned copy cannot materialize anywhere until one of:**
-1. the bundled ffmpeg gains the libass chain (libass+freetype+harfbuzz+fribidi:
-   build, signing, licenses), or
-2. the burn pivots to a core-filters PNG-overlay track (renderer-rasterized
-   bars → concat/qtrle overlay video → single `overlay` filter — works with the
-   bundled binary, no new deps), or
-3. dev-only: an ffmpeg with libass configured via Settings → ffmpegPath.
+The libass gap is closed by option 2: the burn pivoted to a **PNG-overlay
+track** (renderer renders full-frame cue PNGs → ffconcat playlist with exact
+gap/cue durations → single CORE `overlay` filter pass, `-c:a copy`). The ASS
+generator and preflight are deleted. **Proven end-to-end against the actual
+bundled dependency-free ffmpeg** (`vendor/ffmpeg/current`): a synthesized clip
++ cue track produced `rec (captioned).mp4` with bar pixels present inside the
+cue window (Y≈219 in the bar band) and absent outside (Y≈16). Also in the
+R-plan (all on main): R0 — caption uploads never hard-stop (backoff + degraded
+status carrying the real error; the "repeated upload failures" livestream bug
+root-caused to the local web server being down); R1 — burn target
+Off/Stream/Recording/Both with the per-leg plan matrix unit-tested.
 
 ## Pending by-eye (needs a live premium session with a mic)
 
