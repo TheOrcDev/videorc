@@ -42,6 +42,9 @@ const api: VideorcApi = {
     ipcRenderer.invoke('preview-window:permission-required', permissionStatus, message, generation),
   setPreviewWindowAlwaysOnTop: (alwaysOnTop) =>
     ipcRenderer.invoke('preview-window:set-always-on-top', alwaysOnTop),
+  setPreviewWindowMode: (mode) => ipcRenderer.invoke('preview-window:set-mode', mode),
+  reportPreviewDockSlot: (report) => ipcRenderer.invoke('preview-window:report-dock-slot', report),
+  setPreviewDockOverlayOpen: (open) => ipcRenderer.invoke('preview-window:set-dock-overlay', open),
   setPreviewWindowAspectRatio: (width, height) =>
     ipcRenderer.invoke('preview-window:set-aspect-ratio', width, height),
   onPreviewWindowState: (callback) => {

@@ -47,6 +47,15 @@ import {
 } from './runtime-info'
 import { createMediaPermissionGrantWatcher } from './system-permission-watch'
 import { PreviewSupervisorModel } from './preview-supervisor'
+import {
+  composeDockedScreenRect,
+  decideDockVisibility,
+  parseDockSlotReport,
+  parsePreviewWindowMode,
+  type DockHiddenReason,
+  type DockSlotReport,
+  type PreviewWindowMode
+} from './preview-dock'
 import { backendIsolationEnv } from './backend-isolation'
 import { DARK_WINDOW_PALETTE, windowPalette } from './window-palette'
 import {
@@ -660,6 +669,26 @@ function createWindow(): void {
     mainWindow = null
   })
 
+  // Docked-preview followers: every placement-relevant main-window event
+  // recomputes the docked frame FROM MAIN-PROCESS STATE (cached slot rect +
+  // getContentBounds). No renderer round trip — that lag is what sank the
+  // 2026-06-09 glued preview. The child-window parenting moves the frame
+  // atomically during drags; these events keep the native surface in step.
+  for (const event of ['move', 'resize', 'show', 'hide', 'minimize', 'restore'] as const) {
+    mainWindow.on(event as 'move', () => {
+      if (currentPreviewWindowMode() === 'docked') {
+        queueDockedPreviewPlacement()
+      }
+    })
+  }
+  for (const event of ['enter-full-screen', 'leave-full-screen'] as const) {
+    mainWindow.on(event as 'enter-full-screen', () => {
+      if (currentPreviewWindowMode() === 'docked') {
+        queueDockedPreviewPlacement()
+      }
+    })
+  }
+
   if (glassWallpaperEnabled) {
     mainWindow.on('move', queueGlassGeometryBroadcast)
     mainWindow.on('resize', queueGlassGeometryBroadcast)
@@ -698,6 +727,24 @@ let previewWindowLastFrame: Electron.Rectangle | null = null
 let previewWindowAlwaysOnTop = false
 let previewWindowClosing = false
 const previewSupervisor = new PreviewSupervisorModel()
+// --- Docked ("stick") mode: the preview window is a child of the main window,
+// glued over the Studio slot. Main composes placement from its OWN move/resize
+// events + the renderer's window-relative slot report; the renderer is never in
+// the movement path (see preview-dock.ts for why).
+let previewWindowMode: PreviewWindowMode = 'floating'
+let previewWindowModeLoaded = false
+// The floating frame remembered across a dock, so undocking restores it and a
+// close-while-docked never persists the slot rect as the floating frame.
+let previewWindowFloatingFrame: Electron.Rectangle | null = null
+let previewDockSlot: DockSlotReport | null = null
+// Bumped on every dock engage; slot reports answering an older epoch are stale
+// (measured before the redock) and are dropped.
+let previewDockEpoch = 0
+// True while a blocking in-app overlay (dialog/popover) is open: overlays paint
+// in the main window's web contents and would be hidden UNDER the docked native
+// surface, so the surface yields while they are up.
+let previewDockOverlayOpen = false
+let previewDockPlacementQueued = false
 // The visible drag bar at the top of the preview window; the native video covers
 // the content BELOW it, and the aspect lock applies to that video region only.
 const PREVIEW_WINDOW_BAR_HEIGHT = 28
@@ -712,6 +759,14 @@ function previewWindowAspectRatio(): number {
 // Lock user resizing to the output ratio (the bar is excluded via extraSize) and
 // conform the current frame so the video region matches the ratio exactly.
 function applyPreviewWindowAspect(window: BrowserWindow): void {
+  // Docked windows track the Studio slot rect exactly; the RENDERER keeps the
+  // slot aspect-correct (CSS aspect-ratio), so a main-side lock would only
+  // fight the slot-follow setBounds.
+  if (previewWindowMode === 'docked') {
+    window.setAspectRatio(0)
+    window.setMinimumSize(1, 1)
+    return
+  }
   const ratio = previewWindowAspectRatio()
   window.setAspectRatio(ratio, { width: 0, height: PREVIEW_WINDOW_BAR_HEIGHT })
   window.setMinimumSize(320, Math.round(320 / ratio) + PREVIEW_WINDOW_BAR_HEIGHT)
@@ -726,7 +781,7 @@ function applyPreviewWindowAspect(window: BrowserWindow): void {
 let conformingPreviewWindow = false
 
 function conformPreviewWindowToAspect(window: BrowserWindow): void {
-  if (conformingPreviewWindow || window.isFullScreen()) {
+  if (conformingPreviewWindow || window.isFullScreen() || previewWindowMode === 'docked') {
     return
   }
   const ratio = previewWindowAspectRatio()
@@ -763,19 +818,35 @@ function previewWindowGlobalId(): number | undefined {
 
 function previewWindowVideoBounds(window: BrowserWindow): Electron.Rectangle {
   const contentBounds = window.getContentBounds()
+  // Docked mode has no drag bar (the window cannot be dragged); the video fills
+  // the whole slot-sized content rect.
+  const barHeight = previewWindowMode === 'docked' ? 0 : PREVIEW_WINDOW_BAR_HEIGHT
   return {
     x: contentBounds.x,
-    y: contentBounds.y + PREVIEW_WINDOW_BAR_HEIGHT,
+    y: contentBounds.y + barHeight,
     width: contentBounds.width,
-    height: Math.max(1, contentBounds.height - PREVIEW_WINDOW_BAR_HEIGHT)
+    height: Math.max(1, contentBounds.height - barHeight)
   }
 }
 
-// Window frame, open/closed choice, and always-on-top survive relaunches (U3).
+// Window frame, open/closed choice, always-on-top, and floating/docked mode
+// survive relaunches (U3). `frame` is always the FLOATING frame — docked
+// placement derives from the Studio slot and is never persisted.
 type PreviewWindowPrefs = {
   frame?: Electron.Rectangle
   alwaysOnTop?: boolean
   open?: boolean
+  mode?: PreviewWindowMode
+}
+
+// Mode is module state so the placement helpers can consult it synchronously,
+// hydrated from prefs once (lazily, so early callers agree with openPreviewWindow).
+function currentPreviewWindowMode(): PreviewWindowMode {
+  if (!previewWindowModeLoaded) {
+    previewWindowMode = parsePreviewWindowMode(loadPreviewWindowPrefs().mode)
+    previewWindowModeLoaded = true
+  }
+  return previewWindowMode
 }
 
 function previewWindowPrefsPath(): string {
@@ -1730,6 +1801,12 @@ type PreviewWindowState = {
   // coordinates into AppKit's bottom-left-origin global space.
   screenHeight: number
   alwaysOnTop: boolean
+  mode: PreviewWindowMode
+  // Echoed by the renderer's slot reports so stale measurements are rejectable.
+  dockEpoch: number
+  // Why the docked surface is hidden right now (null = showing); the slot UI
+  // turns this into stated copy — a docked preview never just vanishes.
+  dockHiddenReason: DockHiddenReason | null
   supervisor: PreviewSupervisorState
 }
 
@@ -1739,6 +1816,7 @@ function previewWindowState(): PreviewWindowState {
   // The VIDEO region: window content minus the drag bar. Everything downstream
   // (surface placement, probe asserts) follows this rect.
   const contentBounds = open ? previewWindowVideoBounds(window!) : null
+  const mode = currentPreviewWindowMode()
   return {
     open,
     visible: open ? window!.isVisible() && !window!.isMinimized() : false,
@@ -1746,8 +1824,86 @@ function previewWindowState(): PreviewWindowState {
     scaleFactor: contentBounds ? screen.getDisplayMatching(contentBounds).scaleFactor : 1,
     screenHeight: screen.getPrimaryDisplay().bounds.height,
     alwaysOnTop: previewWindowAlwaysOnTop,
+    mode,
+    dockEpoch: previewDockEpoch,
+    dockHiddenReason: open && mode === 'docked' ? dockVisibilityDecision().hiddenReason : null,
     supervisor: previewSupervisor.snapshot()
   }
+}
+
+function dockVisibilityDecision(): ReturnType<typeof decideDockVisibility> {
+  return decideDockVisibility({
+    slot: previewDockSlot,
+    currentEpoch: previewDockEpoch,
+    mainWindowVisible: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()),
+    mainWindowMinimized: Boolean(
+      mainWindow && !mainWindow.isDestroyed() && mainWindow.isMinimized()
+    ),
+    mainWindowFullScreen: Boolean(
+      mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen()
+    ),
+    overlayOpen: previewDockOverlayOpen
+  })
+}
+
+// The docked placement hot path: recompute the docked window frame from the
+// cached window-relative slot rect + the main window's current content bounds.
+// Runs on main-window move/resize (main-process events, no renderer round trip)
+// and whenever the slot report or visibility inputs change. Coalesced to one
+// application per event-loop turn so macOS live-drag event storms stay cheap.
+function queueDockedPreviewPlacement(): void {
+  if (previewDockPlacementQueued) {
+    return
+  }
+  previewDockPlacementQueued = true
+  queueMicrotask(() => {
+    previewDockPlacementQueued = false
+    applyDockedPreviewPlacement()
+  })
+}
+
+function applyDockedPreviewPlacement(): void {
+  const window = previewWindow
+  if (
+    currentPreviewWindowMode() !== 'docked' ||
+    !previewWindowIsOpenForSurface() ||
+    !window ||
+    !mainWindow ||
+    mainWindow.isDestroyed()
+  ) {
+    return
+  }
+  const decision = dockVisibilityDecision()
+  if (!decision.visible) {
+    if (window.isVisible()) {
+      // hide() fires the window's own 'hide' handler, which pushes visible:false
+      // through the normal placement pipeline to both surface hosts.
+      window.hide()
+    } else {
+      emitPreviewWindowState()
+    }
+    return
+  }
+  const slot = previewDockSlot!
+  const rect = composeDockedScreenRect(slot, mainWindow.getContentBounds())
+  const current = window.getBounds()
+  if (
+    rect.x !== current.x ||
+    rect.y !== current.y ||
+    rect.width !== current.width ||
+    rect.height !== current.height
+  ) {
+    window.setBounds(rect)
+  }
+  if (!window.isVisible()) {
+    // Never steal focus from the main window the user is actively using.
+    window.showInactive()
+  }
+  // setBounds/show fire the window's own move/resize/show handlers, which own
+  // the placement push; this direct push covers the no-op-change path where the
+  // visibility inputs (overlay closed, slot re-mounted) changed instead.
+  pushPreviewWindowPlacement()
+  emitPreviewWindowState()
 }
 
 function previewWindowSurfaceBounds(visibleOverride?: boolean): PreviewSurfaceBounds | null {
@@ -1866,6 +2022,11 @@ const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><s
   .hint { position: fixed; top: 28px; left: 0; right: 0; bottom: 0; display: flex;
     align-items: center; justify-content: center; flex-direction: column; gap: 6px; }
   .hint .title { color: ${DARK_WINDOW_PALETTE.textPrimary}; font-size: 13px; }
+  /* Docked ("stick") variant: the window is immovable inside the Studio slot,
+     so the drag bar disappears and the hint fills the whole content rect. */
+  body.docked { -webkit-app-region: no-drag; }
+  body.docked .drag-bar { display: none; }
+  body.docked .hint { top: 0; }
 </style></head><body>
   <div class="hint"><div class="title">Waiting for preview</div>
   <div id="videorc-wait-detail">The native surface appears here as soon as the compositor presents.</div></div>
@@ -1888,21 +2049,26 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
 
   previewSupervisor.openWindow()
   const prefs = loadPreviewWindowPrefs()
+  const mode = currentPreviewWindowMode()
+  const docked = mode === 'docked'
   const rememberedFrame = previewWindowLastFrame ?? prefs.frame ?? null
   const frame = rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null
   const window = new BrowserWindow({
     width: frame?.width ?? 960,
     height: frame?.height ?? 568,
     ...(frame ? { x: frame.x, y: frame.y } : {}),
-    minWidth: 320,
-    minHeight: 208,
+    minWidth: docked ? 1 : 320,
+    minHeight: docked ? 1 : 208,
     title: 'Videorc Preview',
     // hiddenInset is macOS-only; off macOS the standard frame keeps the
     // preview window draggable without renderer drag regions (Phase 4 owns
     // the frameless Windows chrome).
     ...(isMac ? { titleBarStyle: 'hiddenInset' as const } : {}),
     backgroundColor: DARK_WINDOW_PALETTE.base,
-    show: true,
+    // A docked window stays hidden until the renderer answers the dock epoch
+    // with a slot rect; showing it at the remembered FLOATING frame first would
+    // flash a mis-placed preview.
+    show: !docked,
     ...appWindowIconOptions(),
     webPreferences: {
       sandbox: true,
@@ -1913,10 +2079,14 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   })
   previewWindowClosing = false
   previewWindow = window
+  previewWindowFloatingFrame = frame
   previewSupervisor.windowOpened(window.isVisible() && !window.isMinimized())
   previewWindowAlwaysOnTop = prefs.alwaysOnTop === true
-  if (previewWindowAlwaysOnTop) {
+  if (previewWindowAlwaysOnTop && !docked) {
     window.setAlwaysOnTop(true, 'floating')
+  }
+  if (docked) {
+    applyDockedPreviewChrome(window)
   }
   applyPreviewWindowAspect(window)
   savePreviewWindowPrefs({ open: true })
@@ -1946,8 +2116,17 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
         previewSupervisor.closeWindow()
       }
       previewWindowClosing = true
-      previewWindowLastFrame = window.getBounds()
-      savePreviewWindowPrefs({ frame: previewWindowLastFrame, open: false })
+      // While docked the window sits at the Studio slot rect; persisting THAT
+      // would teleport the next floating open into the slot. The floating
+      // frame remembered at dock time is the one that survives.
+      previewWindowLastFrame =
+        currentPreviewWindowMode() === 'docked'
+          ? (previewWindowFloatingFrame ?? previewWindowLastFrame)
+          : window.getBounds()
+      savePreviewWindowPrefs({
+        ...(previewWindowLastFrame ? { frame: previewWindowLastFrame } : {}),
+        open: false
+      })
     }
   })
   window.on('closed', () => {
@@ -1979,11 +2158,121 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   if (previewWindow !== window || window.isDestroyed() || previewWindowClosing) {
     return previewWindowState()
   }
+  if (docked) {
+    setDockedPreviewChromeClass(window, true)
+    engageDockedPreviewPlacement(window)
+  }
   void setNativePreviewSurfaceFramePollingSuppressed(false)
   pushPreviewWindowPlacement()
   emitPreviewWindowState()
   // The first-frame contract clock starts the moment the window is up.
   startFirstFrameWatchdog()
+  return previewWindowState()
+}
+
+// Window-manager chrome for docked mode: immovable, non-resizable, no traffic
+// lights, parented to the main window so AppKit moves it atomically with the
+// app and keeps it stacked above it.
+function applyDockedPreviewChrome(window: BrowserWindow): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    window.setParentWindow(mainWindow)
+  }
+  window.setMovable(false)
+  window.setResizable(false)
+  if (isMac) {
+    window.setWindowButtonVisibility(false)
+  }
+  window.setAlwaysOnTop(false)
+}
+
+function removeDockedPreviewChrome(window: BrowserWindow): void {
+  window.setParentWindow(null)
+  window.setMovable(true)
+  window.setResizable(true)
+  if (isMac) {
+    window.setWindowButtonVisibility(true)
+  }
+  if (previewWindowAlwaysOnTop) {
+    window.setAlwaysOnTop(true, 'floating')
+  }
+}
+
+// The window HTML is a static data URL with no scripting of its own; the docked
+// variant (no drag bar) is toggled by a body class from main.
+function setDockedPreviewChromeClass(window: BrowserWindow, docked: boolean): void {
+  window.webContents
+    .executeJavaScript(`document.body.classList.toggle('docked', ${docked ? 'true' : 'false'})`)
+    .catch(() => {
+      // Cosmetic only: a failed toggle leaves the drag bar visible, never
+      // breaks placement.
+    })
+}
+
+// A dock engage invalidates every earlier slot measurement: bump the epoch the
+// renderer must echo and drop the cached slot until a fresh report lands. The
+// docked window stays hidden until then (decideDockVisibility: no-slot-report).
+function engageDockedPreviewPlacement(window: BrowserWindow): void {
+  previewDockEpoch += 1
+  previewDockSlot = null
+  if (window.isVisible() && currentPreviewWindowMode() === 'docked') {
+    window.hide()
+  }
+  queueDockedPreviewPlacement()
+}
+
+async function setPreviewWindowMode(rawMode: unknown): Promise<PreviewWindowState> {
+  const mode = parsePreviewWindowMode(rawMode)
+  if (mode === currentPreviewWindowMode()) {
+    return previewWindowState()
+  }
+  previewWindowMode = mode
+  previewWindowModeLoaded = true
+  savePreviewWindowPrefs({ mode })
+  const window = previewWindowIsOpenForSurface() ? previewWindow : null
+  if (window) {
+    if (mode === 'docked') {
+      // Remember where floating lived so undock (and close-while-docked) can
+      // restore it.
+      previewWindowFloatingFrame = window.getBounds()
+      savePreviewWindowPrefs({ frame: previewWindowFloatingFrame })
+      applyDockedPreviewChrome(window)
+      applyPreviewWindowAspect(window)
+      setDockedPreviewChromeClass(window, true)
+      engageDockedPreviewPlacement(window)
+    } else {
+      removeDockedPreviewChrome(window)
+      setDockedPreviewChromeClass(window, false)
+      const frame = previewWindowFloatingFrame ?? previewWindowLastFrame
+      if (frame) {
+        window.setBounds(clampFrameToWorkArea(frame))
+      }
+      applyPreviewWindowAspect(window)
+      if (!window.isVisible()) {
+        window.show()
+      }
+      pushPreviewWindowPlacement()
+    }
+  }
+  emitPreviewWindowState()
+  return previewWindowState()
+}
+
+function reportPreviewDockSlot(raw: unknown): PreviewWindowState {
+  const report = parseDockSlotReport(raw)
+  // Stale-epoch reports (measured before the latest dock engage) are dropped —
+  // the exact race that made the 2026-06-09 glue attempt resurface bounds.
+  if (report && report.epoch === previewDockEpoch) {
+    previewDockSlot = report
+    queueDockedPreviewPlacement()
+  }
+  return previewWindowState()
+}
+
+function setPreviewDockOverlayOpen(open: boolean): PreviewWindowState {
+  if (previewDockOverlayOpen !== open) {
+    previewDockOverlayOpen = open
+    queueDockedPreviewPlacement()
+  }
   return previewWindowState()
 }
 
@@ -2024,7 +2313,9 @@ async function togglePreviewWindow(): Promise<PreviewWindowState> {
 
 function setPreviewWindowAlwaysOnTop(alwaysOnTop: boolean): PreviewWindowState {
   previewWindowAlwaysOnTop = alwaysOnTop
-  if (previewWindow && !previewWindow.isDestroyed()) {
+  // While docked the window must stay at normal level (it is part of the app);
+  // the preference is stored and re-applied on undock.
+  if (previewWindow && !previewWindow.isDestroyed() && currentPreviewWindowMode() !== 'docked') {
     previewWindow.setAlwaysOnTop(alwaysOnTop, 'floating')
   }
   savePreviewWindowPrefs({ alwaysOnTop })
@@ -3178,11 +3469,14 @@ async function applyNativePreviewHostCommands(
   // when always-on-top is on).
   const orderAboveWindowId = previewWindowGlobalId()
   if (orderAboveWindowId !== undefined) {
+    // Docked previews are part of the app: never elevated above other apps,
+    // whatever the (floating-mode) always-on-top preference says.
+    const elevated = previewWindowAlwaysOnTop && currentPreviewWindowMode() !== 'docked'
     commands = commands.map((command) =>
       command.bounds
         ? {
             ...command,
-            bounds: { ...command.bounds, orderAboveWindowId, elevated: previewWindowAlwaysOnTop }
+            bounds: { ...command.bounds, orderAboveWindowId, elevated }
           }
         : command
     )
@@ -6676,6 +6970,13 @@ app.whenReady().then(async () => {
   )
   ipcMain.handle('preview-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setPreviewWindowAlwaysOnTop(Boolean(alwaysOnTop))
+  )
+  ipcMain.handle('preview-window:set-mode', (_event, mode: unknown) => setPreviewWindowMode(mode))
+  ipcMain.handle('preview-window:report-dock-slot', (_event, report: unknown) =>
+    reportPreviewDockSlot(report)
+  )
+  ipcMain.handle('preview-window:set-dock-overlay', (_event, open: unknown) =>
+    setPreviewDockOverlayOpen(open === true)
   )
   ipcMain.handle('preview-window:set-aspect-ratio', (_event, width: number, height: number) => {
     if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {

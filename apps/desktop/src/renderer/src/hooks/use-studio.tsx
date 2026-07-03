@@ -2594,7 +2594,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   // SC3: absolute transform write for stage drags (nudge is directional).
   const setSceneSourceTransform = useCallback(
-    async (sourceId: string, patch: { x?: number; y?: number; width?: number; height?: number }) => {
+    async (
+      sourceId: string,
+      patch: { x?: number; y?: number; width?: number; height?: number }
+    ) => {
       if (!client) {
         return
       }
@@ -3263,6 +3266,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     scaleFactor: 1,
     screenHeight: 0,
     alwaysOnTop: false,
+    mode: 'floating',
+    dockEpoch: 0,
+    dockHiddenReason: null,
     supervisor: idlePreviewSupervisorState()
   })
   const previewWindowRef = useRef(previewWindow)

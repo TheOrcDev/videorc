@@ -1985,6 +1985,34 @@ export interface RuntimeInfo {
   nativePreviewSurfaceStageSuspended?: boolean
 }
 
+// Floating: the user drags/resizes the preview window freely (default).
+// Docked ("stick"): the window is a child of the main window, glued over the
+// Studio preview slot so it moves together with the app.
+export type PreviewWindowMode = 'floating' | 'docked'
+
+// Why a docked preview surface is currently hidden; the Studio slot turns each
+// reason into stated copy — a docked preview never silently vanishes.
+export type DockHiddenReason =
+  | 'no-slot-report'
+  | 'slot-unmounted'
+  | 'scrolled-away'
+  | 'overlay-open'
+  | 'main-window-hidden'
+  | 'main-window-fullscreen'
+
+// Renderer → main slot measurement for docked mode. WINDOW-RELATIVE CSS pixels
+// only: the renderer must never compute screen coordinates (main owns the
+// window-position math synchronously; see preview-dock.ts).
+export interface DockSlotReport {
+  epoch: number
+  x: number
+  y: number
+  width: number
+  height: number
+  visibleFraction: number
+  mounted: boolean
+}
+
 // Detached preview window: main is the lifecycle and bounds authority; renderer
 // surface requests must carry this generation so stale effects cannot mutate the
 // active preview.
@@ -1996,6 +2024,11 @@ export interface PreviewWindowState {
   scaleFactor: number
   screenHeight: number
   alwaysOnTop: boolean
+  mode: PreviewWindowMode
+  // Dock epoch the renderer must echo in DockSlotReport; reports for an older
+  // epoch were measured before the latest dock engage and are dropped by main.
+  dockEpoch: number
+  dockHiddenReason: DockHiddenReason | null
   supervisor: PreviewSupervisorState
 }
 
@@ -2127,6 +2160,9 @@ export interface VideorcApi {
     generation?: number
   ) => Promise<PreviewWindowState>
   setPreviewWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<PreviewWindowState>
+  setPreviewWindowMode: (mode: PreviewWindowMode) => Promise<PreviewWindowState>
+  reportPreviewDockSlot: (report: DockSlotReport) => Promise<PreviewWindowState>
+  setPreviewDockOverlayOpen: (open: boolean) => Promise<PreviewWindowState>
   setPreviewWindowAspectRatio: (width: number, height: number) => Promise<PreviewWindowState>
   onPreviewWindowState: (callback: (state: PreviewWindowState) => void) => () => void
   openNotesWindow: () => Promise<NotesWindowState>
