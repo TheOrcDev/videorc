@@ -456,6 +456,22 @@ export function LayoutTab(): ReactElement {
                     <ArrowRight />
                   </Button>
                 </div>
+                {/* Disabled arrows must say why — silent dead controls read as
+                    a broken app (2026-07-02 report on the full-canvas screen). */}
+                {sourceIsFullCanvas(selectedSource) ? (
+                  <p className="text-xs text-muted-foreground">
+                    This source fills the whole canvas, so there is nowhere to move it. Cameras and
+                    resized sources can be nudged.
+                  </p>
+                ) : !sceneEditMode ? (
+                  <p className="text-xs text-muted-foreground">
+                    Turn on scene editing to move this source.
+                  </p>
+                ) : isSessionActive ? (
+                  <p className="text-xs text-muted-foreground">
+                    Scene layout is locked while a session is live.
+                  </p>
+                ) : null}
               </div>
             </>
           )}

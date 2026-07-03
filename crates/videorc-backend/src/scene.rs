@@ -211,7 +211,11 @@ pub fn nudge_source(
 ) -> Result<Scene, String> {
     let step = if large { 0.025 } else { 0.005 };
     let source = find_source_mut(scene, source_id)?;
-    source.transform = sanitize_transform(SceneTransform {
+    // No snapping on nudge: the snap magnet (threshold 0.015) is a DRAG
+    // convenience, but it swallowed every small nudge step (0.005) taken from
+    // a snapped edge/center — each arrow click moved and instantly snapped
+    // back, a permanent no-op. Arrow nudges are precision intent.
+    source.transform = sanitize_transform_unsnapped(SceneTransform {
         x: source.transform.x + direction_x * step,
         y: source.transform.y + direction_y * step,
         ..source.transform.clone()
@@ -456,6 +460,12 @@ fn apply_transform_patch(
 }
 
 fn sanitize_transform(transform: SceneTransform) -> SceneTransform {
+    snap_transform(sanitize_transform_unsnapped(transform))
+}
+
+// Clamp + clean without the edge/center snap — for precision operations
+// (arrow nudges) where the snap magnet must not undo the movement.
+fn sanitize_transform_unsnapped(transform: SceneTransform) -> SceneTransform {
     let (crop_left, crop_right) = normalize_crop_pair(
         clean_number(transform.crop_left),
         clean_number(transform.crop_right),
@@ -465,7 +475,7 @@ fn sanitize_transform(transform: SceneTransform) -> SceneTransform {
         clean_number(transform.crop_bottom),
     );
 
-    snap_transform(SceneTransform {
+    SceneTransform {
         x: clean_number(transform.x).clamp(-1.0, 2.0),
         y: clean_number(transform.y).clamp(-1.0, 2.0),
         width: clean_number(transform.width).clamp(0.0, 2.0),
@@ -474,7 +484,7 @@ fn sanitize_transform(transform: SceneTransform) -> SceneTransform {
         crop_top,
         crop_right,
         crop_bottom,
-    })
+    }
 }
 
 fn normalize_crop_pair(first: f64, second: f64) -> (f64, f64) {
@@ -951,6 +961,33 @@ mod tests {
 
         nudge_source(&mut scene, CAMERA_SOURCE_ID, 1.0, 0.0, true).unwrap();
         assert!((scene.sources[1].transform.x - (original_x + 0.02)).abs() < 0.0001);
+    }
+
+    #[test]
+    fn nudges_escape_the_snap_magnet() {
+        // The snap threshold (0.015) is larger than the small nudge step
+        // (0.005): with snapping applied, every arrow click from a snapped
+        // edge moved and instantly snapped back — a permanent no-op the user
+        // reported as "the arrows do nothing". Nudges skip the snap.
+        let mut scene = scene_from_capture_config(base_params());
+        let source_id = scene.sources[0].id.clone();
+        scene.sources[0].transform = SceneTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 0.5,
+            height: 0.5,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+
+        nudge_source(&mut scene, &source_id, 1.0, 0.0, false).unwrap();
+        assert!((scene.sources[0].transform.x - 0.005).abs() < 0.0001);
+
+        // Repeated clicks keep accumulating instead of re-snapping to 0.
+        nudge_source(&mut scene, &source_id, 1.0, 0.0, false).unwrap();
+        assert!((scene.sources[0].transform.x - 0.010).abs() < 0.0001);
     }
 
     #[test]
