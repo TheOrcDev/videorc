@@ -7333,7 +7333,7 @@ mod tests {
                 id: "backend-account-id".to_string(),
                 platform: StreamPlatform::Youtube,
                 account_id: "UC123".to_string(),
-                account_label: "Videogre Channel".to_string(),
+                account_label: "Videorc Channel".to_string(),
                 account_handle: None,
                 avatar_url: None,
                 scopes: Vec::new(),

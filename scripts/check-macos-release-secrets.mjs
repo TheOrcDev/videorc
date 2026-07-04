@@ -7,7 +7,7 @@ import {
   formatMacosReleaseGithubSecretsReport
 } from './lib/github-release-secrets.mjs'
 
-const repo = process.env.VIDEORC_RELEASE_GITHUB_REPO ?? 'TheOrcDev/videogre'
+const repo = process.env.VIDEORC_RELEASE_GITHUB_REPO ?? 'TheOrcDev/videorc'
 
 const command = spawnSync('gh', ['secret', 'list', '--repo', repo, '--json', 'name'], {
   encoding: 'utf8'

@@ -14,7 +14,7 @@ import {
 } from './process-census.mjs'
 
 test('ownedProcessLedgerPaths mirrors the desktop owned-process ledger locations', () => {
-  const workspaceRoot = '/repo/videogre'
+  const workspaceRoot = '/repo/videorc'
   const workspaceKey = createHash('sha256').update(workspaceRoot).digest('hex').slice(0, 16)
 
   assert.deepEqual(

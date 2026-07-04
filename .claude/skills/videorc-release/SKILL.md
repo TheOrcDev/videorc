@@ -6,7 +6,7 @@ description: Cut and publish a new signed + notarized macOS release of the Video
 # Videorc release
 
 Ship a new macOS version so existing users auto-update. This is the **executable
-procedure**; `docs/releases/release-runbook.md` (in the videogre repo) is the
+procedure**; `docs/releases/release-runbook.md` (in the videorc repo) is the
 source of truth — read it for the versioning model, rollback, and the "why".
 Keep this skill thin: point there, don't duplicate it.
 
@@ -41,7 +41,7 @@ on purpose: that gate demands `CSC_LINK`, which local builds don't have (the
 keychain cert signs instead).
 
 ```sh
-cd ~/projects/videogre
+cd ~/projects/videorc
 set -a
 . ~/.videorc-release.env
 . <(grep -E '^[[:space:]]*VIDEORC_DOWNLOAD_S3_' ~/projects/videorcweb/.env)

@@ -303,7 +303,7 @@ entitlement.
 
 ## OAuth Client IDs
 
-Production builds should inject Videogre-owned OAuth client IDs at backend compile time. Development and self-hosted builds can override those IDs at runtime.
+Production builds should inject Videorc-owned OAuth client IDs at backend compile time. Development and self-hosted builds can override those IDs at runtime.
 
 Bundled production defaults:
 
@@ -345,7 +345,7 @@ OAuth callback URLs (all providers):
 
 Twitch release blocker:
 
-- Register a Videogre-owned Twitch developer app before a production release candidate.
+- Register a Videorc-owned Twitch developer app before a production release candidate.
 - Register the three fixed loopback callback URLs listed above.
 - Bundle the public app client ID with `VIDEORC_BUNDLED_TWITCH_CLIENT_ID` when building
   the backend.

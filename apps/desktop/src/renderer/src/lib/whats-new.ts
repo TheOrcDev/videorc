@@ -1,5 +1,5 @@
 // In-app "What's new": pulls the published changelog from videorc-web
-// (/api/changelog, fed by videogre changelog/ on each release) and decides
+// (/api/changelog, fed by videorc changelog/ on each release) and decides
 // when the post-update dialog should appear.
 
 import { VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'

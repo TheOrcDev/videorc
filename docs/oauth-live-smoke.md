@@ -130,7 +130,7 @@ VIDEORC_SMOKE_TWITCH_ACCOUNT_READY=1
 Twitch currently requires a runtime client secret because the app's Twitch OAuth provider config is not PKCE-only.
 
 Twitch release blocker: a production candidate is not "out-of-the-box" ready until a
-Videogre-owned Twitch developer app exists, `VIDEORC_BUNDLED_TWITCH_CLIENT_ID` is
+Videorc-owned Twitch developer app exists, `VIDEORC_BUNDLED_TWITCH_CLIENT_ID` is
 injected at backend build time, and `VIDEORC_TWITCH_CLIENT_SECRET` is supplied in the
 smoke/runtime environment. The backend already requests
 `channel:manage:broadcast`, `channel:read:stream_key`, and `user:read:chat`; the

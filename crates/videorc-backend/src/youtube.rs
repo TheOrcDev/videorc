@@ -339,8 +339,8 @@ pub async fn prepare_youtube_broadcast(
             .bearer_auth(&request.access_token)
             .json(&json!({
                 "snippet": {
-                    "title": format!("Videogre {}", request.account_label),
-                    "description": "Created by Videogre",
+                    "title": format!("Videorc {}", request.account_label),
+                    "description": "Created by Videorc",
                 },
                 "cdn": {
                     "frameRate": youtube_frame_rate(request.video.fps),
@@ -1024,7 +1024,7 @@ mod tests {
             YouTubePrepareRequest {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),
-                account_label: "Videogre Channel".to_string(),
+                account_label: "Videorc Channel".to_string(),
                 metadata,
                 video: VideoSettings {
                     preset: VideoPreset::Stream1080p60,
@@ -1165,7 +1165,7 @@ mod tests {
             YouTubePrepareRequest {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),
-                account_label: "Videogre Channel".to_string(),
+                account_label: "Videorc Channel".to_string(),
                 metadata,
                 video: VideoSettings {
                     preset: VideoPreset::Stream1080p60,

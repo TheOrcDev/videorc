@@ -50,7 +50,7 @@ checker (`VIDEORC_ENABLE_AUTO_UPDATE=1`) — read the feed.
 ## Cut a release
 
 ```sh
-cd ~/projects/videogre
+cd ~/projects/videorc
 
 # 1. Bump the version (the update key), write the changelog entry, and commit.
 #    Edit apps/desktop/package.json -> "version": "0.9.1"

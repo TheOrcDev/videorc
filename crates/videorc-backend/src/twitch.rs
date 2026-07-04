@@ -379,7 +379,7 @@ mod tests {
                 access_token: "access-token".to_string(),
                 client_id: "client-id".to_string(),
                 account_id: "141981764".to_string(),
-                account_label: "Videogre Twitch".to_string(),
+                account_label: "Videorc Twitch".to_string(),
                 metadata,
                 api_base_url: Some(format!("http://{address}")),
             },

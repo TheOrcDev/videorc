@@ -24,7 +24,7 @@ export const VIDEORC_WEB_LINKS = {
   desktopAuthorize: `${VIDEORC_WEB_ORIGIN}/desktop/authorize`,
   premium: `${VIDEORC_WEB_ORIGIN}/premium`,
   billing: `${VIDEORC_WEB_ORIGIN}/account/billing`,
-  // Published changelog (compiled from videogre changelog/ on each release):
+  // Published changelog (compiled from videorc changelog/ on each release):
   // JSON for the in-app What's New, pages for humans.
   changelogApi: `${VIDEORC_WEB_ORIGIN}/api/changelog`,
   changelog: `${VIDEORC_WEB_ORIGIN}/changelog`

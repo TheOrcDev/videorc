@@ -24,11 +24,11 @@ Install the same named secrets on Videorc after exporting the unused
 AgentPacks certificate material from the secure source of truth:
 
 ```sh
-gh secret set CSC_LINK --repo TheOrcDev/videogre --body-file ./DeveloperIDApplication.p12.base64
-gh secret set CSC_KEY_PASSWORD --repo TheOrcDev/videogre
-gh secret set APPLE_ID --repo TheOrcDev/videogre
-gh secret set APPLE_APP_SPECIFIC_PASSWORD --repo TheOrcDev/videogre
-gh secret set APPLE_TEAM_ID --repo TheOrcDev/videogre
+gh secret set CSC_LINK --repo TheOrcDev/videorc --body-file ./DeveloperIDApplication.p12.base64
+gh secret set CSC_KEY_PASSWORD --repo TheOrcDev/videorc
+gh secret set APPLE_ID --repo TheOrcDev/videorc
+gh secret set APPLE_APP_SPECIFIC_PASSWORD --repo TheOrcDev/videorc
+gh secret set APPLE_TEAM_ID --repo TheOrcDev/videorc
 ```
 
 The local keychain identity currently expected for beta signing is:
@@ -82,16 +82,16 @@ base64 -i "$tmp_dir/DeveloperIDApplication.p12" \
 Install the generated values:
 
 ```sh
-gh secret set CSC_LINK --repo TheOrcDev/videogre --body-file "$tmp_dir/DeveloperIDApplication.p12.base64"
-printf '%s' "$CSC_KEY_PASSWORD" | gh secret set CSC_KEY_PASSWORD --repo TheOrcDev/videogre --body-file -
+gh secret set CSC_LINK --repo TheOrcDev/videorc --body-file "$tmp_dir/DeveloperIDApplication.p12.base64"
+printf '%s' "$CSC_KEY_PASSWORD" | gh secret set CSC_KEY_PASSWORD --repo TheOrcDev/videorc --body-file -
 ```
 
 Then set the notarization credentials:
 
 ```sh
-gh secret set APPLE_ID --repo TheOrcDev/videogre
-gh secret set APPLE_APP_SPECIFIC_PASSWORD --repo TheOrcDev/videogre
-printf '%s' 'C2PA37RB58' | gh secret set APPLE_TEAM_ID --repo TheOrcDev/videogre --body-file -
+gh secret set APPLE_ID --repo TheOrcDev/videorc
+gh secret set APPLE_APP_SPECIFIC_PASSWORD --repo TheOrcDev/videorc
+printf '%s' 'C2PA37RB58' | gh secret set APPLE_TEAM_ID --repo TheOrcDev/videorc --body-file -
 ```
 
 Confirm the remote repository has the required release secrets before spending

@@ -892,7 +892,7 @@ fn provider_credential_status(
                     format!("{label} OAuth is using {client_id_env}.")
                 }
                 OAuthCredentialSource::Bundled => {
-                    format!("{label} OAuth is using the bundled Videogre client ID.")
+                    format!("{label} OAuth is using the bundled Videorc client ID.")
                 }
                 OAuthCredentialSource::Missing => {
                     unreachable!("client ID presence was checked above")
@@ -1279,8 +1279,8 @@ mod tests {
                 "items": [{
                     "id": "UC123",
                     "snippet": {
-                        "title": "Videogre Channel",
-                        "customUrl": "@videogre",
+                        "title": "Videorc Channel",
+                        "customUrl": "@videorc",
                         "thumbnails": {
                             "high": { "url": "https://yt.example/avatar.jpg" }
                         }
@@ -1291,8 +1291,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(profile.account_id, "UC123");
-        assert_eq!(profile.account_label, "Videogre Channel");
-        assert_eq!(profile.account_handle.as_deref(), Some("@videogre"));
+        assert_eq!(profile.account_label, "Videorc Channel");
+        assert_eq!(profile.account_handle.as_deref(), Some("@videorc"));
         assert_eq!(
             profile.avatar_url.as_deref(),
             Some("https://yt.example/avatar.jpg")
@@ -1306,8 +1306,8 @@ mod tests {
             serde_json::json!({
                 "data": {
                     "id": "x-123",
-                    "name": "Videogre",
-                    "username": "videogre",
+                    "name": "Videorc",
+                    "username": "videorc",
                     "profile_image_url": "https://x.example/avatar.jpg"
                 }
             }),
@@ -1315,8 +1315,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(profile.account_id, "x-123");
-        assert_eq!(profile.account_label, "Videogre");
-        assert_eq!(profile.account_handle.as_deref(), Some("@videogre"));
+        assert_eq!(profile.account_label, "Videorc");
+        assert_eq!(profile.account_handle.as_deref(), Some("@videorc"));
         assert_eq!(
             profile.avatar_url.as_deref(),
             Some("https://x.example/avatar.jpg")

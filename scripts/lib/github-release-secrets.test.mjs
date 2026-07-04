@@ -26,12 +26,12 @@ describe('evaluateMacosReleaseGithubSecrets', () => {
       presentSecretNames: ['CSC_LINK', 'APPLE_ID', 'VIDEORC_DOWNLOAD_S3_BUCKET']
     })
     const report = formatMacosReleaseGithubSecretsReport(result, {
-      repo: 'TheOrcDev/videogre'
+      repo: 'TheOrcDev/videorc'
     })
 
     assert.equal(result.ok, false)
     assert.match(report, /macos-release-github-secrets: FAIL/)
-    assert.match(report, /repo: TheOrcDev\/videogre/)
+    assert.match(report, /repo: TheOrcDev\/videorc/)
     assert.match(report, /required: CSC_KEY_PASSWORD/)
     assert.match(report, /required: APPLE_APP_SPECIFIC_PASSWORD/)
     assert.match(report, /required: VIDEORC_DOWNLOAD_S3_SECRET_ACCESS_KEY/)

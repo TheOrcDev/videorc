@@ -34,7 +34,7 @@ describe('runtime info helpers', () => {
     const info = buildRuntimeInfo({
       appVersion: '9.9.9-test',
       execPath: '/Applications/Electron.app/Contents/MacOS/Electron',
-      captureExecPath: '/Users/orcdev/projects/videogre/target/debug/videorc-backend',
+      captureExecPath: '/Users/orcdev/projects/videorc/target/debug/videorc-backend',
       env: {}
     })
 
@@ -43,7 +43,7 @@ describe('runtime info helpers', () => {
       permissionTargetName: 'Electron',
       permissionTargetPath: '/Applications/Electron.app',
       capturePermissionTargetName: 'videorc-backend',
-      capturePermissionTargetPath: '/Users/orcdev/projects/videogre/target/debug/videorc-backend'
+      capturePermissionTargetPath: '/Users/orcdev/projects/videorc/target/debug/videorc-backend'
     })
   })
 
