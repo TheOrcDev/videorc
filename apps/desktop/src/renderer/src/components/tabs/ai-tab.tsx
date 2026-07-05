@@ -15,6 +15,7 @@ import { useEffect, type ReactElement, type ReactNode } from 'react'
 import { toast } from 'sonner'
 
 import { PanelSection } from '@/components/panel-section'
+import { SessionPoster } from '@/components/tabs/library-tab'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -41,7 +42,11 @@ import {
   objectField
 } from '@/lib/format'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
-import { PUBLISH_PACK_CONTENTS, PUBLISH_PIPELINE, composeYouTubeDescription } from '@/lib/publish-pipeline'
+import {
+  PUBLISH_PACK_CONTENTS,
+  PUBLISH_PIPELINE,
+  composeYouTubeDescription
+} from '@/lib/publish-pipeline'
 
 export function AiTab({
   selectedSessionId,
@@ -145,10 +150,14 @@ export function AiTab({
                     type="button"
                     onClick={() => setSelectedSessionId(session.id)}
                   >
+                    <SessionPoster session={session} />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">{session.title}</p>
                       <p className="truncate text-xs text-muted-foreground">
-                        {dayLabel(session.startedAt)} · {session.mode} · {session.status}
+                        {dayLabel(session.startedAt)}
+                        {session.sceneLabel
+                          ? ` · ${session.sceneLabel}`
+                          : ` · ${session.mode}`} · {session.status}
                       </p>
                     </div>
                     <div className="flex shrink-0 gap-0.5" title="Pipeline progress">
@@ -365,7 +374,9 @@ function ArtifactView({
           {description ? <p className="text-sm text-muted-foreground">{description}</p> : null}
         </>
       ) : null,
-    summary: summary ? <p className="text-sm whitespace-pre-line">{artifactText(summary)}</p> : null,
+    summary: summary ? (
+      <p className="text-sm whitespace-pre-line">{artifactText(summary)}</p>
+    ) : null,
     chapters: chapterItems.length ? (
       <ol className="flex flex-col gap-1.5">
         {chapterItems.map((chapter) => (
@@ -477,63 +488,63 @@ function ArtifactView({
                 Zoom, cleanup, and health suggestions appear here after a workflow run.
               </p>
             ) : null}
-        {smartZoomItems.length ? (
-          <ArtifactSection title="Smart zoom">
-            <InsightList
-              badgeField="timestamp"
-              details={[
-                ['subject', 'Subject'],
-                ['reason', 'Why']
-              ]}
-              icon={Crosshair}
-              items={smartZoomItems}
-              primaryField="action"
-            />
-          </ArtifactSection>
-        ) : null}
-        {noiseCleanupItems.length || silenceRemovalItems.length ? (
-          <ArtifactSection title="Cleanup suggestions">
-            <div className="flex flex-col gap-3">
-              {noiseCleanupItems.length ? (
-                <InsightList
-                  details={[
-                    ['suggestion', 'Suggestion'],
-                    ['confidence', 'Confidence']
-                  ]}
-                  icon={Waveform}
-                  items={noiseCleanupItems}
-                  primaryField="issue"
-                />
-              ) : null}
-              {silenceRemovalItems.length ? (
+            {smartZoomItems.length ? (
+              <ArtifactSection title="Smart zoom">
                 <InsightList
                   badgeField="timestamp"
                   details={[
-                    ['reason', 'Reason'],
-                    ['editSuggestion', 'Edit']
+                    ['subject', 'Subject'],
+                    ['reason', 'Why']
                   ]}
-                  icon={Scissors}
-                  items={silenceRemovalItems}
-                  primaryField="reason"
+                  icon={Crosshair}
+                  items={smartZoomItems}
+                  primaryField="action"
                 />
-              ) : null}
-            </div>
-          </ArtifactSection>
-        ) : null}
-        {healthItems.length ? (
-          <ArtifactSection title="Health assistant">
-            <InsightList
-              badgeField="level"
-              details={[
-                ['explanation', 'Explanation'],
-                ['action', 'Action']
-              ]}
-              icon={Warning}
-              items={healthItems}
-              primaryField="issue"
-            />
-          </ArtifactSection>
-        ) : null}
+              </ArtifactSection>
+            ) : null}
+            {noiseCleanupItems.length || silenceRemovalItems.length ? (
+              <ArtifactSection title="Cleanup suggestions">
+                <div className="flex flex-col gap-3">
+                  {noiseCleanupItems.length ? (
+                    <InsightList
+                      details={[
+                        ['suggestion', 'Suggestion'],
+                        ['confidence', 'Confidence']
+                      ]}
+                      icon={Waveform}
+                      items={noiseCleanupItems}
+                      primaryField="issue"
+                    />
+                  ) : null}
+                  {silenceRemovalItems.length ? (
+                    <InsightList
+                      badgeField="timestamp"
+                      details={[
+                        ['reason', 'Reason'],
+                        ['editSuggestion', 'Edit']
+                      ]}
+                      icon={Scissors}
+                      items={silenceRemovalItems}
+                      primaryField="reason"
+                    />
+                  ) : null}
+                </div>
+              </ArtifactSection>
+            ) : null}
+            {healthItems.length ? (
+              <ArtifactSection title="Health assistant">
+                <InsightList
+                  badgeField="level"
+                  details={[
+                    ['explanation', 'Explanation'],
+                    ['action', 'Action']
+                  ]}
+                  icon={Warning}
+                  items={healthItems}
+                  primaryField="issue"
+                />
+              </ArtifactSection>
+            ) : null}
           </CollapsibleContent>
         </Collapsible>
 

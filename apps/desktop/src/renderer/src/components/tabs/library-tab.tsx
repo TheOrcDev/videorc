@@ -454,7 +454,11 @@ function LibraryRow({
 
 /** Poster with one lazy backfill attempt: older sessions have no poster yet;
  * a 404 triggers a single sessions.poster round-trip (idle-aware backend). */
-function SessionPoster({ session }: { session: SessionSummary }): ReactElement {
+export function SessionPoster({
+  session
+}: {
+  session: Pick<SessionSummary, 'id' | 'durationMs'>
+}): ReactElement {
   const { connection, ensureSessionPoster } = useStudio()
   const [attempt, setAttempt] = useState(0)
   const [failed, setFailed] = useState(false)
