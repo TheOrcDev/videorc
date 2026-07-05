@@ -1,5 +1,13 @@
 # Plan 016: Add the open-core entitlement boundary for premium features
 
+> **Addendum 2026-07-05**: the `VIDEORC_PREMIUM_FEATURES=1` unlock described
+> below was removed — a release binary honored it at runtime, which defeated
+> the boundary. The variable is now downgrade-only (`=0` forces Basic for gate
+> testing); premium comes from the signed-in account's verified entitlement,
+> and dev builds resolve to Developer on their own (smokes no longer set the
+> variable). See `docs/distribution.md` ("Open-Core Capability Boundary") for
+> the current enforcement story.
+
 > **Executor instructions**: Follow this plan step by step. Run every
 > verification command and confirm the expected result before moving to the next
 > step. If a STOP condition occurs, stop and report; do not improvise.

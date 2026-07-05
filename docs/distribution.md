@@ -289,17 +289,25 @@ and purchase flows belong to the product/website layer.
 | Livestreaming destinations | Not included in free/core.                                                             | Included: manual RTMP, provider destinations, and multistreaming.                        |
 | Cloud AI workflow          | Not included in free/core.                                                             | Included when the user grants cloud AI consent and required API credentials are present. |
 
-Developer and self-hosted validation can opt into premium-only code paths with
-an explicit environment override:
+How the boundary is enforced (since 2026-07-05 there is no runtime unlock):
 
-```sh
-VIDEORC_PREMIUM_FEATURES=1
-```
+- **Release builds** resolve to Basic unless the signed-in videorc.com account
+  hydrates a verified premium entitlement. No environment variable can raise
+  the tier — `VIDEORC_PREMIUM_FEATURES` is downgrade-only: `=0`/`basic` forces
+  Basic (for exercising the gates), every other value is ignored with a
+  warning.
+- **Debug/dev builds** resolve to the Developer tier automatically, which is
+  what the smokes and baselines rely on; they must not depend on a real
+  signed-in account.
+- **Cloud AI** is additionally server-bound: transcription, titles, chapters,
+  and live-caption tokens are minted by videorc.com for premium accounts, so a
+  patched client cannot reach them.
 
-Smokes that start livestreaming or cloud AI should set this override explicitly.
 Local recording, native preview, source/layout controls, the library, local
-repair/remux, and local audio extraction without upload must not require premium
-entitlement.
+repair/remux, and local audio extraction without upload must not require
+premium entitlement. Anyone distributing a modified build must also follow
+[TRADEMARK.md](../TRADEMARK.md) (rebrand, own bundle id, own OAuth clients,
+own feed/backend).
 
 ## OAuth Client IDs
 
