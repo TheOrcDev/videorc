@@ -293,6 +293,7 @@ mod macos {
             mtm: MainThreadMarker,
         ) -> Self {
             let (drawable_width, drawable_height) = bounds.drawable_size();
+            log_surface_sizing("create", bounds);
             let layer = make_preview_layer(presenter.device(), drawable_width, drawable_height);
             let view = NSView::initWithFrame(NSView::alloc(mtm), view_frame(bounds));
             // Layer-HOSTING contract: setLayer must come before setWantsLayer,
@@ -323,6 +324,9 @@ mod macos {
 
         pub fn set_bounds(&mut self, bounds: NativePreviewHostBounds) {
             let (drawable_width, drawable_height) = bounds.drawable_size();
+            if sizing_inputs(self.bounds) != sizing_inputs(bounds) {
+                log_surface_sizing("update", bounds);
+            }
             self.layer.setDrawableSize(objc2_core_foundation::CGSize {
                 width: drawable_width,
                 height: drawable_height,
@@ -330,6 +334,30 @@ mod macos {
             self.view.setFrame(view_frame(bounds));
             self.bounds = bounds;
         }
+    }
+
+    fn sizing_inputs(bounds: NativePreviewHostBounds) -> (u64, u64, u64) {
+        (
+            bounds.width.max(0.0).to_bits(),
+            bounds.height.max(0.0).to_bits(),
+            bounds.scale_factor.max(0.0).to_bits(),
+        )
+    }
+
+    // PT1 diagnostic (preview res/tearing plan): one change-triggered line that
+    // pins whether a blurry preview is a bounds/scale problem (scale=1 on a
+    // Retina panel, tiny drawable) before anyone touches the present path.
+    fn log_surface_sizing(reason: &str, bounds: NativePreviewHostBounds) {
+        let (drawable_width, drawable_height) = bounds.drawable_size();
+        tracing::info!(
+            "[videorc-native-preview-sizing] {reason} bounds_pts={:.0}x{:.0} scale={:.2} drawable_px={:.0}x{:.0} visible={:?}",
+            bounds.width,
+            bounds.height,
+            bounds.scale_factor,
+            drawable_width,
+            drawable_height,
+            bounds.visible,
+        );
     }
 
     #[derive(Debug)]

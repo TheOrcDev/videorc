@@ -1453,6 +1453,20 @@ mod macos {
             config.include_cursor,
             config.exclude_current_process_windows,
         );
+        // PT1 diagnostic (preview res/tearing plan): pins whether a soft source
+        // was captured below its native pixel size (e.g. the window path
+        // reporting points) before blaming the surface or present path.
+        tracing::info!(
+            "[videorc-capture-sizing] kind={:?} native={}x{} requested={}x{} session={}x{} scales_to_fit={}",
+            config.source_kind,
+            capture_request.native_width,
+            capture_request.native_height,
+            capture_request.requested_width,
+            capture_request.requested_height,
+            config.video.width,
+            config.video.height,
+            capture_request.scales_to_fit,
+        );
         let stream_config = unsafe { SCStreamConfiguration::new() };
         configure_stream(&stream_config, &capture_request);
         let delegate = ScreenPreviewDelegate::new(Arc::clone(&shared));
