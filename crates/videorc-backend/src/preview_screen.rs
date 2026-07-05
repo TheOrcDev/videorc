@@ -784,6 +784,37 @@ fn choose_preview_dimensions(
     (width, height)
 }
 
+// Backing scales live in [1, 4] on shipping Macs (2x Retina, fractional
+// "looks like" modes land between); anything outside that range is a broken
+// display-mode readback and must not distort the capture request.
+fn clamp_backing_scale(scale: f64) -> f64 {
+    if scale.is_finite() {
+        scale.clamp(1.0, 4.0)
+    } else {
+        1.0
+    }
+}
+
+fn points_to_pixels(points: f64, scale: f64) -> u32 {
+    (points.max(0.0) * clamp_backing_scale(scale))
+        .round()
+        .max(1.0) as u32
+}
+
+fn rect_contains_point(
+    origin_x: f64,
+    origin_y: f64,
+    width: f64,
+    height: f64,
+    x: f64,
+    y: f64,
+) -> bool {
+    x >= origin_x
+        && x < origin_x + width.max(0.0)
+        && y >= origin_y
+        && y < origin_y + height.max(0.0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PreviewScreenCaptureRequest {
     native_width: u32,
@@ -1622,9 +1653,15 @@ mod macos {
                         &window,
                     )
                 };
+                // SCWindow.frame is in display POINTS; sizing the capture from
+                // it directly runs at half resolution on Retina. Convert to
+                // real pixels via the containing display's point→pixel scale,
+                // mirroring the display path's pixel_width intent (see
+                // display_capture_dimensions).
+                let scale = window_backing_scale(content, &frame);
                 Ok(SelectedContent {
-                    source_width: frame.size.width.round().max(1.0) as u32,
-                    source_height: frame.size.height.round().max(1.0) as u32,
+                    source_width: points_to_pixels(frame.size.width, scale),
+                    source_height: points_to_pixels(frame.size.height, scale),
                     filter,
                 })
             }
@@ -2053,6 +2090,52 @@ mod macos {
         value.max(1) as u32
     }
 
+    // Resolve the point→pixel scale of the display containing the window's
+    // midpoint (SCWindow.frame and SCDisplay.frame share the global CG point
+    // space). Falls back to the first display's scale, then 1.0 — a wrong 1.0
+    // only reproduces the old too-soft behavior, never an upscaled capture,
+    // because choose_preview_dimensions still clamps at the source size.
+    fn window_backing_scale(
+        content: &SCShareableContent,
+        window_frame: &objc2_core_foundation::CGRect,
+    ) -> f64 {
+        let mid_x = window_frame.origin.x + window_frame.size.width / 2.0;
+        let mid_y = window_frame.origin.y + window_frame.size.height / 2.0;
+        let displays = unsafe { content.displays() };
+        let mut first_display_scale: Option<f64> = None;
+        for index in 0..displays.count() {
+            let display = displays.objectAtIndex(index);
+            let scale =
+                display_point_scale(unsafe { display.displayID() }, unsafe { display.width() }
+                    as f64);
+            if first_display_scale.is_none() {
+                first_display_scale = scale;
+            }
+            let frame = unsafe { display.frame() };
+            let contains = rect_contains_point(
+                frame.origin.x,
+                frame.origin.y,
+                frame.size.width,
+                frame.size.height,
+                mid_x,
+                mid_y,
+            );
+            if contains && let Some(scale) = scale {
+                return scale;
+            }
+        }
+        first_display_scale.unwrap_or(1.0)
+    }
+
+    fn display_point_scale(display_id: CGDirectDisplayID, logical_width: f64) -> Option<f64> {
+        if !(logical_width.is_finite() && logical_width >= 1.0) {
+            return None;
+        }
+        let mode = CGDisplayCopyDisplayMode(display_id)?;
+        let pixel_width = positive_usize_u32(CGDisplayMode::pixel_width(Some(&mode)))?;
+        Some(clamp_backing_scale(f64::from(pixel_width) / logical_width))
+    }
+
     fn display_capture_dimensions(
         display_id: CGDirectDisplayID,
         fallback_width: u32,
@@ -2110,6 +2193,55 @@ mod tests {
     use crate::protocol::{SourceSelection, VideoPreset};
     use crate::storage::Database;
     use tokio::sync::broadcast;
+
+    #[test]
+    fn backing_scale_clamps_to_shipping_range() {
+        assert_eq!(clamp_backing_scale(1.0), 1.0);
+        assert_eq!(clamp_backing_scale(2.0), 2.0);
+        assert!((clamp_backing_scale(1.497) - 1.497).abs() < 1e-9);
+        assert_eq!(clamp_backing_scale(0.5), 1.0);
+        assert_eq!(clamp_backing_scale(8.0), 4.0);
+        assert_eq!(clamp_backing_scale(f64::NAN), 1.0);
+        assert_eq!(clamp_backing_scale(f64::INFINITY), 1.0);
+    }
+
+    #[test]
+    fn window_points_convert_to_pixels_per_scale() {
+        // The PT2 regression: a 1200x800-pt window on a 2x display must
+        // request a 2400x1600-px capture, not 1200x800.
+        assert_eq!(points_to_pixels(1200.0, 2.0), 2400);
+        assert_eq!(points_to_pixels(800.0, 2.0), 1600);
+        assert_eq!(points_to_pixels(1200.0, 1.0), 1200);
+        // Fractional "looks like" modes round to whole pixels.
+        assert_eq!(points_to_pixels(1000.0, 1.497), 1497);
+        // Degenerate inputs stay harmless.
+        assert_eq!(points_to_pixels(0.0, 2.0), 1);
+        assert_eq!(points_to_pixels(-50.0, 2.0), 1);
+    }
+
+    #[test]
+    fn window_pixel_capture_still_clamps_to_session_size() {
+        // Doubling the source must not upscale the REQUEST past the session
+        // output: the existing chooser stays the single clamp.
+        let (width, height) = choose_preview_dimensions(2400, 1600, &test_video());
+        let video = test_video();
+        assert!(width <= video.width && height <= video.height);
+        assert!(width >= 1 && height >= 1);
+    }
+
+    #[test]
+    fn rect_containment_handles_negative_origin_displays() {
+        // A second display arranged left of the primary has a negative origin
+        // in the global CG space.
+        assert!(rect_contains_point(
+            -1920.0, 0.0, 1920.0, 1080.0, -960.0, 540.0
+        ));
+        assert!(!rect_contains_point(
+            -1920.0, 0.0, 1920.0, 1080.0, 10.0, 540.0
+        ));
+        assert!(!rect_contains_point(0.0, 0.0, 1920.0, 1080.0, 1920.0, 0.0));
+        assert!(!rect_contains_point(0.0, 0.0, -10.0, -10.0, 0.0, 0.0));
+    }
 
     fn test_state() -> AppState {
         let (events, _) = broadcast::channel(16);
