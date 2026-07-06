@@ -3,6 +3,8 @@
 // Layout is pure (measurement injected) so wrapping/sizing is unit-testable;
 // the canvas painter is a thin shell over it.
 
+import { layoutCommentHighlight } from '@/lib/comment-highlight'
+
 export type CaptionTextSize = 's' | 'm' | 'l'
 export type CaptionPosition = 'top' | 'bottom'
 
@@ -311,7 +313,9 @@ export async function renderCommentHighlightPng(params: {
   avatarUrl: string | null
   canvasWidth: number
 }): Promise<string | null> {
-  const { layoutCommentHighlight } = await import('@/lib/comment-highlight')
+  // Q8 (plan 022): use-studio already imports comment-highlight statically, so
+  // the dynamic import here never split a chunk (Vite warned) — import it
+  // statically like every other consumer.
   const { monogramInitials } = await import('@/lib/chat-avatar')
   const measurer = canvasMeasurer()
   if (!measurer) {
