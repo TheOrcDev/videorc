@@ -239,10 +239,12 @@ export function LayoutTab(): ReactElement {
                     </ToggleGroup>
                   </Field>
 
-                  <div className="grid grid-cols-2 gap-4">
-                    <Field>
+                  <div className="grid min-w-0 grid-cols-2 gap-4">
+                    <Field className="min-w-0">
                       <FieldLabel>Size</FieldLabel>
                       <ToggleGroup
+                        className="w-full"
+                        spacing={0}
                         type="single"
                         value={layout.cameraSize}
                         variant="outline"
@@ -250,28 +252,57 @@ export function LayoutTab(): ReactElement {
                           value && applyCameraPreset({ cameraSize: value as CameraSize })
                         }
                       >
-                        <ToggleGroupItem value="small">S</ToggleGroupItem>
-                        <ToggleGroupItem value="medium">M</ToggleGroupItem>
-                        <ToggleGroupItem value="large">L</ToggleGroupItem>
+                        <ToggleGroupItem className="flex-1" value="small">
+                          S
+                        </ToggleGroupItem>
+                        <ToggleGroupItem className="flex-1" value="medium">
+                          M
+                        </ToggleGroupItem>
+                        <ToggleGroupItem className="flex-1" value="large">
+                          L
+                        </ToggleGroupItem>
                       </ToggleGroup>
                     </Field>
-                    <Field>
+                    <Field className="min-w-0">
                       <FieldLabel>Shape</FieldLabel>
                       <ToggleGroup
+                        className="w-full"
+                        spacing={0}
                         type="single"
                         value={layout.cameraShape}
                         variant="outline"
                         onValueChange={(value) =>
-                          value && applyLayoutPatch({ cameraShape: value as CameraShape })
+                          value &&
+                          applyLayoutPatch(
+                            // Rounded means a rounded SQUARE by default (owner
+                            // decision 2026-07-06) — picking it snaps the aspect
+                            // to square in the same gesture; the Aspect toggle
+                            // below still allows wide/portrait afterwards.
+                            value === 'rounded'
+                              ? { cameraShape: 'rounded', cameraAspect: 'square' }
+                              : { cameraShape: value as CameraShape }
+                          )
                         }
                       >
-                        <ToggleGroupItem data-videorc-camera-shape="rectangle" value="rectangle">
+                        <ToggleGroupItem
+                          className="min-w-0 flex-1 px-1 text-xs"
+                          data-videorc-camera-shape="rectangle"
+                          value="rectangle"
+                        >
                           Rect
                         </ToggleGroupItem>
-                        <ToggleGroupItem data-videorc-camera-shape="rounded" value="rounded">
-                          Rounded
+                        <ToggleGroupItem
+                          className="min-w-0 flex-1 px-1 text-xs"
+                          data-videorc-camera-shape="rounded"
+                          value="rounded"
+                        >
+                          Round
                         </ToggleGroupItem>
-                        <ToggleGroupItem data-videorc-camera-shape="circle" value="circle">
+                        <ToggleGroupItem
+                          className="min-w-0 flex-1 px-1 text-xs"
+                          data-videorc-camera-shape="circle"
+                          value="circle"
+                        >
                           Circle
                         </ToggleGroupItem>
                       </ToggleGroup>
@@ -296,6 +327,8 @@ export function LayoutTab(): ReactElement {
                     <Field>
                       <FieldLabel>Aspect</FieldLabel>
                       <ToggleGroup
+                        className="w-full"
+                        spacing={0}
                         type="single"
                         value={layout.cameraAspect}
                         variant="outline"
@@ -303,13 +336,25 @@ export function LayoutTab(): ReactElement {
                           value && applyLayoutPatch({ cameraAspect: value as CameraAspect })
                         }
                       >
-                        <ToggleGroupItem data-videorc-camera-aspect="source" value="source">
+                        <ToggleGroupItem
+                          className="min-w-0 flex-1 px-1 text-xs"
+                          data-videorc-camera-aspect="source"
+                          value="source"
+                        >
                           Wide
                         </ToggleGroupItem>
-                        <ToggleGroupItem data-videorc-camera-aspect="square" value="square">
+                        <ToggleGroupItem
+                          className="min-w-0 flex-1 px-1 text-xs"
+                          data-videorc-camera-aspect="square"
+                          value="square"
+                        >
                           Square
                         </ToggleGroupItem>
-                        <ToggleGroupItem data-videorc-camera-aspect="portrait" value="portrait">
+                        <ToggleGroupItem
+                          className="min-w-0 flex-1 px-1 text-xs"
+                          data-videorc-camera-aspect="portrait"
+                          value="portrait"
+                        >
                           Portrait
                         </ToggleGroupItem>
                       </ToggleGroup>
