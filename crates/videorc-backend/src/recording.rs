@@ -272,6 +272,18 @@ pub fn default_recordings_dir() -> PathBuf {
         .join("Recordings")
 }
 
+/// FX8: Library titles read in the user's wall clock. Generic over the zone so
+/// the conversion is testable with a fixed offset (`Local` at the call site).
+fn session_title<Tz: chrono::TimeZone>(started_at: &DateTime<Utc>, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    format!(
+        "Session {}",
+        started_at.with_timezone(tz).format("%Y-%m-%d %H:%M")
+    )
+}
+
 fn default_video_settings() -> VideoSettings {
     VideoSettings {
         preset: VideoPreset::Tutorial1440p30,
@@ -332,6 +344,9 @@ pub async fn start_session(
 
     let session_id = Uuid::new_v4().to_string();
     let started_at = Utc::now();
+    // FX8: the display title reads in the user's wall clock — it sat next to
+    // Library's locally-rendered date column showing a different time. The
+    // stored `started_at` (RFC3339 UTC) and the output filename stay UTC.
     let output_path = params.output.record_enabled.then(|| {
         output_dir.join(format!(
             "videorc-session-{}.mkv",
@@ -382,7 +397,7 @@ pub async fn start_session(
 
     state.database.create_session(&NewSession {
         id: session_id.clone(),
-        title: format!("Session {}", started_at.format("%Y-%m-%d %H:%M")),
+        title: session_title(&started_at, &chrono::Local),
         started_at: started_at.to_rfc3339(),
         mode: mode.to_string(),
         output_path: output_path.as_ref().map(|path| path.display().to_string()),
@@ -6878,6 +6893,20 @@ mod tests {
         StreamTargetState, default_stream_targets,
     };
     use tokio::sync::broadcast;
+
+    #[test]
+    fn session_title_renders_in_the_target_zone_not_utc() {
+        use chrono::{FixedOffset, TimeZone};
+        // UTC 10:13 in a +02:00 zone must read 12:13 — the by-eye finding was
+        // a UTC title sitting next to Library's local 12:13 date column.
+        let started_at = Utc.with_ymd_and_hms(2026, 7, 6, 10, 13, 0).unwrap();
+        let plus_two = FixedOffset::east_opt(2 * 3600).unwrap();
+        assert_eq!(
+            session_title(&started_at, &plus_two),
+            "Session 2026-07-06 12:13"
+        );
+        assert_eq!(session_title(&started_at, &Utc), "Session 2026-07-06 10:13");
+    }
 
     #[test]
     fn screen_overlay_writer_honors_stop_before_writing_frame() {
