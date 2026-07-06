@@ -2,7 +2,7 @@ import { ArrowSquareOut, Monitor, VideoCamera } from '@phosphor-icons/react'
 import { useRef, useState, type ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
-import type { Scene, SceneSource } from '@/lib/backend'
+import type { CameraShape, Scene, SceneSource } from '@/lib/backend'
 import { cn } from '@/lib/utils'
 
 // SC1 (Scene rework): a pure-SVG schematic of the committed composition. The
@@ -19,6 +19,8 @@ export function SceneStage({
   selectedSourceId,
   hasBackground,
   previewOpen,
+  cameraShape = 'rectangle',
+  cameraCornerRadiusPct = 12,
   dragEnabled = false,
   onSelectSource,
   onTogglePreview,
@@ -29,6 +31,10 @@ export function SceneStage({
   selectedSourceId: string | null
   hasBackground: boolean
   previewOpen: boolean
+  /** Camera bubble shape — the stage must not lie about rounded/circle corners. */
+  cameraShape?: CameraShape
+  /** Corner radius (% of the shorter side) when cameraShape is 'rounded'. */
+  cameraCornerRadiusPct?: number
   /** SC3: allow dragging the camera rect (disabled in split/full layouts + live sessions). */
   dragEnabled?: boolean
   onSelectSource: (sourceId: string) => void
@@ -151,6 +157,8 @@ export function SceneStage({
         {sources.map((source) => (
           <StageSourceRect
             key={source.id}
+            cameraCornerRadiusPct={cameraCornerRadiusPct}
+            cameraShape={cameraShape}
             draggable={dragEnabled && source.kind === 'camera' && source.transform.width < 1}
             dragPosition={dragPosition?.sourceId === source.id ? dragPosition : null}
             selected={source.id === selectedSourceId}
@@ -223,6 +231,8 @@ function StageSourceRect({
   selected,
   draggable = false,
   dragPosition,
+  cameraShape,
+  cameraCornerRadiusPct,
   onSelect,
   onPointerDown,
   onPointerMove,
@@ -232,6 +242,8 @@ function StageSourceRect({
   selected: boolean
   draggable?: boolean
   dragPosition: { x: number; y: number } | null
+  cameraShape: CameraShape
+  cameraCornerRadiusPct: number
   onSelect: () => void
   onPointerDown?: (event: React.PointerEvent<SVGGElement>) => void
   onPointerMove?: (event: React.PointerEvent<SVGGElement>) => void
@@ -242,6 +254,16 @@ function StageSourceRect({
   const width = Math.max(2, source.transform.width * STAGE_W)
   const height = Math.max(2, source.transform.height * STAGE_H)
   const camera = source.kind === 'camera'
+  // Mirror the compositors' mask geometry in schematic form: circle = fully
+  // rounded (its box is square by construction), rounded = pct% of the shorter
+  // side, rectangle = the hairline default.
+  const cornerRadius = !camera
+    ? 1.5
+    : cameraShape === 'circle'
+      ? Math.min(width, height) / 2
+      : cameraShape === 'rounded'
+        ? (Math.min(width, height) * Math.min(cameraCornerRadiusPct, 50)) / 100
+        : 1.5
 
   return (
     <g
@@ -262,7 +284,7 @@ function StageSourceRect({
           !source.visible && 'opacity-40'
         )}
         height={height}
-        rx={1.5}
+        rx={cornerRadius}
         strokeDasharray={source.visible ? undefined : '2 1.5'}
         strokeWidth={selected ? 1.2 : 0.6}
         width={width}

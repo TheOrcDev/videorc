@@ -19,6 +19,7 @@ import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useStudio } from '@/hooks/use-studio'
 import type {
+  CameraAspect,
   CameraCorner,
   CameraFit,
   CameraShape,
@@ -138,6 +139,8 @@ export function LayoutTab(): ReactElement {
               real normalized transforms (pure SVG, zero idle IPC). Live pixels
               stay in the detached preview window. */}
           <SceneStage
+            cameraCornerRadiusPct={layout.cameraCornerRadiusPct}
+            cameraShape={layout.cameraShape}
             dragEnabled={showOverlayControls && !isSessionActive}
             hasBackground={Boolean(scene?.background)}
             previewOpen={previewWindow.open}
@@ -265,12 +268,58 @@ export function LayoutTab(): ReactElement {
                         <ToggleGroupItem data-videorc-camera-shape="rectangle" value="rectangle">
                           Rect
                         </ToggleGroupItem>
+                        <ToggleGroupItem data-videorc-camera-shape="rounded" value="rounded">
+                          Rounded
+                        </ToggleGroupItem>
                         <ToggleGroupItem data-videorc-camera-shape="circle" value="circle">
                           Circle
                         </ToggleGroupItem>
                       </ToggleGroup>
                     </Field>
                   </div>
+
+                  {layout.cameraShape === 'rounded' ? (
+                    <PowerSlider
+                      label="Corner radius"
+                      max={50}
+                      min={0}
+                      numericInput
+                      suffix="%"
+                      value={layout.cameraCornerRadiusPct}
+                      onChange={(cameraCornerRadiusPct) =>
+                        applyLayoutPatch({ cameraCornerRadiusPct })
+                      }
+                    />
+                  ) : null}
+
+                  {layout.cameraShape !== 'circle' ? (
+                    <Field>
+                      <FieldLabel>Aspect</FieldLabel>
+                      <ToggleGroup
+                        type="single"
+                        value={layout.cameraAspect}
+                        variant="outline"
+                        onValueChange={(value) =>
+                          value && applyLayoutPatch({ cameraAspect: value as CameraAspect })
+                        }
+                      >
+                        <ToggleGroupItem data-videorc-camera-aspect="source" value="source">
+                          Wide
+                        </ToggleGroupItem>
+                        <ToggleGroupItem data-videorc-camera-aspect="square" value="square">
+                          Square
+                        </ToggleGroupItem>
+                        <ToggleGroupItem data-videorc-camera-aspect="portrait" value="portrait">
+                          Portrait
+                        </ToggleGroupItem>
+                      </ToggleGroup>
+                      {layout.cameraAspect !== 'source' ? (
+                        <p className="text-xs text-muted-foreground">
+                          Crops the sides of the camera — frame yourself centered.
+                        </p>
+                      ) : null}
+                    </Field>
+                  ) : null}
 
                   <PowerSlider
                     label="Margin"
