@@ -22,7 +22,24 @@
   on Discord; Plan 018 diagnostics export exists for exactly this)
 - **Category**: native preview, recording, UI polish
 - **Planned at**: commit `a7e3d4b5`, 2026-07-06
-- **Execution**: TODO
+- **Execution**: EXECUTED 2026-07-06 (F1 `754ca0cb`, F2 `65a8b788`, F3
+  `da643ee4`, F4 `d9996408` on main; gates PASS incl. preview-lifecycle
+  probe, preview-surface + real-launch smokes, recording-studio gates,
+  cargo tests/clippy, desktop tests ×438). Notes vs the plan:
+  - F1 shipped the continuous presenting contract + teardown hardening; a
+    LIVE stall was not reproduced locally (unit tests + probes pin the
+    ladder instead), so root-cause attribution on the reporter's machine
+    rides the new `[preview-watch]` log lines in their next report.
+  - F4's ghost text root-caused to the transparent window showing OTHER
+    APPS through the translucent coat when the wallpaper underlay is
+    unavailable (Automation denied on fresh machines) — degraded glass is
+    now a solid theme base.
+  - Discovered while running `smoke:local-gates`: the backend-resilience
+    smoke had drifted (probed a "Status" text prefix that died in the
+    0.9.7 session-panel declutter — failing on clean main independent of
+    this batch) — repaired in `853881c9` with a data hook + explicit exit.
+  - PENDING owner: F0 Discord ask (version, support bundle, floating-
+    while-recording, mic device) + by-eye on the next shipped build.
 
 ## Reports
 
