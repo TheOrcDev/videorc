@@ -133,8 +133,11 @@ export function Sidebar({
           <img alt="Videorc" className="size-full scale-[1.09]" src={logoUrl} />
         </div>
         <div className="flex min-w-0 flex-col gap-1">
-          <span className="truncate text-sm leading-none font-semibold tracking-tight">
-            Videorc
+          <span className="flex min-w-0 items-baseline gap-1.5 text-sm leading-none font-semibold tracking-tight">
+            <span className="truncate">Videorc</span>
+            <span className="shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground">
+              beta
+            </span>
           </span>
           <span className="truncate text-[11px] leading-none tracking-wide text-muted-foreground">
             Recording studio
