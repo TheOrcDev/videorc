@@ -48,7 +48,7 @@ const SHADER_SOURCE: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 struct VOut { float4 pos [[position]]; float2 uv; };
-struct FragParams { float4 crop; float mirror; float circle; };
+struct FragParams { float4 crop; float mirror; float circle; float aspect; };
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
     VOut out;
     float4 v = verts[vid];
@@ -61,10 +61,19 @@ fragment float4 f_main(VOut in [[stage_in]],
                        sampler samp [[sampler(0)]],
                        constant FragParams& params [[buffer(0)]]) {
     float2 uv = in.uv;
-    // Hard-edge ellipse mask (matches the CPU compositor's inside_ellipse): drop fragments
+    // Hard-edge circle mask (matches the CPU compositor's inside_circle): drop fragments
     // outside the circle so whatever was drawn underneath (e.g. the screen) shows through.
+    // params.aspect is the destination quad's pixel aspect (width/height); normalizing by
+    // the shorter side keeps the mask a true circle on a non-square quad instead of an
+    // ellipse — the camera bubble must stay round even when the preview drawable's aspect
+    // drifts from the output's.
     if (params.circle > 0.5) {
         float2 c = (uv - 0.5) * 2.0;
+        if (params.aspect >= 1.0) {
+            c.x *= params.aspect;
+        } else {
+            c.y /= params.aspect;
+        }
         if (dot(c, c) > 1.0) {
             discard_fragment();
         }
@@ -84,6 +93,9 @@ struct FragParams {
     crop: [f32; 4],
     mirror: f32,
     circle: f32,
+    /// Destination quad aspect (width/height in pixels); lets the shader inscribe a true
+    /// circle in a non-square quad rather than stretching it into an ellipse.
+    aspect: f32,
 }
 
 /// One source layer to composite: BGRA8 pixels at `width`×`height`, drawn into the
@@ -107,7 +119,8 @@ pub struct GpuSource<'a> {
     pub crop: [f32; 4],
     /// Mirror the source horizontally (camera selfie view).
     pub mirror: bool,
-    /// Hard-edge circular/elliptical mask over the destination rect.
+    /// Hard-edge circular mask inscribed in the destination rect (a true circle of
+    /// diameter `min(width, height)`, centered — round regardless of the rect's aspect).
     pub circle: bool,
 }
 
@@ -585,10 +598,20 @@ impl MetalSceneCompositor {
                     MTLResourceOptions::StorageModeShared,
                 )?
             };
+            // Pixel aspect of the destination quad — the circle mask normalizes by the
+            // shorter side so a non-square quad still masks a round circle, not an ellipse.
+            let dest_width_px = f64::from(source.dest[2]) * out_width as f64;
+            let dest_height_px = f64::from(source.dest[3]) * out_height as f64;
+            let aspect = if dest_height_px > 0.0 {
+                (dest_width_px / dest_height_px) as f32
+            } else {
+                1.0
+            };
             let params = FragParams {
                 crop: source.crop,
                 mirror: f32::from(u8::from(source.mirror)),
                 circle: f32::from(u8::from(source.circle)),
+                aspect,
             };
             command_encode_ms += encode_segment_started_at.elapsed().as_secs_f64() * 1000.0;
             let source_texture_started_at = Instant::now();
@@ -1357,6 +1380,7 @@ fn encode_texture_present(
         crop: [0.0; 4],
         mirror: 0.0,
         circle: 0.0,
+        aspect: 1.0,
     };
     unsafe {
         encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
@@ -1696,6 +1720,28 @@ mod tests {
             pixel(&px, out, 0, 0),
             [0, 0, 0, 255],
             "corner masked to background"
+        );
+    }
+
+    #[test]
+    fn gpu_circle_mask_stays_round_on_a_wide_frame_or_skips() {
+        if !metal_available() {
+            return;
+        }
+        // A 16×8 (2:1) frame with a full-frame circle source: the mask must inscribe a
+        // circle of radius 4 (min side / 2) centered at (8, 4). A horizontal extreme at
+        // x=14 sits well outside that circle and must show the black background — the old
+        // unit-circle-in-UV mask stretched into an ellipse and kept it.
+        let out_w = 16usize;
+        let out_h = 8usize;
+        let green = [0u8, 255, 0, 255].repeat(out_w * out_h);
+        let sources = [full_frame(&green, out_w, out_h, false, true, [0.0; 4])];
+        let px = composite_sources(out_w, out_h, [0.0, 0.0, 0.0, 1.0], &sources).unwrap();
+        assert_eq!(pixel(&px, out_w, 8, 4), [0, 255, 0, 255], "center is green");
+        assert_eq!(
+            pixel(&px, out_w, 14, 4),
+            [0, 0, 0, 255],
+            "horizontal extreme masked to background — round, not elliptical"
         );
     }
 

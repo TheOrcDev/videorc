@@ -3505,7 +3505,7 @@ fn blit_rgba_to_yuv420p(
 
     for dest_y in draw_top..draw_bottom {
         for dest_x in draw_left..draw_right {
-            if options.circle_mask && !inside_ellipse(dest_x, dest_y, &fit) {
+            if options.circle_mask && !inside_circle(dest_x, dest_y, &fit) {
                 continue;
             }
             let Some((source_x, source_y)) =
@@ -3530,7 +3530,7 @@ fn blit_rgba_to_yuv420p(
         for uv_x in uv_left..uv_right {
             let dest_x = (uv_x * 2).min(draw_right.saturating_sub(1));
             let dest_y = (uv_y * 2).min(draw_bottom.saturating_sub(1));
-            if options.circle_mask && !inside_ellipse(dest_x, dest_y, &fit) {
+            if options.circle_mask && !inside_circle(dest_x, dest_y, &fit) {
                 continue;
             }
             let Some((source_x, source_y)) =
@@ -3662,17 +3662,22 @@ fn map_source_pixel(
     Some((source_x, source_y))
 }
 
-fn inside_ellipse(dest_x: usize, dest_y: usize, fit: &SourceFit) -> bool {
+/// Whether `(dest_x, dest_y)` falls inside the largest circle inscribed in `fit`'s box
+/// — diameter `min(width, height)`, centered. A circle bubble must stay round even when
+/// the box is not perfectly square (the preview drawable's aspect drifts from the output's,
+/// so the "square" camera box renders slightly non-square). Using separate x/y radii here
+/// drew an ellipse; this matches the recording path's `circle_alpha_mask_filter` so the
+/// preview and the encoded file agree.
+fn inside_circle(dest_x: usize, dest_y: usize, fit: &SourceFit) -> bool {
     let center_x = f64::from(fit.x) + f64::from(fit.width) / 2.0;
     let center_y = f64::from(fit.y) + f64::from(fit.height) / 2.0;
-    let radius_x = f64::from(fit.width) / 2.0;
-    let radius_y = f64::from(fit.height) / 2.0;
-    if radius_x <= 0.0 || radius_y <= 0.0 {
+    let radius = f64::from(fit.width.min(fit.height)) / 2.0;
+    if radius <= 0.0 {
         return false;
     }
-    let dx = (dest_x as f64 + 0.5 - center_x) / radius_x;
-    let dy = (dest_y as f64 + 0.5 - center_y) / radius_y;
-    dx * dx + dy * dy <= 1.0
+    let dx = dest_x as f64 + 0.5 - center_x;
+    let dy = dest_y as f64 + 0.5 - center_y;
+    dx * dx + dy * dy <= radius * radius
 }
 
 fn source_pixel_len(source: &RgbaSource<'_>) -> usize {
@@ -6660,6 +6665,37 @@ mod tests {
 
         let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
         assert_eq!(bytes[0], red_y);
+    }
+
+    #[test]
+    fn circle_mask_stays_round_on_a_non_square_box() {
+        // The preview drawable's aspect can drift from the output's, so the "square" camera
+        // box reaches the compositor slightly non-square. The mask must still be a circle
+        // (diameter = min side, centered), not an ellipse stretched to fill the box.
+        let fit = SourceFit {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 40,
+            source_x: 0.0,
+            source_y: 0.0,
+            source_width: 100.0,
+            source_height: 40.0,
+        };
+        // radius = min(100, 40) / 2 = 20, centered at (50, 20).
+        assert!(inside_circle(50, 20, &fit), "center is inside");
+        assert!(
+            inside_circle(65, 20, &fit),
+            "15px from center is within the 20px radius"
+        );
+        // The old ellipse (radius_x = 50) kept this horizontal extreme; a true circle rejects it.
+        assert!(
+            !inside_circle(80, 20, &fit),
+            "30px from center is outside the circle — an ellipse would have kept it"
+        );
+        // A true circle is symmetric: the same 30px offset is outside vertically too
+        // (here bounded by the box, so assert the corner is dropped).
+        assert!(!inside_circle(0, 0, &fit), "corner is masked out");
     }
 
     #[tokio::test]
