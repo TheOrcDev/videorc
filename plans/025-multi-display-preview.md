@@ -28,7 +28,25 @@
 - **Depends on**: a dual-display Mac for repro + by-eye (owner or reporter)
 - **Category**: native preview, multi-display, macOS coordinates
 - **Planned at**: commit `da1c4d80`, 2026-07-07
-- **Execution**: TODO
+- **Execution**: EXECUTED 2026-07-07 on branch `plan-025-multi-display-fix`
+  (one PR). S2+S4 (contentsScale + geometry tests), S1 (multi-display
+  diagnostic), S3 (display-change observer). **S5 CORRECTLY DEFERRED — do NOT
+  flip it**: the self-exclusion capability already exists
+  (`exclude_current_process_windows`), recording already excludes
+  (`live_layout.rs`), but the PREVIEW deliberately keeps the self-capture
+  tunnel (`preview_screen.rs:276-282` — "OBS-parity default … the preview-tunnel
+  effect is expected behavior in every streaming tool", and a documented past
+  regression: window exclusion "already cost a real stream a browser window
+  whose tab title matched the old name heuristic"). Forcing it would regress
+  documented intent; the ghost frames are that expected tunnel and/or the
+  placement bug's two-surfaces artifact (fixed by S2/S3). Owner call if the
+  default should change. Deterministic gates PASS (cargo 759+42, desktop 484,
+  typecheck/lint/format, backend-resilience smoke). The
+  `probe:preview-lifecycle` env-flaked on this GPU-saturated machine
+  (Electron GPU process `exit_code=15` under the 100× churn after a long
+  session; cleared 50+ cycles with the fix logging `contentsScale=2.00
+  valid=true`) — the REAL verification is a **dual-display by-eye** (owner /
+  François), which the fix is defensible-blind for.
 
 ## Report + evidence
 

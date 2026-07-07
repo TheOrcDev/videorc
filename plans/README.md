@@ -40,7 +40,7 @@ row when done.
 | 022 | Full-app QA fix list: comments crash + gate hole, device-gate repeatability, toast/settings/light-theme/select polish | P0 | M | Owner for Q1 TCC grants + Q2 provider accounts | DONE (2026-07-06; Q0–Q8 on main, gates PASS; pending owner: Q1 TCC grants + device-gate run, Q2 provider accounts, UI by-eye) |
 | 023 | Fix record+stream A/V: slideshow recordings (wallclock PTS on the Annex-B split path) and stream audio skew | P0 | L | none (by-eye needs a real Twitch stream) | DONE (2026-07-07; L0/L1/L3/L4 on main, L2 unneeded — MpegTs default w/ fifo-muxer legs, gates PASS; pending owner: real Twitch+4K by-eye on next release) |
 | 024 | Preview start-stretch + click-flash hint, backend-lost toast stack on permission grant, version-blind support bundle | P0 | M | none (preview by-eye needs a camera) | DONE (2026-07-07; S1–S5 on main, adversarially-verified root causes, gates PASS; S6 owner-triage list; pending owner by-eye + deferred commit-SHA build step) |
-| 025 | Native preview breaks across displays: surface stuck on main display, "Waiting for preview" on the secondary (contentsScale never set + no display-change observer) | P1 | M | dual-display Mac for repro/by-eye | TODO |
+| 025 | Native preview breaks across displays: surface stuck on main display, "Waiting for preview" on the secondary (contentsScale never set + no display-change observer) | P1 | M | dual-display Mac for repro/by-eye | DONE (2026-07-07; S1-S4 on the plan-025 branch, S5 correctly deferred — deliberate self-capture design; gates PASS, preview probe GPU-flaked env-only; pending dual-display by-eye) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) |
 REJECTED (with one-line rationale).
