@@ -21,6 +21,7 @@
     "changelog:build": "node scripts/build-changelog.mjs",
     "changelog:check": "node scripts/build-changelog.mjs --check",
     "changelog:email": "node scripts/changelog-email.mjs",
+    "release:notify:discord": "node scripts/notify-discord-release.mjs",
     "ffmpeg:build:macos": "bash scripts/build-ffmpeg-macos.sh",
     "ffmpeg:fetch:windows": "node scripts/fetch-ffmpeg-windows.mjs",
     "package:backend": "cargo build --release -p videorc-backend",

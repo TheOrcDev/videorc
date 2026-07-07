@@ -95,6 +95,15 @@ Newsletter: `pnpm changelog:email <releaseId>` renders the entry to
 email-ready HTML + plaintext under `dist/changelog/email/` (sending is manual —
 no ESP is wired yet).
 
+Discord announcement: after the feed is verified, `pnpm release:notify:discord`
+posts a short "what's new" (release title + up to 4 changelog highlights) to the
+Videorc Discord channel. `-- --dry-run` previews without posting; a releaseId
+argument re-announces an older release. The webhook is a post-anywhere
+credential and this repo is PUBLIC, so it is **never committed** — it lives in
+`~/.videorc-release.env` as `VIDEORC_DISCORD_RELEASE_WEBHOOK` (gitignored,
+already sourced by the build); the script refuses to run without it and never
+echoes the URL.
+
 ## Verify (always follow the redirect to R2)
 
 ```sh

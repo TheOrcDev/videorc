@@ -74,8 +74,25 @@ If admin still shows an old version (it sat on "0.9.0 beta 1" for three
 releases), that env is pinned to a versioned key — fix the env + redeploy,
 never hand-edit per release.
 
-### 6. Commit the release note
-Update `docs/releases/<version>.md` (check off build/upload/verify), commit + push.
+### 6. Announce on Discord
+After the feed is verified, post a short "what's new" to the Videorc Discord:
+
+```sh
+set -a; . ~/.videorc-release.env; set +a   # loads VIDEORC_DISCORD_RELEASE_WEBHOOK
+pnpm release:notify:discord -- --dry-run    # preview the message first
+pnpm release:notify:discord                 # posts the newest changelog entry
+```
+
+It posts the release title + up to 4 changelog highlights (short — full notes
+live on the site). The webhook URL is a **post-anywhere credential and the repo
+is PUBLIC**, so it is NEVER committed — it lives in `~/.videorc-release.env` as
+`VIDEORC_DISCORD_RELEASE_WEBHOOK` (gitignored, already sourced by the build).
+The script refuses to run without it and never echoes the URL. Pass a releaseId
+to re-announce an older one: `pnpm release:notify:discord 0.9.17-beta.1`.
+
+### 7. Commit the release note
+Update `docs/releases/<version>.md` (check off build/upload/verify/announce),
+commit + push (via a PR — `main` is branch-protected since 2026-07-07).
 
 ## Gotchas (each cost real debugging)
 
