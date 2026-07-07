@@ -2120,6 +2120,30 @@ function emitPreviewWindowState(): void {
 // surface hosts DIRECTLY — no renderer round trip. The renderer still owns the
 // backend session lifecycle (create/destroy/suppression) off the same state
 // events, but a delayed renderer must never leave the surface misplaced.
+// S3 (plan 025): a display hot-plug, arrangement change, or scale change must
+// re-home the native preview surface. The preview-window `move` handler only
+// fires when the WINDOW moves — a monitor being added/removed/rescaled under a
+// stationary window emits no move, so the surface (positioned in absolute
+// screen coordinates + the target display's scale) would otherwise be left on
+// stale geometry. Re-push placement on every display-metrics event; the push
+// re-reads the live contentBounds + matched-display scale.
+function registerDisplayChangeReconcile(): void {
+  const reconcile = (): void => {
+    if (!previewWindow || previewWindow.isDestroyed()) {
+      return
+    }
+    if (currentPreviewWindowMode() === 'docked') {
+      queueDockedPreviewPlacement()
+    } else {
+      pushPreviewWindowPlacement()
+    }
+    emitPreviewWindowState()
+  }
+  screen.on('display-metrics-changed', reconcile)
+  screen.on('display-added', reconcile)
+  screen.on('display-removed', reconcile)
+}
+
 function pushPreviewWindowPlacement(): void {
   const bounds = previewWindowSurfaceBounds()
   if (!bounds) {
@@ -7383,6 +7407,7 @@ app.whenReady().then(async () => {
   registerManagedAssetProtocol()
   initAutoUpdater()
   registerUpdaterIpc(() => mainWindow)
+  registerDisplayChangeReconcile()
   ipcMain.handle('backend:get-connection', () => backendConnection)
   ipcMain.handle('backend:get-logs', () => backendLogs)
   ipcMain.handle('app:get-runtime-info', () => runtimeInfo())
