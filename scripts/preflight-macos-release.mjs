@@ -27,12 +27,16 @@ async function main() {
     ),
     releaseOutputDir: await canWriteDirectory(releaseDir)
   }
+  const signing = {
+    keychainIdentity: hasDeveloperIdIdentity()
+  }
 
   const result = evaluateMacosReleasePreflight({
     platform: process.platform,
     env: process.env,
     tools,
-    paths
+    paths,
+    signing
   })
 
   const report = formatMacosReleasePreflightReport(result)
@@ -59,6 +63,19 @@ function commandExists(command) {
 function xcrunToolExists(tool) {
   const result = spawnSync('xcrun', ['--find', tool], { stdio: 'ignore' })
   return result.status === 0
+}
+
+// True when the keychain holds a "Developer ID Application" codesigning
+// identity — the primary signing path electron-builder auto-detects. Output is
+// inspected but never logged (identity hashes are not printed).
+function hasDeveloperIdIdentity() {
+  const result = spawnSync('security', ['find-identity', '-v', '-p', 'codesigning'], {
+    encoding: 'utf8'
+  })
+  if (result.status !== 0 || typeof result.stdout !== 'string') {
+    return false
+  }
+  return /Developer ID Application:/.test(result.stdout)
 }
 
 async function canWriteDirectory(directory) {
