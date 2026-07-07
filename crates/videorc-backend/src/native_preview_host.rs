@@ -370,6 +370,26 @@ mod macos {
         }
     }
 
+    // Plan 025 S1: the multi-display diagnostic. Silent in the normal case;
+    // fires ONLY when the requested AppKit frame is non-finite — the exact
+    // shape that macOS clamps to the primary display's corner (the "stuck on
+    // the top-right of my main display" report). Correlate with the sizing
+    // line's contentsScale on a dual-display repro to separate a scale
+    // mismatch (defect A) from a bad-frame clamp.
+    fn log_window_placement(requested: NSRect) {
+        if requested.origin.x.is_finite()
+            && requested.origin.y.is_finite()
+            && requested.size.width.is_finite()
+            && requested.size.height.is_finite()
+        {
+            return;
+        }
+        eprintln!(
+            "[videorc-native-preview-sizing] non-finite window frame requested=({},{} {}x{}) — macOS will clamp",
+            requested.origin.x, requested.origin.y, requested.size.width, requested.size.height,
+        );
+    }
+
     fn sizing_inputs(bounds: NativePreviewHostBounds) -> (u64, u64, u64) {
         (
             bounds.width.max(0.0).to_bits(),
@@ -386,13 +406,18 @@ mod macos {
     // pipe — stderr is the helper's free-text lane and is relayed to the log.
     fn log_surface_sizing(reason: &str, bounds: NativePreviewHostBounds) {
         let (drawable_width, drawable_height) = bounds.drawable_size();
+        // Plan 025 S1: contentsScale + drawable validity are now in the line so a
+        // multi-display repro shows the scale the layer WILL adopt (and whether a
+        // transient bad bounds was rejected) alongside the pixel drawable.
         eprintln!(
-            "[videorc-native-preview-sizing] {reason} bounds_pts={:.0}x{:.0} scale={:.2} drawable_px={:.0}x{:.0} visible={:?}",
+            "[videorc-native-preview-sizing] {reason} bounds_pts={:.0}x{:.0} scale={:.2} contentsScale={:.2} drawable_px={:.0}x{:.0} valid={} visible={:?}",
             bounds.width,
             bounds.height,
             bounds.scale_factor,
+            bounds.contents_scale(),
             drawable_width,
             drawable_height,
+            bounds.drawable_is_valid(),
             bounds.visible,
         );
     }
@@ -492,7 +517,9 @@ mod macos {
             bounds.elevated = bounds.elevated.or(self.bounds.elevated);
             self.bounds = bounds;
             self.layer_host.set_bounds(bounds);
-            self.window.setFrame_display(window_frame(bounds), true);
+            let frame = window_frame(bounds);
+            log_window_placement(frame);
+            self.window.setFrame_display(frame, true);
         }
 
         /// The single visibility rule: on screen only while the bounds say visible
