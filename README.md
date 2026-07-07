@@ -15,6 +15,10 @@ window.
 
 **[Download for macOS →](https://videorc.com)** (macOS 13+, Apple Silicon)
 
+**Beta status:** Videorc is still in beta. Expect fast-moving releases,
+rough edges, and occasional recording/streaming bugs while the app is being
+hardened.
+
 ## Why Videorc
 
 Most capture tools make you choose between "simple but shallow" and "powerful
