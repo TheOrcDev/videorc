@@ -1060,7 +1060,7 @@ pub async fn start_session(
 
     let stream_tee_has_recording_leg =
         output_path.is_some() && !(use_encoder_bridge && encoder_bridge_stream_profile.is_some());
-    let (stream_runtime, slave_positions) = build_stream_runtime(
+    let (stream_runtime, slave_positions, stream_url_positions) = build_stream_runtime(
         &stream_targets,
         &skipped_targets,
         stream_tee_has_recording_leg,
@@ -1133,6 +1133,43 @@ pub async fn start_session(
                 // A `tee` slave dropping mid-session (onfail=ignore keeps the rest
                 // running) — attribute it to the specific target and re-emit the
                 // per-target snapshot so the UI can flag exactly which platform fell.
+                // Per-target fifo-muxer legs (plan 023): attribute by URL.
+                if let Some(failure) = parse_fifo_output_failure(trimmed)
+                    && let Some(position) = stream_url_positions
+                        .iter()
+                        .find(|(url, _)| *url == failure.url)
+                        .map(|(_, position)| *position)
+                {
+                    let mut changed = false;
+                    if let Some(entry) = stream_runtime.get_mut(position)
+                        && entry.state != StreamTargetState::Failed
+                    {
+                        let reason = if failure.reason.is_empty() {
+                            "Stream connection failed".to_string()
+                        } else {
+                            failure.reason.clone()
+                        };
+                        let _ = emit_health_event(
+                            &log_state,
+                            Some(&log_session_id),
+                            HealthLevel::Warn,
+                            "stream-target-failed",
+                            &format!("Streaming to {} stopped: {reason}", entry.label),
+                        );
+                        entry.state = StreamTargetState::Failed;
+                        entry.message = Some(reason);
+                        changed = true;
+                    }
+                    if changed {
+                        log_state.emit_event(
+                            "stream.targets",
+                            StreamTargetsSnapshot {
+                                session_id: log_session_id.clone(),
+                                targets: stream_runtime.clone(),
+                            },
+                        );
+                    }
+                }
                 if let Some(failure) = parse_tee_slave_failure(trimmed)
                     && let Some(Some(position)) = slave_positions.get(failure.slave_index).copied()
                 {
@@ -6694,11 +6731,16 @@ fn tee_slave_offset(stream_tee_has_recording_leg: bool) -> usize {
 /// skipped ones as `NotConfigured` with their reason — plus a map from tee slave
 /// index to snapshot position so a per-slave stderr failure can be attributed to the
 /// right target. The map is empty for the plain (non-tee) single-stream output.
+#[allow(clippy::type_complexity)]
 fn build_stream_runtime(
     ready: &[StreamTarget],
     skipped: &[SkippedStreamTarget],
     stream_tee_has_recording_leg: bool,
-) -> (Vec<StreamTargetRuntime>, Vec<Option<usize>>) {
+) -> (
+    Vec<StreamTargetRuntime>,
+    Vec<Option<usize>>,
+    Vec<(String, usize)>,
+) {
     let mut runtime = Vec::with_capacity(ready.len() + skipped.len());
     for target in ready {
         runtime.push(StreamTargetRuntime {
@@ -6734,7 +6776,13 @@ fn build_stream_runtime(
             slave_positions[position + offset] = Some(position);
         }
     }
-    (runtime, slave_positions)
+    // Per-target fifo-muxer outputs (plan 023) report failures by URL.
+    let url_positions = ready
+        .iter()
+        .enumerate()
+        .map(|(position, target)| (target.url.clone(), position))
+        .collect();
+    (runtime, slave_positions, url_positions)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6763,6 +6811,32 @@ fn parse_tee_slave_failure(line: &str) -> Option<TeeSlaveFailure> {
     Some(TeeSlaveFailure {
         slave_index,
         reason,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FifoOutputFailure {
+    url: String,
+    reason: String,
+}
+
+/// Parses an FFmpeg `fifo` muxer failure line, e.g.
+/// `[fifo @ 0x..] Error opening rtmp://host/app/key: Connection refused`.
+/// Stream targets ride per-target fifo-muxer outputs (plan 023 L1), so a
+/// failing leg is attributed by URL instead of a tee slave index.
+fn parse_fifo_output_failure(line: &str) -> Option<FifoOutputFailure> {
+    let tag = line.find("[fifo @")?;
+    let rest = &line[tag..];
+    let marker = "Error opening ";
+    let start = rest.find(marker)? + marker.len();
+    let (url, reason) = rest[start..].rsplit_once(": ")?;
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    Some(FifoOutputFailure {
+        url: url.to_string(),
+        reason: reason.trim().trim_end_matches('.').to_string(),
     })
 }
 
@@ -7808,6 +7882,20 @@ mod tests {
         assert!(parse_tee_slave_failure("[tee @ 0x10] Slave muxer failed somehow").is_none());
     }
 
+    // Plan 023: per-target fifo-muxer legs report failures by URL.
+    #[test]
+    fn parses_fifo_output_failure_lines() {
+        let failure = parse_fifo_output_failure(
+            "[fifo @ 0x7ef042a80] Error opening rtmp://127.0.0.1:11937/live/smoke-offline: Connection refused",
+        )
+        .unwrap();
+        assert_eq!(failure.url, "rtmp://127.0.0.1:11937/live/smoke-offline");
+        assert_eq!(failure.reason, "Connection refused");
+
+        assert!(parse_fifo_output_failure("[flv @ 0x1] Error opening rtmp://x: nope").is_none());
+        assert!(parse_fifo_output_failure("[fifo @ 0x1] something else").is_none());
+    }
+
     #[test]
     fn build_stream_runtime_maps_slaves_after_recording_leg() {
         let streaming = streaming_for(&[
@@ -7815,7 +7903,8 @@ mod tests {
             (StreamPlatform::Twitch, "rtmp://live.twitch/app", "tw"),
         ]);
         let resolution = resolve_stream_targets(&streaming);
-        let (runtime, slaves) = build_stream_runtime(&resolution.ready, &resolution.skipped, true);
+        let (runtime, slaves, _) =
+            build_stream_runtime(&resolution.ready, &resolution.skipped, true);
         assert_eq!(runtime.len(), 2);
         assert!(runtime.iter().all(|t| t.state == StreamTargetState::Live));
         // Slave #0 is the MKV (onfail=abort); the two stream legs are #1 and #2.
@@ -7837,7 +7926,7 @@ mod tests {
             ),
         ]);
         let resolution = resolve_stream_targets(&streaming);
-        let (_, slaves) = build_stream_runtime(&resolution.ready, &resolution.skipped, false);
+        let (_, slaves, _) = build_stream_runtime(&resolution.ready, &resolution.skipped, false);
         assert_eq!(slaves.first().copied().flatten(), Some(0));
         assert_eq!(slaves.get(1).copied().flatten(), Some(1));
         assert_eq!(slaves.get(2).copied().flatten(), Some(2));
@@ -7851,7 +7940,7 @@ mod tests {
             (StreamPlatform::Twitch, "rtmp://live.twitch/app", "tw"),
         ]);
         let resolution = resolve_stream_targets(&streaming);
-        let (_, slaves) = build_stream_runtime(&resolution.ready, &resolution.skipped, false);
+        let (_, slaves, _) = build_stream_runtime(&resolution.ready, &resolution.skipped, false);
         assert_eq!(slaves.first().copied().flatten(), Some(0));
         assert_eq!(slaves.get(1).copied().flatten(), Some(1));
     }
@@ -7861,11 +7950,12 @@ mod tests {
         let streaming = streaming_for(&[(StreamPlatform::Twitch, "rtmp://live.twitch/app", "tw")]);
         let resolution = resolve_stream_targets(&streaming);
         // A lone stream with no recording is a plain flv output: no per-slave reporting.
-        let (runtime, slaves) = build_stream_runtime(&resolution.ready, &resolution.skipped, false);
+        let (runtime, slaves, _) =
+            build_stream_runtime(&resolution.ready, &resolution.skipped, false);
         assert_eq!(runtime.len(), 1);
         assert!(slaves.is_empty());
         // ...but the same single stream *with* a recording tees (MKV + one leg).
-        let (_, with_rec) = build_stream_runtime(&resolution.ready, &resolution.skipped, true);
+        let (_, with_rec, _) = build_stream_runtime(&resolution.ready, &resolution.skipped, true);
         assert_eq!(with_rec.get(1).copied().flatten(), Some(0));
     }
 
@@ -7876,7 +7966,7 @@ mod tests {
             (StreamPlatform::Twitch, "rtmp://live.twitch/app", ""),
         ]);
         let resolution = resolve_stream_targets(&streaming);
-        let (runtime, _) = build_stream_runtime(&resolution.ready, &resolution.skipped, true);
+        let (runtime, _, _) = build_stream_runtime(&resolution.ready, &resolution.skipped, true);
         let twitch = runtime
             .iter()
             .find(|t| t.platform == StreamPlatform::Twitch)
