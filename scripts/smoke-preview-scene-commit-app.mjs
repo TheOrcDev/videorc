@@ -71,6 +71,50 @@ try {
   )
   assertCameraShapeCommit({ compositor: shapeCompositor, surface: shapeSurface, highRevision })
 
+  const marginValue = 18
+  await smokeCommand(smoke, 'open-layout-tab')
+  const marginInputResult = await smokeCommand(smoke, 'eval-js', {
+    code: `
+      const camera = document.querySelector('[data-videorc-stage-source="source:camera"]')
+      camera?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }))
+      camera?.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }))
+      camera?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+
+      const input = document.querySelector('input[aria-label="Margin value"]')
+      if (!input) return { ok: false, reason: 'margin input missing' }
+
+      input.focus()
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+      setter?.call(input, '${marginValue}')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter',
+        code: 'Enter',
+        bubbles: true,
+        cancelable: true
+      }))
+      input.blur()
+      await sleep(${settleMs})
+      return { ok: true, value: input.value }
+    `
+  })
+  if (marginInputResult?.ok === false) {
+    throw new Error(`Margin input was not available: ${JSON.stringify(marginInputResult)}`)
+  }
+  const marginCompositor = await waitForCompositorCameraMargin(
+    ws,
+    marginValue,
+    shapeCompositor.sceneRevision
+  )
+  const marginSurface = await waitForSurfaceRevision(smoke, marginCompositor.sceneRevision)
+  const marginScene = await request(ws, timeoutMs, 'scene.get')
+  assertCameraMarginCommit({
+    compositor: marginCompositor,
+    surface: marginSurface,
+    scene: marginScene,
+    margin: marginValue
+  })
+
   const shapedScene = await request(ws, timeoutMs, 'scene.get')
   const source =
     shapedScene.sources.find((candidate) => candidate.visible) ?? shapedScene.sources[0]
@@ -102,7 +146,7 @@ try {
   assertCommitResult({ commit, compositor, surface, scene, sourceId: source.id, nextX })
 
   console.log(
-    `Preview scene commit smoke OK - stale revision ${highRevision} advanced through camera shape ${shapeCompositor.sceneRevision} and transform ${commit.sceneRevision}, surface ${surface.sceneRevision}.`
+    `Preview scene commit smoke OK - stale revision ${highRevision} advanced through camera shape ${shapeCompositor.sceneRevision}, margin ${marginCompositor.sceneRevision}, and transform ${commit.sceneRevision}, surface ${surface.sceneRevision}.`
   )
 } finally {
   try {
@@ -168,6 +212,29 @@ async function waitForCompositorCameraShape(connection, shape, minRevision) {
   )
 }
 
+async function waitForCompositorCameraMargin(connection, margin, minRevision) {
+  let last = null
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    last = await request(connection, timeoutMs, 'compositor.status')
+    const camera = last.sceneSources?.find((source) => source.kind === 'camera')
+    if (
+      last.sceneRevision > minRevision &&
+      last.frameSceneRevision === last.sceneRevision &&
+      last.sceneLayout?.cameraMargin === margin &&
+      camera
+    ) {
+      return last
+    }
+    await sleep(100)
+  }
+  throw new Error(
+    `Timed out waiting for compositor camera margin ${margin} after revision ${minRevision}. Last status: ${JSON.stringify(
+      last
+    )}`
+  )
+}
+
 async function waitForSurfaceRevision(smoke, revision) {
   let last = null
   const deadline = Date.now() + timeoutMs
@@ -202,6 +269,50 @@ async function waitForSurfaceCameraShape(smoke, shape, revision) {
   )
 }
 
+function assertCameraMarginCommit({ compositor, surface, scene, margin }) {
+  if (compositor.sceneLayout?.cameraMargin !== margin) {
+    throw new Error(
+      `Compositor layout did not commit margin ${margin}: ${JSON.stringify(compositor)}`
+    )
+  }
+  if (surface.sceneRevision !== compositor.sceneRevision) {
+    throw new Error(
+      `Preview surface revision ${surface.sceneRevision} did not match margin commit ${compositor.sceneRevision}.`
+    )
+  }
+  if (surface.surfaceStatus?.state !== 'live') {
+    throw new Error(`Preview surface is not live after margin commit: ${JSON.stringify(surface)}`)
+  }
+
+  const camera = scene.sources.find((source) => source.kind === 'camera')
+  if (!camera) {
+    throw new Error(`Committed scene lost camera source: ${JSON.stringify(scene)}`)
+  }
+  const output =
+    scene.outputs?.find((candidate) => candidate.kind === 'recording') ?? scene.outputs?.[0]
+  if (!output?.width || !output?.height) {
+    throw new Error(`Committed scene has no recording output dimensions: ${JSON.stringify(scene)}`)
+  }
+
+  const rightMargin = 1 - (Number(camera.transform?.x ?? 0) + Number(camera.transform?.width ?? 0))
+  const bottomMargin =
+    1 - (Number(camera.transform?.y ?? 0) + Number(camera.transform?.height ?? 0))
+  const scale = Math.min(output.width / 1280, output.height / 720)
+  const scaledMargin = Math.max(1, Math.round(margin * scale))
+  const expectedRightMargin = scaledMargin / output.width
+  const expectedBottomMargin = scaledMargin / output.height
+  if (Math.abs(rightMargin - expectedRightMargin) > 0.0001) {
+    throw new Error(
+      `Committed camera right margin ${rightMargin}, expected ${expectedRightMargin}: ${JSON.stringify(camera.transform)}`
+    )
+  }
+  if (Math.abs(bottomMargin - expectedBottomMargin) > 0.0001) {
+    throw new Error(
+      `Committed camera bottom margin ${bottomMargin}, expected ${expectedBottomMargin}: ${JSON.stringify(camera.transform)}`
+    )
+  }
+}
+
 function assertCameraShapeCommit({ compositor, surface, highRevision }) {
   if (compositor.sceneRevision <= highRevision) {
     throw new Error(
@@ -216,7 +327,9 @@ function assertCameraShapeCommit({ compositor, surface, highRevision }) {
     throw new Error(`Compositor camera source stayed ${camera?.shape}: ${JSON.stringify(camera)}`)
   }
   if (surface.cameraShape !== 'circle' || surface.sourceShapes?.['source:camera'] !== 'circle') {
-    throw new Error(`Preview surface camera shape did not commit circle: ${JSON.stringify(surface)}`)
+    throw new Error(
+      `Preview surface camera shape did not commit circle: ${JSON.stringify(surface)}`
+    )
   }
 }
 

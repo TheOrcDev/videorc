@@ -374,6 +374,7 @@ export function LayoutTab(): ReactElement {
                     suffix="px"
                     value={layout.cameraMargin}
                     onChange={(cameraMargin) => patchLayout({ cameraMargin })}
+                    onCommit={(cameraMargin) => applyLayoutPatch({ cameraMargin })}
                   />
                 </>
               ) : null}

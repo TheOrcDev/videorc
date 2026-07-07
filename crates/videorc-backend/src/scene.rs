@@ -355,7 +355,7 @@ fn camera_transform(
         }
     };
 
-    sanitize_transform(SceneTransform {
+    sanitize_transform_unsnapped(SceneTransform {
         x,
         y,
         width: camera_width / output_width,
@@ -909,6 +909,26 @@ mod tests {
         assert!((preview_camera.height - recording_camera.height).abs() < 0.0001);
         assert!((preview_camera.x - recording_camera.x).abs() < 0.0001);
         assert!((preview_camera.y - recording_camera.y).abs() < 0.0001);
+    }
+
+    #[test]
+    fn camera_margin_below_snap_threshold_stays_visible() {
+        let mut params = base_params();
+        params.layout.camera_corner = CameraCorner::BottomRight;
+        params.layout.camera_margin = 18;
+
+        let scene = scene_from_capture_config(params);
+        let camera = scene
+            .sources
+            .iter()
+            .find(|source| source.kind == SceneSourceKind::Camera)
+            .expect("camera source present");
+
+        let right_margin = 1.0 - (camera.transform.x + camera.transform.width);
+        let bottom_margin = 1.0 - (camera.transform.y + camera.transform.height);
+
+        assert!((right_margin - (18.0 / 1280.0)).abs() < 0.0001);
+        assert!((bottom_margin - (18.0 / 720.0)).abs() < 0.0001);
     }
 
     #[test]
