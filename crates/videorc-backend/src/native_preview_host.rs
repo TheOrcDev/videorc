@@ -57,6 +57,28 @@ impl NativePreviewHostBounds {
         )
     }
 
+    /// The layer's contentsScale for this bounds' target display (plan 025 S2).
+    /// The drawable is sized in pixels (`drawable_size`), but the layer's
+    /// contentsScale must ALSO track the target display's backing scale, or a
+    /// move to a different-scale display leaves the two disagreeing — a classic
+    /// macOS multi-display mismatch that renders the surface wrong / stops it
+    /// presenting. Never below 1.0.
+    pub fn contents_scale(self) -> f64 {
+        if self.scale_factor.is_finite() {
+            self.scale_factor.max(1.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Whether the drawable size is a finite, positive rect — a transient bad
+    /// bounds during a cross-display move must never reach `setDrawableSize`
+    /// (a NaN/0 drawable is what macOS clamps to the primary's corner).
+    pub fn drawable_is_valid(self) -> bool {
+        let (width, height) = self.drawable_size();
+        width.is_finite() && height.is_finite() && width >= 1.0 && height >= 1.0
+    }
+
     // The full slot frame in AppKit coordinates (the window itself uses the clip
     // frame; this remains the reference for tests and future hosts).
     #[allow(dead_code)]
@@ -323,14 +345,26 @@ mod macos {
         }
 
         pub fn set_bounds(&mut self, bounds: NativePreviewHostBounds) {
-            let (drawable_width, drawable_height) = bounds.drawable_size();
             if sizing_inputs(self.bounds) != sizing_inputs(bounds) {
                 log_surface_sizing("update", bounds);
             }
-            self.layer.setDrawableSize(objc2_core_foundation::CGSize {
-                width: drawable_width,
-                height: drawable_height,
-            });
+            // Plan 025 S2: a transient bad bounds during a cross-display move
+            // (NaN/0 drawable) must never reach the layer — leave the last good
+            // size in place; the next valid push corrects it.
+            if bounds.drawable_is_valid() {
+                let (drawable_width, drawable_height) = bounds.drawable_size();
+                self.layer.setDrawableSize(objc2_core_foundation::CGSize {
+                    width: drawable_width,
+                    height: drawable_height,
+                });
+                // contentsScale must track the TARGET display's backing scale,
+                // not stay frozen at create-time — else a move to a
+                // different-scale display mismatches the drawable and the
+                // surface renders wrong / stops presenting (the multi-display
+                // "Waiting for preview" report).
+                let ca_layer: &CALayer = self.layer.as_super();
+                ca_layer.setContentsScale(bounds.contents_scale());
+            }
             self.view.setFrame(view_frame(bounds));
             self.bounds = bounds;
         }
@@ -704,6 +738,83 @@ pub use macos::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn slot(screen_x: f64, screen_y: f64, scale: f64) -> NativePreviewHostBounds {
+        NativePreviewHostBounds {
+            screen_x,
+            screen_y,
+            width: 640.0,
+            height: 360.0,
+            scale_factor: scale,
+            // The Y-flip axis is ALWAYS the PRIMARY display height — the
+            // AppKit and Electron coordinate systems are both primary-anchored
+            // (plan 025 S4 locks this: a per-display height would be a bug).
+            screen_height: Some(1000.0),
+            ..Default::default()
+        }
+    }
+
+    // Plan 025 S4: the primary-anchored flip lands a window correctly on ANY
+    // display in a standard arrangement. These pin the coordinate contract so
+    // nobody "fixes" appkit_y to a per-display height (which WOULD break it).
+    #[test]
+    fn appkit_flip_is_correct_across_displays() {
+        // Primary display (top-left origin, CG y=200): AppKit bottom =
+        // 1000 - 200 - 360 = 440.
+        assert_eq!(
+            slot(10.0, 200.0, 2.0).appkit_clip_frame(),
+            (10.0, 440.0, 640.0, 360.0)
+        );
+
+        // Secondary to the RIGHT, same top edge (CG x=1728, y=200): x carries
+        // through global, Y-flip identical to primary.
+        assert_eq!(
+            slot(1728.0, 200.0, 1.0).appkit_clip_frame(),
+            (1728.0, 440.0, 640.0, 360.0)
+        );
+
+        // Secondary ABOVE the primary (CG y negative, -300): AppKit bottom =
+        // 1000 - (-300) - 360 = 940 — correctly above the primary's top (1000).
+        assert_eq!(
+            slot(10.0, -300.0, 2.0).appkit_clip_frame(),
+            (10.0, 940.0, 640.0, 360.0)
+        );
+
+        // A window whose top sits ABOVE the primary top edge lands with a
+        // large AppKit y (near/above the primary's full height) — never clamped.
+        let (_, appkit_y, _, _) = slot(2000.0, -640.0, 1.0).appkit_clip_frame();
+        assert!(
+            appkit_y > 1000.0,
+            "above-primary window must not clamp: {appkit_y}"
+        );
+    }
+
+    // Plan 025 S2: contentsScale tracks the target display's scale and stays in
+    // lockstep with the pixel drawable; a bad (non-finite/zero) bounds is
+    // rejected as an invalid drawable so it never reaches the layer.
+    #[test]
+    fn contents_scale_matches_drawable_across_scale_change() {
+        let retina = slot(0.0, 0.0, 2.0);
+        assert_eq!(retina.contents_scale(), 2.0);
+        assert_eq!(retina.drawable_size(), (1280.0, 720.0));
+        assert!(retina.drawable_is_valid());
+
+        // Move to a @1x external display: contentsScale AND drawable both drop.
+        let external = slot(1728.0, 0.0, 1.0);
+        assert_eq!(external.contents_scale(), 1.0);
+        assert_eq!(external.drawable_size(), (640.0, 360.0));
+
+        // Degenerate scale never goes below 1.0, and NaN/zero drawables are
+        // rejected rather than clamped by macOS.
+        assert_eq!(slot(0.0, 0.0, 0.0).contents_scale(), 1.0);
+        assert_eq!(slot(0.0, 0.0, f64::NAN).contents_scale(), 1.0);
+        assert!(!slot(0.0, 0.0, f64::NAN).drawable_is_valid());
+        let zero = NativePreviewHostBounds {
+            width: 0.0,
+            ..slot(0.0, 0.0, 2.0)
+        };
+        assert!(!zero.drawable_is_valid());
+    }
 
     #[test]
     fn host_bounds_clamp_to_visible_drawable_size() {
