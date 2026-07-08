@@ -288,8 +288,11 @@ pub struct StreamTargetMetadataDraft {
     pub twitch_category_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub twitch_language: Option<String>,
+    /// X has no unlisted/private concept — the only reach lever the
+    /// Livestream API exposes is suppressing the announcement post
+    /// (`should_not_tweet`). None means announce (the platform default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub x_visibility: Option<StreamPrivacy>,
+    pub x_announce: Option<bool>,
     pub updated_at: String,
 }
 
@@ -453,7 +456,7 @@ pub fn default_stream_metadata_draft(updated_at: String) -> StreamMetadataDraft 
             twitch_category_id: None,
             twitch_category_name: None,
             twitch_language: (platform == StreamPlatform::Twitch).then(|| "en".to_string()),
-            x_visibility: (platform == StreamPlatform::X).then_some(StreamPrivacy::Public),
+            x_announce: (platform == StreamPlatform::X).then_some(true),
             updated_at: updated_at.clone(),
         })
         .collect(),
@@ -782,8 +785,8 @@ mod tests {
                 .iter()
                 .find(|target| target.platform == StreamPlatform::X)
                 .unwrap()
-                .x_visibility,
-            Some(StreamPrivacy::Public)
+                .x_announce,
+            Some(true)
         );
     }
 

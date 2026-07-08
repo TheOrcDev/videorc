@@ -111,6 +111,7 @@ import type {
   PlatformAccountValidation,
   PreparedXStreamSource,
   PreparedTwitchBroadcast,
+  TwitchAppliedMetadata,
   PreparedYouTubeBroadcast,
   OAuthCompleteParams,
   OAuthStartResult,
@@ -4916,14 +4917,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             })
           )
 
+          // Metadata (title, announce-on-timeline) is derived backend-side
+          // from the stream metadata draft — never hardcoded here.
           const result = await client.request<XPublishResult>('streamTargets.x.publish', {
             accountId: target.accountId,
             sourceId,
             region,
             isLowLatency: true,
-            shouldNotTweet: false,
-            locale: 'en',
-            chatOption: 2,
             sessionId
           })
 
@@ -5359,6 +5359,45 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
     }
 
+    // Manual-RTMP Twitch targets: the transport is a user-provided stream
+    // key, but Helix channel updates work regardless of ingest path — push
+    // title/category/language through the connected account. Best-effort:
+    // a metadata failure must not block going live over the key.
+    const twitchAccount = platformAccounts.find((item) => item.platform === 'twitch')
+    for (const target of captureConfig.streaming.targets.filter(
+      (target) => target.enabled && target.authMode !== 'oauth' && target.platform === 'twitch'
+    )) {
+      if (!twitchAccount) {
+        nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+          status: {
+            state: 'ready',
+            message: 'Streaming over stream key. Connect Twitch to push title and category.'
+          }
+        })
+        continue
+      }
+      try {
+        const applied = await client.request<TwitchAppliedMetadata>(
+          'streamTargets.twitch.applyMetadata',
+          { accountId: twitchAccount.accountId }
+        )
+        nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+          status: {
+            state: 'ready',
+            message: `Twitch channel metadata updated ("${applied.title}").`
+          }
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+          status: {
+            state: 'ready',
+            message: `Streaming over stream key; channel metadata update failed: ${message}`
+          }
+        })
+      }
+    }
+
     setCaptureConfig((current) => bridgeStreamingToLegacy({ ...current, streaming: nextStreaming }))
     await refreshPlatformAccountsForClient(client)
     return {
@@ -5366,7 +5405,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       failures,
       readyLabels: readyStreamTargetLabels(nextStreaming)
     }
-  }, [captureConfig.streaming, captureConfig.video, client, refreshPlatformAccountsForClient])
+  }, [
+    captureConfig.streaming,
+    captureConfig.video,
+    client,
+    platformAccounts,
+    refreshPlatformAccountsForClient
+  ])
 
   const openGoLiveConfirmation = useCallback(async () => {
     if (!client || startBlockedReason) {

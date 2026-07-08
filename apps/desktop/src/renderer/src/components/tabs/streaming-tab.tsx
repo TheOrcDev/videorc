@@ -1446,6 +1446,10 @@ function MetadataEditor({
                 <SelectItem value="public">Public</SelectItem>
               </SelectContent>
             </Select>
+            <FieldDescription>
+              Applies to YouTube. Twitch channels are always public; X broadcasts are always public
+              — use its Announce toggle below to control the announcement post.
+            </FieldDescription>
           </Field>
 
           <div className="flex flex-col gap-4">
@@ -1562,16 +1566,25 @@ function MetadataOverride({
         <FieldLabel htmlFor={`${override.platform}-metadata-description`}>Description</FieldLabel>
         <Textarea
           className="min-h-20 resize-y"
-          disabled={fieldsDisabled || twitch}
+          disabled={fieldsDisabled || twitch || x}
           id={`${override.platform}-metadata-description`}
           placeholder={
-            twitch ? 'Not supported by Twitch' : draft.description || 'Inherits global description'
+            twitch
+              ? 'Not supported by Twitch'
+              : x
+                ? 'Not supported by X'
+                : draft.description || 'Inherits global description'
           }
-          value={twitch ? '' : override.description}
+          value={twitch || x ? '' : override.description}
           onChange={(event) => onPatch({ description: event.target.value })}
         />
         {twitch ? (
           <FieldDescription>Twitch supports title, category, and language.</FieldDescription>
+        ) : null}
+        {x ? (
+          <FieldDescription>
+            X broadcasts carry a title only; it doubles as the announcement post text.
+          </FieldDescription>
         ) : null}
       </Field>
 
@@ -1679,23 +1692,20 @@ function MetadataOverride({
       ) : null}
 
       {x ? (
-        <Field>
-          <FieldLabel>Visibility</FieldLabel>
-          <Select
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-col">
+            <span className="text-sm font-medium">Announce on X timeline</span>
+            <span className="text-xs text-muted-foreground">
+              X broadcasts are always public. Off skips the announcement post.
+            </span>
+          </div>
+          <Switch
+            aria-label="Announce on X timeline"
+            checked={override.xAnnounce ?? true}
             disabled={fieldsDisabled}
-            value={override.xVisibility ?? 'public'}
-            onValueChange={(value) => onPatch({ xVisibility: value as StreamPrivacy })}
-          >
-            <SelectTrigger className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="public">Public</SelectItem>
-              <SelectItem value="unlisted">Unlisted</SelectItem>
-              <SelectItem value="private">Private</SelectItem>
-            </SelectContent>
-          </Select>
-        </Field>
+            onCheckedChange={(xAnnounce) => onPatch({ xAnnounce })}
+          />
+        </div>
       ) : null}
     </div>
   )

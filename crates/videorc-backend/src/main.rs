@@ -1589,6 +1589,46 @@ async fn search_twitch_categories(
     .await
 }
 
+/// Push channel title/category/language for a manual-RTMP Twitch target.
+/// Helix channel updates work regardless of ingest path, so a stream-key
+/// session with a connected account still gets its metadata applied.
+async fn apply_twitch_stream_target_metadata(
+    state: &AppState,
+    params: TwitchPrepareParams,
+) -> anyhow::Result<twitch::TwitchAppliedMetadata> {
+    let metadata = state.database.stream_metadata_draft()?;
+    let validation = validate_stream_metadata_draft(&metadata);
+    if !validation.valid {
+        let message = validation
+            .issues
+            .first()
+            .map(|issue| issue.message.as_str())
+            .unwrap_or("Stream metadata is invalid.");
+        anyhow::bail!("{message}");
+    }
+
+    let credential = twitch_account_credentials(state, params.account_id.as_deref())?;
+    let access_ref = credential
+        .token_secret_ref
+        .as_deref()
+        .context("No Twitch access token is stored.")?;
+    let access_token = secrets::get_secret(access_ref)?;
+    let client_id = oauth::provider_client_id(StreamPlatform::Twitch)?;
+
+    twitch::apply_twitch_channel_metadata(
+        &TwitchPrepareRequest {
+            access_token,
+            client_id,
+            account_id: credential.account.account_id.clone(),
+            account_label: credential.account.account_label.clone(),
+            metadata,
+            api_base_url: None,
+        },
+        &reqwest::Client::new(),
+    )
+    .await
+}
+
 async fn prepare_twitch_stream_target(
     state: &AppState,
     params: TwitchPrepareParams,
@@ -1807,9 +1847,8 @@ async fn publish_x_native_live(
             region: params.region,
             metadata,
             is_low_latency: params.is_low_latency,
-            should_not_tweet: params.should_not_tweet,
-            locale: x_live::default_publish_locale(params.locale),
-            chat_option: x_live::default_chat_option(params.chat_option),
+            locale: x_live::default_publish_locale(),
+            chat_option: x_live::default_chat_option(),
             api_base_url: None,
             poll_attempts: 10,
             poll_interval_ms: 2_000,
@@ -3505,6 +3544,21 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
                     Err(error) => ServerResponse::error(
                         command.id,
                         "twitch-prepare-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "streamTargets.twitch.applyMetadata" => {
+            match serde_json::from_value::<TwitchPrepareParams>(command.params) {
+                Ok(params) => match apply_twitch_stream_target_metadata(state, params).await {
+                    Ok(applied) => ServerResponse::ok(command.id, applied),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "twitch-apply-metadata-failed",
                         error.to_string(),
                     ),
                 },

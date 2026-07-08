@@ -638,7 +638,11 @@ export interface StreamTargetMetadataDraft {
   twitchCategoryId?: string
   twitchCategoryName?: string
   twitchLanguage?: string
-  xVisibility?: StreamPrivacy
+  /**
+   * X has no unlisted/private concept — the only reach lever is suppressing
+   * the announcement post. Undefined means announce (the platform default).
+   */
+  xAnnounce?: boolean
   updatedAt: string
 }
 
@@ -762,6 +766,17 @@ export interface TwitchCategory {
   boxArtUrl?: string
 }
 
+/** Result of `streamTargets.twitch.applyMetadata` — channel metadata pushed without touching the stream key. */
+export interface TwitchAppliedMetadata {
+  platform: 'twitch'
+  accountId: string
+  accountLabel: string
+  title: string
+  categoryId?: string
+  categoryName?: string
+  language?: string
+}
+
 export interface PreparedTwitchBroadcast {
   platform: 'twitch'
   accountId: string
@@ -803,9 +818,6 @@ export interface XPublishParams {
   sourceId: string
   region: string
   isLowLatency: boolean
-  shouldNotTweet: boolean
-  locale?: string
-  chatOption?: number
   /** Active capture session — X lifecycle events land in its session log. */
   sessionId?: string
 }

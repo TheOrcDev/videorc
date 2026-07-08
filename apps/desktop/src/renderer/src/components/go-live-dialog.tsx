@@ -126,8 +126,9 @@ export function GoLiveConfirmationDialog({
               </Select>
               <FieldDescription>
                 {draft?.defaultPrivacy === 'public'
-                  ? 'YouTube will be discoverable from the channel while live.'
-                  : 'YouTube will not be discoverable from the channel while live.'}
+                  ? 'YouTube will be discoverable from the channel while live. '
+                  : 'YouTube will not be discoverable from the channel while live. '}
+                Twitch and X broadcasts are always public.
               </FieldDescription>
             </Field>
 

@@ -63,6 +63,24 @@ pub struct PreparedTwitchBroadcast {
     pub language: Option<String>,
 }
 
+/// Result of pushing channel metadata without touching the stream key —
+/// used for manual-RTMP Twitch targets, where the stream transport is a
+/// user-provided key but the channel page can still be updated via Helix.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TwitchAppliedMetadata {
+    pub platform: StreamPlatform,
+    pub account_id: String,
+    pub account_label: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TwitchCategorySearchResult {
@@ -102,14 +120,17 @@ struct TwitchCategorySearchResponse {
     data: Vec<TwitchCategory>,
 }
 
-pub async fn prepare_twitch_broadcast(
-    request: TwitchPrepareRequest,
+/// Push effective title/category/language to the channel via Helix
+/// `PATCH /helix/channels`. Works regardless of how the stream is ingested
+/// (OAuth-prepared or manual stream key).
+pub async fn apply_twitch_channel_metadata(
+    request: &TwitchPrepareRequest,
     client: &reqwest::Client,
-    put_secret: impl FnOnce(&str, &str) -> Result<()>,
-) -> Result<PreparedTwitchBroadcast> {
+) -> Result<TwitchAppliedMetadata> {
     let metadata = effective_twitch_metadata(&request.metadata)?;
     let base_url = request
         .api_base_url
+        .clone()
         .unwrap_or_else(|| TWITCH_API_BASE_URL.to_string());
 
     let mut channel_body = Map::new();
@@ -141,6 +162,28 @@ pub async fn prepare_twitch_broadcast(
         .context("Could not update Twitch channel metadata.")?
         .error_for_status()
         .context("Twitch channel metadata update failed.")?;
+
+    Ok(TwitchAppliedMetadata {
+        platform: StreamPlatform::Twitch,
+        account_id: request.account_id.clone(),
+        account_label: request.account_label.clone(),
+        title: metadata.title,
+        category_id: metadata.category_id,
+        category_name: metadata.category_name,
+        language: metadata.language,
+    })
+}
+
+pub async fn prepare_twitch_broadcast(
+    request: TwitchPrepareRequest,
+    client: &reqwest::Client,
+    put_secret: impl FnOnce(&str, &str) -> Result<()>,
+) -> Result<PreparedTwitchBroadcast> {
+    let base_url = request
+        .api_base_url
+        .clone()
+        .unwrap_or_else(|| TWITCH_API_BASE_URL.to_string());
+    let applied = apply_twitch_channel_metadata(&request, client).await?;
 
     let key_response: TwitchStreamKeyResponse = client
         .get(twitch_api_url(
@@ -176,10 +219,10 @@ pub async fn prepare_twitch_broadcast(
         stream_key_secret_ref,
         stream_key_present: true,
         redacted_url: "rtmp://live.twitch.tv/app/<stream-key>".to_string(),
-        title: metadata.title,
-        category_id: metadata.category_id,
-        category_name: metadata.category_name,
-        language: metadata.language,
+        title: applied.title,
+        category_id: applied.category_id,
+        category_name: applied.category_name,
+        language: applied.language,
     })
 }
 

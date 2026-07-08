@@ -67,12 +67,6 @@ pub struct XPublishParams {
     pub region: String,
     #[serde(default = "default_true")]
     pub is_low_latency: bool,
-    #[serde(default)]
-    pub should_not_tweet: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub locale: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chat_option: Option<u8>,
     /// Active capture session — X lifecycle events land in its session log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -226,7 +220,6 @@ pub struct XPublishRequest {
     pub region: String,
     pub metadata: StreamMetadataDraft,
     pub is_low_latency: bool,
-    pub should_not_tweet: bool,
     pub locale: String,
     pub chat_option: u8,
     pub api_base_url: Option<String>,
@@ -858,7 +851,7 @@ pub async fn publish_x_broadcast(
         PublishBroadcastStateRequest {
             broadcast_id: &broadcast_id,
             title: &title,
-            should_not_tweet: request.should_not_tweet,
+            should_not_tweet: x_should_not_tweet(&request.metadata),
             locale: &request.locale,
             chat_option: request.chat_option,
         },
@@ -986,25 +979,21 @@ pub fn default_source_name() -> String {
     .unwrap_or_else(|| DEFAULT_SOURCE_NAME.to_string())
 }
 
-pub fn default_publish_locale(value: Option<String>) -> String {
-    value
-        .and_then(|value| {
-            let trimmed = value.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        })
-        .or_else(|| optional_env_any(&["VIDEORC_X_LIVESTREAM_LOCALE", "X_LIVESTREAM_LOCALE"]))
+pub fn default_publish_locale() -> String {
+    optional_env_any(&["VIDEORC_X_LIVESTREAM_LOCALE", "X_LIVESTREAM_LOCALE"])
         .unwrap_or_else(|| DEFAULT_LOCALE.to_string())
 }
 
-pub fn default_chat_option(value: Option<u8>) -> u8 {
-    value.unwrap_or_else(|| {
-        optional_env_any(&[
-            "VIDEORC_X_LIVESTREAM_CHAT_OPTION",
-            "X_LIVESTREAM_CHAT_OPTION",
-        ])
-        .and_then(|value| value.parse::<u8>().ok())
-        .unwrap_or(DEFAULT_CHAT_OPTION)
-    })
+/// PUBLISH `chat_option` enum (X Livestream API doc): 0 none, 1 disabled,
+/// 2 everyone, 3 verified accounts (platform default), 4 follows,
+/// 5 subscribers.
+pub fn default_chat_option() -> u8 {
+    optional_env_any(&[
+        "VIDEORC_X_LIVESTREAM_CHAT_OPTION",
+        "X_LIVESTREAM_CHAT_OPTION",
+    ])
+    .and_then(|value| value.parse::<u8>().ok())
+    .unwrap_or(DEFAULT_CHAT_OPTION)
 }
 
 async fn get_region(
@@ -1424,6 +1413,20 @@ fn x_title(metadata: &StreamMetadataDraft) -> String {
         .to_string()
 }
 
+/// X has no visibility control; the only reach lever the Livestream API
+/// exposes is `should_not_tweet` on PUBLISH (suppresses the announcement
+/// post). The draft stores it as `x_announce` (None/true = announce, the
+/// platform default).
+fn x_should_not_tweet(metadata: &StreamMetadataDraft) -> bool {
+    metadata
+        .target_overrides
+        .iter()
+        .find(|target| target.platform == StreamPlatform::X)
+        .and_then(|target| target.x_announce)
+        .map(|announce| !announce)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1439,6 +1442,47 @@ mod tests {
             account_label: Some("Videorc".to_string()),
             credential_source: "test".to_string(),
         }
+    }
+
+    #[test]
+    fn x_publish_metadata_derives_from_the_draft() {
+        let mut draft =
+            crate::streaming::default_stream_metadata_draft("2026-07-08T00:00:00Z".to_string());
+
+        // Global title, no override customization: announce by default.
+        draft.title = "Global title".to_string();
+        assert_eq!(x_title(&draft), "Global title");
+        assert!(!x_should_not_tweet(&draft));
+
+        // Customized X override wins the title; announce off maps to
+        // should_not_tweet.
+        let x_override = draft
+            .target_overrides
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::X)
+            .unwrap();
+        x_override.customize = true;
+        x_override.title = "X title".to_string();
+        x_override.x_announce = Some(false);
+        assert_eq!(x_title(&draft), "X title");
+        assert!(x_should_not_tweet(&draft));
+
+        // Missing x_announce (pre-migration drafts) means announce.
+        let x_override = draft
+            .target_overrides
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::X)
+            .unwrap();
+        x_override.x_announce = None;
+        assert!(!x_should_not_tweet(&draft));
+
+        // Empty titles everywhere fall back to the fixed default.
+        draft.title = String::new();
+        draft
+            .target_overrides
+            .iter_mut()
+            .for_each(|target| target.title = String::new());
+        assert_eq!(x_title(&draft), "Live from Videorc");
     }
 
     #[test]
