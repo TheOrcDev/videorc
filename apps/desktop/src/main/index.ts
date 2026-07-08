@@ -1218,7 +1218,11 @@ function notesWindowHtml(document: NotesDocument): string {
     textarea { flex: 1; resize: none; border: 0; outline: none; padding: 20px 22px;
       box-sizing: border-box; background: ${DARK_WINDOW_PALETTE.base}; color: ${DARK_WINDOW_PALETTE.textPrimary}; caret-color: ${DARK_WINDOW_PALETTE.textPrimary};
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.45; -webkit-app-region: no-drag; }
+      line-height: 1.45; -webkit-app-region: no-drag;
+      /* Keep the arrow cursor: the window is capture-protected but the OS
+         composites the pointer separately, so an I-beam over "empty" space
+         would betray the hidden notes to viewers. */
+      cursor: default; }
     body[data-font-scale="sm"] textarea { font-size: 18px; }
     body[data-font-scale="md"] textarea { font-size: 24px; }
     body[data-font-scale="lg"] textarea { font-size: 32px; }

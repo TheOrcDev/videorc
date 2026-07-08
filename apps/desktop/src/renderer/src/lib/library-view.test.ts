@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest'
 import type { SessionSummary } from '@/lib/backend'
 import {
   filterLibrarySessions,
+  isLiveSession,
   libraryStorageLabel,
+  liveSessionLabel,
   sessionFormatLabel,
   sessionPosterUrl,
   sortLibrarySessions,
@@ -83,6 +85,37 @@ describe('selection', () => {
     expect(toggleAllLibrarySelection(['a', 'b'], ['a', 'b'])).toEqual([])
     expect(toggleAllLibrarySelection(['a'], ['a', 'b'])).toEqual(['a', 'b'])
     expect(toggleAllLibrarySelection(['a'], [])).toEqual([])
+  })
+})
+
+describe('isLiveSession', () => {
+  it('is live only for the running row that matches the active capture', () => {
+    const row = { id: 'live-1', status: 'running' }
+    expect(isLiveSession(row, { state: 'recording', sessionId: 'live-1' })).toBe(true)
+    expect(isLiveSession(row, { state: 'streaming', sessionId: 'live-1' })).toBe(true)
+    expect(isLiveSession(row, { state: 'stopping', sessionId: 'live-1' })).toBe(true)
+    // Stale 'running' row from a dead backend: no matching active capture.
+    expect(isLiveSession(row, { state: 'recording', sessionId: 'other' })).toBe(false)
+    expect(isLiveSession(row, { state: 'idle', sessionId: 'live-1' })).toBe(false)
+    expect(isLiveSession(row, { state: 'idle', sessionId: undefined })).toBe(false)
+    expect(
+      isLiveSession(
+        { id: 'live-1', status: 'completed' },
+        { state: 'recording', sessionId: 'live-1' }
+      )
+    ).toBe(false)
+    expect(
+      isLiveSession({ id: 'live-1', status: 'failed' }, { state: 'recording', sessionId: 'live-1' })
+    ).toBe(false)
+  })
+})
+
+describe('liveSessionLabel', () => {
+  it('labels the capture state for the live row', () => {
+    expect(liveSessionLabel('recording')).toBe('Recording')
+    expect(liveSessionLabel('starting')).toBe('Recording')
+    expect(liveSessionLabel('streaming')).toBe('Streaming')
+    expect(liveSessionLabel('stopping')).toBe('Finishing')
   })
 })
 

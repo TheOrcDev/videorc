@@ -2372,6 +2372,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // Session over: the viewer chip must clear, not freeze (rider V2).
           void window.videorc?.pushViewerSample?.(null)
         }
+        // Capture started: pull the fresh 'running' row so the Library shows
+        // the live session immediately (status ticks repeat the state, so
+        // only refresh on the transition).
+        if (
+          ['recording', 'streaming'].includes(status.state) &&
+          !['recording', 'streaming'].includes(previousState ?? '')
+        ) {
+          void refreshSessions(nextClient)
+        }
         // D6: the moment a recording lands is the moment to publish it.
         if (
           status.state === 'idle' &&

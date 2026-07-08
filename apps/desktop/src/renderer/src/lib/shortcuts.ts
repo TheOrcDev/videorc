@@ -8,7 +8,7 @@ export interface ShortcutEntry {
   /** Keys as displayed, in press order (⌘ modifiers split out for Kbd chips). */
   keys: string[]
   label: string
-  group: 'Navigation' | 'Session' | 'Windows'
+  group: 'Navigation' | 'Session' | 'Windows' | 'Appearance'
 }
 
 export const SHORTCUTS: readonly ShortcutEntry[] = [
@@ -28,7 +28,9 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
 
   { id: 'preview-window', keys: ['⌘', 'P'], label: 'Open preview window', group: 'Windows' },
   { id: 'notes-window', keys: ['⌘', '⇧', 'N'], label: 'Open notes window', group: 'Windows' },
-  { id: 'comments-window', keys: ['⌘', '⇧', 'J'], label: 'Open comments window', group: 'Windows' }
+  { id: 'comments-window', keys: ['⌘', '⇧', 'J'], label: 'Open comments window', group: 'Windows' },
+
+  { id: 'theme-toggle', keys: ['D'], label: 'Toggle light / dark theme', group: 'Appearance' }
 ] as const
 
 export function shortcutsByGroup(): Map<ShortcutEntry['group'], ShortcutEntry[]> {

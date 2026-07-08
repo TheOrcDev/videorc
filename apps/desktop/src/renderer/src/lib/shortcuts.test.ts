@@ -29,7 +29,12 @@ describe('SHORTCUTS registry', () => {
     }
   })
 
-  it('groups cover Navigation, Session, and Windows', () => {
-    expect([...shortcutsByGroup().keys()]).toEqual(['Navigation', 'Session', 'Windows'])
+  it('groups cover Navigation, Session, Windows, and Appearance', () => {
+    expect([...shortcutsByGroup().keys()]).toEqual([
+      'Navigation',
+      'Session',
+      'Windows',
+      'Appearance'
+    ])
   })
 })

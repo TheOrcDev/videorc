@@ -21,6 +21,7 @@ import { useEffect, useMemo, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
 import { PageHeader } from '@/components/page'
+import { StatusDot } from '@/components/status-dot'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -55,7 +56,9 @@ import { dayLabel, durationMsLabel, formatBytes, isActiveRecordingState } from '
 import {
   LIBRARY_FILTERS,
   filterLibrarySessions,
+  isLiveSession,
   libraryStorageLabel,
+  liveSessionLabel,
   sessionFormatLabel,
   sessionPosterUrl,
   sortLibrarySessions,
@@ -395,8 +398,13 @@ function LibraryRow({
   onRename: () => void
   onDelete: () => void
 }): ReactElement {
+  const { recording } = useStudio()
   const filePath = session.mp4Path ?? session.outputPath ?? null
   const format = sessionFormatLabel(session)
+  // A live row shows the capture's ticking elapsed time; the session row only
+  // gets duration_ms at finalize.
+  const live = isLiveSession(session, recording)
+  const durationMs = live ? recording.durationMs : session.durationMs
   return (
     <div
       className={cn(
@@ -416,7 +424,7 @@ function LibraryRow({
           <p className="truncate text-sm font-medium">{session.title || 'Untitled session'}</p>
           <p className="truncate text-xs text-muted-foreground">
             {dayLabel(session.startedAt)}
-            {!filePath ? ' · no local file' : ''}
+            {!filePath && !live ? ' · no local file' : ''}
           </p>
         </div>
       </div>
@@ -428,13 +436,17 @@ function LibraryRow({
         ) : null}
       </div>
       <span className="text-xs text-muted-foreground tabular-nums">
-        {typeof session.durationMs === 'number' ? durationMsLabel(session.durationMs) : '—'}
+        {typeof durationMs === 'number' ? durationMsLabel(durationMs) : '—'}
       </span>
       <span className="text-xs text-muted-foreground tabular-nums">
         {formatBytes(session.fileSizeBytes)}
       </span>
       <div>
-        {format ? <Badge variant={session.mp4Path ? 'success' : 'outline'}>{format}</Badge> : null}
+        {live ? (
+          <StatusDot pulse label={liveSessionLabel(recording.state)} tone="error" />
+        ) : format ? (
+          <Badge variant={session.mp4Path ? 'success' : 'outline'}>{format}</Badge>
+        ) : null}
       </div>
       <RowActions
         filePath={filePath}
@@ -448,20 +460,25 @@ function LibraryRow({
 }
 
 /** Poster with one lazy backfill attempt: older sessions have no poster yet;
- * a 404 triggers a single sessions.poster round-trip (idle-aware backend). */
+ * a 404 triggers a single sessions.poster round-trip (idle-aware backend).
+ * Running sessions never request the poster — extraction waits for capture
+ * idle, so the request is guaranteed to 404. */
 export function SessionPoster({
   session
 }: {
-  session: Pick<SessionSummary, 'id' | 'durationMs'>
+  session: Pick<SessionSummary, 'id' | 'durationMs' | 'status'>
 }): ReactElement {
-  const { connection, ensureSessionPoster } = useStudio()
+  const { connection, ensureSessionPoster, recording } = useStudio()
   const [attempt, setAttempt] = useState(0)
   const [failed, setFailed] = useState(false)
-  const url = sessionPosterUrl(connection, session)
+  const running = session.status === 'running'
+  const url = running ? null : sessionPosterUrl(connection, session)
   const source = url && attempt > 0 ? `${url}&attempt=${attempt}` : url
   return (
     <span className="grid h-10 w-[4.5rem] shrink-0 place-items-center overflow-hidden rounded-row border bg-muted/30">
-      {source && !failed ? (
+      {isLiveSession(session, recording) ? (
+        <StatusDot pulse tone="error" />
+      ) : source && !failed ? (
         <img
           alt=""
           className="size-full object-cover"
@@ -535,6 +552,9 @@ function RowActions({
   const busy = phase === 'checking' || phase === 'repairing'
   const disconnected = wsStatus !== 'connected'
   const captureProtected = isActiveRecordingState(recording.state)
+  // The live row's file is still being written: playing or duplicating a
+  // partial container yields garbage, so those wait for finalize.
+  const live = isLiveSession(session, recording)
   const canRepair = assessment?.repairable ?? false
   const persistedRepaired = session.qualityStatus?.status === 'repaired'
   const canExportMp4 = Boolean(
@@ -627,9 +647,9 @@ function RowActions({
       <Button
         aria-label="Play recording"
         className="size-8"
-        disabled={!filePath}
+        disabled={!filePath || live}
         size="icon"
-        title="Play in the default player"
+        title={live ? 'Available when the session ends' : 'Play in the default player'}
         variant="ghost"
         onClick={() => void playFile()}
       >
@@ -662,7 +682,7 @@ function RowActions({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem disabled={!filePath} onClick={() => void playFile()}>
+          <DropdownMenuItem disabled={!filePath || live} onClick={() => void playFile()}>
             <Play />
             Play
           </DropdownMenuItem>
@@ -697,7 +717,7 @@ function RowActions({
             Rename
           </DropdownMenuItem>
           <DropdownMenuItem
-            disabled={!filePath || busy || duplicating}
+            disabled={!filePath || busy || duplicating || live}
             onClick={() => void runDuplicate()}
           >
             <Copy />

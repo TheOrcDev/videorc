@@ -1,5 +1,5 @@
-import type { BackendConnection, SessionSummary } from '@/lib/backend'
-import { formatBytes } from '@/lib/format'
+import type { BackendConnection, RecordingStatus, SessionSummary } from '@/lib/backend'
+import { formatBytes, isActiveRecordingState } from '@/lib/format'
 
 // Library table view logic (Library rewrite L4): filtering, sorting, search,
 // selection, poster URLs, and the storage footer — all pure and unit-tested;
@@ -58,6 +58,31 @@ export function sessionFormatLabel(session: SessionSummary): string | null {
   return session.container.toLowerCase() === 'tee'
     ? 'MKV + stream'
     : session.container.toUpperCase()
+}
+
+/** The session being captured RIGHT NOW. A 'running' row that does not match
+ * the active recording is stale (backend died mid-session; it gets reconciled
+ * to 'failed' only on the next backend start) and must not claim to be live. */
+export function isLiveSession(
+  session: Pick<SessionSummary, 'id' | 'status'>,
+  recording: Pick<RecordingStatus, 'state' | 'sessionId'>
+): boolean {
+  return (
+    session.status === 'running' &&
+    recording.sessionId === session.id &&
+    isActiveRecordingState(recording.state)
+  )
+}
+
+/** Row status label while a session is live. */
+export function liveSessionLabel(state: RecordingStatus['state']): string {
+  if (state === 'streaming') {
+    return 'Streaming'
+  }
+  if (state === 'stopping') {
+    return 'Finishing'
+  }
+  return 'Recording'
 }
 
 /** Poster over the backend's token-authenticated HTTP server; null while the
