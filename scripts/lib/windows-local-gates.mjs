@@ -5,7 +5,8 @@ export const WINDOWS_LOCAL_GATE_MANIFEST_NAME = 'windows-local-gates.manifest.js
 export function evaluateWindowsLocalGateHost({
   platform = process.platform,
   arch = process.arch,
-  release = ''
+  release = '',
+  allowUnsupportedBuild = false
 } = {}) {
   const failures = []
   if (platform !== 'win32') {
@@ -16,7 +17,7 @@ export function evaluateWindowsLocalGateHost({
   }
 
   const build = windowsBuildNumber(release)
-  if (platform === 'win32' && build !== null && build < 22000) {
+  if (platform === 'win32' && build !== null && build < 22000 && !allowUnsupportedBuild) {
     failures.push(`requires Windows 11 build 22000 or newer; current build is ${build}`)
   }
 

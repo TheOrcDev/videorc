@@ -32,21 +32,23 @@ test('resolveSmokeAppDirs derives isolated dirs from an explicit smoke state dir
 
 test('smokeAppEnv enables ledger reaping by default for isolated smoke launches', () => {
   withCleanSmokeEnv(() => {
-    const env = smokeAppEnv({ VIDEORC_SMOKE_STATE_DIR: '/tmp/videorc-smoke-state' })
+    const stateDir = '/tmp/videorc-smoke-state'
+    const env = smokeAppEnv({ VIDEORC_SMOKE_STATE_DIR: stateDir })
 
     assert.equal(env.VIDEORC_DISABLE_BACKEND_REAP, '0')
     assert.equal(env.VIDEORC_SMOKE_PRINT_BACKEND_READY, '1')
-    assert.equal(env.VIDEORC_APP_DATA_DIR, '/tmp/videorc-smoke-state/app-data')
-    assert.equal(env.VIDEORC_USER_DATA_DIR, '/tmp/videorc-smoke-state/user-data')
+    assert.equal(env.VIDEORC_APP_DATA_DIR, resolve(stateDir, 'app-data'))
+    assert.equal(env.VIDEORC_USER_DATA_DIR, resolve(stateDir, 'user-data'))
   })
 })
 
 test('smokeAppEnv reuses the smoke output dir as the default isolated state dir', () => {
   withCleanSmokeEnv(() => {
-    const env = smokeAppEnv({ VIDEORC_SMOKE_OUTPUT_DIR: '/tmp/videorc-smoke-output' })
+    const outputDir = '/tmp/videorc-smoke-output'
+    const env = smokeAppEnv({ VIDEORC_SMOKE_OUTPUT_DIR: outputDir })
 
-    assert.equal(env.VIDEORC_APP_DATA_DIR, '/tmp/videorc-smoke-output/app-data')
-    assert.equal(env.VIDEORC_USER_DATA_DIR, '/tmp/videorc-smoke-output/user-data')
+    assert.equal(env.VIDEORC_APP_DATA_DIR, resolve(outputDir, 'app-data'))
+    assert.equal(env.VIDEORC_USER_DATA_DIR, resolve(outputDir, 'user-data'))
   })
 })
 
@@ -75,6 +77,11 @@ test('dev app launch targets the desktop package and uses a shell on Windows', (
   assert.equal(windowsSpec.options.shell, true)
   assert.equal(devAppSpawnOptions({ platform: 'darwin' }).shell, false)
   assert.equal(devAppSpawnOptions({ platform: 'linux' }).shell, false)
+  // detached is POSIX-only: on Windows it silently drops the piped output the
+  // marker handshake depends on, and there is no process group to signal.
+  assert.equal(windowsSpec.options.detached, false)
+  assert.equal(devAppSpawnOptions({ platform: 'darwin' }).detached, true)
+  assert.equal(devAppSpawnOptions({ platform: 'linux' }).detached, true)
 })
 
 test('dev app launch failures include the latest child output', () => {

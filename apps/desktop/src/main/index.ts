@@ -4799,6 +4799,14 @@ function enforceWindowsVersionFloor(): boolean {
   if (!isWindows) {
     return false
   }
+  // Dev/lab escape hatch: Windows 10 boxes stay useful for development even
+  // though Windows 11 is the supported floor. Anything Windows-11-specific
+  // (Mica/acrylic, Windows.Graphics.Capture maturity) is unverified below
+  // build 22000 — expect degraded chrome, not a supported configuration.
+  if (process.env.VIDEORC_ALLOW_UNSUPPORTED_WINDOWS === '1') {
+    logBackend('warn', `Windows version floor bypassed (build ${release()}); unsupported setup.`)
+    return false
+  }
   const build = Number.parseInt(release().split('.')[2] ?? '', 10)
   if (Number.isFinite(build) && build >= 22000) {
     return false
@@ -5027,11 +5035,17 @@ function resolveBackendPermissionTargetPath(): string {
 }
 
 function resolvePackagedFfmpegBinDir(): string | null {
-  if (!app.isPackaged) {
+  // Dev mode on Windows: use the pinned vendor FFmpeg from
+  // `pnpm ffmpeg:fetch:windows` when present, so development does not depend
+  // on a system-wide ffmpeg install. macOS dev keeps resolving via PATH.
+  const binDir = app.isPackaged
+    ? join(process.resourcesPath, 'ffmpeg', 'bin')
+    : process.platform === 'win32'
+      ? join(workspaceRoot(), 'vendor', 'ffmpeg', 'windows-x64', 'bin')
+      : null
+  if (!binDir) {
     return null
   }
-
-  const binDir = join(process.resourcesPath, 'ffmpeg', 'bin')
   const binary = join(binDir, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
   return existsSync(binary) ? binDir : null
 }
@@ -5156,7 +5170,9 @@ function startBackendWithRegistryLock(): void {
       // silently using the real ~/Library/Application Support/Videorc profile.
       ...backendIsolationEnv(process.env),
       PATH: pathEntries.join(delimiter),
-      VIDEORC_BUNDLED_FFMPEG_PATH: ffmpegBinDir ? join(ffmpegBinDir, 'ffmpeg') : '',
+      VIDEORC_BUNDLED_FFMPEG_PATH: ffmpegBinDir
+        ? join(ffmpegBinDir, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
+        : '',
       // The backend's watchdog also exits when THIS process dies — the ppid
       // check alone misses the dev chain (electron -> cargo -> backend), where
       // killing Electron leaves cargo alive as the backend's parent.

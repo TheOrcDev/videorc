@@ -9,6 +9,16 @@ Dark-glass UI carries over; macOS-only niceties degrade gracefully.
 This plan is still a follow-through track, not a claim that Windows is ready.
 The completed work is packaging and platform-seam preparation:
 
+- **First on-box run happened (2026-07-08, Windows 10 x64 dev box).** `pnpm dev`
+  boots, the backend compiles and runs, DXGI display + MediaFoundation
+  camera/mic rows appear in the UI, `pnpm ui:driver`/`ui:cmd` drive the app, and
+  `pnpm smoke:dev` passes end to end (all five layout presets record MP4s that
+  clear the quality gates; A/V skew 4–16ms). Dev-loop setup and the
+  Windows-specific launcher rules learned from that run live in
+  `docs/windows-dev-loop.md`. Known on-box issues: the permissions onboarding
+  dialog shows macOS copy ("capture your Mac", ⌘ shortcuts) on Windows, and the
+  main-process first-frame healer logs macOS-specific "Metal IOSurface" retries.
+
 - **Parent track exists.** The Obsidian parent plan is
   `2026-07-07 - Videorc Complete Windows App Plan`; this repo file remains the
   engineering detail for Windows capture/package execution. W0 evidence now

@@ -15,6 +15,12 @@ import {
   selectLatestReleaseArtifacts
 } from './macos-release-artifact-validation.mjs'
 
+// relative() emits platform separators, so repo-relative path assertions must
+// not hardcode '/' — these tests run on both macOS and Windows boxes.
+function posixPath(value) {
+  return value.replaceAll('\\', '/')
+}
+
 describe('artifactKindFromPath', () => {
   it('recognizes app bundles and DMGs only', () => {
     assert.equal(artifactKindFromPath('/tmp/Videorc.app'), 'app')
@@ -195,10 +201,12 @@ describe('selectLatestReleaseArtifacts', () => {
 describe('release artifact report redaction', () => {
   it('formats repo-relative artifact paths', () => {
     assert.equal(
-      formatArtifactPath('/repo/apps/desktop/release/mac-arm64/Videorc.app', {
-        repoRoot: '/repo',
-        homeDir: '/Users/orcdev'
-      }),
+      posixPath(
+        formatArtifactPath('/repo/apps/desktop/release/mac-arm64/Videorc.app', {
+          repoRoot: '/repo',
+          homeDir: '/Users/orcdev'
+        })
+      ),
       'apps/desktop/release/mac-arm64/Videorc.app'
     )
   })

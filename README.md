@@ -78,6 +78,9 @@ The app launches the Rust backend automatically. Recordings default to
 `~/Movies/Videorc/Recordings`; session metadata lives in
 `~/Library/Application Support/Videorc/videorc.sqlite3`.
 
+Developing on Windows? See [docs/windows-dev-loop.md](docs/windows-dev-loop.md)
+for setup, the version-floor escape hatch, and the fast verify loop.
+
 To produce a local unsigned macOS app bundle:
 
 ```sh

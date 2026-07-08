@@ -9,7 +9,7 @@
 // Harnesses default to isolated app/user data and ledger reaping. Product launches
 // still use the normal app data path unless a smoke explicitly opts into this helper.
 
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -166,7 +166,12 @@ export function devAppSpawnSpec({ env, platform = process.platform } = {}) {
 export function devAppSpawnOptions({ env, platform = process.platform } = {}) {
   return {
     cwd: repoRoot,
-    detached: true,
+    // POSIX only: detached puts the app in its own process group so stopProcess
+    // can signal the whole tree. On Windows, detached + shell silently routes
+    // the child's stdout/stderr away from our pipes (observed 2026-07-08: zero
+    // captured output, handshake markers never seen), and group signalling
+    // doesn't exist anyway — stopProcess uses taskkill /T there instead.
+    detached: platform !== 'win32',
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: platform === 'win32'
@@ -312,6 +317,23 @@ function isChildExited(child) {
 }
 
 function signalProcessGroup(pid, child, sig) {
+  if (process.platform === 'win32') {
+    // No POSIX process groups on Windows: taskkill /T walks the child tree
+    // (shell -> pnpm -> electron -> cargo -> backend). Always force with /F —
+    // without it taskkill only posts WM_CLOSE, which console processes ignore;
+    // the shell root then exits on its own and a later forced pass has no tree
+    // left to walk, orphaning electron/cargo/backend (observed 2026-07-08).
+    try {
+      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+    } catch {
+      try {
+        child?.kill(sig)
+      } catch {
+        // Nothing left to signal.
+      }
+    }
+    return
+  }
   try {
     process.kill(-pid, sig)
   } catch {
@@ -349,8 +371,11 @@ function waitForProcessGroupExit(pid, timeoutMs, processGroupExistsFn = processG
 }
 
 function processGroupExists(pid) {
+  // Windows has no process groups; the spawned shell pid stands in for the
+  // tree (taskkill /T above removes it together with its descendants).
+  const target = process.platform === 'win32' ? pid : -pid
   try {
-    process.kill(-pid, 0)
+    process.kill(target, 0)
     return true
   } catch (error) {
     return error?.code === 'EPERM'

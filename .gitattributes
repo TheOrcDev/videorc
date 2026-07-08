@@ -1,0 +1,4 @@
+# LF everywhere: prettier enforces LF, and macOS/Linux boxes commit LF.
+# Without this, Windows checkouts with core.autocrlf=true materialize CRLF
+# and every format:check fails repo-wide. Git still auto-detects binaries.
+* text=auto eol=lf

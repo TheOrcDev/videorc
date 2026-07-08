@@ -1,18 +1,32 @@
-import { mkdtempSync } from 'node:fs'
+import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { devAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
 import { runBackendRecordingSmoke } from './smoke-recording-session.mjs'
 
-const repoRoot = resolve(import.meta.dirname, '..')
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-dev-smoke-${Date.now()}`)
 )
 const userDataDir =
   process.env.VIDEORC_USER_DATA_DIR ?? mkdtempSync(join(tmpdir(), 'videorc-dev-smoke-user-data-'))
-const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
+const vendorWindowsFfmpeg = resolve(
+  import.meta.dirname,
+  '..',
+  'vendor',
+  'ffmpeg',
+  'windows-x64',
+  'bin',
+  'ffmpeg.exe'
+)
+const ffmpegPath =
+  process.env.VIDEORC_SMOKE_FFMPEG_PATH ??
+  // Windows dev boxes rarely have ffmpeg on PATH; prefer the pinned vendor
+  // build from `pnpm ffmpeg:fetch:windows` (same one dev mode wires in).
+  (process.platform === 'win32' && existsSync(vendorWindowsFfmpeg)
+    ? vendorWindowsFfmpeg
+    : 'ffmpeg')
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 
 let appProcess
@@ -37,15 +51,15 @@ function launchAndReadConnection() {
       rejectConnection(new Error(`Timed out waiting for dev backend READY after ${timeoutMs}ms.`))
     }, timeoutMs)
 
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
-      detached: true,
+    // devAppSpawnSpec handles the Windows pnpm shim (shell: true) — a bare
+    // spawn('pnpm', …) fails with ENOENT on win32.
+    const spec = devAppSpawnSpec({
       env: smokeAppEnv({
         VIDEORC_USER_DATA_DIR: userDataDir,
         VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
-      }),
-      stdio: ['ignore', 'pipe', 'pipe']
+      })
     })
+    appProcess = spawn(spec.command, spec.args, spec.options)
 
     appProcess.stdout.setEncoding('utf8')
     appProcess.stderr.setEncoding('utf8')

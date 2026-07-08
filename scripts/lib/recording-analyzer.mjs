@@ -20,7 +20,7 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 /**
  * Strict OBS-quality gates. All thresholds come from the root-fix plan's
@@ -906,10 +906,7 @@ export function renderMarkdownReport(report) {
 export function writeReports(report, { outDir } = {}) {
   const dir = outDir ?? dirname(report.file)
   mkdirSync(dir, { recursive: true })
-  const base = report.file
-    .split('/')
-    .pop()
-    .replace(/\.[^.]+$/, '')
+  const base = basename(report.file).replace(/\.[^.]+$/, '')
   const jsonPath = join(dir, `${base}.quality.json`)
   const mdPath = join(dir, `${base}.quality.md`)
   writeFileSync(jsonPath, JSON.stringify(report, null, 2))

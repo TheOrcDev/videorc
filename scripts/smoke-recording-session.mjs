@@ -492,10 +492,16 @@ function sleep(ms) {
 }
 
 function resolveSiblingFfprobe(ffmpegPath) {
-  if (typeof ffmpegPath !== 'string' || !ffmpegPath.endsWith('ffmpeg')) {
+  if (typeof ffmpegPath !== 'string') {
     return null
   }
-  return `${ffmpegPath.slice(0, -'ffmpeg'.length)}ffprobe`
+  if (ffmpegPath.endsWith('ffmpeg')) {
+    return `${ffmpegPath.slice(0, -'ffmpeg'.length)}ffprobe`
+  }
+  if (ffmpegPath.endsWith('ffmpeg.exe')) {
+    return `${ffmpegPath.slice(0, -'ffmpeg.exe'.length)}ffprobe.exe`
+  }
+  return null
 }
 
 function formatMetricMs(value) {

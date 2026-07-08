@@ -14,7 +14,12 @@ import {
 const repoRoot = resolve(import.meta.dirname, '..')
 const dryRun = process.argv.includes('--dry-run') || process.argv.includes('--print-only')
 const startedAt = new Date()
-const host = evaluateWindowsLocalGateHost({ release: release() })
+const host = evaluateWindowsLocalGateHost({
+  release: release(),
+  // Same dev/lab escape hatch as the app's startup floor: lets Windows 10
+  // boxes run the gates as an unsupported configuration.
+  allowUnsupportedBuild: process.env.VIDEORC_ALLOW_UNSUPPORTED_WINDOWS === '1'
+})
 const steps = buildWindowsLocalGateSteps({
   repoRoot,
   acceptanceDir: process.env.VIDEORC_WINDOWS_ACCEPTANCE_DIR

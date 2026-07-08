@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { join } from 'node:path'
 import { describe, it } from 'node:test'
 
 import {
@@ -10,6 +11,12 @@ import {
   windowsLocalGateManifestPath,
   windowsLocalGateOutputDir
 } from './windows-local-gates.mjs'
+
+// resolve() emits platform separators, so path assertions must not hardcode
+// '/' — these tests run on both macOS and Windows boxes.
+function posixPath(value) {
+  return value.replaceAll('\\', '/')
+}
 
 describe('evaluateWindowsLocalGateHost', () => {
   it('accepts Windows 11 x64 hosts', () => {
@@ -57,15 +64,15 @@ describe('buildWindowsLocalGateSteps', () => {
     ])
     assert.deepEqual(steps.at(-1).args, ['smoke:packaged:bundled'])
     assert.match(
-      steps.at(-1).env.VIDEORC_PACKAGED_APP_EXECUTABLE,
+      posixPath(steps.at(-1).env.VIDEORC_PACKAGED_APP_EXECUTABLE),
       /C:\/repo\/apps\/desktop\/release\/win-unpacked\/Videorc\.exe$/
     )
     assert.match(
-      steps.at(-1).env.VIDEORC_SMOKE_OUTPUT_DIR,
+      posixPath(steps.at(-1).env.VIDEORC_SMOKE_OUTPUT_DIR),
       /C:\/repo\/docs\/acceptance\/artifacts\/windows\/\d{4}-\d{2}-\d{2}$/
     )
     assert.match(
-      windowsLocalGateOutputDir(steps),
+      posixPath(windowsLocalGateOutputDir(steps)),
       /C:\/repo\/docs\/acceptance\/artifacts\/windows\/\d{4}-\d{2}-\d{2}$/
     )
   })
@@ -77,7 +84,7 @@ describe('buildWindowsLocalGateSteps', () => {
     })
 
     assert.match(
-      steps.at(-1).env.VIDEORC_SMOKE_OUTPUT_DIR,
+      posixPath(steps.at(-1).env.VIDEORC_SMOKE_OUTPUT_DIR),
       /C:\/repo\/docs\/acceptance\/artifacts\/windows\/2026-07-08-lab-1$/
     )
   })
@@ -130,7 +137,7 @@ describe('buildWindowsLocalGateSteps', () => {
       'pnpm',
       'support-bundle:verify',
       '--',
-      `${outputDir}/support-bundle.json`,
+      join(outputDir, 'support-bundle.json'),
       '--windows-acceptance'
     ])
     assert.match(manifest.evidence.acceptanceTemplate, /windows-app-acceptance-template\.md$/)
@@ -139,7 +146,7 @@ describe('buildWindowsLocalGateSteps', () => {
       (step) => step.label === 'owned process lifecycle cleanup smoke'
     )
     assert.deepEqual(processSmoke.env, {
-      VIDEORC_SMOKE_OUTPUT_DIR: `${outputDir}/process-lifecycle`
+      VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'process-lifecycle')
     })
 
     const packagedSmoke = manifest.steps.at(-1)
@@ -168,7 +175,7 @@ describe('buildWindowsLocalGateSteps', () => {
       }
     )
     assert.match(
-      packagedSmoke.env.VIDEORC_PACKAGED_APP_EXECUTABLE,
+      posixPath(packagedSmoke.env.VIDEORC_PACKAGED_APP_EXECUTABLE),
       /C:\/repo\/apps\/desktop\/release\/win-unpacked\/Videorc\.exe$/
     )
     assert.equal(packagedSmoke.env.VIDEORC_SMOKE_OUTPUT_DIR, outputDir)
