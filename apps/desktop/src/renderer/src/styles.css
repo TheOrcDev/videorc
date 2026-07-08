@@ -105,9 +105,12 @@
      translucent coat. Matches the porcelain solid (#FAFAFB). */
   --glass-fallback-base: oklch(0.985 0.001 286);
   --glass-underlay-filter: blur(70px) saturate(1.4) brightness(1.05);
-  /* A hint of true translucency: the frost is not fully opaque, so a little of
-     whatever sits BEHIND the app window shows through the glass. */
-  --glass-underlay-opacity: 0.86;
+  /* A whisper of true translucency. What bleeds through the transparent
+     window is other apps' windows, UNBLURRED (backdrop blur cannot see
+     behind the window), so this is a privacy dial: at the old 0.86, sharp
+     text behind the app was faintly readable through the glass. 0.94 keeps
+     the glass feeling alive without legible bleed — do not lower it. */
+  --glass-underlay-opacity: 0.94;
 
   /* Glass reflection (the .glass-shine utility): a specular sweep from the
      upper-left + a bright top rim where light catches the edge. */
@@ -186,8 +189,10 @@
      smoky texture (the translucent coat alone cannot make a bright wallpaper
      read black; this can). */
   --glass-underlay-filter: blur(70px) saturate(1.1) brightness(0.35);
-  /* A hint of true translucency: see a little of what's behind the window. */
-  --glass-underlay-opacity: 0.82;
+  /* A whisper of true translucency — see the light-theme note: this is a
+     privacy dial (bleed-through is unblurred); was 0.82, which let text
+     behind the app read through. Do not lower it. */
+  --glass-underlay-opacity: 0.92;
 
   /* Glass reflection: the orb's specular highlight — subtle white sweep from
      the upper-left + a glinting top rim on the black glass. */
