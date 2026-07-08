@@ -141,6 +141,17 @@ pub fn create(path: &Path) -> io::Result<()> {
         ));
     }
 
+    {
+        let mut registry = pipe_registry()
+            .lock()
+            .map_err(|_| io::Error::other("named-pipe registry lock poisoned"))?;
+        // The stale server handle must be closed before CreateNamedPipeW runs:
+        // FILE_FLAG_FIRST_PIPE_INSTANCE checks existing OS pipe instances, so
+        // replacing the map entry after creation still leaves the old handle
+        // busy long enough for Windows to reject the replacement.
+        drop(registry.remove(path));
+    }
+
     // PIPE_NOWAIT so `open_writer` can poll ConnectNamedPipe against the
     // stop flag; it flips the handle back to blocking once a reader attaches.
     let handle = unsafe {
@@ -163,8 +174,6 @@ pub fn create(path: &Path) -> io::Result<()> {
     let mut registry = pipe_registry()
         .lock()
         .map_err(|_| io::Error::other("named-pipe registry lock poisoned"))?;
-    // Replacing an entry drops (closes) any stale server instance for the
-    // same path — the named-pipe twin of removing a stale filesystem FIFO.
     registry.insert(path.to_path_buf(), owned);
     Ok(())
 }
