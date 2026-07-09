@@ -36,7 +36,8 @@ export function PermissionsOnboardingDialog({
     openSystemPermission,
     sampleAudioMeter,
     canSampleAudio,
-    runtimeInfo
+    runtimeInfo,
+    mediaAccess
   } = useStudio()
   const [pending, setPending] = useState<'camera' | 'microphone' | null>(null)
 
@@ -61,7 +62,12 @@ export function PermissionsOnboardingDialog({
     return () => window.removeEventListener('focus', onFocus)
   }, [open, refreshBackend])
 
-  const rows = systemAccessRows({ deviceList, audioMeter, platform: runtimeInfo?.platform })
+  const rows = systemAccessRows({
+    deviceList,
+    audioMeter,
+    platform: runtimeInfo?.platform,
+    mediaAccess
+  })
   const allGranted = rows.every((row) => row.state === 'granted')
   const isWindows = isWindowsPlatform(runtimeInfo?.platform)
   const deviceNoun = isWindows ? 'PC' : 'Mac'
@@ -114,6 +120,7 @@ export function PermissionsOnboardingDialog({
           {rows.map((row) => (
             <PermissionRow
               key={row.id}
+              isWindows={isWindows}
               pending={pending === row.id}
               row={row}
               onEnable={() => void enableMedia(row.id as 'camera' | 'microphone')}
@@ -121,6 +128,14 @@ export function PermissionsOnboardingDialog({
             />
           ))}
         </div>
+
+        {isWindows ? (
+          <p className="text-xs text-muted-foreground">
+            Videorc runs as a desktop app, so it won’t appear by name in {settingsName}. In each
+            privacy page, turn on the main access toggle and “Let desktop apps access your camera /
+            microphone.”
+          </p>
+        ) : null}
 
         <DialogFooter className="items-center sm:justify-between">
           <span className="text-xs text-muted-foreground">
@@ -147,11 +162,13 @@ async function waitFor(condition: () => boolean, timeoutMs = 10_000): Promise<vo
 
 function PermissionRow({
   row,
+  isWindows,
   pending,
   onEnable,
   onOpenSettings
 }: {
   row: SystemAccessRow
+  isWindows: boolean
   pending: boolean
   onEnable: () => void
   onOpenSettings: () => void
@@ -159,7 +176,11 @@ function PermissionRow({
   // Screen Recording has no native prompt API — System Settings is the only
   // door. Camera/mic get the in-place prompt while undetermined; once macOS
   // has said no, only System Settings can flip it (TCC never re-asks).
-  const canEnableInPlace = row.id !== 'screen-recording' && row.state === 'first-use'
+  //
+  // Windows has NO in-place prompt at all (askForMediaAccess is macOS-only), so
+  // an "Enable" button there was a dead no-op (the tester's "clicking Enable
+  // does nothing") — every row opens Settings instead.
+  const canEnableInPlace = !isWindows && row.id !== 'screen-recording' && row.state === 'first-use'
   const action =
     row.state === 'granted' || row.state === 'device-issue' ? null : canEnableInPlace ? (
       <Button disabled={pending} size="xs" variant="outline" onClick={onEnable}>

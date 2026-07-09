@@ -42,6 +42,7 @@ export function AppShell(): ReactElement {
     wsStatus,
     deviceList,
     audioMeter,
+    mediaAccess,
     recording,
     runtimeInfo,
     entitlements,
@@ -77,11 +78,16 @@ export function AppShell(): ReactElement {
     }
     onboardingEvaluatedRef.current = true
     const dismissed = localStorage.getItem(STORAGE_KEYS.onboarding) !== null
-    const rows = systemAccessRows({ deviceList, audioMeter, platform: runtimeInfo?.platform })
+    const rows = systemAccessRows({
+      deviceList,
+      audioMeter,
+      platform: runtimeInfo?.platform,
+      mediaAccess
+    })
     if (shouldShowPermissionsOnboarding({ rows, dismissed, backendReady })) {
       setOnboardingOpen(true)
     }
-  }, [audioMeter, backendReady, deviceList, runtimeInfo?.platform])
+  }, [audioMeter, backendReady, deviceList, mediaAccess, runtimeInfo?.platform])
 
   // Studio control pages are ordinary tabs grouped under "Studio" in the sidebar.
   const openStudioPanel = useCallback((panel: StudioPanel) => {

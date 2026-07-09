@@ -1870,6 +1870,15 @@ export interface DiagnosticStats {
 export type HealthLevel = 'info' | 'warn' | 'error'
 export type SystemPermissionPane = 'privacy' | 'screen-recording' | 'camera' | 'microphone'
 
+// Mirrors Electron systemPreferences.getMediaAccessStatus return values, plus
+// 'unknown' for platforms/errors where it cannot be read.
+export type MediaAccessStatus = 'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown'
+
+export interface MediaAccessSnapshot {
+  camera: MediaAccessStatus
+  microphone: MediaAccessStatus
+}
+
 export interface HealthEvent {
   id: string
   sessionId?: string
@@ -2435,6 +2444,11 @@ export interface VideorcApi {
   destroyNativePreviewSurface: (generation?: number) => Promise<PreviewSurfaceStatus>
   getNativePreviewSurfaceStatus: () => Promise<PreviewSurfaceStatus>
   openSystemPermissions: (pane?: SystemPermissionPane) => Promise<void>
+  /** The OS's real camera/microphone access state (Electron
+   * getMediaAccessStatus — supported on macOS AND Windows). Lets the UI show a
+   * truthful chip on Windows, where the audio meter has no capture backend and
+   * would otherwise leave the mic stuck on "checked on first use". */
+  getMediaAccessStatus: () => Promise<MediaAccessSnapshot>
   /** Fire the native macOS grant prompt in place (no System Settings jump).
    * `restarted` is true only when a fresh grant restarted the capture backend
    * — callers probing a device right after must wait for reconnect first. */

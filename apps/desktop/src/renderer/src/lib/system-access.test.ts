@@ -4,6 +4,7 @@ import type { AudioMeterResult, DeviceList } from '@/lib/backend'
 
 import {
   cameraAccessState,
+  mediaAccessToState,
   microphoneAccessState,
   screenAccessState,
   shouldShowPermissionsOnboarding,
@@ -181,5 +182,33 @@ describe('systemAccessRows', () => {
     expect(shouldShowPermissionsOnboarding({ rows, dismissed: false, backendReady: true })).toBe(
       false
     )
+  })
+
+  it('derives Windows camera/mic from the real OS access status, not the meter', () => {
+    // The tester's exact case: mic meter is 'unavailable' (no Windows backend)
+    // and the camera enumerates, but the OS says microphone is denied. The chip
+    // must reflect the OS, not sit on a misleading "first use".
+    const rows = systemAccessRows({
+      deviceList: devices([{ kind: 'camera', status: 'available' }]),
+      audioMeter: { status: 'unavailable' },
+      platform: 'win32',
+      mediaAccess: { camera: 'granted', microphone: 'denied' }
+    })
+    const mic = rows.find((row) => row.id === 'microphone')
+    const camera = rows.find((row) => row.id === 'camera')
+    expect(camera?.state).toBe('granted')
+    expect(mic?.state).toBe('not-granted')
+    // Windows guidance points at the umbrella toggle and says the app isn't listed.
+    expect(mic?.detail).toMatch(/Let desktop apps access your microphone/)
+    expect(mic?.detail).toMatch(/isn.t listed by name/)
+  })
+
+  it('mediaAccessToState maps OS statuses to chip states', () => {
+    expect(mediaAccessToState('granted')).toBe('granted')
+    expect(mediaAccessToState('denied')).toBe('not-granted')
+    expect(mediaAccessToState('restricted')).toBe('not-granted')
+    expect(mediaAccessToState('not-determined')).toBe('first-use')
+    expect(mediaAccessToState('unknown')).toBe('first-use')
+    expect(mediaAccessToState(undefined)).toBe('first-use')
   })
 })

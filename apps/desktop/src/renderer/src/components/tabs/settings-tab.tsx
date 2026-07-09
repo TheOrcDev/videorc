@@ -61,6 +61,7 @@ export function SettingsTab({
     captureConfig,
     deviceList,
     audioMeter,
+    mediaAccess,
     refreshBackend,
     openSystemPermission,
     exportSupportBundle,
@@ -116,7 +117,12 @@ export function SettingsTab({
     return () => window.removeEventListener('focus', onFocus)
   }, [refreshBackend])
 
-  const accessRows = systemAccessRows({ deviceList, audioMeter, platform: runtimeInfo?.platform })
+  const accessRows = systemAccessRows({
+    deviceList,
+    audioMeter,
+    platform: runtimeInfo?.platform,
+    mediaAccess
+  })
 
   const createOutputDirectory = async (): Promise<void> => {
     if (!outputDirectory) {

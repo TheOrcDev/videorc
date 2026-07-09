@@ -1,4 +1,4 @@
-import type { AudioMeterResult, Device, DeviceList } from '@/lib/backend'
+import type { AudioMeterResult, Device, DeviceList, MediaAccessStatus } from '@/lib/backend'
 import { appPlatform, osSettingsName, type AppPlatform } from '@/lib/platform'
 
 // ST3 (Settings rework): live permission states for the System access rows.
@@ -74,18 +74,47 @@ export function microphoneAccessState(audioMeter: AudioMeterResult | null): Syst
   return 'first-use'
 }
 
+// Maps the OS's real getMediaAccessStatus to a chip state. This is the truthful
+// source on Windows, where the audio meter has no capture backend and the
+// camera enumerates regardless of the privacy toggle, so the meter/enumeration
+// derivations above would leave both stuck on "first-use" (the tester's stuck
+// mic chip). 'denied'/'restricted' → the desktop-apps toggle is off.
+export function mediaAccessToState(status: MediaAccessStatus | undefined): SystemAccessState {
+  switch (status) {
+    case 'granted':
+      return 'granted'
+    case 'denied':
+    case 'restricted':
+      return 'not-granted'
+    default:
+      // 'not-determined' | 'unknown' | undefined
+      return 'first-use'
+  }
+}
+
 export function systemAccessRows({
   deviceList,
   audioMeter,
-  platform
+  platform,
+  mediaAccess
 }: {
   deviceList: DeviceList
   audioMeter: AudioMeterResult | null
   platform?: string
+  mediaAccess?: { camera: MediaAccessStatus; microphone: MediaAccessStatus } | null
 }): SystemAccessRow[] {
   const os = appPlatform(platform)
-  const camera = cameraAccessState(deviceList)
-  const microphone = microphoneAccessState(audioMeter)
+  // On Windows the OS access status is the honest signal (see mediaAccessToState);
+  // macOS keeps its TCC-aware enumeration/meter derivation, which already
+  // distinguishes denied from first-use.
+  const camera =
+    os === 'win32' && mediaAccess
+      ? mediaAccessToState(mediaAccess.camera)
+      : cameraAccessState(deviceList)
+  const microphone =
+    os === 'win32' && mediaAccess
+      ? mediaAccessToState(mediaAccess.microphone)
+      : microphoneAccessState(audioMeter)
 
   const rows: SystemAccessRow[] = []
 
@@ -151,6 +180,12 @@ export function shouldShowPermissionsOnboarding({
 
 function accessDetail(state: SystemAccessState, subject: string, os: AppPlatform): string {
   const settings = osSettingsName(os === 'other' ? undefined : os)
+  if (os === 'win32' && (state === 'not-granted' || state === 'first-use')) {
+    // Windows gates desktop (non-Store) apps behind a single umbrella toggle
+    // and does NOT list them by name — the tester was hunting for "Videorc" in
+    // a list where it can never appear. Point at the two real levers instead.
+    return `In ${settings} → Privacy & security → ${windowsPrivacyPageName(subject)}, turn on access and “Let desktop apps access your ${windowsDeviceNoun(subject)}”. Videorc is a desktop app, so it isn’t listed by name.`
+  }
   switch (state) {
     case 'granted':
       return 'Permission granted.'
@@ -160,10 +195,16 @@ function accessDetail(state: SystemAccessState, subject: string, os: AppPlatform
       // ships the entitlements, so Settings is the right pointer.
       return `Your ${settings} is blocking ${subject} — grant access there.`
     case 'first-use':
-      return os === 'win32'
-        ? `Grant ${subject} in ${settings} if it is turned off.`
-        : `${settings} reports this on first use.`
+      return `${settings} reports this on first use.`
     case 'device-issue':
       return 'The device opened but did not send audio frames.'
   }
+}
+
+function windowsPrivacyPageName(subject: string): string {
+  return subject.includes('camera') ? 'Camera' : 'Microphone'
+}
+
+function windowsDeviceNoun(subject: string): string {
+  return subject.includes('camera') ? 'camera' : 'microphone'
 }

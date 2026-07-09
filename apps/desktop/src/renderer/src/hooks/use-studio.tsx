@@ -81,6 +81,7 @@ import type {
   Device,
   DeviceList,
   EntitlementsSnapshot,
+  MediaAccessSnapshot,
   ExportPublishPackResult,
   FileAssessment,
   GateStatus,
@@ -471,6 +472,8 @@ export type StudioContextValue = {
   setSelectedSceneSourceId: Dispatch<SetStateAction<string | null>>
   audioMeter: AudioMeterResult | null
   audioMeterLoading: boolean
+  /** Real OS camera/mic access status (null before the first read). */
+  mediaAccess: MediaAccessSnapshot | null
   // ai + jobs
   aiConsent: boolean
   setAiConsent: Dispatch<SetStateAction<boolean>>
@@ -1225,6 +1228,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [selectedSceneSourceId, setSelectedSceneSourceId] = useState<string | null>(null)
   const [audioMeter, setAudioMeter] = useState<AudioMeterResult | null>(null)
   const [audioMeterLoading, setAudioMeterLoading] = useState(false)
+  // The OS's real camera/mic access state (Electron getMediaAccessStatus).
+  // On Windows this is what makes the permission chips truthful — the audio
+  // meter has no capture backend there, so it can't report mic permission.
+  const [mediaAccess, setMediaAccess] = useState<MediaAccessSnapshot | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [aiConsent, setAiConsent] = useState(false)
   const [aiRunningSessionId, setAiRunningSessionId] = useState<string | null>(null)
@@ -2925,6 +2932,35 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     sceneEditMode,
     settings.ffmpegPath
   ])
+
+  // Real OS camera/mic access status (Electron getMediaAccessStatus, over IPC —
+  // independent of the backend socket). Refresh on mount and whenever the window
+  // regains focus, since grants flip in the OS Settings while we're backgrounded
+  // — the same trigger the Settings/onboarding chips already use.
+  useEffect(() => {
+    const bridge = window.videorc?.getMediaAccessStatus
+    if (!bridge) {
+      return
+    }
+    let cancelled = false
+    const refresh = (): void => {
+      void bridge()
+        .then((snapshot) => {
+          if (!cancelled) {
+            setMediaAccess(snapshot)
+          }
+        })
+        .catch(() => {
+          // Non-fatal: the chips fall back to the meter/enumeration derivation.
+        })
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    return () => {
+      cancelled = true
+      window.removeEventListener('focus', refresh)
+    }
+  }, [])
 
   useEffect(() => {
     if (!client || wsStatus !== 'connected' || sceneEditMode) {
@@ -6278,6 +6314,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSelectedSceneSourceId,
       audioMeter,
       audioMeterLoading,
+      mediaAccess,
       aiConsent,
       setAiConsent,
       aiRunningSessionId,
@@ -6452,6 +6489,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSelectedSceneSourceId,
       audioMeter,
       audioMeterLoading,
+      mediaAccess,
       aiConsent,
       setAiConsent,
       aiRunningSessionId,

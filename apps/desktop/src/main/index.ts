@@ -127,6 +127,8 @@ import type {
   PreviewSurfaceSceneState,
   PreviewSurfaceSceneUpdateParams,
   PreviewSurfaceStatus,
+  MediaAccessSnapshot,
+  MediaAccessStatus,
   PreviewPermissionStatus,
   PreviewSupervisorState,
   SceneSource,
@@ -7032,6 +7034,26 @@ async function requestMediaAccessIfNeeded(pane: SystemPermissionPane): Promise<b
   }
 }
 
+// The OS's real camera/mic access state. getMediaAccessStatus is supported on
+// macOS AND Windows (only askForMediaAccess is mac-only), so this is the honest
+// signal the renderer chips read on Windows — where the audio meter has no
+// capture backend and the camera enumerates regardless of the privacy toggle.
+function readMediaAccessStatus(pane: 'camera' | 'microphone'): MediaAccessStatus {
+  try {
+    return systemPreferences.getMediaAccessStatus(pane) as MediaAccessStatus
+  } catch (error) {
+    logBackend('warn', `Could not read ${pane} access status: ${errorMessage(error)}`)
+    return 'unknown'
+  }
+}
+
+function mediaAccessSnapshot(): MediaAccessSnapshot {
+  return {
+    camera: readMediaAccessStatus('camera'),
+    microphone: readMediaAccessStatus('microphone')
+  }
+}
+
 async function restartBackend(reason: string): Promise<void> {
   if (backendRestartInProgress) {
     return backendRestartInProgress
@@ -7488,6 +7510,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('system:request-media-access', (_event, pane: 'camera' | 'microphone') =>
     requestMediaAccessNative(pane)
   )
+  ipcMain.handle('system:media-access-status', () => mediaAccessSnapshot())
   ipcMain.handle('system:reveal-permission-target', () => revealPermissionTarget())
   ipcMain.handle('system:reveal-path', (_event, targetPath: string) => revealPath(targetPath))
   // OBS setup import (O1): read-only discovery over OBS Studio's config files.
