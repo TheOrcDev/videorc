@@ -14,6 +14,30 @@ export type UpdaterEvent =
   | { type: 'error'; message: string }
   | { type: 'unsupported' }
 
+// electron-updater surfaces an unpublished feed — no `latest*.yml` for this
+// build's platform/channel — as a 404 / "Cannot find channel" error. That is
+// not a failure the user can act on: it means no update channel is published
+// for this build yet (e.g. a Windows build before its release feed goes live).
+// Classify it so the updater can degrade to the benign 'unsupported' state
+// instead of showing an alarming "Couldn't check for updates: … 404" message.
+// Once the feed publishes, the same check resolves to available/not-available
+// with no code change.
+export function isMissingUpdateFeedError(message: string): boolean {
+  const normalized = message.toLowerCase()
+  if (normalized.includes('cannot find channel')) {
+    return true
+  }
+  // A 404 specifically on the update-info manifest (latest.yml / latest-mac.yml
+  // / latest-linux.yml), not an unrelated 404 mid-download.
+  return (
+    normalized.includes('404') &&
+    (normalized.includes('latest.yml') ||
+      normalized.includes('latest-mac.yml') ||
+      normalized.includes('latest-linux.yml') ||
+      normalized.includes('update info'))
+  )
+}
+
 // electron-updater can report a percent slightly outside 0–100 (or NaN before the
 // first chunk); normalise it so the progress bar never overflows.
 export function clampPercent(percent: number): number {

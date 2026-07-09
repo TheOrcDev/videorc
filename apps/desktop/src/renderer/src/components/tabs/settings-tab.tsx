@@ -511,7 +511,8 @@ function UpdateControl({
     case 'unsupported':
       return (
         <p className="text-xs text-muted-foreground">
-          Updates apply to the installed app — not to development builds.
+          Automatic updates aren’t available for this build yet. Grab new versions from the
+          downloads page.
         </p>
       )
     case 'checking':

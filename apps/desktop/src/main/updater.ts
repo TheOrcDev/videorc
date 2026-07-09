@@ -7,6 +7,7 @@ import type { UpdateStatus } from '../shared/backend'
 import { safeConsole } from './safe-console'
 import {
   BACKGROUND_RECHECK_INTERVAL_MS,
+  isMissingUpdateFeedError,
   shouldAutoDownload,
   shouldBackgroundRecheck,
   updateStatusFromEvent
@@ -34,6 +35,17 @@ let listenersAttached = false
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+// A caught updater failure becomes the benign 'unsupported' state when it is
+// just an unpublished feed (no channel for this platform yet); otherwise it is
+// a real, user-facing error.
+function setStatusFromUpdaterError(message: string): void {
+  setStatus(
+    updateStatusFromEvent(
+      isMissingUpdateFeedError(message) ? { type: 'unsupported' } : { type: 'error', message }
+    )
+  )
 }
 
 function setStatus(next: UpdateStatus): void {
@@ -88,7 +100,7 @@ function attachUpdaterListeners(): void {
     const message = errorMessage(error)
     // Update failures are non-fatal.
     safeConsole.warn(`[auto-update] error: ${message}`)
-    setStatus(updateStatusFromEvent({ type: 'error', message }))
+    setStatusFromUpdaterError(message)
   })
 }
 
@@ -163,7 +175,7 @@ export function registerUpdaterIpc(mainWindowGetter: MainWindowGetter): void {
     } catch (error) {
       const message = errorMessage(error)
       safeConsole.warn(`[auto-update] check failed: ${message}`)
-      setStatus(updateStatusFromEvent({ type: 'error', message }))
+      setStatusFromUpdaterError(message)
       return currentStatus
     }
   })
@@ -178,7 +190,7 @@ export function registerUpdaterIpc(mainWindowGetter: MainWindowGetter): void {
       return currentStatus
     } catch (error) {
       const message = errorMessage(error)
-      setStatus(updateStatusFromEvent({ type: 'error', message }))
+      setStatusFromUpdaterError(message)
       return currentStatus
     }
   })
