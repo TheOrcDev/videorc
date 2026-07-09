@@ -48,6 +48,7 @@ row when done.
 | 030 | X native playback verification + source health: pre-publish HLS gate + continuous watchability probe, conservative source health, full X lifecycle in session logs (2026-07-08 spinner incident: same source/params worked at 7 min and spun at 2 min — playback provisioning is the suspect, measured not guessed) | P0 | M-L | 028, 029 | DONE (2026-07-08; S1-S4 shipped in 0.9.21-beta.1, gates PASS; pending owner S5: long-session measurement w/ second-account viewer, partner-manager escalation if a fresh source never verifies) |
 | 031 | X source hygiene: fresh source per session (only condition that ever played from second one), END broadcast before encoder stop (docs order — we did the opposite), graceful RTMP teardown grace (every session ended in SIGKILL) | P0 | S-M | 030 | DONE (2026-07-08; S1-S3 landed, gates PASS; acceptance: two consecutive short real sessions must x-playback-verify within seconds on fresh sources) |
 | 032 | Bundled FFmpeg RTMPS TLS + Homebrew-dylib leak: static OpenSSL (SecureTransport rtmps stalls — A/B proven 0.0 vs 29.998 fps reaching X, starving every packaged X stream into a spinner) AND shipped bundles hard-linked /opt/homebrew libX11/libxcb (could not launch without Homebrew) | P0 | S | none | DONE (2026-07-08; gates fail closed on missing openssl/tls + homebrew dylibs; A/B repush + owner short-session acceptance on 0.9.23) |
+| 033 | Make Comments the authoritative YouTube/Twitch/X feed with truthful send delivery and acknowledged stream highlights | P0 | L | shipped X-read code from 028/029 (their real-account acceptance is still pending), Google OAuth approval, documented X native-chat write contract for literal three-way send | IN PROGRESS (U0 underway; YouTube live acceptance and exact X native-chat send retain scoped external blockers) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) |
 REJECTED (with one-line rationale).
@@ -417,13 +418,21 @@ changes.
   export command does not deepen the current Studio orchestration knot.
 - 019 is explicitly post-macOS stabilization. Windows packaging work is not the
   same as Windows capture acceptance.
+- 033 builds on 028/029's native X read path but does not depend on media Plan
+  006 for its internal domain/UI work. Google OAuth approval gates production
+  YouTube comments. The literal three-native-chat outbound acceptance remains
+  blocked until X supplies a documented write contract; do not substitute X
+  Posts. If the legacy >30fps stream path must support highlights, report that
+  focused media dependency instead of widening 033 silently.
 
 ## Recommended first slice
 
 Current next move: finish Plan 006. After that, run Plan 013 to close the OBS
 by-eye acceptance gap, and Plan 012 when you are ready to cut a signed macOS
 release candidate. Plans 014-018 are the product-readiness stack around that
-core; Plan 019 is later Windows follow-through.
+core; Plan 019 is later Windows follow-through. For the current Comments work,
+start Plan 033 at U0: repair the stale X gate and event-lag recovery before
+changing provider or UI behavior.
 
 ## Findings considered and rejected
 
