@@ -6,6 +6,7 @@ import {
   compositorStatusHasRenderedSceneRevision,
   decideNativePreviewCompositorPresent,
   nativePreviewDroppedFramesWithSuppressed,
+  nativePreviewSceneProofPresentationOwner,
   pendingCompositorStatusSupersedes
 } from './native-preview-present-policy'
 
@@ -106,5 +107,25 @@ describe('native preview present policy', () => {
         2
       )
     ).toBe(5)
+  })
+
+  it('keeps scene-proof presentation with main while the main pump is active', () => {
+    expect(
+      nativePreviewSceneProofPresentationOwner({
+        mainPumpActive: true,
+        statusReaderAvailable: true,
+        rendererUpdaterAvailable: true
+      })
+    ).toBe('main-pump')
+  })
+
+  it('uses the renderer only as a fallback when the main pump is unavailable', () => {
+    expect(
+      nativePreviewSceneProofPresentationOwner({
+        mainPumpActive: false,
+        statusReaderAvailable: true,
+        rendererUpdaterAvailable: true
+      })
+    ).toBe('renderer-fallback')
   })
 })

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import { accountSkippedPreviewFrame } from './native-preview-latest-wins'
+import {
+  accountCoalescedPreviewFrame,
+  accountSkippedPreviewFrame
+} from './native-preview-latest-wins'
 
 describe('accountSkippedPreviewFrame', () => {
   it('counts stale compositor frames as preview drops', () => {
@@ -51,6 +54,27 @@ describe('accountSkippedPreviewFrame', () => {
       framesRendered: 7,
       droppedFrames: 1,
       compositorFrameLag: 2
+    })
+  })
+})
+
+describe('accountCoalescedPreviewFrame', () => {
+  it('tracks a superseded compositor handoff separately from failed native presents', () => {
+    expect(
+      accountCoalescedPreviewFrame(
+        {
+          framesRendered: 40,
+          presentedFrameId: 38,
+          droppedFrames: 2,
+          nativePreviewMainCoalescedFrameCount: 5
+        },
+        41
+      )
+    ).toEqual({
+      framesRendered: 41,
+      droppedFrames: 2,
+      compositorFrameLag: 3,
+      nativePreviewMainCoalescedFrameCount: 6
     })
   })
 })

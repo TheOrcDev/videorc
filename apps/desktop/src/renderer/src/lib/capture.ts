@@ -1450,21 +1450,32 @@ export function reconcileSourceSelection(
   // only ever explicit, remembered user choices; the fallback is a display or
   // nothing, and the permission banners guide the user from there.
   const defaultCaptureDevice = selectableCaptureDevices.find((device) => device.kind === 'screen')
-  const selectedCapture = nextSources.windowId
-    ? (findRememberedSource(
-        nextSources.windowId,
-        nextSources.windowName,
-        selectableCaptureDevices
-      ) ?? defaultCaptureDevice)
-    : (findRememberedSource(
-        nextSources.screenId,
-        nextSources.screenName,
-        selectableCaptureDevices
-      ) ?? defaultCaptureDevice)
-  nextSources.screenId = selectedCapture?.kind === 'screen' ? selectedCapture.id : undefined
-  nextSources.screenName = selectedCapture?.kind === 'screen' ? selectedCapture.name : undefined
-  nextSources.windowId = selectedCapture?.kind === 'window' ? selectedCapture.id : undefined
-  nextSources.windowName = selectedCapture?.kind === 'window' ? selectedCapture.name : undefined
+  // The dev diagnostic pattern deliberately replaces screen/window capture.
+  // Device discovery keeps refreshing while the app is open; letting a later
+  // snapshot auto-select a display makes the synthetic gate (and the visible
+  // source picker) silently change underneath the operator.
+  if (nextSources.testPattern) {
+    nextSources.screenId = undefined
+    nextSources.screenName = undefined
+    nextSources.windowId = undefined
+    nextSources.windowName = undefined
+  } else {
+    const selectedCapture = nextSources.windowId
+      ? (findRememberedSource(
+          nextSources.windowId,
+          nextSources.windowName,
+          selectableCaptureDevices
+        ) ?? defaultCaptureDevice)
+      : (findRememberedSource(
+          nextSources.screenId,
+          nextSources.screenName,
+          selectableCaptureDevices
+        ) ?? defaultCaptureDevice)
+    nextSources.screenId = selectedCapture?.kind === 'screen' ? selectedCapture.id : undefined
+    nextSources.screenName = selectedCapture?.kind === 'screen' ? selectedCapture.name : undefined
+    nextSources.windowId = selectedCapture?.kind === 'window' ? selectedCapture.id : undefined
+    nextSources.windowName = selectedCapture?.kind === 'window' ? selectedCapture.name : undefined
+  }
 
   const selectedCamera =
     findRememberedSource(nextSources.cameraId, nextSources.cameraName, cameras) ?? cameras[0]

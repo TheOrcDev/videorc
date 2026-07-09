@@ -25,6 +25,27 @@ export function accountSkippedPreviewFrame(
   }
 }
 
+export function accountCoalescedPreviewFrame(
+  status: Pick<
+    PreviewSurfaceStatus,
+    'framesRendered' | 'presentedFrameId' | 'droppedFrames' | 'nativePreviewMainCoalescedFrameCount'
+  >,
+  skippedFrameId: number
+): Pick<
+  PreviewSurfaceStatus,
+  'framesRendered' | 'droppedFrames' | 'compositorFrameLag' | 'nativePreviewMainCoalescedFrameCount'
+> {
+  const accounted = accountSkippedPreviewFrame(status, skippedFrameId)
+  const droppedFrames = nonNegativeInteger(status.droppedFrames)
+  const newlyCoalesced = Math.max(0, accounted.droppedFrames - droppedFrames)
+  return {
+    ...accounted,
+    droppedFrames,
+    nativePreviewMainCoalescedFrameCount:
+      nonNegativeInteger(status.nativePreviewMainCoalescedFrameCount) + newlyCoalesced
+  }
+}
+
 function compositorLag(
   status: Pick<PreviewSurfaceStatus, 'framesRendered' | 'presentedFrameId'>
 ): number {

@@ -252,3 +252,17 @@ export class PreviewSupervisorModel {
 export function isPreviewTerminalState(state: PreviewLifecycleState): boolean {
   return state === 'closed' || state === 'failed' || state === 'permission-required'
 }
+
+export type PreviewWindowTargetAction = 'none' | 'open' | 'close'
+
+/** Resolve a toggle or explicit target into an idempotent window action. */
+export function previewWindowTargetAction(
+  currentOpen: boolean,
+  expectedOpen?: boolean
+): PreviewWindowTargetAction {
+  const targetOpen = expectedOpen ?? !currentOpen
+  if (targetOpen === currentOpen) {
+    return 'none'
+  }
+  return targetOpen ? 'open' : 'close'
+}

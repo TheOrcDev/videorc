@@ -245,7 +245,6 @@ export function QuickSettings(): ReactElement {
                 <Button
                   key={preset.id}
                   disabled={
-                    layoutSwitchPending !== null ||
                     (layoutPresetNeedsCamera(preset.id) && !hasCamera) ||
                     (layoutPresetNeedsScreen(preset.id) && !hasScreen)
                   }

@@ -134,6 +134,17 @@ export function buildMacosReleaseArtifactChecks(path) {
         args: ['-d', '--entitlements', ':-', target.path],
         expectOutputIncludes: REQUIRED_CAPTURE_ENTITLEMENTS
       })),
+      {
+        id: 'native-preview-addon-signature',
+        label: 'native preview addon signature',
+        command: 'codesign',
+        args: [
+          '--verify',
+          '--strict',
+          '--verbose=2',
+          `${path}/Contents/Resources/videorc_native_preview.node`
+        ]
+      },
       ...bundledXOauth1ConsumerCheckTargets(path)
     ]
   }

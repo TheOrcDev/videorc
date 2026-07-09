@@ -19,6 +19,22 @@ export type NativePreviewCompositorPresentDecision =
   | { kind: 'suppress-starting' }
   | { kind: 'queue' }
 
+export type NativePreviewSceneProofPresentationOwner =
+  | 'main-pump'
+  | 'renderer-fallback'
+  | 'unavailable'
+
+export function nativePreviewSceneProofPresentationOwner(input: {
+  mainPumpActive: boolean
+  statusReaderAvailable: boolean
+  rendererUpdaterAvailable: boolean
+}): NativePreviewSceneProofPresentationOwner {
+  if (input.mainPumpActive) {
+    return input.statusReaderAvailable ? 'main-pump' : 'unavailable'
+  }
+  return input.rendererUpdaterAvailable ? 'renderer-fallback' : 'unavailable'
+}
+
 export function decideNativePreviewCompositorPresent(input: {
   nativePreviewSurfaceEnabled: boolean
   updateCompositorAvailable: boolean

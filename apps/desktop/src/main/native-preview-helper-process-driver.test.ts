@@ -49,7 +49,15 @@ class FakeChild extends EventEmitter {
   }
 
   respond(payload: unknown): void {
-    const request = this.lastRequest()
+    this.respondTo(this.stdin.writes.length - 1, payload)
+  }
+
+  respondTo(index: number, payload: unknown): void {
+    const line = this.stdin.writes[index]
+    if (!line) {
+      throw new Error(`expected helper request at index ${index}`)
+    }
+    const request = JSON.parse(line) as Record<string, unknown>
     this.stdout.emit(
       'data',
       `${JSON.stringify({
@@ -212,7 +220,8 @@ describe('native-preview-helper-process-driver', () => {
         iosurfaceId: 44,
         width: 1920,
         height: 1080,
-        frameId: 12
+        frameId: 12,
+        runId: 'helper-run-1'
       },
       bounds: surfaceBounds(),
       scene: {
@@ -270,8 +279,99 @@ describe('native-preview-helper-process-driver', () => {
       inputToPresentLatencyP95Ms: 52,
       inputToPresentLatencyP99Ms: 52,
       framePollingSuppressed: true,
-      sourcePixelsPresent: true
+      sourcePixelsPresent: true,
+      nativePreviewPresentedSceneRevision: 1,
+      nativePreviewCompositorRunId: 'helper-run-1'
     })
+  })
+
+  it('keeps presentation cadence metrics across placement commands', async () => {
+    const child = new FakeChild()
+    let clockMs = 0
+    const driver = createNativePreviewHelperProcessDriver({
+      command: 'helper',
+      nowMs: () => clockMs,
+      spawnProcess: () => child as never
+    })
+    const present = async (frameId: number, presentedAtMs: number) => {
+      const promise = driver.presentCompositorHandoff({
+        handoff: { iosurfaceId: frameId, width: 16, height: 16, frameId },
+        suppressFramePolling: true
+      })
+      clockMs = presentedAtMs
+      child.respond({
+        hasOverlay: true,
+        activation: {
+          transport: 'native-surface',
+          backing: 'cametal-layer',
+          presentedFrameId: frameId,
+          framePollingSuppressed: true,
+          sourcePixelsPresent: true
+        }
+      })
+      return promise
+    }
+
+    await present(1, 10)
+    clockMs = 20
+    await expect(present(2, 30)).resolves.toMatchObject({ presentFps: 50 })
+
+    clockMs = 35
+    const placement = driver.applyHostCommands([{ kind: 'update-bounds', bounds: surfaceBounds() }])
+    clockMs = 36
+    child.respond({ hasOverlay: true })
+    await placement
+
+    clockMs = 40
+    const afterPlacement = await present(3, 300)
+    expect(afterPlacement).toMatchObject({
+      intervalP95Ms: 270,
+      nativePreviewPlacementRoundTripP95Ms: 1,
+      nativePreviewPresentRoundTripP95Ms: 260
+    })
+    expect(afterPlacement?.presentFps).toBeCloseTo((2 * 1000) / 290)
+  })
+
+  it('reports other helper requests that remain pending when a frame activates', async () => {
+    const child = new FakeChild()
+    const driver = createNativePreviewHelperProcessDriver({
+      command: 'helper',
+      spawnProcess: () => child as never
+    })
+    const hostCommand = driver.applyHostCommands([
+      { kind: 'update-bounds', bounds: surfaceBounds() }
+    ])
+    const present = driver.presentCompositorHandoff({
+      handoff: { iosurfaceId: 7, width: 16, height: 16, frameId: 9 },
+      suppressFramePolling: true
+    })
+
+    child.respondTo(1, {
+      hasOverlay: true,
+      nativePreviewIosurfaceCacheHits: 12,
+      nativePreviewIosurfaceImports: 4,
+      nativePreviewIosurfaceInvalidations: 1,
+      nativePreviewIosurfaceImportFailures: 2,
+      activation: {
+        transport: 'native-surface',
+        backing: 'cametal-layer',
+        presentedFrameId: 9,
+        framePollingSuppressed: true,
+        sourcePixelsPresent: true
+      }
+    })
+
+    await expect(present).resolves.toMatchObject({
+      pendingHostCommandCount: 1,
+      nativePreviewHostKind: 'helper-process',
+      nativePreviewHostAttached: true,
+      nativePreviewIosurfaceCacheHits: 12,
+      nativePreviewIosurfaceImports: 4,
+      nativePreviewIosurfaceInvalidations: 1,
+      nativePreviewIosurfaceImportFailures: 2
+    })
+    child.respondTo(0, { hasOverlay: true })
+    await hostCommand
   })
 
   it('returns null when the helper has no real layer activation yet', async () => {

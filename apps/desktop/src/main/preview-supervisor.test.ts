@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { PreviewSupervisorModel, isPreviewTerminalState } from './preview-supervisor'
+import {
+  PreviewSupervisorModel,
+  isPreviewTerminalState,
+  previewWindowTargetAction
+} from './preview-supervisor'
 
 function supervisor(): PreviewSupervisorModel {
   let tick = 0
@@ -202,5 +206,19 @@ describe('PreviewSupervisorModel', () => {
     expect(isPreviewTerminalState('permission-required')).toBe(true)
     expect(isPreviewTerminalState('surface-live')).toBe(false)
     expect(isPreviewTerminalState('closing')).toBe(false)
+  })
+})
+
+describe('previewWindowTargetAction', () => {
+  it('turns an expected state into an idempotent open or close action', () => {
+    expect(previewWindowTargetAction(false, true)).toBe('open')
+    expect(previewWindowTargetAction(true, true)).toBe('none')
+    expect(previewWindowTargetAction(true, false)).toBe('close')
+    expect(previewWindowTargetAction(false, false)).toBe('none')
+  })
+
+  it('preserves ordinary toggle behavior when no target is supplied', () => {
+    expect(previewWindowTargetAction(false)).toBe('open')
+    expect(previewWindowTargetAction(true)).toBe('close')
   })
 })

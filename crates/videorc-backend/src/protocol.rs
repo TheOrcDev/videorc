@@ -617,6 +617,18 @@ pub struct SceneConfigParams {
     pub protected_overlay_window_ids: Vec<u32>,
 }
 
+/// Backend-owned scene layout transaction. Renderer-generated intent ids are
+/// monotonic for the lifetime of a backend connection; callers that predate the
+/// transaction API may omit the id and let the backend allocate the next one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneLayoutApplyParams {
+    #[serde(default)]
+    pub intent_id: Option<u64>,
+    #[serde(flatten)]
+    pub config: SceneConfigParams,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneTransformUpdateParams {

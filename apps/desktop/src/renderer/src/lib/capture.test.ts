@@ -56,6 +56,40 @@ function captureConfigFixture(): CaptureConfig {
 }
 
 describe('reconcileSourceSelection', () => {
+  it('keeps the dev synthetic source authoritative across later device refreshes', () => {
+    const next = reconcileSourceSelection(
+      {
+        testPattern: true,
+        cameraId: 'camera:1',
+        cameraName: 'FaceTime HD Camera'
+      },
+      [
+        {
+          id: 'screen:screencapturekit:1',
+          name: 'Display 1',
+          kind: 'screen',
+          status: 'available'
+        },
+        {
+          id: 'camera:1',
+          name: 'FaceTime HD Camera',
+          kind: 'camera',
+          status: 'available'
+        }
+      ]
+    )
+
+    expect(next).toMatchObject({
+      testPattern: true,
+      cameraId: 'camera:1',
+      cameraName: 'FaceTime HD Camera'
+    })
+    expect(next.screenId).toBeUndefined()
+    expect(next.screenName).toBeUndefined()
+    expect(next.windowId).toBeUndefined()
+    expect(next.windowName).toBeUndefined()
+  })
+
   // The renderer mounts with an empty deviceList placeholder and the
   // reconcile effect fires before the backend's first devices.list answer.
   // Remembered selections must survive that pre-snapshot tick: clearing them

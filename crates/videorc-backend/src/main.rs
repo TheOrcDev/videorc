@@ -2299,6 +2299,74 @@ fn handle_connection_control(
     ))
 }
 
+fn queue_websocket_response(outgoing: &mpsc::UnboundedSender<Message>, response: ServerResponse) {
+    match serde_json::to_string(&response) {
+        Ok(text) => {
+            let _ = outgoing.send(Message::Text(text.into()));
+        }
+        Err(error) => tracing::error!("Could not serialize response: {error}"),
+    }
+}
+
+type WebSocketCommandFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ServerResponse> + Send>>;
+type WebSocketCommandHandler =
+    std::sync::Arc<dyn Fn(AppState, String) -> WebSocketCommandFuture + Send + Sync>;
+
+fn production_websocket_command_handler() -> WebSocketCommandHandler {
+    std::sync::Arc::new(|state, text| {
+        Box::pin(async move { handle_text_message(&state, text.as_str()).await })
+    })
+}
+
+fn websocket_command_may_overlap(text: &str) -> bool {
+    serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
+        matches!(
+            command.method.as_str(),
+            "scene.layout.apply_live" | "scene.layout.apply_preview"
+        )
+    })
+}
+
+async fn drain_websocket_layout_commands(tasks: &mut tokio::task::JoinSet<()>) {
+    while let Some(completed) = tasks.join_next().await {
+        if let Err(error) = completed {
+            tracing::warn!("WebSocket layout command task failed: {error}");
+        }
+    }
+}
+
+async fn run_websocket_command_dispatcher(
+    state: AppState,
+    mut commands: mpsc::UnboundedReceiver<String>,
+    outgoing: mpsc::UnboundedSender<Message>,
+    command_handler: WebSocketCommandHandler,
+) {
+    let mut layout_tasks = tokio::task::JoinSet::new();
+
+    while let Some(text) = commands.recv().await {
+        if websocket_command_may_overlap(text.as_str()) {
+            let command_state = state.clone();
+            let response_tx = outgoing.clone();
+            let handler = command_handler.clone();
+            layout_tasks.spawn(async move {
+                let response = handler(command_state, text).await;
+                queue_websocket_response(&response_tx, response);
+            });
+            continue;
+        }
+
+        // A stateful non-layout command is an ordering barrier. All layouts
+        // accepted before it finish first, and later commands remain queued
+        // until this mutation completes.
+        drain_websocket_layout_commands(&mut layout_tasks).await;
+        let response = command_handler(state.clone(), text).await;
+        queue_websocket_response(&outgoing, response);
+    }
+
+    drain_websocket_layout_commands(&mut layout_tasks).await;
+}
+
 async fn ws_handler(
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
@@ -2313,9 +2381,17 @@ async fn ws_handler(
 }
 
 async fn websocket_session(socket: WebSocket, state: AppState) {
+    websocket_session_with_handler(socket, state, production_websocket_command_handler()).await;
+}
+
+async fn websocket_session_with_handler(
+    socket: WebSocket,
+    state: AppState,
+    command_handler: WebSocketCommandHandler,
+) {
     let (mut sender, mut receiver) = socket.split();
     let mut events = state.events.subscribe();
-    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<String>();
+    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<Message>();
     let event_tx = outgoing_tx.clone();
     // Per-connection event exclusions: the renderer mutes the 60Hz
     // compositor.status firehose while the main process drives presents
@@ -2325,7 +2401,23 @@ async fn websocket_session(socket: WebSocket, state: AppState) {
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     let exclusions = excluded_events.clone();
 
-    tokio::spawn(async move {
+    let writer_task = tokio::spawn(async move {
+        while let Some(message) = outgoing_rx.recv().await {
+            if sender.send(message).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let ready_event = ServerEvent::new(
+        "backend.ready",
+        backend_connection(state.port, state.token.clone()),
+    );
+    if let Ok(text) = serde_json::to_string(&ready_event) {
+        let _ = outgoing_tx.send(Message::Text(text.into()));
+    }
+
+    let event_task = tokio::spawn(async move {
         while let Ok(event) = events.recv().await {
             let muted = exclusions
                 .lock()
@@ -2336,7 +2428,7 @@ async fn websocket_session(socket: WebSocket, state: AppState) {
             }
             match serde_json::to_string(&event) {
                 Ok(text) => {
-                    if event_tx.send(text).is_err() {
+                    if event_tx.send(Message::Text(text.into())).is_err() {
                         break;
                     }
                 }
@@ -2345,56 +2437,54 @@ async fn websocket_session(socket: WebSocket, state: AppState) {
         }
     });
 
-    let ready_event = ServerEvent::new(
-        "backend.ready",
-        backend_connection(state.port, state.token.clone()),
-    );
-    if let Ok(text) = serde_json::to_string(&ready_event) {
-        let _ = sender.send(Message::Text(text.into())).await;
-    }
+    let (command_tx, command_rx) = mpsc::unbounded_channel::<String>();
+    let command_dispatcher_task = tokio::spawn(run_websocket_command_dispatcher(
+        state.clone(),
+        command_rx,
+        outgoing_tx.clone(),
+        command_handler,
+    ));
 
     loop {
-        tokio::select! {
-            Some(text) = outgoing_rx.recv() => {
-                if sender.send(Message::Text(text.into())).await.is_err() {
+        let Some(incoming) = receiver.next().await else {
+            break;
+        };
+
+        match incoming {
+            Ok(Message::Text(text)) => {
+                // Connection-local control messages never reach the shared
+                // dispatcher (the exclusion set is per socket).
+                if let Some(response) = handle_connection_control(&excluded_events, text.as_str()) {
+                    queue_websocket_response(&outgoing_tx, response);
+                    continue;
+                }
+
+                if command_tx.send(text.to_string()).is_err() {
                     break;
                 }
             }
-            incoming = receiver.next() => {
-                let Some(incoming) = incoming else {
-                    break;
-                };
-
-                match incoming {
-                    Ok(Message::Text(text)) => {
-                        // Connection-local control messages never reach the
-                        // shared dispatcher (the exclusion set is per socket).
-                        let response = match handle_connection_control(&excluded_events, text.as_str()) {
-                            Some(response) => response,
-                            None => handle_text_message(&state, text.as_str()).await,
-                        };
-                        match serde_json::to_string(&response) {
-                            Ok(text) => {
-                                if sender.send(Message::Text(text.into())).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(error) => tracing::error!("Could not serialize response: {error}"),
-                        }
-                    }
-                    Ok(Message::Close(_)) => break,
-                    Ok(Message::Ping(payload)) => {
-                        let _ = sender.send(Message::Pong(payload)).await;
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!("WebSocket receive error: {error}");
-                        break;
-                    }
-                }
+            Ok(Message::Close(_)) => break,
+            Ok(Message::Ping(payload)) => {
+                let _ = outgoing_tx.send(Message::Pong(payload));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!("WebSocket receive error: {error}");
+                break;
             }
         }
     }
+
+    // Every command read from the socket is accepted work. Closing this
+    // connection stops new intake, but the detached dispatcher drains the
+    // accepted queue so native/source mutations are never canceled halfway.
+    drop(command_tx);
+    drop(command_dispatcher_task);
+    event_task.abort();
+    let _ = event_task.await;
+    drop(outgoing_tx);
+    writer_task.abort();
+    let _ = writer_task.await;
 }
 
 async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
@@ -2692,6 +2782,7 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
         "compositor.scene.update" => {
             match serde_json::from_value::<protocol::CompositorSceneUpdateParams>(command.params) {
                 Ok(params) => {
+                    let _scene_commit = state.scene_commit.lock().await;
                     let status = update_compositor_scene(state, params).await;
                     ServerResponse::ok(command.id, status)
                 }
@@ -2777,8 +2868,13 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             match serde_json::from_value::<protocol::SceneConfigParams>(command.params) {
                 Ok(params) => {
                     let scene = scene_from_capture_config(params.clone());
-                    match live_layout::commit_scene_with_layout(state, &scene, params.layout, None)
-                        .await
+                    match live_layout::commit_idle_scene_with_layout(
+                        state,
+                        &scene,
+                        params.layout,
+                        None,
+                    )
+                    .await
                     {
                         Ok(status) => ServerResponse::ok(command.id, status),
                         Err(error) => ServerResponse::error(
@@ -2794,12 +2890,27 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             }
         }
         "scene.layout.apply_live" => {
-            match serde_json::from_value::<protocol::SceneConfigParams>(command.params) {
+            match serde_json::from_value::<protocol::SceneLayoutApplyParams>(command.params) {
                 Ok(params) => match live_layout::apply_layout_live(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
                     Err(error) => {
                         ServerResponse::error(command.id, "layout-live-failed", error.to_string())
                     }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "scene.layout.apply_preview" => {
+            match serde_json::from_value::<protocol::SceneLayoutApplyParams>(command.params) {
+                Ok(params) => match live_layout::apply_layout_preview(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "layout-preview-failed",
+                        error.to_string(),
+                    ),
                 },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
@@ -4167,6 +4278,7 @@ async fn ffmpeg_status(ffmpeg_path: &str) -> ToolStatus {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Instant;
     use tokio::sync::broadcast;
 
     // Regression: OAuthCallbackQuery once carried rename_all = "camelCase",
@@ -4261,6 +4373,670 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[derive(Clone)]
+    struct TestWebSocketState {
+        app: AppState,
+        command_handler: WebSocketCommandHandler,
+        session_finished: std::sync::Arc<tokio::sync::Semaphore>,
+    }
+
+    async fn test_ws_handler(
+        State(state): State<TestWebSocketState>,
+        Query(query): Query<WsQuery>,
+        ws: WebSocketUpgrade,
+    ) -> impl IntoResponse {
+        if query.token != state.app.token {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+
+        ws.on_upgrade(move |socket| async move {
+            websocket_session_with_handler(socket, state.app, state.command_handler).await;
+            state.session_finished.add_permits(1);
+        })
+        .into_response()
+    }
+
+    async fn connect_test_websocket(
+        command_handler: WebSocketCommandHandler,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio::task::JoinHandle<()>,
+        std::sync::Arc<tokio::sync::Semaphore>,
+    ) {
+        let state = test_state();
+        let token = state.token.clone();
+        let session_finished = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let server_session_finished = session_finished.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                Router::new()
+                    .route("/ws", get(test_ws_handler))
+                    .with_state(TestWebSocketState {
+                        app: state,
+                        command_handler,
+                        session_finished: server_session_finished,
+                    }),
+            )
+            .await;
+        });
+        let (socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws?token={token}"))
+                .await
+                .unwrap();
+        (socket, server, session_finished)
+    }
+
+    #[tokio::test]
+    async fn websocket_non_layout_start_then_stop_remains_fifo() {
+        let order = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<&'static str>::new()));
+        let start_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let stop_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_start = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let order = order.clone();
+            let start_entered = start_entered.clone();
+            let stop_entered = stop_entered.clone();
+            let release_start = release_start.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let order = order.clone();
+                let start_entered = start_entered.clone();
+                let stop_entered = stop_entered.clone();
+                let release_start = release_start.clone();
+                Box::pin(async move {
+                    let command: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let id = command["id"].as_str().unwrap().to_string();
+                    match command["method"].as_str().unwrap() {
+                        "test.mutation.start" => {
+                            start_entered.add_permits(1);
+                            release_start.acquire().await.unwrap().forget();
+                            order.lock().await.push("start");
+                        }
+                        "test.mutation.stop" => {
+                            stop_entered.add_permits(1);
+                            order.lock().await.push("stop");
+                        }
+                        method => panic!("unexpected test command: {method}"),
+                    }
+                    ServerResponse::ok(id, json!({}))
+                })
+            })
+        };
+        let (mut socket, server, _) = connect_test_websocket(handler).await;
+
+        for (id, method) in [
+            ("start", "test.mutation.start"),
+            ("stop", "test.mutation.stop"),
+        ] {
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({ "id": id, "method": method, "params": {} })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        timeout(Duration::from_secs(1), start_entered.acquire())
+            .await
+            .expect("start command should be accepted")
+            .unwrap()
+            .forget();
+        assert!(
+            timeout(Duration::from_millis(100), stop_entered.acquire())
+                .await
+                .is_err(),
+            "stop must not overtake an accepted non-layout start"
+        );
+
+        release_start.add_permits(1);
+        timeout(Duration::from_secs(1), stop_entered.acquire())
+            .await
+            .expect("stop should run after start completes")
+            .unwrap()
+            .forget();
+        assert_eq!(*order.lock().await, ["start", "stop"]);
+
+        let _ = socket.close(None).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_layout_commands_respect_non_layout_boundaries() {
+        let order = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<&'static str>::new()));
+        let start_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let layout_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let stop_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_start = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_layout = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let order = order.clone();
+            let start_entered = start_entered.clone();
+            let layout_entered = layout_entered.clone();
+            let stop_entered = stop_entered.clone();
+            let release_start = release_start.clone();
+            let release_layout = release_layout.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let order = order.clone();
+                let start_entered = start_entered.clone();
+                let layout_entered = layout_entered.clone();
+                let stop_entered = stop_entered.clone();
+                let release_start = release_start.clone();
+                let release_layout = release_layout.clone();
+                Box::pin(async move {
+                    let command: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let id = command["id"].as_str().unwrap().to_string();
+                    match command["method"].as_str().unwrap() {
+                        "test.mutation.start" => {
+                            start_entered.add_permits(1);
+                            release_start.acquire().await.unwrap().forget();
+                            order.lock().await.push("start");
+                        }
+                        "scene.layout.apply_preview" => {
+                            layout_entered.add_permits(1);
+                            release_layout.acquire().await.unwrap().forget();
+                            order.lock().await.push("layout");
+                        }
+                        "test.mutation.stop" => {
+                            stop_entered.add_permits(1);
+                            order.lock().await.push("stop");
+                        }
+                        method => panic!("unexpected test command: {method}"),
+                    }
+                    ServerResponse::ok(id, json!({}))
+                })
+            })
+        };
+        let (mut socket, server, _) = connect_test_websocket(handler).await;
+
+        for (id, method) in [
+            ("start", "test.mutation.start"),
+            ("layout", "scene.layout.apply_preview"),
+            ("stop", "test.mutation.stop"),
+        ] {
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({ "id": id, "method": method, "params": {} })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        timeout(Duration::from_secs(1), start_entered.acquire())
+            .await
+            .expect("start command should be accepted")
+            .unwrap()
+            .forget();
+        assert!(
+            timeout(Duration::from_millis(100), layout_entered.acquire())
+                .await
+                .is_err(),
+            "layout must not overtake the preceding non-layout start"
+        );
+
+        release_start.add_permits(1);
+        timeout(Duration::from_secs(1), layout_entered.acquire())
+            .await
+            .expect("layout should run after start completes")
+            .unwrap()
+            .forget();
+        assert!(
+            timeout(Duration::from_millis(100), stop_entered.acquire())
+                .await
+                .is_err(),
+            "stop must not overtake the preceding layout"
+        );
+
+        release_layout.add_permits(1);
+        timeout(Duration::from_secs(1), stop_entered.acquire())
+            .await
+            .expect("stop should run after layout completes")
+            .unwrap()
+            .forget();
+        assert_eq!(*order.lock().await, ["start", "layout", "stop"]);
+
+        let _ = socket.close(None).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_disconnect_does_not_cancel_an_accepted_mutation() {
+        let mutation_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_mutation = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let mutation_completed = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let mutation_entered = mutation_entered.clone();
+            let release_mutation = release_mutation.clone();
+            let mutation_completed = mutation_completed.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let mutation_entered = mutation_entered.clone();
+                let release_mutation = release_mutation.clone();
+                let mutation_completed = mutation_completed.clone();
+                Box::pin(async move {
+                    let command: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let id = command["id"].as_str().unwrap().to_string();
+                    assert_eq!(command["method"], "test.mutation.start");
+                    mutation_entered.add_permits(1);
+                    release_mutation.acquire().await.unwrap().forget();
+                    mutation_completed.add_permits(1);
+                    ServerResponse::ok(id, json!({}))
+                })
+            })
+        };
+        let (mut socket, server, session_finished) = connect_test_websocket(handler).await;
+
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({
+                    "id": "start",
+                    "method": "test.mutation.start",
+                    "params": {},
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), mutation_entered.acquire())
+            .await
+            .expect("mutation should be accepted before disconnect")
+            .unwrap()
+            .forget();
+
+        let _ = socket.close(None).await;
+        drop(socket);
+        timeout(Duration::from_secs(1), session_finished.acquire())
+            .await
+            .expect("server should observe the disconnected socket")
+            .unwrap()
+            .forget();
+
+        release_mutation.add_permits(1);
+        timeout(Duration::from_millis(250), mutation_completed.acquire())
+            .await
+            .expect("accepted mutation must finish after its socket disconnects")
+            .unwrap()
+            .forget();
+
+        server.abort();
+    }
+
+    fn preview_layout_params(intent_id: u64, preset: protocol::LayoutPreset) -> serde_json::Value {
+        let mut layout = protocol::default_layout_settings();
+        layout.layout_preset = preset;
+        let config = protocol::SceneConfigParams {
+            sources: protocol::SourceSelection {
+                screen_id: Some("screen:screencapturekit:1".to_string()),
+                window_id: None,
+                camera_id: Some("camera:avfoundation-native:camera-1".to_string()),
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout,
+            video: None,
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        };
+        let mut params = serde_json::to_value(config).expect("preview layout params");
+        params["intentId"] = json!(intent_id);
+        params
+    }
+
+    async fn request_for_test(
+        state: &AppState,
+        id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> ServerResponse {
+        handle_text_message(
+            state,
+            &json!({
+                "id": id,
+                "method": method,
+                "params": params,
+            })
+            .to_string(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn websocket_newer_preview_layout_supersedes_older_warmup_promptly() {
+        let state = test_state();
+        {
+            let mut camera = state.preview_camera.lock().await;
+            camera.status.state = protocol::PreviewCameraState::Live;
+            camera.status.camera_id = Some("camera:avfoundation-native:camera-1".to_string());
+            camera.status.frame_age_ms = Some(0);
+            camera.status.frames_captured = 1;
+            camera.status.sequence = Some(1);
+        }
+        {
+            let mut screen = state.preview_screen.lock().await;
+            screen.status.state = protocol::PreviewScreenState::Starting;
+            screen.status.source_id = Some("screen:screencapturekit:1".to_string());
+            screen.status.frames_captured = 0;
+            screen.status.sequence = None;
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/ws", get(ws_handler))
+                    .with_state(state.clone()),
+            )
+            .into_future(),
+        );
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws?token={}", state.token))
+                .await
+                .unwrap();
+
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({
+                    "id": "initial",
+                    "method": "scene.load_from_capture_config",
+                    "params": preview_layout_params(0, protocol::LayoutPreset::CameraOnly),
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let initial = timeout(Duration::from_secs(1), async {
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    continue;
+                };
+                let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if payload["id"] == "initial" {
+                    break payload;
+                }
+            }
+        })
+        .await
+        .expect("initial scene command should return over /ws");
+        assert_eq!(initial["ok"], true);
+
+        let started = Instant::now();
+        for (id, intent_id, preset) in [
+            ("older-warmup", 10, protocol::LayoutPreset::SideBySide),
+            ("newer-camera-only", 11, protocol::LayoutPreset::CameraOnly),
+        ] {
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({
+                        "id": id,
+                        "method": "scene.layout.apply_preview",
+                        "params": preview_layout_params(intent_id, preset),
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        let (older, newer) = timeout(Duration::from_millis(1_500), async {
+            let mut older = None;
+            let mut newer = None;
+            while older.is_none() || newer.is_none() {
+                let message = socket.next().await.unwrap().unwrap();
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    continue;
+                };
+                let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+                match payload["id"].as_str() {
+                    Some("older-warmup") => older = Some(payload),
+                    Some("newer-camera-only") => newer = Some(payload),
+                    _ => {}
+                }
+            }
+            (older.unwrap(), newer.unwrap())
+        })
+        .await
+        .expect("newer click must not wait behind the older 5s warm-up timeout");
+
+        assert_eq!(newer["ok"], true);
+        assert_eq!(newer["payload"]["intentId"], 11);
+        assert_eq!(older["ok"], false);
+        assert!(
+            older["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("superseded"))
+        );
+        assert!(started.elapsed() < Duration::from_millis(1_500));
+
+        let _ = socket.close(None).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn preview_layout_public_api_is_zero_settle_last_intent_wins_with_one_revision_truth() {
+        let state = test_state();
+        {
+            let mut camera = state.preview_camera.lock().await;
+            camera.status.state = protocol::PreviewCameraState::Live;
+            camera.status.camera_id = Some("camera:avfoundation-native:camera-1".to_string());
+            camera.status.frame_age_ms = Some(0);
+            camera.status.frames_captured = 1;
+            camera.status.sequence = Some(1);
+        }
+        {
+            let mut screen = state.preview_screen.lock().await;
+            screen.status.state = protocol::PreviewScreenState::Live;
+            screen.status.source_id = Some("screen:screencapturekit:1".to_string());
+            screen.status.frame_age_ms = Some(60_000);
+            screen.status.frames_captured = 1;
+            screen.status.sequence = Some(1);
+        }
+
+        let initial = request_for_test(
+            &state,
+            "initial",
+            "scene.load_from_capture_config",
+            preview_layout_params(0, protocol::LayoutPreset::CameraOnly),
+        )
+        .await;
+        assert!(initial.ok);
+
+        let screen_only = request_for_test(
+            &state,
+            "screen-only",
+            "scene.layout.apply_preview",
+            preview_layout_params(1, protocol::LayoutPreset::ScreenOnly),
+        )
+        .await;
+        assert!(screen_only.ok, "{:?}", screen_only.error);
+
+        let side_by_side = request_for_test(
+            &state,
+            "side-by-side",
+            "scene.layout.apply_preview",
+            preview_layout_params(2, protocol::LayoutPreset::SideBySide),
+        )
+        .await;
+        assert!(side_by_side.ok, "{:?}", side_by_side.error);
+        let committed = side_by_side.payload.expect("side-by-side status");
+        let revision = committed["sceneRevision"].as_u64().expect("scene revision");
+        assert_eq!(committed["intentId"], 2);
+
+        let stale = request_for_test(
+            &state,
+            "stale-screen-only",
+            "scene.layout.apply_preview",
+            preview_layout_params(1, protocol::LayoutPreset::ScreenOnly),
+        )
+        .await;
+        assert!(
+            !stale.ok,
+            "an older layout intent must never replace the latest"
+        );
+
+        let scene = request_for_test(&state, "scene", "scene.get", json!({})).await;
+        let scene = scene.payload.expect("scene response");
+        assert_eq!(scene["sources"].as_array().map(Vec::len), Some(2));
+        assert!(scene["sources"].as_array().is_some_and(|sources| {
+            sources.iter().any(|source| source["kind"] == "camera")
+                && sources.iter().any(|source| source["kind"] == "screen")
+        }));
+
+        let compositor =
+            request_for_test(&state, "compositor", "compositor.status", json!({})).await;
+        assert_eq!(
+            compositor.payload.expect("compositor status")["sceneRevision"],
+            revision
+        );
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert_eq!(
+            preview_camera_status(&state).await.state,
+            protocol::PreviewCameraState::Live,
+            "the newer side-by-side intent must cancel screen-only's camera-stop grace"
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_layout_public_api_keeps_previous_scene_until_required_source_is_ready() {
+        let state = test_state();
+        {
+            let mut camera = state.preview_camera.lock().await;
+            camera.status.state = protocol::PreviewCameraState::Live;
+            camera.status.camera_id = Some("camera:avfoundation-native:camera-1".to_string());
+            camera.status.frame_age_ms = Some(0);
+            camera.status.frames_captured = 1;
+            camera.status.sequence = Some(1);
+        }
+        {
+            let mut screen = state.preview_screen.lock().await;
+            screen.status.state = protocol::PreviewScreenState::Starting;
+            screen.status.source_id = Some("screen:screencapturekit:1".to_string());
+            screen.status.frames_captured = 0;
+            screen.status.sequence = None;
+        }
+
+        let initial = request_for_test(
+            &state,
+            "initial-warm",
+            "scene.load_from_capture_config",
+            preview_layout_params(0, protocol::LayoutPreset::CameraOnly),
+        )
+        .await;
+        let initial_revision = initial.payload.expect("initial scene status")["sceneRevision"]
+            .as_u64()
+            .expect("initial revision");
+
+        let warm_state = state.clone();
+        let pending = tokio::spawn(async move {
+            request_for_test(
+                &warm_state,
+                "warm-side-by-side",
+                "scene.layout.apply_preview",
+                preview_layout_params(10, protocol::LayoutPreset::SideBySide),
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let while_warming = request_for_test(&state, "warming-scene", "scene.get", json!({})).await;
+        let while_warming = while_warming.payload.expect("warming scene");
+        assert_eq!(while_warming["sources"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            state.compositor.lock().await.status.scene_revision,
+            Some(initial_revision),
+            "warm-up must not publish target metadata ahead of target pixels"
+        );
+
+        {
+            let mut screen = state.preview_screen.lock().await;
+            screen.status.state = protocol::PreviewScreenState::Live;
+            screen.status.frames_captured = 1;
+            screen.status.sequence = Some(1);
+        }
+
+        let applied = pending.await.expect("warm request task");
+        assert!(applied.ok, "{:?}", applied.error);
+        let applied = applied.payload.expect("warm apply status");
+        assert_eq!(applied["mode"], "warm");
+        assert!(applied["sceneRevision"].as_u64().expect("warm revision") > initial_revision);
+        assert_eq!(
+            applied["scene"]["sources"].as_array().map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_layout_public_api_cancels_an_older_in_flight_warmup() {
+        let state = test_state();
+        {
+            let mut camera = state.preview_camera.lock().await;
+            camera.status.state = protocol::PreviewCameraState::Live;
+            camera.status.camera_id = Some("camera:avfoundation-native:camera-1".to_string());
+            camera.status.frame_age_ms = Some(0);
+            camera.status.frames_captured = 1;
+            camera.status.sequence = Some(1);
+        }
+        {
+            let mut screen = state.preview_screen.lock().await;
+            screen.status.state = protocol::PreviewScreenState::Starting;
+            screen.status.source_id = Some("screen:screencapturekit:1".to_string());
+        }
+
+        let initial = request_for_test(
+            &state,
+            "initial-cancel",
+            "scene.load_from_capture_config",
+            preview_layout_params(0, protocol::LayoutPreset::CameraOnly),
+        )
+        .await;
+        assert!(initial.ok);
+
+        let stale_state = state.clone();
+        let stale_pending = tokio::spawn(async move {
+            request_for_test(
+                &stale_state,
+                "stale-warmup",
+                "scene.layout.apply_preview",
+                preview_layout_params(20, protocol::LayoutPreset::SideBySide),
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let newest = request_for_test(
+            &state,
+            "newest-camera-only",
+            "scene.layout.apply_preview",
+            preview_layout_params(21, protocol::LayoutPreset::CameraOnly),
+        )
+        .await;
+        assert!(newest.ok, "{:?}", newest.error);
+
+        let stale = stale_pending.await.expect("stale warm-up task");
+        assert!(!stale.ok);
+        assert!(
+            stale
+                .error
+                .is_some_and(|error| error.message.contains("superseded"))
+        );
+        let final_scene = request_for_test(&state, "final-scene", "scene.get", json!({})).await;
+        let final_scene = final_scene.payload.expect("final scene");
+        assert_eq!(final_scene["sources"].as_array().map(Vec::len), Some(1));
+        assert_eq!(final_scene["sources"][0]["kind"], "camera");
     }
 
     fn platform_account_with_status(

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
+import { requestSmokeCommandWithRetry } from './lib/smoke-command-client.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const cycles = positiveInteger(process.env.VIDEORC_PREVIEW_LIFECYCLE_CYCLES, 100)
@@ -31,7 +32,17 @@ try {
   }
   exitCode = 2
 } finally {
-  if (launched) await stopProcess(launched.process)
+  if (launched) {
+    if (smoke) {
+      await requestSmokeCommandWithRetry(
+        smoke,
+        'preview-lifecycle-allow-app-quit',
+        {},
+        { timeoutMs: 500 }
+      ).catch(() => undefined)
+    }
+    await stopProcess(launched.process)
+  }
 }
 
 process.exit(exitCode)
@@ -45,7 +56,9 @@ async function main() {
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
       VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
       VIDEORC_DISABLE_AUTO_PREVIEW: '1',
-      VIDEORC_SMOKE_COMMAND_SERVER: '1'
+      VIDEORC_SMOKE_COMMAND_SERVER: '1',
+      VIDEORC_PREVIEW_LIFECYCLE_PROBE: '1',
+      VIDEORC_GLASS_WALLPAPER: '0'
     },
     onLine: (line) => console.log(line)
   })
@@ -53,6 +66,18 @@ async function main() {
 
   const initialState = await ensureClosed('initial close')
   lastSupervisorGeneration = supervisorGeneration(initialState)
+  const quitAttempt = await smokeCommand('preview-lifecycle-attempt-app-quit')
+  assertProbe(
+    quitAttempt?.prevented === true,
+    'probe ownership: unrelated app quit was prevented',
+    quitAttempt
+  )
+  const afterQuitAttempt = await smokeCommand('preview-window-state')
+  assertProbe(
+    afterQuitAttempt.open === false && afterQuitAttempt.supervisor?.lifecycleState === 'closed',
+    'probe ownership: app and command server remained live after the quit attempt',
+    afterQuitAttempt
+  )
 
   for (let cycle = 1; cycle <= cycles; cycle += 1) {
     await toggleOpen(`cycle ${cycle}: toggle open`)
@@ -82,7 +107,7 @@ async function main() {
 }
 
 async function toggleOpen(label) {
-  const toggled = await smokeCommand('preview-window-toggle')
+  const toggled = await smokeCommand('preview-window-toggle', { expectedOpen: true })
   assertProbe(
     toggled.supervisor?.windowOpen === true || toggled.supervisor?.lifecycleState === 'opening',
     `${label}: supervisor reports window opening`,
@@ -110,7 +135,7 @@ async function toggleOpen(label) {
 }
 
 async function toggleClosed(label) {
-  const toggled = await smokeCommand('preview-window-toggle')
+  const toggled = await smokeCommand('preview-window-toggle', { expectedOpen: false })
   assertProbe(toggled.open === false, `${label}: command reports closed`, toggled)
   assertProbe(
     supervisorGeneration(toggled) === lastSupervisorGeneration,
@@ -287,37 +312,7 @@ async function waitForState(predicate, timeoutMsLocal) {
 }
 
 async function smokeCommand(command, params = {}) {
-  const deadline = Date.now() + 5000
-  let lastError = null
-  do {
-    try {
-      const response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command, params })
-      })
-      const payload = await response.json()
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error ?? `${command} smoke command failed`)
-      }
-      return payload.result
-    } catch (error) {
-      lastError = error
-      if (!isRetryableSmokeCommandError(error)) {
-        throw error
-      }
-      await sleep(150)
-    }
-  } while (Date.now() < deadline)
-  throw lastError ?? new Error(`${command} smoke command failed`)
-}
-
-function isRetryableSmokeCommandError(error) {
-  const message = String(error?.message ?? error)
-  return (
-    message.includes('Main window is not ready') ||
-    message.includes('Timed out waiting for active tab')
-  )
+  return requestSmokeCommandWithRetry(smoke, command, params)
 }
 
 function assertProbe(condition, label, detail) {

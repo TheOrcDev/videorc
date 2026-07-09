@@ -47,6 +47,10 @@ mac:
       to: native_preview_host_helper
       filter:
         - native_preview_host_helper
+    - from: ../../target/release/videorc_native_preview.node
+      to: videorc_native_preview.node
+      filter:
+        - videorc_native_preview.node
     - from: ../../vendor/ffmpeg/current
       to: ffmpeg
       filter:

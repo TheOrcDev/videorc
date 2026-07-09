@@ -24,6 +24,10 @@ const inputs = [
     remedy: 'pnpm package:backend:macos'
   },
   {
+    path: join(repoRoot, 'target', 'release', 'videorc_native_preview.node'),
+    remedy: 'pnpm build:native-preview-addon:release'
+  },
+  {
     path: join(repoRoot, 'vendor', 'ffmpeg', 'current', 'bin', 'ffmpeg'),
     remedy: 'pnpm ffmpeg:build:macos'
   },
@@ -38,6 +42,20 @@ for (const input of missing) {
   console.error(`preflight-macos-package: MISSING ${input.path} - produce it with: ${input.remedy}`)
 }
 if (missing.length > 0) {
+  process.exit(1)
+}
+
+const nativePreviewAddon = join(repoRoot, 'target', 'release', 'videorc_native_preview.node')
+try {
+  execFileSync('lipo', [nativePreviewAddon, '-verify_arch', 'arm64', 'x86_64'], {
+    stdio: 'pipe'
+  })
+} catch (error) {
+  console.error(
+    `preflight-macos-package: native preview addon is not universal arm64+x86_64: ${
+      error instanceof Error ? error.message : String(error)
+    }\nRebuild with: pnpm build:native-preview-addon:release`
+  )
   process.exit(1)
 }
 

@@ -42,6 +42,7 @@ if (!identityList.includes(identity)) {
 const toolPaths = [
   join(appPath, 'Contents/Resources/videorc-backend'),
   join(appPath, 'Contents/Resources/native_preview_host_helper'),
+  join(appPath, 'Contents/Resources/videorc_native_preview.node'),
   join(appPath, 'Contents/Resources/ffmpeg/bin/ffmpeg'),
   join(appPath, 'Contents/Resources/ffmpeg/bin/ffprobe')
 ]

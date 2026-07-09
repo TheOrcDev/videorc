@@ -26,6 +26,8 @@ import { join } from 'node:path'
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
+const expectInProcessNative =
+  process.platform === 'darwin' && process.env.VIDEORC_NATIVE_PREVIEW_HELPER_FALLBACK !== '1'
 const outputDirectory = join(tmpdir(), `videorc-preview-window-probe-${Date.now()}`)
 mkdirSync(outputDirectory, { recursive: true })
 
@@ -33,8 +35,9 @@ let launched
 let smoke
 const failures = []
 let lastWindowDump = []
-// PT4 (preview res/tearing plan): the helper logs every surface sizing change;
-// capturing the lines lets the probe assert the REAL drawable, not TS math.
+// PT4 (preview res/tearing plan): the transitional helper logs every surface
+// sizing change. The production in-process host reports the same real drawable
+// metrics through native status, so both paths remain regression-covered.
 const surfaceSizingLines = []
 function recordSurfaceSizing(line) {
   const match = line.match(
@@ -69,7 +72,6 @@ async function main() {
     env: {
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
       VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
-      VIDEORC_DISABLE_AUTO_PREVIEW: '1',
       VIDEORC_SMOKE_COMMAND_SERVER: '1'
     },
     onLine: (line) => {
@@ -78,6 +80,12 @@ async function main() {
     }
   })
   smoke = launched.connections['preview-motion-ready']
+
+  // Give the production CAMetalLayer a deterministic compositor target. The
+  // older helper-only probe could validate window geometry before any pixels
+  // existed; the in-process drawable contract must exercise an actual present.
+  await smokeCommand('enable-synthetic-source', { settleMs: 250 })
+  await smokeCommand('open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-card]' })
 
   // --- Open: surface session created at the window's content rect ---------------
   const opened = await smokeCommand('preview-window-open')
@@ -187,29 +195,67 @@ async function main() {
   // the slot rect in PHYSICAL pixels (points × the display's scale factor) —
   // a lost scale factor halves the effective preview resolution on Retina.
   {
-    const state = await smokeCommand('preview-window-state')
-    const sizing = surfaceSizingLines[surfaceSizingLines.length - 1]
-    assertProbe(
-      Boolean(sizing),
-      'dock-drawable: helper reported a surface sizing line',
-      `captured=${surfaceSizingLines.length}`
+    const nativeSizingState = await waitFor(
+      async () => smokeCommand('preview-window-state'),
+      (candidate) =>
+        candidate.surfaceStatus.nativePreviewHostKind === 'helper-process' ||
+        inProcessDrawableMatchesContentBounds(candidate),
+      8000
     )
-    if (sizing) {
+    const state = nativeSizingState.last
+    if (state.surfaceStatus.nativePreviewHostKind === 'in-process') {
+      const sizing = {
+        boundsWidth: state.contentBounds?.width,
+        boundsHeight: state.contentBounds?.height,
+        scale: state.surfaceStatus.nativePreviewContentsScale,
+        drawableWidth: state.surfaceStatus.nativePreviewDrawableWidth,
+        drawableHeight: state.surfaceStatus.nativePreviewDrawableHeight
+      }
+      const complete = Object.values(sizing).every(
+        (value) => typeof value === 'number' && Number.isFinite(value)
+      )
+      assertProbe(
+        complete,
+        'dock-drawable: in-process host reported native sizing',
+        JSON.stringify(sizing)
+      )
       const widthMatches =
-        Math.abs(sizing.drawableWidth - sizing.boundsWidth * sizing.scale) <= 1
+        complete && Math.abs(sizing.drawableWidth - sizing.boundsWidth * sizing.scale) <= 1
       const heightMatches =
-        Math.abs(sizing.drawableHeight - sizing.boundsHeight * sizing.scale) <= 1
+        complete && Math.abs(sizing.drawableHeight - sizing.boundsHeight * sizing.scale) <= 1
       assertProbe(
         widthMatches && heightMatches,
         'dock-drawable: drawable equals slot points × scale',
         JSON.stringify(sizing)
       )
       assertProbe(
-        typeof state.scaleFactor !== 'number' ||
-          Math.abs(sizing.scale - state.scaleFactor) < 0.01,
-        'dock-drawable: helper scale matches the display scale factor',
-        `helper=${sizing.scale} display=${state.scaleFactor}`
+        typeof state.scaleFactor !== 'number' || Math.abs(sizing.scale - state.scaleFactor) < 0.01,
+        'dock-drawable: native contents scale matches the display scale factor',
+        `native=${sizing.scale} display=${state.scaleFactor}`
       )
+    } else {
+      const sizing = surfaceSizingLines[surfaceSizingLines.length - 1]
+      assertProbe(
+        Boolean(sizing),
+        'dock-drawable: helper reported a surface sizing line',
+        `captured=${surfaceSizingLines.length}`
+      )
+      if (sizing) {
+        const widthMatches = Math.abs(sizing.drawableWidth - sizing.boundsWidth * sizing.scale) <= 1
+        const heightMatches =
+          Math.abs(sizing.drawableHeight - sizing.boundsHeight * sizing.scale) <= 1
+        assertProbe(
+          widthMatches && heightMatches,
+          'dock-drawable: drawable equals slot points × scale',
+          JSON.stringify(sizing)
+        )
+        assertProbe(
+          typeof state.scaleFactor !== 'number' ||
+            Math.abs(sizing.scale - state.scaleFactor) < 0.01,
+          'dock-drawable: helper scale matches the display scale factor',
+          `helper=${sizing.scale} display=${state.scaleFactor}`
+        )
+      }
     }
   }
 
@@ -378,6 +424,25 @@ async function dockSlotRect() {
   return response.result
 }
 
+function inProcessDrawableMatchesContentBounds(state) {
+  const status = state?.surfaceStatus
+  const bounds = state?.contentBounds
+  if (status?.nativePreviewHostKind !== 'in-process' || !bounds) {
+    return false
+  }
+  const drawableWidth = status.nativePreviewDrawableWidth
+  const drawableHeight = status.nativePreviewDrawableHeight
+  const scale = status.nativePreviewContentsScale
+  if (![drawableWidth, drawableHeight, scale].every(Number.isFinite)) {
+    return false
+  }
+  return (
+    Math.abs(drawableWidth - bounds.width * scale) <= 1 &&
+    Math.abs(drawableHeight - bounds.height * scale) <= 1 &&
+    (typeof state.scaleFactor !== 'number' || Math.abs(scale - state.scaleFactor) < 0.01)
+  )
+}
+
 /**
  * Poll until the surface sits at (main window content origin + the LIVE Studio
  * slot rect). Both are re-fetched each poll, so main-window moves change the
@@ -406,11 +471,23 @@ async function waitForDockedSurfaceAtSlot(label, tolerance = 6, timeoutMsLocal =
         Math.abs(bounds.width - expected.width) <= tolerance &&
         Math.abs(bounds.height - expected.height) <= tolerance
       const windowAtSlot = state.open && state.visible && match(state.contentBounds)
-      if (windowAtSlot && state.surface.visible && match(state.surface.bounds)) {
+      if (
+        !expectInProcessNative &&
+        windowAtSlot &&
+        state.surface.visible &&
+        match(state.surface.bounds)
+      ) {
         assertProbe(true, `${label} [proof-window]`, '')
         return state
       }
       if (windowAtSlot && state.nativeOwnsPlacement) {
+        if (
+          state.surfaceStatus.nativePreviewHostKind === 'in-process' &&
+          state.surfaceStatus.transport === 'native-surface'
+        ) {
+          assertProbe(true, `${label} [in-process layer]`, '')
+          return state
+        }
         const native = windowList().find(
           (w) => w.owner === 'native_preview_host_helper' && match(w)
         )
@@ -455,11 +532,18 @@ async function waitForSurfaceAtContentRect(label, tolerance = 6, timeoutMsLocal 
         Math.abs(bounds.y - expected.y) <= tolerance &&
         Math.abs(bounds.width - expected.width) <= tolerance &&
         Math.abs(bounds.height - expected.height) <= tolerance
-      if (state.surface.visible && match(state.surface.bounds)) {
+      if (!expectInProcessNative && state.surface.visible && match(state.surface.bounds)) {
         assertProbe(true, `${label} [proof-window]`, '')
         return state
       }
       if (state.nativeOwnsPlacement) {
+        if (
+          state.surfaceStatus.nativePreviewHostKind === 'in-process' &&
+          state.surfaceStatus.transport === 'native-surface'
+        ) {
+          assertProbe(true, `${label} [in-process layer]`, '')
+          return state
+        }
         // Detached mode runs the helper window at NORMAL level (it stacks with
         // the preview window as one app), so match by owner, not layer.
         const native = windowList().find(

@@ -104,8 +104,30 @@ pub struct PreviewCameraRuntime {
     pub status: PreviewCameraStatus,
     run_id: Option<String>,
     source_key: Option<SourceKey>,
+    starting: Option<PreviewCameraStartKey>,
+    start_generation: u64,
     active: Option<NativeCameraPreviewThread>,
     poll_task: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewCameraStartKey {
+    source_key: SourceKey,
+    ffmpeg_path: String,
+    video: VideoSettings,
+    target_fps: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewCameraStartLease {
+    key: PreviewCameraStartKey,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreviewCameraStartRegistration {
+    JoinExisting,
+    Started(PreviewCameraStartLease),
 }
 
 #[derive(Debug)]
@@ -116,6 +138,15 @@ struct NativeCameraPreviewThread {
     ffmpeg_path: String,
     layout: LayoutSettings,
     video: VideoSettings,
+}
+
+/// Fast half of a camera stop. Runtime ownership has already been detached and
+/// the capture thread has been signalled; only the potentially slow thread join
+/// remains. This lets layout retirement make its intent check and detach atomic
+/// without holding the layout-intent mutex across a blocking join.
+pub(crate) struct PreviewCameraStop {
+    status: PreviewCameraStatus,
+    join_handle: Option<thread::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +317,8 @@ pub fn initial_preview_camera_state() -> PreviewCameraRuntime {
         status: idle_status(Some("Native camera preview is not running.".to_string())),
         run_id: None,
         source_key: None,
+        starting: None,
+        start_generation: 0,
         active: None,
         poll_task: None,
     }
@@ -342,21 +375,6 @@ pub async fn start_preview_camera(
         return status;
     }
 
-    stop_current_camera(&state).await;
-
-    let run_id = Uuid::new_v4().to_string();
-    let shared = Arc::new(StdMutex::new(PreviewCameraShared::default()));
-    let (stop_tx, stop_rx) = std_mpsc::channel();
-    let (startup_tx, startup_rx) = std_mpsc::channel();
-    let thread_shared = Arc::clone(&shared);
-    let thread_config = NativeCameraPreviewConfig {
-        camera_id: camera_id.clone(),
-        unique_id: unique_id.clone(),
-        ffmpeg_path: ffmpeg_path.clone(),
-        video: params.video.clone(),
-        layout: params.layout.clone(),
-    };
-
     let starting = PreviewCameraStatus {
         state: PreviewCameraState::Starting,
         camera_id: Some(camera_id.clone()),
@@ -380,7 +398,33 @@ pub async fn start_preview_camera(
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Starting native camera preview.".to_string()),
     };
-    set_camera_status(&state, starting.clone()).await;
+    let start_key = PreviewCameraStartKey {
+        source_key: source_key.clone(),
+        ffmpeg_path: ffmpeg_path.clone(),
+        video: params.video.clone(),
+        target_fps,
+    };
+    let start_lease = match begin_camera_start(&state, start_key.clone(), starting).await {
+        PreviewCameraStartRegistration::JoinExisting => {
+            return wait_for_camera_start(&state, &start_key).await;
+        }
+        PreviewCameraStartRegistration::Started(lease) => lease,
+    };
+
+    stop_current_camera_for_restart(&state).await;
+
+    let run_id = Uuid::new_v4().to_string();
+    let shared = Arc::new(StdMutex::new(PreviewCameraShared::default()));
+    let (stop_tx, stop_rx) = std_mpsc::channel();
+    let (startup_tx, startup_rx) = std_mpsc::channel();
+    let thread_shared = Arc::clone(&shared);
+    let thread_config = NativeCameraPreviewConfig {
+        camera_id: camera_id.clone(),
+        unique_id: unique_id.clone(),
+        ffmpeg_path: ffmpeg_path.clone(),
+        video: params.video.clone(),
+        layout: params.layout.clone(),
+    };
 
     let join_handle = thread::Builder::new()
         .name("videorc-preview-camera".to_string())
@@ -397,8 +441,12 @@ pub async fn start_preview_camera(
                 target_fps,
                 format!("Could not start camera thread: {error}"),
             );
-            set_camera_status(&state, status.clone()).await;
-            return status;
+            if set_camera_status_for_start(&state, &start_lease, status.clone()).await {
+                acquire_preview_camera_source(&state, source_key, SourceLifecycleStatus::Failed)
+                    .await;
+                return status;
+            }
+            return preview_camera_status(&state).await;
         }
     };
 
@@ -429,12 +477,6 @@ pub async fn start_preview_camera(
             selected_fps,
             message,
         } => {
-            let poll_task = tokio::spawn(poll_camera_metrics(
-                state.clone(),
-                run_id.clone(),
-                Arc::clone(&shared),
-                target_fps,
-            ));
             let status = PreviewCameraStatus {
                 state: PreviewCameraState::Live,
                 camera_id: Some(camera_id),
@@ -458,20 +500,48 @@ pub async fn start_preview_camera(
                 updated_at: Utc::now().to_rfc3339(),
                 message,
             };
+            let mut started_thread = Some(NativeCameraPreviewThread {
+                stop_tx,
+                join_handle: Some(join_handle),
+                shared: Arc::clone(&shared),
+                ffmpeg_path,
+                layout: params.layout,
+                video: params.video,
+            });
+            let installed = {
+                let mut slot = state.preview_camera.lock().await;
+                if !claim_camera_start(&mut slot, &start_lease) {
+                    false
+                } else {
+                    slot.status = status.clone();
+                    slot.run_id = Some(run_id.clone());
+                    slot.source_key = Some(source_key.clone());
+                    slot.active = started_thread.take();
+                    true
+                }
+            };
+            if !installed {
+                if let Some(mut stale_thread) = started_thread {
+                    let _ = stale_thread.stop_tx.send(());
+                    if let Some(join_handle) = stale_thread.join_handle.take() {
+                        let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
+                    }
+                }
+                return preview_camera_status(&state).await;
+            }
+            let poll_task = tokio::spawn(poll_camera_metrics(
+                state.clone(),
+                run_id.clone(),
+                Arc::clone(&shared),
+                target_fps,
+            ));
             {
                 let mut slot = state.preview_camera.lock().await;
-                slot.status = status.clone();
-                slot.run_id = Some(run_id);
-                slot.source_key = Some(source_key.clone());
-                slot.active = Some(NativeCameraPreviewThread {
-                    stop_tx,
-                    join_handle: Some(join_handle),
-                    shared,
-                    ffmpeg_path,
-                    layout: params.layout,
-                    video: params.video,
-                });
-                slot.poll_task = Some(poll_task);
+                if slot.run_id.as_deref() == Some(run_id.as_str()) {
+                    slot.poll_task = Some(poll_task);
+                } else {
+                    poll_task.abort();
+                }
             }
             acquire_preview_camera_source(&state, source_key, SourceLifecycleStatus::Live).await;
             state.emit_event("preview.camera.status", status.clone());
@@ -503,14 +573,17 @@ pub async fn start_preview_camera(
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some(message),
             };
-            acquire_preview_camera_source(
-                &state,
-                source_key,
-                SourceLifecycleStatus::PermissionNeeded,
-            )
-            .await;
-            set_camera_status(&state, status.clone()).await;
-            status
+            if set_camera_status_for_start(&state, &start_lease, status.clone()).await {
+                acquire_preview_camera_source(
+                    &state,
+                    source_key,
+                    SourceLifecycleStatus::PermissionNeeded,
+                )
+                .await;
+                status
+            } else {
+                preview_camera_status(&state).await
+            }
         }
         NativeCameraStartup::DeviceMissing(message) => {
             let _ = stop_tx.send(());
@@ -538,23 +611,39 @@ pub async fn start_preview_camera(
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some(message),
             };
-            acquire_preview_camera_source(&state, source_key, SourceLifecycleStatus::SourceMissing)
+            if set_camera_status_for_start(&state, &start_lease, status.clone()).await {
+                acquire_preview_camera_source(
+                    &state,
+                    source_key,
+                    SourceLifecycleStatus::SourceMissing,
+                )
                 .await;
-            set_camera_status(&state, status.clone()).await;
-            status
+                status
+            } else {
+                preview_camera_status(&state).await
+            }
         }
         NativeCameraStartup::Failed(message) => {
             let _ = stop_tx.send(());
             let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
             let status = failed_status(Some(camera_id), Some(unique_id), target_fps, message);
-            acquire_preview_camera_source(&state, source_key, SourceLifecycleStatus::Failed).await;
-            set_camera_status(&state, status.clone()).await;
-            status
+            if set_camera_status_for_start(&state, &start_lease, status.clone()).await {
+                acquire_preview_camera_source(&state, source_key, SourceLifecycleStatus::Failed)
+                    .await;
+                status
+            } else {
+                preview_camera_status(&state).await
+            }
         }
     }
 }
 
 pub async fn stop_preview_camera(state: &AppState) -> PreviewCameraStatus {
+    let stop = begin_preview_camera_stop(state).await;
+    finish_preview_camera_stop(stop).await
+}
+
+pub(crate) async fn begin_preview_camera_stop(state: &AppState) -> PreviewCameraStop {
     let keep_alive = release_current_preview_camera_source(state).await;
     if keep_alive {
         let status = {
@@ -567,13 +656,44 @@ pub async fn stop_preview_camera(state: &AppState) -> PreviewCameraStatus {
             status
         };
         state.emit_event("preview.camera.status", status.clone());
-        return status;
+        return PreviewCameraStop {
+            status,
+            join_handle: None,
+        };
     }
 
-    stop_current_camera(state).await;
     let status = idle_status(Some("Native camera preview stopped.".to_string()));
-    set_camera_status(state, status.clone()).await;
-    status
+    let (previous, poll_task) = {
+        let mut slot = state.preview_camera.lock().await;
+        slot.status = status.clone();
+        slot.run_id = None;
+        slot.source_key = None;
+        slot.starting = None;
+        (slot.active.take(), slot.poll_task.take())
+    };
+    if let Some(task) = poll_task {
+        task.abort();
+    }
+    let join_handle = previous.and_then(|mut previous| {
+        let _ = previous.stop_tx.send(());
+        previous.join_handle.take()
+    });
+    {
+        let mut diagnostics = state.diagnostics.lock().await;
+        *diagnostics = apply_preview_camera_source_stats(diagnostics.clone(), &status);
+    }
+    state.emit_event("preview.camera.status", status.clone());
+    PreviewCameraStop {
+        status,
+        join_handle,
+    }
+}
+
+pub(crate) async fn finish_preview_camera_stop(mut stop: PreviewCameraStop) -> PreviewCameraStatus {
+    if let Some(join_handle) = stop.join_handle.take() {
+        let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
+    }
+    stop.status
 }
 
 pub async fn preview_camera_status(state: &AppState) -> PreviewCameraStatus {
@@ -736,6 +856,7 @@ async fn set_camera_status(state: &AppState, status: PreviewCameraStatus) {
         slot.status = status.clone();
         slot.run_id = None;
         slot.source_key = status.camera_id.clone().map(SourceKey::camera);
+        slot.starting = None;
     }
     {
         let mut diagnostics = state.diagnostics.lock().await;
@@ -745,10 +866,21 @@ async fn set_camera_status(state: &AppState, status: PreviewCameraStatus) {
 }
 
 async fn stop_current_camera(state: &AppState) {
+    stop_current_camera_inner(state, true).await;
+}
+
+async fn stop_current_camera_for_restart(state: &AppState) {
+    stop_current_camera_inner(state, false).await;
+}
+
+async fn stop_current_camera_inner(state: &AppState, clear_starting: bool) {
     let (previous, poll_task) = {
         let mut slot = state.preview_camera.lock().await;
         slot.run_id = None;
-        slot.source_key = None;
+        if clear_starting {
+            slot.source_key = None;
+            slot.starting = None;
+        }
         (slot.active.take(), slot.poll_task.take())
     };
 
@@ -762,6 +894,88 @@ async fn stop_current_camera(state: &AppState) {
             let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
         }
     }
+}
+
+async fn begin_camera_start(
+    state: &AppState,
+    start_key: PreviewCameraStartKey,
+    status: PreviewCameraStatus,
+) -> PreviewCameraStartRegistration {
+    let mut slot = state.preview_camera.lock().await;
+    if slot.starting.as_ref() == Some(&start_key) {
+        return PreviewCameraStartRegistration::JoinExisting;
+    }
+    slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
+    let lease = PreviewCameraStartLease {
+        key: start_key.clone(),
+        generation: slot.start_generation,
+    };
+    slot.status = status.clone();
+    slot.run_id = None;
+    slot.source_key = Some(start_key.source_key.clone());
+    slot.starting = Some(start_key);
+    drop(slot);
+
+    {
+        let mut diagnostics = state.diagnostics.lock().await;
+        *diagnostics = apply_preview_camera_source_stats(diagnostics.clone(), &status);
+    }
+    state.emit_event("preview.camera.status", status);
+    PreviewCameraStartRegistration::Started(lease)
+}
+
+fn claim_camera_start(slot: &mut PreviewCameraRuntime, lease: &PreviewCameraStartLease) -> bool {
+    if slot.start_generation != lease.generation || slot.starting.as_ref() != Some(&lease.key) {
+        return false;
+    }
+    slot.starting = None;
+    true
+}
+
+async fn wait_for_camera_start(
+    state: &AppState,
+    start_key: &PreviewCameraStartKey,
+) -> PreviewCameraStatus {
+    let timeout =
+        native_camera_preview_thread_startup_timeout().saturating_add(Duration::from_secs(1));
+    let started_at = Instant::now();
+    loop {
+        let (still_starting, status) = {
+            let slot = state.preview_camera.lock().await;
+            (
+                slot.starting.as_ref() == Some(start_key)
+                    && matches!(slot.status.state, PreviewCameraState::Starting),
+                slot.status.clone(),
+            )
+        };
+        if !still_starting || started_at.elapsed() >= timeout {
+            return status;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn set_camera_status_for_start(
+    state: &AppState,
+    lease: &PreviewCameraStartLease,
+    status: PreviewCameraStatus,
+) -> bool {
+    let source_key = status.camera_id.clone().map(SourceKey::camera);
+    {
+        let mut slot = state.preview_camera.lock().await;
+        if !claim_camera_start(&mut slot, lease) {
+            return false;
+        }
+        slot.status = status.clone();
+        slot.run_id = None;
+        slot.source_key = source_key;
+    }
+    {
+        let mut diagnostics = state.diagnostics.lock().await;
+        *diagnostics = apply_preview_camera_source_stats(diagnostics.clone(), &status);
+    }
+    state.emit_event("preview.camera.status", status);
+    true
 }
 
 async fn current_camera_source_key(state: &AppState) -> Option<SourceKey> {
@@ -2691,6 +2905,62 @@ mod tests {
         assert!(!keep_alive);
         assert!(entry.consumers.is_empty());
         assert_eq!(entry.status, SourceLifecycleStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn camera_start_cannot_install_after_screen_only_retirement() {
+        let state = test_state();
+        let video = test_video();
+        let source_key = SourceKey::camera("camera:avfoundation-native:test");
+        let start_key = PreviewCameraStartKey {
+            source_key: source_key.clone(),
+            ffmpeg_path: "ffmpeg".to_string(),
+            video: video.clone(),
+            target_fps: video.fps,
+        };
+        let starting = PreviewCameraStatus {
+            state: PreviewCameraState::Starting,
+            camera_id: Some(source_key.id.clone()),
+            device_unique_id: Some("test".to_string()),
+            target_fps: video.fps,
+            width: None,
+            height: None,
+            requested_width: None,
+            requested_height: None,
+            actual_width: None,
+            actual_height: None,
+            selected_format_width: None,
+            selected_format_height: None,
+            selected_format_min_fps: None,
+            selected_format_max_fps: None,
+            source_fps: None,
+            frame_age_ms: None,
+            frames_captured: 0,
+            dropped_frames: 0,
+            sequence: None,
+            updated_at: Utc::now().to_rfc3339(),
+            message: Some("Starting native camera preview.".to_string()),
+        };
+
+        let lease = match begin_camera_start(&state, start_key, starting).await {
+            PreviewCameraStartRegistration::Started(lease) => lease,
+            PreviewCameraStartRegistration::JoinExisting => panic!("first start must own a lease"),
+        };
+
+        // Screen-only retires camera capture while the old native startup thread
+        // is still discovering/starting its device.
+        let stopped = stop_preview_camera(&state).await;
+        assert_eq!(stopped.state, PreviewCameraState::DeviceMissing);
+        let stale_start_claimed = {
+            let mut slot = state.preview_camera.lock().await;
+            claim_camera_start(&mut slot, &lease)
+        };
+
+        assert!(!stale_start_claimed);
+        assert_eq!(
+            preview_camera_status(&state).await.state,
+            PreviewCameraState::DeviceMissing
+        );
     }
 
     #[tokio::test]

@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import type { PreviewSurfaceBounds } from './backend'
-import { normalizePreviewSurfaceBounds, previewSurfaceBoundsChanged } from './native-preview-bounds'
+import {
+  normalizePreviewSurfaceBounds,
+  previewSurfaceBoundsChanged,
+  previewSurfaceDrawableBoundsChanged,
+  previewSurfaceNativeDrawableMatchesBounds
+} from './native-preview-bounds'
 
 type FuturePreviewSurfaceBounds = PreviewSurfaceBounds & { futurePlacementToken: string }
 
@@ -162,5 +167,77 @@ describe('previewSurfaceBoundsChanged', () => {
       screenHeight: base.screenHeight
     }
     expect(previewSurfaceBoundsChanged(legacy, base)).toBe(false)
+  })
+})
+
+describe('previewSurfaceDrawableBoundsChanged', () => {
+  const base = normalizePreviewSurfaceBounds({
+    screenX: 100,
+    screenY: 200,
+    width: 640,
+    height: 360,
+    scaleFactor: 2,
+    visible: true,
+    orderAboveWindowId: 10
+  })
+
+  it('ignores absolute movement and z-order for an in-process child layer', () => {
+    expect(
+      previewSurfaceDrawableBoundsChanged(base, {
+        ...base,
+        screenX: 500,
+        screenY: 600,
+        screenHeight: 1440,
+        orderAboveWindowId: 99,
+        elevated: true
+      })
+    ).toBe(false)
+  })
+
+  it('detects size, scale, and visibility changes that affect the child layer', () => {
+    expect(previewSurfaceDrawableBoundsChanged(base, { ...base, width: 800 })).toBe(true)
+    expect(previewSurfaceDrawableBoundsChanged(base, { ...base, scaleFactor: 1 })).toBe(true)
+    expect(previewSurfaceDrawableBoundsChanged(base, { ...base, visible: false })).toBe(true)
+  })
+})
+
+describe('previewSurfaceNativeDrawableMatchesBounds', () => {
+  const docked = normalizePreviewSurfaceBounds({
+    screenX: 100,
+    screenY: 200,
+    width: 440,
+    height: 247,
+    scaleFactor: 2,
+    visible: true
+  })
+
+  it('rejects stale floating drawable metrics after logical bounds already changed to docked', () => {
+    expect(
+      previewSurfaceNativeDrawableMatchesBounds(
+        {
+          nativePreviewDrawableWidth: 1440,
+          nativePreviewDrawableHeight: 810,
+          nativePreviewContentsScale: 2
+        },
+        docked
+      )
+    ).toBe(false)
+  })
+
+  it('accepts drawable pixels that equal docked points times display scale', () => {
+    expect(
+      previewSurfaceNativeDrawableMatchesBounds(
+        {
+          nativePreviewDrawableWidth: 880,
+          nativePreviewDrawableHeight: 494,
+          nativePreviewContentsScale: 2
+        },
+        docked
+      )
+    ).toBe(true)
+  })
+
+  it('fails closed while native drawable metrics are unavailable', () => {
+    expect(previewSurfaceNativeDrawableMatchesBounds({}, docked)).toBe(false)
   })
 })

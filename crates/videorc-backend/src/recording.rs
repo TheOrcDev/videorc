@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio::time::{Duration, sleep, timeout};
 use uuid::Uuid;
 
@@ -68,8 +68,8 @@ use crate::protocol::{
     PreviewScreenSourceKind, PreviewScreenState, PreviewSnapshot, PreviewSnapshotParams,
     PreviewTransport, RecordingPipelineStage, RecordingState, RecordingStatus, RemuxSessionParams,
     RtmpPreset, RtmpSettings, Scene, SceneConfigParams, SceneSourceKind, SceneTransform,
-    SideBySideCameraSide, SideBySideSplit, StartSessionParams, StreamHealth, VideoPreset,
-    VideoSettings,
+    SideBySideCameraSide, SideBySideSplit, StartSessionParams, StreamHealth, StreamScreen,
+    VideoPreset, VideoSettings,
 };
 use crate::repair::{
     GateStatus, MAINTENANCE_CANCELLED, QualityExpectations, QualityThresholds, QualityVerdict,
@@ -385,6 +385,46 @@ pub fn idle_status() -> RecordingStatus {
         pipeline: None,
         duration_ms: None,
         message: Some("Ready to start a capture session.".to_string()),
+    }
+}
+
+struct RecordingStartupSceneLease {
+    scene_revision: u64,
+    _scene_commit: OwnedMutexGuard<()>,
+}
+
+async fn commit_recording_startup_scene_at_time(
+    state: &AppState,
+    scene: &Scene,
+    layout: LayoutSettings,
+    active_screen: Option<StreamScreen>,
+    now_millis: u64,
+) -> RecordingStartupSceneLease {
+    // Recording startup and live/idle scene transactions share one commit edge.
+    // Keep this lease alive until the exact startup revision reaches compositor
+    // pixels; otherwise the renderer's delayed idle reload can replace the scene
+    // while the recording barrier is still waiting for it.
+    let scene_commit = state.scene_commit.clone().lock_owned().await;
+    {
+        let mut active_scene = state.scene.lock().await;
+        *active_scene = scene.clone();
+    }
+    let current_revision = state.compositor.lock().await.status.scene_revision;
+    let scene_revision = crate::live_layout::next_scene_revision(current_revision, now_millis);
+    update_compositor_scene(
+        state,
+        CompositorSceneUpdateParams {
+            revision: scene_revision,
+            scene: Some(scene.clone()),
+            layout,
+            active_screen,
+        },
+    )
+    .await;
+
+    RecordingStartupSceneLease {
+        scene_revision,
+        _scene_commit: scene_commit,
     }
 }
 
@@ -739,6 +779,7 @@ pub async fn start_session(
             fps: SCREEN_OVERLAY_FPS,
         });
     let mut startup_barrier_result: Option<CompositorStartupBarrierResult> = None;
+    let mut recording_startup_scene: Option<RecordingStartupSceneLease> = None;
     let (encoder_bridge_frame_store, encoder_bridge_stream_frame_store) = if use_encoder_bridge {
         let target_fps = recording_compositor_target_fps(&state, &params.output.video).await;
         start_synthetic_compositor(
@@ -781,17 +822,6 @@ pub async fn start_session(
             })
         });
         let startup_source_requirements = recording_startup_source_requirements(&scene);
-        let revision = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
-        update_compositor_scene(
-            &state,
-            CompositorSceneUpdateParams {
-                revision,
-                scene: Some(scene),
-                layout: params.layout.clone(),
-                active_screen: active_screen.clone(),
-            },
-        )
-        .await;
         if let Err(error) = await_recording_camera_cadence_ready(
             &state,
             &session_id,
@@ -817,13 +847,23 @@ pub async fn start_session(
             }
             return Err(error);
         }
+        let startup_scene = commit_recording_startup_scene_at_time(
+            &state,
+            &scene,
+            params.layout.clone(),
+            active_screen.clone(),
+            u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+        )
+        .await;
+        let startup_scene_revision = startup_scene.scene_revision;
+        recording_startup_scene = Some(startup_scene);
         match await_recording_startup_barrier(
             &state,
             &session_id,
             params.output.video.width,
             params.output.video.height,
             params.output.video.fps,
-            Some(revision),
+            Some(startup_scene_revision),
             startup_source_requirements,
         )
         .await
@@ -1062,6 +1102,10 @@ pub async fn start_session(
     let running_status = active.status(running_state, Some(format!("Running {mode} session.")));
 
     *state.recording.lock().await = Some(active);
+    // A delayed idle capture-config reload that was queued before session start
+    // may resume only after `recording` is authoritative; the idle-only commit
+    // path will then reject it instead of silently replacing the startup scene.
+    drop(recording_startup_scene.take());
     state.emit_event("recording.status", running_status.clone());
     publish_recording_live_preview_status(&state, use_encoder_bridge, None).await;
     if has_native_audio {
@@ -7767,6 +7811,63 @@ mod tests {
             // The exact tester numbers that used to fail under the 71ms/150ms budgets.
             assert!(recording_startup_frame_gap_budget(30) > Duration::from_millis(172));
         }
+    }
+
+    #[tokio::test]
+    async fn recording_startup_scene_lease_blocks_concurrent_commits_until_released() {
+        let state = test_state();
+        let layout = base_params(true, false).layout;
+        let recording_scene = scene_with_sources(vec![scene_source(
+            "source:recording",
+            SceneSourceKind::TestPattern,
+            scene_transform(0.0, 0.0, 1.0, 1.0),
+            true,
+        )]);
+
+        let startup = commit_recording_startup_scene_at_time(
+            &state,
+            &recording_scene,
+            layout.clone(),
+            None,
+            1_000,
+        )
+        .await;
+        assert_eq!(startup.scene_revision, 1_000);
+
+        let competing_state = state.clone();
+        let competing_scene = scene_with_sources(vec![scene_source(
+            "source:competing",
+            SceneSourceKind::TestPattern,
+            scene_transform(0.0, 0.0, 1.0, 1.0),
+            true,
+        )]);
+        let competing = tokio::spawn(async move {
+            crate::live_layout::commit_scene_with_layout(
+                &competing_state,
+                &competing_scene,
+                layout,
+                None,
+            )
+            .await
+            .expect("competing scene commit")
+        });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            !competing.is_finished(),
+            "another scene writer must not replace the startup revision before proof"
+        );
+        assert_eq!(
+            state.compositor.lock().await.status.scene_revision,
+            Some(startup.scene_revision)
+        );
+
+        drop(startup);
+        let committed = timeout(Duration::from_secs(1), competing)
+            .await
+            .expect("competing commit should resume after startup proof")
+            .expect("competing commit task");
+        assert!(committed.scene_revision > 1_000);
     }
 
     fn base_params(record_enabled: bool, stream_enabled: bool) -> StartSessionParams {

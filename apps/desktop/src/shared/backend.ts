@@ -1284,6 +1284,7 @@ export interface PreviewSurfaceStatus {
   nativePreviewMainQueueWaitP95Ms?: number
   nativePreviewMainPresentP95Ms?: number
   nativePreviewMainQueuedBehindCount?: number
+  nativePreviewMainCoalescedFrameCount?: number
   nativePreviewHelperRoundTripP95Ms?: number
   nativePreviewMainStatusFetchP95Ms?: number
   nativePreviewMainStatusFetchFailures?: number
@@ -1295,6 +1296,22 @@ export interface PreviewSurfaceStatus {
   nativePreviewMainSceneMismatchAgeMs?: number
   nativePreviewMainLastSkippedSceneRevision?: number
   nativePreviewMainLastSkippedFrameSceneRevision?: number
+  nativePreviewHostKind?: 'in-process' | 'helper-process' | 'external-module' | 'proof-surface'
+  nativePreviewHostAttached?: boolean
+  nativePreviewPlacementEventsReceived?: number
+  nativePreviewPlacementsCoalesced?: number
+  nativePreviewPlacementsApplied?: number
+  nativePreviewPlacementRoundTripP95Ms?: number
+  nativePreviewPresentRoundTripP95Ms?: number
+  nativePreviewIosurfaceCacheHits?: number
+  nativePreviewIosurfaceImports?: number
+  nativePreviewIosurfaceInvalidations?: number
+  nativePreviewIosurfaceImportFailures?: number
+  nativePreviewDrawableWidth?: number
+  nativePreviewDrawableHeight?: number
+  nativePreviewContentsScale?: number
+  nativePreviewPresentedSceneRevision?: number
+  nativePreviewCompositorRunId?: string
   framePollingSuppressed: boolean
   sourcePixelsPresent: boolean
   pendingHostCommandCount: number
@@ -1330,6 +1347,7 @@ export interface PreviewSurfacePresentParams {
   nativePreviewMainQueueWaitP95Ms?: number
   nativePreviewMainPresentP95Ms?: number
   nativePreviewMainQueuedBehindCount?: number
+  nativePreviewMainCoalescedFrameCount?: number
   nativePreviewHelperRoundTripP95Ms?: number
   nativePreviewMainStatusFetchP95Ms?: number
   nativePreviewMainStatusFetchFailures?: number

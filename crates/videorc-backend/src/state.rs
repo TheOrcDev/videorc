@@ -41,6 +41,13 @@ pub struct PreviewMetricsState {
     pub surface_resize_count: u64,
 }
 
+#[derive(Debug, Default)]
+pub struct LayoutIntentState {
+    pub latest_intent_id: u64,
+    pub latest_needs_camera: bool,
+    pub latest_needs_screen: bool,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub token: String,
@@ -61,6 +68,13 @@ pub struct AppState {
     pub preview_surface: PreviewSurfaceSlot,
     pub compositor: CompositorSlot,
     pub scene: Arc<tokio::sync::Mutex<Scene>>,
+    /// Serializes scene storage, revision allocation, compositor publication,
+    /// and the scene-changed event as one commit edge.
+    pub scene_commit: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes the commit edge of layout transactions while allowing source
+    /// warm-up to run concurrently. A newer registered intent supersedes older
+    /// waiters before they can replace the last good scene.
+    pub layout_intents: Arc<tokio::sync::Mutex<LayoutIntentState>>,
     pub source_registry: Arc<tokio::sync::Mutex<SourceRegistry>>,
     pub diagnostics: Arc<tokio::sync::Mutex<DiagnosticStats>>,
     pub last_audio_meter: Arc<tokio::sync::Mutex<Option<AudioMeterSampleSnapshot>>>,
@@ -106,6 +120,8 @@ impl AppState {
             preview_surface: Arc::new(tokio::sync::Mutex::new(initial_preview_surface_state())),
             compositor: Arc::new(tokio::sync::Mutex::new(initial_compositor_state())),
             scene: Arc::new(tokio::sync::Mutex::new(default_scene())),
+            scene_commit: Arc::new(tokio::sync::Mutex::new(())),
+            layout_intents: Arc::new(tokio::sync::Mutex::new(LayoutIntentState::default())),
             source_registry: Arc::new(tokio::sync::Mutex::new(SourceRegistry::new())),
             diagnostics: Arc::new(tokio::sync::Mutex::new(idle_diagnostics())),
             last_audio_meter: Arc::new(tokio::sync::Mutex::new(None)),

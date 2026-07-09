@@ -93,13 +93,10 @@ export function LayoutTab(): ReactElement {
                 const needsCamera = layoutPresetNeedsCamera(preset.id)
                 const needsScreen = layoutPresetNeedsScreen(preset.id)
                 const switching = layoutSwitchPending === preset.id
-                // Live sessions switch presets through the backend swap engine
-                // (swap-on-ready); only an in-flight switch or missing sources block.
+                // Live sessions switch through the backend's latest-intent engine.
+                // Keep controls clickable while one warms so a newer choice can supersede it.
                 const disabled =
-                  !preset.enabled ||
-                  (needsCamera && !hasCamera) ||
-                  (needsScreen && !hasScreen) ||
-                  layoutSwitchPending !== null
+                  !preset.enabled || (needsCamera && !hasCamera) || (needsScreen && !hasScreen)
                 return (
                   <button
                     aria-pressed={layout.layoutPreset === preset.id}
