@@ -16,7 +16,15 @@
 - **Category**: recording, streaming, audio sync, encoder bridge.
 - **Planned at**: `f676337a` 2026-07-07; root cause confirmed 2026-07-08 on
   branch `codex/x-livestream-api`.
-- **Execution**: TODO.
+- **Execution**: S1 (unit red-harness) + S2 (absolute schedule, zero-wait
+  catch-up, explicit stall gap) + S3-core (`schedule_skipped_ms` diagnostics;
+  `late_deadline_ticks` truthful once the re-anchor is gone) landed 2026-07-09
+  on `codex/av-drift-schedule` — prompted by the FIRST Windows artifact
+  (`videorc-session-20260709-171559.mp4`: 166 frames / 6.0s wall = ~8% timeline
+  compression, uniform 33ms PTS — same mechanism, raw-yuv path paced by the
+  fresh-frame wait instead of the VT re-anchor). REMAINING: S1 endurance gate,
+  S3 session-end mic-vs-encoder invariant, S4 stop-path audio drain check, S5
+  canary/endurance close-out (need long runs + devices/owner).
 
 ## Symptom
 

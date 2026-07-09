@@ -181,6 +181,7 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         encoder_bridge_deadline_lag_p95_ms: None,
         encoder_bridge_deadline_lag_max_ms: None,
         encoder_bridge_late_deadline_ticks: 0,
+        encoder_bridge_schedule_skipped_ms: 0,
         encoder_bridge_recording_input_fps: None,
         encoder_bridge_stream_input_fps: None,
         encoder_bridge_recording_writer_loop_p95_ms: None,
@@ -730,6 +731,7 @@ pub struct EncoderBridgeDiagnosticSnapshot {
     pub deadline_lag_p95_ms: Option<f64>,
     pub deadline_lag_max_ms: Option<f64>,
     pub late_deadline_ticks: u64,
+    pub schedule_skipped_ms: u64,
     pub recording_input_fps: Option<f64>,
     pub stream_input_fps: Option<f64>,
     pub recording_writer_loop_p95_ms: Option<f64>,
@@ -802,6 +804,7 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_deadline_lag_p95_ms = bridge.deadline_lag_p95_ms;
     stats.encoder_bridge_deadline_lag_max_ms = bridge.deadline_lag_max_ms;
     stats.encoder_bridge_late_deadline_ticks = bridge.late_deadline_ticks;
+    stats.encoder_bridge_schedule_skipped_ms = bridge.schedule_skipped_ms;
     stats.encoder_bridge_recording_input_fps = bridge.recording_input_fps;
     stats.encoder_bridge_stream_input_fps = bridge.stream_input_fps;
     stats.encoder_bridge_recording_writer_loop_p95_ms = bridge.recording_writer_loop_p95_ms;
@@ -2053,6 +2056,7 @@ mod tests {
                 deadline_lag_p95_ms: None,
                 deadline_lag_max_ms: None,
                 late_deadline_ticks: 0,
+                schedule_skipped_ms: 0,
                 recording_input_fps: None,
                 stream_input_fps: None,
                 recording_writer_loop_p95_ms: None,
@@ -2125,6 +2129,7 @@ mod tests {
                 deadline_lag_p95_ms: Some(4.0),
                 deadline_lag_max_ms: Some(9.0),
                 late_deadline_ticks: 7,
+                schedule_skipped_ms: 0,
                 recording_input_fps: Some(29.0),
                 stream_input_fps: Some(28.0),
                 recording_writer_loop_p95_ms: Some(12.0),

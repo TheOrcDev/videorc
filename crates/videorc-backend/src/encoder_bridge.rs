@@ -176,6 +176,7 @@ struct EncoderBridgeRuntimeStats {
     deadline_lag_p95_ms: Option<f64>,
     deadline_lag_max_ms: Option<f64>,
     late_deadline_ticks: u64,
+    schedule_skipped_ms: u64,
 }
 
 /// A compositor frame fed into the encoder FIFO on one tick.
@@ -211,6 +212,49 @@ fn classify_bridge_frame(last_fed: Option<u64>, fed: Option<u64>) -> BridgeFrame
             Some(previous) if previous == sequence => BridgeFrameSource::Repeated,
             _ => BridgeFrameSource::Fresh,
         },
+    }
+}
+
+/// Lag past which the schedule stops trying to catch up frame-by-frame and
+/// re-anchors with an EXPLICIT, counted gap (app nap, display sleep). Below
+/// this, late loops converge by feeding repeats with a zero fresh-frame wait.
+const ENCODER_BRIDGE_STALL_REANCHOR_THRESHOLD: Duration = Duration::from_secs(2);
+
+/// Per-tick schedule decision (plan 026). The writer schedule is ABSOLUTE
+/// (`next_frame_at += interval`); wall time is never silently dropped. The old
+/// re-anchor (`next_frame_at = now + interval` whenever a tick overran) deleted
+/// the overshoot from the video timeline every iteration — the encoder emitted
+/// fewer than fps frames per wall second while stamping exact-CFR PTS, so video
+/// ran fast and audio drifted late (~0.6-0.8s/min on macOS; ~8% timeline
+/// compression on the first real Windows artifact, 2026-07-09).
+#[derive(Debug, PartialEq, Eq)]
+struct BridgeTickPlan {
+    /// The loop is at/past its deadline: skip the fresh-frame wait and feed the
+    /// latest available frame immediately (a repeat if unchanged) so the
+    /// schedule converges instead of compressing.
+    skip_fresh_wait: bool,
+    /// Whole intervals dropped from the schedule as an explicit stall gap.
+    /// Zero in every healthy tick.
+    reanchor_skipped_intervals: u64,
+}
+
+fn plan_bridge_tick(lag: Duration, frame_interval: Duration) -> BridgeTickPlan {
+    if frame_interval.is_zero() {
+        return BridgeTickPlan {
+            skip_fresh_wait: false,
+            reanchor_skipped_intervals: 0,
+        };
+    }
+    if lag >= ENCODER_BRIDGE_STALL_REANCHOR_THRESHOLD {
+        let skipped = (lag.as_nanos() / frame_interval.as_nanos()) as u64;
+        return BridgeTickPlan {
+            skip_fresh_wait: true,
+            reanchor_skipped_intervals: skipped,
+        };
+    }
+    BridgeTickPlan {
+        skip_fresh_wait: lag > Duration::ZERO,
+        reanchor_skipped_intervals: 0,
     }
 }
 
@@ -786,6 +830,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut deadline_lag_times_ms = Vec::with_capacity(128);
     let mut max_deadline_lag_ms: Option<f64> = None;
     let mut late_deadline_ticks = 0_u64;
+    let mut schedule_skipped_ms = 0_u64;
     #[cfg(target_os = "macos")]
     let mut video_toolbox_probe = EncoderBridgeVideoToolboxProbe::new(
         video_output.uses_video_toolbox() || encoder_bridge_video_toolbox_probe_enabled(),
@@ -824,15 +869,31 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     while !stop.load(Ordering::Relaxed) {
         let loop_started_at = Instant::now();
         let now = Instant::now();
-        if now > next_frame_at {
-            let deadline_lag = now.duration_since(next_frame_at);
-            if deadline_lag >= ENCODER_BRIDGE_DEADLINE_LAG_THRESHOLD {
-                let lag_ms = deadline_lag.as_secs_f64() * 1000.0;
-                deadline_lag_times_ms.push(lag_ms);
-                max_deadline_lag_ms =
-                    Some(max_deadline_lag_ms.map_or(lag_ms, |current| current.max(lag_ms)));
-                late_deadline_ticks = late_deadline_ticks.saturating_add(1);
-            }
+        let tick_lag = now.saturating_duration_since(next_frame_at);
+        if now > next_frame_at && tick_lag >= ENCODER_BRIDGE_DEADLINE_LAG_THRESHOLD {
+            let lag_ms = tick_lag.as_secs_f64() * 1000.0;
+            deadline_lag_times_ms.push(lag_ms);
+            max_deadline_lag_ms =
+                Some(max_deadline_lag_ms.map_or(lag_ms, |current| current.max(lag_ms)));
+            late_deadline_ticks = late_deadline_ticks.saturating_add(1);
+        }
+        let tick_plan = plan_bridge_tick(tick_lag, frame_interval);
+        if tick_plan.reanchor_skipped_intervals > 0 {
+            // Pathological stall: drop whole intervals as an EXPLICIT gap. The
+            // schedule stays wall-true (sequence advances by the same count,
+            // keeping synthetic PTS honest on the encoded path) and the loss is
+            // counted, never silent.
+            next_frame_at += frame_interval * tick_plan.reanchor_skipped_intervals as u32;
+            sequence = sequence.saturating_add(tick_plan.reanchor_skipped_intervals);
+            let skipped_ms = (frame_interval.as_secs_f64()
+                * tick_plan.reanchor_skipped_intervals as f64
+                * 1000.0) as u64;
+            schedule_skipped_ms = schedule_skipped_ms.saturating_add(skipped_ms);
+            tracing::warn!(
+                skipped_intervals = tick_plan.reanchor_skipped_intervals,
+                skipped_ms,
+                "encoder bridge schedule stalled; dropped intervals as an explicit gap"
+            );
         }
         let sleep_started_at = Instant::now();
         if now < next_frame_at {
@@ -854,6 +915,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         };
         let wait_budget = if startup_wait_sequence.is_some() {
             frame_interval + frame_interval
+        } else if tick_plan.skip_fresh_wait {
+            // Behind schedule: feed the latest available frame immediately (a
+            // repeat if unchanged) so the absolute schedule converges by
+            // emitting honest repeats instead of compressing the timeline.
+            Duration::ZERO
         } else {
             compositor_frame_wait_budget(video_output, consecutive_repeated_frames, frame_interval)
         };
@@ -922,6 +988,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                             deadline_lag_p95_ms: p95_ms(&deadline_lag_times_ms),
                             deadline_lag_max_ms: max_deadline_lag_ms,
                             late_deadline_ticks,
+                            schedule_skipped_ms,
                         },
                         diagnostics_context,
                         Some(
@@ -1109,6 +1176,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     deadline_lag_p95_ms: p95_ms(&deadline_lag_times_ms),
                     deadline_lag_max_ms: max_deadline_lag_ms,
                     late_deadline_ticks,
+                    schedule_skipped_ms,
                 },
                 diagnostics_context,
                 Some(format!(
@@ -1184,6 +1252,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     deadline_lag_p95_ms: p95_ms(&deadline_lag_times_ms),
                     deadline_lag_max_ms: max_deadline_lag_ms,
                     late_deadline_ticks,
+                    schedule_skipped_ms,
                 },
                 diagnostics_context,
                 Some(format!(
@@ -1199,9 +1268,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         };
         writer_active_times_ms.push(active_started_at.elapsed().as_secs_f64() * 1000.0);
         writer_loop_times_ms.push(loop_started_at.elapsed().as_secs_f64() * 1000.0);
-        if video_output.uses_video_toolbox() && Instant::now() > next_frame_at {
-            next_frame_at = Instant::now() + frame_interval;
-        }
+        // Plan 026: the schedule is absolute — no re-anchor. A tick that
+        // overruns starts the next iteration behind, which zeroes the
+        // fresh-frame wait (above) and converges with repeats; wall time is
+        // never silently dropped from the video timeline.
         frames_in_window = frames_in_window.saturating_add(1);
         if startup_wait_sequence.is_some() {
             next_frame_at = Instant::now() + frame_interval;
@@ -1248,6 +1318,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     deadline_lag_p95_ms: p95_ms(&deadline_lag_times_ms),
                     deadline_lag_max_ms: max_deadline_lag_ms,
                     late_deadline_ticks,
+                    schedule_skipped_ms,
                 },
                 diagnostics_context,
                 None,
@@ -1364,6 +1435,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             deadline_lag_p95_ms: p95_ms(&deadline_lag_times_ms),
             deadline_lag_max_ms: max_deadline_lag_ms,
             late_deadline_ticks,
+            schedule_skipped_ms,
         },
         diagnostics_context,
         None,
@@ -2284,6 +2356,7 @@ async fn emit_encoder_bridge_diagnostics(
                 deadline_lag_p95_ms: runtime.deadline_lag_p95_ms,
                 deadline_lag_max_ms: runtime.deadline_lag_max_ms,
                 late_deadline_ticks: runtime.late_deadline_ticks,
+                schedule_skipped_ms: runtime.schedule_skipped_ms,
                 recording_input_fps,
                 stream_input_fps,
                 recording_writer_loop_p95_ms,
@@ -3099,5 +3172,77 @@ mod tests {
         assert_eq!(settings.height, 2160);
         assert_eq!(settings.fps, 30);
         assert_eq!(settings.bitrate_kbps, 30_000);
+    }
+
+    // Plan 026 S1: the writer schedule must NEVER silently compress the video
+    // timeline. Simulates the loop arithmetic against a compositor slower than
+    // the target fps (the exact shape that produced audio drifting ~0.7s/min on
+    // macOS and ~8% timeline compression in the first Windows artifact): every
+    // on-schedule tick waits ~34ms for a fresh 29.4fps frame, so the loop
+    // overruns its 33.33ms deadline every single iteration. With the absolute
+    // schedule + zero-wait catch-up the emitted frame count must track wall
+    // time; the old re-anchor design fails this by ~1.3% (≈780ms over 60s).
+    #[test]
+    fn bridge_schedule_never_compresses_under_a_slow_compositor() {
+        let interval = Duration::from_nanos(1_000_000_000 / 30);
+        let fresh_wait = Duration::from_micros(34_000); // 29.4fps compositor
+        let catchup_cost = Duration::from_millis(2); // instant repeat + write
+
+        let mut wall = Duration::ZERO;
+        let mut next_frame_at = Duration::ZERO;
+        let mut frames = 0_u64;
+        let simulated = Duration::from_secs(60);
+
+        while wall < simulated {
+            let lag = wall.saturating_sub(next_frame_at);
+            let plan = plan_bridge_tick(lag, interval);
+            assert_eq!(
+                plan.reanchor_skipped_intervals, 0,
+                "a merely-slow compositor must never trigger the stall gap"
+            );
+            if wall < next_frame_at {
+                wall = next_frame_at; // sleep to the deadline
+            }
+            next_frame_at += interval;
+            wall += if plan.skip_fresh_wait {
+                catchup_cost
+            } else {
+                fresh_wait
+            };
+            frames += 1;
+        }
+
+        let timeline = interval * frames as u32;
+        let drift = if timeline > wall {
+            timeline - wall
+        } else {
+            wall - timeline
+        };
+        assert!(
+            drift <= Duration::from_millis(100),
+            "video timeline drifted {}ms from wall clock over 60s (frames {frames})",
+            drift.as_millis()
+        );
+    }
+
+    #[test]
+    fn bridge_schedule_stall_gap_is_explicit_and_wall_true() {
+        let interval = Duration::from_nanos(1_000_000_000 / 30);
+
+        // Sub-threshold lag: catch up with repeats, never drop intervals.
+        let behind = plan_bridge_tick(Duration::from_millis(500), interval);
+        assert!(behind.skip_fresh_wait);
+        assert_eq!(behind.reanchor_skipped_intervals, 0);
+
+        // On schedule: normal fresh-frame wait.
+        let on_time = plan_bridge_tick(Duration::ZERO, interval);
+        assert!(!on_time.skip_fresh_wait);
+        assert_eq!(on_time.reanchor_skipped_intervals, 0);
+
+        // Pathological stall (app nap): drop WHOLE intervals as an explicit,
+        // counted gap so PTS stay wall-true instead of compressing.
+        let stalled = plan_bridge_tick(Duration::from_secs(5), interval);
+        assert!(stalled.skip_fresh_wait);
+        assert_eq!(stalled.reanchor_skipped_intervals, 150); // 5s / 33.33ms
     }
 }

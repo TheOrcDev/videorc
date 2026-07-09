@@ -1211,6 +1211,12 @@ pub struct DiagnosticStats {
     /// after their scheduled CFR deadline.
     #[serde(default)]
     pub encoder_bridge_late_deadline_ticks: u64,
+    /// Wall-clock milliseconds the bridge schedule explicitly skipped during
+    /// pathological stalls (app nap, display sleep). Healthy sessions: ~0.
+    /// Any nonzero value is honest, bounded loss — never silent compression
+    /// (plan 026).
+    #[serde(default)]
+    pub encoder_bridge_schedule_skipped_ms: u64,
     /// Recording-leg bridge input FPS for split-output sessions.
     #[serde(default)]
     pub encoder_bridge_recording_input_fps: Option<f64>,

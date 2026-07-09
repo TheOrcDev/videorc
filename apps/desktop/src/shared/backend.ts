@@ -1627,6 +1627,7 @@ export interface DiagnosticStats {
   encoderBridgeDeadlineLagMaxMs?: number
   /** Cumulative bridge writer ticks that started late against their CFR deadline. */
   encoderBridgeLateDeadlineTicks: number
+  encoderBridgeScheduleSkippedMs: number
   /** Recording-leg bridge input FPS for split-output sessions. */
   encoderBridgeRecordingInputFps?: number
   /** Stream-leg bridge input FPS for split-output sessions. */
