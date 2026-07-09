@@ -73,7 +73,7 @@ $WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateSho
 ```
 Home Screen Version
 ```powershell
-\$WshShell = New-Object -ComObject WScript.Shell; $DesktopPath = [Environment]::GetFolderPath("Desktop"); $Shortcut = $WshShell.CreateShortcut("$DesktopPath\Videorc.lnk"); $Shortcut.TargetPath = "$env:LOCALAPPDATA\Programs\Videorc\Videorc.exe"; $Shortcut.Arguments = "--disable-gpu --disable-gpu-sandbox --no-sandbox --disable-features=GpuProcessHighPriorityPerWindow"; $Shortcut.WorkingDirectory = "$env:LOCALAPPDATA\Programs\Videorc"; $Shortcut.Save(); Write-Host "Videorc shortcut successfully created on your Desktop!" -ForegroundColor Green
+$WshShell = New-Object -ComObject WScript.Shell; $DesktopPath = [Environment]::GetFolderPath("Desktop"); $Shortcut = $WshShell.CreateShortcut("$DesktopPath\Videorc.lnk"); $Shortcut.TargetPath = "$env:LOCALAPPDATA\Programs\Videorc\Videorc.exe"; $Shortcut.Arguments = "--disable-gpu --disable-gpu-sandbox --no-sandbox --disable-features=GpuProcessHighPriorityPerWindow"; $Shortcut.WorkingDirectory = "$env:LOCALAPPDATA\Programs\Videorc"; $Shortcut.Save(); Write-Host "Videorc shortcut successfully created on your Desktop!" -ForegroundColor Green
 ```
 
 ## Build from source
