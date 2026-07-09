@@ -3687,6 +3687,11 @@ const RECORDING_CAMERA_CADENCE_READY_TIMEOUT: Duration = Duration::from_millis(3
 const RECORDING_CAMERA_CADENCE_READY_POLL: Duration = Duration::from_millis(25);
 const RECORDING_CAMERA_CADENCE_FRAME_INTERVAL_FACTOR: f64 = 2.1;
 const RECORDING_CAMERA_CADENCE_MAX_FRAME_AGE_MS: u64 = 250;
+// The FFmpeg/dshow callback cadence (Windows) is jitterier than AVFoundation's
+// sample-PTS cadence, so its readiness budget is more generous: the compositor
+// absorbs occasional camera hitches, and frame freshness already proves the
+// stream is live. ~140ms p95 at 30fps still catches a genuinely stalled camera.
+const RECORDING_CAMERA_CADENCE_CALLBACK_BUDGET_FACTOR: f64 = 2.0;
 const RECORDING_ENCODER_BRIDGE_SOURCE_READY_TIMEOUT: Duration = Duration::from_millis(750);
 const RECORDING_ENCODER_BRIDGE_SOURCE_READY_POLL: Duration = Duration::from_millis(25);
 
@@ -3814,7 +3819,12 @@ async fn await_recording_camera_cadence_ready(
             )
         };
 
-        if camera_cadence_ready(sample_pts_gap_p95_ms, frame_age_ms, threshold_ms) {
+        if camera_cadence_ready(
+            sample_pts_gap_p95_ms,
+            callback_gap_p95_ms,
+            frame_age_ms,
+            threshold_ms,
+        ) {
             let _ = emit_health_event(
                 state,
                 Some(session_id),
@@ -3855,11 +3865,31 @@ async fn await_recording_camera_cadence_ready(
 
 fn camera_cadence_ready(
     sample_pts_gap_p95_ms: Option<f64>,
+    callback_gap_p95_ms: Option<f64>,
     frame_age_ms: Option<u64>,
     threshold_ms: f64,
 ) -> bool {
-    sample_pts_gap_p95_ms.is_some_and(|gap| gap.is_finite() && gap <= threshold_ms)
-        && frame_age_ms.is_some_and(|age| age <= RECORDING_CAMERA_CADENCE_MAX_FRAME_AGE_MS)
+    let frames_fresh =
+        frame_age_ms.is_some_and(|age| age <= RECORDING_CAMERA_CADENCE_MAX_FRAME_AGE_MS);
+    if !frames_fresh {
+        return false;
+    }
+
+    match sample_pts_gap_p95_ms.filter(|gap| gap.is_finite()) {
+        // macOS AVFoundation native capture reports per-sample presentation
+        // timestamps, so we gate on that precise cadence.
+        Some(gap) => gap <= threshold_ms,
+        // The FFmpeg-fed path (Windows dshow) delivers raw frames with no
+        // per-sample PTS, so `sample_pts_gap` is never measured — the old gate
+        // could never pass and blocked every recording. The compositor reads
+        // the frame store on its own clock and repeats the last frame across a
+        // camera hitch, so readiness here is a SUSTAINED, fresh stream: a
+        // measured callback cadence within a lenient budget (dshow jitter runs
+        // higher than AVFoundation) plus a recent frame (checked above).
+        None => callback_gap_p95_ms.is_some_and(|gap| {
+            gap.is_finite() && gap <= threshold_ms * RECORDING_CAMERA_CADENCE_CALLBACK_BUDGET_FACTOR
+        }),
+    }
 }
 
 fn camera_cadence_ready_threshold_ms(target_fps: u32) -> f64 {
@@ -9713,11 +9743,60 @@ mod tests {
         let threshold = camera_cadence_ready_threshold_ms(30);
 
         assert!(threshold > 69.0 && threshold < 71.0);
-        assert!(camera_cadence_ready(Some(33.3), Some(40), threshold));
-        assert!(camera_cadence_ready(Some(66.7), Some(40), threshold));
-        assert!(!camera_cadence_ready(Some(83.3), Some(40), threshold));
-        assert!(!camera_cadence_ready(Some(33.3), Some(300), threshold));
-        assert!(!camera_cadence_ready(None, Some(40), threshold));
+        // macOS AVFoundation path: gated on the per-sample PTS cadence.
+        assert!(camera_cadence_ready(
+            Some(33.3),
+            Some(30.0),
+            Some(40),
+            threshold
+        ));
+        assert!(camera_cadence_ready(
+            Some(66.7),
+            Some(30.0),
+            Some(40),
+            threshold
+        ));
+        assert!(!camera_cadence_ready(
+            Some(83.3),
+            Some(30.0),
+            Some(40),
+            threshold
+        ));
+        assert!(!camera_cadence_ready(
+            Some(33.3),
+            Some(30.0),
+            Some(300),
+            threshold
+        ));
+    }
+
+    #[test]
+    fn camera_cadence_guard_falls_back_to_callback_cadence_without_sample_pts() {
+        // The Windows FFmpeg/dshow path reports no per-sample PTS, so the gate
+        // must not require it — otherwise recording is blocked forever (the
+        // tester's "cadence did not settle, sample PTS p95 n/a"). It falls back
+        // to a fresh, sustained callback cadence within a lenient budget.
+        let threshold = camera_cadence_ready_threshold_ms(30);
+
+        // The exact tester numbers: no sample PTS, callback p95 76.9ms, age 37ms.
+        assert!(camera_cadence_ready(None, Some(76.9), Some(37), threshold));
+        // A truly stalled camera (callback p95 far over the lenient budget) or
+        // stale frames still block.
+        assert!(!camera_cadence_ready(
+            None,
+            Some(200.0),
+            Some(37),
+            threshold
+        ));
+        assert!(!camera_cadence_ready(
+            None,
+            Some(76.9),
+            Some(300),
+            threshold
+        ));
+        // No frames and no callback cadence at all is not ready.
+        assert!(!camera_cadence_ready(None, None, Some(40), threshold));
+        assert!(!camera_cadence_ready(None, Some(76.9), None, threshold));
     }
 
     #[test]
