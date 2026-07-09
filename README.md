@@ -69,7 +69,11 @@ If you launch the application on Windows (especially on Windows Insider or pre-r
 
 You can automatically generate a corrected troubleshooting shortcut directly in your **Downloads** folder by running the following command in **PowerShell (Admin)**:
 ```powershell
-$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut("$env:USERPROFILE\Downloads\Videorc Testing.lnk"); $Shortcut.TargetPath = "$env:LOCALAPPDATA\Programs\Videorc\Videorc.exe"; $Shortcut.Arguments = "--disable-gpu --disable-gpu-sandbox --no-sandbox --disable-features=GpuProcessHighPriorityPerWindow"; $Shortcut.WorkingDirectory = "$env:LOCALAPPDATA\Programs\Videorc"; $Shortcut.Save(); explorer "$env:USERPROFILE\Downloads"
+$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut("$env:USERPROFILE\Downloads\Videorc.lnk"); $Shortcut.TargetPath = "$env:LOCALAPPDATA\Programs\Videorc\Videorc.exe"; $Shortcut.Arguments = "--disable-gpu --disable-gpu-sandbox --no-sandbox --disable-features=GpuProcessHighPriorityPerWindow"; $Shortcut.WorkingDirectory = "$env:LOCALAPPDATA\Programs\Videorc"; $Shortcut.Save(); explorer "$env:USERPROFILE\Downloads"
+```
+Home Screen Version
+```powershell
+\$WshShell = New-Object -ComObject WScript.Shell; $DesktopPath = [Environment]::GetFolderPath("Desktop"); $Shortcut = $WshShell.CreateShortcut("$DesktopPath\Videorc.lnk"); $Shortcut.TargetPath = "$env:LOCALAPPDATA\Programs\Videorc\Videorc.exe"; $Shortcut.Arguments = "--disable-gpu --disable-gpu-sandbox --no-sandbox --disable-features=GpuProcessHighPriorityPerWindow"; $Shortcut.WorkingDirectory = "$env:LOCALAPPDATA\Programs\Videorc"; $Shortcut.Save(); Write-Host "Videorc shortcut successfully created on your Desktop!" -ForegroundColor Green
 ```
 
 ## Build from source
