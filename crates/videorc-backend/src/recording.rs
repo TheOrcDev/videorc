@@ -3914,9 +3914,11 @@ fn recording_startup_frame_gap_budget(target_fps: u32) -> Duration {
     let frame_interval_ms =
         1000.0 / f64::from(target_fps.max(1)) * RECORDING_STARTUP_CADENCE_FRAME_INTERVAL_FACTOR;
     let budget = Duration::from_millis(frame_interval_ms.ceil() as u64);
+    // Exactly one arm survives cfg-stripping and becomes the tail expression;
+    // `return` here would trip clippy::needless_return on that platform.
     #[cfg(not(target_os = "macos"))]
     {
-        return budget.max(RECORDING_STARTUP_CADENCE_MIN_FRAME_GAP);
+        budget.max(RECORDING_STARTUP_CADENCE_MIN_FRAME_GAP)
     }
     #[cfg(target_os = "macos")]
     {

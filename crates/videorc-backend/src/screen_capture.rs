@@ -240,12 +240,16 @@ fn utf16_z(value: &[u16]) -> Option<String> {
 mod macos {
     use super::*;
     use block2::RcBlock;
+    // Scoped here (not at the top of the file) so the Windows arm never sees
+    // an unused import — PR #59 deleted the top-level `use std::sync::mpsc`
+    // as apparently-unused and broke the macOS build.
     use objc2_core_graphics::{
         CGDirectDisplayID, CGDisplayCopyDisplayMode, CGDisplayMode, CGPreflightScreenCaptureAccess,
         CGRequestScreenCaptureAccess,
     };
     use objc2_foundation::{NSError, NSString};
     use objc2_screen_capture_kit::{SCShareableContent, SCWindow};
+    use std::sync::mpsc;
 
     enum ShareableContentResult {
         Devices(Vec<Device>),
