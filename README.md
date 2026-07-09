@@ -64,6 +64,14 @@ signed-in Videorc account: the desktop app never holds AI provider keys, and
 nothing is uploaded without explicit per-session consent. Local audio
 extraction works without any account. Hosted AI is what funds the project.
 
+## Troubleshooting Windows Builds
+If you launch the application on Windows (especially on Windows Insider or pre-release environments) and encounter a pitch-black screen or an immediate silent crash, the Chromium rendering engine is likely experiencing a GPU virtualization conflict.
+
+You can automatically generate a corrected troubleshooting shortcut directly in your **Downloads** folder by running the following command in **PowerShell (Admin)**:
+```powershell
+$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut("$env:USERPROFILE\Downloads\Videorc Testing.lnk"); $Shortcut.TargetPath = "$env:LOCALAPPDATA\Programs\Videorc\Videorc.exe"; $Shortcut.Arguments = "--disable-gpu --disable-gpu-sandbox --no-sandbox --disable-features=GpuProcessHighPriorityPerWindow"; $Shortcut.WorkingDirectory = "$env:LOCALAPPDATA\Programs\Videorc"; $Shortcut.Save(); explorer "$env:USERPROFILE\Downloads"
+```
+
 ## Build from source
 
 Prerequisites: Node.js 24+, pnpm 11+, Rust stable (rustup), FFmpeg on `PATH`
