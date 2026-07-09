@@ -134,7 +134,7 @@ verification gates.
 
 ## Contributors
 
-- **[TheOrcDev](https://github.com/TheOrcDev)** — founder & lead developer
+- **[TheOrcDev](https://github.com/TheOrcDev)** — Warchief
 
 <p align="center">
   <a href="https://github.com/TheOrcDev/videorc/graphs/contributors">
