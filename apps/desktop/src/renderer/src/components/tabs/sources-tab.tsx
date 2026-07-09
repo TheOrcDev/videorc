@@ -385,7 +385,7 @@ export function SourcesTab(): ReactElement {
 
       <PanelSection
         className="lg:col-span-2"
-        description="Native CoreAudio meter with manual source gain. No automatic processing is applied."
+        description="Live input meter with manual source gain. No automatic processing is applied."
         icon={Waveform}
         title="Microphone mixer"
       >

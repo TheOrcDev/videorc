@@ -3529,8 +3529,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           state: 'unavailable',
           source: 'unavailable',
           transport: 'unavailable',
-          message:
-            permissionStatus.message ?? 'macOS permission is required before preview can run.'
+          message: permissionStatus.message ?? 'Permission is required before preview can run.'
         })
         return
       }

@@ -39,6 +39,7 @@ import type { DirectoryFacts, UpdateStatus } from '@/lib/backend'
 import { isActiveRecordingState } from '@/lib/format'
 import { recordingQuality, streamingSummary } from '@/lib/studio-session-view'
 import { shortcutsByGroup } from '@/lib/shortcuts'
+import { displayKeyGlyphs, osSettingsName } from '@/lib/platform'
 import { systemAccessRows } from '@/lib/system-access'
 import { isUpdateInstallable } from '@/lib/update-ui'
 
@@ -302,7 +303,7 @@ export function SettingsTab({
         </PanelSection>
 
         <PanelSection
-          description="What macOS lets Videorc capture right now."
+          description={`What ${osSettingsName(runtimeInfo?.platform)} lets Videorc capture right now.`}
           icon={LockKey}
           title="System access"
           action={
@@ -361,8 +362,8 @@ export function SettingsTab({
               Set up permissions
             </Button>
             <p className="text-xs text-muted-foreground">
-              Grants live in macOS System Settings → Privacy &amp; Security. After changing one,
-              come back here — rows refresh automatically.
+              Grants live in {osSettingsName(runtimeInfo?.platform)}. After changing one, come back
+              here — rows refresh automatically.
             </p>
           </div>
         </PanelSection>
@@ -373,7 +374,7 @@ export function SettingsTab({
       <div className="grid items-start gap-5 lg:grid-cols-2">
         <div className="flex flex-col gap-5">
           <PanelSection
-            description="How Videorc looks and behaves on this Mac."
+            description="How Videorc looks and behaves on this device."
             icon={PaintBrush}
             title="Appearance & behavior"
           >
@@ -447,7 +448,7 @@ export function SettingsTab({
                   >
                     <span className="flex-1 truncate text-muted-foreground">{entry.label}</span>
                     <KbdGroup>
-                      {entry.keys.map((key, index) => (
+                      {displayKeyGlyphs(entry.keys, runtimeInfo?.platform).map((key, index) => (
                         <Kbd key={`${entry.id}-${index}`}>{key}</Kbd>
                       ))}
                     </KbdGroup>

@@ -6,6 +6,7 @@ import { AccountMenu } from '@/components/account-menu'
 import { type StatusDotTone } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
+import { displayKeyGlyph } from '@/lib/platform'
 import { useUpdater } from '@/hooks/use-updater'
 import { updateChip } from '@/lib/update-ui'
 import {
@@ -24,6 +25,7 @@ function NavRow({
   isActive,
   triggerId,
   shortcutDigit,
+  modKey,
   onClick
 }: {
   icon: Icon
@@ -31,6 +33,7 @@ function NavRow({
   isActive: boolean
   triggerId: string
   shortcutDigit?: string
+  modKey: string
   onClick: () => void
 }): ReactElement {
   return (
@@ -52,7 +55,12 @@ function NavRow({
         className={cn('size-4 shrink-0', isActive && 'text-primary')}
       />
       <span className="flex-1 truncate text-left">{label}</span>
-      {shortcutDigit ? <Kbd>⌘{shortcutDigit}</Kbd> : null}
+      {shortcutDigit ? (
+        <Kbd>
+          {modKey}
+          {shortcutDigit}
+        </Kbd>
+      ) : null}
     </button>
   )
 }
@@ -125,7 +133,8 @@ export function Sidebar({
   statusTone,
   statusLabel,
   live,
-  onOpenCommand
+  onOpenCommand,
+  platform
 }: {
   active: WorkspaceTab
   activeStudioPanel: StudioPanel | null
@@ -136,9 +145,11 @@ export function Sidebar({
   statusLabel: string
   live: boolean
   onOpenCommand: () => void
+  platform?: string
 }): ReactElement {
   const tabsIn = (group: string): typeof WORKSPACE_TABS =>
     WORKSPACE_TABS.filter((tab) => tab.group === group)
+  const modKey = displayKeyGlyph('⌘', platform)
 
   return (
     <aside className="flex w-56 shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground">
@@ -176,7 +187,7 @@ export function Sidebar({
           <MagnifyingGlass className="size-4 shrink-0" />
           <span className="flex-1 text-left">Search</span>
           <KbdGroup>
-            <Kbd>⌘</Kbd>
+            <Kbd>{modKey}</Kbd>
             <Kbd>K</Kbd>
           </KbdGroup>
         </button>
@@ -190,6 +201,7 @@ export function Sidebar({
               isActive={active === tab.id}
               triggerId={tab.id}
               shortcutDigit={shortcutDigitFor(tab.id)}
+              modKey={modKey}
               onClick={() => onSelect(tab.id)}
             />
           ))}
@@ -205,6 +217,7 @@ export function Sidebar({
               isActive={activeStudioPanel === panel.id}
               triggerId={panel.legacyTabId}
               shortcutDigit={shortcutDigitFor(panel.id)}
+              modKey={modKey}
               onClick={() => onSelectStudioPanel(panel.id)}
             />
           ))}
@@ -220,6 +233,7 @@ export function Sidebar({
               isActive={active === tab.id}
               triggerId={tab.id}
               shortcutDigit={shortcutDigitFor(tab.id)}
+              modKey={modKey}
               onClick={() => onSelect(tab.id)}
             />
           ))}
@@ -240,6 +254,7 @@ export function Sidebar({
                 isActive={active === tab.id}
                 triggerId={tab.id}
                 shortcutDigit={shortcutDigitFor(tab.id)}
+                modKey={modKey}
                 onClick={() => onSelect(tab.id)}
               />
             ))}

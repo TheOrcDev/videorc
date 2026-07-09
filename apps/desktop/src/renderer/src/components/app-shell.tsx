@@ -7,6 +7,7 @@ import { PermissionsOnboardingDialog } from '@/components/permissions-onboarding
 import { Sidebar } from '@/components/sidebar'
 import { Button } from '@/components/ui/button'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
+
 import type { StatusDotTone } from '@/components/status-dot'
 import { AiTab } from '@/components/tabs/ai-tab'
 import { AssetsTab } from '@/components/tabs/assets-tab'
@@ -31,6 +32,7 @@ import { WhatsNewDialog } from '@/components/whats-new-dialog'
 import { useStudio } from '@/hooks/use-studio'
 import { useWhatsNew } from '@/hooks/use-whats-new'
 import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from '@/lib/capture'
+import { displayKeyGlyph } from '@/lib/platform'
 import { shouldShowPermissionsOnboarding, systemAccessRows } from '@/lib/system-access'
 import { cn } from '@/lib/utils'
 
@@ -58,6 +60,8 @@ export function AppShell(): ReactElement {
   const [commandOpen, setCommandOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const whatsNew = useWhatsNew(runtimeInfo?.version)
+  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
+  const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
 
   // Permissions onboarding gate: evaluated ONCE per launch, and only after the
   // backend has connected and real device enumeration arrived — before that
@@ -227,6 +231,7 @@ export function AppShell(): ReactElement {
           statusLabel={statusLabel}
           live={live}
           onOpenCommand={() => setCommandOpen(true)}
+          platform={runtimeInfo?.platform}
         />
 
         <main className="flex h-[calc(100vh-2.25rem)] flex-1 flex-col">
@@ -278,7 +283,7 @@ export function AppShell(): ReactElement {
             <Button size="sm" variant="ghost" onClick={() => setCommandOpen(true)}>
               Search
               <KbdGroup>
-                <Kbd>⌘</Kbd>
+                <Kbd>{modKey}</Kbd>
                 <Kbd>K</Kbd>
               </KbdGroup>
             </Button>
@@ -286,7 +291,7 @@ export function AppShell(): ReactElement {
             <Button size="sm" variant="ghost" onClick={() => void togglePreviewWindow()}>
               {previewWindow.open ? 'Close Preview' : 'Open Preview'}
               <KbdGroup>
-                <Kbd>⌘</Kbd>
+                <Kbd>{modKey}</Kbd>
                 <Kbd>P</Kbd>
               </KbdGroup>
             </Button>
@@ -305,8 +310,8 @@ export function AppShell(): ReactElement {
                 >
                   {notesWindow.open ? 'Close Notes' : 'Open Notes'}
                   <KbdGroup>
-                    <Kbd>⌘</Kbd>
-                    <Kbd>⇧</Kbd>
+                    <Kbd>{modKey}</Kbd>
+                    <Kbd>{shiftKey}</Kbd>
                     <Kbd>N</Kbd>
                   </KbdGroup>
                 </Button>
@@ -325,8 +330,8 @@ export function AppShell(): ReactElement {
                   <ChatCircle data-icon="inline-start" />
                   {commentsWindow.open ? 'Close Comments' : 'Open Comments'}
                   <KbdGroup>
-                    <Kbd>⌘</Kbd>
-                    <Kbd>⇧</Kbd>
+                    <Kbd>{modKey}</Kbd>
+                    <Kbd>{shiftKey}</Kbd>
                     <Kbd>J</Kbd>
                   </KbdGroup>
                 </Button>

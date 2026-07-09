@@ -298,6 +298,7 @@ export function StudioTab(): ReactElement {
           onClose={() => setChatRailOpen(false)}
           onHighlight={studio.toggleCommentHighlight}
           onPopOut={studio.toggleCommentsWindow}
+          platform={studio.runtimeInfo?.platform}
         />
       ) : null}
     </div>

@@ -216,7 +216,7 @@ export function ObsImportDialog({
           </div>
         ) : discovery ? (
           <p className="text-sm text-muted-foreground">
-            No OBS Studio installation with scene collections was found on this Mac.
+            No OBS Studio installation with scene collections was found on this device.
           </p>
         ) : (
           <p className="text-sm text-muted-foreground">Looking for OBS Studio…</p>

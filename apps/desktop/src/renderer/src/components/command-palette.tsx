@@ -13,6 +13,7 @@ import {
   CommandShortcut
 } from '@/components/ui/command'
 import { Kbd } from '@/components/ui/kbd'
+import { displayKeyGlyph } from '@/lib/platform'
 import {
   STUDIO_PANELS,
   WORKSPACE_TABS,
@@ -39,6 +40,8 @@ export function CommandPalette({
     commentsWindow,
     toggleCommentsWindow
   } = useStudio()
+  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
+  const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
   const { setTheme } = useTheme()
 
   const run = (action: () => void | Promise<void>): void => {
@@ -68,7 +71,10 @@ export function CommandPalette({
                 {tab.label}
                 {digit ? (
                   <CommandShortcut className="tracking-normal">
-                    <Kbd>⌘{digit}</Kbd>
+                    <Kbd>
+                      {modKey}
+                      {digit}
+                    </Kbd>
                   </CommandShortcut>
                 ) : null}
               </CommandItem>
@@ -91,7 +97,10 @@ export function CommandPalette({
                 {panel.label}
                 {digit ? (
                   <CommandShortcut className="tracking-normal">
-                    <Kbd>⌘{digit}</Kbd>
+                    <Kbd>
+                      {modKey}
+                      {digit}
+                    </Kbd>
                   </CommandShortcut>
                 ) : null}
               </CommandItem>
@@ -129,7 +138,10 @@ export function CommandPalette({
               <ChatCircle className="size-4" />
               {commentsWindow.open ? 'Close comments window' : 'Open comments window'}
               <CommandShortcut className="tracking-normal">
-                <Kbd>⌘⇧J</Kbd>
+                <Kbd>
+                  {modKey}
+                  {shiftKey}J
+                </Kbd>
               </CommandShortcut>
             </CommandItem>
           ) : null}

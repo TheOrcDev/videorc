@@ -383,7 +383,7 @@ function previewSupervisorDisplay(
         detail:
           supervisor.lastError ??
           previewPermissionMessage(supervisor.permissionStatus) ??
-          'macOS permission is required before this source can preview.',
+          'Permission is required before this source can preview.',
         tone: 'warn'
       }
     case 'failed':
@@ -433,7 +433,7 @@ function previewPermissionMessage(
     case 'camera-required':
       return 'Camera permission is required for camera sources.'
     case 'unknown':
-      return 'macOS permission is required before this source can preview.'
+      return 'Permission is required before this source can preview.'
     case 'ok':
       return null
   }

@@ -35,3 +35,26 @@ export function osSettingsName(platform: string | undefined): string {
       return 'system settings'
   }
 }
+
+// macOS uses ⌘ (Cmd) as the primary modifier; Windows/Linux use Ctrl. The
+// keydown handlers already accept `metaKey || ctrlKey`, so only the DISPLAYED
+// glyph needs translating. Shortcut data is authored with mac glyphs
+// (shortcuts.ts) and rendered through this map.
+const NON_MAC_KEY_GLYPHS: Record<string, string> = {
+  '⌘': 'Ctrl',
+  '⌥': 'Alt',
+  '⇧': 'Shift'
+}
+
+/** Translates a single displayed key glyph for the platform (⌘ → Ctrl, etc.). */
+export function displayKeyGlyph(glyph: string, platform: string | undefined): string {
+  if (appPlatform(platform) === 'darwin') {
+    return glyph
+  }
+  return NON_MAC_KEY_GLYPHS[glyph] ?? glyph
+}
+
+/** Translates every glyph in a key sequence (shortcuts.ts `keys` arrays). */
+export function displayKeyGlyphs(keys: readonly string[], platform: string | undefined): string[] {
+  return keys.map((key) => displayKeyGlyph(key, platform))
+}

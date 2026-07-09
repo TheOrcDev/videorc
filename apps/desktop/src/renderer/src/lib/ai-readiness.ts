@@ -50,7 +50,7 @@ export function cloudAiReadiness({
       return disabled(
         'session-expired',
         'Videorc session expired',
-        'Your sign-in expired on this Mac — sign in again to use cloud AI.'
+        'Your sign-in expired on this device — sign in again to use cloud AI.'
       )
     }
     return disabled('error', 'Cloud AI unavailable', error)

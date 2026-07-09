@@ -117,7 +117,7 @@ export function AudioMixer(): ReactElement {
             <span className="flex min-w-0 flex-col">
               <span className="truncate text-sm font-medium">{systemAudio.name}</span>
               <span className="truncate text-xs text-muted-foreground">
-                Pending native macOS adapter
+                Pending native system-audio adapter
               </span>
             </span>
           </span>
