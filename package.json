@@ -40,6 +40,7 @@
     "dist:desktop:signed-local": "pnpm package:desktop:signed-local && cd apps/desktop && pnpm exec electron-builder --mac dmg --prepackaged release/mac-arm64 --config.mac.identity=null --config.mac.notarize=false --config.dmg.sign=false && cd ../.. && pnpm release:manifest:macos",
     "package:desktop:windows": "pnpm package:backend && pnpm ffmpeg:fetch:windows && pnpm package:preflight:windows && pnpm --filter @videorc/desktop package",
     "dist:desktop:windows": "pnpm package:backend && pnpm ffmpeg:fetch:windows && pnpm package:preflight:windows && pnpm --filter @videorc/desktop dist",
+    "dist:desktop:windows:signed": "pnpm package:backend && pnpm ffmpeg:fetch:windows && pnpm package:preflight:windows && pnpm --filter @videorc/desktop dist:windows:signed",
     "dist:desktop": "pnpm package:backend:macos && pnpm ffmpeg:build:macos && pnpm package:preflight:macos && pnpm --filter @videorc/desktop dist",
     "dist:desktop:signed": "pnpm release:preflight:macos && pnpm package:backend:macos && pnpm ffmpeg:build:macos && pnpm package:preflight:macos && pnpm --filter @videorc/desktop dist:signed && pnpm release:manifest:macos",
     "dist:desktop:release": "pnpm release:preflight:macos && pnpm package:backend:macos && pnpm ffmpeg:build:macos && pnpm package:preflight:macos && pnpm --filter @videorc/desktop dist:release && pnpm release:manifest:macos",

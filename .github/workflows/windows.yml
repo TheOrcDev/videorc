@@ -102,9 +102,45 @@ jobs:
       - name: Build Windows installer
         # Backend release build + pinned LGPL ffmpeg fetch + fail-closed
         # preflight (runs the ffmpeg rtmps/tls/h264_mf capability probe on a
-        # real Windows host) + electron-builder dir/nsis targets. Unsigned:
-        # testers will see a SmartScreen warning until signing lands.
-        run: pnpm dist:desktop:windows
+        # real Windows host) + electron-builder dir/nsis targets.
+        #
+        # Authenticode: signed via Azure Trusted Signing when the AZURE_*
+        # secrets are available (same-repo PRs, pushes, dispatch). Fork PRs
+        # get no secrets and fall back to the unsigned build instead of
+        # failing — electron-builder hard-errors if azureSignOptions is
+        # configured without credentials, hence the branch here and the
+        # separate overlay config. Setup: docs/windows-signing.md.
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          if ($env:AZURE_CLIENT_ID) {
+            Write-Host "Azure signing secrets present - building SIGNED installer"
+            pnpm dist:desktop:windows:signed
+          } else {
+            Write-Host "No Azure signing secrets (fork PR?) - building UNSIGNED installer"
+            pnpm dist:desktop:windows
+          }
+
+      - name: Verify Authenticode signature
+        # Fail closed: if we intended to sign (secrets present), an unsigned
+        # or broken-signature exe must fail the job, not ship as an artifact.
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          $exe = Get-ChildItem apps/desktop/release/*.exe | Select-Object -First 1
+          if (-not $exe) { throw "no installer exe found in apps/desktop/release" }
+          $sig = Get-AuthenticodeSignature $exe.FullName
+          Write-Host "signature status for $($exe.Name): $($sig.Status)"
+          if ($env:AZURE_CLIENT_ID) {
+            if ($sig.Status -ne 'Valid') {
+              throw "signing was requested but $($exe.Name) has signature status '$($sig.Status)'"
+            }
+            Write-Host "signer: $($sig.SignerCertificate.Subject)"
+          } else {
+            Write-Host "unsigned build (no signing secrets) - skipping verification"
+          }
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4

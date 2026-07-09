@@ -11,6 +11,7 @@
     "build": "electron-vite build",
     "package": "pnpm build && electron-builder --dir --config.mac.identity=null --config.mac.notarize=false",
     "dist": "pnpm build && electron-builder --config.mac.identity=null --config.mac.notarize=false --config.dmg.sign=false",
+    "dist:windows:signed": "pnpm build && electron-builder --win --config electron-builder.windows-signed.yml",
     "dist:signed": "pnpm build && electron-builder --mac dmg",
     "dist:release": "pnpm build && APPLE_TEAM_ID=C2PA37RB58 electron-builder --publish never && node scripts/staple-dmg.mjs",
     "release:upload": "node scripts/release-upload.mjs",

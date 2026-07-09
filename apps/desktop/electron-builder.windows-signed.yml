@@ -1,0 +1,28 @@
+# Azure Trusted Signing overlay for Windows release builds.
+#
+# This is a SEPARATE config on purpose: when `win.azureSignOptions` is present,
+# electron-builder 26 hard-fails the build unless the Entra ID credentials
+# (AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET) are in the
+# environment. Keeping it out of the base electron-builder.yml keeps unsigned
+# builds (fork PRs, local dev boxes without Azure access) working.
+#
+# Used by `pnpm dist:windows:signed` (see the windows.yml installer job, which
+# picks this path only when the Azure secrets are available). Setup runbook:
+# docs/windows-signing.md.
+#
+# electron-builder installs the TrustedSigning PowerShell module itself and
+# defaults the timestamp server to http://timestamp.acs.microsoft.com — no
+# extra CI steps needed.
+extends: ./electron-builder.yml
+
+win:
+  azureSignOptions:
+    # Region endpoint of the Trusted Signing account (weu = West Europe).
+    # Must match the region chosen when creating the account in the Azure
+    # portal — see docs/windows-signing.md.
+    endpoint: https://weu.codesigning.azure.net
+    codeSigningAccountName: videorc-signing
+    certificateProfileName: videorc-public-trust
+    # TODO(windows-auto-update): once the Trusted Signing cert is issued, set
+    # `publisherName` to its exact subject CN. electron-updater uses it to
+    # verify downloaded update signatures when the Windows update feed ships.

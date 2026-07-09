@@ -84,9 +84,13 @@ mac:
     - dmg
     - zip
 
-# Windows 11 x64. Unsigned for now (internal testing); Authenticode signing is
-# Phase 5. The .exe backend and the windows-x64 ffmpeg dir override the
-# top-level (macOS) extraResources paths. See docs/windows-port-plan.md.
+# Windows 11 x64. This base config builds UNSIGNED (fork PRs, boxes without
+# Azure credentials). Authenticode signing lives in the
+# electron-builder.windows-signed.yml overlay (Azure Trusted Signing; see
+# docs/windows-signing.md) because electron-builder fails the build when
+# azureSignOptions is present without AZURE_* env credentials. The .exe
+# backend and the windows-x64 ffmpeg dir override the top-level (macOS)
+# extraResources paths. See docs/windows-port-plan.md.
 win:
   icon: build-resources/icon.ico
   extraResources:
