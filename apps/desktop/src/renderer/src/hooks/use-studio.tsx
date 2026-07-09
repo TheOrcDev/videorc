@@ -647,6 +647,7 @@ const idleDiagnosticStats = (): DiagnosticStats => ({
   encoderBridgeDeadlineLagP95Ms: undefined,
   encoderBridgeDeadlineLagMaxMs: undefined,
   encoderBridgeLateDeadlineTicks: 0,
+  encoderBridgeScheduleSkippedMs: 0,
   encoderBridgeRecordingInputFps: undefined,
   encoderBridgeStreamInputFps: undefined,
   encoderBridgeRecordingWriterLoopP95Ms: undefined,

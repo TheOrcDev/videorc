@@ -1627,6 +1627,7 @@ export interface DiagnosticStats {
   encoderBridgeDeadlineLagMaxMs?: number
   /** Cumulative bridge writer ticks that started late against their CFR deadline. */
   encoderBridgeLateDeadlineTicks: number
+  encoderBridgeScheduleSkippedMs: number
   /** Recording-leg bridge input FPS for split-output sessions. */
   encoderBridgeRecordingInputFps?: number
   /** Stream-leg bridge input FPS for split-output sessions. */
@@ -2160,6 +2161,10 @@ export interface RuntimeInfo {
   arch: string
   osRelease: string
   gpuDevices: RuntimeGpuDevice[]
+  /** True when Videorc is running with hardware acceleration disabled — via
+   * VIDEORC_DISABLE_GPU=1 or the persisted GPU-crash fallback. Surfaced so
+   * support bundles name the active graphics mode. */
+  hardwareAccelerationDisabled: boolean
   isPackaged: boolean
   permissionTargetName: string
   permissionTargetPath: string

@@ -27,6 +27,7 @@ export interface RuntimeInfoInput {
   arch?: string
   osRelease?: string
   gpuInfo?: unknown
+  hardwareAccelerationDisabled?: boolean
   env: Partial<
     Pick<
       NodeJS.ProcessEnv,
@@ -84,6 +85,7 @@ export function buildRuntimeInfo({
   arch = process.arch,
   osRelease = release(),
   gpuInfo,
+  hardwareAccelerationDisabled = false,
   env
 }: RuntimeInfoInput): RuntimeInfo {
   const targetPath = permissionTargetPath(execPath)
@@ -96,6 +98,7 @@ export function buildRuntimeInfo({
     arch,
     osRelease,
     gpuDevices: normalizeRuntimeGpuDevices(gpuInfo),
+    hardwareAccelerationDisabled,
     isPackaged,
     permissionTargetName: isPackaged ? 'Videorc' : 'Electron',
     permissionTargetPath: targetPath,

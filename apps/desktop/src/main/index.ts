@@ -57,6 +57,15 @@ import {
   permissionUrlForPane
 } from './runtime-info'
 import { requestMediaAccessWithRestart, type MediaAccessResult } from './media-access'
+import {
+  clearGpuFallbackState,
+  decideGpuFallback,
+  gpuFallbackStatePath,
+  isGpuCrashReason,
+  readGpuFallbackState,
+  shouldPersistGpuFallback,
+  writeGpuFallbackState
+} from './gpu-fallback'
 import { createMediaPermissionGrantWatcher } from './system-permission-watch'
 import { PreviewSupervisorModel } from './preview-supervisor'
 import {
@@ -311,6 +320,57 @@ if (remoteDebugPortOverride) {
 if (process.env.VIDEORC_SMOKE_DISABLE_ELECTRON_GPU === '1') {
   app.commandLine.appendSwitch('disable-gpu')
 }
+// GPU fallback (Windows Insider incident: broken Chromium GPU process boots
+// only with GPU flags and composites transparent windows as BLANK). Must run
+// before app.ready: VIDEORC_DISABLE_GPU=1 is the explicit user hatch, a
+// persisted gpu-fallback.json (written after repeated GPU crashes, below)
+// self-heals the next launch, and VIDEORC_FORCE_GPU=1 overrides + clears it.
+const gpuFallbackFile = gpuFallbackStatePath(app.getPath('userData'))
+const gpuFallbackDecision = decideGpuFallback({
+  env: process.env,
+  persisted: readGpuFallbackState(gpuFallbackFile)
+})
+if (gpuFallbackDecision.clearPersisted) {
+  clearGpuFallbackState(gpuFallbackFile)
+}
+if (gpuFallbackDecision.disable) {
+  app.disableHardwareAcceleration()
+}
+let gpuProcessCrashCount = 0
+let gpuFallbackPersistedThisLaunch = false
+app.on('child-process-gone', (_event, details) => {
+  // Every abnormal child exit is worth a support-bundle line; GPU crashes
+  // additionally drive the persisted software-rendering fallback.
+  if (details.type !== 'GPU' || !isGpuCrashReason(details.reason)) {
+    if (details.reason !== 'clean-exit' && details.reason !== 'killed') {
+      logBackend(
+        'warn',
+        `Chromium ${details.type} process gone (${details.reason}, exit ${details.exitCode ?? 'n/a'}).`
+      )
+    }
+    return
+  }
+  gpuProcessCrashCount += 1
+  logBackend(
+    'warn',
+    `GPU process crashed (${details.reason}, ${gpuProcessCrashCount} this launch). Repeated crashes switch Videorc to software rendering on the next launch.`
+  )
+  if (!gpuFallbackDecision.disable && !gpuFallbackPersistedThisLaunch) {
+    if (shouldPersistGpuFallback(gpuProcessCrashCount)) {
+      gpuFallbackPersistedThisLaunch = true
+      writeGpuFallbackState(gpuFallbackFile, {
+        disableHardwareAcceleration: true,
+        reason: 'gpu-process-crashes',
+        crashCount: gpuProcessCrashCount,
+        updatedAt: new Date().toISOString()
+      })
+      logBackend(
+        'warn',
+        'GPU process is unreliable on this machine — Videorc will use software rendering from the next launch (set VIDEORC_FORCE_GPU=1 to undo).'
+      )
+    }
+  }
+})
 // Keep the detached preview window live while it sits behind the main window.
 // A scene change is made in the main window, so the preview is occluded at that
 // moment — and macOS/Chromium stops compositing a fully-occluded window, which
@@ -3395,7 +3455,13 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
       // it and moves with it like one app.
       parent: previewWindow ?? mainWindow,
       frame: false,
-      transparent: true,
+      // Transparency requires the GPU compositor on Windows — with a broken
+      // GPU process (Windows Insider builds) a transparent window composites
+      // NOTHING and the preview reads as a blank canvas even though the <img>
+      // polling underneath is fully software-safe. Off macOS the surface is
+      // opaque over a solid dark base; macOS keeps transparency (its real
+      // preview path is the CAMetalLayer helper anyway).
+      transparent: isMac,
       focusable: false,
       skipTaskbar: true,
       hasShadow: false,
@@ -3404,7 +3470,7 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
       // user-movable and never a click target.
       movable: false,
       show: false,
-      backgroundColor: '#00000000',
+      backgroundColor: isMac ? '#00000000' : '#101014',
       ...appWindowIconOptions(),
       webPreferences: {
         sandbox: true,
@@ -7088,6 +7154,7 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
     arch: process.arch,
     osRelease: release(),
     gpuInfo,
+    hardwareAccelerationDisabled: gpuFallbackDecision.disable,
     env: process.env
   })
 }
