@@ -121,6 +121,16 @@ on the shape before you invest in a PR. Read [AGENTS.md](AGENTS.md) before
 touching recording or native-preview code — those areas have non-negotiable
 verification gates.
 
+## Contributors
+
+- **[TheOrcDev](https://github.com/TheOrcDev)** — founder & lead developer
+
+<p align="center">
+  <a href="https://github.com/TheOrcDev/videorc/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=TheOrcDev/videorc" alt="Contributors" />
+  </a>
+</p>
+
 ## License
 
 Code: [AGPL-3.0](LICENSE). Brand: the Videorc name, logo, and app icon are not
