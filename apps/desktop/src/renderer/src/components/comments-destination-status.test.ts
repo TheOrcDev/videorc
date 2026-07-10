@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   CommentsDestinationStatus,
-  commentsDestinationSummary
+  commentsDestinationSummary,
+  providerBadgeTitle
 } from '@/components/comments-destination-status'
 import type { LiveChatProviderState, StreamPlatform } from '@/lib/backend'
 
@@ -56,6 +57,20 @@ describe('comments destination status', () => {
         sendTargets: []
       })
     ).toBe('No writable destinations · Twitch reconnect to send · X receive-only')
+  })
+
+  it('names the bound account so a wrong-channel manual stream is visible', () => {
+    expect(providerBadgeTitle(provider('twitch', { message: '', accountLabel: 'OrcDev' }))).toBe(
+      'Reading chat as OrcDev.'
+    )
+    expect(
+      providerBadgeTitle(
+        provider('twitch', { message: 'twitch connected', accountLabel: 'OrcDev' })
+      )
+    ).toBe('twitch connected — Reading chat as OrcDev.')
+    expect(providerBadgeTitle(provider('twitch', { message: 'twitch connected' }))).toBe(
+      'twitch connected'
+    )
   })
 
   it('renders provider and failure status with the shared badge contract', () => {

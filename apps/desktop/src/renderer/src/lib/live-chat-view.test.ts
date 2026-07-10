@@ -6,6 +6,8 @@ import {
   applyLiveChatMessage,
   applyLiveChatMessages,
   applyLiveChatProviderStatus,
+  chatNeedsConnectionAction,
+  chatSetupToastWarnings,
   emptyLiveChatSnapshot,
   filterMessagesByPlatform,
   liveChatEmptyMessage,
@@ -49,6 +51,45 @@ function provider(
     message
   }
 }
+
+describe('chat setup warnings', () => {
+  it('warns for failed and missing-scope destinations with their message', () => {
+    const failed: LiveChatProviderState = {
+      ...provider(
+        'twitch',
+        'Twitch live chat unavailable: Reconnect Twitch to enable live comments.'
+      ),
+      state: 'failed',
+      read: 'failed',
+      write: 'failed'
+    }
+    const missingScope: LiveChatProviderState = {
+      ...provider('twitch', 'Reconnect Twitch to send.', 'twitch-2'),
+      write: 'missing-scope'
+    }
+
+    expect(chatSetupToastWarnings([failed, missingScope]).map((warning) => warning.id)).toEqual([
+      'twitch',
+      'twitch-2'
+    ])
+    expect(chatSetupToastWarnings([failed])[0].message).toContain('Reconnect Twitch')
+  })
+
+  it('never warns for healthy or documented receive-only destinations', () => {
+    const healthy = provider('twitch', '')
+    const xReceiveOnly = provider('x', 'X live chat is receive-only.')
+    const xUnavailable: LiveChatProviderState = {
+      ...provider('x', 'Manual RTMP has no native X broadcast context.', 'x-manual'),
+      read: 'unavailable',
+      write: 'read-only'
+    }
+
+    expect(chatSetupToastWarnings([healthy, xReceiveOnly, xUnavailable])).toEqual([])
+    // The unavailable state still deserves the Comments empty-state CTA.
+    expect(chatNeedsConnectionAction([xUnavailable])).toBe(true)
+    expect(chatNeedsConnectionAction([healthy, xReceiveOnly])).toBe(false)
+  })
+})
 
 describe('live-chat-view', () => {
   it('sorts messages chronologically by receivedAt', () => {

@@ -127,6 +127,33 @@ function providerNeedsAction(provider: LiveChatProviderState): boolean {
   return providerStatePriority(provider) < 4
 }
 
+export type ChatSetupWarning = {
+  id: string
+  platform: StreamPlatform
+  message: string
+}
+
+/**
+ * Destinations whose comments are broken or need a reconnect — never the
+ * documented receive-only/unavailable states. These warrant a go-live toast:
+ * a silently empty Comments feed must never be the first (or only) signal
+ * that chat setup failed (2026-07-10 live-session report).
+ */
+export function chatSetupToastWarnings(providers: LiveChatProviderState[]): ChatSetupWarning[] {
+  return providers
+    .filter((provider) => providerStatePriority(provider) <= 1)
+    .map((provider) => ({
+      id: provider.id,
+      platform: provider.platform,
+      message: provider.message || 'Live comments are unavailable for this destination.'
+    }))
+}
+
+/** True when some destination's comments could be fixed by (re)connecting an account. */
+export function chatNeedsConnectionAction(providers: LiveChatProviderState[]): boolean {
+  return providers.some((provider) => providerStatePriority(provider) <= 2)
+}
+
 export function liveChatEmptyMessage(
   snapshot: Pick<LiveChatSnapshot, 'providers'>,
   noProviderMessage = 'Connect YouTube, Twitch, or X to read live comments.'

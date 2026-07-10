@@ -192,8 +192,10 @@ import {
   applyLiveChatMessages,
   applyLiveChatProviderStatus,
   applyLiveChatSnapshot,
+  chatSetupToastWarnings,
   reconcileLiveChatRecovery
 } from '@/lib/live-chat-view'
+import { CHAT_PLATFORM_LABELS } from '@/components/chat-platform-icon'
 import {
   buildNativePreviewCompositorUpdateParams,
   compositorStatusHasRenderedSceneRevision,
@@ -1071,6 +1073,38 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!client) return
     await client.request('liveChat.clearLocal')
   }, [client])
+  // A silently empty Comments feed must never be the only signal that chat
+  // setup failed at go-live (2026-07-10: Twitch chat needed a reconnect and
+  // the failure lived only in a backend warn log). Toast each broken
+  // destination once per session, with a jump to the Livestream tab.
+  const chatSetupWarnedRef = useRef<{ sessionId?: string; warned: Set<string> }>({
+    warned: new Set()
+  })
+  useEffect(() => {
+    const sessionId = liveChatSnapshot.sessionId
+    if (!sessionId) {
+      return
+    }
+    if (chatSetupWarnedRef.current.sessionId !== sessionId) {
+      chatSetupWarnedRef.current = { sessionId, warned: new Set() }
+    }
+    for (const warning of chatSetupToastWarnings(liveChatSnapshot.providers)) {
+      if (chatSetupWarnedRef.current.warned.has(warning.id)) {
+        continue
+      }
+      chatSetupWarnedRef.current.warned.add(warning.id)
+      toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} comments are not connected`, {
+        description: warning.message,
+        action: {
+          label: 'Open Livestream',
+          onClick: () =>
+            window.dispatchEvent(
+              new CustomEvent(WORKSPACE_NAVIGATE_EVENT, { detail: { tab: 'streaming' } })
+            )
+        }
+      })
+    }
+  }, [liveChatSnapshot])
   // Live captions: status + transcript driven by captions.* events; the mic
   // audio itself never reaches the renderer (the Rust backend uploads chunks).
   const [captionsStatus, setCaptionsStatus] = useState<CaptionsStatus>({ state: 'idle' })
