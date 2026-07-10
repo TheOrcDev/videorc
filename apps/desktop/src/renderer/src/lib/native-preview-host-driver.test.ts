@@ -6,7 +6,8 @@ import {
   compositorStatusMetalTargetHandoff,
   nativeCametalLayerStatusMatchesHandoff,
   proofSurfaceCompositorMessage,
-  realSurfaceUnavailableMessage
+  realSurfaceUnavailableMessage,
+  staleNativePreviewHandoffShouldDeclareFallback
 } from '../../../shared/native-preview-host-driver'
 
 function compositorStatus(
@@ -100,6 +101,18 @@ describe('native-preview-host-driver', () => {
       frameId: 42,
       runId: 'preview-run-1'
     })
+  })
+
+  it('declares stale-handoff fallback only after repeated bounded failure', () => {
+    expect(
+      staleNativePreviewHandoffShouldDeclareFallback({ attemptCount: 1, elapsedMs: 1_500 })
+    ).toBe(false)
+    expect(
+      staleNativePreviewHandoffShouldDeclareFallback({ attemptCount: 10, elapsedMs: 250 })
+    ).toBe(false)
+    expect(
+      staleNativePreviewHandoffShouldDeclareFallback({ attemptCount: 3, elapsedMs: 1_000 })
+    ).toBe(true)
   })
 
   it('rejects IOSurface handoffs rendered from an older scene revision', () => {

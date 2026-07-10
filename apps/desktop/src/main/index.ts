@@ -145,6 +145,7 @@ import {
   proofSurfaceCompositorMessage,
   realSurfaceInvalidActivationMessage,
   realSurfaceUnavailableMessage,
+  staleNativePreviewHandoffShouldDeclareFallback,
   type NativePreviewRealSurfaceDriver
 } from '../shared/native-preview-host-driver'
 import {
@@ -867,6 +868,8 @@ function runFirstFrameHealingAction(
 }
 let nativePreviewLastRealSurfaceFallbackLogKey: string | undefined
 let nativePreviewRealSurfaceInvalidActivationCount = 0
+let nativePreviewStaleHandoffStartedAtMs: number | null = null
+let nativePreviewStaleHandoffAttemptCount = 0
 let nativePreviewMainQueueWaitSamplesMs: number[] = []
 let nativePreviewMainPresentSamplesMs: number[] = []
 let nativePreviewMainQueuedBehindCount = 0
@@ -4940,6 +4943,7 @@ async function tryPresentNativePreviewRealSurfaceCompositor(
       typeof status.metalTargetIosurfaceId === 'number' && status.metalTargetIosurfaceId > 0
     const sceneRevisionMismatch = compositorFrameSceneRevisionMismatch(status)
     if (sceneRevisionMismatch) {
+      resetNativePreviewStaleHandoffDiagnostic()
       recordNativePreviewMainSceneMismatch(status)
       return {
         kind: 'skipped',
@@ -4952,19 +4956,36 @@ async function tryPresentNativePreviewRealSurfaceCompositor(
       (!compositorStatusHasRenderedFrameRevision(status) ||
         compositorStatusIsSmokeSceneExercise(status))
     ) {
+      resetNativePreviewStaleHandoffDiagnostic()
       return {
         kind: 'skipped',
         logKey: 'no-handoff:not-rendered'
       }
     }
+    if (hasMetalTarget) {
+      const nowMs = Date.now()
+      nativePreviewStaleHandoffStartedAtMs ??= nowMs
+      nativePreviewStaleHandoffAttemptCount += 1
+      const declareFallback = staleNativePreviewHandoffShouldDeclareFallback({
+        attemptCount: nativePreviewStaleHandoffAttemptCount,
+        elapsedMs: nowMs - nativePreviewStaleHandoffStartedAtMs
+      })
+      return {
+        kind: 'skipped',
+        reason: declareFallback
+          ? `Native preview falling back to image polling: the compositor's Metal IOSurface target stayed older than the ${DEFAULT_NATIVE_PREVIEW_MAX_HANDOFF_AGE_MS}ms handoff budget for ${nowMs - nativePreviewStaleHandoffStartedAtMs}ms.`
+          : undefined,
+        logKey: declareFallback ? 'no-handoff:stale' : 'no-handoff:stale-transient'
+      }
+    }
+    resetNativePreviewStaleHandoffDiagnostic()
     return {
       kind: 'skipped',
-      reason: hasMetalTarget
-        ? `Native preview falling back to image polling: the compositor's Metal IOSurface target is older than the ${DEFAULT_NATIVE_PREVIEW_MAX_HANDOFF_AGE_MS}ms handoff budget (compose is too slow to stay live).`
-        : `Native preview falling back to image polling: the compositor status carries no Metal IOSurface target (metalTargetIosurfaceId=${status.metalTargetIosurfaceId ?? 'absent'}), so there is nothing to present natively for this scene.`,
-      logKey: `no-handoff:${hasMetalTarget ? 'stale' : 'absent'}`
+      reason: `Native preview falling back to image polling: the compositor status carries no Metal IOSurface target (metalTargetIosurfaceId=${status.metalTargetIosurfaceId ?? 'absent'}), so there is nothing to present natively for this scene.`,
+      logKey: 'no-handoff:absent'
     }
   }
+  resetNativePreviewStaleHandoffDiagnostic()
   if (nativePreviewSurfaceStatus.state !== 'live') {
     nativePreviewRealSurfaceInvalidActivationCount = 0
     return {
@@ -5537,6 +5558,7 @@ function destroyNativePreviewSurface(
     return nativePreviewSurfaceStatus
   }
   nativePreviewPlacementQueue.cancelPending()
+  resetNativePreviewStaleHandoffDiagnostic()
   resetNativePreviewMainHandoffMetrics()
   nativePreviewSurfaceCompositorRequestSerial += 1
   nativePreviewFramePollingSuppressionSerial += 1
@@ -5552,6 +5574,11 @@ function destroyNativePreviewSurface(
   nativePreviewSurfaceWindow = null
   nativePreviewSurfaceStatus = idleNativePreviewSurfaceStatus()
   return nativePreviewSurfaceStatus
+}
+
+function resetNativePreviewStaleHandoffDiagnostic(): void {
+  nativePreviewStaleHandoffStartedAtMs = null
+  nativePreviewStaleHandoffAttemptCount = 0
 }
 
 function destroyNativePreviewSurfaceForBlockedPresentation(
