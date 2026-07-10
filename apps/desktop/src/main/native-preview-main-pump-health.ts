@@ -1,4 +1,5 @@
 export const DEFAULT_MAIN_PUMP_FRAME_STALL_TIMEOUT_MS = 2_000
+export const DEFAULT_MAIN_PUMP_COMPACT_EVENT_GRACE_MS = 1_000
 
 export interface MainPumpFrameDeliveryHealth {
   active: boolean
@@ -34,4 +35,22 @@ export function mainPumpFrameDeliveryStalled({
   }
   const heartbeatAtMs = Math.max(activatedAtMs, lastPresentDrivingEventAtMs)
   return heartbeatAtMs > 0 && nowMs - heartbeatAtMs >= timeoutMs
+}
+
+export function mainPumpStatusCompatibilityMayPresent({
+  activatedAtMs,
+  lastFrameReadyAtMs,
+  nowMs,
+  compactEventGraceMs = DEFAULT_MAIN_PUMP_COMPACT_EVENT_GRACE_MS
+}: {
+  activatedAtMs: number
+  lastFrameReadyAtMs: number
+  nowMs: number
+  compactEventGraceMs?: number
+}): boolean {
+  if (!Number.isFinite(compactEventGraceMs) || compactEventGraceMs < 0) {
+    return false
+  }
+  const compactHeartbeatAtMs = Math.max(activatedAtMs, lastFrameReadyAtMs)
+  return compactHeartbeatAtMs > 0 && nowMs - compactHeartbeatAtMs > compactEventGraceMs
 }

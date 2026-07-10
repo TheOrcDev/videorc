@@ -126,7 +126,8 @@ import {
 } from './native-preview-first-frame'
 import {
   DEFAULT_MAIN_PUMP_FRAME_STALL_TIMEOUT_MS,
-  mainPumpFrameDeliveryStalled
+  mainPumpFrameDeliveryStalled,
+  mainPumpStatusCompatibilityMayPresent
 } from './native-preview-main-pump-health'
 import { discoverObs, readObsSetup, readObsStreamKey } from './obs-import'
 import { initAutoUpdater, registerUpdaterIpc } from './updater'
@@ -6423,8 +6424,16 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       const status = parsed.payload as CompositorStatus
       nativePreviewMainLatestCompositorStatus = status
       // Compatibility for a backend without the compact event. Current
-      // backends never enter this branch after frame-ready starts flowing.
-      if (Date.now() - nativePreviewMainLastFrameReadyAtMs > 1000) {
+      // backends never enter this branch after frame-ready starts flowing. A
+      // fresh connection gets one grace window so a queued diagnostics status
+      // cannot beat the first compact frame and offer an expired IOSurface.
+      if (
+        mainPumpStatusCompatibilityMayPresent({
+          activatedAtMs: nativePreviewMainPumpActivatedAtMs,
+          lastFrameReadyAtMs: nativePreviewMainLastFrameReadyAtMs,
+          nowMs: Date.now()
+        })
+      ) {
         nativePreviewMainLastPresentDrivingEventAtMs = Date.now()
         nativePreviewMainStatusPump.enqueue(status)
       }

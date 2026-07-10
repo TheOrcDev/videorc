@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_MAIN_PUMP_FRAME_STALL_TIMEOUT_MS,
-  mainPumpFrameDeliveryStalled
+  mainPumpFrameDeliveryStalled,
+  mainPumpStatusCompatibilityMayPresent
 } from './native-preview-main-pump-health'
 
 describe('mainPumpFrameDeliveryStalled', () => {
@@ -64,6 +65,30 @@ describe('mainPumpFrameDeliveryStalled', () => {
         ...healthy,
         lastPresentDrivingEventAtMs: 9_500,
         nowMs: 10_000
+      })
+    ).toBe(false)
+  })
+
+  it('gives the compact lane one grace window after every connection', () => {
+    expect(
+      mainPumpStatusCompatibilityMayPresent({
+        activatedAtMs: 10_000,
+        lastFrameReadyAtMs: 0,
+        nowMs: 10_500
+      })
+    ).toBe(false)
+    expect(
+      mainPumpStatusCompatibilityMayPresent({
+        activatedAtMs: 10_000,
+        lastFrameReadyAtMs: 0,
+        nowMs: 11_001
+      })
+    ).toBe(true)
+    expect(
+      mainPumpStatusCompatibilityMayPresent({
+        activatedAtMs: 10_000,
+        lastFrameReadyAtMs: 12_000,
+        nowMs: 12_500
       })
     ).toBe(false)
   })
