@@ -4,6 +4,7 @@
 // unit-testable (and so the panel component stays a thin view).
 
 import type {
+  CommentsSendOperation,
   LiveChatMessage,
   LiveChatProviderState,
   LiveChatSnapshot,
@@ -22,11 +23,18 @@ export const MAX_LIVE_CHAT_VIEW_MESSAGES = 500
  * of growing an unbounded side buffer or scheduling one render per message.
  */
 export const MAX_PENDING_LIVE_CHAT_MESSAGES = 128
+export const MAX_LIVE_CHAT_RECOVERY_ATTEMPTS = 3
+
+export interface PendingLiveChatMessages {
+  messages: LiveChatMessage[]
+  overflowed: boolean
+}
 
 export class BoundedLiveChatMessageBatch {
   readonly capacity: number
   private messages: LiveChatMessage[] = []
   private messageIds = new Set<string>()
+  private overflowed = false
 
   constructor(capacity = MAX_PENDING_LIVE_CHAT_MESSAGES) {
     if (!Number.isInteger(capacity) || capacity < 1) {
@@ -41,12 +49,19 @@ export class BoundedLiveChatMessageBatch {
 
   enqueue(message: LiveChatMessage): boolean {
     if (this.messageIds.has(message.id)) {
+      const existingIndex = this.messages.findIndex((queued) => queued.id === message.id)
+      const existing = this.messages[existingIndex]
+      if (existingIndex >= 0 && existing && message.isDeleted && !existing.isDeleted) {
+        this.messages[existingIndex] = message
+        return true
+      }
       return false
     }
     if (this.messages.length >= this.capacity) {
       const evicted = this.messages.shift()
       if (evicted) {
         this.messageIds.delete(evicted.id)
+        this.overflowed = true
       }
     }
     this.messages.push(message)
@@ -55,15 +70,21 @@ export class BoundedLiveChatMessageBatch {
   }
 
   drain(): LiveChatMessage[] {
-    const messages = this.messages
+    return this.drainWithStatus().messages
+  }
+
+  drainWithStatus(): PendingLiveChatMessages {
+    const pending = { messages: this.messages, overflowed: this.overflowed }
     this.messages = []
     this.messageIds.clear()
-    return messages
+    this.overflowed = false
+    return pending
   }
 
   clear(): void {
     this.messages = []
     this.messageIds.clear()
+    this.overflowed = false
   }
 }
 
@@ -134,10 +155,10 @@ export class LiveChatMessageBatcher {
     this.suspended = true
   }
 
-  drainPending(): LiveChatMessage[] {
+  drainPending(): PendingLiveChatMessages {
     this.cancelScheduledFlush?.()
     this.cancelScheduledFlush = null
-    return this.batch.drain()
+    return this.batch.drainWithStatus()
   }
 
   resume(): void {
@@ -156,6 +177,60 @@ export class LiveChatMessageBatcher {
   dispose(): void {
     this.clear()
     this.disposed = true
+  }
+}
+
+export class LiveChatRecoveryOverflowError extends Error {
+  readonly attempts: number
+
+  constructor(attempts: number) {
+    super(`Live chat recovery overflowed after ${attempts} attempts.`)
+    this.name = 'LiveChatRecoveryOverflowError'
+    this.attempts = attempts
+  }
+}
+
+export async function runBoundedLiveChatRecovery<T>(
+  attempt: (attemptNumber: number) => Promise<{ value: T; overflowed: boolean }>,
+  maxAttempts = MAX_LIVE_CHAT_RECOVERY_ATTEMPTS
+): Promise<T> {
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error('Live chat recovery attempts must be a positive integer.')
+  }
+  for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber += 1) {
+    const result = await attempt(attemptNumber)
+    if (!result.overflowed) return result.value
+  }
+  throw new LiveChatRecoveryOverflowError(maxAttempts)
+}
+
+export type LiveChatSendOperationsQueryResult =
+  | { ok: true; operations: CommentsSendOperation[] }
+  | { ok: false }
+
+export type LiveChatSendOperationQueryDecision =
+  | { kind: 'preserve' }
+  | { kind: 'replace'; operation?: CommentsSendOperation }
+
+export function liveChatSendOperationQueryDecision({
+  result,
+  sessionId,
+  revisionAtStart,
+  currentRevision
+}: {
+  result: LiveChatSendOperationsQueryResult
+  sessionId?: string
+  revisionAtStart: number
+  currentRevision: number
+}): LiveChatSendOperationQueryDecision {
+  if (!result.ok || revisionAtStart !== currentRevision) {
+    return { kind: 'preserve' }
+  }
+  return {
+    kind: 'replace',
+    operation: sessionId
+      ? result.operations.filter((operation) => operation.sessionId === sessionId).at(-1)
+      : undefined
   }
 }
 

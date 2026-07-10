@@ -47,7 +47,7 @@ export function applyCommentsSnapshotDelta(
 
   if (delta.kind === 'provider') {
     const sameProvider = (provider: LiveChatProviderState): boolean =>
-      provider.platform === delta.provider.platform && provider.targetId === delta.provider.targetId
+      provider.id === delta.provider.id
     const providers = snapshot.providers.some(sameProvider)
       ? snapshot.providers.map((provider) => (sameProvider(provider) ? delta.provider : provider))
       : [...snapshot.providers, delta.provider]
@@ -59,8 +59,17 @@ export function applyCommentsSnapshotDelta(
     }
   }
 
-  if (snapshot.messages.some((message) => message.id === delta.message.id)) {
-    return snapshot
+  const existingIndex = snapshot.messages.findIndex((message) => message.id === delta.message.id)
+  if (existingIndex >= 0) {
+    const existing = snapshot.messages[existingIndex]
+    if (!delta.message.isDeleted || existing.isDeleted) return snapshot
+    const messages = snapshot.messages.slice()
+    messages[existingIndex] = delta.message
+    return {
+      ...snapshot,
+      messages,
+      updatedAt: delta.message.receivedAt
+    }
   }
   const messages = [...snapshot.messages, delta.message].sort(messageOrder)
   return {

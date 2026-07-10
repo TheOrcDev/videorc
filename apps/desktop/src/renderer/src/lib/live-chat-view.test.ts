@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import type { LiveChatMessage, LiveChatProviderState, StreamPlatform } from '@/lib/backend'
+import type {
+  CommentsSendOperation,
+  LiveChatMessage,
+  LiveChatProviderState,
+  StreamPlatform
+} from '@/lib/backend'
 import {
   applyLiveChatCleared,
   applyLiveChatMessage,
@@ -9,12 +14,15 @@ import {
   BoundedLiveChatMessageBatch,
   emptyLiveChatSnapshot,
   filterMessagesByPlatform,
+  liveChatSendOperationQueryDecision,
+  LiveChatRecoveryOverflowError,
   LiveChatMessageBatcher,
   liveChatEmptyMessage,
   nextUnreadCount,
   reconcileLiveChatRecovery,
   reconcileLiveChatSnapshot,
   replayLiveChatBootstrapEvents,
+  runBoundedLiveChatRecovery,
   shouldAutoscroll,
   sortMessagesChronological,
   visibleMessages
@@ -50,6 +58,18 @@ function provider(
     read: 'ready',
     write: platform === 'x' ? 'read-only' : 'ready',
     message
+  }
+}
+
+function sendOperation(id: string): CommentsSendOperation {
+  return {
+    id,
+    sessionId: 's1',
+    text: 'hello',
+    phase: 'sent',
+    destinations: [],
+    createdAt: '2026-06-06T10:00:00Z',
+    updatedAt: '2026-06-06T10:00:01Z'
   }
 }
 
@@ -266,6 +286,28 @@ describe('live-chat-view', () => {
     expect(notifications[0].map(({ id }) => id)).toEqual(['a', 'b'])
   })
 
+  it('replaces an original with a same-batch deletion tombstone', () => {
+    const notifications: LiveChatMessage[][] = []
+    const batcher = new LiveChatMessageBatcher({
+      onFlush: (messages) => notifications.push(messages),
+      schedule: () => () => undefined
+    })
+    const original = message('a', 'youtube', '2026-06-06T10:00:01Z')
+    const tombstone = {
+      ...original,
+      eventType: 'deleted' as const,
+      isDeleted: true,
+      messageText: 'Message deleted',
+      receivedAt: '2026-06-06T10:00:02Z'
+    }
+
+    batcher.enqueue(original)
+    batcher.enqueue(tombstone)
+    batcher.flush()
+
+    expect(notifications).toEqual([[tombstone]])
+  })
+
   it('flushes a full batch and never lets the pending queue grow past capacity', () => {
     const notifications: LiveChatMessage[][] = []
     let cancelled = 0
@@ -312,8 +354,72 @@ describe('live-chat-view', () => {
     batcher.enqueue(message('c', 'x', '2026-06-06T10:00:03Z'))
 
     expect(notifications).toHaveLength(0)
-    expect(batcher.drainPending().map(({ id }) => id)).toEqual(['b', 'c'])
+    expect(batcher.drainPending()).toEqual({
+      messages: [
+        message('b', 'twitch', '2026-06-06T10:00:02Z'),
+        message('c', 'x', '2026-06-06T10:00:03Z')
+      ],
+      overflowed: true
+    })
     batcher.resume()
+  })
+
+  it('retries authoritative recovery until one bounded tail does not overflow', async () => {
+    const attempts: number[] = []
+    const result = await runBoundedLiveChatRecovery(async (attempt) => {
+      attempts.push(attempt)
+      return { value: `snapshot-${attempt}`, overflowed: attempt < 3 }
+    })
+
+    expect(result).toBe('snapshot-3')
+    expect(attempts).toEqual([1, 2, 3])
+  })
+
+  it('fails explicitly after the bounded recovery attempt budget', async () => {
+    const recovery = runBoundedLiveChatRecovery(
+      async () => ({ value: 'incomplete', overflowed: true }),
+      2
+    )
+    await expect(recovery).rejects.toBeInstanceOf(LiveChatRecoveryOverflowError)
+    await expect(recovery).rejects.toMatchObject({ attempts: 2 })
+  })
+
+  it('preserves send-operation state on query failure or a newer event', () => {
+    expect(
+      liveChatSendOperationQueryDecision({
+        result: { ok: false },
+        sessionId: 's1',
+        revisionAtStart: 4,
+        currentRevision: 4
+      })
+    ).toEqual({ kind: 'preserve' })
+    expect(
+      liveChatSendOperationQueryDecision({
+        result: { ok: true, operations: [sendOperation('stale')] },
+        sessionId: 's1',
+        revisionAtStart: 4,
+        currentRevision: 5
+      })
+    ).toEqual({ kind: 'preserve' })
+  })
+
+  it('clears send-operation state only after a successful current empty query', () => {
+    expect(
+      liveChatSendOperationQueryDecision({
+        result: { ok: true, operations: [] },
+        sessionId: 's1',
+        revisionAtStart: 4,
+        currentRevision: 4
+      })
+    ).toEqual({ kind: 'replace', operation: undefined })
+    expect(
+      liveChatSendOperationQueryDecision({
+        result: { ok: true, operations: [sendOperation('latest')] },
+        sessionId: 's1',
+        revisionAtStart: 4,
+        currentRevision: 4
+      })
+    ).toEqual({ kind: 'replace', operation: sendOperation('latest') })
   })
 
   it('windows the rendered tail to the most recent messages', () => {

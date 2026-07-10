@@ -192,9 +192,13 @@ import {
   applyLiveChatMessages,
   applyLiveChatProviderStatus,
   applyLiveChatSnapshot,
+  liveChatSendOperationQueryDecision,
+  LiveChatRecoveryOverflowError,
   LiveChatMessageBatcher,
   reconcileLiveChatRecovery,
   replayLiveChatBootstrapEvents,
+  runBoundedLiveChatRecovery,
+  type LiveChatSendOperationsQueryResult,
   type LiveChatBootstrapEvent
 } from '@/lib/live-chat-view'
 import {
@@ -278,6 +282,21 @@ function openLibraryFromQualityToast(sessionId?: string): void {
 // cadence that alone kept the renderer permanently busy. State-machine flips
 // still commit immediately via the significant-change fast path.
 const TELEMETRY_UI_COMMIT_INTERVAL_MS = 1000
+const LIVE_CHAT_RECOVERY_RETRY_DELAY_MS = 250
+
+async function requestLiveChatSendOperations(
+  request: () => Promise<CommentsSendOperation[]>
+): Promise<LiveChatSendOperationsQueryResult> {
+  try {
+    return { ok: true, operations: await request() }
+  } catch {
+    return { ok: false }
+  }
+}
+
+function successfulEmptyLiveChatSendOperationsQuery(): LiveChatSendOperationsQueryResult {
+  return { ok: true, operations: [] }
+}
 
 // One target patch, with the derived streaming fields (enabled flag, mode,
 // enabled ids) recomputed — shared by the settings editor and the Go Live
@@ -1273,16 +1292,58 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [updateLiveChatSnapshot]
   )
-  const [latestLiveChatSendOperation, setLatestLiveChatSendOperation] = useState<
-    CommentsSendOperation | undefined
-  >()
-  const applyLiveChatSendOperation = useCallback((operation: CommentsSendOperation): void => {
-    setLatestLiveChatSendOperation((current) =>
-      current?.sessionId === operation.sessionId
-        ? reconcileCommentsSendOperation(current, operation)
-        : operation
-    )
-  }, [])
+  const latestLiveChatSendOperationRef = useRef<CommentsSendOperation | undefined>(undefined)
+  const liveChatSendOperationRevisionRef = useRef(0)
+  const replaceLiveChatSendOperation = useCallback(
+    (
+      operation: CommentsSendOperation | undefined,
+      options: { publishSnapshot?: boolean } = {}
+    ): void => {
+      const current = latestLiveChatSendOperationRef.current
+      const next = operation
+        ? current?.sessionId === operation.sessionId
+          ? reconcileCommentsSendOperation(current, operation)
+          : operation
+        : undefined
+      latestLiveChatSendOperationRef.current = next
+      liveChatSendOperationRevisionRef.current += 1
+      if (options.publishSnapshot) {
+        const snapshot = liveChatSnapshotRef.current
+        void window.videorc?.pushCommentsSnapshot?.({
+          mode: { kind: 'live' },
+          snapshot,
+          latestSendOperation: next?.sessionId === snapshot.sessionId ? next : undefined
+        })
+      }
+    },
+    []
+  )
+  const applyLiveChatSendOperation = useCallback(
+    (operation: CommentsSendOperation): void => {
+      replaceLiveChatSendOperation(operation, { publishSnapshot: true })
+    },
+    [replaceLiveChatSendOperation]
+  )
+  const applyLiveChatSendOperationsQuery = useCallback(
+    (
+      result: LiveChatSendOperationsQueryResult,
+      sessionId: string | undefined,
+      revisionAtStart: number
+    ): CommentsSendOperation | undefined => {
+      const decision = liveChatSendOperationQueryDecision({
+        result,
+        sessionId,
+        revisionAtStart,
+        currentRevision: liveChatSendOperationRevisionRef.current
+      })
+      if (decision.kind === 'replace') {
+        replaceLiveChatSendOperation(decision.operation)
+      }
+      const current = latestLiveChatSendOperationRef.current
+      return current?.sessionId === sessionId ? current : undefined
+    },
+    [replaceLiveChatSendOperation]
+  )
   const clearLiveChat = useCallback(async () => {
     if (!client) return
     await client.request('liveChat.clearLocal')
@@ -1399,16 +1460,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       offClear?.()
     }
   }, [client])
-  useEffect(() => {
-    void window.videorc?.pushCommentsSnapshot?.({
-      mode: { kind: 'live' },
-      snapshot: liveChatSnapshot,
-      latestSendOperation:
-        latestLiveChatSendOperation?.sessionId === liveChatSnapshot.sessionId
-          ? latestLiveChatSendOperation
-          : undefined
-    })
-  }, [latestLiveChatSendOperation, liveChatSnapshot])
   const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(loadCaptureConfig)
 
   // Backend-authoritative comment highlight. The renderer owns only the
@@ -1624,13 +1675,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     )
     replaceLiveChatSnapshotState(next)
     const installedReplacementRevision = liveChatReplacementRevisionRef.current
-    const operations = next.sessionId
-      ? await client
-          .request<CommentsSendOperation[]>('liveChat.sendOperations.list', {
+    const sendOperationRevisionAtStart = liveChatSendOperationRevisionRef.current
+    const operationsResult = next.sessionId
+      ? await requestLiveChatSendOperations(() =>
+          client.request<CommentsSendOperation[]>('liveChat.sendOperations.list', {
             sessionId: next.sessionId
           })
-          .catch(() => [])
-      : []
+        )
+      : successfulEmptyLiveChatSendOperationsQuery()
     if (
       !commentsRefreshRevisionIsCurrent(
         installedReplacementRevision,
@@ -1641,18 +1693,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     const currentSnapshot = liveChatSnapshotRef.current
     if (currentSnapshot.sessionId !== next.sessionId) return
-    const latestSendOperation = operations.at(-1)
-    if (latestSendOperation) {
-      applyLiveChatSendOperation(latestSendOperation)
-    } else {
-      setLatestLiveChatSendOperation(undefined)
-    }
+    const latestSendOperation = applyLiveChatSendOperationsQuery(
+      operationsResult,
+      next.sessionId,
+      sendOperationRevisionAtStart
+    )
     await window.videorc?.pushCommentsSnapshot?.({
       mode: { kind: 'live' },
       snapshot: currentSnapshot,
       latestSendOperation
     })
-  }, [applyLiveChatSendOperation, client, replaceLiveChatSnapshotState])
+  }, [applyLiveChatSendOperationsQuery, client, replaceLiveChatSnapshotState])
   const openCommentsWindow = useCallback(async () => {
     await refreshLiveChatSnapshotForComments().catch(() => {})
     await window.videorc?.setCommentsViewMode?.({ kind: 'live' })
@@ -2984,54 +3035,117 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       liveChatBootstrapEvents.push(event)
     }
     let liveChatRecovery: Promise<void> | null = null
+    let liveChatRecoveryRetryTimer: number | null = null
     let commentHighlightRevision = 0
-    const recoverLiveChatSnapshot = (): Promise<void> => {
+    type LiveChatRecoveryResult =
+      | { kind: 'disposed' | 'superseded' }
+      | {
+          kind: 'candidate'
+          snapshot: LiveChatSnapshot
+          queued: LiveChatMessage[]
+          stateRevisionAtStart: number
+          highlight: CommentHighlightState | null
+          highlightRevisionAtStart: number
+          operationsResult: LiveChatSendOperationsQueryResult
+          sendOperationRevisionAtStart: number
+        }
+    const scheduleLiveChatRecoveryRetry = (): void => {
+      if (disposed || liveChatRecoveryRetryTimer !== null) return
+      liveChatRecoveryRetryTimer = window.setTimeout(() => {
+        liveChatRecoveryRetryTimer = null
+        void recoverLiveChatSnapshot().catch((error: unknown) => {
+          if (!disposed) reportError(error)
+        })
+      }, LIVE_CHAT_RECOVERY_RETRY_DELAY_MS)
+    }
+    function recoverLiveChatSnapshot(): Promise<void> {
       if (disposed) return Promise.resolve()
       if (liveChatRecovery) return liveChatRecovery
+      if (liveChatRecoveryRetryTimer !== null) {
+        window.clearTimeout(liveChatRecoveryRetryTimer)
+        liveChatRecoveryRetryTimer = null
+      }
       liveChatMessageBatcher.suspend()
       liveChatRecovery = (async () => {
-        const stateRevisionAtStart = liveChatStateRevisionRef.current
-        const replacementRevisionAtStart = liveChatReplacementRevisionRef.current
-        const highlightRevisionAtStart = commentHighlightRevision
         try {
-          const [snapshot, highlight] = await Promise.all([
-            nextClient.request<LiveChatSnapshot>('liveChat.status'),
-            nextClient.request<CommentHighlightState>('comments.highlight.status').catch(() => null)
-          ])
-          const operations = snapshot.sessionId
-            ? await nextClient
-                .request<CommentsSendOperation[]>('liveChat.sendOperations.list', {
-                  sessionId: snapshot.sessionId
-                })
-                .catch(() => [])
-            : []
-          if (disposed) return
-          if (
-            commentsRefreshRevisionIsCurrent(
-              replacementRevisionAtStart,
-              liveChatReplacementRevisionRef.current
-            )
-          ) {
-            const queued = liveChatMessageBatcher.drainPending()
-            replaceLiveChatSnapshotState(
-              reconcileLiveChatRecovery(
-                snapshot,
-                liveChatSnapshotRef.current,
-                queued,
-                !commentsRefreshRevisionIsCurrent(
-                  stateRevisionAtStart,
-                  liveChatStateRevisionRef.current
+          const recovery = await runBoundedLiveChatRecovery<LiveChatRecoveryResult>(async () => {
+            const stateRevisionAtStart = liveChatStateRevisionRef.current
+            const replacementRevisionAtStart = liveChatReplacementRevisionRef.current
+            const highlightRevisionAtStart = commentHighlightRevision
+            const sendOperationRevisionAtStart = liveChatSendOperationRevisionRef.current
+            const [snapshot, highlight] = await Promise.all([
+              nextClient.request<LiveChatSnapshot>('liveChat.status'),
+              nextClient
+                .request<CommentHighlightState>('comments.highlight.status')
+                .catch(() => null)
+            ])
+            const operationsResult = snapshot.sessionId
+              ? await requestLiveChatSendOperations(() =>
+                  nextClient.request<CommentsSendOperation[]>('liveChat.sendOperations.list', {
+                    sessionId: snapshot.sessionId
+                  })
                 )
+              : successfulEmptyLiveChatSendOperationsQuery()
+            if (disposed) {
+              return { value: { kind: 'disposed' }, overflowed: false }
+            }
+            if (
+              !commentsRefreshRevisionIsCurrent(
+                replacementRevisionAtStart,
+                liveChatReplacementRevisionRef.current
               )
+            ) {
+              return { value: { kind: 'superseded' }, overflowed: false }
+            }
+            const pending = liveChatMessageBatcher.drainPending()
+            return {
+              value: {
+                kind: 'candidate',
+                snapshot,
+                queued: pending.messages,
+                stateRevisionAtStart,
+                highlight,
+                highlightRevisionAtStart,
+                operationsResult,
+                sendOperationRevisionAtStart
+              },
+              overflowed: pending.overflowed
+            }
+          })
+          if (recovery.kind !== 'candidate' || disposed) return
+
+          const recoveredSnapshot = reconcileLiveChatRecovery(
+            recovery.snapshot,
+            liveChatSnapshotRef.current,
+            recovery.queued,
+            !commentsRefreshRevisionIsCurrent(
+              recovery.stateRevisionAtStart,
+              liveChatStateRevisionRef.current
             )
-            const latestSendOperation = operations.at(-1)
-            if (latestSendOperation) applyLiveChatSendOperation(latestSendOperation)
-            else setLatestLiveChatSendOperation(undefined)
-          }
-          if (highlight && commentHighlightRevision === highlightRevisionAtStart) {
-            publishCommentHighlightState(highlight)
+          )
+          replaceLiveChatSnapshotState(recoveredSnapshot)
+          const latestSendOperation = applyLiveChatSendOperationsQuery(
+            recovery.operationsResult,
+            recoveredSnapshot.sessionId,
+            recovery.sendOperationRevisionAtStart
+          )
+          void window.videorc?.pushCommentsSnapshot?.({
+            mode: { kind: 'live' },
+            snapshot: recoveredSnapshot,
+            latestSendOperation
+          })
+          if (
+            recovery.highlight &&
+            commentHighlightRevision === recovery.highlightRevisionAtStart
+          ) {
+            publishCommentHighlightState(recovery.highlight)
             setCommentHighlightApplyingId(null)
           }
+        } catch (error) {
+          if (error instanceof LiveChatRecoveryOverflowError) {
+            scheduleLiveChatRecoveryRetry()
+          }
+          throw error
         } finally {
           liveChatRecovery = null
           liveChatMessageBatcher.resume()
@@ -3229,13 +3343,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bufferLiveChatBootstrapEvent({ kind: 'snapshot', snapshot })
         liveChatMessageBatcher.clear()
         replaceLiveChatSnapshotState(snapshot)
+        const latestSendOperation = latestLiveChatSendOperationRef.current
         void window.videorc?.pushCommentsSnapshot?.({
           mode: { kind: 'live' },
           snapshot,
           latestSendOperation:
-            latestLiveChatSendOperation?.sessionId === snapshot.sessionId
-              ? latestLiveChatSendOperation
-              : undefined
+            latestSendOperation?.sessionId === snapshot.sessionId ? latestSendOperation : undefined
         })
       }),
       nextClient.on('liveChat.message', (payload) => {
@@ -3268,13 +3381,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bufferLiveChatBootstrapEvent({ kind: 'snapshot', snapshot })
         liveChatMessageBatcher.clear()
         replaceLiveChatSnapshotState(snapshot)
+        const latestSendOperation = latestLiveChatSendOperationRef.current
         void window.videorc?.pushCommentsSnapshot?.({
           mode: { kind: 'live' },
           snapshot,
           latestSendOperation:
-            latestLiveChatSendOperation?.sessionId === snapshot.sessionId
-              ? latestLiveChatSendOperation
-              : undefined
+            latestSendOperation?.sessionId === snapshot.sessionId ? latestSendOperation : undefined
         })
       }),
       nextClient.on('liveChat.sendOperation', (payload) => {
@@ -3566,14 +3678,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         liveChatMessageBatcher.clear()
         liveChatBootstrapComplete = true
         replaceLiveChatSnapshotState(initialLiveChatSnapshot)
-        const initialSendOperations = initialLiveChatSnapshot.sessionId
-          ? await bootstrapRequest<CommentsSendOperation[]>('liveChat.sendOperations.list', {
-              sessionId: initialLiveChatSnapshot.sessionId
-            }).catch(() => [])
-          : []
-        const initialSendOperation = initialSendOperations.at(-1)
-        if (initialSendOperation) applyLiveChatSendOperation(initialSendOperation)
-        else setLatestLiveChatSendOperation(undefined)
+        const sendOperationRevisionAtStart = liveChatSendOperationRevisionRef.current
+        const initialSendOperationsResult = initialLiveChatSnapshot.sessionId
+          ? await requestLiveChatSendOperations(() =>
+              bootstrapRequest<CommentsSendOperation[]>('liveChat.sendOperations.list', {
+                sessionId: initialLiveChatSnapshot.sessionId
+              })
+            )
+          : successfulEmptyLiveChatSendOperationsQuery()
+        if (!generationIsCurrent()) return
+        const initialSendOperation = applyLiveChatSendOperationsQuery(
+          initialSendOperationsResult,
+          initialLiveChatSnapshot.sessionId,
+          sendOperationRevisionAtStart
+        )
         void window.videorc?.pushCommentsSnapshot?.({
           mode: { kind: 'live' },
           snapshot: initialLiveChatSnapshot,
@@ -3668,6 +3786,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       disposed = true
       bootstrapAbort.abort()
       liveChatMessageBatcher.dispose()
+      if (liveChatRecoveryRetryTimer !== null) {
+        window.clearTimeout(liveChatRecoveryRetryTimer)
+        liveChatRecoveryRetryTimer = null
+      }
       platformBootstrapClient.close()
       nativePreviewCompositorPendingRef.current = null
       nativePreviewCompositorLatestStatusRef.current = null
@@ -3709,6 +3831,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [
     appendLog,
     applyLiveChatSendOperation,
+    applyLiveChatSendOperationsQuery,
     applyPreviewLiveStatus,
     applyPreviewCameraStatus,
     applyPreviewScreenStatus,

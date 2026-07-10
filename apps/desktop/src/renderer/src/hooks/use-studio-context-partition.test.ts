@@ -275,7 +275,36 @@ describe('studio context invalidation boundaries', () => {
     expect(handler).toMatch(/liveChatMessageBatcher\.enqueue\(message\)/)
     expect(handler).not.toMatch(/setLiveChatSnapshot\s*\(/)
     expect(source).toMatch(
-      /setLiveChatSnapshot\(\(current\) => applyLiveChatMessages\(current, messages\)\)/
+      /updateLiveChatSnapshot\(\(current\) => applyLiveChatMessages\(current, messages\)\)/
     )
+  })
+
+  it('uses deltas for ordinary chat messages without a snapshot-dependent relay effect', () => {
+    const source = readFileSync(new URL('./use-studio.tsx', import.meta.url), 'utf8')
+    const handlerStart = source.indexOf("nextClient.on('liveChat.message'")
+    const nextHandlerStart = source.indexOf("nextClient.on('liveChat.providerStatus'", handlerStart)
+    const handler = source.slice(handlerStart, nextHandlerStart)
+    const snapshotDependentRelayEffect =
+      /useEffect\(\(\) => \{[\s\S]{0,800}?pushCommentsSnapshot[\s\S]{0,800}?\}, \[[^\]]*\bliveChatSnapshot\b[^\]]*\]\)/
+
+    expect(handler).toMatch(/pushCommentsDelta/)
+    expect(handler).not.toMatch(/pushCommentsSnapshot/)
+    expect(source).not.toMatch(snapshotDependentRelayEffect)
+  })
+
+  it('retries overflowed lag recovery and revision-guards all live send-operation queries', () => {
+    const source = readFileSync(new URL('./use-studio.tsx', import.meta.url), 'utf8')
+    const recoveryStart = source.indexOf('function recoverLiveChatSnapshot')
+    const recoveryEnd = source.indexOf('setClient(nextClient)', recoveryStart)
+    const recovery = source.slice(recoveryStart, recoveryEnd)
+
+    expect(recoveryStart).toBeGreaterThan(-1)
+    expect(recoveryEnd).toBeGreaterThan(recoveryStart)
+    expect(recovery).toMatch(/runBoundedLiveChatRecovery/)
+    expect(recovery).toMatch(/overflowed: pending\.overflowed/)
+    expect(recovery).toMatch(/scheduleLiveChatRecoveryRetry/)
+    expect(recovery).toMatch(/sendOperationRevisionAtStart/)
+    expect(source.match(/requestLiveChatSendOperations\(/g)).toHaveLength(4)
+    expect(source.match(/applyLiveChatSendOperationsQuery\(/g)).toHaveLength(3)
   })
 })

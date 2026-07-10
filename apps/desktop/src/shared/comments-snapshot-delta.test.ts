@@ -6,7 +6,11 @@ import {
   applyCommentsSnapshotDelta
 } from './comments-snapshot-delta'
 
-function message(id: string, sessionId = 'live-session'): LiveChatMessage {
+function message(
+  id: string,
+  sessionId = 'live-session',
+  overrides: Partial<LiveChatMessage> = {}
+): LiveChatMessage {
   return {
     id,
     providerMessageId: id,
@@ -20,7 +24,8 @@ function message(id: string, sessionId = 'live-session'): LiveChatMessage {
     messageText: id,
     fragments: [],
     eventType: 'message',
-    isDeleted: false
+    isDeleted: false,
+    ...overrides
   }
 }
 
@@ -56,17 +61,22 @@ describe('comments snapshot deltas', () => {
 
   it('updates one provider without replacing the rest', () => {
     const youtube: LiveChatProviderState = {
+      id: 'youtube-main',
       platform: 'youtube',
+      targetId: 'youtube-main',
+      read: 'ready',
+      write: 'ready',
       state: 'connected',
-      message: 'Ready',
-      capabilities: []
+      message: 'Ready'
     }
     const twitch: LiveChatProviderState = {
+      id: 'twitch-main',
       platform: 'twitch',
       targetId: 'twitch-main',
+      read: 'ready',
+      write: 'ready',
       state: 'connected',
-      message: 'Ready',
-      capabilities: []
+      message: 'Ready'
     }
     const current = { ...snapshot(), providers: [youtube, twitch] }
     const next = applyCommentsSnapshotDelta(current, {
@@ -80,6 +90,42 @@ describe('comments snapshot deltas', () => {
       youtube,
       { ...twitch, state: 'reconnecting', message: 'Reconnecting' }
     ])
+  })
+
+  it('keeps destinations on the same platform separate by provider id', () => {
+    const first: LiveChatProviderState = {
+      id: 'youtube-primary',
+      platform: 'youtube',
+      targetId: 'youtube-primary',
+      read: 'ready',
+      write: 'ready',
+      state: 'connected',
+      message: 'Ready'
+    }
+    const second = { ...first, id: 'youtube-secondary', targetId: 'youtube-secondary' }
+    const current = { ...snapshot(), providers: [first] }
+    const next = applyCommentsSnapshotDelta(current, {
+      kind: 'provider',
+      provider: second,
+      sessionId: current.sessionId,
+      updatedAt: '2026-07-10T00:00:10Z'
+    })
+
+    expect(next.providers).toEqual([first, second])
+  })
+
+  it('replaces an existing message with its deletion tombstone', () => {
+    const original = message('001')
+    const tombstone = message('001', 'live-session', {
+      eventType: 'deleted',
+      isDeleted: true,
+      messageText: '',
+      receivedAt: '2026-07-10T00:01:00Z'
+    })
+    const current = { ...snapshot(), messages: [original] }
+    const next = applyCommentsSnapshotDelta(current, { kind: 'message', message: tombstone })
+
+    expect(next.messages).toEqual([tombstone])
   })
 
   it('does not let live deltas overwrite a historical transcript', () => {
