@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
@@ -121,11 +121,12 @@ export async function collectProcessResourceDetails(
 
 /**
  * Capture checkpoint-only resources from a stable process population. The
- * backend's cached diagnostics sampler intentionally launches a short-lived
- * `ps` child once per second; a census can race that child even though it is
- * gone before `footprint`/`lsof` run. Requiring two consecutive identical
- * PID/role censuses and complete resource coverage removes that observer race
- * without hiding a persistent process addition, replacement, or failed probe.
+ * backend's cached diagnostics sampler intentionally launches one exact `ps`
+ * observer once per second; exclude only that known backend child and record
+ * every exclusion in the checkpoint. Requiring two consecutive identical
+ * PID/role censuses plus complete resource coverage handles all other observer
+ * races without hiding a persistent process addition, replacement, or failed
+ * probe.
  */
 export async function collectStableProcessResourceCheckpoint({
   collectCensus,
@@ -143,8 +144,13 @@ export async function collectStableProcessResourceCheckpoint({
 
   let previousIdentity = null
   let lastReason = 'no census collected'
+  const observedExcludedObservers = new Map()
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const census = await collectCensus()
+    const observedCensus = await collectCensus()
+    const { census, excludedObservers } = resourceCheckpointCensus(observedCensus)
+    for (const observer of excludedObservers) {
+      observedExcludedObservers.set(observer.pid, observer)
+    }
     const identity = processCensusIdentity(census)
     if (identity === previousIdentity) {
       const checkpoint = await collectResources(census)
@@ -155,7 +161,10 @@ export async function collectStableProcessResourceCheckpoint({
             ...checkpoint,
             stability: {
               attempts: attempt,
-              consecutiveIdentitySamples: 2
+              consecutiveIdentitySamples: 2,
+              excludedObservers: [...observedExcludedObservers.values()].sort(
+                (left, right) => left.pid - right.pid
+              )
             }
           }
         }
@@ -542,6 +551,48 @@ function processCensusIdentity(census) {
     .map((row) => `${row.pid}:${row.role ?? 'other'}`)
     .sort()
     .join(',')
+}
+
+function resourceCheckpointCensus(census) {
+  const processRows = census?.processRows ?? []
+  const backendPids = new Set(
+    processRows.filter((row) => row.role === 'backend').map((row) => row.pid)
+  )
+  const excludedRows = processRows.filter((row) =>
+    isBackendRuntimeResourceSampler(row, backendPids)
+  )
+  if (excludedRows.length === 0) {
+    return { census, excludedObservers: [] }
+  }
+  const excludedPids = new Set(excludedRows.map((row) => row.pid))
+  const retainedRows = processRows.filter((row) => !excludedPids.has(row.pid))
+  return {
+    census: {
+      ...census,
+      processRows: retainedRows,
+      summary: summarizeRows(retainedRows)
+    },
+    excludedObservers: excludedRows.map((row) => ({
+      pid: row.pid,
+      role: row.role,
+      command: row.command,
+      args: row.args
+    }))
+  }
+}
+
+function isBackendRuntimeResourceSampler(row, backendPids) {
+  if (
+    row?.role !== 'other' ||
+    !backendPids.has(row.ppid) ||
+    basename(String(row.command ?? '')) !== 'ps'
+  ) {
+    return false
+  }
+  const args = String(row.args ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+  return /^(?:(?:\/usr)?\/bin\/)?ps -axo pid=,ppid=,rss=,comm=$/.test(args)
 }
 
 function resourceCheckpointCoverageComplete(checkpoint) {

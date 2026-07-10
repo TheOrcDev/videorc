@@ -311,8 +311,94 @@ test('stable resource checkpoints retry a transient process and retain complete 
   )
   assert.deepEqual(result.checkpoint.stability, {
     attempts: 4,
-    consecutiveIdentitySamples: 2
+    consecutiveIdentitySamples: 2,
+    excludedObservers: []
   })
+})
+
+test('stable resource checkpoints exclude only the exact backend resource sampler observer', async () => {
+  const persistent = [
+    { pid: 111, ppid: 1, role: 'electron-main', command: '/app/Videorc', args: 'Videorc' },
+    { pid: 222, ppid: 111, role: 'backend', command: '/app/videorc-backend', args: '' }
+  ]
+  const censuses = [333, 444].map((pid) => ({
+    processRows: [
+      ...persistent,
+      {
+        pid,
+        ppid: 222,
+        role: 'other',
+        command: '/bin/ps',
+        args: 'ps -axo pid=,ppid=,rss=,comm='
+      }
+    ]
+  }))
+
+  const result = await collectStableProcessResourceCheckpoint({
+    collectCensus: async () => censuses.shift(),
+    collectResources: async (census) =>
+      completeResourceCheckpoint(
+        census.processRows.map((row) => ({
+          ...row,
+          physicalFootprintBytes: row.pid * 1_000,
+          openFileCount: row.pid
+        }))
+      ),
+    settleMs: 0
+  })
+
+  assert.deepEqual(
+    result.checkpoint.rows.map((row) => row.pid),
+    [111, 222]
+  )
+  assert.deepEqual(result.checkpoint.stability, {
+    attempts: 2,
+    consecutiveIdentitySamples: 2,
+    excludedObservers: [
+      {
+        pid: 333,
+        role: 'other',
+        command: '/bin/ps',
+        args: 'ps -axo pid=,ppid=,rss=,comm='
+      },
+      {
+        pid: 444,
+        role: 'other',
+        command: '/bin/ps',
+        args: 'ps -axo pid=,ppid=,rss=,comm='
+      }
+    ]
+  })
+})
+
+test('stable resource checkpoints retain unrelated other processes', async () => {
+  const census = {
+    processRows: [
+      { pid: 222, ppid: 1, role: 'backend', command: '/app/videorc-backend', args: '' },
+      { pid: 555, ppid: 222, role: 'other', command: '/bin/ps', args: 'ps aux' }
+    ]
+  }
+  let collectedRows = []
+  const result = await collectStableProcessResourceCheckpoint({
+    collectCensus: async () => census,
+    collectResources: async (stableCensus) => {
+      collectedRows = stableCensus.processRows
+      return completeResourceCheckpoint(
+        stableCensus.processRows.map((row) => ({
+          ...row,
+          physicalFootprintBytes: row.pid * 1_000,
+          openFileCount: row.pid
+        }))
+      )
+    },
+    settleMs: 0
+  })
+
+  assert.deepEqual(
+    collectedRows.map((row) => row.pid),
+    [222, 555]
+  )
+  assert.deepEqual(result.checkpoint.stability.excludedObservers, [])
 })
 
 test('stable resource checkpoints retry incomplete resource coverage', async () => {
