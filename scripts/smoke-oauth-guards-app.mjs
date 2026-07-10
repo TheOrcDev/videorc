@@ -250,14 +250,28 @@ function assertSecretRefPreflight(preflight) {
   ) {
     throw new Error(`Secret-ref Go Live preflight should be valid: ${JSON.stringify(preflight)}`)
   }
-  if (preflight.issues.length !== 0) {
+  const [approvalWarning] = preflight.issues
+  if (
+    preflight.issues.length !== 1 ||
+    approvalWarning?.platform !== 'youtube' ||
+    approvalWarning?.targetId !== 'youtube' ||
+    approvalWarning?.severity !== 'warning' ||
+    !String(approvalWarning?.message).includes('Google approval')
+  ) {
     throw new Error(
-      `Secret-ref Go Live preflight should not report issues: ${JSON.stringify(preflight)}`
+      `Secret-ref Go Live preflight should report only the non-blocking YouTube approval warning: ${JSON.stringify(preflight)}`
     )
   }
 
   const youtube = preflight.destinations.find((destination) => destination.platform === 'youtube')
-  if (!youtube || !youtube.ready || youtube.authMode !== 'manual-rtmp') {
+  if (
+    !youtube ||
+    !youtube.ready ||
+    youtube.authMode !== 'manual-rtmp' ||
+    youtube.chatRead !== 'unavailable' ||
+    youtube.chatWrite !== 'unavailable' ||
+    !String(youtube.chatMessage).includes('Google approval')
+  ) {
     throw new Error(
       `Manual YouTube secret-ref preflight should be ready: ${JSON.stringify(preflight)}`
     )

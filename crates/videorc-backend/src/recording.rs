@@ -172,6 +172,10 @@ pub struct ActiveRecording {
     pub screen_overlay: Option<ScreenOverlaySession>,
     pub encoder_bridge: Option<EncoderBridgeRecordingSession>,
     pub encoder_bridge_stream: Option<EncoderBridgeRecordingSession>,
+    /// True only when this session has a viewer-facing stream leg rendered by
+    /// the compositor bridge. Legacy FFmpeg and record-only paths must reject
+    /// comment highlights before touching the overlay slot.
+    pub comment_highlight_available: bool,
     pub _capture_permit: Option<CapturePermit>,
     pub stop_requested: bool,
 }
@@ -650,9 +654,9 @@ pub async fn start_session(
     // (fire-and-forget, and a closed renderer never sends it) — clearing here
     // is the authoritative boundary (caption carry-over fix, 2026-07-04).
     let _ = crate::captions::clear_caption_overlay(&state.caption_overlay);
-    // Same boundary rule for the comment-highlight overlay: a new session
-    // never inherits a highlighted comment.
-    let _ = crate::captions::clear_caption_overlay(&state.highlight_overlay);
+    // Same boundary rule for comment highlights, including backend state and
+    // any old expiry task — a new session never inherits the prior card.
+    let _ = crate::comment_highlight::clear_comment_highlight_for_session_start(&state).await;
     // Burn-in needs the synthetic compositor (encoder-bridge path) and, for a
     // split-leg plan, an auxiliary render. Outside those shapes the captions
     // stay UI-only — say so instead of silently skipping pixels.
@@ -1051,6 +1055,7 @@ pub async fn start_session(
         },
         encoder_bridge,
         encoder_bridge_stream,
+        comment_highlight_available: comment_highlight_available(&params, use_encoder_bridge),
         _capture_permit: Some(capture_permit),
         stop_requested: false,
     };
@@ -1366,6 +1371,8 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     let mut final_status_events = state.events.subscribe();
     let mut guard = state.recording.lock().await;
     let Some(active) = guard.as_mut() else {
+        drop(guard);
+        let _ = crate::comment_highlight::clear_comment_highlight(&state).await;
         return Ok(idle_status());
     };
 
@@ -1404,6 +1411,12 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
             format!("Stopping {} session.", active.mode)
         }),
     );
+    // Keep recording -> highlight lock order aligned with set_comment_highlight:
+    // once stop_requested is true, no late set can install a new card after
+    // this authoritative clear.
+    let _ =
+        crate::comment_highlight::clear_comment_highlight_for_session_end(&state, &wait_session_id)
+            .await;
     drop(guard);
 
     state.emit_event("recording.status", status.clone());
@@ -2572,6 +2585,12 @@ async fn monitor_session(
     let Some(mut monitored_recording) = monitored_recording else {
         return;
     };
+
+    // Also cover provider/process exits that bypass an explicit stop RPC. The
+    // session guard prevents this late monitor task from clearing a newer
+    // session's card.
+    let _ = crate::comment_highlight::clear_comment_highlight_for_session_end(&state, &session_id)
+        .await;
 
     if let Some(native_audio_stats) = monitored_recording.native_audio_stats {
         let diagnostic_stats = {
@@ -6508,6 +6527,10 @@ fn caption_leg_plan(params: &StartSessionParams) -> crate::captions::CaptionOver
         params.output.stream_enabled,
         caption_burn_target(params),
     )
+}
+
+fn comment_highlight_available(params: &StartSessionParams, use_encoder_bridge: bool) -> bool {
+    params.output.stream_enabled && use_encoder_bridge
 }
 
 fn recording_compositor_stream_output(
@@ -11607,6 +11630,24 @@ mod tests {
                 publish_yuv_frames: false,
             })
         );
+    }
+
+    #[test]
+    fn comment_highlight_requires_a_composited_stream_leg() {
+        assert!(!comment_highlight_available(
+            &base_params(true, false),
+            true
+        ));
+        assert!(!comment_highlight_available(
+            &base_params(false, true),
+            false
+        ));
+        assert!(!comment_highlight_available(
+            &base_params(true, true),
+            false
+        ));
+        assert!(comment_highlight_available(&base_params(false, true), true));
+        assert!(comment_highlight_available(&base_params(true, true), true));
     }
 
     #[test]

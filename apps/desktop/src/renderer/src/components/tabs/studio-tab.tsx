@@ -292,6 +292,9 @@ export function StudioTab(): ReactElement {
       {chatRailOpen && chatRailAvailable ? (
         <LiveChatRail
           highlightedId={studio.highlightedCommentId}
+          highlightApplyingId={studio.commentHighlightApplyingId}
+          highlightFailure={studio.commentHighlightFailure}
+          highlightState={studio.commentHighlightState}
           snapshot={studio.liveChatSnapshot}
           windowOpen={studio.commentsWindow.open}
           onClearLocal={studio.clearLiveChat}

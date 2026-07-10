@@ -10,6 +10,8 @@ import {
   filterMessagesByPlatform,
   liveChatEmptyMessage,
   nextUnreadCount,
+  reconcileLiveChatRecovery,
+  reconcileLiveChatSnapshot,
   shouldAutoscroll,
   sortMessagesChronological,
   visibleMessages
@@ -33,8 +35,19 @@ function message(id: string, platform: StreamPlatform, receivedAt: string): Live
   }
 }
 
-function provider(platform: StreamPlatform, message: string): LiveChatProviderState {
-  return { platform, state: 'connected', message, capabilities: [] }
+function provider(
+  platform: StreamPlatform,
+  message: string,
+  id: string = platform
+): LiveChatProviderState {
+  return {
+    id,
+    platform,
+    state: 'connected',
+    read: 'ready',
+    write: platform === 'x' ? 'read-only' : 'ready',
+    message
+  }
 }
 
 describe('live-chat-view', () => {
@@ -62,6 +75,35 @@ describe('live-chat-view', () => {
     expect(snapshot.messages).toHaveLength(1)
   })
 
+  it('replaces an original with a same-id deletion tombstone', () => {
+    let snapshot = emptyLiveChatSnapshot('now')
+    const original = message('message-1', 'youtube', '2026-06-06T10:00:01Z')
+    const tombstone = {
+      ...original,
+      messageText: 'Message deleted',
+      eventType: 'deleted' as const,
+      isDeleted: true
+    }
+    snapshot = applyLiveChatMessage(snapshot, original)
+    snapshot = applyLiveChatMessage(snapshot, tombstone)
+
+    expect(snapshot.messages).toEqual([tombstone])
+  })
+
+  it('keeps a delete-before-original tombstone and isolates other destination ids', () => {
+    let snapshot = emptyLiveChatSnapshot('now')
+    const original = message('message-1', 'youtube', '2026-06-06T10:00:01Z')
+    const tombstone = { ...original, eventType: 'deleted' as const, isDeleted: true }
+    snapshot = applyLiveChatMessages(snapshot, [tombstone, original])
+    snapshot = applyLiveChatMessage(
+      snapshot,
+      message('other-target:message-1', 'youtube', '2026-06-06T10:00:02Z')
+    )
+
+    expect(snapshot.messages).toHaveLength(2)
+    expect(snapshot.messages.find((row) => row.id === 'message-1')?.isDeleted).toBe(true)
+  })
+
   it('filters by platform, treating an empty set as show-all', () => {
     const messages = [
       message('y', 'youtube', '2026-06-06T10:00:01Z'),
@@ -80,6 +122,30 @@ describe('live-chat-view', () => {
     snapshot = applyLiveChatProviderStatus(snapshot, provider('youtube', 'connected'))
     expect(snapshot.providers).toHaveLength(2)
     expect(snapshot.providers.find((p) => p.platform === 'youtube')?.message).toBe('connected')
+  })
+
+  it('updates provider status by destination id without overwriting same-platform targets', () => {
+    let snapshot = emptyLiveChatSnapshot('now')
+    snapshot = applyLiveChatProviderStatus(
+      snapshot,
+      provider('youtube', 'primary connected', 'youtube-primary')
+    )
+    snapshot = applyLiveChatProviderStatus(
+      snapshot,
+      provider('youtube', 'backup connecting', 'youtube-backup')
+    )
+    snapshot = applyLiveChatProviderStatus(
+      snapshot,
+      provider('youtube', 'backup connected', 'youtube-backup')
+    )
+
+    expect(snapshot.providers).toHaveLength(2)
+    expect(snapshot.providers.find((row) => row.id === 'youtube-primary')?.message).toBe(
+      'primary connected'
+    )
+    expect(snapshot.providers.find((row) => row.id === 'youtube-backup')?.message).toBe(
+      'backup connected'
+    )
   })
 
   it('clears the message view but keeps providers', () => {
@@ -108,6 +174,53 @@ describe('live-chat-view', () => {
       message('c', 'twitch', '2026-06-06T10:00:03Z')
     ])
     expect(snapshot.messages.map((m) => m.id)).toEqual(['b', 'a', 'c'])
+    expect(snapshot.updatedAt).toBe('2026-06-06T10:00:03Z')
+  })
+
+  it('replaces stale incremental belief after lag and merges the queued tail', () => {
+    const authoritative = {
+      ...emptyLiveChatSnapshot('snapshot-time'),
+      sessionId: 's1',
+      messages: [
+        message('a', 'youtube', '2026-06-06T10:00:01Z'),
+        message('c', 'x', '2026-06-06T10:00:03Z')
+      ]
+    }
+    const snapshot = reconcileLiveChatSnapshot(authoritative, [
+      message('c', 'x', '2026-06-06T10:00:03Z'),
+      message('b', 'twitch', '2026-06-06T10:00:02Z')
+    ])
+
+    expect(snapshot.messages.map((m) => m.id)).toEqual(['a', 'b', 'c'])
+    expect(snapshot.updatedAt).toBe('2026-06-06T10:00:03Z')
+  })
+
+  it('restores a lagged message without rolling back provider status received during the RPC', () => {
+    const stale = {
+      ...emptyLiveChatSnapshot('stale-time'),
+      sessionId: 's1',
+      providers: [provider('youtube', 'scope refreshed')],
+      messages: [message('a', 'youtube', '2026-06-06T10:00:01Z')]
+    }
+    const authoritative = {
+      ...emptyLiveChatSnapshot('snapshot-time'),
+      sessionId: 's1',
+      providers: [provider('youtube', 'connecting')],
+      messages: [
+        message('a', 'youtube', '2026-06-06T10:00:01Z'),
+        message('missed', 'twitch', '2026-06-06T10:00:02Z')
+      ]
+    }
+
+    const recovered = reconcileLiveChatRecovery(
+      authoritative,
+      stale,
+      [message('tail', 'x', '2026-06-06T10:00:03Z')],
+      true
+    )
+
+    expect(recovered.messages.map((row) => row.id)).toEqual(['a', 'missed', 'tail'])
+    expect(recovered.providers[0]?.message).toBe('scope refreshed')
   })
 
   it('windows the rendered tail to the most recent messages', () => {
@@ -120,16 +233,18 @@ describe('live-chat-view', () => {
 
   it('uses actionable provider messages for the empty state', () => {
     expect(liveChatEmptyMessage({ providers: [] })).toBe(
-      'Connect YouTube or Twitch to read live comments.'
+      'Connect YouTube, Twitch, or X to read live comments.'
     )
     expect(
       liveChatEmptyMessage({
         providers: [
           {
+            id: 'twitch',
             platform: 'twitch',
             state: 'disabled',
-            message: 'Connect Twitch to read live comments.',
-            capabilities: ['not-connected']
+            read: 'unavailable',
+            write: 'unavailable',
+            message: 'Connect Twitch to read live comments.'
           }
         ]
       })
@@ -138,10 +253,12 @@ describe('live-chat-view', () => {
       liveChatEmptyMessage({
         providers: [
           {
+            id: 'twitch',
             platform: 'twitch',
             state: 'disabled',
-            message: 'Reconnect Twitch to enable live comments.',
-            capabilities: ['needs-reconnect']
+            read: 'ready',
+            write: 'missing-scope',
+            message: 'Reconnect Twitch to enable live comments.'
           }
         ]
       })
@@ -150,10 +267,12 @@ describe('live-chat-view', () => {
       liveChatEmptyMessage({
         providers: [
           {
+            id: 'twitch',
             platform: 'twitch',
             state: 'connected',
-            message: 'Twitch live chat connected.',
-            capabilities: ['available']
+            read: 'ready',
+            write: 'ready',
+            message: 'Twitch live chat connected.'
           }
         ]
       })

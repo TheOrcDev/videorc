@@ -23,7 +23,13 @@ import {
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { useStudio } from '@/hooks/use-studio'
-import type { GoLiveDestinationPreflight, StreamPlatform, StreamPrivacy } from '@/lib/backend'
+import type {
+  CommentsReadState,
+  CommentsWriteState,
+  GoLiveDestinationPreflight,
+  StreamPlatform,
+  StreamPrivacy
+} from '@/lib/backend'
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
 
 // The Go Live confirmation flow: review destinations + metadata, resolve any
@@ -57,7 +63,9 @@ export function GoLiveConfirmationDialog({
 }): ReactElement {
   const entitlementBlocker = entitlementGate.allowed ? null : entitlementGate
   const entitlementUpgradeUrl = entitlementBlocker?.upgradeUrl
-  const errorCount = preflight?.issues.filter((issue) => issue.severity === 'error').length ?? 0
+  const errorIssues = preflight?.issues.filter((issue) => issue.severity === 'error') ?? []
+  const warningIssues = preflight?.issues.filter((issue) => issue.severity === 'warning') ?? []
+  const errorCount = errorIssues.length
   const entitlementIssueCount =
     entitlementBlocker &&
     !preflight?.issues.some((issue) => issue.message === entitlementBlocker.reason)
@@ -135,13 +143,10 @@ export function GoLiveConfirmationDialog({
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-sm font-medium">Destinations</span>
-                {issueCount ? (
-                  <Badge variant="destructive">
-                    {issueCount} issue{issueCount === 1 ? '' : 's'}
-                  </Badge>
-                ) : (
-                  <Badge variant="success">Ready</Badge>
-                )}
+                <GoLiveDestinationSummary
+                  issueCount={issueCount}
+                  warningCount={warningIssues.length}
+                />
               </div>
               <div className="grid gap-2">
                 {preflight?.destinations.length ? (
@@ -181,14 +186,31 @@ export function GoLiveConfirmationDialog({
               </div>
             ) : null}
 
-            {preflight?.issues.length ? (
+            {errorIssues.length ? (
               <div className="flex flex-col gap-2 rounded-row border border-destructive/25 bg-destructive/5 p-3">
                 <div className="flex items-center gap-2 text-sm font-medium text-destructive">
                   <WarningCircle className="size-4" weight="fill" />
                   Resolve before going live
                 </div>
                 <ul className="grid gap-1.5 text-sm text-muted-foreground">
-                  {preflight.issues.map((issue, index) => (
+                  {errorIssues.map((issue, index) => (
+                    <li key={`${issue.platform ?? 'global'}-${issue.targetId ?? 'all'}-${index}`}>
+                      {issue.platform ? `${platformLabel(issue.platform)}: ` : ''}
+                      {issue.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {warningIssues.length ? (
+              <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <WarningCircle className="size-4 text-warning" weight="fill" />
+                  Comments limitations
+                </div>
+                <ul className="grid gap-1.5 text-sm text-muted-foreground">
+                  {warningIssues.map((issue, index) => (
                     <li key={`${issue.platform ?? 'global'}-${issue.targetId ?? 'all'}-${index}`}>
                       {issue.platform ? `${platformLabel(issue.platform)}: ` : ''}
                       {issue.message}
@@ -282,6 +304,11 @@ function GoLiveDestinationRow({
         {destination.accountLabel ? (
           <p className="mt-0.5 text-xs text-muted-foreground">{destination.accountLabel}</p>
         ) : null}
+        <GoLiveCommentsStatus
+          message={destination.chatMessage}
+          read={destination.chatRead}
+          write={destination.chatWrite}
+        />
         {!destination.ready ? (
           <div className="mt-2 flex flex-wrap gap-2">
             {destination.authMode === 'oauth' ? (
@@ -310,6 +337,106 @@ function GoLiveDestinationRow({
       </p>
     </div>
   )
+}
+
+export function GoLiveCommentsStatus({
+  read,
+  write,
+  message
+}: {
+  read: CommentsReadState
+  write: CommentsWriteState
+  message: string
+}): ReactElement {
+  return (
+    <div className="mt-2 flex flex-col gap-1.5">
+      <div aria-label="Comments read and send status" className="flex flex-wrap gap-1.5">
+        <Badge
+          variant={
+            read === 'ready'
+              ? 'success'
+              : read === 'failed'
+                ? 'destructive'
+                : read === 'connecting' || read === 'waiting-for-broadcast-context'
+                  ? 'warning'
+                  : 'outline'
+          }
+        >
+          Read: {commentsReadLabel(read)}
+        </Badge>
+        <Badge
+          variant={
+            write === 'ready'
+              ? 'success'
+              : write === 'failed'
+                ? 'destructive'
+                : write === 'missing-scope'
+                  ? 'warning'
+                  : 'outline'
+          }
+        >
+          Send: {commentsWriteLabel(write)}
+        </Badge>
+      </div>
+      <p className="text-xs text-muted-foreground">{message}</p>
+    </div>
+  )
+}
+
+export function GoLiveDestinationSummary({
+  issueCount,
+  warningCount
+}: {
+  issueCount: number
+  warningCount: number
+}): ReactElement {
+  if (issueCount > 0) {
+    return (
+      <Badge variant="destructive">
+        {issueCount} issue{issueCount === 1 ? '' : 's'}
+      </Badge>
+    )
+  }
+  if (warningCount > 0) {
+    return (
+      <Badge variant="warning">
+        Ready · {warningCount} comment limitation{warningCount === 1 ? '' : 's'}
+      </Badge>
+    )
+  }
+  return <Badge variant="success">Ready</Badge>
+}
+
+function commentsReadLabel(state: CommentsReadState): string {
+  switch (state) {
+    case 'ready':
+      return 'Ready'
+    case 'connecting':
+      return 'Connecting'
+    case 'waiting-for-broadcast-context':
+      return 'After publish'
+    case 'ended':
+      return 'Ended'
+    case 'failed':
+      return 'Failed'
+    case 'unavailable':
+      return 'Unavailable'
+  }
+}
+
+function commentsWriteLabel(state: CommentsWriteState): string {
+  switch (state) {
+    case 'ready':
+      return 'Ready'
+    case 'missing-scope':
+      return 'Reconnect needed'
+    case 'read-only':
+      return 'Receive only'
+    case 'failed':
+      return 'Failed'
+    case 'unavailable':
+      return 'Unavailable'
+  }
 }
 
 function platformLabel(platform: StreamPlatform): string {

@@ -8,6 +8,7 @@
 // Usage: node scripts/ui-theme-screens.mjs [tab ...]   (default: studio streaming)
 
 import { execFile } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -15,6 +16,7 @@ import { request as httpRequest } from 'node:http'
 import { promisify } from 'node:util'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -175,7 +177,142 @@ async function captureAll(smoke, host, suffix) {
   }
 }
 
+async function seedCommentsRail(connection, smoke) {
+  const ws = await connectBackend(connection, timeoutMs)
+  const sessionId = `ui-theme-comments-${Date.now()}`
+  const targets = {
+    youtube: 'ui-theme-youtube',
+    twitch: 'ui-theme-twitch',
+    x: 'ui-theme-x'
+  }
+  await request(ws, timeoutMs, 'liveChat.start', {
+    sessionId,
+    platforms: Object.keys(targets),
+    destinations: Object.entries(targets).map(([platform, targetId]) => ({ platform, targetId })),
+    // Keep all three connectors live through both theme captures. One message
+    // per platform per second is enough visual variety without flooding the rail.
+    fakes: Object.entries(targets).map(([platform, targetId]) => ({
+      platform,
+      targetId,
+      count: 120,
+      intervalMs: 1000,
+      send: platform === 'x' ? undefined : 'sent'
+    }))
+  })
+
+  const deadline = Date.now() + 20_000
+  let snapshot
+  let seeded = false
+  do {
+    snapshot = await request(ws, timeoutMs, 'liveChat.status', {})
+    const platforms = new Set(snapshot.messages.map((message) => message.platform))
+    if (['youtube', 'twitch', 'x'].every((platform) => platforms.has(platform))) {
+      console.log(
+        `seeded Comments rail: ${snapshot.messages.length} messages across YouTube, Twitch, and X`
+      )
+      seeded = true
+      break
+    }
+    await sleep(250)
+  } while (Date.now() < deadline)
+
+  if (!seeded) {
+    ws.close()
+    throw new Error(`Timed out seeding three-platform Comments rail: ${JSON.stringify(snapshot)}`)
+  }
+
+  // Prove renderer reconciliation, not only backend delivery: the terminal
+  // websocket event must reach main's Comments cache without opening the
+  // detached window or relying on the original RPC response.
+  const operationId = randomUUID()
+  const operation = await request(ws, timeoutMs, 'liveChat.send', {
+    operationId,
+    sessionId,
+    text: 'Theme sweep host reply'
+  })
+  const relayDeadline = Date.now() + 10_000
+  let relayedView
+  do {
+    relayedView = await smokeCommand(smoke, 'comments-window-set-view-mode', {
+      mode: { kind: 'live' }
+    })
+    if (
+      relayedView?.latestSendOperation?.id === operationId &&
+      relayedView.latestSendOperation.phase === operation.phase
+    ) {
+      break
+    }
+    await sleep(100)
+  } while (Date.now() < relayDeadline)
+  if (
+    relayedView?.latestSendOperation?.id !== operationId ||
+    relayedView.latestSendOperation.phase !== operation.phase
+  ) {
+    ws.close()
+    throw new Error(
+      `Comments sendOperation event did not reconcile through the renderer: ${JSON.stringify(relayedView)}`
+    )
+  }
+  console.log(`reconciled Comments send operation: ${operationId} (${operation.phase})`)
+  return ws
+}
+
+async function commentsRailState(host) {
+  return cdpEvaluate(
+    host,
+    `(() => {
+      const rail = Array.from(document.querySelectorAll('aside'))
+        .find((candidate) => candidate.textContent?.includes('Comments'));
+      const messageIds = rail
+        ? Array.from(rail.querySelectorAll('[data-message-id]'))
+            .map((row) => row.getAttribute('data-message-id'))
+            .filter(Boolean)
+        : [];
+      return {
+        found: Boolean(rail),
+        text: rail?.textContent ?? '',
+        messageIds,
+        platforms: ['youtube', 'twitch', 'x'].filter((platform) =>
+          messageIds.some((id) => id.includes(':' + platform + ':'))
+        )
+      };
+    })()`
+  )
+}
+
+async function captureCommentsRail(smoke, host, suffix) {
+  try {
+    await smokeCommandRetry(smoke, 'open-tab', { tab: 'studio' })
+  } catch {
+    /* selector waits can time out while the tab still opens */
+  }
+  const deadline = Date.now() + 15_000
+  let state
+  do {
+    state = await commentsRailState(host)
+    if (
+      state.found &&
+      ['youtube', 'twitch', 'x'].every((platform) => state.platforms.includes(platform))
+    ) {
+      break
+    }
+    await sleep(250)
+  } while (Date.now() < deadline)
+  if (
+    !state?.found ||
+    !['youtube', 'twitch', 'x'].every((platform) => state.platforms.includes(platform))
+  ) {
+    throw new Error(`Three-platform Comments rail did not render: ${JSON.stringify(state)}`)
+  }
+  await sleep(500)
+  await cdpScreenshot(host, `comments-rail-${suffix}`)
+  if (process.env.VIDEORC_SHOTS_WINDOW === '1') {
+    await compositedShot(smoke, `comments-rail-${suffix}-window`)
+  }
+}
+
 let devtoolsUrl = null
+let commentsBackendSocket = null
 const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-ui-shots-'))
 const launched = await launchDevApp({
   requiredMarkers: ['backend-ready', 'preview-motion-ready'],
@@ -234,6 +371,8 @@ try {
     }
   }
 
+  commentsBackendSocket = await seedCommentsRail(launched.connections['backend-ready'], smoke)
+
   // Optional: open the command palette (synthetic ⌘K on document — the shell
   // listens there) and capture it before the tab sweep.
   if (process.env.VIDEORC_SHOTS_PALETTE === '1') {
@@ -252,6 +391,7 @@ try {
   }
 
   await captureAll(smoke, host, 'dark')
+  await captureCommentsRail(smoke, host, 'dark')
 
   console.log('flipping to light...')
   await cdpEvaluate(host, `localStorage.setItem('videorc.theme', 'light'); location.reload(); 'ok'`)
@@ -259,6 +399,8 @@ try {
   const lightThemeClass = await cdpEvaluate(host, 'document.documentElement.className')
   console.log(`light root class: "${lightThemeClass}"`)
   await captureAll(smoke, host, 'light')
+  await captureCommentsRail(smoke, host, 'light')
 } finally {
+  commentsBackendSocket?.close()
   await launched.stop()
 }

@@ -98,6 +98,13 @@ import {
 import { discoverObs, readObsSetup, readObsStreamKey } from './obs-import'
 import { initAutoUpdater, registerUpdaterIpc } from './updater'
 import {
+  CommentsCommandBroker,
+  commentsViewModeSenderAllowed,
+  liveCommentsCommandAllowed,
+  parseCommentsViewMode
+} from './comments-command-broker'
+import { reconcileCommentsSendOperation } from '../shared/comments-send-operation'
+import {
   DEFAULT_NATIVE_PREVIEW_MAX_HANDOFF_AGE_MS,
   compositorStatusMetalTargetHandoff,
   nativeCametalLayerStatusMatchesHandoff,
@@ -121,6 +128,14 @@ import type {
   CameraShape,
   CaptionsUpdate,
   CaptionsWindowState,
+  CommentHighlightCommand,
+  CommentHighlightState,
+  CommentsClearCommand,
+  CommentsCommandResolution,
+  CommentsSendCommand,
+  CommentsSendOperation,
+  CommentsViewMode,
+  CommentsViewSnapshot,
   CommentsWindowState,
   CompositorStatus,
   LayoutSettings,
@@ -160,8 +175,29 @@ let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
 let commentsWindowClosing = false
 let commentsWindowContentProtected = false
-let latestCommentHighlightState: { messageId: string | null } = { messageId: null }
-let latestCommentsSnapshot: LiveChatSnapshot | null = null
+let latestCommentHighlightState: CommentHighlightState = { generation: 0, phase: 'idle' }
+let latestLiveCommentsSnapshot: LiveChatSnapshot | null = null
+const commentsHistorySnapshots = new Map<string, LiveChatSnapshot>()
+let commentsViewMode: CommentsViewMode = { kind: 'live' }
+let latestLiveCommentsSendOperation: CommentsSendOperation | undefined
+const commentsHistorySendOperations = new Map<string, CommentsSendOperation>()
+const commentsCommandBroker = new CommentsCommandBroker()
+type CommentsSmokeCommandFixture =
+  | {
+      kind: 'highlight'
+      outcome: 'live' | 'failed'
+      delayMs: number
+      reason: string
+    }
+  | {
+      kind: 'send'
+      outcome: 'sent' | 'partial' | 'failed'
+      delayMs: number
+      reason: string
+    }
+let commentsSmokeCommandFixture: CommentsSmokeCommandFixture | null = null
+let commentsSmokeCommandTrace: Record<string, unknown> | null = null
+let commentsSmokeSnapshotOverride = false
 let captionsWindow: BrowserWindow | null = null
 let captionsWindowLastFrame: Electron.Rectangle | null = null
 let captionsWindowAlwaysOnTop = false
@@ -851,6 +887,7 @@ function createWindow(): void {
   })
 
   mainWindow.on('closed', () => {
+    commentsCommandBroker.rejectAll()
     destroyNativePreviewSurface()
     if (previewWindow && !previewWindow.isDestroyed()) {
       previewWindow.close()
@@ -1666,6 +1703,253 @@ function commentsWindowState(message?: string): CommentsWindowState {
         ? undefined
         : 'Comments window is disabled by VIDEORC_COMMENTS_WINDOW=0.')
   }
+}
+
+function currentCommentsView(): CommentsViewSnapshot | null {
+  if (commentsViewMode.kind === 'live') {
+    return {
+      mode: commentsViewMode,
+      snapshot: latestLiveCommentsSnapshot ?? {
+        providers: [],
+        messages: [],
+        unreadCount: 0,
+        updatedAt: new Date().toISOString()
+      },
+      latestSendOperation: latestLiveCommentsSendOperation
+    }
+  }
+  const snapshot = commentsHistorySnapshots.get(commentsViewMode.sessionId) ?? null
+  return snapshot
+    ? {
+        mode: commentsViewMode,
+        snapshot,
+        latestSendOperation: commentsHistorySendOperations.get(commentsViewMode.sessionId)
+      }
+    : null
+}
+
+function assertLiveCommentsCommandSession(sessionId: unknown): asserts sessionId is string {
+  if (
+    !liveCommentsCommandAllowed({
+      mode: commentsViewMode,
+      liveSessionId: latestLiveCommentsSnapshot?.sessionId,
+      commandSessionId: typeof sessionId === 'string' ? sessionId : undefined
+    })
+  ) {
+    throw new Error('Comments commands are available only for the selected live session.')
+  }
+}
+
+function commentsCommandRequestId(value: unknown): string {
+  if (!value || typeof value !== 'object' || !('requestId' in value)) {
+    throw new Error('Comments command requires a request id.')
+  }
+  const requestId = value.requestId
+  if (typeof requestId !== 'string' || !requestId.trim()) {
+    throw new Error('Comments command requires a request id.')
+  }
+  return requestId
+}
+
+function cacheCommentsView(view: CommentsViewSnapshot): void {
+  if (view.mode.kind === 'live') {
+    const sessionChanged = latestLiveCommentsSnapshot?.sessionId !== view.snapshot.sessionId
+    latestLiveCommentsSnapshot = view.snapshot
+    if (sessionChanged || view.latestSendOperation !== undefined) {
+      latestLiveCommentsSendOperation = view.latestSendOperation
+        ? reconcileCommentsSendOperation(latestLiveCommentsSendOperation, view.latestSendOperation)
+        : undefined
+    }
+  } else {
+    commentsHistorySnapshots.set(view.mode.sessionId, view.snapshot)
+    if (view.latestSendOperation) {
+      commentsHistorySendOperations.set(
+        view.mode.sessionId,
+        reconcileCommentsSendOperation(
+          commentsHistorySendOperations.get(view.mode.sessionId),
+          view.latestSendOperation
+        )
+      )
+    } else {
+      commentsHistorySendOperations.delete(view.mode.sessionId)
+    }
+  }
+}
+
+function cacheCommentsSendResult(operation: CommentsSendOperation): 'live' | 'history' {
+  if (latestLiveCommentsSnapshot?.sessionId === operation.sessionId) {
+    latestLiveCommentsSendOperation = reconcileCommentsSendOperation(
+      latestLiveCommentsSendOperation,
+      operation
+    )
+    return 'live'
+  }
+  commentsHistorySendOperations.set(
+    operation.sessionId,
+    reconcileCommentsSendOperation(
+      commentsHistorySendOperations.get(operation.sessionId),
+      operation
+    )
+  )
+  return 'history'
+}
+
+function emitCommentsView(): void {
+  const view = currentCommentsView()
+  if (view && commentsWindow && !commentsWindow.webContents.isDestroyed()) {
+    commentsWindow.webContents.send('comments-window:snapshot', view)
+  }
+}
+
+function emitCommentHighlightState(state: CommentHighlightState): void {
+  latestCommentHighlightState = state
+  if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
+    commentsWindow.webContents.send('comments-window:highlight-state', state)
+  }
+}
+
+function smokeCommentsSendOperation(
+  command: CommentsSendCommand,
+  fixture: Extract<CommentsSmokeCommandFixture, { kind: 'send' }>
+): CommentsSendOperation {
+  const now = new Date().toISOString()
+  const twitchFailed = fixture.outcome !== 'sent'
+  return {
+    id: command.operationId,
+    sessionId: command.sessionId,
+    text: command.text,
+    phase: fixture.outcome,
+    destinations: [
+      {
+        destinationId: 'comments-probe-youtube',
+        platform: 'youtube',
+        phase: fixture.outcome === 'failed' ? 'failed' : 'sent',
+        ...(fixture.outcome === 'failed' ? { reason: fixture.reason } : {})
+      },
+      {
+        destinationId: 'comments-probe-twitch',
+        platform: 'twitch',
+        phase: twitchFailed ? 'failed' : 'sent',
+        ...(twitchFailed ? { reason: fixture.reason } : {})
+      },
+      {
+        destinationId: 'comments-probe-x',
+        platform: 'x',
+        phase: 'read-only',
+        reason: 'X comments are receive-only.'
+      }
+    ],
+    createdAt: now,
+    updatedAt: now
+  }
+}
+
+/** Smoke-only deterministic renderer response. The stale resolution attempt is
+ * intentional: the probe proves that only the matching request id completes. */
+function dispatchSmokeCommentHighlight(command: CommentHighlightCommand): boolean {
+  const fixture = commentsSmokeCommandFixture
+  if (!fixture || fixture.kind !== 'highlight') return false
+  const staleResolutionAccepted = commentsCommandBroker.resolve({
+    requestId: `${command.requestId}:stale`,
+    ok: true,
+    value: latestCommentHighlightState
+  })
+  commentsSmokeCommandTrace = {
+    kind: fixture.kind,
+    outcome: fixture.outcome,
+    requestId: command.requestId,
+    staleResolutionAccepted,
+    terminal: 'pending'
+  }
+  setTimeout(() => {
+    const state: CommentHighlightState = {
+      sessionId: command.sessionId,
+      messageId: command.messageId,
+      generation: latestCommentHighlightState.generation + 1,
+      phase: fixture.outcome,
+      ...(fixture.outcome === 'failed' ? { reason: fixture.reason } : {})
+    }
+    emitCommentHighlightState(state)
+    const resolutionAccepted = commentsCommandBroker.resolve(
+      fixture.outcome === 'live'
+        ? { requestId: command.requestId, ok: true, value: state }
+        : { requestId: command.requestId, ok: false, error: fixture.reason }
+    )
+    commentsSmokeCommandTrace = {
+      kind: fixture.kind,
+      outcome: fixture.outcome,
+      requestId: command.requestId,
+      resolutionRequestId: command.requestId,
+      staleResolutionAccepted,
+      resolutionAccepted,
+      terminal: fixture.outcome === 'live' ? 'resolved' : 'rejected'
+    }
+  }, fixture.delayMs)
+  return true
+}
+
+function dispatchSmokeCommentsSend(command: CommentsSendCommand): boolean {
+  const fixture = commentsSmokeCommandFixture
+  if (!fixture || fixture.kind !== 'send') return false
+  const operation = smokeCommentsSendOperation(command, fixture)
+  const staleResolutionAccepted = commentsCommandBroker.resolve({
+    requestId: `${command.requestId}:stale`,
+    ok: true,
+    value: operation
+  })
+  commentsSmokeCommandTrace = {
+    kind: fixture.kind,
+    outcome: fixture.outcome,
+    requestId: command.requestId,
+    operationId: command.operationId,
+    staleResolutionAccepted,
+    terminal: 'pending'
+  }
+  setTimeout(() => {
+    const resolutionAccepted = commentsCommandBroker.resolve({
+      requestId: command.requestId,
+      ok: true,
+      value: operation
+    })
+    if (resolutionAccepted) {
+      cacheCommentsSendResult(operation)
+      emitCommentsView()
+    }
+    commentsSmokeCommandTrace = {
+      kind: fixture.kind,
+      outcome: fixture.outcome,
+      requestId: command.requestId,
+      resolutionRequestId: command.requestId,
+      operationId: command.operationId,
+      resultOperationId: operation.id,
+      staleResolutionAccepted,
+      resolutionAccepted,
+      terminal: 'resolved'
+    }
+  }, fixture.delayMs)
+  return true
+}
+
+function commentsCaptureHeaderSignal(image: NativeImage): number {
+  const size = image.getSize()
+  const bitmap = image.toBitmap()
+  // "Comments" occupies this stable logical-pixel region. A stale partial
+  // texture can still contain bright comment-row text near the top, so scoring
+  // the whole header produces false positives; score the title itself.
+  const xStart = Math.max(0, Math.floor((68 / 420) * size.width))
+  const xEnd = Math.min(size.width, Math.ceil((154 / 420) * size.width))
+  const yStart = Math.max(0, Math.floor((8 / 640) * size.height))
+  const yEnd = Math.min(size.height, Math.ceil((29 / 640) * size.height))
+  let signal = 0
+  for (let y = yStart; y < yEnd; y += 1) {
+    for (let x = xStart; x < xEnd; x += 1) {
+      const index = (y * size.width + x) * 4
+      if (Math.max(bitmap[index], bitmap[index + 1], bitmap[index + 2]) >= 72) {
+        signal += 1
+      }
+    }
+  }
+  return signal
 }
 
 function emitCommentsWindowState(message?: string): void {
@@ -6041,11 +6325,173 @@ async function runSmokePreviewMotionCommand(
   }
 
   if (command === 'comments-window-push-snapshot') {
-    latestCommentsSnapshot = params.snapshot as LiveChatSnapshot
-    if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
-      commentsWindow.webContents.send('comments-window:snapshot', latestCommentsSnapshot)
+    commentsSmokeSnapshotOverride = true
+    const snapshot = params.snapshot as LiveChatSnapshot
+    const requestedMode = params.mode as CommentsViewMode | undefined
+    const mode = requestedMode ?? { kind: 'live' as const }
+    cacheCommentsView({
+      mode,
+      snapshot,
+      latestSendOperation: params.latestSendOperation as CommentsSendOperation | undefined
+    })
+    commentsViewMode = mode
+    emitCommentsView()
+    return currentCommentsView()
+  }
+
+  if (command === 'comments-window-set-view-mode') {
+    const mode = params.mode as CommentsViewMode
+    if (!mode || (mode.kind !== 'live' && mode.kind !== 'history')) {
+      throw new Error('Comments view mode must be live or history.')
     }
-    return latestCommentsSnapshot
+    commentsViewMode = mode
+    emitCommentsView()
+    return currentCommentsView()
+  }
+
+  if (command === 'comments-window-set-command-fixture') {
+    const kind = params.kind
+    const outcome = params.outcome
+    const delayMs =
+      typeof params.delayMs === 'number' && Number.isFinite(params.delayMs)
+        ? Math.min(5_000, Math.max(0, Math.round(params.delayMs)))
+        : 100
+    const reason =
+      typeof params.reason === 'string' && params.reason.trim()
+        ? params.reason.trim()
+        : 'Probe command failed as requested.'
+    if (
+      (kind === 'highlight' && (outcome === 'live' || outcome === 'failed')) ||
+      (kind === 'send' && (outcome === 'sent' || outcome === 'partial' || outcome === 'failed'))
+    ) {
+      commentsSmokeCommandFixture = {
+        kind,
+        outcome,
+        delayMs,
+        reason
+      } as CommentsSmokeCommandFixture
+      commentsSmokeCommandTrace = null
+      return commentsSmokeCommandFixture
+    }
+    throw new Error('Invalid Comments smoke command fixture.')
+  }
+
+  if (command === 'comments-window-command-trace') {
+    return {
+      pendingCount: commentsCommandBroker.pendingCount,
+      trace: commentsSmokeCommandTrace
+    }
+  }
+
+  if (command === 'comments-window-route-send-result') {
+    const operation = params.operation as CommentsSendOperation
+    if (!operation || typeof operation.sessionId !== 'string') {
+      throw new Error('Comments send result requires a session id.')
+    }
+    const routedTo = cacheCommentsSendResult(operation)
+    emitCommentsView()
+    return {
+      routedTo,
+      currentView: currentCommentsView(),
+      liveOperation: latestLiveCommentsSendOperation,
+      historyOperation: commentsHistorySendOperations.get(operation.sessionId)
+    }
+  }
+
+  if (command === 'comments-window-authority-probe') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      throw new Error('Comments window is not open.')
+    }
+    const before = {
+      highlight: latestCommentHighlightState,
+      view: currentCommentsView(),
+      viewers: latestViewerSample
+    }
+    const invokeResults = await window.webContents.executeJavaScript(
+      `(async () => Promise.all([
+        window.videorc.pushCommentHighlightState({
+          sessionId: 'forged-comments-session',
+          messageId: 'forged-comments-message',
+          generation: 999,
+          phase: 'live'
+        }),
+        window.videorc.pushCommentsSnapshot({
+          mode: { kind: 'live' },
+          snapshot: {
+            sessionId: 'forged-comments-session',
+            providers: [],
+            messages: [],
+            unreadCount: 0,
+            updatedAt: '2099-01-01T00:00:00Z'
+          }
+        }),
+        window.videorc.pushViewerSample({
+          sessionClientId: 'forged-comments-session',
+          total: 999999,
+          sampledAt: '2099-01-01T00:00:00Z',
+          destinations: []
+        })
+      ]))()`,
+      true
+    )
+    await delay(50)
+    const after = {
+      highlight: latestCommentHighlightState,
+      view: currentCommentsView(),
+      viewers: latestViewerSample
+    }
+    return {
+      invokeResults,
+      before,
+      after,
+      unchanged: JSON.stringify(before) === JSON.stringify(after)
+    }
+  }
+
+  if (command === 'comments-window-click-message') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      return { clicked: false, reason: 'Comments window is not open.' }
+    }
+    const messageId = typeof params.messageId === 'string' ? params.messageId : ''
+    return window.webContents.executeJavaScript(
+      `(() => {
+        const messageId = ${jsonForInlineScript(messageId)};
+        const row = Array.from(document.querySelectorAll('[data-message-id]'))
+          .find((candidate) => candidate.getAttribute('data-message-id') === messageId);
+        const button = row?.querySelector('button');
+        if (!button) return { clicked: false, messageId, phase: row?.getAttribute('data-highlight-phase') ?? null };
+        button.click();
+        return { clicked: true, messageId, phase: row.getAttribute('data-highlight-phase') };
+      })()`,
+      true
+    )
+  }
+
+  if (command === 'comments-window-submit-message') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      return { submitted: false, reason: 'Comments window is not open.' }
+    }
+    const text = typeof params.text === 'string' ? params.text : ''
+    return window.webContents.executeJavaScript(
+      `(async () => {
+        const input = document.querySelector('input[aria-label="Send a comment to all writable destinations"]');
+        if (!input) return { submitted: false, reason: 'Composer is not available.' };
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        setter?.call(input, ${jsonForInlineScript(text)});
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        const button = document.querySelector('button[aria-label="Send comment to all writable destinations"]');
+        if (!button || button.disabled) {
+          return { submitted: false, reason: 'Send action is disabled.', value: input.value };
+        }
+        button.click();
+        return { submitted: true, value: input.value };
+      })()`,
+      true
+    )
   }
 
   if (command === 'comments-window-reader-state') {
@@ -6054,14 +6500,78 @@ async function runSmokePreviewMotionCommand(
       return { open: false, text: '', messageCount: 0 }
     }
     const rendered = await window.webContents.executeJavaScript(
-      `({
-        open: true,
-        text: document.body.innerText,
-        messageCount: document.querySelectorAll('li').length
-      })`,
+      `(() => {
+        const rows = Array.from(document.querySelectorAll('[data-message-id]'));
+        const composer = document.querySelector('input[aria-label="Send a comment to all writable destinations"]');
+        return {
+          open: true,
+          text: document.body.innerText,
+          messageCount: rows.length,
+          composerCount: composer ? 1 : 0,
+          composerDisabled: composer?.disabled ?? null,
+          highlightActionCount: document.querySelectorAll('button[aria-label^="Show "][aria-label$=" on the stream"]').length,
+          destinationStatus: document.querySelector('[data-slot="comments-destination-status"]')?.textContent ?? '',
+          deliveryStatus: document.querySelector('[aria-label="Latest comment delivery"]')?.textContent ?? '',
+          highlightPhases: Object.fromEntries(rows.map((row) => [
+            row.getAttribute('data-message-id'),
+            row.getAttribute('data-highlight-phase')
+          ])),
+          highlightReasons: Object.fromEntries(rows.map((row) => [
+            row.getAttribute('data-message-id'),
+            row.querySelector('[data-slot="badge"][title]')?.getAttribute('title') ?? null
+          ]))
+        };
+      })()`,
       true
     )
     return rendered
+  }
+
+  if (command === 'comments-window-capture-page') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      throw new Error('Comments window is not open.')
+    }
+    const current = window.getBounds()
+    if (current.width !== 420 || current.height !== 640) {
+      window.setBounds({ x: current.x, y: current.y, width: 420, height: 640 })
+    }
+    window.show()
+    let captured: NativeImage | null = null
+    let headerSignal = -1
+    let captureAttempts = 0
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      window.webContents.invalidate()
+      await delay(120)
+      const candidate = await window.webContents.capturePage()
+      const candidateSignal = commentsCaptureHeaderSignal(candidate)
+      captureAttempts = attempt
+      if (candidateSignal > headerSignal) {
+        captured = candidate
+        headerSignal = candidateSignal
+      }
+    }
+    if (!captured) {
+      throw new Error('Comments window capture did not produce an image.')
+    }
+    const sourceSize = captured.getSize()
+    const image =
+      sourceSize.width === 420 && sourceSize.height === 640
+        ? captured
+        : captured.resize({ width: 420, height: 640, quality: 'best' })
+    const name =
+      typeof params.name === 'string' ? params.name.replace(/[^a-z0-9-]/gi, '') : 'comments'
+    const directory = process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? app.getPath('temp')
+    const file = join(directory, `videorc-comments-${name}.png`)
+    writeFileSync(file, nativeImage.createFromBuffer(image.toJPEG(100)).toPNG())
+    return {
+      file,
+      size: image.getSize(),
+      sourceSize,
+      bounds: window.getBounds(),
+      captureAttempts,
+      headerSignal
+    }
   }
 
   if (command === 'notes-window-save-document') {
@@ -7707,38 +8217,98 @@ app.whenReady().then(async () => {
   // Relay (C3): the main renderer owns the single WS client and pushes each
   // live-chat snapshot through here to the window; the window's Clear routes
   // back to the main renderer. Last snapshot is cached for the window's first paint.
-  ipcMain.handle('comments-window:push-snapshot', (_event, snapshot: LiveChatSnapshot) => {
-    latestCommentsSnapshot = snapshot
-    if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
-      commentsWindow.webContents.send('comments-window:snapshot', snapshot)
+  ipcMain.handle('comments-window:push-snapshot', (event, view: CommentsViewSnapshot) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+      return undefined
     }
+    if (commentsSmokeSnapshotOverride) {
+      return currentCommentsView()
+    }
+    cacheCommentsView(view)
+    if (commentsViewMode.kind === view.mode.kind) {
+      if (
+        view.mode.kind === 'live' ||
+        (commentsViewMode.kind === 'history' && commentsViewMode.sessionId === view.mode.sessionId)
+      ) {
+        emitCommentsView()
+      }
+    }
+    return view
   })
-  ipcMain.handle('comments-window:get-snapshot', () => latestCommentsSnapshot)
+  ipcMain.handle('comments-window:get-snapshot', () => currentCommentsView())
+  ipcMain.handle('comments-window:set-view-mode', (event, value: unknown) => {
+    const mode = parseCommentsViewMode(value)
+    if (!mode) {
+      throw new Error('Comments view mode must be live or a complete history selection.')
+    }
+    if (
+      !commentsViewModeSenderAllowed({
+        senderId: event.sender.id,
+        mainRendererId: mainWindow?.webContents.id,
+        commentsRendererId: commentsWindow?.webContents.id,
+        mode
+      })
+    ) {
+      throw new Error('This window cannot change the Comments view mode.')
+    }
+    if (
+      mode.kind === 'history' &&
+      commentsHistorySnapshots.get(mode.sessionId)?.sessionId !== mode.sessionId
+    ) {
+      throw new Error('The requested Comments history snapshot is unavailable.')
+    }
+    commentsViewMode = mode
+    emitCommentsView()
+    return currentCommentsView()
+  })
   // Click-to-highlight relay (Comments upgrade S3): the window clicks, the
   // MAIN renderer owns the lifecycle + rasterization (it has the backend
   // client), and the resulting on-stream state relays back to the window.
-  ipcMain.handle('comments-window:highlight', (_event, message: unknown) => {
-    if (mainWindow && !mainWindow.webContents.isDestroyed()) {
-      mainWindow.webContents.send('comments-window:highlight-request', message)
+  ipcMain.handle('comments-window:highlight', (event, value: unknown): Promise<unknown> => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only the Comments window can request a highlight.'))
     }
+    const requestId = commentsCommandRequestId(value)
+    if (!('sessionId' in (value as object)) || !('messageId' in (value as object))) {
+      return Promise.reject(new Error('Comments highlight requires a session and message id.'))
+    }
+    const command = value as CommentHighlightCommand
+    if (typeof command.messageId !== 'string' || !command.messageId.trim()) {
+      return Promise.reject(new Error('Comments highlight requires a message id.'))
+    }
+    assertLiveCommentsCommandSession(command.sessionId)
+    return commentsCommandBroker.request(requestId, () => {
+      if (dispatchSmokeCommentHighlight(command)) return true
+      if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+      mainWindow.webContents.send('comments-window:highlight-request', command)
+      return true
+    })
   })
-  ipcMain.handle('comments-window:highlight-state-push', (_event, state: unknown) => {
-    latestCommentHighlightState =
-      typeof state === 'object' && state !== null && 'messageId' in state
-        ? (state as { messageId: string | null })
-        : { messageId: null }
-    if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
-      commentsWindow.webContents.send(
-        'comments-window:highlight-state',
-        latestCommentHighlightState
-      )
+  ipcMain.handle(
+    'comments-window:highlight-result-push',
+    (event, resolution: CommentsCommandResolution<unknown>) => {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+      return commentsCommandBroker.resolve(resolution)
     }
+  )
+  ipcMain.handle('comments-window:highlight-state-push', (event, state: unknown) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+      return undefined
+    }
+    const next: CommentHighlightState =
+      typeof state === 'object' && state !== null && 'phase' in state && 'generation' in state
+        ? (state as CommentHighlightState)
+        : { generation: latestCommentHighlightState.generation + 1, phase: 'idle' }
+    emitCommentHighlightState(next)
   })
   ipcMain.handle('comments-window:highlight-state-get', () => latestCommentHighlightState)
   // Viewer-count relay (viewer rider V2): the main renderer owns the backend
   // WS and pushes the latest stream.viewers sample; the Comments window seeds
   // from the cache and follows pushes. Null clears the chip (session over).
-  ipcMain.handle('comments-window:viewers-push', (_event, sample: unknown) => {
+  ipcMain.handle('comments-window:viewers-push', (event, sample: unknown) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+      return undefined
+    }
     latestViewerSample = sample && typeof sample === 'object' ? sample : null
     if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
       commentsWindow.webContents.send('comments-window:viewers', latestViewerSample)
@@ -7747,21 +8317,76 @@ app.whenReady().then(async () => {
   ipcMain.handle('comments-window:viewers-get', () => latestViewerSample)
   // Send relay (Comments upgrade S5): the window types, the MAIN renderer owns
   // the backend call, and the per-platform results relay back to the window.
-  ipcMain.handle('comments-window:send', (_event, text: unknown) => {
-    if (mainWindow && !mainWindow.webContents.isDestroyed() && typeof text === 'string') {
-      mainWindow.webContents.send('comments-window:send-request', text)
+  ipcMain.handle(
+    'comments-window:send',
+    (event, value: unknown): Promise<CommentsSendOperation> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        return Promise.reject(new Error('Only the Comments window can send Comments commands.'))
+      }
+      const requestId = commentsCommandRequestId(value)
+      if (
+        !('sessionId' in (value as object)) ||
+        !('operationId' in (value as object)) ||
+        !('text' in (value as object))
+      ) {
+        return Promise.reject(new Error('Comments send requires an operation, session, and text.'))
+      }
+      const command = value as CommentsSendCommand
+      if (
+        typeof command.operationId !== 'string' ||
+        !command.operationId.trim() ||
+        typeof command.text !== 'string'
+      ) {
+        return Promise.reject(new Error('Comments send requires an operation id and text.'))
+      }
+      assertLiveCommentsCommandSession(command.sessionId)
+      return commentsCommandBroker.request(requestId, () => {
+        if (dispatchSmokeCommentsSend(command)) return true
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        mainWindow.webContents.send('comments-window:send-request', command)
+        return true
+      })
     }
-  })
-  ipcMain.handle('comments-window:send-result-push', (_event, results: unknown) => {
-    if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
-      commentsWindow.webContents.send('comments-window:send-result', results)
+  )
+  ipcMain.handle(
+    'comments-window:send-result-push',
+    (event, resolution: CommentsCommandResolution<CommentsSendOperation>) => {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+      const accepted = commentsCommandBroker.resolve(resolution)
+      if (accepted && resolution.ok && resolution.value) {
+        cacheCommentsSendResult(resolution.value)
+      }
+      return accepted
     }
-  })
-  ipcMain.handle('comments-window:clear', () => {
-    if (mainWindow && !mainWindow.webContents.isDestroyed()) {
-      mainWindow.webContents.send('comments-window:clear-request')
+  )
+  ipcMain.handle('comments-window:clear', (event, value: unknown): Promise<LiveChatSnapshot> => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only the Comments window can clear Comments.'))
     }
+    const requestId = commentsCommandRequestId(value)
+    if (!('sessionId' in (value as object))) {
+      return Promise.reject(new Error('Comments clear requires a live session id.'))
+    }
+    const command = value as CommentsClearCommand
+    assertLiveCommentsCommandSession(command.sessionId)
+    return commentsCommandBroker.request(requestId, () => {
+      if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+      mainWindow.webContents.send('comments-window:clear-request', command)
+      return true
+    })
   })
+  ipcMain.handle(
+    'comments-window:clear-result-push',
+    (event, resolution: CommentsCommandResolution<LiveChatSnapshot>) => {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+      const accepted = commentsCommandBroker.resolve(resolution)
+      if (accepted && resolution.ok && resolution.value) {
+        cacheCommentsView({ mode: { kind: 'live' }, snapshot: resolution.value })
+        emitCommentsView()
+      }
+      return accepted
+    }
+  )
   ipcMain.handle('captions-window:open', () => openCaptionsWindow())
   ipcMain.handle('captions-window:close', () => closeCaptionsWindow())
   ipcMain.handle('captions-window:toggle', () => toggleCaptionsWindow())

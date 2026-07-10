@@ -5,7 +5,6 @@
 
 import type {
   LiveChatMessage,
-  LiveChatProviderConnectionState,
   LiveChatProviderState,
   LiveChatSnapshot,
   StreamPlatform
@@ -14,7 +13,7 @@ import type {
 /** Platforms that can appear in the unified feed, in display order. */
 export const LIVE_CHAT_PLATFORMS: StreamPlatform[] = ['youtube', 'twitch', 'x']
 
-/** Max messages retained in the renderer view (ephemeral; never persisted). */
+/** Max persisted messages projected into the renderer at once; SQLite remains authoritative. */
 export const MAX_LIVE_CHAT_VIEW_MESSAGES = 500
 
 /** An empty snapshot for initial render / after a hard reset. */
@@ -48,13 +47,18 @@ export function applyLiveChatSnapshot(snapshot: LiveChatSnapshot): LiveChatSnaps
   }
 }
 
-/** Merge one incremental message: dedupe by id, insert chronologically, bound the buffer. */
+/** Merge one incremental message: tombstones replace originals; other duplicate ids are skipped. */
 export function applyLiveChatMessage(
   snapshot: LiveChatSnapshot,
   message: LiveChatMessage
 ): LiveChatSnapshot {
-  if (snapshot.messages.some((existing) => existing.id === message.id)) {
-    return snapshot
+  const existingIndex = snapshot.messages.findIndex((existing) => existing.id === message.id)
+  if (existingIndex >= 0) {
+    const existing = snapshot.messages[existingIndex]
+    if (!message.isDeleted || existing.isDeleted) return snapshot
+    const messages = snapshot.messages.slice()
+    messages[existingIndex] = message
+    return { ...snapshot, messages, updatedAt: message.receivedAt }
   }
   // The buffer is sorted by construction and messages almost always arrive in
   // order, so scan back from the tail for the insertion point instead of
@@ -73,9 +77,9 @@ export function applyLiveChatProviderStatus(
   snapshot: LiveChatSnapshot,
   provider: LiveChatProviderState
 ): LiveChatSnapshot {
-  const exists = snapshot.providers.some((row) => row.platform === provider.platform)
+  const exists = snapshot.providers.some((row) => row.id === provider.id)
   const providers = exists
-    ? snapshot.providers.map((row) => (row.platform === provider.platform ? provider : row))
+    ? snapshot.providers.map((row) => (row.id === provider.id ? provider : row))
     : [...snapshot.providers, provider]
   return { ...snapshot, providers }
 }
@@ -111,35 +115,28 @@ export function shouldAutoscroll(paused: boolean): boolean {
 /** Max rows rendered in the feed at once (windowed/virtualized tail). */
 export const MAX_RENDERED_LIVE_CHAT_MESSAGES = 200
 
-function providerStatePriority(
-  state: LiveChatProviderConnectionState,
-  capabilities: string[]
-): number {
-  if (state === 'failed') return 0
-  if (capabilities.includes('needs-reconnect')) return 1
-  if (capabilities.includes('not-connected')) return 2
-  if (state === 'unsupported' || capabilities.includes('unsupported')) return 3
+function providerStatePriority(provider: LiveChatProviderState): number {
+  if (provider.state === 'failed' || provider.read === 'failed') return 0
+  if (provider.write === 'missing-scope') return 1
+  if (provider.read === 'unavailable') return 2
+  if (provider.state === 'unsupported') return 3
   return 4
 }
 
 function providerNeedsAction(provider: LiveChatProviderState): boolean {
-  return providerStatePriority(provider.state, provider.capabilities) < 4
+  return providerStatePriority(provider) < 4
 }
 
 export function liveChatEmptyMessage(
   snapshot: Pick<LiveChatSnapshot, 'providers'>,
-  noProviderMessage = 'Connect YouTube or Twitch to read live comments.'
+  noProviderMessage = 'Connect YouTube, Twitch, or X to read live comments.'
 ): string {
   if (snapshot.providers.length === 0) {
     return noProviderMessage
   }
   const provider = snapshot.providers
     .filter(providerNeedsAction)
-    .sort(
-      (left, right) =>
-        providerStatePriority(left.state, left.capabilities) -
-        providerStatePriority(right.state, right.capabilities)
-    )[0]
+    .sort((left, right) => providerStatePriority(left) - providerStatePriority(right))[0]
   return provider?.message ?? 'No comments yet. Comments appear here once you go live.'
 }
 
@@ -152,17 +149,42 @@ export function applyLiveChatMessages(
   incoming: LiveChatMessage[]
 ): LiveChatSnapshot {
   if (incoming.length === 0) return snapshot
-  const seen = new Set(snapshot.messages.map((message) => message.id))
-  const fresh: LiveChatMessage[] = []
+  const byId = new Map(snapshot.messages.map((message) => [message.id, message]))
+  let changed = false
   for (const message of incoming) {
-    if (!seen.has(message.id)) {
-      seen.add(message.id)
-      fresh.push(message)
+    const existing = byId.get(message.id)
+    if (!existing || (message.isDeleted && !existing.isDeleted)) {
+      byId.set(message.id, message)
+      changed = true
     }
   }
-  if (fresh.length === 0) return snapshot
-  const messages = boundMessages(sortMessagesChronological([...snapshot.messages, ...fresh]))
-  return { ...snapshot, messages, updatedAt: fresh[fresh.length - 1].receivedAt }
+  if (!changed) return snapshot
+  const messages = boundMessages(sortMessagesChronological([...byId.values()]))
+  return {
+    ...snapshot,
+    messages,
+    updatedAt: messages[messages.length - 1]?.receivedAt ?? snapshot.updatedAt
+  }
+}
+
+/** Replace missed incremental belief after reconnect/lag, then merge events queued during RPC. */
+export function reconcileLiveChatSnapshot(
+  authoritative: LiveChatSnapshot,
+  queued: LiveChatMessage[]
+): LiveChatSnapshot {
+  return applyLiveChatMessages(applyLiveChatSnapshot(authoritative), queued)
+}
+
+/** Recover messages missed during event lag without rolling back a newer
+ * provider-status event that arrived while the authoritative RPC was in flight. */
+export function reconcileLiveChatRecovery(
+  authoritative: LiveChatSnapshot,
+  current: LiveChatSnapshot,
+  queued: LiveChatMessage[],
+  preserveCurrentProviders: boolean
+): LiveChatSnapshot {
+  const recovered = reconcileLiveChatSnapshot(authoritative, queued)
+  return preserveCurrentProviders ? { ...recovered, providers: current.providers } : recovered
 }
 
 /** The most-recent `max` messages — the rendered window for a virtualized list. */

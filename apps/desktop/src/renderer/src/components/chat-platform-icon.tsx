@@ -32,20 +32,23 @@ const CHAT_PLATFORM_TINT: Record<StreamPlatform, string> = {
 
 export function ChatPlatformIcon({
   platform,
-  className
+  className,
+  decorative = false
 }: {
   platform: StreamPlatform
   className?: string
+  decorative?: boolean
 }): ReactElement {
   const Glyph = CHAT_PLATFORM_ICON[platform]
   return (
     <Glyph
-      aria-label={CHAT_PLATFORM_LABELS[platform]}
+      aria-hidden={decorative || undefined}
+      aria-label={decorative ? undefined : CHAT_PLATFORM_LABELS[platform]}
       className={cn('size-3.5 shrink-0', CHAT_PLATFORM_TINT[platform], className)}
-      role="img"
+      role={decorative ? undefined : 'img'}
       weight="fill"
     >
-      <title>{CHAT_PLATFORM_LABELS[platform]}</title>
+      {decorative ? null : <title>{CHAT_PLATFORM_LABELS[platform]}</title>}
     </Glyph>
   )
 }

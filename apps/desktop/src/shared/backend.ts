@@ -243,6 +243,12 @@ export interface ServerEvent<TPayload = unknown> {
   payload: TPayload
 }
 
+/** One socket fell behind the bounded event channel and must refresh authoritative state. */
+export interface EventsLaggedPayload {
+  skipped: number
+  occurredAt: string
+}
+
 export interface StartRecordingParams {
   outputDirectory?: string
   ffmpegPath?: string
@@ -926,6 +932,9 @@ export interface GoLiveDestinationPreflight {
   accountId?: string
   accountLabel?: string
   message: string
+  chatRead: CommentsReadState
+  chatWrite: CommentsWriteState
+  chatMessage: string
 }
 
 export type GoLivePreflightIssueSeverity = 'warning' | 'error'
@@ -2216,11 +2225,91 @@ export interface DockSlotReport {
   mounted: boolean
 }
 
-/** Per-platform outcome of liveChat.send (Comments upgrade S4/S5). */
-export interface ChatSendResult {
+export type CommentsSendOperationPhase =
+  | 'sending'
+  | 'sent'
+  | 'partial'
+  | 'failed'
+  | 'delivery-unknown'
+
+export type DestinationDeliveryPhase =
+  | 'pending'
+  | 'sent'
+  | 'failed'
+  | 'read-only'
+  | 'unavailable'
+  | 'timed-out-unknown'
+
+export interface DestinationDelivery {
+  destinationId: string
   platform: StreamPlatform
-  status: 'sent' | 'failed' | 'unsupported'
+  phase: DestinationDeliveryPhase
+  providerMessageId?: string
   reason?: string
+}
+
+/** One persisted, idempotent send-to-all operation. */
+export interface CommentsSendOperation {
+  id: string
+  sessionId: string
+  text: string
+  phase: CommentsSendOperationPhase
+  destinations: DestinationDelivery[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CommentsSendCommand {
+  requestId: string
+  operationId: string
+  sessionId: string
+  text: string
+}
+
+export interface CommentsClearCommand {
+  requestId: string
+  sessionId: string
+}
+
+export interface CommentHighlightCommand {
+  requestId: string
+  sessionId: string
+  messageId: string
+}
+
+export type CommentHighlightPhase = 'idle' | 'live' | 'failed'
+
+export interface CommentHighlightState {
+  sessionId?: string
+  messageId?: string
+  generation: number
+  phase: CommentHighlightPhase
+  expiresAt?: string
+  reason?: string
+}
+
+export interface SetCommentHighlightParams {
+  sessionId: string
+  messageId: string
+  pngBase64: string
+  position: 'top' | 'bottom'
+}
+
+export interface CommentsCommandResolution<T> {
+  requestId: string
+  ok: boolean
+  value?: T
+  error?: string
+}
+
+export type CommentsViewMode =
+  | { kind: 'live' }
+  | { kind: 'history'; sessionId: string; title: string; startedAt: string }
+
+export interface CommentsViewSnapshot {
+  mode: CommentsViewMode
+  snapshot: LiveChatSnapshot
+  latestSendOperation?: CommentsSendOperation
 }
 
 // Detached preview window: main is the lifecycle and bounds authority; renderer
@@ -2359,19 +2448,25 @@ export interface VideorcApi {
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */
   cacheChatAvatar: (url: string) => Promise<string | null>
-  /** Comments window -> main renderer: relay a click-to-highlight request. */
-  sendCommentHighlight: (message: LiveChatMessage) => Promise<void>
-  onCommentHighlightRequest: (callback: (message: LiveChatMessage) => void) => () => void
-  /** Main renderer -> comments window: which comment is on stream (or null). */
-  pushCommentHighlightState: (state: { messageId: string | null }) => Promise<void>
-  getCommentHighlightState: () => Promise<{ messageId: string | null }>
-  onCommentHighlightState: (callback: (state: { messageId: string | null }) => void) => () => void
-  /** Comments window -> main renderer: send this text to all platforms. */
-  sendChatFromCommentsWindow: (text: string) => Promise<void>
-  onChatSendRequest: (callback: (text: string) => void) => () => void
-  /** Main renderer -> comments window: per-platform results of the last send. */
-  pushChatSendResult: (results: ChatSendResult[]) => Promise<void>
-  onChatSendResult: (callback: (results: ChatSendResult[]) => void) => () => void
+  /** Correlated Comments-window command relay; the main renderer owns the backend socket. */
+  sendCommentHighlight: (command: CommentHighlightCommand) => Promise<CommentHighlightState>
+  onCommentHighlightRequest: (callback: (command: CommentHighlightCommand) => void) => () => void
+  pushCommentHighlightResult: (
+    resolution: CommentsCommandResolution<CommentHighlightState>
+  ) => Promise<boolean>
+  pushCommentHighlightState: (state: CommentHighlightState) => Promise<void>
+  getCommentHighlightState: () => Promise<CommentHighlightState>
+  onCommentHighlightState: (callback: (state: CommentHighlightState) => void) => () => void
+  sendChatFromCommentsWindow: (command: CommentsSendCommand) => Promise<CommentsSendOperation>
+  onChatSendRequest: (callback: (command: CommentsSendCommand) => void) => () => void
+  pushChatSendResult: (
+    resolution: CommentsCommandResolution<CommentsSendOperation>
+  ) => Promise<boolean>
+  clearComments: (command: CommentsClearCommand) => Promise<LiveChatSnapshot>
+  onCommentsClearRequest: (callback: (command: CommentsClearCommand) => void) => () => void
+  pushCommentsClearResult: (
+    resolution: CommentsCommandResolution<LiveChatSnapshot>
+  ) => Promise<boolean>
   getBundledBackgroundAssets: () => Promise<BackgroundImportResult[]>
   openOAuthUrl: (authUrl: string) => Promise<void>
   getOAuthCallbackRedirectUri: (platform?: string) => Promise<string | null>
@@ -2405,11 +2500,10 @@ export interface VideorcApi {
   getCommentsWindowState: () => Promise<CommentsWindowState>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<CommentsWindowState>
   onCommentsWindowState: (callback: (state: CommentsWindowState) => void) => () => void
-  pushCommentsSnapshot: (snapshot: LiveChatSnapshot) => Promise<void>
-  getCommentsSnapshot: () => Promise<LiveChatSnapshot | null>
-  onCommentsSnapshot: (callback: (snapshot: LiveChatSnapshot) => void) => () => void
-  clearComments: () => Promise<void>
-  onCommentsClearRequest: (callback: () => void) => () => void
+  pushCommentsSnapshot: (view: CommentsViewSnapshot) => Promise<void>
+  getCommentsSnapshot: () => Promise<CommentsViewSnapshot | null>
+  setCommentsViewMode: (mode: CommentsViewMode) => Promise<CommentsViewSnapshot | null>
+  onCommentsSnapshot: (callback: (view: CommentsViewSnapshot) => void) => () => void
   openCaptionsWindow: () => Promise<CaptionsWindowState>
   closeCaptionsWindow: () => Promise<CaptionsWindowState>
   toggleCaptionsWindow: () => Promise<CaptionsWindowState>
@@ -2556,9 +2650,8 @@ export interface RepairRestoreParams {
 
 // --- In-app live chat (read-only unified comments feed) ---
 // Wire mirror of crates/videorc-backend/src/live_chat.rs. Plan:
-// "2026-06-06 - Videorc In-App Livestream Comments Plan". The renderer treats chat as
-// read-only and ephemeral: never persisted to localStorage, never round-tripped to the
-// backend; only the latest snapshot/events drive the panel.
+// "2026-06-06 - Videorc In-App Livestream Comments Plan". The backend owns
+// destination capability, persisted messages/send operations, and live snapshots.
 
 /** Whether a connected account can read live chat for a platform (setup-time audit). */
 export type ChatCapabilityState = 'available' | 'needs-reconnect' | 'not-connected' | 'unsupported'
@@ -2567,6 +2660,8 @@ export type ChatCapabilityState = 'available' | 'needs-reconnect' | 'not-connect
 export interface ChatCapability {
   platform: StreamPlatform
   state: ChatCapabilityState
+  read: CommentsReadState
+  write: CommentsWriteState
   /** True only when chat can actually be read right now. */
   chatReadAvailable: boolean
   requiredScope?: string
@@ -2586,6 +2681,16 @@ export type LiveChatProviderConnectionState =
   | 'unsupported'
   | 'ended'
 
+export type CommentsReadState =
+  | 'connecting'
+  | 'ready'
+  | 'waiting-for-broadcast-context'
+  | 'ended'
+  | 'failed'
+  | 'unavailable'
+
+export type CommentsWriteState = 'ready' | 'missing-scope' | 'read-only' | 'failed' | 'unavailable'
+
 /** What kind of chat row a message is — drives styling for monetized/system events. */
 export type LiveChatEventType =
   | 'message'
@@ -2597,16 +2702,18 @@ export type LiveChatEventType =
 
 /** Live connector state for one platform within a session. */
 export interface LiveChatProviderState {
+  id: string
   platform: StreamPlatform
   targetId?: string
   accountId?: string
   accountLabel?: string
+  read: CommentsReadState
+  write: CommentsWriteState
   state: LiveChatProviderConnectionState
   message: string
   lastConnectedAt?: string
   lastMessageAt?: string
   lastError?: string
-  capabilities: string[]
 }
 
 /** A rich-text fragment of a message (plain text, emote, mention, …). */
@@ -2616,7 +2723,7 @@ export interface LiveChatMessageFragment {
   imageUrl?: string
 }
 
-/** One normalized chat message. `id` (`{platform}:{providerMessageId}`) is the dedupe key. */
+/** One normalized, SQLite-persisted chat message. `id` is the app-level dedupe key. */
 export interface LiveChatMessage {
   id: string
   providerMessageId: string
@@ -2638,7 +2745,7 @@ export interface LiveChatMessage {
   rawProviderType?: string
 }
 
-/** Full live-chat snapshot: provider rows + buffered messages + unread count. */
+/** Authoritative live-chat snapshot: provider rows + persisted/buffered messages + unread count. */
 export interface LiveChatSnapshot {
   sessionId?: string
   providers: LiveChatProviderState[]

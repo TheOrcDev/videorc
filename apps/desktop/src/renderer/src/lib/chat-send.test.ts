@@ -1,70 +1,135 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ChatSendResult, LiveChatProviderState } from '@/lib/backend'
+import type { CommentsSendOperation, LiveChatProviderState } from '@/lib/backend'
 import {
   CHAT_SEND_MAX_CHARS,
   chatSendFailures,
-  localEchoMessage,
+  destinationDelivery,
+  pendingCommentsSendOperation,
   sendablePlatforms,
   validateChatDraft
 } from './chat-send'
 
 const provider = (
   platform: LiveChatProviderState['platform'],
-  state: LiveChatProviderState['state']
-): LiveChatProviderState => ({ platform, state }) as LiveChatProviderState
+  state: LiveChatProviderState['state'],
+  write: LiveChatProviderState['write'] = 'ready'
+): LiveChatProviderState => ({ id: platform, platform, state, write }) as LiveChatProviderState
 
 describe('sendablePlatforms', () => {
-  it('keeps connected YouTube/Twitch only', () => {
+  it('uses backend write truth and de-duplicates platforms', () => {
     expect(
       sendablePlatforms([
         provider('youtube', 'connected'),
         provider('twitch', 'connected'),
-        provider('x', 'connected'),
+        provider('x', 'connected', 'read-only'),
         provider('youtube', 'failed')
       ])
     ).toEqual(['youtube', 'twitch'])
-    expect(sendablePlatforms([provider('twitch', 'connecting')])).toEqual([])
   })
-})
 
-describe('localEchoMessage', () => {
-  it('synthesizes a renderable You row with unique ids', () => {
-    const echo = localEchoMessage('hi chat', 3, '2026-07-05T12:00:00Z')
-    expect(echo.authorName).toBe('You')
-    expect(echo.messageText).toBe('hi chat')
-    expect(echo.id).not.toBe(localEchoMessage('hi chat', 4, '2026-07-05T12:00:00Z').id)
-    expect(echo.eventType).toBe('message')
+  it('keeps an independently writable destination sendable while its reader reconnects', () => {
+    expect(sendablePlatforms([provider('twitch', 'reconnecting')])).toEqual(['twitch'])
   })
 })
 
 describe('chatSendFailures', () => {
-  const result = (
-    platform: ChatSendResult['platform'],
-    status: ChatSendResult['status'],
-    reason?: string
-  ): ChatSendResult => ({ platform, status, reason }) as ChatSendResult
+  const operation = (
+    destinations: CommentsSendOperation['destinations']
+  ): CommentsSendOperation => ({
+    id: 'operation-1',
+    sessionId: 'session-1',
+    text: 'hello',
+    phase: 'partial',
+    destinations,
+    createdAt: 'now',
+    updatedAt: 'now'
+  })
 
   it('surfaces failed platforms with their reasons', () => {
-    const failures = chatSendFailures([
-      result('youtube', 'sent'),
-      result('twitch', 'failed', 'Twitch rejected the send — reconnect Twitch.')
-    ])
+    const failures = chatSendFailures(
+      operation([
+        { destinationId: 'youtube', platform: 'youtube', phase: 'sent' },
+        {
+          destinationId: 'twitch',
+          platform: 'twitch',
+          phase: 'failed',
+          reason: 'Twitch rejected the send — reconnect Twitch.'
+        }
+      ])
+    )
     expect(failures).toEqual([
-      { platform: 'twitch', reason: 'Twitch rejected the send — reconnect Twitch.' }
+      {
+        destinationId: 'twitch',
+        platform: 'twitch',
+        reason: 'Twitch rejected the send — reconnect Twitch.'
+      }
     ])
   })
 
-  it('stays quiet about expected unsupported rows when something sent', () => {
+  it('keeps read-only rows out of the failure list', () => {
     expect(
-      chatSendFailures([result('youtube', 'sent'), result('x', 'unsupported', 'No API.')])
+      chatSendFailures(
+        operation([
+          { destinationId: 'youtube', platform: 'youtube', phase: 'sent' },
+          { destinationId: 'x', platform: 'x', phase: 'read-only', reason: 'Receive only.' }
+        ])
+      )
     ).toEqual([])
   })
 
-  it('says so when NOTHING could send', () => {
-    const failures = chatSendFailures([result('x', 'unsupported', 'No API.')])
+  it('surfaces ambiguous timeouts without encouraging an automatic retry', () => {
+    const value = operation([
+      {
+        destinationId: 'youtube',
+        platform: 'youtube',
+        phase: 'timed-out-unknown'
+      }
+    ])
+    const failures = chatSendFailures(value)
     expect(failures).toHaveLength(1)
-    expect(failures[0]!.reason).toMatch(/No connected destination/)
+    expect(failures[0]!.reason).toMatch(/unknown/)
+    expect(destinationDelivery(value, 'youtube')?.phase).toBe('timed-out-unknown')
+  })
+})
+
+describe('pendingCommentsSendOperation', () => {
+  it('shows every destination without inventing a successful local echo', () => {
+    expect(
+      pendingCommentsSendOperation({
+        id: 'operation-1',
+        sessionId: 'session-1',
+        text: 'hello',
+        now: 'now',
+        providers: [
+          provider('youtube', 'connected'),
+          provider('twitch', 'connected', 'missing-scope'),
+          provider('x', 'connected', 'read-only')
+        ]
+      })
+    ).toMatchObject({
+      phase: 'sending',
+      destinations: [
+        { platform: 'youtube', phase: 'pending' },
+        { platform: 'twitch', phase: 'unavailable' },
+        { platform: 'x', phase: 'read-only' }
+      ]
+    })
+  })
+
+  it('keeps write-ready destinations pending while their read connector reconnects', () => {
+    expect(
+      pendingCommentsSendOperation({
+        id: 'operation-2',
+        sessionId: 'session-1',
+        text: 'still sending',
+        now: 'now',
+        providers: [provider('twitch', 'reconnecting')]
+      })
+    ).toMatchObject({
+      phase: 'sending',
+      destinations: [{ platform: 'twitch', phase: 'pending' }]
+    })
   })
 })
 

@@ -78,6 +78,11 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:live-layout-switch-recording']
       },
       {
+        label: 'comment highlight stream artifact smoke',
+        command: 'pnpm',
+        args: ['smoke:comment-highlight-stream']
+      },
+      {
         label: 'backend-owned preview scene commit smoke',
         command: 'pnpm',
         args: ['smoke:preview-scene-commit']

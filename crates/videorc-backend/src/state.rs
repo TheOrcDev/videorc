@@ -82,6 +82,10 @@ pub struct AppState {
     /// Comment-highlight overlay (Comments upgrade S2): independent from the
     /// captions bar — highlight top, captions bottom, coexisting.
     pub highlight_overlay: crate::captions::CaptionOverlaySlot,
+    /// Backend-owned acknowledgement/lifetime for the viewer-facing comment
+    /// card. The image slot above and this state are mutated under this
+    /// state-machine lock so stale expiry tasks cannot clear newer cards.
+    pub comment_highlight: crate::comment_highlight::CommentHighlightSlot,
 }
 
 impl AppState {
@@ -121,6 +125,7 @@ impl AppState {
             captions: crate::captions::new_captions_slot(),
             caption_overlay: crate::captions::new_caption_overlay_slot(),
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
+            comment_highlight: crate::comment_highlight::new_comment_highlight_slot(),
         }
     }
 

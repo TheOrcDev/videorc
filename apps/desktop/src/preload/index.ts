@@ -2,15 +2,17 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 import type {
   BackendConnection,
-  ChatSendResult,
   BackendLifecycleEvent,
   BackendLogEvent,
+  CommentHighlightCommand,
+  CommentHighlightState,
+  CommentsClearCommand,
+  CommentsSendCommand,
+  CommentsViewSnapshot,
   CaptionsUpdate,
   CaptionsWindowState,
   CommentsWindowState,
   GlassWallpaperState,
-  LiveChatMessage,
-  LiveChatSnapshot,
   NotesDocument,
   NotesWindowState,
   PreviewWindowState,
@@ -29,34 +31,39 @@ const api: VideorcApi = {
     ipcRenderer.invoke('backgrounds:import-image-path', sourcePath),
   backgroundAssetExists: (assetPath) => ipcRenderer.invoke('backgrounds:asset-exists', assetPath),
   cacheChatAvatar: (url) => ipcRenderer.invoke('avatars:cache', url),
-  sendCommentHighlight: (message) => ipcRenderer.invoke('comments-window:highlight', message),
+  sendCommentHighlight: (command) => ipcRenderer.invoke('comments-window:highlight', command),
   onCommentHighlightRequest: (callback) => {
-    const listener = (_event: Electron.IpcRendererEvent, message: LiveChatMessage): void =>
-      callback(message)
+    const listener = (_event: Electron.IpcRendererEvent, command: CommentHighlightCommand): void =>
+      callback(command)
     ipcRenderer.on('comments-window:highlight-request', listener)
     return () => ipcRenderer.removeListener('comments-window:highlight-request', listener)
   },
+  pushCommentHighlightResult: (resolution) =>
+    ipcRenderer.invoke('comments-window:highlight-result-push', resolution),
   pushCommentHighlightState: (state) =>
     ipcRenderer.invoke('comments-window:highlight-state-push', state),
   getCommentHighlightState: () => ipcRenderer.invoke('comments-window:highlight-state-get'),
-  sendChatFromCommentsWindow: (text) => ipcRenderer.invoke('comments-window:send', text),
+  sendChatFromCommentsWindow: (command) => ipcRenderer.invoke('comments-window:send', command),
   onChatSendRequest: (callback) => {
-    const listener = (_event: Electron.IpcRendererEvent, text: string): void => callback(text)
+    const listener = (_event: Electron.IpcRendererEvent, command: CommentsSendCommand): void =>
+      callback(command)
     ipcRenderer.on('comments-window:send-request', listener)
     return () => ipcRenderer.removeListener('comments-window:send-request', listener)
   },
-  pushChatSendResult: (results) => ipcRenderer.invoke('comments-window:send-result-push', results),
-  onChatSendResult: (callback) => {
-    const listener = (_event: Electron.IpcRendererEvent, results: ChatSendResult[]): void =>
-      callback(results)
-    ipcRenderer.on('comments-window:send-result', listener)
-    return () => ipcRenderer.removeListener('comments-window:send-result', listener)
+  pushChatSendResult: (resolution) =>
+    ipcRenderer.invoke('comments-window:send-result-push', resolution),
+  clearComments: (command) => ipcRenderer.invoke('comments-window:clear', command),
+  onCommentsClearRequest: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, command: CommentsClearCommand): void =>
+      callback(command)
+    ipcRenderer.on('comments-window:clear-request', listener)
+    return () => ipcRenderer.removeListener('comments-window:clear-request', listener)
   },
+  pushCommentsClearResult: (resolution) =>
+    ipcRenderer.invoke('comments-window:clear-result-push', resolution),
   onCommentHighlightState: (callback) => {
-    const listener = (
-      _event: Electron.IpcRendererEvent,
-      state: { messageId: string | null }
-    ): void => callback(state)
+    const listener = (_event: Electron.IpcRendererEvent, state: CommentHighlightState): void =>
+      callback(state)
     ipcRenderer.on('comments-window:highlight-state', listener)
     return () => ipcRenderer.removeListener('comments-window:highlight-state', listener)
   },
@@ -122,19 +129,14 @@ const api: VideorcApi = {
     ipcRenderer.on('comments-window:state', listener)
     return () => ipcRenderer.removeListener('comments-window:state', listener)
   },
-  pushCommentsSnapshot: (snapshot) => ipcRenderer.invoke('comments-window:push-snapshot', snapshot),
+  pushCommentsSnapshot: (view) => ipcRenderer.invoke('comments-window:push-snapshot', view),
   getCommentsSnapshot: () => ipcRenderer.invoke('comments-window:get-snapshot'),
+  setCommentsViewMode: (mode) => ipcRenderer.invoke('comments-window:set-view-mode', mode),
   onCommentsSnapshot: (callback) => {
-    const listener = (_event: Electron.IpcRendererEvent, snapshot: LiveChatSnapshot): void =>
-      callback(snapshot)
+    const listener = (_event: Electron.IpcRendererEvent, view: CommentsViewSnapshot): void =>
+      callback(view)
     ipcRenderer.on('comments-window:snapshot', listener)
     return () => ipcRenderer.removeListener('comments-window:snapshot', listener)
-  },
-  clearComments: () => ipcRenderer.invoke('comments-window:clear'),
-  onCommentsClearRequest: (callback) => {
-    const listener = (): void => callback()
-    ipcRenderer.on('comments-window:clear-request', listener)
-    return () => ipcRenderer.removeListener('comments-window:clear-request', listener)
   },
   openCaptionsWindow: () => ipcRenderer.invoke('captions-window:open'),
   closeCaptionsWindow: () => ipcRenderer.invoke('captions-window:close'),

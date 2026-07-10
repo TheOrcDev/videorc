@@ -23,6 +23,7 @@ describe('buildRecordingStudioGateSteps', () => {
       'real-user launch first-frame contract smoke',
       'layout/source preview liveness smoke',
       'active-session live layout switch recording smoke',
+      'comment highlight stream artifact smoke',
       'backend-owned preview scene commit smoke',
       'preview main pump diagnostics smoke',
       'preview click/focus continuity smoke',
@@ -45,11 +46,12 @@ describe('buildRecordingStudioGateSteps', () => {
       'backend-isolation.test.ts'
     ])
     assert.deepEqual(steps[1].args, ['test:scripts'])
-    assert.deepEqual(steps.at(-13).args, ['smoke:dev'])
-    assert.deepEqual(steps.at(-12).args, ['smoke:screens'])
-    assert.deepEqual(steps.at(-11).args, ['smoke:preview-real-launch'])
-    assert.deepEqual(steps.at(-10).args, ['smoke:layout-source-loop'])
-    assert.deepEqual(steps.at(-9).args, ['smoke:live-layout-switch-recording'])
+    assert.deepEqual(steps.at(-14).args, ['smoke:dev'])
+    assert.deepEqual(steps.at(-13).args, ['smoke:screens'])
+    assert.deepEqual(steps.at(-12).args, ['smoke:preview-real-launch'])
+    assert.deepEqual(steps.at(-11).args, ['smoke:layout-source-loop'])
+    assert.deepEqual(steps.at(-10).args, ['smoke:live-layout-switch-recording'])
+    assert.deepEqual(steps.at(-9).args, ['smoke:comment-highlight-stream'])
     assert.deepEqual(steps.at(-8).args, ['smoke:preview-scene-commit'])
     assert.deepEqual(steps.at(-7).args, ['smoke:preview-pump-diagnostics'])
     assert.deepEqual(steps.at(-6).args, ['smoke:preview-click-focus'])
@@ -94,6 +96,7 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(report, /smoke:screens/)
     assert.match(report, /smoke:layout-source-loop/)
     assert.match(report, /smoke:live-layout-switch-recording/)
+    assert.match(report, /smoke:comment-highlight-stream/)
     assert.match(report, /smoke:preview-scene-commit/)
     assert.match(report, /smoke:preview-pump-diagnostics/)
     assert.match(report, /smoke:preview-click-focus/)

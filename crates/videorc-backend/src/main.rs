@@ -5,6 +5,7 @@ mod camera_capture;
 mod captions;
 mod capture_input;
 mod color;
+mod comment_highlight;
 mod compositor;
 mod compositor_synthetic;
 mod devices;
@@ -183,6 +184,13 @@ async fn main() -> Result<()> {
             "Marked {reconciled} orphaned 'running' session(s) as failed (previous backend did not shut down cleanly)."
         ),
         Err(error) => tracing::warn!("Could not reconcile orphaned sessions: {error:#}"),
+    }
+    match database.reconcile_orphaned_chat_send_operations() {
+        Ok(0) => {}
+        Ok(reconciled) => tracing::warn!(
+            "Marked {reconciled} interrupted Comments send operation(s) as delivery unknown."
+        ),
+        Err(error) => tracing::warn!("Could not reconcile Comments send operations: {error:#}"),
     }
     let mut state = AppState::new(token.clone(), port, events, database);
     state.oauth_callback_port = oauth_callback_port;
@@ -1438,7 +1446,8 @@ fn twitch_chat_config(
     state: &AppState,
     target: &crate::streaming::StreamTargetSettings,
 ) -> Result<twitch_chat::TwitchChatConfig> {
-    let credential = twitch_account_credentials(state, target.account_id.as_deref())?;
+    let credential = twitch_account_credentials(state, target.account_id.as_deref())
+        .map_err(|error| anyhow::anyhow!("Connect Twitch to enable live comments: {error}"))?;
     if !credential
         .account
         .scopes
@@ -1481,7 +1490,9 @@ async fn spawn_session_live_chat(
     let mut params = live_chat::LiveChatStartParams {
         session_id: session_id.to_string(),
         platforms: Vec::new(),
+        destinations: Vec::new(),
         fake: None,
+        fakes: Vec::new(),
         youtube: None,
         twitch: None,
         x: None,
@@ -1490,9 +1501,26 @@ async fn spawn_session_live_chat(
         if !enabled.contains(target.id.as_str()) {
             continue;
         }
+        params
+            .destinations
+            .push(live_chat::LiveChatDestinationStart {
+                target_id: target.id.clone(),
+                platform: target.platform,
+                read: None,
+                write: None,
+                preparation_error: None,
+            });
         match target.platform {
             StreamPlatform::Youtube => {
                 if target.auth_mode != crate::streaming::StreamAuthMode::Oauth {
+                    if let Some(destination) = params.destinations.last_mut() {
+                        destination.read = Some(live_chat::CommentsReadState::Unavailable);
+                        destination.write = Some(live_chat::CommentsWriteState::Unavailable);
+                        destination.preparation_error = Some(
+                            "Connect YouTube and select the matching broadcast to attach Comments."
+                                .to_string(),
+                        );
+                    }
                     continue;
                 }
                 if !params.platforms.contains(&StreamPlatform::Youtube) {
@@ -1501,7 +1529,11 @@ async fn spawn_session_live_chat(
                 match youtube_chat_config(state, target).await {
                     Ok(config) => params.youtube = Some(config),
                     Err(error) => {
-                        state.emit_log("warn", format!("YouTube live chat unavailable: {error}"))
+                        let message = format!("YouTube live chat unavailable: {error}");
+                        if let Some(destination) = params.destinations.last_mut() {
+                            destination.preparation_error = Some(message.clone());
+                        }
+                        state.emit_log("warn", message)
                     }
                 }
             }
@@ -1516,10 +1548,25 @@ async fn spawn_session_live_chat(
                     if !params.platforms.contains(&StreamPlatform::Twitch) {
                         params.platforms.push(StreamPlatform::Twitch);
                     }
-                    state.emit_log("warn", format!("Twitch live chat unavailable: {error}"))
+                    let message = format!("Twitch live chat unavailable: {error}");
+                    if let Some(destination) = params.destinations.last_mut() {
+                        destination.preparation_error = Some(message.clone());
+                    }
+                    state.emit_log("warn", message)
                 }
             },
             StreamPlatform::X => {
+                if target.auth_mode != crate::streaming::StreamAuthMode::Oauth {
+                    if let Some(destination) = params.destinations.last_mut() {
+                        destination.read = Some(live_chat::CommentsReadState::Unavailable);
+                        destination.write = Some(live_chat::CommentsWriteState::ReadOnly);
+                        destination.preparation_error = Some(
+                            "Manual RTMP has no native X broadcast context, so X comments are unavailable for this destination."
+                                .to_string(),
+                        );
+                    }
+                    continue;
+                }
                 if !params.platforms.contains(&StreamPlatform::X) {
                     params.platforms.push(StreamPlatform::X);
                 }
@@ -1527,7 +1574,7 @@ async fn spawn_session_live_chat(
             StreamPlatform::Custom => {}
         }
     }
-    if !params.platforms.is_empty() {
+    if !params.destinations.is_empty() {
         live_chat::start_live_chat(state, params).await;
     }
 }
@@ -2312,11 +2359,68 @@ async fn ws_handler(
         .into_response()
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EventsLaggedPayload {
+    skipped: u64,
+    occurred_at: String,
+}
+
+const WEBSOCKET_EVENT_QUEUE_CAPACITY: usize = 256;
+
+async fn relay_websocket_events(
+    mut events: broadcast::Receiver<ServerEvent>,
+    event_tx: mpsc::Sender<String>,
+    exclusions: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+) {
+    loop {
+        let (event, is_recovery) = match events.recv().await {
+            Ok(event) => (event, false),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                // Backpressure is deliberate: a slow socket can retain at most the
+                // connection-local queue plus the shared broadcast ring. Once the ring
+                // drops events, preserve the existing recovery contract so the renderer
+                // replaces incremental live-chat state via `liveChat.status`.
+                (
+                    ServerEvent::new(
+                        "events.lagged",
+                        EventsLaggedPayload {
+                            skipped,
+                            occurred_at: chrono::Utc::now().to_rfc3339(),
+                        },
+                    ),
+                    true,
+                )
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        };
+
+        // A recovery frame is mandatory connection control, not an ordinary event a
+        // renderer can exclude. Keep the pre-bounded-queue protocol behavior intact.
+        let muted = !is_recovery
+            && exclusions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(&event.event);
+        if muted {
+            continue;
+        }
+
+        match serde_json::to_string(&event) {
+            Ok(text) => {
+                if event_tx.send(text).await.is_err() {
+                    break;
+                }
+            }
+            Err(error) => tracing::error!("Could not serialize event: {error}"),
+        }
+    }
+}
+
 async fn websocket_session(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
-    let mut events = state.events.subscribe();
-    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<String>();
-    let event_tx = outgoing_tx.clone();
+    let events = state.events.subscribe();
+    let (event_tx, mut outgoing_rx) = mpsc::channel::<String>(WEBSOCKET_EVENT_QUEUE_CAPACITY);
     // Per-connection event exclusions: the renderer mutes the 60Hz
     // compositor.status firehose while the main process drives presents
     // (receiving+decoding those frames leaked Blink buffers at ~1.5MB/s), and
@@ -2325,25 +2429,7 @@ async fn websocket_session(socket: WebSocket, state: AppState) {
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     let exclusions = excluded_events.clone();
 
-    tokio::spawn(async move {
-        while let Ok(event) = events.recv().await {
-            let muted = exclusions
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .contains(&event.event);
-            if muted {
-                continue;
-            }
-            match serde_json::to_string(&event) {
-                Ok(text) => {
-                    if event_tx.send(text).is_err() {
-                        break;
-                    }
-                }
-                Err(error) => tracing::error!("Could not serialize event: {error}"),
-            }
-        }
-    });
+    tokio::spawn(relay_websocket_events(events, event_tx, exclusions));
 
     let ready_event = ServerEvent::new(
         "backend.ready",
@@ -2492,34 +2578,28 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
                 }
             }
         }
-        // Comment-highlight overlay (Comments upgrade S2): its own slot, top
-        // position by default — it must coexist with the captions bar.
+        "comments.highlight.status" => ServerResponse::ok(
+            command.id,
+            comment_highlight::comment_highlight_status(state).await,
+        ),
         "comments.highlight.set" => {
-            let png_base64 = command
-                .params
-                .get("pngBase64")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            let position = command
-                .params
-                .get("position")
-                .and_then(|value| {
-                    serde_json::from_value::<captions::CaptionOverlayPosition>(value.clone()).ok()
-                })
-                .unwrap_or(captions::CaptionOverlayPosition::Top);
-            match captions::install_caption_overlay(&state.highlight_overlay, png_base64, position)
-            {
-                Ok(info) => ServerResponse::ok(command.id, info),
-                Err(error) => ServerResponse::error(
-                    command.id,
-                    "comments-highlight-invalid",
-                    error.to_string(),
-                ),
+            match serde_json::from_value::<comment_highlight::SetCommentHighlightParams>(
+                command.params,
+            ) {
+                Ok(params) => match comment_highlight::set_comment_highlight(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
             }
         }
         "comments.highlight.clear" => ServerResponse::ok(
             command.id,
-            captions::clear_caption_overlay(&state.highlight_overlay),
+            comment_highlight::clear_comment_highlight(state).await,
         ),
         "captions.overlay.clear" => ServerResponse::ok(
             command.id,
@@ -3257,24 +3337,33 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             ServerResponse::ok(command.id, live_chat::current_diagnostics(state).await)
         }
         "liveChat.send" => {
-            let text = command
+            match serde_json::from_value::<live_chat::CommentsSendParams>(command.params) {
+                Ok(params) => match live_chat::send_live_chat_message(state, params).await {
+                    Ok(operation) => ServerResponse::ok(command.id, operation),
+                    Err(error) => ServerResponse::error(command.id, "live-chat-send-failed", error),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "liveChat.sendOperations.list" => {
+            let session_id = command
                 .params
-                .get("text")
+                .get("sessionId")
                 .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            if text.is_empty() || text.chars().count() > 200 {
-                ServerResponse::error(
-                    command.id,
-                    "live-chat-send-invalid",
-                    "Chat messages must be 1-200 characters.",
-                )
+                .unwrap_or_default();
+            if session_id.is_empty() {
+                ServerResponse::error(command.id, "invalid-params", "sessionId is required.")
             } else {
-                ServerResponse::ok(
-                    command.id,
-                    live_chat::send_live_chat_message(state, &text).await,
-                )
+                match state.database.list_chat_send_operations(session_id) {
+                    Ok(operations) => ServerResponse::ok(command.id, operations),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "live-chat-send-operations-list-failed",
+                        error.to_string(),
+                    ),
+                }
             }
         }
         "liveChat.clearLocal" => {
@@ -4238,6 +4327,242 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_event_relay_bounds_slow_clients_and_reports_backpressure_lag() {
+        let (events_tx, events_rx) = broadcast::channel(2);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(1);
+        let excluded = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::<
+            String,
+        >::new()));
+        let relay = tokio::spawn(relay_websocket_events(events_rx, outgoing_tx, excluded));
+
+        events_tx
+            .send(ServerEvent::new("test.burst", json!({ "sequence": 0 })))
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while outgoing_rx.len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first event did not fill bounded outbound queue");
+
+        // The relay takes sequence 1 from the broadcast ring, then blocks on the full
+        // one-slot outbound queue. This is real outbound backpressure, not scheduler lag.
+        events_tx
+            .send(ServerEvent::new("test.burst", json!({ "sequence": 1 })))
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while events_tx.len() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("relay did not block on the full outbound queue");
+
+        for sequence in 2..64 {
+            events_tx
+                .send(ServerEvent::new(
+                    "test.burst",
+                    json!({ "sequence": sequence }),
+                ))
+                .unwrap();
+        }
+        assert_eq!(outgoing_rx.len(), 1, "outbound queue exceeded its bound");
+
+        let first: serde_json::Value =
+            serde_json::from_str(&outgoing_rx.recv().await.expect("first bounded event")).unwrap();
+        assert_eq!(first["payload"]["sequence"], 0);
+        let second: serde_json::Value =
+            serde_json::from_str(&outgoing_rx.recv().await.expect("second bounded event")).unwrap();
+        assert_eq!(second["payload"]["sequence"], 1);
+
+        let lagged: serde_json::Value = serde_json::from_str(
+            &timeout(Duration::from_secs(1), outgoing_rx.recv())
+                .await
+                .expect("events.lagged timeout")
+                .expect("events.lagged frame"),
+        )
+        .unwrap();
+        assert_eq!(lagged["event"], "events.lagged");
+        assert!(lagged["payload"]["skipped"].as_u64().unwrap() > 0);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(lagged["payload"]["occurredAt"].as_str().unwrap())
+                .is_ok()
+        );
+
+        // The two newest broadcast events survive the ring overrun. Once consumed, the
+        // same bounded relay remains live and carries subsequent incremental events.
+        for expected in [62, 63] {
+            let event: serde_json::Value =
+                serde_json::from_str(&outgoing_rx.recv().await.expect("retained post-lag event"))
+                    .unwrap();
+            assert_eq!(event["payload"]["sequence"], expected);
+        }
+        events_tx
+            .send(ServerEvent::new("test.afterLag", json!({ "alive": true })))
+            .unwrap();
+        let after_lag: serde_json::Value = serde_json::from_str(
+            &timeout(Duration::from_secs(1), outgoing_rx.recv())
+                .await
+                .expect("post-lag event timeout")
+                .expect("post-lag event"),
+        )
+        .unwrap();
+        assert_eq!(after_lag["event"], "test.afterLag");
+        assert_eq!(after_lag["payload"]["alive"], true);
+
+        drop(events_tx);
+        relay.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_event_relay_reports_lag_stays_open_and_serves_a_fresh_snapshot() {
+        let (events, _) = broadcast::channel(2);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let state = AppState::new(
+            "test-token".to_string(),
+            address.port(),
+            events,
+            Database::open_in_memory_for_tests(),
+        );
+
+        // Seed authoritative chat state before the socket subscribes. The lagged client must
+        // be able to replace its incremental belief with this full snapshot afterward.
+        let params = serde_json::from_value(json!({
+            "sessionId": "lag-recovery-session",
+            "fake": {
+                "platform": "youtube",
+                "count": 1,
+                "intervalMs": 0,
+                "includeDuplicate": false
+            }
+        }))
+        .unwrap();
+        live_chat::start_live_chat(&state, params).await;
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if live_chat::current_status(&state).await.messages.len() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fake chat message");
+
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws?token=test-token"))
+                .await
+                .unwrap();
+
+        let ready = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("backend.ready timeout")
+            .expect("backend.ready frame")
+            .expect("backend.ready websocket result");
+        let ready: serde_json::Value = serde_json::from_str(ready.to_text().unwrap()).unwrap();
+        assert_eq!(ready["event"], "backend.ready");
+
+        // A current-thread Tokio test cannot schedule the relay while this tight loop fills
+        // its two-slot receiver, making the lag deterministic rather than timing-sensitive.
+        for sequence in 0..64 {
+            state.emit_event("test.burst", json!({ "sequence": sequence }));
+        }
+
+        let lagged = timeout(Duration::from_secs(2), async {
+            loop {
+                let frame = socket
+                    .next()
+                    .await
+                    .expect("lag recovery frame")
+                    .expect("lag recovery websocket result");
+                if !frame.is_text() {
+                    continue;
+                }
+                let value: serde_json::Value =
+                    serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                if value["event"] == "events.lagged" {
+                    break value;
+                }
+            }
+        })
+        .await
+        .expect("events.lagged timeout");
+        assert!(lagged["payload"]["skipped"].as_u64().unwrap() > 0);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(lagged["payload"]["occurredAt"].as_str().unwrap())
+                .is_ok()
+        );
+
+        state.emit_event("test.afterLag", json!({ "alive": true }));
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let frame = socket
+                    .next()
+                    .await
+                    .expect("post-lag frame")
+                    .expect("post-lag websocket result");
+                if !frame.is_text() {
+                    continue;
+                }
+                let value: serde_json::Value =
+                    serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                if value["event"] == "test.afterLag" {
+                    assert!(value["payload"]["alive"].as_bool().unwrap());
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("relay stopped after lag");
+
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({
+                    "id": "status-after-lag",
+                    "method": "liveChat.status",
+                    "params": {}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let snapshot = timeout(Duration::from_secs(2), async {
+            loop {
+                let frame = socket
+                    .next()
+                    .await
+                    .expect("status frame")
+                    .expect("status websocket result");
+                if !frame.is_text() {
+                    continue;
+                }
+                let value: serde_json::Value =
+                    serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                if value["id"] == "status-after-lag" {
+                    break value;
+                }
+            }
+        })
+        .await
+        .expect("fresh liveChat.status timeout");
+        assert!(snapshot["ok"].as_bool().unwrap());
+        assert_eq!(snapshot["payload"]["sessionId"], "lag-recovery-session");
+        assert_eq!(snapshot["payload"]["messages"].as_array().unwrap().len(), 1);
+
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn oauth_callback_listener_skips_busy_candidate_ports() {
         // Hold whichever candidate binds first, then confirm a second bind
         // falls through to a DIFFERENT candidate instead of failing. Tolerates
@@ -4359,8 +4684,10 @@ mod tests {
             .expect("twitch provider row");
         assert_eq!(
             twitch.state,
-            live_chat::LiveChatProviderConnectionState::Disabled
+            live_chat::LiveChatProviderConnectionState::Failed
         );
+        assert_eq!(twitch.read, live_chat::CommentsReadState::Unavailable);
+        assert_eq!(twitch.write, live_chat::CommentsWriteState::Unavailable);
         assert!(twitch.message.contains("Connect Twitch"));
     }
 
@@ -4391,8 +4718,10 @@ mod tests {
             .expect("twitch provider row");
         assert_eq!(
             twitch.state,
-            live_chat::LiveChatProviderConnectionState::Disabled
+            live_chat::LiveChatProviderConnectionState::Failed
         );
+        assert_eq!(twitch.read, live_chat::CommentsReadState::Unavailable);
+        assert_eq!(twitch.write, live_chat::CommentsWriteState::MissingScope);
         assert!(twitch.message.contains("Reconnect Twitch"));
     }
 

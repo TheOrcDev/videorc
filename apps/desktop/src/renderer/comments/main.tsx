@@ -1,11 +1,22 @@
-import React, { useEffect, useRef, useState, type ReactElement } from 'react'
+import React, { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import ReactDOM from 'react-dom/client'
 
 import { CommentsReader } from '@/components/comments-reader'
 import { AppErrorBoundary } from '@/components/error-boundary'
-import type { LiveChatMessage, LiveChatSnapshot, ViewerSample } from '@/lib/backend'
-import { chatSendFailures, localEchoMessage, sendablePlatforms } from '@/lib/chat-send'
+import type {
+  CommentHighlightState,
+  CommentsSendOperation,
+  CommentsViewSnapshot,
+  LiveChatMessage,
+  ViewerSample
+} from '@/lib/backend'
+import { chatSendFailures, pendingCommentsSendOperation, sendablePlatforms } from '@/lib/chat-send'
 import type { ChatSendFailure } from '@/lib/chat-send'
+import { commentHighlightExpiryDelay, expireCommentHighlightState } from '@/lib/comment-highlight'
+import {
+  commentsSendOperationTerminal,
+  commentsSendTransportFailureCanReplace
+} from '../../shared/comments-send-operation'
 import { emptyLiveChatSnapshot } from '@/lib/live-chat-view'
 import '@/styles.css'
 
@@ -30,28 +41,92 @@ if (import.meta.env.DEV && localStorage.getItem('videorc.reactPerfTrack') !== '1
 // The window's data comes from the main renderer through the main-process relay
 // (C3): seed from the cached snapshot, then follow live pushes; Clear routes back.
 function CommentsWindowApp(): ReactElement {
-  const [snapshot, setSnapshot] = useState<LiveChatSnapshot>(() =>
-    emptyLiveChatSnapshot(new Date().toISOString())
-  )
+  const [view, setView] = useState<CommentsViewSnapshot>(() => ({
+    mode: { kind: 'live' },
+    snapshot: emptyLiveChatSnapshot(new Date().toISOString())
+  }))
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
-  const [highlightedId, setHighlightedId] = useState<string | null>(null)
-  // Send-to-all state (S5): optimistic "You" echoes merged into the feed +
-  // per-platform failures from the last send.
-  const [echoes, setEchoes] = useState<LiveChatMessage[]>([])
-  const [sendPending, setSendPending] = useState(false)
-  const [sendFailures, setSendFailures] = useState<ChatSendFailure[]>([])
-  const [viewerSample, setViewerSample] = useState<ViewerSample | null>(null)
-  const echoSequence = useRef(0)
+  const [highlightState, setHighlightState] = useState<CommentHighlightState>({
+    generation: 0,
+    phase: 'idle'
+  })
+  const highlightIntentRef = useRef(0)
+  const [highlightApplyingId, setHighlightApplyingId] = useState<string | null>(null)
+  const [highlightFailure, setHighlightFailure] = useState<{
+    messageId: string
+    reason: string
+  } | null>(null)
   useEffect(() => {
+    if (!highlightFailure) return
+    const timer = window.setTimeout(() => setHighlightFailure(null), 5_000)
+    return () => window.clearTimeout(timer)
+  }, [highlightFailure])
+  useEffect(() => {
+    const delay = commentHighlightExpiryDelay(highlightState, Date.now())
+    if (delay === null) return
+    const generation = highlightState.generation
+    const timer = window.setTimeout(
+      () =>
+        setHighlightState((current) =>
+          expireCommentHighlightState(current, generation, Date.now())
+        ),
+      delay + 1
+    )
+    return () => window.clearTimeout(timer)
+  }, [highlightState])
+  const [sendPending, setSendPending] = useState(false)
+  const [sendOperation, setSendOperation] = useState<CommentsSendOperation | null>(null)
+  const sendOperationRef = useRef<CommentsSendOperation | null>(null)
+  const sendPendingOperationIdRef = useRef<string | null>(null)
+  const [sendFailures, setSendFailures] = useState<ChatSendFailure[]>([])
+  const viewRef = useRef(view)
+  const applySendOperation = useCallback((operation: CommentsSendOperation | null): void => {
+    sendOperationRef.current = operation
+    setSendOperation(operation)
+    setSendFailures(chatSendFailures(operation))
+  }, [])
+  const [viewerSample, setViewerSample] = useState<ViewerSample | null>(null)
+  useEffect(() => {
+    const applyView = (next: CommentsViewSnapshot): void => {
+      const previous = viewRef.current
+      viewRef.current = next
+      setView(next)
+      const sameLiveSession =
+        previous.mode.kind === 'live' &&
+        next.mode.kind === 'live' &&
+        previous.snapshot.sessionId === next.snapshot.sessionId
+      const currentOperation = sendOperationRef.current
+      const nextOperation =
+        next.latestSendOperation?.sessionId === next.snapshot.sessionId
+          ? next.latestSendOperation
+          : undefined
+      if (
+        nextOperation &&
+        !(currentOperation?.phase === 'sending' && currentOperation.id !== nextOperation.id)
+      ) {
+        applySendOperation(nextOperation)
+        if (
+          sendPendingOperationIdRef.current === nextOperation.id &&
+          commentsSendOperationTerminal(nextOperation)
+        ) {
+          sendPendingOperationIdRef.current = null
+          setSendPending(false)
+        }
+      } else if (!sameLiveSession) {
+        applySendOperation(null)
+        sendPendingOperationIdRef.current = null
+        setSendPending(false)
+      }
+    }
     void window.videorc
       ?.getCommentsSnapshot?.()
-      .then((initial) => initial && setSnapshot(initial))
+      .then((initial) => initial && applyView(initial))
       .catch(() => {})
     void window.videorc
       ?.getCommentsWindowState?.()
       .then((state) => state && setAlwaysOnTop(state.alwaysOnTop))
       .catch(() => {})
-    const offSnapshot = window.videorc?.onCommentsSnapshot?.((next) => setSnapshot(next))
+    const offSnapshot = window.videorc?.onCommentsSnapshot?.((next) => applyView(next))
     void window.videorc
       ?.getViewerSample?.()
       .then((sample) => setViewerSample(sample ?? null))
@@ -64,51 +139,140 @@ function CommentsWindowApp(): ReactElement {
     // (the main renderer owns the highlight lifecycle).
     void window.videorc
       ?.getCommentHighlightState?.()
-      .then((state) => state && setHighlightedId(state.messageId))
+      .then((state) => state && setHighlightState(state))
       .catch(() => {})
-    const offHighlight = window.videorc?.onCommentHighlightState?.((state) =>
-      setHighlightedId(state.messageId)
-    )
-    const offSendResult = window.videorc?.onChatSendResult?.((results) => {
-      setSendPending(false)
-      setSendFailures(chatSendFailures(results))
+    const offHighlight = window.videorc?.onCommentHighlightState?.((state) => {
+      setHighlightState(state)
+      setHighlightApplyingId(null)
     })
     return () => {
       offSnapshot?.()
       offViewers?.()
       offState?.()
       offHighlight?.()
-      offSendResult?.()
     }
-  }, [])
+  }, [applySendOperation])
+  const { snapshot } = view
   const sendTargets = sendablePlatforms(snapshot.providers)
-  const feedSnapshot: LiveChatSnapshot =
-    echoes.length > 0 ? { ...snapshot, messages: [...snapshot.messages, ...echoes] } : snapshot
   return (
     <CommentsReader
-      viewerSample={viewerSample}
-      snapshot={feedSnapshot}
+      viewerSample={view.mode.kind === 'live' ? viewerSample : null}
+      snapshot={snapshot}
+      viewMode={view.mode}
       alwaysOnTop={alwaysOnTop}
-      highlightedId={highlightedId}
+      highlightApplyingId={highlightApplyingId}
+      highlightFailure={highlightFailure}
+      highlightState={highlightState}
       sendFailures={sendFailures}
+      sendOperation={sendOperation}
       sendPending={sendPending}
       sendTargets={sendTargets}
-      onClear={() => {
-        setEchoes([])
-        void window.videorc?.clearComments?.()
-      }}
-      onHighlight={(message: LiveChatMessage) =>
-        void window.videorc?.sendCommentHighlight?.(message)
+      onBackToLive={
+        view.mode.kind === 'history'
+          ? () => {
+              void window.videorc?.setCommentsViewMode?.({ kind: 'live' })
+            }
+          : undefined
+      }
+      onClear={
+        view.mode.kind === 'live' && snapshot.sessionId
+          ? () => {
+              setSendFailures([])
+              void window.videorc
+                ?.clearComments?.({
+                  requestId: crypto.randomUUID(),
+                  sessionId: snapshot.sessionId!
+                })
+                .catch((error) =>
+                  setSendFailures([
+                    {
+                      destinationId: 'comments-clear-command',
+                      platform: 'custom',
+                      reason: error instanceof Error ? error.message : 'Could not clear Comments.'
+                    }
+                  ])
+                )
+            }
+          : undefined
+      }
+      onHighlight={
+        view.mode.kind === 'live' && snapshot.sessionId
+          ? (message: LiveChatMessage) => {
+              const intent = ++highlightIntentRef.current
+              const command = {
+                requestId: crypto.randomUUID(),
+                sessionId: snapshot.sessionId!,
+                messageId: message.id
+              }
+              setHighlightFailure(null)
+              setHighlightApplyingId(message.id)
+              void window.videorc
+                ?.sendCommentHighlight?.(command)
+                .then((state) => {
+                  if (highlightIntentRef.current !== intent) return
+                  setHighlightFailure(null)
+                  setHighlightState(state)
+                })
+                .catch((error) => {
+                  if (highlightIntentRef.current !== intent) return
+                  setHighlightFailure({
+                    messageId: message.id,
+                    reason: error instanceof Error ? error.message : 'Highlight failed.'
+                  })
+                })
+                .finally(() => {
+                  if (highlightIntentRef.current === intent) setHighlightApplyingId(null)
+                })
+            }
+          : undefined
       }
       onSend={(text) => {
-        echoSequence.current += 1
-        setEchoes((current) => [
-          ...current.slice(-19),
-          localEchoMessage(text, echoSequence.current, new Date().toISOString())
-        ])
+        if (!snapshot.sessionId) return
+        const operationId = crypto.randomUUID()
+        sendPendingOperationIdRef.current = operationId
         setSendPending(true)
         setSendFailures([])
-        void window.videorc?.sendChatFromCommentsWindow?.(text)
+        applySendOperation(
+          pendingCommentsSendOperation({
+            id: operationId,
+            sessionId: snapshot.sessionId,
+            text,
+            providers: snapshot.providers
+          })
+        )
+        void window.videorc
+          ?.sendChatFromCommentsWindow?.({
+            requestId: crypto.randomUUID(),
+            operationId,
+            sessionId: snapshot.sessionId,
+            text
+          })
+          .then((operation) => {
+            if (sendPendingOperationIdRef.current !== operationId) return
+            applySendOperation(operation)
+            if (commentsSendOperationTerminal(operation)) {
+              sendPendingOperationIdRef.current = null
+              setSendPending(false)
+            }
+          })
+          .catch((error) => {
+            if (sendPendingOperationIdRef.current !== operationId) return
+            if (!commentsSendTransportFailureCanReplace(sendOperationRef.current, operationId)) {
+              sendPendingOperationIdRef.current = null
+              setSendPending(false)
+              return
+            }
+            sendPendingOperationIdRef.current = null
+            setSendPending(false)
+            applySendOperation(null)
+            setSendFailures([
+              {
+                destinationId: 'comments-command',
+                platform: 'custom',
+                reason: error instanceof Error ? error.message : 'Send failed.'
+              }
+            ])
+          })
       }}
       onToggleAlwaysOnTop={() => void window.videorc?.setCommentsWindowAlwaysOnTop?.(!alwaysOnTop)}
     />

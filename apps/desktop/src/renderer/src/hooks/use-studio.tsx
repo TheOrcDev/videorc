@@ -15,6 +15,10 @@ import { toast } from 'sonner'
 
 import { BackendClient } from '@/backendClient'
 import { previewSurfaceBoundsChanged } from '../../../shared/native-preview-bounds'
+import {
+  commentsRefreshRevisionIsCurrent,
+  reconcileCommentsSendOperation
+} from '../../../shared/comments-send-operation'
 import { cloudAiReadiness } from '@/lib/ai-readiness'
 import {
   applyStoredManualStreamKeyResult,
@@ -66,7 +70,11 @@ import {
 } from '@/lib/youtube-channels'
 import type {
   AiCapabilities,
-  ChatSendResult,
+  CommentHighlightCommand,
+  CommentHighlightState,
+  CommentsClearCommand,
+  CommentsSendCommand,
+  CommentsSendOperation,
   SessionStorageTotals,
   AiQuotaStatus,
   AiWorkflowResult,
@@ -84,6 +92,7 @@ import type {
   MediaAccessSnapshot,
   ExportPublishPackResult,
   FileAssessment,
+  EventsLaggedPayload,
   GateStatus,
   GoLivePreflight,
   HealthEvent,
@@ -156,11 +165,6 @@ import type {
 } from '@/lib/backend'
 import { createEmptyLiveChatSnapshot } from '@/lib/backend'
 import { renderCaptionCueFramePng, renderCaptionOverlayPng } from '@/lib/caption-overlay'
-import {
-  HIGHLIGHT_AUTO_DISMISS_MS,
-  nextHighlightState,
-  type HighlightState
-} from '@/lib/comment-highlight'
 import { renderCommentHighlightPng } from '@/lib/caption-overlay'
 import {
   appendCaptionLine,
@@ -172,9 +176,10 @@ import {
 import { goLiveEntitlementGate, videoProfileEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import {
-  applyLiveChatMessage,
+  applyLiveChatMessages,
   applyLiveChatProviderStatus,
-  applyLiveChatSnapshot
+  applyLiveChatSnapshot,
+  reconcileLiveChatRecovery
 } from '@/lib/live-chat-view'
 import {
   buildNativePreviewCompositorUpdateParams,
@@ -438,8 +443,11 @@ export type StudioContextValue = {
   closeCommentsWindow: () => Promise<void>
   toggleCommentsWindow: () => Promise<void>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<void>
-  openSessionCommentsWindow: (sessionId: string) => Promise<void>
+  openSessionCommentsWindow: (sessionId: string, title: string, startedAt: string) => Promise<void>
   highlightedCommentId: string | null
+  commentHighlightState: CommentHighlightState
+  commentHighlightApplyingId: string | null
+  commentHighlightFailure: { messageId: string; reason: string } | null
   toggleCommentHighlight: (message: LiveChatMessage) => void
   streamMetadataDraft: StreamMetadataDraft | null
   streamMetadataValidation: StreamMetadataValidation | null
@@ -954,6 +962,35 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [liveChatSnapshot, setLiveChatSnapshot] = useState<LiveChatSnapshot>(() =>
     createEmptyLiveChatSnapshot(new Date().toISOString())
   )
+  const liveChatSnapshotRef = useRef(liveChatSnapshot)
+  const liveChatStateRevisionRef = useRef(0)
+  const liveChatReplacementRevisionRef = useRef(0)
+  liveChatSnapshotRef.current = liveChatSnapshot
+  const updateLiveChatSnapshot = useCallback((next: SetStateAction<LiveChatSnapshot>): void => {
+    liveChatStateRevisionRef.current += 1
+    setLiveChatSnapshot((current) => {
+      const resolved = typeof next === 'function' ? next(current) : next
+      liveChatSnapshotRef.current = resolved
+      return resolved
+    })
+  }, [])
+  const replaceLiveChatSnapshotState = useCallback(
+    (next: LiveChatSnapshot): void => {
+      liveChatReplacementRevisionRef.current += 1
+      updateLiveChatSnapshot(next)
+    },
+    [updateLiveChatSnapshot]
+  )
+  const [latestLiveChatSendOperation, setLatestLiveChatSendOperation] = useState<
+    CommentsSendOperation | undefined
+  >()
+  const applyLiveChatSendOperation = useCallback((operation: CommentsSendOperation): void => {
+    setLatestLiveChatSendOperation((current) =>
+      current?.sessionId === operation.sessionId
+        ? reconcileCommentsSendOperation(current, operation)
+        : operation
+    )
+  }, [])
   const clearLiveChat = useCallback(async () => {
     if (!client) return
     await client.request('liveChat.clearLocal')
@@ -1041,128 +1078,292 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     void reconcile()
     const offState = window.videorc?.onCommentsWindowState?.((state) => setCommentsWindow(state))
-    const offClear = window.videorc?.onCommentsClearRequest?.(() => {
-      void clearLiveChat()
+    const offClear = window.videorc?.onCommentsClearRequest?.((command: CommentsClearCommand) => {
+      void (async () => {
+        if (!client) throw new Error('Backend socket is not connected.')
+        if (liveChatSnapshotRef.current.sessionId !== command.sessionId) {
+          throw new Error('That Comments view is no longer the active livestream.')
+        }
+        return client.request<LiveChatSnapshot>('liveChat.clearLocal')
+      })()
+        .then(async (snapshot) => {
+          await window.videorc?.pushCommentsClearResult?.({
+            requestId: command.requestId,
+            ok: true,
+            value: snapshot
+          })
+        })
+        .catch(async (error) => {
+          await window.videorc?.pushCommentsClearResult?.({
+            requestId: command.requestId,
+            ok: false,
+            error: error instanceof Error ? error.message : 'Could not clear Comments.'
+          })
+        })
     })
     return () => {
       cancelled = true
       offState?.()
       offClear?.()
     }
-  }, [clearLiveChat])
+  }, [client])
   useEffect(() => {
-    void window.videorc?.pushCommentsSnapshot?.(liveChatSnapshot)
-  }, [liveChatSnapshot])
+    void window.videorc?.pushCommentsSnapshot?.({
+      mode: { kind: 'live' },
+      snapshot: liveChatSnapshot,
+      latestSendOperation:
+        latestLiveChatSendOperation?.sessionId === liveChatSnapshot.sessionId
+          ? latestLiveChatSendOperation
+          : undefined
+    })
+  }, [latestLiveChatSendOperation, liveChatSnapshot])
+  const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(loadCaptureConfig)
 
-  // --- Click-to-highlight (Comments upgrade S3) --------------------------------
-  // One comment at a time burns onto the stream via the compositor's dedicated
-  // highlight slot. The reducer is pure (comment-highlight.ts); this effect
-  // owns the rasterize→RPC round trip, the auto-dismiss timer, and clears on
-  // session end. Clicks arrive locally (rail) or relayed from the Comments
-  // window through main.
-  const [commentHighlight, setCommentHighlight] = useState<HighlightState | null>(null)
-  const toggleCommentHighlight = useCallback((message: LiveChatMessage) => {
-    setCommentHighlight((current) =>
-      nextHighlightState(current, { type: 'toggle', message, nowMs: Date.now() })
-    )
-  }, [])
-  const highlightedCommentId = commentHighlight?.message.id ?? null
+  // Backend-authoritative comment highlight. The renderer owns only the
+  // temporary rasterization phase; `On stream` comes from the backend state.
+  const [commentHighlightState, setCommentHighlightState] = useState<CommentHighlightState>({
+    generation: 0,
+    phase: 'idle'
+  })
+  const commentHighlightIntentRef = useRef(0)
+  const [commentHighlightApplyingId, setCommentHighlightApplyingId] = useState<string | null>(null)
+  const [commentHighlightFailure, setCommentHighlightFailure] = useState<{
+    messageId: string
+    reason: string
+  } | null>(null)
   useEffect(() => {
-    const off = window.videorc?.onCommentHighlightRequest?.((message) => {
-      toggleCommentHighlight(message)
+    if (!commentHighlightFailure) return
+    const timer = window.setTimeout(() => setCommentHighlightFailure(null), 5_000)
+    return () => window.clearTimeout(timer)
+  }, [commentHighlightFailure])
+  const highlightedCommentId =
+    commentHighlightState.phase === 'live' ? (commentHighlightState.messageId ?? null) : null
+
+  const applyCommentHighlight = useCallback(
+    async (
+      message: LiveChatMessage,
+      expectedSessionId: string | undefined,
+      intent: number
+    ): Promise<CommentHighlightState | null> => {
+      if (!client) throw new Error('Backend socket is not connected.')
+      const sessionId = expectedSessionId ?? liveChatSnapshot.sessionId
+      if (!sessionId || message.sessionId !== sessionId) {
+        throw new Error('That comment does not belong to the active livestream.')
+      }
+      setCommentHighlightApplyingId(message.id)
+      try {
+        if (
+          commentHighlightState.phase === 'live' &&
+          commentHighlightState.messageId === message.id
+        ) {
+          const cleared = await client.request<CommentHighlightState>('comments.highlight.clear')
+          return commentHighlightIntentRef.current === intent ? cleared : null
+        }
+        const streamVideo = streamOutputVideoSettings(
+          captureConfig.video,
+          captureConfig.streamEnabled ? captureConfig.streaming : undefined
+        )
+        const avatarUrl = message.authorAvatarUrl
+          ? await window.videorc?.cacheChatAvatar?.(message.authorAvatarUrl).catch(() => null)
+          : null
+        if (commentHighlightIntentRef.current !== intent) return null
+        const pngBase64 = await renderCommentHighlightPng({
+          authorName: message.authorName,
+          text: message.messageText,
+          avatarUrl: avatarUrl ?? null,
+          canvasWidth: streamVideo.width,
+          platform: message.platform
+        })
+        if (!pngBase64) throw new Error('Could not render this comment for the stream.')
+        if (commentHighlightIntentRef.current !== intent) return null
+        const state = await client.request<CommentHighlightState>('comments.highlight.set', {
+          sessionId,
+          messageId: message.id,
+          pngBase64,
+          position: 'top'
+        })
+        return commentHighlightIntentRef.current === intent ? state : null
+      } finally {
+        if (commentHighlightIntentRef.current === intent) {
+          setCommentHighlightApplyingId(null)
+        }
+      }
+    },
+    [captureConfig, client, commentHighlightState, liveChatSnapshot.sessionId]
+  )
+
+  const publishCommentHighlightState = useCallback((state: CommentHighlightState): void => {
+    setCommentHighlightState(state)
+    void window.videorc?.pushCommentHighlightState?.(state)
+  }, [])
+
+  const toggleCommentHighlight = useCallback(
+    (message: LiveChatMessage): void => {
+      const intent = ++commentHighlightIntentRef.current
+      setCommentHighlightFailure(null)
+      void applyCommentHighlight(message, undefined, intent)
+        .then((state) => {
+          if (!state || commentHighlightIntentRef.current !== intent) return
+          setCommentHighlightFailure(null)
+          publishCommentHighlightState(state)
+        })
+        .catch(async (error) => {
+          if (commentHighlightIntentRef.current !== intent) return
+          setCommentHighlightFailure({
+            messageId: message.id,
+            reason: error instanceof Error ? error.message : 'Highlight failed.'
+          })
+          const authoritative = await client
+            ?.request<CommentHighlightState>('comments.highlight.status')
+            .catch(() => null)
+          if (authoritative) publishCommentHighlightState(authoritative)
+        })
+    },
+    [applyCommentHighlight, client, publishCommentHighlightState]
+  )
+
+  useEffect(() => {
+    const off = window.videorc?.onCommentHighlightRequest?.((command: CommentHighlightCommand) => {
+      const intent = ++commentHighlightIntentRef.current
+      setCommentHighlightFailure(null)
+      const message = liveChatSnapshot.messages.find(
+        (candidate) =>
+          candidate.id === command.messageId && candidate.sessionId === command.sessionId
+      )
+      void (
+        message
+          ? applyCommentHighlight(message, command.sessionId, intent)
+          : Promise.reject(new Error('The selected live comment is no longer available.'))
+      )
+        .then(async (state) => {
+          const resolvedState =
+            state ??
+            (await client
+              ?.request<CommentHighlightState>('comments.highlight.status')
+              .catch(() => null))
+          if (!resolvedState) {
+            throw new Error('A newer comment highlight replaced this request.')
+          }
+          if (state && commentHighlightIntentRef.current === intent) {
+            publishCommentHighlightState(state)
+          }
+          await window.videorc?.pushCommentHighlightResult?.({
+            requestId: command.requestId,
+            ok: true,
+            value: resolvedState
+          })
+        })
+        .catch(async (error) => {
+          if (commentHighlightIntentRef.current === intent) {
+            setCommentHighlightFailure({
+              messageId: command.messageId,
+              reason: error instanceof Error ? error.message : 'Highlight failed.'
+            })
+          }
+          const authoritative = await client
+            ?.request<CommentHighlightState>('comments.highlight.status')
+            .catch(() => null)
+          if (authoritative && commentHighlightIntentRef.current === intent) {
+            publishCommentHighlightState(authoritative)
+          }
+          await window.videorc?.pushCommentHighlightResult?.({
+            requestId: command.requestId,
+            ok: false,
+            error: error instanceof Error ? error.message : 'Highlight failed.'
+          })
+        })
     })
     return off
-  }, [toggleCommentHighlight])
+  }, [applyCommentHighlight, client, liveChatSnapshot.messages, publishCommentHighlightState])
+
   useEffect(() => {
-    void window.videorc?.pushCommentHighlightState?.({ messageId: highlightedCommentId })
-  }, [highlightedCommentId])
-  // Send relay (S5): the Comments window types; this renderer owns the
-  // backend call and pushes the per-platform results back.
-  useEffect(() => {
-    const off = window.videorc?.onChatSendRequest?.((text) => {
+    const off = window.videorc?.onChatSendRequest?.((command: CommentsSendCommand) => {
       void (async () => {
-        if (!client) {
-          await window.videorc?.pushChatSendResult?.([])
-          return
-        }
-        try {
-          const results = await client.request<ChatSendResult[]>('liveChat.send', { text })
-          await window.videorc?.pushChatSendResult?.(results)
-        } catch (error) {
-          await window.videorc?.pushChatSendResult?.([
-            {
-              platform: 'custom',
-              status: 'failed',
-              reason: error instanceof Error ? error.message : 'Send failed.'
-            }
-          ])
-        }
+        if (!client) throw new Error('Backend socket is not connected.')
+        return client.request<CommentsSendOperation>('liveChat.send', {
+          operationId: command.operationId,
+          sessionId: command.sessionId,
+          text: command.text
+        })
       })()
+        .then(async (operation) => {
+          await window.videorc?.pushChatSendResult?.({
+            requestId: command.requestId,
+            ok: true,
+            value: operation
+          })
+        })
+        .catch(async (error) => {
+          await window.videorc?.pushChatSendResult?.({
+            requestId: command.requestId,
+            ok: false,
+            error: error instanceof Error ? error.message : 'Send failed.'
+          })
+        })
     })
     return off
   }, [client])
-  const commentHighlightSessionActive = isActiveRecordingState(recording.state)
-  useEffect(() => {
-    if (!commentHighlightSessionActive && commentHighlight) {
-      setCommentHighlight(null)
-    }
-  }, [commentHighlightSessionActive, commentHighlight])
-  useEffect(() => {
-    if (!client) {
-      return
-    }
-    if (!commentHighlight) {
-      void client.request('comments.highlight.clear').catch(() => {})
-      return
-    }
-    const { message } = commentHighlight
-    let cancelled = false
-    const streamVideo = streamOutputVideoSettings(
-      captureConfig.video,
-      captureConfig.streamEnabled ? captureConfig.streaming : undefined
-    )
-    void (async () => {
-      const avatarUrl = message.authorAvatarUrl
-        ? await window.videorc?.cacheChatAvatar?.(message.authorAvatarUrl).catch(() => null)
-        : null
-      const pngBase64 = await renderCommentHighlightPng({
-        authorName: message.authorName,
-        text: message.messageText,
-        avatarUrl: avatarUrl ?? null,
-        canvasWidth: streamVideo.width
-      })
-      if (cancelled || !pngBase64) {
-        return
-      }
-      await client.request('comments.highlight.set', { pngBase64, position: 'top' })
-    })().catch(() => {
-      // Best-effort: the next click retries; the reader still shows state.
-    })
-    const timer = window.setTimeout(() => {
-      setCommentHighlight((current) =>
-        nextHighlightState(current, { type: 'expire', messageId: message.id })
-      )
-    }, HIGHLIGHT_AUTO_DISMISS_MS)
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-    // Rasterize once per highlighted message; config changes mid-highlight
-    // keep the current card (it dismisses within seconds anyway).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, commentHighlight])
 
   const refreshLiveChatSnapshotForComments = useCallback(async (): Promise<void> => {
     if (!client) {
       return
     }
+    const stateRevisionAtStart = liveChatStateRevisionRef.current
+    const replacementRevisionAtStart = liveChatReplacementRevisionRef.current
     const snapshot = await client.request<LiveChatSnapshot>('liveChat.status')
-    const next = applyLiveChatSnapshot(snapshot)
-    setLiveChatSnapshot(next)
-    await window.videorc?.pushCommentsSnapshot?.(next)
-  }, [client])
+    if (
+      !commentsRefreshRevisionIsCurrent(
+        replacementRevisionAtStart,
+        liveChatReplacementRevisionRef.current
+      )
+    ) {
+      return
+    }
+    const currentSnapshotAtCommit = liveChatSnapshotRef.current
+    const stateChangedDuringStatus = !commentsRefreshRevisionIsCurrent(
+      stateRevisionAtStart,
+      liveChatStateRevisionRef.current
+    )
+    const next = reconcileLiveChatRecovery(
+      snapshot,
+      currentSnapshotAtCommit,
+      stateChangedDuringStatus ? currentSnapshotAtCommit.messages : [],
+      stateChangedDuringStatus
+    )
+    replaceLiveChatSnapshotState(next)
+    const installedReplacementRevision = liveChatReplacementRevisionRef.current
+    const operations = next.sessionId
+      ? await client
+          .request<CommentsSendOperation[]>('liveChat.sendOperations.list', {
+            sessionId: next.sessionId
+          })
+          .catch(() => [])
+      : []
+    if (
+      !commentsRefreshRevisionIsCurrent(
+        installedReplacementRevision,
+        liveChatReplacementRevisionRef.current
+      )
+    ) {
+      return
+    }
+    const currentSnapshot = liveChatSnapshotRef.current
+    if (currentSnapshot.sessionId !== next.sessionId) return
+    const latestSendOperation = operations.at(-1)
+    if (latestSendOperation) {
+      applyLiveChatSendOperation(latestSendOperation)
+    } else {
+      setLatestLiveChatSendOperation(undefined)
+    }
+    await window.videorc?.pushCommentsSnapshot?.({
+      mode: { kind: 'live' },
+      snapshot: currentSnapshot,
+      latestSendOperation
+    })
+  }, [applyLiveChatSendOperation, client, replaceLiveChatSnapshotState])
   const openCommentsWindow = useCallback(async () => {
     await refreshLiveChatSnapshotForComments().catch(() => {})
+    await window.videorc?.setCommentsViewMode?.({ kind: 'live' })
     await window.videorc?.openCommentsWindow?.()
     await refreshLiveChatSnapshotForComments().catch(() => {})
   }, [refreshLiveChatSnapshotForComments])
@@ -1171,6 +1372,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
   const toggleCommentsWindow = useCallback(async () => {
     await refreshLiveChatSnapshotForComments().catch(() => {})
+    await window.videorc?.setCommentsViewMode?.({ kind: 'live' })
     await window.videorc?.toggleCommentsWindow?.()
     await refreshLiveChatSnapshotForComments().catch(() => {})
   }, [refreshLiveChatSnapshotForComments])
@@ -1178,7 +1380,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await window.videorc?.setCommentsWindowAlwaysOnTop?.(alwaysOnTop)
   }, [])
   const openSessionCommentsWindow = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string, title: string, startedAt: string) => {
       if (!client) {
         toast.error('Backend socket is not connected.')
         return
@@ -1194,7 +1396,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           unreadCount: messages.length,
           updatedAt: new Date().toISOString()
         })
-        await window.videorc?.pushCommentsSnapshot?.(snapshot)
+        const operations = await client
+          .request<CommentsSendOperation[]>('liveChat.sendOperations.list', { sessionId })
+          .catch(() => [])
+        await window.videorc?.pushCommentsSnapshot?.({
+          mode: { kind: 'history', sessionId, title, startedAt },
+          snapshot,
+          latestSendOperation: operations.at(-1)
+        })
+        await window.videorc?.setCommentsViewMode?.({
+          kind: 'history',
+          sessionId,
+          title,
+          startedAt
+        })
         await window.videorc?.openCommentsWindow?.()
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Could not open saved comments.'
@@ -1245,7 +1460,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [settings, setSettings] = useState<SettingsState>(() =>
     loadJson(STORAGE_KEYS.settings, defaultSettings)
   )
-  const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(loadCaptureConfig)
   // Stable handle for callbacks that only need to READ the config (labels,
   // lookups) without re-creating themselves on every config change.
   const lastRecordingStateRef = useRef<string | null>(null)
@@ -2365,6 +2579,105 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
 
     const nextClient = new BackendClient(connection)
+    let disposed = false
+    let queuedLiveChatMessages: LiveChatMessage[] = []
+    let liveChatFlushTimer: number | null = null
+    let liveChatRecovery: Promise<void> | null = null
+    let commentHighlightRevision = 0
+
+    const flushLiveChatMessages = (): void => {
+      liveChatFlushTimer = null
+      if (disposed || liveChatRecovery || queuedLiveChatMessages.length === 0) {
+        return
+      }
+      const messages = queuedLiveChatMessages
+      queuedLiveChatMessages = []
+      updateLiveChatSnapshot((current) => applyLiveChatMessages(current, messages))
+    }
+    const scheduleLiveChatFlush = (): void => {
+      if (disposed || liveChatFlushTimer !== null || queuedLiveChatMessages.length === 0) {
+        return
+      }
+      // WebSocket messages arrive as separate browser tasks, so a microtask
+      // flush still produces one React update per comment. One short frame
+      // window coalesces bursts while keeping live interaction responsive.
+      liveChatFlushTimer = window.setTimeout(flushLiveChatMessages, 16)
+    }
+    const queueLiveChatMessage = (message: LiveChatMessage): void => {
+      queuedLiveChatMessages.push(message)
+      scheduleLiveChatFlush()
+    }
+    const replaceLiveChatSnapshot = (snapshot: LiveChatSnapshot): void => {
+      queuedLiveChatMessages = []
+      replaceLiveChatSnapshotState(applyLiveChatSnapshot(snapshot))
+    }
+    const recoverLiveChatSnapshot = (): Promise<void> => {
+      if (disposed) {
+        return Promise.resolve()
+      }
+      if (liveChatRecovery) {
+        return liveChatRecovery
+      }
+      liveChatRecovery = (async () => {
+        const stateRevisionAtStart = liveChatStateRevisionRef.current
+        const replacementRevisionAtStart = liveChatReplacementRevisionRef.current
+        const highlightRevisionAtStart = commentHighlightRevision
+        try {
+          const [snapshot, highlight] = await Promise.all([
+            nextClient.request<LiveChatSnapshot>('liveChat.status'),
+            nextClient.request<CommentHighlightState>('comments.highlight.status').catch(() => null)
+          ])
+          const operations = snapshot.sessionId
+            ? await nextClient
+                .request<CommentsSendOperation[]>('liveChat.sendOperations.list', {
+                  sessionId: snapshot.sessionId
+                })
+                .catch(() => [])
+            : []
+          if (disposed) {
+            return
+          }
+          // A full snapshot/clear that lands after the RPC started is newer and
+          // must win wholesale. Provider-only updates can coexist with recovery:
+          // retain their rows while restoring authoritative missed messages.
+          if (
+            commentsRefreshRevisionIsCurrent(
+              replacementRevisionAtStart,
+              liveChatReplacementRevisionRef.current
+            )
+          ) {
+            const messagesAfterSnapshot = queuedLiveChatMessages
+            queuedLiveChatMessages = []
+            replaceLiveChatSnapshotState(
+              reconcileLiveChatRecovery(
+                snapshot,
+                liveChatSnapshotRef.current,
+                messagesAfterSnapshot,
+                !commentsRefreshRevisionIsCurrent(
+                  stateRevisionAtStart,
+                  liveChatStateRevisionRef.current
+                )
+              )
+            )
+            const latestSendOperation = operations.at(-1)
+            if (latestSendOperation) {
+              applyLiveChatSendOperation(latestSendOperation)
+            } else {
+              setLatestLiveChatSendOperation(undefined)
+            }
+          }
+          if (highlight && commentHighlightRevision === highlightRevisionAtStart) {
+            setCommentHighlightState(highlight)
+            setCommentHighlightApplyingId(null)
+            void window.videorc?.pushCommentHighlightState?.(highlight)
+          }
+        } finally {
+          liveChatRecovery = null
+          scheduleLiveChatFlush()
+        }
+      })()
+      return liveChatRecovery
+    }
     setClient(nextClient)
     setWsStatus('connecting')
     setLastError(null)
@@ -2511,20 +2824,44 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('platformAccounts.changed', (payload) => {
         setPlatformAccounts(payload as PlatformAccount[])
       }),
-      nextClient.on('liveChat.snapshot', (payload) =>
-        setLiveChatSnapshot(applyLiveChatSnapshot(payload as LiveChatSnapshot))
-      ),
+      nextClient.on('liveChat.snapshot', (payload) => {
+        replaceLiveChatSnapshot(payload as LiveChatSnapshot)
+      }),
       nextClient.on('liveChat.message', (payload) =>
-        setLiveChatSnapshot((current) => applyLiveChatMessage(current, payload as LiveChatMessage))
+        queueLiveChatMessage(payload as LiveChatMessage)
       ),
-      nextClient.on('liveChat.providerStatus', (payload) =>
-        setLiveChatSnapshot((current) =>
+      nextClient.on('liveChat.providerStatus', (payload) => {
+        updateLiveChatSnapshot((current) =>
           applyLiveChatProviderStatus(current, payload as LiveChatProviderState)
         )
-      ),
-      nextClient.on('liveChat.cleared', (payload) =>
-        setLiveChatSnapshot(applyLiveChatSnapshot(payload as LiveChatSnapshot))
-      ),
+      }),
+      nextClient.on('liveChat.cleared', (payload) => {
+        replaceLiveChatSnapshot(payload as LiveChatSnapshot)
+      }),
+      nextClient.on('liveChat.sendOperation', (payload) => {
+        const operation = payload as CommentsSendOperation
+        if (operation.sessionId === liveChatSnapshotRef.current.sessionId) {
+          applyLiveChatSendOperation(operation)
+        }
+      }),
+      nextClient.on('comments.highlight.status', (payload) => {
+        commentHighlightRevision += 1
+        const status = payload as CommentHighlightState
+        setCommentHighlightState(status)
+        setCommentHighlightApplyingId(null)
+        void window.videorc?.pushCommentHighlightState?.(status)
+      }),
+      nextClient.on('events.lagged', (payload) => {
+        const lagged = payload as EventsLaggedPayload
+        if (lagged.skipped < 1) {
+          return
+        }
+        void recoverLiveChatSnapshot().catch((error: unknown) => {
+          if (!disposed) {
+            reportError(error)
+          }
+        })
+      }),
       nextClient.on('captions.status', (payload) => setCaptionsStatus(payload as CaptionsStatus)),
       nextClient.on('captions.update', (payload) =>
         setCaptionLines((current) =>
@@ -2697,8 +3034,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         applyRecordingStatus(nextRecording)
         const nextDiagnostics = await nextClient.request<DiagnosticStats>('diagnostics.stats')
         setDiagnosticStats(nextDiagnostics)
-        const nextLiveChat = await nextClient.request<LiveChatSnapshot>('liveChat.status')
-        setLiveChatSnapshot(applyLiveChatSnapshot(nextLiveChat))
+        // A new WebSocket may follow a backend restart or an app-side reconnect. Always
+        // replace incremental chat belief from the persisted coordinator snapshot.
+        await recoverLiveChatSnapshot()
+        const nextCommentHighlight = await nextClient.request<CommentHighlightState>(
+          'comments.highlight.status'
+        )
+        setCommentHighlightState(nextCommentHighlight)
+        await window.videorc?.pushCommentHighlightState?.(nextCommentHighlight)
         const nextPreview = await nextClient.request<PreviewLiveStatus>('preview.live.status')
         applyPreviewLiveStatus(nextPreview)
         const nextPreviewSurface =
@@ -2735,6 +3078,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       })
 
     return () => {
+      disposed = true
+      queuedLiveChatMessages = []
+      if (liveChatFlushTimer !== null) {
+        window.clearTimeout(liveChatFlushTimer)
+        liveChatFlushTimer = null
+      }
       nativePreviewCompositorPendingRef.current = null
       nativePreviewCompositorLatestStatusRef.current = null
       nativePreviewCompositorPresentingRef.current = false
@@ -2771,6 +3120,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     appendLog,
+    applyLiveChatSendOperation,
     applyPreviewLiveStatus,
     applyPreviewCameraStatus,
     applyPreviewScreenStatus,
@@ -2783,6 +3133,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     queueNativePreviewCompositorPresent,
     resetNativePreviewCompositorTiming,
     refreshPlatformAccountsForClient,
+    replaceLiveChatSnapshotState,
+    updateLiveChatSnapshot,
     refreshAiReadinessForClient,
     refreshScreensForClient,
     refreshStreamMetadataForClient,
@@ -6284,6 +6636,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setCommentsWindowAlwaysOnTop,
       openSessionCommentsWindow,
       highlightedCommentId,
+      commentHighlightState,
+      commentHighlightApplyingId,
+      commentHighlightFailure,
       toggleCommentHighlight,
       streamMetadataDraft,
       streamMetadataValidation,
@@ -6459,6 +6814,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setCommentsWindowAlwaysOnTop,
       openSessionCommentsWindow,
       highlightedCommentId,
+      commentHighlightState,
+      commentHighlightApplyingId,
+      commentHighlightFailure,
       toggleCommentHighlight,
       streamMetadataDraft,
       streamMetadataValidation,

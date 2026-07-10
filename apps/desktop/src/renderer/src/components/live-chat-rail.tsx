@@ -2,10 +2,13 @@ import { ArrowSquareOut, ChatCircle, X } from '@phosphor-icons/react'
 import type { ReactElement } from 'react'
 
 import { LiveChatPanel } from '@/components/live-chat-panel'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia } from '@/components/ui/empty'
 import { Kbd } from '@/components/ui/kbd'
+import { Separator } from '@/components/ui/separator'
 import { displayKeyGlyph } from '@/lib/platform'
-import type { LiveChatSnapshot } from '../../../shared/backend'
+import type { CommentHighlightState, LiveChatSnapshot } from '../../../shared/backend'
 
 // The chat rail is live while streaming and can stay mounted after stop while
 // the retained in-memory transcript has comments.
@@ -19,6 +22,9 @@ export function LiveChatRail({
   windowOpen,
   onPopOut,
   highlightedId = null,
+  highlightState,
+  highlightApplyingId = null,
+  highlightFailure = null,
   onHighlight,
   platform
 }: {
@@ -28,16 +34,28 @@ export function LiveChatRail({
   windowOpen: boolean
   onPopOut: () => void | Promise<void>
   highlightedId?: string | null
+  highlightState?: CommentHighlightState
+  highlightApplyingId?: string | null
+  highlightFailure?: { messageId: string; reason: string } | null
   onHighlight?: (message: import('../../../shared/backend').LiveChatMessage) => void
   platform?: string
 }): ReactElement {
   const modKey = displayKeyGlyph('⌘', platform)
+  const live = Boolean(snapshot.sessionId)
+  const mode = live ? 'Live' : snapshot.messages.length > 0 ? 'History' : 'Idle'
   return (
     <aside className="flex w-80 shrink-0 flex-col gap-3 rounded-panel border bg-muted/20 p-4">
       <div className="flex items-center gap-2">
         <ChatCircle className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
-        <span className="flex-1 text-sm font-medium">Live chat</span>
-        <Kbd>{modKey}J</Kbd>
+        <span className="text-sm font-medium">Comments</span>
+        <Badge
+          className="h-4 px-1.5 text-[10px]"
+          variant={mode === 'Live' ? 'success' : mode === 'History' ? 'secondary' : 'outline'}
+        >
+          {mode}
+        </Badge>
+        <span className="flex-1" />
+        <Kbd>{modKey}⇧J</Kbd>
         <Button
           aria-label={windowOpen ? 'Bring comments back into the app' : 'Open comments in a window'}
           aria-keyshortcuts="Meta+Shift+J"
@@ -46,32 +64,40 @@ export function LiveChatRail({
           variant="ghost"
           onClick={() => void onPopOut()}
         >
-          <ArrowSquareOut className="size-4" />
+          <ArrowSquareOut data-icon="inline-start" />
         </Button>
         <Button
-          aria-label="Close live chat"
+          aria-label="Close comments"
           className="size-7"
           size="icon"
           variant="ghost"
           onClick={onClose}
         >
-          <X className="size-4" />
+          <X data-icon="inline-start" />
         </Button>
       </div>
+      <Separator />
       {windowOpen ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-row border border-dashed bg-muted/20 px-4 py-8 text-center">
-          <ArrowSquareOut className="size-5 text-muted-foreground" weight="duotone" />
-          <p className="text-sm text-muted-foreground">Comments are open in a separate window.</p>
+        <Empty className="border-0 px-4 py-8">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <ArrowSquareOut weight="duotone" />
+            </EmptyMedia>
+            <EmptyDescription>Comments are open in a separate window.</EmptyDescription>
+          </EmptyHeader>
           <Button size="sm" variant="outline" onClick={() => void onPopOut()}>
             Bring back into the app
           </Button>
-        </div>
+        </Empty>
       ) : (
         <LiveChatPanel
           highlightedId={highlightedId}
+          highlightApplyingId={highlightApplyingId}
+          highlightFailure={highlightFailure}
+          highlightState={highlightState}
           snapshot={snapshot}
           onClearLocal={onClearLocal}
-          onHighlight={onHighlight}
+          onHighlight={live && snapshot.sessionId ? onHighlight : undefined}
         />
       )}
     </aside>

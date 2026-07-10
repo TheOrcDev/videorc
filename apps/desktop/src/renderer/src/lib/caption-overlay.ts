@@ -3,7 +3,7 @@
 // Layout is pure (measurement injected) so wrapping/sizing is unit-testable;
 // the canvas painter is a thin shell over it.
 
-import { layoutCommentHighlight } from '@/lib/comment-highlight'
+import { commentHighlightPlatformBadge, layoutCommentHighlight } from '@/lib/comment-highlight'
 
 export type CaptionTextSize = 's' | 'm' | 'l'
 export type CaptionPosition = 'top' | 'bottom'
@@ -312,6 +312,7 @@ export async function renderCommentHighlightPng(params: {
   text: string
   avatarUrl: string | null
   canvasWidth: number
+  platform?: import('@/lib/backend').StreamPlatform
 }): Promise<string | null> {
   // Q8 (plan 022): use-studio already imports comment-highlight statically, so
   // the dynamic import here never split a chunk (Vite warned) — import it
@@ -399,12 +400,67 @@ export async function renderCommentHighlightPng(params: {
     context.textAlign = 'center'
     context.textBaseline = 'middle'
     context.fillText(
-      monogramInitials(layout.name),
+      monogramInitials(params.authorName.trim() || 'Viewer'),
       avatarX + metrics.avatarPx / 2,
       avatarY + metrics.avatarPx / 2 + 1
     )
   }
   context.restore()
+
+  // Platform glyph: compact brand-colored badge over the avatar. The identity
+  // line also spells out the platform, preserving meaning in monochrome.
+  const platformBadge = commentHighlightPlatformBadge(params.platform)
+  if (platformBadge) {
+    const badgeSize = Math.max(12, Math.round(metrics.avatarPx * 0.42))
+    const badgeX = avatarX + metrics.avatarPx - badgeSize * 0.84
+    const badgeY = avatarY + metrics.avatarPx - badgeSize * 0.84
+    context.save()
+    context.beginPath()
+    context.arc(badgeX + badgeSize / 2, badgeY + badgeSize / 2, badgeSize / 2, 0, Math.PI * 2)
+    context.fillStyle = platformBadge.color
+    context.fill()
+    context.strokeStyle = 'rgba(255, 255, 255, 0.28)'
+    context.lineWidth = Math.max(1, Math.round(badgeSize * 0.06))
+    context.stroke()
+    context.strokeStyle = '#FFFFFF'
+    context.fillStyle = '#FFFFFF'
+    context.lineWidth = Math.max(1.5, badgeSize * 0.1)
+    context.lineCap = 'round'
+    context.lineJoin = 'round'
+    const centerX = badgeX + badgeSize / 2
+    const centerY = badgeY + badgeSize / 2
+    if (platformBadge.glyph === 'play') {
+      context.beginPath()
+      context.moveTo(centerX - badgeSize * 0.12, centerY - badgeSize * 0.2)
+      context.lineTo(centerX + badgeSize * 0.2, centerY)
+      context.lineTo(centerX - badgeSize * 0.12, centerY + badgeSize * 0.2)
+      context.closePath()
+      context.fill()
+    } else if (platformBadge.glyph === 'x') {
+      context.beginPath()
+      context.moveTo(centerX - badgeSize * 0.18, centerY - badgeSize * 0.22)
+      context.lineTo(centerX + badgeSize * 0.18, centerY + badgeSize * 0.22)
+      context.moveTo(centerX + badgeSize * 0.16, centerY - badgeSize * 0.22)
+      context.lineTo(centerX - badgeSize * 0.16, centerY + badgeSize * 0.22)
+      context.stroke()
+    } else if (platformBadge.glyph === 'twitch') {
+      context.strokeRect(
+        centerX - badgeSize * 0.2,
+        centerY - badgeSize * 0.2,
+        badgeSize * 0.4,
+        badgeSize * 0.34
+      )
+      context.beginPath()
+      context.moveTo(centerX - badgeSize * 0.06, centerY + badgeSize * 0.14)
+      context.lineTo(centerX - badgeSize * 0.14, centerY + badgeSize * 0.24)
+      context.stroke()
+    } else {
+      context.beginPath()
+      context.arc(centerX, centerY, badgeSize * 0.12, 0, Math.PI * 2)
+      context.fill()
+    }
+    context.restore()
+  }
 
   // Name + comment text.
   const textX = avatarX + metrics.avatarPx + metrics.paddingPx

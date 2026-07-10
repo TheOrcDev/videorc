@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::live_chat::{
     LiveChatEventType, LiveChatMessage, LiveChatMessageFragment, LiveChatProviderConnectionState,
-    deliver_message, live_chat_message_id, set_provider_and_emit,
+    ProviderSendReceipt, deliver_message, live_chat_message_id, set_provider_and_emit,
 };
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
@@ -71,7 +71,7 @@ pub async fn send_twitch_chat_message(
     client: &reqwest::Client,
     config: &TwitchChatSenderConfig,
     text: &str,
-) -> Result<(), String> {
+) -> Result<ProviderSendReceipt, String> {
     let base = config
         .api_base_url
         .as_deref()
@@ -88,16 +88,71 @@ pub async fn send_twitch_chat_message(
         .send()
         .await
         .map_err(|error| format!("Could not reach Twitch: {error}"))?;
-    if response.status().is_success() {
-        return Ok(());
-    }
     let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let response_bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("Could not read Twitch's send response: {error}"))?;
+    if status.is_success() {
+        let body = serde_json::from_slice::<Value>(&response_bytes)
+            .map_err(|error| format!("Twitch returned an unreadable send response: {error}"))?;
+        let delivery = body
+            .get("data")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .ok_or_else(|| "Twitch returned no delivery result.".to_string())?;
+        if !delivery
+            .get("is_sent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            let reason = delivery
+                .pointer("/drop_reason/message")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    delivery
+                        .pointer("/drop_reason/code")
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or("Twitch dropped the message.");
+            return Err(reason.to_string());
+        }
+        let provider_message_id = delivery
+            .get("message_id")
+            .and_then(Value::as_str)
+            .filter(|message_id| !message_id.trim().is_empty())
+            .ok_or_else(|| "Twitch reported sent without a message id.".to_string())?;
+        return Ok(ProviderSendReceipt {
+            provider_message_id: Some(provider_message_id.to_string()),
+        });
+    }
+
+    // Helix error bodies can be empty or non-JSON. Preserve auth/rate-limit
+    // classification from HTTP status, enriching other failures only when a
+    // provider message parses successfully.
+    let body = serde_json::from_slice::<Value>(&response_bytes).ok();
     Err(match status.as_u16() {
         401 | 403 => {
             "Twitch rejected the send — reconnect Twitch to grant the new chat permission."
                 .to_string()
         }
-        _ => format!("Twitch send failed ({status})."),
+        429 => format!(
+            "Twitch rate-limited the send{}.",
+            retry_after
+                .map(|seconds| format!("; retry after {seconds}s"))
+                .unwrap_or_default()
+        ),
+        _ => body
+            .as_ref()
+            .and_then(|body| body.get("message"))
+            .and_then(Value::as_str)
+            .map(|message| format!("Twitch send failed ({status}): {message}"))
+            .unwrap_or_else(|| format!("Twitch send failed ({status}).")),
     })
 }
 
@@ -287,7 +342,12 @@ fn base_message(
 ) -> LiveChatMessage {
     let published_at = timestamp.unwrap_or(received_at).to_string();
     LiveChatMessage {
-        id: live_chat_message_id(StreamPlatform::Twitch, &provider_message_id),
+        id: live_chat_message_id(
+            session_id,
+            StreamPlatform::Twitch,
+            target_id,
+            &provider_message_id,
+        ),
         provider_message_id,
         platform: StreamPlatform::Twitch,
         target_id: target_id.map(ToOwned::to_owned),
@@ -448,16 +508,34 @@ fn normalize_notification(
             timestamp,
             received_at,
         )),
-        "channel.chat.message_delete" => Some(moderation_row(
-            message_id,
-            "A chat message was removed.".to_string(),
-            true,
-            session_id,
-            target_id,
-            timestamp,
-            received_at,
-            "channel.chat.message_delete",
-        )),
+        "channel.chat.message_delete" => {
+            let deleted_message_id = event["message_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|id| !id.is_empty());
+            Some(match deleted_message_id {
+                Some(deleted_message_id) => moderation_row(
+                    deleted_message_id,
+                    "A chat message was removed.".to_string(),
+                    true,
+                    session_id,
+                    target_id,
+                    timestamp,
+                    received_at,
+                    "channel.chat.message_delete",
+                ),
+                None => moderation_row(
+                    message_id,
+                    "Twitch reported a deleted message without its message id.".to_string(),
+                    false,
+                    session_id,
+                    target_id,
+                    timestamp,
+                    received_at,
+                    "channel.chat.message_delete:missing-message-id",
+                ),
+            })
+        }
         "channel.chat.clear" => Some(moderation_row(
             message_id,
             "Chat was cleared.".to_string(),
@@ -587,6 +665,7 @@ async fn run_eventsub_session(
                     set_provider_and_emit(
                         state,
                         StreamPlatform::Twitch,
+                        config.target_id.as_deref(),
                         LiveChatProviderConnectionState::Connected,
                         "Twitch live chat connected.",
                     )
@@ -663,6 +742,7 @@ pub async fn run_twitch_chat_connector(
     set_provider_and_emit(
         &state,
         StreamPlatform::Twitch,
+        config.target_id.as_deref(),
         LiveChatProviderConnectionState::Connecting,
         "Connecting to Twitch live chat…",
     )
@@ -686,6 +766,7 @@ pub async fn run_twitch_chat_connector(
                 set_provider_and_emit(
                     &state,
                     StreamPlatform::Twitch,
+                    config.target_id.as_deref(),
                     LiveChatProviderConnectionState::Reconnecting,
                     "Reconnecting to Twitch live chat…",
                 )
@@ -697,6 +778,7 @@ pub async fn run_twitch_chat_connector(
                 set_provider_and_emit(
                     &state,
                     StreamPlatform::Twitch,
+                    config.target_id.as_deref(),
                     LiveChatProviderConnectionState::Failed,
                     message,
                 )
@@ -714,6 +796,7 @@ mod tests {
 
     use axum::extract::State;
     use axum::extract::ws::{Message as AxumMessage, WebSocketUpgrade};
+    use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use axum::routing::{get, post};
     use axum::{Json, Router};
@@ -723,6 +806,59 @@ mod tests {
         LiveChatProviderConnectionState, LiveChatProviderState, current_status,
     };
     use crate::storage::Database;
+
+    #[derive(Clone)]
+    struct MockChatSendResponse {
+        status: StatusCode,
+        body: Value,
+    }
+
+    #[derive(Clone)]
+    struct MockRawChatSendResponse {
+        status: StatusCode,
+        body: String,
+    }
+
+    async fn mock_chat_send(State(response): State<MockChatSendResponse>) -> impl IntoResponse {
+        (response.status, Json(response.body))
+    }
+
+    async fn mock_raw_chat_send(
+        State(response): State<MockRawChatSendResponse>,
+    ) -> impl IntoResponse {
+        (response.status, response.body)
+    }
+
+    async fn spawn_chat_send_server(status: StatusCode, body: Value) -> String {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/helix/chat/messages", post(mock_chat_send))
+            .with_state(MockChatSendResponse { status, body });
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{address}")
+    }
+
+    async fn spawn_raw_chat_send_server(status: StatusCode, body: &str) -> String {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/helix/chat/messages", post(mock_raw_chat_send))
+            .with_state(MockRawChatSendResponse {
+                status,
+                body: body.to_string(),
+            });
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{address}")
+    }
 
     fn chat_message_frame() -> String {
         json!({
@@ -836,16 +972,18 @@ mod tests {
 
     fn twitch_provider_row() -> LiveChatProviderState {
         LiveChatProviderState {
+            id: "twitch".to_string(),
             platform: StreamPlatform::Twitch,
             target_id: Some("twitch".to_string()),
             account_id: Some("broadcaster-1".to_string()),
             account_label: Some("Twitch Channel".to_string()),
+            read: crate::live_chat::CommentsReadState::Connecting,
+            write: crate::live_chat::CommentsWriteState::Ready,
             state: LiveChatProviderConnectionState::Connecting,
             message: "Connecting to Twitch live chat…".to_string(),
             last_connected_at: None,
             last_message_at: None,
             last_error: None,
-            capabilities: vec!["available".to_string()],
         }
     }
 
@@ -856,7 +994,7 @@ mod tests {
             if snapshot
                 .messages
                 .iter()
-                .any(|message| message.id == "twitch:chat-1")
+                .any(|message| message.id == "session-1:twitch:twitch:chat-1")
             {
                 return snapshot;
             }
@@ -864,6 +1002,80 @@ mod tests {
                 panic!("timed out waiting for mocked Twitch chat message: {snapshot:?}");
             }
             sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    fn sender_config(api_base_url: String) -> TwitchChatSenderConfig {
+        TwitchChatSenderConfig {
+            access_token: "token".to_string(),
+            client_id: "client".to_string(),
+            broadcaster_user_id: "broadcaster".to_string(),
+            sender_user_id: "sender".to_string(),
+            api_base_url: Some(api_base_url),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_parses_delivery_receipt() {
+        let base = spawn_chat_send_server(
+            StatusCode::OK,
+            json!({ "data": [{ "message_id": "tw-sent-1", "is_sent": true }] }),
+        )
+        .await;
+        let receipt =
+            send_twitch_chat_message(&reqwest::Client::new(), &sender_config(base), "hello")
+                .await
+                .unwrap();
+        assert_eq!(receipt.provider_message_id.as_deref(), Some("tw-sent-1"));
+    }
+
+    #[tokio::test]
+    async fn send_treats_dropped_success_response_as_failure() {
+        let base = spawn_chat_send_server(
+            StatusCode::OK,
+            json!({
+                "data": [{
+                    "message_id": "",
+                    "is_sent": false,
+                    "drop_reason": { "code": "automod_held", "message": "Held by AutoMod" }
+                }]
+            }),
+        )
+        .await;
+        let error =
+            send_twitch_chat_message(&reqwest::Client::new(), &sender_config(base), "hello")
+                .await
+                .unwrap_err();
+        assert_eq!(error, "Held by AutoMod");
+    }
+
+    #[tokio::test]
+    async fn send_rejects_sent_response_without_provider_message_id() {
+        let base = spawn_chat_send_server(
+            StatusCode::OK,
+            json!({ "data": [{ "is_sent": true, "message_id": "" }] }),
+        )
+        .await;
+        let error =
+            send_twitch_chat_message(&reqwest::Client::new(), &sender_config(base), "hello")
+                .await
+                .unwrap_err();
+        assert!(error.contains("without a message id"));
+    }
+
+    #[tokio::test]
+    async fn send_classifies_non_json_auth_and_rate_limit_errors_from_status() {
+        for (status, expected) in [
+            (StatusCode::UNAUTHORIZED, "reconnect Twitch"),
+            (StatusCode::TOO_MANY_REQUESTS, "rate-limited"),
+        ] {
+            let base = spawn_raw_chat_send_server(status, "not-json").await;
+            let error =
+                send_twitch_chat_message(&reqwest::Client::new(), &sender_config(base), "hello")
+                    .await
+                    .unwrap_err();
+            assert!(error.contains(expected), "{status}: {error}");
+            assert!(!error.contains("unreadable"), "{status}: {error}");
         }
     }
 
@@ -903,7 +1115,7 @@ mod tests {
         assert_eq!(twitch.state, LiveChatProviderConnectionState::Connected);
         assert_eq!(snapshot.messages.len(), 1);
         let message = &snapshot.messages[0];
-        assert_eq!(message.id, "twitch:chat-1");
+        assert_eq!(message.id, "session-1:twitch:twitch:chat-1");
         assert_eq!(message.message_text, "hi Kappa");
         assert_eq!(
             message.author_avatar_url.as_deref(),
@@ -996,7 +1208,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(message.id, "twitch:chat-1");
+        assert_eq!(message.id, "s1:twitch:t1:chat-1");
         assert_eq!(message.provider_message_id, "chat-1");
         assert_eq!(message.platform, StreamPlatform::Twitch);
         assert_eq!(message.target_id.as_deref(), Some("t1"));
@@ -1063,7 +1275,7 @@ mod tests {
     fn message_delete_and_clear_become_safe_rows() {
         let deleted = normalize_notification(
             "channel.chat.message_delete",
-            &json!({ "target_message_id": "x" }),
+            &json!({ "message_id": "x" }),
             "del-1",
             None,
             "s1",
@@ -1073,6 +1285,22 @@ mod tests {
         .unwrap();
         assert_eq!(deleted.event_type, LiveChatEventType::Deleted);
         assert!(deleted.is_deleted);
+        assert_eq!(deleted.provider_message_id, "x");
+        assert_eq!(deleted.id, "s1:twitch:default:x");
+
+        let malformed = normalize_notification(
+            "channel.chat.message_delete",
+            &json!({ "target_user_id": "viewer-1" }),
+            "delivery-id-not-a-chat-id",
+            None,
+            "s1",
+            None,
+            "now",
+        )
+        .unwrap();
+        assert_eq!(malformed.event_type, LiveChatEventType::Moderation);
+        assert!(!malformed.is_deleted);
+        assert!(malformed.message_text.contains("without its message id"));
 
         let cleared = normalize_notification(
             "channel.chat.clear_user_messages",

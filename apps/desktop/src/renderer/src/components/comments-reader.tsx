@@ -1,44 +1,60 @@
-import { PaperPlaneRight, PushPin, Eye } from '@phosphor-icons/react'
+import { ChatCircle, Eye, PaperPlaneRight, PushPin } from '@phosphor-icons/react'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
+import { CommentRow, commentHighlightPresentationForMessage } from '@/components/comment-row'
+import { CommentsDestinationStatus } from '@/components/comments-destination-status'
 import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platform-icon'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput
+} from '@/components/ui/input-group'
+import { Kbd } from '@/components/ui/kbd'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { Separator } from '@/components/ui/separator'
 import type {
+  CommentHighlightState,
+  CommentsSendOperation,
+  CommentsViewMode,
   LiveChatMessage,
   LiveChatProviderState,
   LiveChatSnapshot,
   StreamPlatform,
   ViewerSample
 } from '@/lib/backend'
-import { AvatarCircle } from '@/lib/chat-avatar'
 import { CHAT_SEND_MAX_CHARS, validateChatDraft, type ChatSendFailure } from '@/lib/chat-send'
 import { liveChatEmptyMessage, sortMessagesChronological } from '@/lib/live-chat-view'
-import { viewerChipDetail, viewerChipLabel, viewerSampleStale } from '@/lib/viewer-count-view'
 import { cn } from '@/lib/utils'
+import { viewerChipDetail, viewerChipLabel, viewerSampleStale } from '@/lib/viewer-count-view'
 
 const BOTTOM_THRESHOLD_PX = 64
 
-function formatTime(iso: string): string {
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+function scrollViewport(root: HTMLDivElement | null): HTMLDivElement | null {
+  return root?.querySelector<HTMLDivElement>('[data-slot="scroll-area-viewport"]') ?? null
 }
 
-// The detached Comments window's reader: a glanceable, big-text feed for a
-// second monitor — minimal chrome (a drag bar with pin + clear), no filter
-// chips. Deliberately distinct from the dense in-app LiveChatPanel
-// (purpose-built reader, per the plan's Auto-Grill Verdict). Live data arrives
-// via IPC relay; this renders whatever snapshot it is handed.
+// The detached Comments window is a glanceable, larger-text reader for a
+// second monitor. It deliberately shares CommentRow with the dense in-app
+// panel so platform identity, paid state, and on-stream state cannot drift.
 export function CommentsReader({
   snapshot,
   onClear,
   alwaysOnTop = false,
   onToggleAlwaysOnTop,
   highlightedId = null,
+  highlightState,
+  highlightApplyingId = null,
+  highlightFailure = null,
+  viewMode,
+  onBackToLive,
   onHighlight,
   sendTargets = [],
   sendPending = false,
+  sendOperation = null,
   sendFailures = [],
   onSend,
   viewerSample = null
@@ -47,73 +63,104 @@ export function CommentsReader({
   onClear?: () => void
   alwaysOnTop?: boolean
   onToggleAlwaysOnTop?: () => void
-  /** Latest live concurrent-viewer sample (viewer rider V2); null hides the chip. */
+  /** Latest live concurrent-viewer sample; null hides the chip. */
   viewerSample?: ViewerSample | null
-  /** The comment currently shown ON the stream (relayed from the main renderer). */
+  /** The comment currently shown on the stream. */
   highlightedId?: string | null
-  /** Click-to-highlight: show/replace/unpin this comment on the stream. */
+  highlightState?: CommentHighlightState
+  highlightApplyingId?: string | null
+  /** A failed command is local UI feedback; it never replaces backend overlay truth. */
+  highlightFailure?: { messageId: string; reason: string } | null
+  viewMode?: CommentsViewMode
+  onBackToLive?: () => void
+  /** Click a viewer comment to show, replace, or remove it on the stream. */
   onHighlight?: (message: LiveChatMessage) => void
-  /** Send-to-all input (S5): platforms the message will reach right now. */
+  /** Platforms the shared composer reaches right now. */
   sendTargets?: StreamPlatform[]
   sendPending?: boolean
+  sendOperation?: CommentsSendOperation | null
   sendFailures?: ChatSendFailure[]
   onSend?: (text: string) => void
 }): ReactElement {
   const messages = sortMessagesChronological(snapshot.messages)
-  const savedTranscript = messages.length > 0 && snapshot.providers.length === 0
-  const feedRef = useRef<HTMLDivElement>(null)
-  // Staleness re-check for the viewer chip (15s tick while a sample exists).
+  const live = Boolean(snapshot.sessionId)
+  const mode =
+    viewMode?.kind === 'history'
+      ? 'History'
+      : live
+        ? 'Live'
+        : messages.length > 0
+          ? 'History'
+          : 'Idle'
+  const scrollRootRef = useRef<HTMLDivElement>(null)
+  const viewportRef = useRef<HTMLDivElement | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
-  useEffect(() => {
-    if (!viewerSample) {
-      return
-    }
-    const timer = setInterval(() => setNowMs(Date.now()), 15_000)
-    return () => clearInterval(timer)
-  }, [viewerSample])
   const [pinned, setPinned] = useState(true)
   const [unread, setUnread] = useState(0)
   const previousCount = useRef(messages.length)
 
-  // Auto-scroll while pinned to the bottom; otherwise count what arrived.
+  useEffect(() => {
+    if (!viewerSample) return
+    const timer = setInterval(() => setNowMs(Date.now()), 15_000)
+    return () => clearInterval(timer)
+  }, [viewerSample])
+
+  useEffect(() => {
+    const viewport = scrollViewport(scrollRootRef.current)
+    viewportRef.current = viewport
+    if (!viewport) return
+
+    const handleScroll = (): void => {
+      const atBottom =
+        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= BOTTOM_THRESHOLD_PX
+      setPinned(atBottom)
+      if (atBottom) setUnread(0)
+    }
+
+    viewport.addEventListener('scroll', handleScroll, { passive: true })
+    return () => viewport.removeEventListener('scroll', handleScroll)
+  }, [])
+
   useEffect(() => {
     const added = messages.length - previousCount.current
     previousCount.current = messages.length
+    const viewport = viewportRef.current
     if (pinned) {
-      feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight })
+      viewport?.scrollTo({ top: viewport.scrollHeight })
     } else if (added > 0) {
       setUnread((value) => value + added)
     }
   }, [messages.length, pinned])
 
-  const onScroll = (): void => {
-    const element = feedRef.current
-    if (!element) return
-    const atBottom =
-      element.scrollHeight - element.scrollTop - element.clientHeight <= BOTTOM_THRESHOLD_PX
-    setPinned(atBottom)
-    if (atBottom) setUnread(0)
-  }
-
   const jumpToLatest = (): void => {
-    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: 'smooth' })
+    const viewport = viewportRef.current
+    viewport?.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
     setPinned(true)
     setUnread(0)
   }
 
   return (
     <div className="relative flex h-screen flex-col bg-background text-foreground">
-      {/* The whole drag bar moves the window (hiddenInset titlebar); the
-          controls opt back out of the drag region. */}
-      {/* pl clears the macOS traffic lights — the hiddenInset titlebar draws
-          close/minimize INSIDE this bar, over the title text otherwise. */}
-      <header className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border pl-[78px] pr-3 [-webkit-app-region:drag]">
-        <span className="text-xs font-medium text-subtle">
-          {savedTranscript ? 'Saved comments' : 'Comments'}
-        </span>
+      <header className="flex min-h-10 shrink-0 items-center gap-2 pl-[78px] pr-3 [-webkit-app-region:drag]">
+        <span className="shrink-0 text-xs font-medium">Comments</span>
+        <Badge
+          className="h-4 shrink-0 px-1.5 text-[10px]"
+          variant={mode === 'Live' ? 'success' : mode === 'History' ? 'secondary' : 'outline'}
+        >
+          {mode}
+        </Badge>
+        {viewMode?.kind === 'history' ? (
+          <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
+            {viewMode.title} · {new Date(viewMode.startedAt).toLocaleDateString()}
+          </span>
+        ) : onClear ? (
+          <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
+            Clear view keeps Library history.
+          </span>
+        ) : (
+          <span className="flex-1" />
+        )}
         {viewerSample ? (
-          /* Viewer rider V2: concurrent VIEWERS ("watching"), never "subs";
-             stale samples grey out instead of freezing at a confident number. */
           <span
             className={cn(
               'flex items-center gap-1 text-xs tabular-nums',
@@ -121,70 +168,85 @@ export function CommentsReader({
             )}
             title={viewerChipDetail(viewerSample)}
           >
-            <Eye className="size-3.5 shrink-0" weight="duotone" />
+            <Eye aria-hidden className="size-3.5 shrink-0" weight="duotone" />
             {viewerChipLabel(viewerSample)}
           </span>
         ) : null}
-        <div className="flex items-center gap-0.5">
+        <div className="flex items-center gap-0.5 [-webkit-app-region:no-drag]">
+          {viewMode?.kind === 'history' && onBackToLive ? (
+            <Button size="sm" type="button" variant="ghost" onClick={onBackToLive}>
+              Back to live
+            </Button>
+          ) : null}
           {onToggleAlwaysOnTop ? (
             <Button
               aria-label="Keep this window on top"
               aria-pressed={alwaysOnTop}
-              className={cn(
-                'size-7 [-webkit-app-region:no-drag]',
-                alwaysOnTop && 'text-foreground'
-              )}
-              size="icon"
+              className={cn(alwaysOnTop && 'text-foreground')}
+              size="icon-sm"
+              type="button"
               variant="ghost"
               onClick={onToggleAlwaysOnTop}
             >
-              <PushPin className="size-4" weight={alwaysOnTop ? 'fill' : 'regular'} />
+              <PushPin data-icon="inline-start" weight={alwaysOnTop ? 'fill' : 'regular'} />
             </Button>
           ) : null}
           {onClear ? (
-            <Button
-              className="h-7 [-webkit-app-region:no-drag]"
-              size="sm"
-              variant="ghost"
-              onClick={onClear}
-            >
-              Clear
+            <Button size="sm" type="button" variant="ghost" onClick={onClear}>
+              Clear view
             </Button>
           ) : null}
         </div>
       </header>
+      <Separator />
 
-      <div ref={feedRef} className="flex-1 overflow-y-auto px-3 py-2" onScroll={onScroll}>
+      <ScrollArea ref={scrollRootRef} className="min-h-0 flex-1 px-3 py-2">
         {messages.length === 0 ? (
           <OffAir providers={snapshot.providers} />
         ) : (
-          <ol className="flex flex-col gap-2">
+          <ol aria-label="Comments" className="flex flex-col gap-1">
             {messages.map((message) => (
-              <MessageRow
+              <CommentRow
                 key={message.id}
-                highlighted={message.id === highlightedId}
+                density="comfortable"
+                highlight={commentHighlightPresentationForMessage({
+                  messageId: message.id,
+                  highlightedId,
+                  state: highlightState,
+                  applyingId: highlightApplyingId,
+                  failure: highlightFailure
+                })}
                 message={message}
-                onHighlight={onHighlight}
+                onHighlight={
+                  mode === 'Live' && viewMode?.kind !== 'history' ? onHighlight : undefined
+                }
               />
             ))}
           </ol>
         )}
-      </div>
+      </ScrollArea>
 
       {unread > 0 ? (
-        <button
+        <Button
+          className={cn(
+            'absolute inset-x-0 mx-auto w-fit shadow-soft',
+            onSend && mode === 'Live' ? 'bottom-16' : 'bottom-3'
+          )}
+          size="sm"
           type="button"
-          className="absolute inset-x-0 bottom-16 mx-auto w-fit rounded-chip border border-border bg-popover px-3 py-1 text-xs font-medium shadow-soft"
+          variant="secondary"
           onClick={jumpToLatest}
         >
-          {unread} new {unread === 1 ? 'message' : 'messages'} ↓
-        </button>
+          {unread} new {unread === 1 ? 'comment' : 'comments'} ↓
+        </Button>
       ) : null}
 
-      {onSend ? (
+      {onSend && mode === 'Live' && viewMode?.kind !== 'history' ? (
         <SendRow
           failures={sendFailures}
+          operation={sendOperation}
           pending={sendPending}
+          providers={snapshot.providers}
           targets={sendTargets}
           onSend={onSend}
         />
@@ -193,39 +255,40 @@ export function CommentsReader({
   )
 }
 
-// Send-to-all input (Comments upgrade S5): one message, every connected
-// platform that supports sending; the chips say exactly where it will go.
 function SendRow({
   targets,
+  providers,
   pending,
   failures,
+  operation,
   onSend
 }: {
   targets: StreamPlatform[]
+  providers: LiveChatProviderState[]
   pending: boolean
   failures: ChatSendFailure[]
+  operation: CommentsSendOperation | null
   onSend: (text: string) => void
 }): ReactElement {
   const [draft, setDraft] = useState('')
   const canSend = targets.length > 0 && !pending
   const submit = (): void => {
     const text = validateChatDraft(draft)
-    if (!text || !canSend) {
-      return
-    }
+    if (!text || !canSend) return
     onSend(text)
     setDraft('')
   }
+
   return (
-    <div className="shrink-0 border-t border-border px-3 py-2">
-      <div className="flex items-center gap-2">
-        <Input
-          aria-label="Send a message to your live chats"
-          className="h-8 flex-1 text-sm"
-          disabled={!canSend && targets.length === 0}
+    <div className="shrink-0 px-3 py-2">
+      <Separator className="mb-2" />
+      <InputGroup>
+        <InputGroupInput
+          aria-label="Send a comment to all writable destinations"
+          disabled={targets.length === 0}
           maxLength={CHAT_SEND_MAX_CHARS}
           placeholder={
-            targets.length > 0 ? 'Message your live chats…' : 'Connect a chat to send messages'
+            targets.length > 0 ? 'Message writable destinations…' : 'No writable destinations'
           }
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
@@ -236,146 +299,87 @@ function SendRow({
             }
           }}
         />
-        <span className="flex items-center gap-1" title="This message goes to these platforms">
-          {targets.map((platform) => (
-            <ChatPlatformIcon key={platform} platform={platform} />
-          ))}
-        </span>
-        <Button
-          aria-label="Send"
-          className="size-8"
-          disabled={!canSend || !validateChatDraft(draft)}
-          size="icon"
-          variant="ghost"
-          onClick={submit}
-        >
-          <PaperPlaneRight className="size-4" weight="fill" />
-        </Button>
+        <InputGroupAddon align="inline-end">
+          <Kbd aria-label="Enter">↵</Kbd>
+          <InputGroupButton
+            aria-label={pending ? 'Sending comment' : 'Send comment to all writable destinations'}
+            disabled={!canSend || !validateChatDraft(draft)}
+            size="icon-xs"
+            onClick={submit}
+          >
+            <PaperPlaneRight data-icon="inline-end" weight="fill" />
+          </InputGroupButton>
+        </InputGroupAddon>
+      </InputGroup>
+      <div className="mt-1.5">
+        <CommentsDestinationStatus
+          failures={failures}
+          mode="composer"
+          providers={providers}
+          sendTargets={targets}
+        />
+        {operation ? (
+          <div className="mt-1.5 flex flex-col gap-1" aria-label="Latest comment delivery">
+            <Badge
+              className="max-w-full truncate"
+              title={operation.text}
+              variant={
+                operation.phase === 'sent'
+                  ? 'success'
+                  : operation.phase === 'failed' || operation.phase === 'delivery-unknown'
+                    ? 'destructive'
+                    : 'secondary'
+              }
+            >
+              You · {operation.text} · {operation.phase.replace('-', ' ')}
+            </Badge>
+            <div className="flex flex-wrap gap-1">
+              {operation.destinations.map((destination) => (
+                <Badge
+                  key={destination.destinationId}
+                  title={destination.reason}
+                  variant={
+                    destination.phase === 'sent'
+                      ? 'success'
+                      : destination.phase === 'failed' || destination.phase === 'timed-out-unknown'
+                        ? 'destructive'
+                        : destination.phase === 'pending'
+                          ? 'warning'
+                          : 'outline'
+                  }
+                >
+                  <ChatPlatformIcon decorative platform={destination.platform} />
+                  {CHAT_PLATFORM_LABELS[destination.platform]} ·{' '}
+                  {destination.phase === 'timed-out-unknown'
+                    ? 'Unknown'
+                    : destination.phase === 'read-only'
+                      ? 'Receive-only'
+                      : destination.phase === 'pending'
+                        ? 'Sending…'
+                        : destination.phase.charAt(0).toUpperCase() + destination.phase.slice(1)}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
-      {failures.map((failure) => (
-        <p
-          className="mt-1 text-[11px] text-warning-foreground dark:text-warning"
-          key={`${failure.platform}:${failure.reason}`}
-        >
-          {CHAT_PLATFORM_LABELS[failure.platform]}: {failure.reason}
-        </p>
-      ))}
     </div>
   )
 }
 
-// Off-air / waiting state: show platform readiness if any provider is attached,
-// otherwise prompt to start a livestream. Mirrors the in-app panel's copy.
 function OffAir({ providers }: { providers: LiveChatProviderState[] }): ReactElement {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-      {providers.length > 0 ? (
-        <>
-          <div className="flex flex-wrap justify-center gap-1.5">
-            {providers.map((provider) => (
-              <ProviderPill key={provider.platform} provider={provider} />
-            ))}
-          </div>
-          <p className="text-sm text-subtle">
-            {liveChatEmptyMessage({ providers }, 'Start a livestream to see comments here.')}
-          </p>
-        </>
-      ) : (
-        <p className="text-sm text-subtle">Start a livestream to see comments here.</p>
-      )}
-    </div>
-  )
-}
-
-function ProviderPill({ provider }: { provider: LiveChatProviderState }): ReactElement {
-  const tone =
-    provider.state === 'connected'
-      ? 'text-success'
-      : provider.state === 'failed'
-        ? 'text-destructive'
-        : 'text-warning'
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded-chip border border-border px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-      <span className={cn('size-1.5 shrink-0 rounded-full bg-current', tone)} />
-      {CHAT_PLATFORM_LABELS[provider.platform]}
-    </span>
-  )
-}
-
-function MessageRow({
-  message,
-  highlighted = false,
-  onHighlight
-}: {
-  message: LiveChatMessage
-  highlighted?: boolean
-  onHighlight?: (message: LiveChatMessage) => void
-}): ReactElement {
-  const isPaid = message.eventType === 'paid'
-  const isSystem =
-    message.eventType === 'system' ||
-    message.eventType === 'moderation' ||
-    message.eventType === 'membership'
-  // Only real viewer messages can go on stream.
-  const highlightable = Boolean(onHighlight) && !isSystem && !message.isDeleted
-  return (
-    <li
-      aria-pressed={highlightable ? highlighted : undefined}
-      role={highlightable ? 'button' : undefined}
-      tabIndex={highlightable ? 0 : undefined}
-      title={
-        highlightable
-          ? highlighted
-            ? 'Remove from stream'
-            : 'Show this comment on the stream'
-          : undefined
-      }
-      className={cn(
-        'flex items-start gap-2 rounded-row px-2 py-1.5 text-[15px] leading-snug',
-        isPaid && 'bg-warning/10 ring-1 ring-warning/30',
-        isSystem && 'text-muted-foreground italic',
-        message.isDeleted && 'text-muted-foreground line-through',
-        highlightable && 'cursor-pointer transition-colors hover:bg-accent',
-        highlighted && 'bg-accent ring-1 ring-ring'
-      )}
-      onClick={highlightable ? () => onHighlight?.(message) : undefined}
-      onKeyDown={
-        highlightable
-          ? (event) => {
-              if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault()
-                onHighlight?.(message)
-              }
-            }
-          : undefined
-      }
-    >
-      <AvatarCircle
-        avatarUrl={message.authorAvatarUrl}
-        className="mt-0.5"
-        name={message.authorName}
-      />
-      <span className="min-w-0 flex-1">
-        <ChatPlatformIcon
-          className="mr-1.5 inline-block align-[-2px]"
-          platform={message.platform}
-        />
-        <span className="font-semibold">{message.authorName}</span>
-        {message.amountText ? (
-          <span className="mx-1 rounded-chip bg-warning/15 px-1.5 py-0.5 text-[11px] font-medium text-warning">
-            {message.amountText}
-          </span>
-        ) : null}{' '}
-        <span className="text-foreground">{message.messageText}</span>
-        <span className="ml-1.5 align-baseline text-[10px] text-muted-foreground/60 tabular-nums">
-          {formatTime(message.receivedAt)}
-        </span>
-        {highlighted ? (
-          <span className="ml-1.5 rounded-chip bg-success/15 px-1.5 py-0.5 align-baseline text-[10px] font-medium text-success">
-            On stream
-          </span>
-        ) : null}
-      </span>
-    </li>
+    <Empty className="h-full border-0 p-6">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <ChatCircle weight="duotone" />
+        </EmptyMedia>
+        <EmptyTitle className="text-base">No comments yet</EmptyTitle>
+        <EmptyDescription>
+          {liveChatEmptyMessage({ providers }, 'Start a livestream to see comments here.')}
+        </EmptyDescription>
+      </EmptyHeader>
+      <CommentsDestinationStatus providers={providers} />
+    </Empty>
   )
 }

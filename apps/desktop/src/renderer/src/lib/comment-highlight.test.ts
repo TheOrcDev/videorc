@@ -3,6 +3,10 @@ import { describe, expect, it } from 'vitest'
 import type { LiveChatMessage } from '@/lib/backend'
 import {
   HIGHLIGHT_MAX_TEXT_LINES,
+  commentHighlightExpiryDelay,
+  commentHighlightIdentity,
+  commentHighlightPlatformBadge,
+  expireCommentHighlightState,
   highlightMetrics,
   layoutCommentHighlight,
   nextHighlightState,
@@ -50,12 +54,13 @@ describe('layoutCommentHighlight', () => {
       authorName: 'Orc Dev',
       text: 'what capture card is that?',
       canvasWidth: 1920,
+      platform: 'youtube',
       measure
     })!
     expect(layout.textLines.length).toBeGreaterThan(0)
     expect(layout.cardWidthPx).toBeLessThanOrEqual(Math.floor(1920 * 0.6))
     expect(layout.cardHeightPx).toBeGreaterThan(layout.metrics.avatarPx)
-    expect(layout.name).toBe('Orc Dev')
+    expect(layout.name).toBe('YouTube · Orc Dev')
   })
 
   it('falls back to a Viewer name and survives empty text', () => {
@@ -67,6 +72,17 @@ describe('layoutCommentHighlight', () => {
     })!
     expect(layout.name).toBe('Viewer')
     expect(layout.textLines).toEqual([])
+  })
+
+  it('preserves platform identity on the stream card', () => {
+    expect(commentHighlightIdentity('Orc Dev', 'twitch')).toBe('Twitch · Orc Dev')
+    expect(commentHighlightIdentity(' ', 'x')).toBe('X · Viewer')
+    expect(commentHighlightPlatformBadge('youtube')).toEqual({
+      label: 'YouTube',
+      color: '#FF0033',
+      glyph: 'play'
+    })
+    expect(commentHighlightPlatformBadge(undefined)).toBeNull()
   })
 })
 
@@ -93,5 +109,40 @@ describe('nextHighlightState', () => {
     const shown = nextHighlightState(null, { type: 'toggle', message: message('a'), nowMs: 1 })
     expect(nextHighlightState(shown, { type: 'clear' })).toBeNull()
     expect(nextHighlightState(null, { type: 'clear' })).toBeNull()
+  })
+})
+
+describe('backend highlight expiry presentation', () => {
+  it('stops claiming On stream when the backend-owned expiry passes', () => {
+    const live = {
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      generation: 4,
+      phase: 'live',
+      expiresAt: '2026-07-10T12:00:10.000Z'
+    } as const
+    const before = Date.parse('2026-07-10T12:00:09.000Z')
+    const after = Date.parse('2026-07-10T12:00:10.001Z')
+
+    expect(commentHighlightExpiryDelay(live, before)).toBe(1_000)
+    expect(expireCommentHighlightState(live, live.generation, before)).toBe(live)
+    expect(expireCommentHighlightState(live, live.generation, after)).toEqual({
+      generation: 4,
+      phase: 'idle'
+    })
+  })
+
+  it('does not let an old expiry timer clear a newer generation', () => {
+    const newer = {
+      sessionId: 'session-1',
+      messageId: 'message-2',
+      generation: 5,
+      phase: 'live',
+      expiresAt: '2026-07-10T12:00:20.000Z'
+    } as const
+
+    expect(expireCommentHighlightState(newer, 4, Date.parse('2026-07-10T12:00:30.000Z'))).toBe(
+      newer
+    )
   })
 })

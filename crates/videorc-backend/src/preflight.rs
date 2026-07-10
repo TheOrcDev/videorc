@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::live_chat::{CommentsReadState, CommentsWriteState};
 use crate::streaming::{
     PlatformAccount, PlatformAccountStatus, StreamAuthMode, StreamMetadataDraft, StreamPlatform,
     StreamTargetSettings, StreamingSettings,
@@ -37,9 +38,10 @@ pub struct GoLiveDestinationPreflight {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_label: Option<String>,
     pub message: String,
-    /// Live-chat readiness, independent of stream `ready` (e.g. X stays false even when the
-    /// stream itself is ready). Drives the Go Live confirmation's separate chat-readiness line.
-    pub chat_ready: bool,
+    /// Comment capability is independent of stream `ready`: chat limitations are warnings and
+    /// never block a valid video destination.
+    pub chat_read: CommentsReadState,
+    pub chat_write: CommentsWriteState,
     pub chat_message: String,
 }
 
@@ -236,8 +238,17 @@ fn destination_preflight(
         }
     }
 
-    let chat =
-        crate::live_chat::chat_capability(target.platform, account_for_target(target, accounts));
+    let (chat_read, chat_write, chat_message) = destination_chat_preflight(target, accounts);
+    if ready
+        && target.platform != StreamPlatform::Custom
+        && (chat_read != CommentsReadState::Ready || chat_write != CommentsWriteState::Ready)
+    {
+        issues.push(target_issue(
+            target,
+            GoLivePreflightIssueSeverity::Warning,
+            chat_message.clone(),
+        ));
+    }
     GoLiveDestinationPreflight {
         target_id: target.id.clone(),
         platform: target.platform,
@@ -249,9 +260,82 @@ fn destination_preflight(
         account_id,
         account_label,
         message,
-        chat_ready: chat.chat_read_available,
-        chat_message: chat.message,
+        chat_read,
+        chat_write,
+        chat_message,
     }
+}
+
+fn destination_chat_preflight(
+    target: &StreamTargetSettings,
+    accounts: &[PlatformAccount],
+) -> (CommentsReadState, CommentsWriteState, String) {
+    let capability =
+        crate::live_chat::chat_capability(target.platform, account_for_target(target, accounts));
+    if target.platform == StreamPlatform::X {
+        let account = account_for_target(target, accounts);
+        let account_connected =
+            account.is_some_and(|account| account.status == PlatformAccountStatus::Connected);
+        let (native_available, capability_message) = match x_live::x_native_live_capability(account)
+        {
+            Ok(capability) => (capability.native_available, capability.message),
+            Err(error) => (false, error.to_string()),
+        };
+        return x_destination_chat_preflight(
+            target.auth_mode,
+            account_connected,
+            native_available,
+            capability_message,
+        );
+    }
+
+    let message = match (target.platform, capability.read, capability.write) {
+        (StreamPlatform::Twitch, CommentsReadState::Ready, CommentsWriteState::Ready) => {
+            "Twitch comments are ready to read and send.".to_string()
+        }
+        (StreamPlatform::Twitch, CommentsReadState::Ready, CommentsWriteState::MissingScope) => {
+            "Twitch comments are readable. Reconnect Twitch to send from Videorc.".to_string()
+        }
+        (StreamPlatform::Twitch, CommentsReadState::Unavailable, CommentsWriteState::Ready) => {
+            "Reconnect Twitch to read comments; sending permission is already granted.".to_string()
+        }
+        (
+            StreamPlatform::Twitch,
+            CommentsReadState::Unavailable,
+            CommentsWriteState::MissingScope,
+        ) => "Reconnect Twitch to read comments and send from Videorc.".to_string(),
+        _ => capability.message,
+    };
+    (capability.read, capability.write, message)
+}
+
+fn x_destination_chat_preflight(
+    auth_mode: StreamAuthMode,
+    account_connected: bool,
+    native_available: bool,
+    capability_message: String,
+) -> (CommentsReadState, CommentsWriteState, String) {
+    if auth_mode != StreamAuthMode::Oauth {
+        return (
+            CommentsReadState::Unavailable,
+            CommentsWriteState::ReadOnly,
+            "Manual RTMP has no native X broadcast context, so X live chat is receive-only and unavailable."
+                .to_string(),
+        );
+    }
+    if !account_connected || !native_available {
+        return (
+            CommentsReadState::Unavailable,
+            CommentsWriteState::ReadOnly,
+            capability_message,
+        );
+    }
+    (
+        CommentsReadState::WaitingForBroadcastContext,
+        CommentsWriteState::ReadOnly,
+        "X comments attach after the native broadcast is published; X live chat is receive-only."
+            .to_string(),
+    )
 }
 
 fn effective_metadata(
@@ -392,11 +476,91 @@ mod tests {
                 .iter()
                 .any(|issue| issue.platform == Some(StreamPlatform::Youtube))
         );
-        // Chat readiness is reported independently of stream `ready`: X needs native live
-        // credentials and publish metadata before chat can connect.
-        assert!(!x.chat_ready);
-        assert!(x.chat_message.to_lowercase().contains("x native live"));
+        // This checkout has no release X consumer/user token, so preflight must not pretend
+        // it is merely waiting for publish context.
+        assert_eq!(x.chat_read, CommentsReadState::Unavailable);
+        assert_eq!(x.chat_write, CommentsWriteState::ReadOnly);
+        assert!(x.chat_message.contains("OAuth 1.0a"));
+        assert_eq!(youtube.chat_read, CommentsReadState::Unavailable);
+        assert_eq!(youtube.chat_write, CommentsWriteState::Unavailable);
         assert!(!youtube.chat_message.is_empty());
+    }
+
+    #[test]
+    fn x_comments_wait_for_publish_only_after_native_oauth_setup_is_ready() {
+        let waiting = x_destination_chat_preflight(
+            StreamAuthMode::Oauth,
+            true,
+            true,
+            "X native live ready.".to_string(),
+        );
+        assert_eq!(waiting.0, CommentsReadState::WaitingForBroadcastContext);
+        assert_eq!(waiting.1, CommentsWriteState::ReadOnly);
+        assert!(
+            waiting
+                .2
+                .contains("after the native broadcast is published")
+        );
+
+        let missing_account = x_destination_chat_preflight(
+            StreamAuthMode::Oauth,
+            false,
+            true,
+            "Connect X before going live.".to_string(),
+        );
+        assert_eq!(missing_account.0, CommentsReadState::Unavailable);
+
+        let manual = x_destination_chat_preflight(
+            StreamAuthMode::ManualRtmp,
+            true,
+            true,
+            "ignored".to_string(),
+        );
+        assert_eq!(manual.0, CommentsReadState::Unavailable);
+        assert!(manual.2.contains("Manual RTMP"));
+    }
+
+    #[test]
+    fn twitch_comment_read_and_write_scopes_are_independent_non_blocking_warnings() {
+        let read_only = twitch_manual_preflight(&[crate::live_chat::TWITCH_CHAT_SCOPE]);
+        assert!(read_only.valid, "{read_only:?}");
+        assert_eq!(
+            read_only.destinations[0].chat_read,
+            CommentsReadState::Ready
+        );
+        assert_eq!(
+            read_only.destinations[0].chat_write,
+            CommentsWriteState::MissingScope
+        );
+        assert_eq!(read_only.issues.len(), 1);
+        assert_eq!(
+            read_only.issues[0].severity,
+            GoLivePreflightIssueSeverity::Warning
+        );
+
+        let write_only = twitch_manual_preflight(&[crate::live_chat::TWITCH_CHAT_WRITE_SCOPE]);
+        assert!(write_only.valid, "{write_only:?}");
+        assert_eq!(
+            write_only.destinations[0].chat_read,
+            CommentsReadState::Unavailable
+        );
+        assert_eq!(
+            write_only.destinations[0].chat_write,
+            CommentsWriteState::Ready
+        );
+        assert_eq!(
+            write_only.issues[0].severity,
+            GoLivePreflightIssueSeverity::Warning
+        );
+
+        let both = twitch_manual_preflight(&[
+            crate::live_chat::TWITCH_CHAT_SCOPE,
+            crate::live_chat::TWITCH_CHAT_WRITE_SCOPE,
+        ]);
+        assert!(both.valid, "{both:?}");
+        assert_eq!(both.destinations[0].chat_read, CommentsReadState::Ready);
+        assert_eq!(both.destinations[0].chat_write, CommentsWriteState::Ready);
+        assert!(both.issues.is_empty());
     }
 
     #[test]
@@ -484,6 +648,38 @@ mod tests {
             updated_at: "2026-06-03T00:00:00Z".to_string(),
             status: PlatformAccountStatus::Connected,
         }
+    }
+
+    fn twitch_manual_preflight(scopes: &[&str]) -> GoLivePreflight {
+        let mut targets = default_stream_targets();
+        let twitch = targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Twitch)
+            .unwrap();
+        twitch.enabled = true;
+        twitch.auth_mode = StreamAuthMode::ManualRtmp;
+        twitch.stream_key_present = true;
+        twitch.stream_key_secret_ref = Some("stream-target:twitch:test-key".to_string());
+        let streaming = StreamingSettings {
+            enabled: true,
+            mode: StreamMode::Single,
+            selected_target_id: Some(twitch.id.clone()),
+            default_output_preset: crate::protocol::VideoPreset::StreamSafe1080p30,
+            default_bitrate_kbps: 6000,
+            enabled_target_ids: vec![twitch.id.clone()],
+            targets,
+        };
+        let metadata = StreamMetadataDraft {
+            title: "Launch stream".to_string(),
+            ..default_stream_metadata_draft("2026-07-10T00:00:00Z".to_string())
+        };
+        let mut twitch_account = account(StreamPlatform::Twitch, "tw", "Twitch Channel");
+        twitch_account.scopes = scopes.iter().map(|scope| (*scope).to_string()).collect();
+        validate_go_live_preflight(
+            GoLivePreflightParams { streaming },
+            &metadata,
+            &[twitch_account],
+        )
     }
 
     fn platform_id(platform: StreamPlatform) -> &'static str {

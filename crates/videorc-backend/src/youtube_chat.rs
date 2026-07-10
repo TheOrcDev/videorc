@@ -21,8 +21,8 @@ use serde_json::Value;
 use tokio::time::sleep;
 
 use crate::live_chat::{
-    LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState, deliver_message,
-    live_chat_message_id, set_provider_and_emit,
+    LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState, ProviderSendReceipt,
+    deliver_message, live_chat_message_id, set_provider_and_emit,
 };
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
@@ -71,7 +71,7 @@ pub async fn send_youtube_chat_message(
     access_token: &str,
     live_chat_id: &str,
     text: &str,
-) -> Result<(), String> {
+) -> Result<ProviderSendReceipt, String> {
     let base = api_base_url.unwrap_or("https://www.googleapis.com/youtube/v3");
     let response = client
         .post(format!("{base}/liveChatMessages"))
@@ -81,14 +81,96 @@ pub async fn send_youtube_chat_message(
         .send()
         .await
         .map_err(|error| format!("Could not reach YouTube: {error}"))?;
-    if response.status().is_success() {
-        return Ok(());
-    }
     let status = response.status();
-    Err(match status.as_u16() {
-        401 | 403 => "YouTube rejected the send — reconnect YouTube to refresh access.".to_string(),
-        _ => format!("YouTube send failed ({status})."),
-    })
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let response_bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("Could not read YouTube's send response: {error}"))?;
+    if status.is_success() {
+        let body = serde_json::from_slice::<Value>(&response_bytes)
+            .map_err(|error| format!("YouTube returned an unreadable send response: {error}"))?;
+        let provider_message_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| "YouTube accepted the request without a message id.".to_string())?;
+        return Ok(ProviderSendReceipt {
+            provider_message_id: Some(provider_message_id.to_string()),
+        });
+    }
+
+    // Error responses are not guaranteed to be JSON. Classify the HTTP status
+    // first, then enrich it from a provider body when one is available.
+    let body = serde_json::from_slice::<Value>(&response_bytes).ok();
+    Err(classify_youtube_send_error(
+        status,
+        body.as_ref(),
+        retry_after.as_deref(),
+    ))
+}
+
+fn classify_youtube_send_error(
+    status: reqwest::StatusCode,
+    body: Option<&Value>,
+    retry_after: Option<&str>,
+) -> String {
+    let provider_code = body
+        .and_then(|body| body.pointer("/error/errors/0/reason"))
+        .and_then(Value::as_str);
+    let provider_message = body
+        .and_then(|body| body.pointer("/error/message"))
+        .and_then(Value::as_str);
+    let provider_reason = provider_message.or(provider_code);
+    let normalized_code = provider_code.unwrap_or_default().to_ascii_lowercase();
+    let normalized_message = provider_message.unwrap_or_default().to_ascii_lowercase();
+    let retry_suffix = || {
+        retry_after
+            .map(|seconds| format!("; retry after {seconds}s"))
+            .unwrap_or_default()
+    };
+
+    match status.as_u16() {
+        401 => "YouTube rejected the send — reconnect YouTube to refresh access.".to_string(),
+        403 if normalized_code.contains("livechatdisabled")
+            || normalized_message.contains("live chat is disabled") =>
+        {
+            "YouTube live chat is disabled for this broadcast.".to_string()
+        }
+        403 if normalized_code.contains("livechatended")
+            || normalized_message.contains("live chat has ended") =>
+        {
+            "YouTube live chat has ended for this broadcast.".to_string()
+        }
+        403 if normalized_code.contains("quota")
+            || normalized_code.contains("ratelimit")
+            || normalized_message.contains("quota")
+            || normalized_message.contains("rate limit") =>
+        {
+            format!(
+                "YouTube rate-limited or exhausted quota for the send{}.",
+                retry_suffix()
+            )
+        }
+        403 if matches!(
+            normalized_code.as_str(),
+            "autherror" | "forbidden" | "insufficientpermissions"
+        ) =>
+        {
+            "YouTube rejected the send — reconnect YouTube to refresh access.".to_string()
+        }
+        403 => provider_reason
+            .map(|reason| format!("YouTube send failed ({status}): {reason}"))
+            .unwrap_or_else(|| format!("YouTube send failed ({status}).")),
+        429 => format!("YouTube rate-limited the send{}.", retry_suffix()),
+        _ => provider_reason
+            .map(|reason| format!("YouTube send failed ({status}): {reason}"))
+            .unwrap_or_else(|| format!("YouTube send failed ({status}).")),
+    }
 }
 
 /// Which `liveChatMessages` endpoint a request targets.
@@ -137,6 +219,15 @@ struct LiveChatItemSnippet {
     super_chat_details: Option<AmountDetails>,
     #[serde(default)]
     super_sticker_details: Option<AmountDetails>,
+    #[serde(default)]
+    message_deleted_details: Option<MessageDeletedDetails>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageDeletedDetails {
+    #[serde(default)]
+    deleted_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -223,7 +314,7 @@ fn event_type_for(message_type: &str) -> LiveChatEventType {
         | "memberMilestoneChatEvent"
         | "membershipGiftingEvent"
         | "giftMembershipReceivedEvent" => LiveChatEventType::Membership,
-        "messageDeletedEvent" => LiveChatEventType::Deleted,
+        "messageDeletedEvent" | "tombstone" => LiveChatEventType::Deleted,
         "userBannedEvent" => LiveChatEventType::Moderation,
         _ => LiveChatEventType::System,
     }
@@ -240,7 +331,7 @@ fn system_text_for(message_type: &str, amount: Option<&str>) -> String {
         "memberMilestoneChatEvent" => "Member milestone".to_string(),
         "membershipGiftingEvent" => "Gifted memberships".to_string(),
         "giftMembershipReceivedEvent" => "Received a gifted membership".to_string(),
-        "messageDeletedEvent" => "Message deleted".to_string(),
+        "messageDeletedEvent" | "tombstone" => "Message deleted".to_string(),
         "userBannedEvent" => "A user was removed from chat".to_string(),
         "chatEndedEvent" => "Live chat has ended".to_string(),
         "sponsorOnlyModeStartedEvent" => "Members-only chat started".to_string(),
@@ -272,13 +363,23 @@ fn normalize_item(
     target_id: Option<&str>,
     received_at: &str,
 ) -> Option<LiveChatMessage> {
-    let provider_message_id = item.id.clone()?;
+    let event_provider_message_id = item.id.clone()?;
     let message_type = item
         .snippet
         .message_type
         .as_deref()
         .unwrap_or("textMessageEvent");
     let event_type = event_type_for(message_type);
+    let provider_message_id = if event_type == LiveChatEventType::Deleted {
+        item.snippet
+            .message_deleted_details
+            .as_ref()
+            .and_then(|details| details.deleted_message_id.clone())
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or(event_provider_message_id)
+    } else {
+        event_provider_message_id
+    };
     let author = item.author_details.as_ref();
     let amount_text = item
         .snippet
@@ -298,7 +399,12 @@ fn normalize_item(
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| system_text_for(message_type, amount_text.as_deref()));
     Some(LiveChatMessage {
-        id: live_chat_message_id(StreamPlatform::Youtube, &provider_message_id),
+        id: live_chat_message_id(
+            session_id,
+            StreamPlatform::Youtube,
+            target_id,
+            &provider_message_id,
+        ),
         provider_message_id,
         platform: StreamPlatform::Youtube,
         target_id: target_id.map(ToOwned::to_owned),
@@ -535,10 +641,22 @@ pub async fn run_youtube_chat_connector(
         Some(id) => Some(id),
         None => match &config.broadcast_id {
             Some(broadcast_id) => {
-                resolve_live_chat_id(&client, &base_url, &config.access_token, broadcast_id)
+                match resolve_live_chat_id(&client, &base_url, &config.access_token, broadcast_id)
                     .await
-                    .ok()
-                    .flatten()
+                {
+                    Ok(live_chat_id) => live_chat_id,
+                    Err(error) => {
+                        set_provider_and_emit(
+                            &state,
+                            StreamPlatform::Youtube,
+                            target_id.as_deref(),
+                            LiveChatProviderConnectionState::Failed,
+                            &format!("Could not resolve YouTube live chat: {error:#}"),
+                        )
+                        .await;
+                        return;
+                    }
+                }
             }
             None => None,
         },
@@ -547,6 +665,7 @@ pub async fn run_youtube_chat_connector(
         set_provider_and_emit(
             &state,
             StreamPlatform::Youtube,
+            target_id.as_deref(),
             LiveChatProviderConnectionState::Failed,
             "No live chat is available for this YouTube broadcast.",
         )
@@ -554,11 +673,12 @@ pub async fn run_youtube_chat_connector(
         return;
     };
     // The send path needs the resolved id too (Comments upgrade S4).
-    crate::live_chat::set_youtube_send_chat_id(&state, &live_chat_id).await;
+    crate::live_chat::set_youtube_send_chat_id(&state, target_id.as_deref(), &live_chat_id).await;
 
     set_provider_and_emit(
         &state,
         StreamPlatform::Youtube,
+        target_id.as_deref(),
         LiveChatProviderConnectionState::Connecting,
         "Connecting to YouTube live chat…",
     )
@@ -588,6 +708,7 @@ pub async fn run_youtube_chat_connector(
                     set_provider_and_emit(
                         &state,
                         StreamPlatform::Youtube,
+                        target_id.as_deref(),
                         LiveChatProviderConnectionState::Connected,
                         "YouTube live chat connected.",
                     )
@@ -602,6 +723,7 @@ pub async fn run_youtube_chat_connector(
                     set_provider_and_emit(
                         &state,
                         StreamPlatform::Youtube,
+                        target_id.as_deref(),
                         LiveChatProviderConnectionState::Ended,
                         "YouTube live chat has ended.",
                     )
@@ -616,8 +738,14 @@ pub async fn run_youtube_chat_connector(
                     FetchError::Network => YouTubeChatErrorKind::Transient,
                 };
                 let (provider_state, message, stop) = provider_reaction(kind);
-                set_provider_and_emit(&state, StreamPlatform::Youtube, provider_state, message)
-                    .await;
+                set_provider_and_emit(
+                    &state,
+                    StreamPlatform::Youtube,
+                    target_id.as_deref(),
+                    provider_state,
+                    message,
+                )
+                .await;
                 if stop {
                     return;
                 }
@@ -643,12 +771,61 @@ mod tests {
     use axum::extract::{OriginalUri, State};
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use axum::{Json, Router};
     use serde_json::json;
     use tokio::net::TcpListener;
 
     use super::*;
+
+    #[derive(Clone)]
+    struct MockSendResponse {
+        status: StatusCode,
+        body: Value,
+    }
+
+    #[derive(Clone)]
+    struct MockRawSendResponse {
+        status: StatusCode,
+        body: String,
+    }
+
+    async fn mock_send_response(State(response): State<MockSendResponse>) -> impl IntoResponse {
+        (response.status, Json(response.body))
+    }
+
+    async fn mock_raw_send_response(
+        State(response): State<MockRawSendResponse>,
+    ) -> impl IntoResponse {
+        (response.status, response.body)
+    }
+
+    async fn spawn_send_server(status: StatusCode, body: Value) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/liveChatMessages", post(mock_send_response))
+            .with_state(MockSendResponse { status, body });
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{address}")
+    }
+
+    async fn spawn_raw_send_server(status: StatusCode, body: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/liveChatMessages", post(mock_raw_send_response))
+            .with_state(MockRawSendResponse {
+                status,
+                body: body.to_string(),
+            });
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{address}")
+    }
 
     fn text_response() -> LiveChatMessagesResponse {
         serde_json::from_value(json!({
@@ -683,12 +860,136 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn send_parses_provider_message_id() {
+        let base = spawn_send_server(StatusCode::OK, json!({ "id": "yt-sent-1" })).await;
+        let receipt = send_youtube_chat_message(
+            &reqwest::Client::new(),
+            Some(&base),
+            "token",
+            "chat-1",
+            "hello",
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt.provider_message_id.as_deref(), Some("yt-sent-1"));
+    }
+
+    #[tokio::test]
+    async fn send_rejects_success_without_provider_message_id() {
+        let base =
+            spawn_send_server(StatusCode::OK, json!({ "kind": "youtube#liveChatMessage" })).await;
+        let error = send_youtube_chat_message(
+            &reqwest::Client::new(),
+            Some(&base),
+            "token",
+            "chat-1",
+            "hello",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("without a message id"));
+    }
+
+    #[tokio::test]
+    async fn send_preserves_provider_error_reason() {
+        let base = spawn_send_server(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": { "message": "Live chat is disabled." } }),
+        )
+        .await;
+        let error = send_youtube_chat_message(
+            &reqwest::Client::new(),
+            Some(&base),
+            "token",
+            "chat-1",
+            "hello",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("Live chat is disabled"));
+    }
+
+    #[tokio::test]
+    async fn send_classifies_non_json_auth_and_rate_limit_errors_from_status() {
+        for (status, expected) in [
+            (StatusCode::UNAUTHORIZED, "reconnect YouTube"),
+            (StatusCode::TOO_MANY_REQUESTS, "rate-limited"),
+        ] {
+            let base = spawn_raw_send_server(status, "not-json").await;
+            let error = send_youtube_chat_message(
+                &reqwest::Client::new(),
+                Some(&base),
+                "token",
+                "chat-1",
+                "hello",
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains(expected), "{status}: {error}");
+            assert!(!error.contains("unreadable"), "{status}: {error}");
+        }
+    }
+
+    #[test]
+    fn youtube_403_reason_classification_preserves_broadcast_quota_and_auth_truth() {
+        let disabled = json!({
+            "error": {
+                "message": "Live chat is disabled.",
+                "errors": [{ "reason": "liveChatDisabled" }]
+            }
+        });
+        assert_eq!(
+            classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&disabled), None),
+            "YouTube live chat is disabled for this broadcast."
+        );
+
+        let ended = json!({
+            "error": {
+                "message": "Live chat has ended.",
+                "errors": [{ "reason": "liveChatEnded" }]
+            }
+        });
+        assert_eq!(
+            classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&ended), None),
+            "YouTube live chat has ended for this broadcast."
+        );
+
+        let quota = json!({
+            "error": {
+                "message": "Quota exhausted.",
+                "errors": [{ "reason": "quotaExceeded" }]
+            }
+        });
+        let quota_error =
+            classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&quota), Some("30"));
+        assert!(quota_error.contains("quota"));
+        assert!(quota_error.contains("retry after 30s"));
+
+        let auth = json!({
+            "error": {
+                "message": "Insufficient Permission",
+                "errors": [{ "reason": "insufficientPermissions" }]
+            }
+        });
+        assert!(
+            classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&auth), None)
+                .contains("reconnect YouTube")
+        );
+
+        let unknown = json!({ "error": { "message": "Broadcast owner disabled posting." } });
+        let unknown_error =
+            classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&unknown), None);
+        assert!(unknown_error.contains("Broadcast owner disabled posting"));
+        assert!(!unknown_error.contains("reconnect YouTube"));
+    }
+
     #[test]
     fn normalizes_text_message_with_author_roles() {
         let page = normalize_page(text_response(), "s1", Some("t1"), "2026-06-06T10:00:01Z");
         assert_eq!(page.messages.len(), 1);
         let message = &page.messages[0];
-        assert_eq!(message.id, "youtube:msg-1");
+        assert_eq!(message.id, "s1:youtube:t1:msg-1");
         assert_eq!(message.provider_message_id, "msg-1");
         assert_eq!(message.platform, StreamPlatform::Youtube);
         assert_eq!(message.target_id.as_deref(), Some("t1"));
@@ -731,7 +1032,13 @@ mod tests {
         let response: LiveChatMessagesResponse = serde_json::from_value(json!({
             "items": [
                 { "id": "m1", "snippet": { "type": "newSponsorEvent" } },
-                { "id": "d1", "snippet": { "type": "messageDeletedEvent" } }
+                {
+                    "id": "deletion-event-1",
+                    "snippet": {
+                        "type": "messageDeletedEvent",
+                        "messageDeletedDetails": { "deletedMessageId": "message-1" }
+                    }
+                }
             ]
         }))
         .unwrap();
@@ -739,6 +1046,33 @@ mod tests {
         assert_eq!(page.messages[0].event_type, LiveChatEventType::Membership);
         assert_eq!(page.messages[1].event_type, LiveChatEventType::Deleted);
         assert!(page.messages[1].is_deleted);
+        assert_eq!(page.messages[1].provider_message_id, "message-1");
+        assert_eq!(page.messages[1].id, "s1:youtube:default:message-1");
+    }
+
+    #[test]
+    fn current_tombstone_contract_uses_the_outer_message_id() {
+        let response: LiveChatMessagesResponse = serde_json::from_value(json!({
+            "items": [
+                {
+                    "id": "message-1",
+                    "snippet": { "type": "textMessageEvent", "displayMessage": "remove me" }
+                },
+                {
+                    "id": "message-1",
+                    "snippet": { "type": "tombstone" }
+                }
+            ]
+        }))
+        .unwrap();
+
+        let page = normalize_page(response, "s1", Some("youtube-target"), "now");
+        assert_eq!(page.messages.len(), 2);
+        assert_eq!(page.messages[0].id, page.messages[1].id);
+        assert_eq!(page.messages[1].provider_message_id, "message-1");
+        assert_eq!(page.messages[1].event_type, LiveChatEventType::Deleted);
+        assert!(page.messages[1].is_deleted);
+        assert_eq!(page.messages[1].message_text, "Message deleted");
     }
 
     #[test]

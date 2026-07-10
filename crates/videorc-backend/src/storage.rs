@@ -9,7 +9,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::diagnostics::permission_pane_for_log;
-use crate::live_chat::{LiveChatEventType, LiveChatMessage, LiveChatMessageFragment};
+use crate::live_chat::{
+    CommentsSendOperation, CommentsSendOperationPhase, LiveChatEventType, LiveChatMessage,
+    LiveChatMessageFragment,
+};
 use crate::process_job::output_owned_std;
 use crate::protocol::{
     AiArtifact, AiArtifactKind, AiArtifactStatus, DiagnosticStats, HealthEvent, HealthLevel,
@@ -111,6 +114,59 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    /// Fake chat is an explicit test/smoke transport. Give it a real session
+    /// row so inbound comments and outbound operations exercise the same
+    /// SQLite foreign-key/persistence path as production sessions.
+    pub fn ensure_fake_live_chat_session(&self, session_id: &str) -> Result<()> {
+        if self
+            .lock()?
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.create_session(&NewSession {
+            id: session_id.to_string(),
+            title: "Comments smoke session".to_string(),
+            started_at: Utc::now().to_rfc3339(),
+            mode: "stream".to_string(),
+            output_path: None,
+            container: None,
+            stream_preset: Some("stream-safe-1080p30".to_string()),
+            sources: SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: true,
+            },
+            layout: crate::protocol::default_layout_settings(),
+            output: OutputSettings {
+                record_enabled: false,
+                stream_enabled: true,
+                output_directory: None,
+                ffmpeg_path: None,
+                video: crate::protocol::VideoSettings {
+                    preset: crate::protocol::VideoPreset::StreamSafe1080p30,
+                    width: 1920,
+                    height: 1080,
+                    fps: 30,
+                    bitrate_kbps: 6_000,
+                },
+                rtmp: crate::protocol::RtmpSettings {
+                    preset: crate::protocol::RtmpPreset::Custom,
+                    server_url: String::new(),
+                    stream_key: String::new(),
+                },
+            },
+        })
     }
 
     pub fn finish_session(
@@ -265,6 +321,77 @@ impl Database {
     pub fn list_live_chat_messages(&self, session_id: &str) -> Result<Vec<LiveChatMessage>> {
         let conn = self.lock()?;
         self.live_chat_messages_for_session_locked(&conn, session_id)
+    }
+
+    pub fn save_chat_send_operation(&self, operation: &CommentsSendOperation) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO live_chat_send_operations (
+                id, session_id, message_text, phase_json, destinations_json, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                phase_json = excluded.phase_json,
+                destinations_json = excluded.destinations_json,
+                updated_at = excluded.updated_at",
+            params![
+                operation.id,
+                operation.session_id,
+                operation.text,
+                serde_json::to_string(&operation.phase)?,
+                serde_json::to_string(&operation.destinations)?,
+                operation.created_at,
+                operation.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_chat_send_operation(&self, id: &str) -> Result<Option<CommentsSendOperation>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, session_id, message_text, phase_json, destinations_json, created_at, updated_at
+             FROM live_chat_send_operations WHERE id = ?1",
+            params![id],
+            chat_send_operation_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn list_chat_send_operations(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<CommentsSendOperation>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, session_id, message_text, phase_json, destinations_json, created_at, updated_at
+             FROM live_chat_send_operations
+             WHERE session_id = ?1
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id], chat_send_operation_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn reconcile_orphaned_chat_send_operations(&self) -> Result<usize> {
+        let sending = serde_json::to_string(&CommentsSendOperationPhase::Sending)?;
+        let operations = {
+            let conn = self.lock()?;
+            let mut statement = conn.prepare(
+                "SELECT id, session_id, message_text, phase_json, destinations_json, created_at, updated_at
+                 FROM live_chat_send_operations WHERE phase_json = ?1",
+            )?;
+            let rows = statement.query_map(params![sending], chat_send_operation_from_row)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let count = operations.len();
+        let now = Utc::now().to_rfc3339();
+        for mut operation in operations {
+            operation.mark_interrupted_unknown(now.clone());
+            self.save_chat_send_operation(&operation)?;
+        }
+        Ok(count)
     }
 
     pub fn save_ai_artifact(
@@ -530,6 +657,10 @@ impl Database {
             )?;
             conn.execute(
                 "DELETE FROM live_chat_messages WHERE session_id = ?1",
+                params![id],
+            )?;
+            conn.execute(
+                "DELETE FROM live_chat_send_operations WHERE session_id = ?1",
                 params![id],
             )?;
             deleted += conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -1236,6 +1367,20 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_live_chat_messages_session_received
                 ON live_chat_messages(session_id, received_at, id);
 
+            CREATE TABLE IF NOT EXISTS live_chat_send_operations (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                message_text TEXT NOT NULL,
+                phase_json TEXT NOT NULL,
+                destinations_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_live_chat_send_operations_session_created
+                ON live_chat_send_operations(session_id, created_at, id);
+
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value_json TEXT NOT NULL,
@@ -1524,6 +1669,28 @@ impl Database {
             .lock()
             .map_err(|_| anyhow::anyhow!("SQLite connection lock was poisoned"))
     }
+}
+
+fn chat_send_operation_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CommentsSendOperation> {
+    let phase_json: String = row.get(3)?;
+    let destinations_json: String = row.get(4)?;
+    let phase = serde_json::from_str(&phase_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let destinations = serde_json::from_str(&destinations_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(CommentsSendOperation {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        text: row.get(2)?,
+        phase,
+        destinations,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
 }
 
 fn query_repair_jobs(conn: &Connection, filter: &str) -> Result<Vec<RepairJob>> {
@@ -1829,7 +1996,9 @@ mod tests {
 
     use super::*;
     use crate::live_chat::{
-        LiveChatEventType, LiveChatMessage, LiveChatMessageFragment, live_chat_message_id,
+        CommentsSendOperation, CommentsSendOperationPhase, DestinationDelivery,
+        DestinationDeliveryPhase, LiveChatEventType, LiveChatMessage, LiveChatMessageFragment,
+        live_chat_message_id,
     };
     use crate::protocol::{
         CameraCorner, CameraFit, CameraShape, CameraSize, CameraTransformMode, LayoutPreset,
@@ -1926,7 +2095,12 @@ mod tests {
     fn sample_live_chat_message(session_id: &str, seq: u32) -> LiveChatMessage {
         let provider_message_id = format!("provider-{seq}");
         LiveChatMessage {
-            id: live_chat_message_id(StreamPlatform::Youtube, &provider_message_id),
+            id: live_chat_message_id(
+                session_id,
+                StreamPlatform::Youtube,
+                Some("target-youtube"),
+                &provider_message_id,
+            ),
             provider_message_id,
             platform: StreamPlatform::Youtube,
             target_id: Some("target-youtube".to_string()),
@@ -2112,10 +2286,80 @@ mod tests {
 
         let messages = database.list_live_chat_messages("session-1").unwrap();
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].id, "youtube:provider-1");
+        assert_eq!(
+            messages[0].id,
+            "session-1:youtube:target-youtube:provider-1"
+        );
         assert_eq!(messages[0].message_text, "edited/deleted text");
         assert!(messages[0].is_deleted);
         assert_eq!(messages[1].fragments[0].text, "hello 2");
+    }
+
+    #[test]
+    fn chat_send_operations_round_trip_and_recover_without_retrying() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-1"))
+            .unwrap();
+        let operation = CommentsSendOperation {
+            id: "5b0d17a0-8a49-4ef7-a187-6b115ec9cc48".to_string(),
+            session_id: "session-1".to_string(),
+            text: "hello all".to_string(),
+            phase: CommentsSendOperationPhase::Sending,
+            destinations: vec![DestinationDelivery {
+                destination_id: "twitch".to_string(),
+                platform: StreamPlatform::Twitch,
+                phase: DestinationDeliveryPhase::Pending,
+                provider_message_id: None,
+                reason: None,
+            }],
+            created_at: "2026-07-10T00:00:00Z".to_string(),
+            updated_at: "2026-07-10T00:00:00Z".to_string(),
+        };
+        database.save_chat_send_operation(&operation).unwrap();
+        assert_eq!(
+            database.get_chat_send_operation(&operation.id).unwrap(),
+            Some(operation.clone())
+        );
+
+        assert_eq!(
+            database.reconcile_orphaned_chat_send_operations().unwrap(),
+            1
+        );
+        let recovered = database
+            .get_chat_send_operation(&operation.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.phase, CommentsSendOperationPhase::DeliveryUnknown);
+        assert_eq!(
+            recovered.destinations[0].phase,
+            DestinationDeliveryPhase::TimedOutUnknown
+        );
+        assert_eq!(
+            recovered.destinations[0].reason.as_deref(),
+            Some("interrupted-before-confirmation")
+        );
+        assert_eq!(
+            database.list_chat_send_operations("session-1").unwrap(),
+            vec![recovered]
+        );
+    }
+
+    #[test]
+    fn same_provider_message_id_is_distinct_across_sessions() {
+        let database = test_database();
+        for session_id in ["session-1", "session-2"] {
+            database
+                .create_session(&sample_session(session_id))
+                .unwrap();
+            database
+                .save_live_chat_message(&sample_live_chat_message(session_id, 1))
+                .unwrap();
+        }
+        let first = database.list_live_chat_messages("session-1").unwrap();
+        let second = database.list_live_chat_messages("session-2").unwrap();
+        assert_ne!(first[0].id, second[0].id);
+        assert_eq!(first[0].provider_message_id, second[0].provider_message_id);
     }
 
     #[test]

@@ -706,7 +706,9 @@ function RowActions({
           </DropdownMenuItem>
           <DropdownMenuItem
             disabled={!canOpenComments || busy || disconnected}
-            onClick={() => void openSessionCommentsWindow(session.id)}
+            onClick={() =>
+              void openSessionCommentsWindow(session.id, session.title, session.startedAt)
+            }
           >
             <ChatCircle />
             Open Comments
