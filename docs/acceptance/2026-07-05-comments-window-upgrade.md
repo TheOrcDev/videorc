@@ -63,3 +63,27 @@ Commits: `1296ab04` (S1 glyphs+avatars) → `7743622a` (S2 highlight slot) →
    session → no inherited highlight.
 
 Sign-off: _pending owner pass_
+
+## Superseded behavior and hardening (2026-07-10)
+
+Plan 033 replaces several optimistic S3-S5 behaviors above. The historical
+record remains useful, but the current contract is now:
+
+- the backend owns highlight acknowledgement, eligibility, the ten-second
+  lifetime, session teardown, and deletion teardown; a renderer cannot claim
+  `On stream` from local state;
+- a send is one durable, idempotent operation with one terminal result per
+  concrete destination, including provider message IDs, failures,
+  receive-only destinations, and `timed-out-unknown` without automatic retry;
+- the optimistic `You` echo is removed because it could claim delivery before
+  either provider accepted the message;
+- X native live chat remains explicitly receive-only until X supplies a
+  documented, approved write contract; an X Post is not substituted for live
+  chat;
+- provider deletion events tombstone the original row and remove a matching
+  active highlight. Twitch uses the current `event.message_id` contract;
+  YouTube handles current `tombstone` rows and the deprecated deletion-event
+  shape defensively.
+
+Current implementation, artifact evidence, and scoped external blockers are
+recorded in `docs/acceptance/2026-07-10-unified-livestream-comments.md`.

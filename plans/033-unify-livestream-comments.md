@@ -20,13 +20,15 @@
 >   apps/desktop/src/main/{comments-command-broker,comments-command-broker.test}.ts
 >   apps/desktop/src/renderer/comments/main.tsx
 >   apps/desktop/src/renderer/src/hooks/use-studio.tsx
->   apps/desktop/src/renderer/src/components/{comments-reader,live-chat-panel,live-chat-rail,chat-platform-icon}.tsx
->   apps/desktop/src/renderer/src/components/{comment-row,comment-row.test,comments-destination-status}.tsx
+>   apps/desktop/src/renderer/src/components/{comments-reader,live-chat-panel,live-chat-rail,chat-platform-icon,go-live-dialog}.tsx
+>   apps/desktop/src/renderer/src/components/{comment-row,comment-row.test,comments-destination-status,comments-destination-status.test}.tsx
 >   apps/desktop/src/renderer/src/components/ui/avatar.tsx
->   apps/desktop/src/renderer/src/components/tabs/streaming-tab.tsx
+>   apps/desktop/src/renderer/src/components/tabs/{library-tab,studio-tab,streaming-tab}.tsx
+>   apps/desktop/src/shared/{comments-send-operation,comments-send-operation.test}.ts
 >   apps/desktop/src/renderer/src/lib/{chat-send,comment-highlight,live-chat-view,caption-overlay,capture}.ts
 >   apps/desktop/src/renderer/src/lib/{chat-send,comment-highlight,live-chat-view,caption-overlay,capture}.test.ts
 >   scripts/{smoke-live-chat-fake-providers,comments-window-probe,ui-theme-screens}.mjs
+>   scripts/smoke-oauth-guards-app.mjs
 >   scripts/smoke-comment-highlight-stream-app.mjs
 >   scripts/lib/{comment-highlight-artifact,comment-highlight-artifact.test}.mjs
 >   scripts/lib/{recording-studio-gates,recording-studio-gates.test}.mjs
@@ -66,6 +68,15 @@
   externally blocked because Videorc's approved X Livestream API documents
   chat as read-only. Do not mark this plan DONE while that requirement remains
   unchanged and X has no approved write path.
+- **Execution outcome (2026-07-10)**: Milestone A implementation and
+  account-free acceptance pass. The real YouTube/Twitch/X account rows and the
+  isolated-worktree ScreenCaptureKit device row are scoped `BLOCKED`. Milestone
+  B and therefore this plan remain `BLOCKED` on the missing approved X native
+  livestream-chat write contract. The aggregate `smoke:local-gates` command is
+  also blocked by an out-of-scope, pre-existing Plan 027 smoke that still
+  imports removed `sourceSelectionChangeMessages`; all later constituent gates
+  were run directly and passed. See
+  `docs/acceptance/2026-07-10-unified-livestream-comments.md`.
 
 ### Execution ledger
 
@@ -74,15 +85,15 @@ Do not give one agent the entire plan as an unbounded implementation task.
 
 | Slice | Status | Depends on | Exit state |
 |---|---|---|---|
-| U0 | IN PROGRESS | clean isolated worktree | automated gate repaired and lag recovery proven |
-| U1 | TODO | U0 PASS | destination-scoped read/write truth migrated |
-| U2 | TODO | U1 PASS | correlated, persistent, concurrent fan-out proven with fakes |
-| U3 | TODO | U1 PASS + owner-provided Google approval | PASS when live YouTube proof exists; otherwise BLOCKED only for U3 |
-| U4 | TODO | U1 PASS + shipped X read contract | X receive/reconnect PASS; Milestone B separately BLOCKED without a write contract |
-| U5 | TODO | U1 PASS | backend-authoritative highlight plus output artifact proof |
-| U6 | TODO | U2 and U5 PASS | correlated detached-window transport and live/history isolation |
-| U7 | TODO | U6 PASS | shared Comments UI and visual acceptance evidence |
-| U8 | TODO | U0-U2 and U4-U7 PASS; U3 PASS or scoped BLOCKED | automated acceptance PASS; real providers recorded PASS/FAIL/BLOCKED individually |
+| U0 | PASS | clean isolated worktree | stale gate repaired; lag frame, authoritative reconciliation, batching, and cleanup proven |
+| U1 | PASS | U0 PASS | destination-scoped read/write truth, bindings, stable ids, and readiness migration proven |
+| U2 | PASS | U1 PASS | correlated, persistent, concurrent fan-out and restart/idempotency behavior proven |
+| U3 | BLOCKED | U1 PASS + owner-provided Google approval | production enablement and live proof await Google approval; explicit unavailable state proven |
+| U4 | PASS | U1 PASS + shipped X read contract | automated receive/reconnect/timeouts pass; real account acceptance and Milestone B write remain separately blocked |
+| U5 | PASS | U1 PASS | backend-authoritative highlight and stream/split artifact proof pass; real ScreenCaptureKit device step is scoped blocked |
+| U6 | PASS | U2 and U5 PASS | correlated detached-window transport, sender validation, and live/history isolation pass |
+| U7 | PASS | U6 PASS | shared Comments UI, keyboard behavior, and named dark/light/detached visual acceptance pass |
+| U8 | PASS | U0-U2 and U4-U7 PASS; U3 PASS or scoped BLOCKED | focused account-free acceptance passes; real-provider/device rows and the unrelated stale aggregate-gate prerequisite are recorded separately as BLOCKED |
 
 Milestone A may ship only after all non-external rows pass and every unavailable
 provider is represented truthfully. Milestone B remains BLOCKED until X supplies
@@ -371,6 +382,8 @@ the repo-required Node 24 runtime for every pnpm command:
   - `apps/desktop/src/shared/backend.ts`
   - `apps/desktop/src/main/index.ts`
   - `apps/desktop/src/preload/index.ts`
+  - new `apps/desktop/src/shared/comments-send-operation.ts`
+  - new `apps/desktop/src/shared/comments-send-operation.test.ts`
   - new `apps/desktop/src/main/comments-command-broker.ts`
   - new `apps/desktop/src/main/comments-command-broker.test.ts`
   - `apps/desktop/src/renderer/comments/main.tsx`
@@ -380,8 +393,11 @@ the repo-required Node 24 runtime for every pnpm command:
   - `apps/desktop/src/renderer/src/components/live-chat-panel.tsx`
   - `apps/desktop/src/renderer/src/components/live-chat-rail.tsx`
   - `apps/desktop/src/renderer/src/components/chat-platform-icon.tsx`
-  - new shared `comment-row.tsx`, `comment-row.test.tsx`, and
-    `comments-destination-status.tsx`
+  - `apps/desktop/src/renderer/src/components/go-live-dialog.tsx` + focused test
+  - `apps/desktop/src/renderer/src/components/tabs/library-tab.tsx`
+  - `apps/desktop/src/renderer/src/components/tabs/studio-tab.tsx`
+  - new shared `comment-row.tsx`, `comment-row.test.tsx`,
+    `comments-destination-status.tsx`, and focused test
   - `apps/desktop/src/renderer/src/components/ui/avatar.tsx` (generated through
     shadcn CLI if absent)
   - `apps/desktop/src/renderer/src/lib/chat-send.ts` + tests
@@ -395,6 +411,7 @@ the repo-required Node 24 runtime for every pnpm command:
     create a new helper only if no existing one owns broadcast selection
 - Gates/docs:
   - `scripts/smoke-live-chat-fake-providers.mjs`
+  - `scripts/smoke-oauth-guards-app.mjs`
   - `scripts/comments-window-probe.mjs`
   - `scripts/ui-theme-screens.mjs`
   - new `scripts/smoke-comment-highlight-stream-app.mjs`
@@ -945,25 +962,28 @@ chat send has a documented contract and live proof.
 
 ### Milestone A implementation complete
 
-- [ ] `pnpm --filter @videorc/desktop test` passes.
-- [ ] `cargo fmt --check --all`, full backend tests, and clippy pass.
-- [ ] `pnpm typecheck`, `pnpm lint`, and `pnpm format:check` pass.
-- [ ] `pnpm test:scripts` passes.
-- [ ] `pnpm smoke:live-chat-fake-providers` passes and is included in
+- [x] `pnpm --filter @videorc/desktop test` passes.
+- [x] `cargo fmt --check --all`, full backend tests, and clippy pass.
+- [x] `pnpm typecheck`, `pnpm lint`, and `pnpm format:check` pass.
+- [x] `pnpm test:scripts` passes.
+- [x] `pnpm smoke:live-chat-fake-providers` passes and is included in
       `smoke:local-gates`.
-- [ ] `pnpm probe:comments-window` passes live/history and correlated action
+- [x] `pnpm probe:comments-window` passes live/history and correlated action
       cases.
 - [ ] `pnpm smoke:comment-highlight-stream` and
       `pnpm smoke:recording-studio` pass with final-artifact highlight evidence.
-- [ ] The named main-rail and detached-window screenshots pass the U7 visual
+      The focused highlight smoke and recording-studio steps 1–18 pass; the
+      combined item remains unchecked because step 19 had no ScreenCaptureKit
+      source in the isolated worktree process.
+- [x] The named main-rail and detached-window screenshots pass the U7 visual
       checklist and are referenced from the dated acceptance record.
-- [ ] Every active target exposes typed read and write state; one send operation
+- [x] Every active target exposes typed read and write state; one send operation
       shows a terminal provider-confirmed or `timed-out-unknown` result for every
       target, with no false sent state, silent omission, or indefinite pending.
-- [ ] A clicked live comment shows `On stream` only after backend acknowledgement
+- [x] A clicked live comment shows `On stream` only after backend acknowledgement
       and is visible in the outgoing artifact/player; history and unsupported
       output paths cannot claim success.
-- [ ] `git status --short` in the isolated implementation worktree shows no
+- [x] `git status --short` in the isolated implementation worktree shows no
       unrelated changes, and `plans/README.md` records the actual plan status.
 
 ### Milestone A real-provider acceptance
@@ -974,7 +994,7 @@ chat send has a documented contract and live proof.
       visibly receive-only unless an approved native-chat writer exists.
 - [ ] A real comment from each provider is highlighted and visibly equivalent
       on the outgoing player/artifact.
-- [ ] The dated acceptance record has an owner and `PASS`, `FAIL`, or `BLOCKED`
+- [x] The dated acceptance record has an owner and `PASS`, `FAIL`, or `BLOCKED`
       for YouTube read/write, Twitch read/write, X read/write, reconnect, and
       highlight proof. Google/account/permission gaps are `BLOCKED`, never
       generic sign-off or inferred success.
