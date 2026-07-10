@@ -102,14 +102,15 @@ test('custom app launch preserves isolated env and targets a packaged executable
 })
 
 test('performance launch uses the exact packaged executable when configured', () => {
+  const executable = resolve('/tmp/Videorc.app/Contents/MacOS/Videorc')
   assert.deepEqual(
     performanceAppSpawnSpec({
       VIDEORC_PERF_APP_EXECUTABLE: '/tmp/Videorc.app/Contents/MacOS/Videorc'
     }),
     {
-      command: '/tmp/Videorc.app/Contents/MacOS/Videorc',
+      command: executable,
       args: [],
-      cwd: '/tmp/Videorc.app/Contents/MacOS'
+      cwd: resolve('/tmp/Videorc.app/Contents/MacOS')
     }
   )
   assert.equal(performanceAppSpawnSpec({}), undefined)

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
+import { resolve } from 'node:path'
 
 import {
   buildPerformanceScenario,
@@ -122,14 +123,14 @@ describe('performanceScenarioReportPaths', () => {
   it('derives a child report next to an explicit wrapper report', () => {
     assert.deepEqual(
       performanceScenarioReportPaths({ scenario: 'ui-idle', outputPath: '/tmp/result.json' }),
-      { wrapper: '/tmp/result.json', child: '/tmp/result.child.json' }
+      { wrapper: resolve('/tmp/result.json'), child: resolve('/tmp/result.child.json') }
     )
   })
 
   it('keeps wrapper and child paths distinct when output has no json suffix', () => {
     assert.deepEqual(
       performanceScenarioReportPaths({ scenario: 'ui-idle', outputPath: '/tmp/result' }),
-      { wrapper: '/tmp/result', child: '/tmp/result.child.json' }
+      { wrapper: resolve('/tmp/result'), child: resolve('/tmp/result.child.json') }
     )
   })
 })
