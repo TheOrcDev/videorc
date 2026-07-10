@@ -29,6 +29,27 @@ export function layoutTransactionProofDisposition(input: {
   return input.proofSucceeded ? 'apply-proven' : 'apply-unproven'
 }
 
+// A backend commit whose recording/streaming output proof passed but whose
+// native preview presented-revision readback missed is a preview-only fault:
+// the session output is already proven and the controls are reconciled to the
+// commit, so it must not be raised as a destructive error.
+export class NativePreviewPresentationProofError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'NativePreviewPresentationProofError'
+  }
+}
+
+export type LayoutTransactionUnprovenSeverity = 'output-error' | 'presentation-warning'
+
+export function layoutTransactionUnprovenSeverity(
+  proofError: unknown
+): LayoutTransactionUnprovenSeverity {
+  return proofError instanceof NativePreviewPresentationProofError
+    ? 'presentation-warning'
+    : 'output-error'
+}
+
 export type LayoutTransactionFailureReconciliation<T> = {
   source: 'backend-truth' | 'latest-commit'
   snapshot: T

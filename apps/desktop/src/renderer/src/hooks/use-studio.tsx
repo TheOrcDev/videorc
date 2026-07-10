@@ -74,6 +74,8 @@ import {
   layoutTransactionBackendSnapshotIsStable,
   layoutTransactionFailureReconciliation,
   layoutTransactionProofDisposition,
+  layoutTransactionUnprovenSeverity,
+  NativePreviewPresentationProofError,
   shouldReloadSceneFromCaptureConfig
 } from '@/lib/layout-transaction-policy'
 import {
@@ -301,6 +303,10 @@ const NATIVE_PREVIEW_COMPOSITOR_POLL_INTERVAL_MS = 1000 / 60
 const NATIVE_PREVIEW_COMPOSITOR_TIMING_SAMPLE_LIMIT = 900
 const NATIVE_PREVIEW_SCENE_FRAME_WAIT_TIMEOUT_MS = 750
 const NATIVE_PREVIEW_SCENE_FRAME_WAIT_INTERVAL_MS = 33
+// The native surface presents latest-wins on a busy GPU while streaming; its
+// presented-revision readback routinely needs more than the 750 ms compositor
+// frame window. Budget it separately, below the 5 s live output proof.
+const NATIVE_PREVIEW_SCENE_PROOF_WAIT_TIMEOUT_MS = 3000
 const LIVE_LAYOUT_PROOF_WAIT_TIMEOUT_MS = 5000
 const LIVE_LAYOUT_PROOF_WAIT_INTERVAL_MS = 100
 
@@ -367,7 +373,7 @@ async function waitForNativePreviewSurfaceSceneRevision(
     return null
   }
 
-  const deadline = Date.now() + NATIVE_PREVIEW_SCENE_FRAME_WAIT_TIMEOUT_MS
+  const deadline = Date.now() + NATIVE_PREVIEW_SCENE_PROOF_WAIT_TIMEOUT_MS
   let lastStatus: PreviewSurfaceStatus | null = null
   while (Date.now() < deadline) {
     try {
@@ -3639,7 +3645,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return false
       }
       const previewWindowState = await window.videorc?.getPreviewWindowState?.()
-      if (nativePreviewSurfaceEnabled && previewWindowState?.open) {
+      // While the preview is hidden (dialog overlay, minimized, fullscreen,
+      // scrolled away) the host benign-skips presents, so a presented-revision
+      // proof can never arrive. The compositor proof above already covered the
+      // commit; do not demand a proof the surface is not allowed to produce.
+      const surfaceCanPresent =
+        previewWindowState?.open === true &&
+        previewWindowState.visible &&
+        previewWindowState.dockHiddenReason == null
+      if (nativePreviewSurfaceEnabled && surfaceCanPresent) {
         const proofOwner = nativePreviewSceneProofPresentationOwner({
           mainPumpActive: mainPumpActiveRef.current,
           statusReaderAvailable: Boolean(window.videorc?.getNativePreviewSurfaceStatus),
@@ -3653,7 +3667,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               ? await window.videorc.updateNativePreviewSurfaceCompositor(compositorStatus)
               : null
         if (!surfaceStatus) {
-          throw new Error(
+          throw new NativePreviewPresentationProofError(
             `Native preview could not verify committed scene revision ${status.sceneRevision}.`
           )
         }
@@ -3662,7 +3676,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           surfaceStatus.nativePreviewHostKind !== 'proof-surface' &&
           !nativePreviewStatusProvesSceneRevision(surfaceStatus, status.sceneRevision)
         ) {
-          throw new Error(
+          throw new NativePreviewPresentationProofError(
             `Native preview did not present committed scene revision ${status.sceneRevision}.`
           )
         }
@@ -3803,6 +3817,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (disposition === 'apply-unproven') {
             const detail =
               proofError instanceof Error ? proofError.message : 'Presentation proof timed out.'
+            if (layoutTransactionUnprovenSeverity(proofError) === 'presentation-warning') {
+              // The commit and the recording/streaming output proof already
+              // passed; only the preview window's presented-revision readback
+              // missed. Keep it diagnostic — a destructive error here reads as
+              // a session failure while everything the viewer sees is correct.
+              console.warn(
+                `Layout committed at revision ${status.sceneRevision}; native preview presentation proof was not observed. ${detail}`
+              )
+              toast.warning('Preview verification lagged behind the layout change', {
+                description:
+                  'The layout was applied and the output is unaffected. If the preview looks stale, close and reopen it.'
+              })
+              return
+            }
             reportError(
               new Error(
                 `Layout committed at revision ${status.sceneRevision}, but preview proof was not observed. The controls were reconciled to the backend commit. ${detail}`

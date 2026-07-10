@@ -34,7 +34,13 @@ export function nativePreviewStatusProvesSceneRevision(
     status.sourcePixelsPresent === true &&
     status.nativePreviewHostKind !== 'proof-surface' &&
     status.nativePreviewHostAttached === true &&
-    status.nativePreviewPresentedSceneRevision === sceneRevision
+    typeof status.nativePreviewPresentedSceneRevision === 'number' &&
+    // Presentation is latest-wins: under rapid commits the surface may skip an
+    // intermediate revision and present a newer one. A presented revision at or
+    // above the awaited one proves the awaited commit was satisfied or
+    // superseded by newer committed truth; only an older presented revision
+    // means the surface is stale.
+    status.nativePreviewPresentedSceneRevision >= sceneRevision
   )
 }
 

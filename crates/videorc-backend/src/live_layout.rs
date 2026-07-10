@@ -590,8 +590,12 @@ fn layout_apply_status(
     status: SceneCommitStatus,
     message: Option<String>,
 ) -> LiveLayoutApplyStatus {
-    let presentation_proven =
-        status.compositor_status.frame_scene_revision == Some(status.scene_revision);
+    // Rendering is latest-wins: a frame at or beyond the committed revision
+    // proves this commit was satisfied or superseded by newer committed truth.
+    let presentation_proven = status
+        .compositor_status
+        .frame_scene_revision
+        .is_some_and(|revision| revision >= status.scene_revision);
     LiveLayoutApplyStatus {
         applied: true,
         mode: mode.to_string(),

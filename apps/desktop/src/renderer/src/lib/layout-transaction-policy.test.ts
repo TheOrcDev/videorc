@@ -5,6 +5,8 @@ import {
   layoutTransactionBackendSnapshotIsStable,
   layoutTransactionFailureReconciliation,
   layoutTransactionProofDisposition,
+  layoutTransactionUnprovenSeverity,
+  NativePreviewPresentationProofError,
   shouldReloadSceneFromCaptureConfig
 } from './layout-transaction-policy'
 
@@ -37,6 +39,25 @@ describe('layout transaction policy', () => {
         proofSucceeded: false
       })
     ).toBe('ignore-stale')
+  })
+
+  it('downgrades a preview-only presentation miss to a warning', () => {
+    expect(
+      layoutTransactionUnprovenSeverity(
+        new NativePreviewPresentationProofError(
+          'Native preview did not present committed scene revision 7.'
+        )
+      )
+    ).toBe('presentation-warning')
+  })
+
+  it('keeps output-proof failures at error severity', () => {
+    expect(
+      layoutTransactionUnprovenSeverity(
+        new Error('Live layout switch did not reach the active recording/streaming output')
+      )
+    ).toBe('output-error')
+    expect(layoutTransactionUnprovenSeverity(undefined)).toBe('output-error')
   })
 
   it('reconciles commit A when superseding intent B fails after scene events were suppressed', () => {
