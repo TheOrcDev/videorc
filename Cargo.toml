@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/videorc-backend"]
+members = ["crates/videorc-backend", "crates/videorc-native-preview-addon"]
 resolver = "3"
 
 # Disable incremental codegen for dev builds. On macOS arm64, stale incremental
@@ -12,6 +12,9 @@ incremental = false
 # starves capture. Optimize the backend crate even in dev so `pnpm dev` behaves like
 # the shipped build; its hot paths are otherwise GPU/hardware so this is cheap at runtime.
 [profile.dev.package.videorc-backend]
+opt-level = 2
+
+[profile.dev.package.videorc-native-preview-addon]
 opt-level = 2
 
 # The per-frame heavy lifting also runs inside dependencies (serde event

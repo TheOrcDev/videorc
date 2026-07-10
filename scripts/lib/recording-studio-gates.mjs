@@ -98,6 +98,14 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:preview-click-focus']
       },
       {
+        // Combined perceptual contract: native CAMetalLayer continuity while
+        // floating/docked windows move, focus/click changes, and rapid layout
+        // intent replaces the previous scene without an artificial settle.
+        label: 'preview interaction stress smoke',
+        command: 'pnpm',
+        args: ['smoke:preview-interaction-stress']
+      },
+      {
         label: 'detached preview lifecycle probe',
         command: 'pnpm',
         args: ['probe:preview-lifecycle']
@@ -141,6 +149,11 @@ export function buildRecordingStudioGateSteps({
 
   if (includeDeviceSmoke) {
     steps.push(
+      {
+        label: 'real-device preview interaction and recording artifact smoke',
+        command: 'pnpm',
+        args: ['smoke:preview-interaction-stress:devices']
+      },
       {
         label: 'real ScreenCaptureKit live layout switch recording smoke',
         command: 'pnpm',

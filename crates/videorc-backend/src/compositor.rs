@@ -998,6 +998,10 @@ pub async fn update_compositor_active_screen(
     state: &AppState,
     active_screen: Option<StreamScreen>,
 ) -> CompositorStatus {
+    // Active takeover screens are scene pixels too. Serialize them with layout,
+    // idle reload, and recording-start commits so they cannot invalidate an
+    // exact startup revision while its first frame is being proven.
+    let _scene_commit = state.scene_commit.lock().await;
     let (revision, scene, layout) = {
         let compositor = state.compositor.lock().await;
         let Some(snapshot) = compositor.scene.as_ref() else {

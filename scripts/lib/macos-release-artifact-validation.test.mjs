@@ -45,6 +45,7 @@ describe('buildMacosReleaseArtifactChecks', () => {
         'capture entitlements (native_preview_host_helper)',
         'capture entitlements (ffmpeg)',
         'capture entitlements (ffprobe)',
+        'native preview addon signature',
         'bundled X OAuth1 consumer key (videorc-backend)',
         'bundled X OAuth1 consumer secret (videorc-backend)'
       ]
@@ -178,6 +179,24 @@ describe('capture entitlement gate', () => {
       captureEntitlementCheckTargets('/a/Videorc.app').map((target) => target.id),
       ['app', 'videorc-backend', 'native-preview-host-helper', 'ffmpeg', 'ffprobe']
     )
+  })
+
+  it('requires the packaged in-process native preview addon to be signed', () => {
+    const check = buildMacosReleaseArtifactChecks('/a/Videorc.app').find(
+      (candidate) => candidate.id === 'native-preview-addon-signature'
+    )
+
+    assert.deepEqual(check, {
+      id: 'native-preview-addon-signature',
+      label: 'native preview addon signature',
+      command: 'codesign',
+      args: [
+        '--verify',
+        '--strict',
+        '--verbose=2',
+        '/a/Videorc.app/Contents/Resources/videorc_native_preview.node'
+      ]
+    })
   })
 })
 

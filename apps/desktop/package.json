@@ -7,7 +7,7 @@
   "author": "TheOrcDev",
   "license": "AGPL-3.0-only",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "pnpm --dir ../.. build:native-preview-addon && electron-vite dev",
     "build": "electron-vite build",
     "package": "pnpm build && electron-builder --dir --config.mac.identity=null --config.mac.notarize=false",
     "dist": "pnpm build && electron-builder --config.mac.identity=null --config.mac.notarize=false --config.dmg.sign=false",

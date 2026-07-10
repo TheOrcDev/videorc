@@ -42,9 +42,11 @@ try {
   ws = await connectBackend(backend, timeoutMs)
 
   await smokeCommand(smoke, 'preview-window-open')
-  await smokeCommand(smoke, 'enable-synthetic-source', { settleMs })
   // Isolated smoke profiles persist no camera; camera presets need one selected.
   await smokeCommand(smoke, 'select-camera-device', { settleMs })
+  // Enable the synthetic replacement last. A late device-list reconciliation
+  // must not auto-select a physical display over this explicit diagnostic source.
+  await smokeCommand(smoke, 'enable-synthetic-source', { settleMs })
   await smokeCommand(smoke, 'open-layout-tab')
   await sleep(settleMs)
 
@@ -61,7 +63,9 @@ try {
     )
   }
 
-  console.log('Layout source loop smoke OK - layout buttons, backend scene, and detached preview surface stayed in sync.')
+  console.log(
+    'Layout source loop smoke OK - layout buttons, backend scene, and detached preview surface stayed in sync.'
+  )
 } finally {
   try {
     ws?.close()

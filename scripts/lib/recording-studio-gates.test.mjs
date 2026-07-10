@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 
 import {
@@ -27,6 +28,7 @@ describe('buildRecordingStudioGateSteps', () => {
       'backend-owned preview scene commit smoke',
       'preview main pump diagnostics smoke',
       'preview click/focus continuity smoke',
+      'preview interaction stress smoke',
       'detached preview lifecycle probe',
       'preview window placement + docked stick probe',
       'detached native preview surface reattach smoke',
@@ -46,15 +48,16 @@ describe('buildRecordingStudioGateSteps', () => {
       'backend-isolation.test.ts'
     ])
     assert.deepEqual(steps[1].args, ['test:scripts'])
-    assert.deepEqual(steps.at(-14).args, ['smoke:dev'])
-    assert.deepEqual(steps.at(-13).args, ['smoke:screens'])
-    assert.deepEqual(steps.at(-12).args, ['smoke:preview-real-launch'])
-    assert.deepEqual(steps.at(-11).args, ['smoke:layout-source-loop'])
-    assert.deepEqual(steps.at(-10).args, ['smoke:live-layout-switch-recording'])
-    assert.deepEqual(steps.at(-9).args, ['smoke:comment-highlight-stream'])
-    assert.deepEqual(steps.at(-8).args, ['smoke:preview-scene-commit'])
-    assert.deepEqual(steps.at(-7).args, ['smoke:preview-pump-diagnostics'])
-    assert.deepEqual(steps.at(-6).args, ['smoke:preview-click-focus'])
+    assert.deepEqual(steps.at(-15).args, ['smoke:dev'])
+    assert.deepEqual(steps.at(-14).args, ['smoke:screens'])
+    assert.deepEqual(steps.at(-13).args, ['smoke:preview-real-launch'])
+    assert.deepEqual(steps.at(-12).args, ['smoke:layout-source-loop'])
+    assert.deepEqual(steps.at(-11).args, ['smoke:live-layout-switch-recording'])
+    assert.deepEqual(steps.at(-10).args, ['smoke:comment-highlight-stream'])
+    assert.deepEqual(steps.at(-9).args, ['smoke:preview-scene-commit'])
+    assert.deepEqual(steps.at(-8).args, ['smoke:preview-pump-diagnostics'])
+    assert.deepEqual(steps.at(-7).args, ['smoke:preview-click-focus'])
+    assert.deepEqual(steps.at(-6).args, ['smoke:preview-interaction-stress'])
     assert.deepEqual(steps.at(-5).args, ['probe:preview-lifecycle'])
     assert.deepEqual(steps.at(-4).args, ['probe:preview-window'])
     assert.deepEqual(steps.at(-3).args, ['smoke:preview-surface'])
@@ -69,9 +72,15 @@ describe('buildRecordingStudioGateSteps', () => {
 
   it('can include the heavier native preview layout-stress smoke', () => {
     const steps = buildRecordingStudioGateSteps({ includeDeviceSmoke: true })
+    const interactionDeviceSmoke = steps.at(-3)
     const liveLayoutDeviceSmoke = steps.at(-2)
     const deviceSmoke = steps.at(-1)
 
+    assert.equal(
+      interactionDeviceSmoke.label,
+      'real-device preview interaction and recording artifact smoke'
+    )
+    assert.deepEqual(interactionDeviceSmoke.args, ['smoke:preview-interaction-stress:devices'])
     assert.equal(
       liveLayoutDeviceSmoke.label,
       'real ScreenCaptureKit live layout switch recording smoke'
@@ -100,6 +109,7 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(report, /smoke:preview-scene-commit/)
     assert.match(report, /smoke:preview-pump-diagnostics/)
     assert.match(report, /smoke:preview-click-focus/)
+    assert.match(report, /smoke:preview-interaction-stress/)
     assert.match(report, /probe:preview-lifecycle/)
     assert.match(report, /probe:preview-window/)
     assert.match(report, /smoke:preview-surface/)
@@ -110,6 +120,35 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(report, /VIDEORC_NATIVE_PREVIEW_SOURCE_COMPLETE_SCENE=1/)
     assert.match(report, /VIDEORC_NATIVE_PREVIEW_LAYOUT_STRESS_UPDATES=4/)
     assert.match(report, /pnpm smoke:live-layout-switch-recording:devices/)
+    assert.match(report, /pnpm smoke:preview-interaction-stress:devices/)
     assert.match(report, /pnpm smoke:recording-native-preview/)
+  })
+
+  it('keeps normal and device interaction-stress entrypoints available', () => {
+    const packageJson = JSON.parse(
+      readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
+    )
+
+    assert.equal(
+      packageJson.scripts['smoke:preview-interaction-stress'],
+      'node scripts/smoke-preview-interaction-stress-app.mjs'
+    )
+    assert.equal(
+      packageJson.scripts['smoke:preview-interaction-stress:devices'],
+      'VIDEORC_PREVIEW_INTERACTION_DEVICE_SMOKE=1 node scripts/smoke-preview-interaction-stress-app.mjs'
+    )
+  })
+
+  it('waits for the finalized MP4 before analyzing the device interaction recording', () => {
+    const source = readFileSync(
+      new URL('../smoke-preview-interaction-stress-app.mjs', import.meta.url),
+      'utf8'
+    )
+
+    assert.match(
+      source,
+      /import \{ resolveFinalRecordingPath \} from '.\/lib\/final-recording-path\.mjs'/
+    )
+    assert.match(source, /await resolveFinalRecordingPath\(\{/)
   })
 })

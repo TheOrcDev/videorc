@@ -1,0 +1,123 @@
+import type { PreviewSurfaceStatus } from '../shared/backend'
+
+export interface NativePreviewHelperFallbackPolicyOptions {
+  fallbackFlag?: string
+  explicitHelperPath?: string
+}
+
+export interface NativePreviewPlacementOwnershipInput {
+  status: PreviewSurfaceStatus
+  driverKind: 'in-process' | 'external-module' | 'helper-process' | null
+  recentPresent: boolean
+}
+
+export type NativePreviewPresentFailureDisposition =
+  | 'presented'
+  | 'benign-skip'
+  | 'retain-native'
+  | 'disable-native'
+
+export function nativePreviewPresentFailureDisposition(input: {
+  driverKind: 'in-process' | 'external-module' | 'helper-process' | null
+  surfaceVisible: boolean
+  presentValidated: boolean
+  consecutiveFailures: number
+  failureThreshold: number
+}): NativePreviewPresentFailureDisposition {
+  if (input.driverKind === 'in-process' && !input.surfaceVisible) {
+    return 'benign-skip'
+  }
+  if (input.presentValidated) {
+    return 'presented'
+  }
+  if (
+    input.driverKind === 'in-process' &&
+    input.consecutiveFailures + 1 >= Math.max(1, input.failureThreshold)
+  ) {
+    return 'disable-native'
+  }
+  return 'retain-native'
+}
+
+export function nativePreviewValidatedHandoffStatus(
+  status: PreviewSurfaceStatus,
+  input: { sceneRevision?: number; runId?: string }
+): PreviewSurfaceStatus {
+  return {
+    ...status,
+    nativePreviewPresentedSceneRevision: input.sceneRevision,
+    nativePreviewCompositorRunId: input.runId
+  }
+}
+
+export function nativePreviewPlacementOwnedByNativeSurface(
+  input: NativePreviewPlacementOwnershipInput
+): boolean {
+  const attachedNativeSurface = nativePreviewSurfaceHasAttachedNativePixels(input.status)
+  return attachedNativeSurface && (input.driverKind === 'in-process' || input.recentPresent)
+}
+
+export function nativePreviewSurfaceHasAttachedNativePixels(status: PreviewSurfaceStatus): boolean {
+  return (
+    status.state === 'live' &&
+    status.transport === 'native-surface' &&
+    status.backing === 'cametal-layer' &&
+    status.sourcePixelsPresent === true &&
+    status.nativePreviewHostAttached === true &&
+    status.nativePreviewHostKind !== 'proof-surface'
+  )
+}
+
+export function nativePreviewDriverFailureFallbackStatus(
+  status: PreviewSurfaceStatus,
+  input: { reason: string; framePollingSuppressed: boolean }
+): PreviewSurfaceStatus {
+  return {
+    ...status,
+    state: 'live',
+    transport: 'electron-proof-surface',
+    backing: 'electron-browser-window',
+    framePollingSuppressed: input.framePollingSuppressed,
+    sourcePixelsPresent: false,
+    nativePreviewHostKind: 'proof-surface',
+    nativePreviewHostAttached: false,
+    updatedAt: new Date().toISOString(),
+    message: input.reason
+  }
+}
+
+export function nativePreviewHelperFallbackAllowed(
+  options: NativePreviewHelperFallbackPolicyOptions
+): boolean {
+  return options.fallbackFlag?.trim() === '1' || Boolean(options.explicitHelperPath?.trim())
+}
+
+export function nativePreviewProofPollingSuppressed(input: {
+  lifecycleSuppressed: boolean
+  nativeSurfaceOwnsPresentation: boolean
+  nativeFailureFallbackActive?: boolean
+}): boolean {
+  return (
+    input.nativeSurfaceOwnsPresentation ||
+    (input.lifecycleSuppressed && input.nativeFailureFallbackActive !== true)
+  )
+}
+
+export function nativePreviewFramePollingSuppressionStatus(
+  status: PreviewSurfaceStatus,
+  suppressed: boolean
+): PreviewSurfaceStatus {
+  const attachedNativeSurface = nativePreviewSurfaceHasAttachedNativePixels(status)
+
+  return {
+    ...status,
+    framePollingSuppressed: suppressed,
+    sourcePixelsPresent: suppressed && !attachedNativeSurface ? false : status.sourcePixelsPresent,
+    updatedAt: new Date().toISOString(),
+    message: attachedNativeSurface
+      ? status.message
+      : suppressed
+        ? 'Electron proof preview surface frame polling is suppressed while recording.'
+        : 'Electron proof preview surface frame polling is enabled.'
+  }
+}

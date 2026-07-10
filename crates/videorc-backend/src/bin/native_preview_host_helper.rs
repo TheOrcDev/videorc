@@ -136,6 +136,10 @@ mod macos {
         #[serde(skip_serializing_if = "Option::is_none")]
         present_failure_reason: Option<String>,
         activation: Option<ActivationPayload>,
+        native_preview_iosurface_cache_hits: u64,
+        native_preview_iosurface_imports: u64,
+        native_preview_iosurface_invalidations: u64,
+        native_preview_iosurface_import_failures: u64,
     }
 
     #[derive(Debug, Serialize)]
@@ -590,6 +594,7 @@ mod macos {
                     Ok(activation) => (Some(ActivationPayload::from(activation)), None),
                     Err(failure) => (None, Some(failure.reason().to_string())),
                 };
+                let cache_metrics = runner.cache_metrics();
                 write_response(
                     stdout,
                     &HelperResponse {
@@ -599,6 +604,10 @@ mod macos {
                             has_overlay: runner.has_overlay(),
                             present_failure_reason,
                             activation,
+                            native_preview_iosurface_cache_hits: cache_metrics.hits,
+                            native_preview_iosurface_imports: cache_metrics.imports,
+                            native_preview_iosurface_invalidations: cache_metrics.invalidations,
+                            native_preview_iosurface_import_failures: cache_metrics.import_failures,
                         }),
                         error: None,
                     },

@@ -64,6 +64,10 @@ interface HelperPresentPayload {
   hasOverlay: boolean
   presentFailureReason?: string | null
   activation?: HelperActivation | null
+  nativePreviewIosurfaceCacheHits?: number
+  nativePreviewIosurfaceImports?: number
+  nativePreviewIosurfaceInvalidations?: number
+  nativePreviewIosurfaceImportFailures?: number
 }
 
 interface HelperActivation {
@@ -84,6 +88,8 @@ interface NativePresentMetrics {
   inputToPresentLatencyP95Ms?: number
   inputToPresentLatencyP99Ms?: number
   nativePreviewHelperRoundTripP95Ms?: number
+  nativePreviewPlacementRoundTripP95Ms?: number
+  nativePreviewPresentRoundTripP95Ms?: number
 }
 
 const NATIVE_PRESENT_SAMPLE_LIMIT = 900
@@ -119,6 +125,7 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
   private presentIntervalsMs: number[] = []
   private inputToPresentLatenciesMs: number[] = []
   private helperRoundTripMs: number[] = []
+  private placementRoundTripMs: number[] = []
   private percentileMetricsCache: { computedAtMs: number; fields: NativePresentMetrics } | null =
     null
 
@@ -151,8 +158,16 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
       'info',
       `Native preview host helper applying commands: ${normalizedCommands.map(formatHostCommand).join(', ')}.`
     )
-    this.resetMetrics()
-    await this.request('applyHostCommands', { commands: normalizedCommands })
+    const startedAtMs = this.nowMs()
+    try {
+      await this.request('applyHostCommands', { commands: normalizedCommands })
+    } finally {
+      recordLimitedSample(this.placementRoundTripMs, Math.max(0, this.nowMs() - startedAtMs))
+      // Placement has its own lifetime samples; invalidate only the derived
+      // percentile snapshot so the next present reports the new RTT without
+      // erasing cadence or latency history.
+      this.percentileMetricsCache = null
+    }
     return null
   }
 
@@ -189,7 +204,9 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
       payload.activation,
       request,
       this.now(),
-      this.recordPresentMetrics(request)
+      this.recordPresentMetrics(request),
+      this.pending.size,
+      payload
     )
   }
 
@@ -285,6 +302,8 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
               inputToPresentLatencyP95Ms: percentile(this.inputToPresentLatenciesMs, 0.95),
               inputToPresentLatencyP99Ms: percentile(this.inputToPresentLatenciesMs, 0.99),
               nativePreviewHelperRoundTripP95Ms: percentile(this.helperRoundTripMs, 0.95),
+              nativePreviewPlacementRoundTripP95Ms: percentile(this.placementRoundTripMs, 0.95),
+              nativePreviewPresentRoundTripP95Ms: percentile(this.helperRoundTripMs, 0.95),
               intervalP95Ms: percentile(this.presentIntervalsMs, 0.95),
               intervalP99Ms: percentile(this.presentIntervalsMs, 0.99)
             }
@@ -299,7 +318,9 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
             inputToPresentLatencyP99Ms: percentileFields.inputToPresentLatencyP99Ms
           }
     const helperMetrics = {
-      nativePreviewHelperRoundTripP95Ms: percentileFields.nativePreviewHelperRoundTripP95Ms
+      nativePreviewHelperRoundTripP95Ms: percentileFields.nativePreviewHelperRoundTripP95Ms,
+      nativePreviewPlacementRoundTripP95Ms: percentileFields.nativePreviewPlacementRoundTripP95Ms,
+      nativePreviewPresentRoundTripP95Ms: percentileFields.nativePreviewPresentRoundTripP95Ms
     }
     if (this.presentTimestampsMs.length < 2) {
       return {
@@ -530,7 +551,9 @@ function helperActivationToPreviewSurfaceStatus(
   activation: HelperActivation,
   request: NativePreviewRealSurfacePresentRequest,
   updatedAt: string,
-  metrics: NativePresentMetrics = {}
+  metrics: NativePresentMetrics = {},
+  pendingHostCommandCount = 0,
+  helperPayload?: HelperPresentPayload
 ): PreviewSurfaceStatus {
   const bounds = request.bounds ? normalizePreviewSurfaceBounds(request.bounds) : undefined
   const width = Math.max(1, Math.round(bounds?.width ?? request.handoff.width))
@@ -551,13 +574,23 @@ function helperActivationToPreviewSurfaceStatus(
     intervalP95Ms: metrics.intervalP95Ms,
     intervalP99Ms: metrics.intervalP99Ms,
     nativePreviewHelperRoundTripP95Ms: metrics.nativePreviewHelperRoundTripP95Ms,
+    nativePreviewPlacementRoundTripP95Ms: metrics.nativePreviewPlacementRoundTripP95Ms,
+    nativePreviewPresentRoundTripP95Ms: metrics.nativePreviewPresentRoundTripP95Ms,
     inputToPresentLatencyMs: metrics.inputToPresentLatencyMs,
     inputToPresentLatencyP50Ms: metrics.inputToPresentLatencyP50Ms,
     inputToPresentLatencyP95Ms: metrics.inputToPresentLatencyP95Ms,
     inputToPresentLatencyP99Ms: metrics.inputToPresentLatencyP99Ms,
     framePollingSuppressed: request.suppressFramePolling || activation.framePollingSuppressed,
     sourcePixelsPresent: activation.sourcePixelsPresent,
-    pendingHostCommandCount: 0,
+    pendingHostCommandCount,
+    nativePreviewHostKind: 'helper-process',
+    nativePreviewHostAttached: helperPayload?.hasOverlay === true,
+    nativePreviewPresentedSceneRevision: request.scene?.revision,
+    nativePreviewCompositorRunId: request.handoff.runId,
+    nativePreviewIosurfaceCacheHits: helperPayload?.nativePreviewIosurfaceCacheHits,
+    nativePreviewIosurfaceImports: helperPayload?.nativePreviewIosurfaceImports,
+    nativePreviewIosurfaceInvalidations: helperPayload?.nativePreviewIosurfaceInvalidations,
+    nativePreviewIosurfaceImportFailures: helperPayload?.nativePreviewIosurfaceImportFailures,
     bounds,
     updatedAt,
     message: activation.message

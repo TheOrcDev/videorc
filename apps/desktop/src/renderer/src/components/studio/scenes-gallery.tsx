@@ -40,7 +40,6 @@ export function ScenesGallery(): ReactElement {
       <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
         {SCENE_PRESETS.map((preset) => {
           const disabled =
-            layoutSwitchPending !== null ||
             (layoutPresetNeedsCamera(preset.id) && !hasCamera) ||
             (layoutPresetNeedsScreen(preset.id) && !hasScreen)
           const active = activePreset === preset.id

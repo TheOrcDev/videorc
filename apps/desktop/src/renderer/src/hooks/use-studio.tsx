@@ -19,6 +19,7 @@ import {
   commentsRefreshRevisionIsCurrent,
   reconcileCommentsSendOperation
 } from '../../../shared/comments-send-operation'
+import { nativePreviewStatusProvesSceneRevision } from '../../../shared/native-preview-scene-authority'
 import { cloudAiReadiness } from '@/lib/ai-readiness'
 import {
   applyStoredManualStreamKeyResult,
@@ -68,6 +69,17 @@ import {
   isYouTubeChannelAuthFailure,
   shouldAutoRefreshYouTubeChannels
 } from '@/lib/youtube-channels'
+import {
+  latestLayoutTransactionCommit,
+  layoutTransactionBackendSnapshotIsStable,
+  layoutTransactionFailureReconciliation,
+  layoutTransactionProofDisposition,
+  shouldReloadSceneFromCaptureConfig
+} from '@/lib/layout-transaction-policy'
+import {
+  nativePreviewSurfaceSyncCanCommit,
+  nativePreviewSurfaceSyncNeedsCreate
+} from '@/lib/native-preview-surface-lifecycle'
 import type {
   AiCapabilities,
   CommentHighlightCommand,
@@ -111,7 +123,6 @@ import type {
   PreviewScreenStatus,
   PreviewSurfaceBounds,
   PreviewSurfacePresentParams,
-  PreviewSurfaceSceneUpdateParams,
   PreviewSurfaceStatus,
   PreviewSupervisorState,
   PreviewWindowMode,
@@ -186,6 +197,7 @@ import {
   compositorStatusHasRenderedSceneRevision,
   decideNativePreviewCompositorPresent,
   nativePreviewDroppedFramesWithSuppressed,
+  nativePreviewSceneProofPresentationOwner,
   pendingCompositorStatusSupersedes,
   type NativePreviewRendererTimingFields
 } from '@/lib/native-preview-present-policy'
@@ -347,6 +359,30 @@ async function waitForRenderedCompositorSceneRevision(
   return initialStatus
 }
 
+async function waitForNativePreviewSurfaceSceneRevision(
+  sceneRevision: number
+): Promise<PreviewSurfaceStatus | null> {
+  const readStatus = window.videorc?.getNativePreviewSurfaceStatus
+  if (!readStatus) {
+    return null
+  }
+
+  const deadline = Date.now() + NATIVE_PREVIEW_SCENE_FRAME_WAIT_TIMEOUT_MS
+  let lastStatus: PreviewSurfaceStatus | null = null
+  while (Date.now() < deadline) {
+    try {
+      lastStatus = await readStatus()
+    } catch {
+      return lastStatus
+    }
+    if (nativePreviewStatusProvesSceneRevision(lastStatus, sceneRevision)) {
+      return lastStatus
+    }
+    await sleep(NATIVE_PREVIEW_SCENE_FRAME_WAIT_INTERVAL_MS)
+  }
+  return lastStatus
+}
+
 async function waitForLiveLayoutProof(
   activeClient: BackendClient,
   status: LiveLayoutApplyStatus
@@ -391,6 +427,40 @@ async function waitForLiveLayoutProof(
     `Live layout switch did not reach the active recording/streaming output within ${Math.round(
       LIVE_LAYOUT_PROOF_WAIT_TIMEOUT_MS / 1000
     )}s (target revision ${status.sceneRevision}, rendered revision ${renderedRevision}, active revision ${activeRevision}).${errorDetail}`
+  )
+}
+
+type LayoutTransactionStatus = LiveLayoutApplyStatus & {
+  intentId: number
+  compositorStatus: CompositorStatus
+  presentationProven: boolean
+}
+
+type LayoutTransactionSnapshot = {
+  sceneRevision: number
+  scene: Scene
+  layout: LayoutSettings
+  compositorStatus: CompositorStatus
+}
+
+async function waitForPreviewLayoutProof(
+  activeClient: BackendClient,
+  status: LayoutTransactionStatus
+): Promise<CompositorStatus> {
+  const initialStatus = status.compositorStatus
+  if (compositorStatusHasRenderedSceneRevision(initialStatus, status.sceneRevision)) {
+    return initialStatus
+  }
+  const renderedStatus = await waitForRenderedCompositorSceneRevision(
+    activeClient,
+    status.sceneRevision,
+    initialStatus
+  )
+  if (compositorStatusHasRenderedSceneRevision(renderedStatus, status.sceneRevision)) {
+    return renderedStatus
+  }
+  throw new Error(
+    `Preview layout switch did not present committed revision ${status.sceneRevision} within the proof window.`
   )
 }
 
@@ -1467,9 +1537,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // the same session (fast assessment, then post-repair); one toast is enough.
   const qualityToastSessionsRef = useRef<Set<string>>(new Set())
   const captureConfigRef = useRef(captureConfig)
+  const layoutIntentIdRef = useRef(Date.now())
+  const layoutIntentAwaitingProofRef = useRef<number | null>(null)
+  const latestLayoutTransactionCommitRef = useRef<LayoutTransactionSnapshot | null>(null)
+  const skipNextConfigSceneReloadRef = useRef(false)
   useEffect(() => {
     captureConfigRef.current = captureConfig
   }, [captureConfig])
+  useEffect(() => {
+    latestLayoutTransactionCommitRef.current = null
+  }, [client])
   // Smoke-only: isolated smoke profiles persist no camera selection, so
   // camera-dependent layout presets would always be disabled under gates.
   // DEV-gated like the synthetic-source toggle; driven by the
@@ -1480,9 +1557,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     const smokeWindow = window as Window & {
       __videorcSmokeSelectFirstCamera?: () => string | null
+      __videorcSmokeSelectFirstScreen?: () => { id: string; kind: 'screen' | 'window' } | null
     }
     smokeWindow.__videorcSmokeSelectFirstCamera = (): string | null => {
-      const camera = deviceList.devices.find((device) => device.kind === 'camera')
+      const camera = deviceList.devices.find(
+        (device) => device.kind === 'camera' && device.status === 'available'
+      )
       if (!camera) {
         return null
       }
@@ -1492,8 +1572,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }))
       return camera.id
     }
+    smokeWindow.__videorcSmokeSelectFirstScreen = () => {
+      const source = deviceList.devices.find(
+        (device) =>
+          (device.kind === 'screen' || device.kind === 'window') &&
+          device.status === 'available' &&
+          device.id.includes('screencapturekit')
+      )
+      if (!source || (source.kind !== 'screen' && source.kind !== 'window')) {
+        return null
+      }
+      setCaptureConfig((current) => ({
+        ...current,
+        sources: {
+          ...current.sources,
+          screenId: source.kind === 'screen' ? source.id : undefined,
+          screenName: source.kind === 'screen' ? source.name : undefined,
+          windowId: source.kind === 'window' ? source.id : undefined,
+          windowName: source.kind === 'window' ? source.name : undefined,
+          testPattern: false
+        }
+      }))
+      return { id: source.id, kind: source.kind }
+    }
     return () => {
       delete smokeWindow.__videorcSmokeSelectFirstCamera
+      delete smokeWindow.__videorcSmokeSelectFirstScreen
     }
   }, [deviceList])
   const legacyStreamKeyMigrationAttemptedRef = useRef<Set<string>>(new Set())
@@ -1521,6 +1625,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Late-bound mirror so applyRecordingStatus (declared earlier) can trigger the
   // consolidated frame-polling suppression defined with the preview window state.
   const syncFramePollingSuppressionRef = useRef<(() => void) | null>(null)
+  const nativePreviewFramePollingSuppressionRequestedRef = useRef<boolean | null>(null)
   const nativePreviewCameraKeyRef = useRef<string | null>(null)
   const nativePreviewScreenKeyRef = useRef<string | null>(null)
   const nativePreviewCommittedSceneRef = useRef<{
@@ -2813,6 +2918,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         applyPreviewScreenStatus(payload as PreviewScreenStatus)
       }),
       nextClient.on('scene.changed', (payload) => {
+        if (layoutIntentAwaitingProofRef.current !== null) {
+          return
+        }
         applyScene(payload as Scene)
       }),
       nextClient.on('screens.changed', (payload) => {
@@ -3271,20 +3379,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setPlatformAccountValidations(nextPlatformAccountValidations)
       setStreamMetadataDraft(nextStreamMetadataDraft)
       setStreamMetadataValidation(nextStreamMetadataValidation)
-      if (!sceneEditMode) {
-        await reloadSceneFromCaptureConfig()
-      }
     } catch (error) {
       reportError(error)
     }
-  }, [
-    client,
-    refreshAiReadinessForClient,
-    reloadSceneFromCaptureConfig,
-    reportError,
-    sceneEditMode,
-    settings.ffmpegPath
-  ])
+  }, [client, refreshAiReadinessForClient, reportError, settings.ffmpegPath])
 
   // Real OS camera/mic access status (Electron getMediaAccessStatus, over IPC —
   // independent of the backend socket). Refresh on mount and whenever the window
@@ -3316,16 +3414,61 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
 
   useEffect(() => {
-    if (!client || wsStatus !== 'connected' || sceneEditMode) {
+    if (
+      !client ||
+      !shouldReloadSceneFromCaptureConfig({
+        connected: wsStatus === 'connected',
+        sceneEditMode,
+        recordingState: recording.state,
+        startRequestPending,
+        stopRequestPending
+      })
+    ) {
+      return
+    }
+    if (skipNextConfigSceneReloadRef.current) {
+      skipNextConfigSceneReloadRef.current = false
       return
     }
 
     const timer = window.setTimeout(() => {
-      void reloadSceneFromCaptureConfig().catch(reportError)
+      if (
+        !shouldReloadSceneFromCaptureConfig({
+          connected: wsStatusRef.current === 'connected',
+          sceneEditMode,
+          recordingState: recordingRef.current.state,
+          startRequestPending,
+          stopRequestPending
+        })
+      ) {
+        return
+      }
+      void reloadSceneFromCaptureConfig().catch((error) => {
+        if (
+          shouldReloadSceneFromCaptureConfig({
+            connected: wsStatusRef.current === 'connected',
+            sceneEditMode,
+            recordingState: recordingRef.current.state,
+            startRequestPending,
+            stopRequestPending
+          })
+        ) {
+          reportError(error)
+        }
+      })
     }, 250)
 
     return () => window.clearTimeout(timer)
-  }, [client, reloadSceneFromCaptureConfig, reportError, sceneEditMode, wsStatus])
+  }, [
+    client,
+    recording.state,
+    reloadSceneFromCaptureConfig,
+    reportError,
+    sceneEditMode,
+    startRequestPending,
+    stopRequestPending,
+    wsStatus
+  ])
 
   const resetSceneSource = useCallback(
     async (sourceId = selectedSceneSourceId ?? undefined) => {
@@ -3472,12 +3615,78 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [sourceDeviceSwitchPending, setSourceDeviceSwitchPending] =
     useState<LiveSourceDeviceSwitchPending | null>(null)
 
+  const rememberLayoutTransactionSnapshot = useCallback((snapshot: LayoutTransactionSnapshot) => {
+    latestLayoutTransactionCommitRef.current = latestLayoutTransactionCommit(
+      latestLayoutTransactionCommitRef.current,
+      snapshot
+    )
+  }, [])
+
+  const rememberLayoutCommit = useCallback(
+    async (
+      status: LayoutTransactionStatus,
+      sessionActive: boolean,
+      intentId: number
+    ): Promise<boolean> => {
+      if (!client) {
+        return false
+      }
+
+      const compositorStatus = sessionActive
+        ? await waitForLiveLayoutProof(client, status)
+        : await waitForPreviewLayoutProof(client, status)
+      if (layoutIntentIdRef.current !== intentId || status.intentId !== intentId) {
+        return false
+      }
+      const previewWindowState = await window.videorc?.getPreviewWindowState?.()
+      if (nativePreviewSurfaceEnabled && previewWindowState?.open) {
+        const proofOwner = nativePreviewSceneProofPresentationOwner({
+          mainPumpActive: mainPumpActiveRef.current,
+          statusReaderAvailable: Boolean(window.videorc?.getNativePreviewSurfaceStatus),
+          rendererUpdaterAvailable: Boolean(window.videorc?.updateNativePreviewSurfaceCompositor)
+        })
+        const surfaceStatus =
+          proofOwner === 'main-pump'
+            ? await waitForNativePreviewSurfaceSceneRevision(status.sceneRevision)
+            : proofOwner === 'renderer-fallback' &&
+                window.videorc?.updateNativePreviewSurfaceCompositor
+              ? await window.videorc.updateNativePreviewSurfaceCompositor(compositorStatus)
+              : null
+        if (!surfaceStatus) {
+          throw new Error(
+            `Native preview could not verify committed scene revision ${status.sceneRevision}.`
+          )
+        }
+        applyPreviewSurfaceStatus(surfaceStatus)
+        if (
+          surfaceStatus.nativePreviewHostKind !== 'proof-surface' &&
+          !nativePreviewStatusProvesSceneRevision(surfaceStatus, status.sceneRevision)
+        ) {
+          throw new Error(
+            `Native preview did not present committed scene revision ${status.sceneRevision}.`
+          )
+        }
+      }
+      if (layoutIntentIdRef.current !== intentId || status.intentId !== intentId) {
+        return false
+      }
+      if (typeof compositorStatus.sceneRevision === 'number') {
+        nativePreviewCommittedSceneRef.current = {
+          sceneId: status.scene.id,
+          sceneRevision: compositorStatus.sceneRevision,
+          compositorStatus
+        }
+      }
+      return true
+    },
+    [applyPreviewSurfaceStatus, client, nativePreviewSurfaceEnabled]
+  )
+
   const rememberLiveLayoutCommit = useCallback(
     async (status: LiveLayoutApplyStatus) => {
       if (!client) {
         return
       }
-
       const compositorStatus = await waitForLiveLayoutProof(client, status)
       if (typeof compositorStatus.sceneRevision === 'number') {
         nativePreviewCommittedSceneRef.current = {
@@ -3490,166 +3699,188 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [client]
   )
 
-  const applyLayoutPatch = useCallback(
-    (patch: Partial<LayoutSettings>) => {
-      const layout: LayoutSettings = {
-        ...captureConfig.layout,
-        ...patch
-      }
+  const applyLayoutTransactionState = useCallback(
+    (snapshot: LayoutTransactionSnapshot) => {
+      applyScene(snapshot.scene)
+      skipNextConfigSceneReloadRef.current = true
+      setCaptureConfig((current) => {
+        const next = { ...current, layout: snapshot.layout }
+        captureConfigRef.current = next
+        return next
+      })
+    },
+    [applyScene]
+  )
 
-      const isActive = isActiveRecordingState(recordingRef.current.state)
-      if (isActive) {
-        if (!client || wsStatus !== 'connected') {
-          toast.error('Backend socket is not connected — layout unchanged.')
-          return
-        }
-        if (layoutSwitchPending) {
-          return
-        }
-        setLayoutSwitchPending(layout.layoutPreset)
-        void (async () => {
-          try {
-            const protectedOverlayWindowIds = await currentProtectedOverlayWindowIds()
-            const status = await client.request<LiveLayoutApplyStatus>('scene.layout.apply_live', {
-              sources: captureConfig.sources,
-              layout,
-              video: captureConfig.video,
-              background: activeSceneBackground,
-              protectedOverlayWindowIds
-            })
-            await rememberLiveLayoutCommit(status)
-            applyScene(status.scene)
-            setCaptureConfig((current) => ({
-              ...current,
-              layout: {
-                ...current.layout,
-                ...patch
-              }
-            }))
-            if (status.mode === 'warm' && status.message) {
-              toast.success(status.message)
-            }
-          } catch (error) {
-            reportError(error)
-          } finally {
-            setLayoutSwitchPending(null)
-          }
-        })()
+  const readLayoutTransactionBackendTruth = useCallback(async () => {
+    if (!client) {
+      return null
+    }
+
+    // The first `scene.get` is an ordering barrier for accepted overlapping layout
+    // commands. The second proves the same scene contents surrounded the compositor
+    // status read, since layout commits reuse the same scene id.
+    const sceneBefore = await client.request<Scene>('scene.get')
+    const compositorStatus = await client.request<CompositorStatus>('compositor.status')
+    const sceneAfter = await client.request<Scene>('scene.get')
+    if (
+      typeof compositorStatus.sceneRevision !== 'number' ||
+      !compositorStatus.sceneLayout ||
+      !layoutTransactionBackendSnapshotIsStable({
+        sceneBefore,
+        compositorSceneId: compositorStatus.sceneId,
+        sceneAfter
+      })
+    ) {
+      return null
+    }
+
+    return {
+      sceneRevision: compositorStatus.sceneRevision,
+      scene: sceneAfter,
+      layout: compositorStatus.sceneLayout,
+      compositorStatus
+    } satisfies LayoutTransactionSnapshot
+  }, [client])
+
+  const requestLayoutTransaction = useCallback(
+    (layout: LayoutSettings) => {
+      const sessionActive = isActiveRecordingState(recordingRef.current.state)
+      if (!client || wsStatus !== 'connected') {
+        toast.error('Backend socket is not connected — layout unchanged.')
         return
       }
 
-      setCaptureConfig((current) => ({
-        ...current,
-        layout: {
-          ...current.layout,
-          ...patch
+      const intentId = Math.max(layoutIntentIdRef.current + 1, Date.now())
+      layoutIntentIdRef.current = intentId
+      layoutIntentAwaitingProofRef.current = intentId
+      setLayoutSwitchPending(layout.layoutPreset)
+
+      void (async () => {
+        try {
+          const requestedConfig = captureConfigRef.current
+          const protectedOverlayWindowIds = await currentProtectedOverlayWindowIds()
+          const method = sessionActive ? 'scene.layout.apply_live' : 'scene.layout.apply_preview'
+          const status = await client.request<LayoutTransactionStatus>(method, {
+            intentId,
+            sources: requestedConfig.sources,
+            layout,
+            video: requestedConfig.video,
+            background: activeSceneBackground,
+            protectedOverlayWindowIds
+          })
+          const committedSnapshot: LayoutTransactionSnapshot = {
+            sceneRevision: status.sceneRevision,
+            scene: status.scene,
+            layout: status.compositorStatus.sceneLayout ?? layout,
+            compositorStatus: status.compositorStatus
+          }
+          // Intent freshness and backend commit freshness are separate. A may be
+          // superseded by B after A commits; remember A before waiting for proof
+          // so a failed B can reconcile the renderer to committed backend truth.
+          rememberLayoutTransactionSnapshot(committedSnapshot)
+          let proofSucceeded = false
+          let proofError: unknown = null
+          try {
+            proofSucceeded = await rememberLayoutCommit(status, sessionActive, intentId)
+          } catch (error) {
+            proofError = error
+          }
+          const disposition = layoutTransactionProofDisposition({
+            latestIntentId: layoutIntentIdRef.current,
+            committedIntentId: status.intentId,
+            proofSucceeded
+          })
+          if (disposition === 'ignore-stale') {
+            return
+          }
+
+          // The backend commit is authoritative even if a bounded compositor or
+          // native-surface proof misses. Keep React/config in the same committed
+          // state, then surface the presentation fault; leaving the old selection
+          // visible would create a third, false scene truth.
+          applyLayoutTransactionState(committedSnapshot)
+          if (disposition === 'apply-unproven') {
+            const detail =
+              proofError instanceof Error ? proofError.message : 'Presentation proof timed out.'
+            reportError(
+              new Error(
+                `Layout committed at revision ${status.sceneRevision}, but preview proof was not observed. The controls were reconciled to the backend commit. ${detail}`
+              )
+            )
+            return
+          }
+          if (status.mode === 'warm' && status.message) {
+            toast.success(status.message)
+          }
+        } catch (error) {
+          // Superseded requests are expected and must not overwrite the newer
+          // selection or flash an error. The latest request still reports exact
+          // readiness/presentation failures.
+          if (layoutIntentIdRef.current === intentId) {
+            let backendTruth: LayoutTransactionSnapshot | null = null
+            try {
+              backendTruth = await readLayoutTransactionBackendTruth()
+            } catch {
+              // The last observed commit remains the safe fallback. Connection
+              // recovery performs its own authoritative scene.get reconciliation.
+            }
+            const reconciliation = layoutTransactionFailureReconciliation({
+              latestIntentId: layoutIntentIdRef.current,
+              failedIntentId: intentId,
+              backendTruth,
+              latestCommit: latestLayoutTransactionCommitRef.current
+            })
+            if (reconciliation) {
+              rememberLayoutTransactionSnapshot(reconciliation.snapshot)
+              applyLayoutTransactionState(reconciliation.snapshot)
+              reportError(error)
+            } else if (layoutIntentIdRef.current === intentId) {
+              reportError(error)
+            }
+          }
+        } finally {
+          if (layoutIntentAwaitingProofRef.current === intentId) {
+            layoutIntentAwaitingProofRef.current = null
+          }
+          if (layoutIntentIdRef.current === intentId) {
+            setLayoutSwitchPending(null)
+          }
         }
-      }))
-      void loadScene({
-        sources: captureConfig.sources,
-        layout,
-        video: captureConfig.video
-      }).catch(reportError)
+      })()
     },
     [
       activeSceneBackground,
-      applyScene,
-      captureConfig.layout,
-      captureConfig.sources,
-      captureConfig.video,
+      applyLayoutTransactionState,
       client,
-      layoutSwitchPending,
-      loadScene,
-      rememberLiveLayoutCommit,
+      readLayoutTransactionBackendTruth,
+      rememberLayoutCommit,
+      rememberLayoutTransactionSnapshot,
       reportError,
       wsStatus
     ]
   )
 
+  const applyLayoutPatch = useCallback(
+    (patch: Partial<LayoutSettings>) => {
+      requestLayoutTransaction({
+        ...captureConfigRef.current.layout,
+        ...patch
+      })
+    },
+    [requestLayoutTransaction]
+  )
+
   const applyCameraPreset = useCallback(
     (patch: Partial<LayoutSettings>) => {
-      const layout: LayoutSettings = {
-        ...captureConfig.layout,
+      requestLayoutTransaction({
+        ...captureConfigRef.current.layout,
         ...patch,
         cameraTransformMode: 'preset',
         cameraTransform: null
-      }
-
-      // Live switching (plan slice D2): during a session the backend owns the swap —
-      // it starts missing sources and commits swap-on-ready. The local config only
-      // updates on success so a failed switch honestly stays on the old layout.
-      const isActive = isActiveRecordingState(recordingRef.current.state)
-      if (isActive) {
-        if (!client || wsStatus !== 'connected') {
-          toast.error('Backend socket is not connected — layout unchanged.')
-          return
-        }
-        if (layoutSwitchPending) {
-          return
-        }
-        setLayoutSwitchPending(layout.layoutPreset)
-        void (async () => {
-          try {
-            const protectedOverlayWindowIds = await currentProtectedOverlayWindowIds()
-            const status = await client.request<LiveLayoutApplyStatus>('scene.layout.apply_live', {
-              sources: captureConfig.sources,
-              layout,
-              video: captureConfig.video,
-              background: activeSceneBackground,
-              protectedOverlayWindowIds
-            })
-            await rememberLiveLayoutCommit(status)
-            applyScene(status.scene)
-            setCaptureConfig((current) => ({
-              ...current,
-              layout: {
-                ...current.layout,
-                ...patch,
-                cameraTransformMode: 'preset',
-                cameraTransform: null
-              }
-            }))
-            if (status.mode === 'warm' && status.message) {
-              toast.success(status.message)
-            }
-          } catch (error) {
-            // The previous layout is still live; surface the exact backend reason.
-            reportError(error)
-          } finally {
-            setLayoutSwitchPending(null)
-          }
-        })()
-        return
-      }
-
-      setCaptureConfig((current) => ({
-        ...current,
-        layout: {
-          ...current.layout,
-          ...patch,
-          cameraTransformMode: 'preset',
-          cameraTransform: null
-        }
-      }))
-      void loadScene({
-        sources: captureConfig.sources,
-        layout,
-        video: captureConfig.video
-      }).catch(reportError)
+      })
     },
-    [
-      applyScene,
-      activeSceneBackground,
-      captureConfig.layout,
-      captureConfig.sources,
-      captureConfig.video,
-      client,
-      layoutSwitchPending,
-      loadScene,
-      rememberLiveLayoutCommit,
-      reportError,
-      wsStatus
-    ]
+    [requestLayoutTransaction]
   )
 
   const switchSourceDeviceLive = useCallback(
@@ -3736,16 +3967,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return status
     }
 
-    // The camera may only be hot when something composes it: the current preset, or
-    // an active session (kept warm so live layout switches swap instantly). A merely
-    // selected camera must not hold the device — and its indicator light — all day.
+    // Layout transactions own source retirement. In particular, screen-only keeps
+    // the camera alive for a cancelable one-second grace so a rapid side-by-side
+    // intent cannot race a renderer-authored stop/cold-start cycle.
     const presetUsesCamera = captureConfig.layout.layoutPreset !== 'screen-only'
-    const sessionActive = isActiveRecordingState(recordingRef.current.state)
-    if (!presetUsesCamera && !sessionActive) {
-      nativePreviewCameraKeyRef.current = null
-      const status = await client.request<PreviewCameraStatus>('preview.camera.stop')
-      applyPreviewCameraStatus(status)
-      return status
+    if (!presetUsesCamera) {
+      return previewCameraStatusRef.current
     }
 
     const key = JSON.stringify({
@@ -3825,6 +4052,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return status
     }
 
+    // The backend stops an unneeded screen source only after the camera-only scene
+    // has committed, keeping the previous good pixels available through warm-up.
+    if (captureConfig.layout.layoutPreset === 'camera-only') {
+      return previewScreenStatusRef.current
+    }
+
     const blockedStatus = selectedPreviewScreenBlockedStatus(
       captureConfig.sources,
       deviceListRef.current.devices
@@ -3889,6 +4122,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [
     applyPreviewScreenStatus,
     captureConfig.sources,
+    captureConfig.layout.layoutPreset,
     captureConfig.video,
     client,
     runtimeInfo?.disableAutoPreview,
@@ -3993,18 +4227,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const syncNativePreviewSurfaceBounds = useCallback(
     async (bounds: PreviewSurfaceBounds, generation?: number) => {
       const generationIsCurrent = (candidate: number | undefined): boolean =>
-        candidate === undefined || previewWindowRef.current.supervisor.generation === candidate
+        nativePreviewSurfaceSyncCanCommit(previewWindowRef.current, candidate)
       if (!nativePreviewSurfaceEnabled || !client || wsStatus !== 'connected') {
         return
       }
-      if (
-        !window.videorc?.createNativePreviewSurface ||
-        !window.videorc?.updateNativePreviewSurfaceBounds
-      ) {
+      if (!window.videorc?.createNativePreviewSurface) {
         return
       }
-      const surfaceAlreadyCreated =
-        nativePreviewSurfaceCreatedRef.current || previewSurfaceStatusRef.current.state === 'live'
+      // The explicit session ref is the lifecycle authority. A cached live
+      // renderer status may outlive close teardown; treating that stale status
+      // as an existing backend session turns reopen into update_bounds instead
+      // of create and leaves the compositor stopped.
+      const surfaceAlreadyCreated = nativePreviewSurfaceCreatedRef.current
       if (
         surfaceAlreadyCreated &&
         !previewSurfaceBoundsChanged(nativePreviewSurfaceLastSyncedBoundsRef.current, bounds)
@@ -4020,7 +4254,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nativePreviewSurfaceBoundsSyncInFlightRef.current = true
       try {
         while (nativePreviewSurfaceBoundsPendingRef.current) {
-          const nextBounds = nativePreviewSurfaceBoundsPendingRef.current
+          const nextBounds: PreviewSurfaceBounds = nativePreviewSurfaceBoundsPendingRef.current
           const nextGeneration = nativePreviewSurfaceBoundsPendingGenerationRef.current
           nativePreviewSurfaceBoundsPendingRef.current = null
           nativePreviewSurfaceBoundsPendingGenerationRef.current = undefined
@@ -4029,8 +4263,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           const applyHostCommands = window.videorc?.applyNativePreviewHostCommands
           const current = previewSurfaceStatusRef.current
-          const surfaceAlreadyCreated =
-            nativePreviewSurfaceCreatedRef.current || current.state === 'live'
+          const surfaceAlreadyCreated = nativePreviewSurfaceCreatedRef.current
           if (
             surfaceAlreadyCreated &&
             !previewSurfaceBoundsChanged(
@@ -4047,16 +4280,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : captureConfig.sources.cameraId
                 ? 'camera'
                 : 'synthetic'
-          // Placement fast path: preview-window movement must not wait for two
-          // backend round trips. Apply the update-bounds host command straight to
-          // the native hosts, then inform the backend and drop its stale echo below.
-          const directlyApplied = surfaceAlreadyCreated && applyHostCommands
-          if (directlyApplied) {
-            await applyHostCommands([{ kind: 'update-bounds', bounds: nextBounds }], nextGeneration)
-          }
-          if (!generationIsCurrent(nextGeneration)) {
-            continue
-          }
+          // Main is the sole live placement writer. Renderer reports the latest
+          // bounds to backend telemetry/lifecycle state, but never sends movement to
+          // the native host directly or replays the backend's delayed bounds echo.
           const backendStatus = surfaceAlreadyCreated
             ? await client.request<PreviewSurfaceStatus>('preview.surface.update_bounds', {
                 bounds: nextBounds
@@ -4070,36 +4296,34 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             nativePreviewCompositorSuppressedPresentsRef.current = 0
             resetNativePreviewCompositorTiming()
           }
-          nativePreviewSurfaceCreatedRef.current =
-            backendStatus.state === 'live' || surfaceAlreadyCreated
           const queuedCommands = await client.request<NativePreviewHostCommand[]>(
             'preview.surface.take_native_host_commands'
           )
-          // The backend queues an update-bounds echo for the change we already
-          // applied; replaying it would snap the window back to a stale rect. Only
-          // matching echoes are dropped — a genuinely different backend-initiated
-          // bounds command still goes through.
-          const hostCommands = directlyApplied
-            ? queuedCommands.filter(
-                (command) =>
-                  command.kind !== 'update-bounds' ||
-                  !command.bounds ||
-                  previewSurfaceBoundsChanged(command.bounds, nextBounds)
-              )
-            : queuedCommands
+          const hostCommands = queuedCommands.filter((command) => command.kind !== 'update-bounds')
           const hostStatus =
             hostCommands.length > 0 && applyHostCommands
               ? await applyHostCommands(hostCommands, nextGeneration)
-              : surfaceAlreadyCreated
-                ? await window.videorc.updateNativePreviewSurfaceBounds(nextBounds, nextGeneration)
-                : await window.videorc.createNativePreviewSurface(nextBounds, nextGeneration)
+              : !surfaceAlreadyCreated
+                ? await window.videorc.createNativePreviewSurface(nextBounds, nextGeneration)
+                : window.videorc.getNativePreviewSurfaceStatus
+                  ? await window.videorc.getNativePreviewSurfaceStatus()
+                  : current
           if (!generationIsCurrent(nextGeneration)) {
             continue
           }
-          nativePreviewSurfaceCreatedRef.current =
-            nativePreviewSurfaceCreatedRef.current || hostStatus.state === 'live'
+          if (nativePreviewSurfaceSyncNeedsCreate(surfaceAlreadyCreated, backendStatus.state)) {
+            // A close teardown can finish while an older bounds request is in
+            // flight. If that stale request observed the old renderer ref, the
+            // backend truth wins and this same latest bounds becomes a create.
+            nativePreviewSurfaceCreatedRef.current = false
+            nativePreviewSurfaceLastSyncedBoundsRef.current = null
+            nativePreviewSurfaceBoundsPendingRef.current = nextBounds
+            nativePreviewSurfaceBoundsPendingGenerationRef.current = nextGeneration
+            continue
+          }
+          nativePreviewSurfaceCreatedRef.current = backendStatus.state === 'live'
           const backendStatusAfterHostDrain =
-            hostCommands.length > 0
+            queuedCommands.length > 0
               ? { ...backendStatus, pendingHostCommandCount: 0 }
               : backendStatus
           const surfaceStatus = mergePreviewSurfaceHostStatus(
@@ -4202,10 +4426,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     const suppress =
       isActiveRecordingState(recordingRef.current.state) || !previewWindowRef.current.open
+    if (nativePreviewFramePollingSuppressionRequestedRef.current === suppress) {
+      return
+    }
+    nativePreviewFramePollingSuppressionRequestedRef.current = suppress
     void window.videorc
       .setNativePreviewSurfaceFramePollingSuppressed(suppress)
-      .then(applyPreviewSurfaceStatus)
+      .then((status) => {
+        if (nativePreviewFramePollingSuppressionRequestedRef.current === suppress) {
+          applyPreviewSurfaceStatus(status)
+        }
+      })
       .catch((error: unknown) => {
+        if (nativePreviewFramePollingSuppressionRequestedRef.current === suppress) {
+          nativePreviewFramePollingSuppressionRequestedRef.current = null
+        }
         console.error('Native preview frame-polling suppression failed:', error)
       })
   }, [applyPreviewSurfaceStatus, nativePreviewSurfaceEnabled])
@@ -4219,6 +4454,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       generation === undefined || previewWindowRef.current.supervisor.generation === generation
     nativePreviewSurfaceCreatedRef.current = false
     nativePreviewSurfaceLastSyncedBoundsRef.current = null
+    nativePreviewSurfaceBoundsPendingRef.current = null
     nativePreviewSurfaceBoundsPendingGenerationRef.current = undefined
     try {
       if (window.videorc?.applyNativePreviewHostCommands) {
@@ -4402,53 +4638,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     )
   }, [captureConfig.video.width, captureConfig.video.height])
 
-  const syncNativePreviewSurfaceScene = useCallback(async () => {
-    if (
-      !nativePreviewSurfaceEnabled ||
-      !window.videorc?.updateNativePreviewSurfaceScene ||
-      !client ||
-      wsStatus !== 'connected'
-    ) {
+  const syncNativePreviewSurfaceCompositor = useCallback(async () => {
+    if (!nativePreviewSurfaceEnabled || !client || wsStatus !== 'connected') {
       return
     }
 
-    // Start/stop the camera + screen capture the NEW layout needs before pushing
-    // the scene. The compositor only marks a scene revision "rendered" once it
-    // publishes a frame carrying that revision, which it can only do when the
-    // sources the scene references are live. If we push the scene first (e.g.
-    // camera-only -> screen-only) the screen capture is still racing to come up,
-    // the compositor never renders the revision, the rendered-revision wait times
-    // out, and the preview freezes instead of switching. Ensuring the sources here
-    // (rather than only via the debounced auto-preview effect) closes that race.
-    await Promise.all([ensureNativePreviewCamera(), ensureNativePreviewScreen()])
-
+    // Scene contents and source readiness now come only from the backend commit.
+    // This hook may re-present committed compositor truth, but it must never author
+    // another native-surface scene with the same revision and different contents.
     const committed = nativePreviewCommittedSceneRef.current
-    const committedStatus =
-      committed && sceneWithBackground && committed.sceneId === sceneWithBackground.id
-        ? committed.compositorStatus
-        : null
+    const committedStatus = committed?.compositorStatus ?? null
     const compositorStatus =
       committedStatus ?? (await client.request<CompositorStatus>('compositor.status'))
     const revision = compositorStatus.sceneRevision
     if (typeof revision !== 'number') {
       return
     }
-    const params: PreviewSurfaceSceneUpdateParams = {
-      revision,
-      scene: sceneWithBackground,
-      layout: captureConfig.layout,
-      activeScreen: activeScreen ?? null
-    }
-
-    const previewSceneStatus = await window.videorc.updateNativePreviewSurfaceScene(params)
-    applyPreviewSurfaceStatus({
-      ...previewSceneStatus,
-      framesRendered: Math.max(
-        previewSceneStatus.framesRendered,
-        previewSurfaceStatusRef.current.framesRendered
-      )
-    })
-
     const renderedStatus = await waitForRenderedCompositorSceneRevision(
       client,
       revision,
@@ -4457,7 +4662,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!compositorStatusHasRenderedSceneRevision(renderedStatus, revision)) {
       return
     }
-    if (window.videorc.updateNativePreviewSurfaceCompositor) {
+    const proofOwner = nativePreviewSceneProofPresentationOwner({
+      mainPumpActive: mainPumpActiveRef.current,
+      statusReaderAvailable: Boolean(window.videorc?.getNativePreviewSurfaceStatus),
+      rendererUpdaterAvailable: Boolean(window.videorc?.updateNativePreviewSurfaceCompositor)
+    })
+    if (proofOwner === 'main-pump') {
+      const status = await waitForNativePreviewSurfaceSceneRevision(revision)
+      if (status) {
+        applyPreviewSurfaceStatus(status)
+      }
+      return
+    }
+    if (proofOwner === 'renderer-fallback' && window.videorc.updateNativePreviewSurfaceCompositor) {
       const status = await window.videorc.updateNativePreviewSurfaceCompositor(renderedStatus)
       applyPreviewSurfaceStatus({
         ...status,
@@ -4468,26 +4685,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       })
       return
     }
-  }, [
-    activeScreen,
-    applyPreviewSurfaceStatus,
-    captureConfig.layout,
-    client,
-    ensureNativePreviewCamera,
-    ensureNativePreviewScreen,
-    nativePreviewSurfaceEnabled,
-    sceneWithBackground,
-    wsStatus
-  ])
+  }, [applyPreviewSurfaceStatus, client, nativePreviewSurfaceEnabled, wsStatus])
 
   useEffect(() => {
     if (!nativePreviewSurfaceEnabled) {
       return
     }
-    void syncNativePreviewSurfaceScene().catch((error: unknown) => {
-      console.error('Native preview surface scene update failed:', error)
+    void syncNativePreviewSurfaceCompositor().catch((error: unknown) => {
+      console.error('Native preview compositor sync failed:', error)
     })
-  }, [nativePreviewSurfaceEnabled, syncNativePreviewSurfaceScene])
+  }, [nativePreviewSurfaceEnabled, syncNativePreviewSurfaceCompositor])
 
   // First-frame healing ladder: main asks for a scene re-commit when the
   // compositor holds a stale/foreign scene (backend-owned revisions displace it).
@@ -4496,12 +4703,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     const unsubscribe = window.videorc?.onPreviewSceneResyncRequest?.(() => {
-      void syncNativePreviewSurfaceScene().catch((error: unknown) => {
-        console.error('Native preview scene resync failed:', error)
+      void syncNativePreviewSurfaceCompositor().catch((error: unknown) => {
+        console.error('Native preview compositor resync failed:', error)
       })
     })
     return () => unsubscribe?.()
-  }, [nativePreviewSurfaceEnabled, syncNativePreviewSurfaceScene])
+  }, [nativePreviewSurfaceEnabled, syncNativePreviewSurfaceCompositor])
 
   const registerPreviewSurfaceResize = useCallback(() => {
     if (!client || wsStatus !== 'connected') {

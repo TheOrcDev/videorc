@@ -70,6 +70,61 @@ export function previewSurfaceBoundsChanged(
   )
 }
 
+/**
+ * Fields that require work inside an in-process CAMetalLayer. Absolute screen
+ * placement and z-order move atomically with the owning NSView, so forwarding
+ * them back through JS/native presentation only adds contention.
+ */
+export function previewSurfaceDrawableBoundsChanged(
+  previous: PreviewSurfaceBounds | null,
+  next: PreviewSurfaceBounds
+): boolean {
+  if (!previous) {
+    return true
+  }
+  return (
+    Math.abs(previous.width - next.width) >= 1 ||
+    Math.abs(previous.height - next.height) >= 1 ||
+    Math.abs(previous.scaleFactor - next.scaleFactor) >= 0.01 ||
+    (previous.visible ?? true) !== (next.visible ?? true)
+  )
+}
+
+export interface NativePreviewDrawableMetrics {
+  nativePreviewDrawableWidth?: number
+  nativePreviewDrawableHeight?: number
+  nativePreviewContentsScale?: number
+}
+
+/**
+ * Status bounds can advance before an asynchronously queued native resize. The
+ * in-process movement fast path is safe only when the CAMetalLayer's measured
+ * drawable also matches the desired point bounds and display scale.
+ */
+export function previewSurfaceNativeDrawableMatchesBounds(
+  metrics: NativePreviewDrawableMetrics,
+  bounds: PreviewSurfaceBounds
+): boolean {
+  const drawableWidth = metrics.nativePreviewDrawableWidth
+  const drawableHeight = metrics.nativePreviewDrawableHeight
+  const contentsScale = metrics.nativePreviewContentsScale
+  if (
+    !Number.isFinite(drawableWidth) ||
+    !Number.isFinite(drawableHeight) ||
+    !Number.isFinite(contentsScale)
+  ) {
+    return false
+  }
+  const scale = Math.max(1, bounds.scaleFactor)
+  const expectedWidth = Math.round(Math.max(1, Math.round(bounds.width)) * scale)
+  const expectedHeight = Math.round(Math.max(1, Math.round(bounds.height)) * scale)
+  return (
+    Math.abs(drawableWidth! - expectedWidth) < 1 &&
+    Math.abs(drawableHeight! - expectedHeight) < 1 &&
+    Math.abs(contentsScale! - scale) < 0.01
+  )
+}
+
 function hasClip(bounds: PreviewSurfaceBounds): boolean {
   // null-tolerant: serialized bounds may carry explicit nulls for absent clip
   // fields; treating null as "clip present" would collapse the clip to 0×0.

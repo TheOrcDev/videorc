@@ -155,6 +155,48 @@ pub struct NativePreviewHostCommand {
     pub bounds: Option<NativePreviewHostBounds>,
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn native_preview_command_invalidates_iosurface_cache(
+    _previous_bounds: Option<NativePreviewHostBounds>,
+    command: NativePreviewHostCommand,
+) -> bool {
+    match command.kind {
+        NativePreviewHostCommandKind::Create | NativePreviewHostCommandKind::Destroy => true,
+        // Imported textures describe the compositor's source IOSurfaces, not
+        // the preview drawable. Metal scales them into any window size, so a
+        // bounds or display-scale update preserves the source cache.
+        NativePreviewHostCommandKind::UpdateBounds => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NativePreviewIosurfaceCacheMetrics {
+    pub hits: u64,
+    pub imports: u64,
+    pub invalidations: u64,
+    pub import_failures: u64,
+}
+
+impl NativePreviewIosurfaceCacheMetrics {
+    fn record_cache_hit(&mut self) {
+        self.hits = self.hits.saturating_add(1);
+    }
+
+    fn record_import_success(&mut self) {
+        self.imports = self.imports.saturating_add(1);
+    }
+
+    fn record_import_failure(&mut self) {
+        self.import_failures = self.import_failures.saturating_add(1);
+    }
+
+    fn record_invalidation(&mut self, cached_entry_count: usize) {
+        if cached_entry_count > 0 {
+            self.invalidations = self.invalidations.saturating_add(1);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NativePreviewHostActivation {
     pub transport: PreviewTransport,
@@ -282,6 +324,7 @@ mod macos {
     use super::{
         NativePreviewHostActivation, NativePreviewHostBounds, NativePreviewHostCommand,
         NativePreviewHostCommandKind, NativePreviewHostPresentFailure,
+        NativePreviewIosurfaceCacheMetrics, native_preview_command_invalidates_iosurface_cache,
     };
     use crate::metal_compositor::{
         MetalImportedIosurfaceTexture, MetalPreviewPresentFailure, MetalPreviewPresenter,
@@ -345,13 +388,14 @@ mod macos {
         }
 
         pub fn set_bounds(&mut self, bounds: NativePreviewHostBounds) {
-            if sizing_inputs(self.bounds) != sizing_inputs(bounds) {
+            let drawable_changed = sizing_inputs(self.bounds) != sizing_inputs(bounds);
+            if drawable_changed {
                 log_surface_sizing("update", bounds);
             }
             // Plan 025 S2: a transient bad bounds during a cross-display move
             // (NaN/0 drawable) must never reach the layer — leave the last good
             // size in place; the next valid push corrects it.
-            if bounds.drawable_is_valid() {
+            if drawable_changed && bounds.drawable_is_valid() {
                 let (drawable_width, drawable_height) = bounds.drawable_size();
                 self.layer.setDrawableSize(objc2_core_foundation::CGSize {
                     width: drawable_width,
@@ -365,7 +409,9 @@ mod macos {
                 let ca_layer: &CALayer = self.layer.as_super();
                 ca_layer.setContentsScale(bounds.contents_scale());
             }
-            self.view.setFrame(view_frame(bounds));
+            if self.bounds.view_frame_in_clip() != bounds.view_frame_in_clip() {
+                self.view.setFrame(view_frame(bounds));
+            }
             self.bounds = bounds;
         }
     }
@@ -515,11 +561,21 @@ mod macos {
                 .order_above_window_id
                 .or(self.bounds.order_above_window_id);
             bounds.elevated = bounds.elevated.or(self.bounds.elevated);
+            let previous_window_frame = self.bounds.appkit_clip_frame();
             self.bounds = bounds;
             self.layer_host.set_bounds(bounds);
             let frame = window_frame(bounds);
-            log_window_placement(frame);
-            self.window.setFrame_display(frame, true);
+            let next_window_frame = bounds.appkit_clip_frame();
+            if previous_window_frame != next_window_frame {
+                log_window_placement(frame);
+                if previous_window_frame.2 == next_window_frame.2
+                    && previous_window_frame.3 == next_window_frame.3
+                {
+                    self.window.setFrameOrigin(frame.origin);
+                } else {
+                    self.window.setFrame_display(frame, true);
+                }
+            }
         }
 
         /// The single visibility rule: on screen only while the bounds say visible
@@ -623,6 +679,7 @@ mod macos {
         presenter: MetalPreviewPresenter,
         overlay: Option<NativePreviewOverlayHost>,
         cached_textures: Vec<MetalImportedIosurfaceTexture>,
+        cache_metrics: NativePreviewIosurfaceCacheMetrics,
     }
 
     impl NativePreviewIosurfacePresenterRunner {
@@ -631,11 +688,17 @@ mod macos {
                 presenter: MetalPreviewPresenter::new_default()?,
                 overlay: None,
                 cached_textures: Vec::new(),
+                cache_metrics: NativePreviewIosurfaceCacheMetrics::default(),
             })
         }
 
         pub fn apply_command(&mut self, command: NativePreviewHostCommand, mtm: MainThreadMarker) {
-            self.cached_textures.clear();
+            let previous_bounds = self.overlay.as_ref().map(|overlay| overlay.bounds);
+            if native_preview_command_invalidates_iosurface_cache(previous_bounds, command) {
+                self.cache_metrics
+                    .record_invalidation(self.cached_textures.len());
+                self.cached_textures.clear();
+            }
             apply_overlay_command(&self.presenter, &mut self.overlay, command, mtm);
         }
 
@@ -669,15 +732,26 @@ mod macos {
                 .iter()
                 .position(|texture| texture.matches(iosurface_id, width, height));
             let imported_index = match cached_index {
-                Some(index) => index,
+                Some(index) => {
+                    self.cache_metrics.record_cache_hit();
+                    index
+                }
                 None => {
-                    let imported = self
-                        .presenter
-                        .import_iosurface_texture_handle(iosurface_id, width, height)
-                        .ok_or(NativePreviewHostPresentFailure::IosurfaceImportFailed)?;
+                    let Some(imported) =
+                        self.presenter
+                            .import_iosurface_texture_handle(iosurface_id, width, height)
+                    else {
+                        self.cache_metrics.record_import_failure();
+                        return Err(NativePreviewHostPresentFailure::IosurfaceImportFailed);
+                    };
+                    self.cache_metrics.record_import_success();
                     // A size change obsoletes every cached slot at once.
+                    let cached_entry_count = self.cached_textures.len();
                     self.cached_textures
                         .retain(|texture| texture.matches(texture.iosurface_id(), width, height));
+                    self.cache_metrics.record_invalidation(
+                        cached_entry_count.saturating_sub(self.cached_textures.len()),
+                    );
                     if self.cached_textures.len() >= IMPORTED_TEXTURE_CACHE_SIZE {
                         self.cached_textures.remove(0);
                     }
@@ -707,6 +781,10 @@ mod macos {
 
         pub fn has_overlay(&self) -> bool {
             self.overlay.is_some()
+        }
+
+        pub fn cache_metrics(&self) -> NativePreviewIosurfaceCacheMetrics {
+            self.cache_metrics
         }
     }
 
@@ -841,6 +919,84 @@ mod tests {
             ..slot(0.0, 0.0, 2.0)
         };
         assert!(!zero.drawable_is_valid());
+    }
+
+    #[test]
+    fn iosurface_cache_survives_placement_and_drawable_changes_until_lifecycle_reset() {
+        let base = slot(10.0, 20.0, 2.0);
+        let update = |bounds| NativePreviewHostCommand {
+            kind: NativePreviewHostCommandKind::UpdateBounds,
+            bounds: Some(bounds),
+        };
+
+        for placement_only in [
+            NativePreviewHostBounds {
+                screen_x: 50.0,
+                ..base
+            },
+            NativePreviewHostBounds {
+                screen_y: 60.0,
+                screen_height: Some(1200.0),
+                ..base
+            },
+            NativePreviewHostBounds {
+                visible: Some(false),
+                ..base
+            },
+            NativePreviewHostBounds {
+                order_above_window_id: Some(42),
+                elevated: Some(true),
+                ..base
+            },
+        ] {
+            assert!(!native_preview_command_invalidates_iosurface_cache(
+                Some(base),
+                update(placement_only)
+            ));
+        }
+
+        assert!(!native_preview_command_invalidates_iosurface_cache(
+            Some(base),
+            update(NativePreviewHostBounds {
+                width: 800.0,
+                ..base
+            })
+        ));
+        assert!(!native_preview_command_invalidates_iosurface_cache(
+            Some(base),
+            update(NativePreviewHostBounds {
+                scale_factor: 1.0,
+                ..base
+            })
+        ));
+        assert!(native_preview_command_invalidates_iosurface_cache(
+            Some(base),
+            NativePreviewHostCommand {
+                kind: NativePreviewHostCommandKind::Destroy,
+                bounds: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn iosurface_cache_metrics_count_real_cache_events_without_resetting() {
+        let mut metrics = NativePreviewIosurfaceCacheMetrics::default();
+
+        metrics.record_cache_hit();
+        metrics.record_import_success();
+        metrics.record_import_failure();
+        metrics.record_invalidation(0);
+        metrics.record_invalidation(3);
+
+        assert_eq!(
+            metrics,
+            NativePreviewIosurfaceCacheMetrics {
+                hits: 1,
+                imports: 1,
+                invalidations: 1,
+                import_failures: 1,
+            }
+        );
     }
 
     #[test]
