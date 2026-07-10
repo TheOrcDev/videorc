@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: temporary-macos-release-calibration-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   calibrate:
@@ -44,6 +44,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
