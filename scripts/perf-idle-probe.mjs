@@ -45,6 +45,7 @@ import {
   classifyProcess,
   collectProcessCensus,
   collectProcessResourceDetails,
+  collectStableProcessResourceCheckpoint,
   compareProcessResourceCheckpoints,
   ownedProcessLedgerPaths,
   pruneDeadOwnedProcessRecords,
@@ -279,12 +280,15 @@ try {
   const backend = launched.connections['backend-ready']
   const samples = []
   const cpuSamples = []
-  const firstResourceCensus = await collectProcessCensus({
-    ledgerPaths,
-    pgid: launched.process.pid
+  const firstStableResourceCheckpoint = await collectStableProcessResourceCheckpoint({
+    collectCensus: () =>
+      collectProcessCensus({
+        ledgerPaths,
+        pgid: launched.process.pid
+      })
   })
   resourceCheckpoints = {
-    first: await collectProcessResourceDetails(firstResourceCensus),
+    first: firstStableResourceCheckpoint.checkpoint,
     last: null,
     comparison: null
   }
@@ -351,11 +355,14 @@ try {
   measuredWireBytes = previewMode === 'detached' ? detachedMeasurementWireBytes : wireTap.bytes()
   diagnosticStatusAfter = await wireTap.request('diagnostics.stats')
   wireTap.close()
-  const lastResourceCensus = await collectProcessCensus({
-    ledgerPaths,
-    pgid: launched.process.pid
+  const lastStableResourceCheckpoint = await collectStableProcessResourceCheckpoint({
+    collectCensus: () =>
+      collectProcessCensus({
+        ledgerPaths,
+        pgid: launched.process.pid
+      })
   })
-  resourceCheckpoints.last = await collectProcessResourceDetails(lastResourceCensus)
+  resourceCheckpoints.last = lastStableResourceCheckpoint.checkpoint
   resourceCheckpoints.comparison = compareProcessResourceCheckpoints(
     resourceCheckpoints.first,
     resourceCheckpoints.last

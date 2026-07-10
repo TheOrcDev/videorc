@@ -21,13 +21,14 @@ describe('process endurance evidence', () => {
       warmupMs: 100,
       measurementMs: 200,
       intervalMs: 100,
+      resourceCheckpointSettleMs: 0,
       now: () => nowMs,
       sleep: async (ms) => {
         nowMs += ms
       },
       collectCensus: async () => {
         censusSequence += 1
-        if (censusSequence === 2 || censusSequence === 3) nowMs += 30
+        if (censusSequence === 3 || censusSequence === 4) nowMs += 30
         return fakeCensus(censusSequence)
       },
       collectCpu: async () => ({
@@ -84,14 +85,15 @@ describe('process endurance evidence', () => {
       warmupMs: 0,
       measurementMs: 4_000,
       intervalMs: 500,
+      resourceCheckpointSettleMs: 0,
       now: () => nowMs,
       sleep: async (ms) => {
         nowMs += ms
       },
       collectCensus: async () => {
         censusSequence += 1
-        if (censusSequence === 2) nowMs += 1_800
-        else if (censusSequence >= 3 && censusSequence <= 7) nowMs += 100
+        if (censusSequence === 3) nowMs += 1_800
+        else if (censusSequence >= 4 && censusSequence <= 8) nowMs += 100
         return fakeCensus(censusSequence)
       },
       collectCpu: async () => ({
@@ -109,15 +111,15 @@ describe('process endurance evidence', () => {
     assert.deepEqual(evidence.memory.samples[0], {
       sampledAtMs: 1_800,
       scheduledAtMs: 0,
-      totalRssKb: 606,
-      ownedRssKb: 102,
+      totalRssKb: 609,
+      ownedRssKb: 103,
       aliveOwnedProcessCount: 1,
       deadOwnedProcessCount: 0,
       processGroupCount: 3,
       byRole: {
-        backend: { count: 1, rssKb: 102 },
-        'electron-main': { count: 1, rssKb: 202 },
-        'electron-renderer': { count: 1, rssKb: 302 }
+        backend: { count: 1, rssKb: 103 },
+        'electron-main': { count: 1, rssKb: 203 },
+        'electron-renderer': { count: 1, rssKb: 303 }
       }
     })
     assert.equal(evidence.sampling.skippedDeadlineCount, 2)

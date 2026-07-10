@@ -5,6 +5,7 @@ import {
   classifyProcess,
   collectProcessCensus,
   collectProcessResourceDetails,
+  collectStableProcessResourceCheckpoint,
   compareProcessResourceCheckpoints
 } from './process-census.mjs'
 import { summarizeProcessMemory } from './process-memory-gate.mjs'
@@ -27,6 +28,8 @@ export async function collectProcessEndurance({
   collectCensus = collectProcessCensus,
   collectResources = collectProcessResourceDetails,
   collectCpu = sampleProcessGroupCpu,
+  resourceCheckpointAttempts = 8,
+  resourceCheckpointSettleMs = 50,
   now = monotonicNowMs,
   sleep = sleepMs
 }) {
@@ -46,8 +49,14 @@ export async function collectProcessEndurance({
   const effectiveWarmupMs = Math.max(0, Number(warmupMs) || 0)
   if (effectiveWarmupMs > 0) await sleep(effectiveWarmupMs)
 
-  const firstCensus = await collectCensus({ ledgerPaths, pgid })
-  const firstResourceCheckpoint = await collectResources(firstCensus)
+  const firstStableResourceCheckpoint = await collectStableProcessResourceCheckpoint({
+    collectCensus: () => collectCensus({ ledgerPaths, pgid }),
+    collectResources,
+    maxAttempts: resourceCheckpointAttempts,
+    settleMs: resourceCheckpointSettleMs,
+    sleepFn: sleep
+  })
+  const firstResourceCheckpoint = firstStableResourceCheckpoint.checkpoint
   const censuses = []
   const memorySamples = []
   const cpuSamples = []
@@ -87,8 +96,14 @@ export async function collectProcessEndurance({
   }
   const measurementStartedAtMs = scheduledSamples.measurementStartedAtMs
   const measurementEndedAtMs = scheduledSamples.measurementEndedAtMs
-  const lastCensus = await collectCensus({ ledgerPaths, pgid })
-  const lastResourceCheckpoint = await collectResources(lastCensus)
+  const lastStableResourceCheckpoint = await collectStableProcessResourceCheckpoint({
+    collectCensus: () => collectCensus({ ledgerPaths, pgid }),
+    collectResources,
+    maxAttempts: resourceCheckpointAttempts,
+    settleMs: resourceCheckpointSettleMs,
+    sleepFn: sleep
+  })
+  const lastResourceCheckpoint = lastStableResourceCheckpoint.checkpoint
   const resourceCheckpoints = {
     first: firstResourceCheckpoint,
     last: lastResourceCheckpoint,

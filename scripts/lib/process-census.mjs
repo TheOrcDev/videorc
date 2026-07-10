@@ -120,6 +120,60 @@ export async function collectProcessResourceDetails(
 }
 
 /**
+ * Capture checkpoint-only resources from a stable process population. The
+ * backend's cached diagnostics sampler intentionally launches a short-lived
+ * `ps` child once per second; a census can race that child even though it is
+ * gone before `footprint`/`lsof` run. Requiring two consecutive identical
+ * PID/role censuses and complete resource coverage removes that observer race
+ * without hiding a persistent process addition, replacement, or failed probe.
+ */
+export async function collectStableProcessResourceCheckpoint({
+  collectCensus,
+  collectResources = collectProcessResourceDetails,
+  maxAttempts = 8,
+  settleMs = 50,
+  sleepFn = sleep
+}) {
+  if (typeof collectCensus !== 'function' || typeof collectResources !== 'function') {
+    throw new Error('Stable resource checkpoint requires census and resource collectors.')
+  }
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 2) {
+    throw new Error(`Stable resource checkpoint requires at least 2 attempts, got ${maxAttempts}.`)
+  }
+
+  let previousIdentity = null
+  let lastReason = 'no census collected'
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const census = await collectCensus()
+    const identity = processCensusIdentity(census)
+    if (identity === previousIdentity) {
+      const checkpoint = await collectResources(census)
+      if (resourceCheckpointCoverageComplete(checkpoint)) {
+        return {
+          census,
+          checkpoint: {
+            ...checkpoint,
+            stability: {
+              attempts: attempt,
+              consecutiveIdentitySamples: 2
+            }
+          }
+        }
+      }
+      lastReason = `resource coverage was incomplete (${resourceCheckpointCoverageReason(checkpoint)})`
+    } else {
+      lastReason = `process population was still changing (${identity})`
+    }
+    previousIdentity = identity
+    if (attempt < maxAttempts && settleMs > 0) await sleepFn(settleMs)
+  }
+
+  throw new Error(
+    `Could not capture a stable complete process-resource checkpoint after ${maxAttempts} attempts: ${lastReason}`
+  )
+}
+
+/**
  * Resource totals are only meaningful deltas when both checkpoints covered the
  * same live processes. Keep exact PID continuity separate from role-population
  * continuity so a helper restart cannot masquerade as a memory/file decrease.
@@ -481,6 +535,23 @@ function summarizeResourceMetricCoverage(rows, metric) {
     complete: rows.length > 0 && succeeded === rows.length,
     byRole
   }
+}
+
+function processCensusIdentity(census) {
+  return (census?.processRows ?? [])
+    .map((row) => `${row.pid}:${row.role ?? 'other'}`)
+    .sort()
+    .join(',')
+}
+
+function resourceCheckpointCoverageComplete(checkpoint) {
+  return RESOURCE_METRICS.every((metric) => checkpoint?.coverage?.[metric]?.complete === true)
+}
+
+function resourceCheckpointCoverageReason(checkpoint) {
+  return RESOURCE_METRICS.map(
+    (metric) => `${metric}=${coverageRatio(checkpoint?.coverage?.[metric])}`
+  ).join(', ')
 }
 
 function completeResourceMetricTotal(rows, metric, coverage) {

@@ -7,6 +7,7 @@ import {
   classifyProcess,
   collectProcessCensus,
   collectProcessResourceDetails,
+  collectStableProcessResourceCheckpoint,
   compareProcessResourceCheckpoints,
   ownedProcessLedgerPaths,
   parseProcessTable,
@@ -276,6 +277,83 @@ test('collectProcessResourceDetails records macOS physical footprint and open fi
   })
 })
 
+test('stable resource checkpoints retry a transient process and retain complete persistent rows', async () => {
+  const persistent = {
+    processRows: [
+      { pid: 111, role: 'electron-main' },
+      { pid: 222, role: 'backend' }
+    ]
+  }
+  const withTransientSampler = {
+    processRows: [...persistent.processRows, { pid: 333, role: 'other' }]
+  }
+  const censuses = [persistent, withTransientSampler, persistent, persistent]
+  let resourcesCollected = 0
+
+  const result = await collectStableProcessResourceCheckpoint({
+    collectCensus: async () => censuses.shift(),
+    collectResources: async (census) => {
+      resourcesCollected += 1
+      const rows = census.processRows.map((row) => ({
+        ...row,
+        physicalFootprintBytes: row.pid * 1_000,
+        openFileCount: row.pid
+      }))
+      return completeResourceCheckpoint(rows)
+    },
+    settleMs: 0
+  })
+
+  assert.equal(resourcesCollected, 1)
+  assert.deepEqual(
+    result.checkpoint.rows.map((row) => row.pid),
+    [111, 222]
+  )
+  assert.deepEqual(result.checkpoint.stability, {
+    attempts: 4,
+    consecutiveIdentitySamples: 2
+  })
+})
+
+test('stable resource checkpoints retry incomplete resource coverage', async () => {
+  const census = { processRows: [{ pid: 111, role: 'backend' }] }
+  let attempts = 0
+  const result = await collectStableProcessResourceCheckpoint({
+    collectCensus: async () => census,
+    collectResources: async () => {
+      attempts += 1
+      return attempts === 1
+        ? {
+            rows: [
+              {
+                pid: 111,
+                role: 'backend',
+                physicalFootprintBytes: null,
+                openFileCount: 1
+              }
+            ],
+            coverage: {
+              physicalFootprintBytes: { requested: 1, succeeded: 0, complete: false },
+              openFileCount: { requested: 1, succeeded: 1, complete: true }
+            },
+            totals: { physicalFootprintBytes: null, openFileCount: 1 }
+          }
+        : completeResourceCheckpoint([
+            {
+              pid: 111,
+              role: 'backend',
+              physicalFootprintBytes: 111_000,
+              openFileCount: 1
+            }
+          ])
+    },
+    settleMs: 0
+  })
+
+  assert.equal(attempts, 2)
+  assert.equal(result.checkpoint.coverage.physicalFootprintBytes.complete, true)
+})
+
 test('resource checkpoint totals stay null when the last footprint sample is incomplete', async () => {
   const census = {
     processRows: [
@@ -413,3 +491,33 @@ test('pruneDeadOwnedProcessRecords removes only records whose pids are gone', as
     { pid: 111, label: 'videorc-backend', startedAt: '2026-06-20T10:00:00.000Z' }
   ])
 })
+
+function completeResourceCheckpoint(rows) {
+  const byRole = Object.fromEntries(
+    [...new Set(rows.map((row) => row.role))].map((role) => {
+      const count = rows.filter((row) => row.role === role).length
+      return [role, { requested: count, succeeded: count, complete: count > 0 }]
+    })
+  )
+  return {
+    rows,
+    coverage: {
+      physicalFootprintBytes: {
+        requested: rows.length,
+        succeeded: rows.length,
+        complete: rows.length > 0,
+        byRole
+      },
+      openFileCount: {
+        requested: rows.length,
+        succeeded: rows.length,
+        complete: rows.length > 0,
+        byRole
+      }
+    },
+    totals: {
+      physicalFootprintBytes: rows.reduce((total, row) => total + row.physicalFootprintBytes, 0),
+      openFileCount: rows.reduce((total, row) => total + row.openFileCount, 0)
+    }
+  }
+}
