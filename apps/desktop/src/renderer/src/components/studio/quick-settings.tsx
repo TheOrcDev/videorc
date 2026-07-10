@@ -34,6 +34,7 @@ import {
   buildCaptureSources,
   buildMicrophoneSources,
   capturePickerDevices,
+  microphonePickerDevices,
   layoutPresetNeedsCamera,
   layoutPresetNeedsScreen
 } from '@/lib/capture'
@@ -117,7 +118,7 @@ export function QuickSettings(): ReactElement {
 
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
-  const microphones = deviceList.devices.filter((device) => device.kind === 'microphone')
+  const microphones = microphonePickerDevices(deviceList.devices)
   const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
   const hasCamera = Boolean(captureConfig.sources.cameraId)
   const hasScreen = Boolean(selectedCaptureId)

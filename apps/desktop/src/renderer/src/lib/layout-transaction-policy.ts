@@ -29,6 +29,46 @@ export function layoutTransactionProofDisposition(input: {
   return input.proofSucceeded ? 'apply-proven' : 'apply-unproven'
 }
 
+// Instant background apply while live: commit only when a session is active,
+// only after the session's own start armed the watcher (start params already
+// carry the background), and only when the resolved background VALUE changed —
+// the registry yields new objects on unrelated edits (rename, import into an
+// inactive slot) which must not commit.
+export function liveBackgroundCommitDecision(input: {
+  sessionActive: boolean
+  armedFingerprint: string | null
+  fingerprint: string
+}): { next: string | null; commit: boolean } {
+  if (!input.sessionActive) {
+    return { next: null, commit: false }
+  }
+  if (input.armedFingerprint === null || input.armedFingerprint === input.fingerprint) {
+    return { next: input.fingerprint, commit: false }
+  }
+  return { next: input.fingerprint, commit: true }
+}
+
+// A backend commit whose recording/streaming output proof passed but whose
+// native preview presented-revision readback missed is a preview-only fault:
+// the session output is already proven and the controls are reconciled to the
+// commit, so it must not be raised as a destructive error.
+export class NativePreviewPresentationProofError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'NativePreviewPresentationProofError'
+  }
+}
+
+export type LayoutTransactionUnprovenSeverity = 'output-error' | 'presentation-warning'
+
+export function layoutTransactionUnprovenSeverity(
+  proofError: unknown
+): LayoutTransactionUnprovenSeverity {
+  return proofError instanceof NativePreviewPresentationProofError
+    ? 'presentation-warning'
+    : 'output-error'
+}
+
 export type LayoutTransactionFailureReconciliation<T> = {
   source: 'backend-truth' | 'latest-commit'
   snapshot: T

@@ -59,7 +59,7 @@ describe('native preview compositor scene authority', () => {
     ).toBe(false)
   })
 
-  it('requires an attached in-process present of the committed revision', () => {
+  it('requires an attached in-process present at or beyond the committed revision', () => {
     const status = {
       state: 'live',
       transport: 'native-surface',
@@ -75,6 +75,28 @@ describe('native preview compositor scene authority', () => {
     expect(
       nativePreviewStatusProvesSceneRevision(
         { ...status, nativePreviewHostKind: 'proof-surface', nativePreviewHostAttached: false },
+        12
+      )
+    ).toBe(false)
+  })
+
+  it('accepts a newer presented revision as proof of a superseded commit', () => {
+    const status = {
+      state: 'live',
+      transport: 'native-surface',
+      backing: 'cametal-layer',
+      sourcePixelsPresent: true,
+      nativePreviewHostKind: 'in-process',
+      nativePreviewHostAttached: true,
+      nativePreviewPresentedSceneRevision: 13
+    } as PreviewSurfaceStatus
+
+    // Latest-wins presentation may skip an intermediate committed revision and
+    // land directly on a newer one; the older commit is proven, not stale.
+    expect(nativePreviewStatusProvesSceneRevision(status, 12)).toBe(true)
+    expect(
+      nativePreviewStatusProvesSceneRevision(
+        { ...status, nativePreviewPresentedSceneRevision: undefined },
         12
       )
     ).toBe(false)

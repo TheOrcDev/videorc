@@ -119,3 +119,9 @@ commit + push (via a PR — `main` is branch-protected since 2026-07-07).
   `max-age=60`; a long / `immutable` cache serves an expired 403.
 - **Notarization is a network round-trip to Apple** — the build sits for minutes
   near the end; that's normal, not a hang.
+- **Don't source env via `. <(grep …)` under `/bin/bash`** — macOS ships bash
+  3.2, where sourcing from process substitution silently loads NOTHING; the
+  0.9.27 upload failed with "Release upload S3 endpoint URL must be a valid
+  HTTP(S) URL" because `VIDEORC_DOWNLOAD_S3_*` never entered the environment
+  (zsh handles it fine, which hides the bug when testing interactively).
+  Write the grep output to a temp file and `.` that file instead.

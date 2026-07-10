@@ -88,6 +88,11 @@ async fn list_macos_devices(ffmpeg_path: &str) -> DeviceList {
                 devices.extend(screens);
             }
 
+            devices.extend(avfoundation_microphone_picker_devices(
+                &av_devices,
+                native_microphone_available,
+            ));
+
             for device in av_devices {
                 match device.kind {
                     AvFoundationDeviceKind::Video => {
@@ -113,10 +118,10 @@ async fn list_macos_devices(ffmpeg_path: &str) -> DeviceList {
                             });
                         }
                     }
-                    AvFoundationDeviceKind::Audio => devices.push(avfoundation_microphone_device(
-                        &device,
-                        native_microphone_available,
-                    )),
+                    // Audio rows are handled by avfoundation_microphone_picker_devices
+                    // above; they are hidden entirely while a native CoreAudio
+                    // input is available.
+                    AvFoundationDeviceKind::Audio => {}
                 }
             }
         }
@@ -636,26 +641,37 @@ fn db_to_level(db: f64) -> f64 {
     ((db + 60.0) / 60.0).clamp(0.0, 1.0)
 }
 
-fn avfoundation_microphone_device(
-    device: &AvFoundationDevice,
+// FFmpeg avfoundation microphones duplicate every CoreAudio input and exist
+// as the internal silent-mic retry path: recording resolves their index by
+// name at session time (find_avfoundation_microphone_index_for_native_name),
+// never through picker rows. Publishing them while a native input was
+// available doubled every microphone in the picker and made a broken
+// "Fallback - X" row the fresh-profile default, so they are listed only when
+// no native CoreAudio input can be selected at all.
+fn avfoundation_microphone_picker_devices(
+    av_devices: &[AvFoundationDevice],
     native_microphone_available: bool,
-) -> Device {
+) -> Vec<Device> {
+    if native_microphone_available {
+        return Vec::new();
+    }
+    av_devices
+        .iter()
+        .filter(|device| device.kind == AvFoundationDeviceKind::Audio)
+        .map(avfoundation_microphone_device)
+        .collect()
+}
+
+fn avfoundation_microphone_device(device: &AvFoundationDevice) -> Device {
     Device {
         id: format!("microphone:avfoundation:{}", device.index),
-        name: if native_microphone_available {
-            format!("Fallback - {}", device.name)
-        } else {
-            device.name.clone()
-        },
+        name: device.name.clone(),
         kind: DeviceKind::Microphone,
         status: DeviceStatus::Available,
-        detail: Some(if native_microphone_available {
-            "FFmpeg avfoundation fallback; use this if the native CoreAudio input opens but does not send frames."
-                .to_string()
-        } else {
+        detail: Some(
             "FFmpeg avfoundation fallback; native CoreAudio probe did not return an available input."
-                .to_string()
-        }),
+                .to_string(),
+        ),
         width: None,
         height: None,
     }
@@ -748,42 +764,48 @@ mod tests {
     }
 
     #[test]
-    fn avfoundation_microphone_is_exposed_as_fallback_when_native_exists() {
-        let device = avfoundation_microphone_device(
-            &AvFoundationDevice {
+    fn avfoundation_microphones_are_hidden_from_picker_when_native_exists() {
+        let av_devices = vec![
+            AvFoundationDevice {
+                index: 0,
+                name: "FaceTime HD Camera".to_string(),
+                kind: AvFoundationDeviceKind::Video,
+            },
+            AvFoundationDevice {
                 index: 2,
                 name: "MacBook Pro Microphone".to_string(),
                 kind: AvFoundationDeviceKind::Audio,
             },
-            true,
-        );
+        ];
 
-        assert_eq!(device.id, "microphone:avfoundation:2");
-        assert_eq!(device.name, "Fallback - MacBook Pro Microphone");
-        assert_eq!(device.status, DeviceStatus::Available);
-        assert!(
-            device
-                .detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains("does not send frames")
-        );
+        // With a native CoreAudio input available, no avfoundation microphone
+        // may reach the picker; the silent-mic retry path resolves the ffmpeg
+        // index by name at session time instead.
+        assert!(avfoundation_microphone_picker_devices(&av_devices, true).is_empty());
     }
 
     #[test]
-    fn avfoundation_microphone_keeps_plain_label_when_native_is_unavailable() {
-        let device = avfoundation_microphone_device(
-            &AvFoundationDevice {
+    fn avfoundation_microphones_are_listed_plain_when_native_is_unavailable() {
+        let av_devices = vec![
+            AvFoundationDevice {
+                index: 0,
+                name: "FaceTime HD Camera".to_string(),
+                kind: AvFoundationDeviceKind::Video,
+            },
+            AvFoundationDevice {
                 index: 2,
                 name: "MacBook Pro Microphone".to_string(),
                 kind: AvFoundationDeviceKind::Audio,
             },
-            false,
-        );
+        ];
 
-        assert_eq!(device.name, "MacBook Pro Microphone");
+        let devices = avfoundation_microphone_picker_devices(&av_devices, false);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, "microphone:avfoundation:2");
+        assert_eq!(devices[0].name, "MacBook Pro Microphone");
+        assert_eq!(devices[0].status, DeviceStatus::Available);
         assert!(
-            device
+            devices[0]
                 .detail
                 .as_deref()
                 .unwrap_or_default()

@@ -63,6 +63,18 @@ function providerStatusLabel(provider: LiveChatProviderState): string {
   return providerStateLabel(provider.state)
 }
 
+// Chat binds to the linked account's channel, not to wherever the stream key
+// points. On a manual-RTMP stream of a different channel that reads the wrong
+// chat with a green "Connected" badge — name the bound account so the
+// mismatch is at least visible.
+export function providerBadgeTitle(provider: LiveChatProviderState): string {
+  const identity = provider.accountLabel ? `Reading chat as ${provider.accountLabel}.` : ''
+  if (provider.message && identity) {
+    return `${provider.message} — ${identity}`
+  }
+  return provider.message || identity
+}
+
 export function commentsDestinationSummary({
   providers,
   sendTargets,
@@ -166,7 +178,7 @@ export function CommentsDestinationStatus({
       {providers.map((provider) => (
         <Badge
           key={provider.id}
-          title={provider.message}
+          title={providerBadgeTitle(provider)}
           variant={providerBadgeVariant(provider.state)}
         >
           <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-current" />

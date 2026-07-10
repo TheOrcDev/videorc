@@ -5,7 +5,14 @@ import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platfo
 import { CommentRow, commentHighlightPresentationForMessage } from '@/components/comment-row'
 import { CommentsDestinationStatus } from '@/components/comments-destination-status'
 import { Button } from '@/components/ui/button'
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle
+} from '@/components/ui/empty'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
@@ -18,6 +25,7 @@ import type {
 import {
   LIVE_CHAT_PLATFORMS,
   MAX_RENDERED_LIVE_CHAT_MESSAGES,
+  chatNeedsConnectionAction,
   filterMessagesByPlatform,
   liveChatEmptyMessage,
   nextUnreadCount,
@@ -185,6 +193,24 @@ export function LiveChatPanel({
                 <EmptyTitle className="text-sm">No comments yet</EmptyTitle>
                 <EmptyDescription className="text-xs">{emptyMessage}</EmptyDescription>
               </EmptyHeader>
+              {chatNeedsConnectionAction(snapshot.providers) ? (
+                <EmptyContent>
+                  <Button
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                    onClick={() =>
+                      window.dispatchEvent(
+                        new CustomEvent('videorc:navigate-workspace', {
+                          detail: { tab: 'streaming' }
+                        })
+                      )
+                    }
+                  >
+                    Open Livestream settings
+                  </Button>
+                </EmptyContent>
+              ) : null}
             </Empty>
           )}
         </ScrollArea>
