@@ -14,7 +14,13 @@ import { ScenesGallery } from '@/components/studio/scenes-gallery'
 import { SessionPanel } from '@/components/studio/session-panel'
 import { Button } from '@/components/ui/button'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
-import { useStudio } from '@/hooks/use-studio'
+import {
+  useStudioChat,
+  useStudioCore,
+  useStudioDiagnostics,
+  useStudioPreview,
+  useStudioRecordingState
+} from '@/hooks/use-studio'
 import { videoProfileCompatibility } from '@/lib/capture'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
@@ -27,9 +33,9 @@ import {
 } from '@/lib/studio-session-view'
 
 export function StudioTab(): ReactElement {
-  const studio = useStudio()
+  const studio = useStudioCore()
+  const { recording } = useStudioRecordingState()
   const {
-    recording,
     canStop,
     startRequestPending,
     stopRequestPending,
@@ -39,17 +45,8 @@ export function StudioTab(): ReactElement {
     captureConfig,
     setCaptureConfig,
     entitlements,
-    previewLiveStatus,
-    previewSurfaceStatus,
-    nativePreviewSurfaceEnabled,
-    refreshPreview,
-    openPreviewPermissions,
-    openPreviewWindow,
-    previewWindow,
-    setPreviewWindowMode,
     wsStatus,
     health,
-    diagnosticStats,
     goLiveConfirmationOpen,
     goLiveConfirmationPending,
     goLivePartialSetup,
@@ -63,7 +60,6 @@ export function StudioTab(): ReactElement {
   } = studio
 
   const active = isSessionTransportActive(recording.state)
-  const previewHealth = studioHealth(diagnosticStats, active, studio.runtimeInfo?.platform)
   const banner = studioBlocker(studio)
   const liveStreamCompatibility = videoProfileCompatibility({
     ...captureConfig,
@@ -94,43 +90,6 @@ export function StudioTab(): ReactElement {
           : !health.ffmpeg.available
             ? (health.ffmpeg.message ?? 'FFmpeg is not available.')
             : null
-
-  // Live chat rail: live while streaming, retained after stop while the in-memory
-  // transcript still has comments. It clears once the local chat view is cleared.
-  const chatProvidersAttached = studio.liveChatSnapshot.providers.length > 0
-  const chatRailAvailable = liveChatRailAvailable(recording.state, studio.liveChatSnapshot)
-  const [chatRailOpen, setChatRailOpen] = useState(false)
-  const chatAutoOpened = useRef(false)
-  useEffect(() => {
-    if (!chatRailAvailable) {
-      chatAutoOpened.current = false
-      setChatRailOpen(false)
-      return
-    }
-    if (
-      shouldAutoOpenLiveChatRail({
-        alreadyAutoOpened: chatAutoOpened.current,
-        providersAttached: chatProvidersAttached,
-        recordingState: recording.state,
-        snapshot: studio.liveChatSnapshot
-      })
-    ) {
-      chatAutoOpened.current = true
-      setChatRailOpen(true)
-    }
-  }, [chatRailAvailable, chatProvidersAttached, recording.state, studio.liveChatSnapshot])
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key.toLowerCase() === 'j' && !event.shiftKey && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault()
-        if (chatRailAvailable) {
-          setChatRailOpen((value) => !value)
-        }
-      }
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [chatRailAvailable])
 
   // Two-button start: set the intended mode, then start on the next render so startSession
   // sees the updated streamEnabled (record vs go-live) instead of a stale closure value.
@@ -192,70 +151,7 @@ export function StudioTab(): ReactElement {
 
           {/* Preview (left, the hero) + Session facts & controls (right). */}
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
-            <PanelSection
-              title="Preview"
-              action={
-                <div className="flex items-center gap-1.5">
-                  {/* data hook: the backend-resilience smoke reads this badge
-                      (the old probe grepped for a "Status" text prefix that
-                      died with the session-panel declutter). */}
-                  <span data-videorc-session-status>
-                    <StatusBadge
-                      tone={sessionStatusTone(recording.state, wsStatus)}
-                      value={sessionStatusLabel(recording.state, wsStatus)}
-                    />
-                  </span>
-                  {previewWindow.open && previewWindow.mode === 'floating' ? (
-                    <Button
-                      aria-label="Stick preview into the app"
-                      className="size-8"
-                      size="icon"
-                      title="Stick the preview into this panel"
-                      variant="ghost"
-                      onClick={() => void setPreviewWindowMode('docked')}
-                    >
-                      <PushPinSimple className="size-4" />
-                    </Button>
-                  ) : previewWindow.open ? (
-                    <Button
-                      aria-label="Pop preview out into its own window"
-                      className="size-8"
-                      size="icon"
-                      title="Pop the preview out into its own window"
-                      variant="ghost"
-                      onClick={() => void setPreviewWindowMode('floating')}
-                    >
-                      <ArrowSquareOut className="size-4" />
-                    </Button>
-                  ) : (
-                    <Button
-                      aria-label="Open preview window"
-                      className="size-8"
-                      size="icon"
-                      title="Open preview in its own window"
-                      variant="ghost"
-                      onClick={() => void openPreviewWindow()}
-                    >
-                      <ArrowSquareOut className="size-4" />
-                    </Button>
-                  )}
-                </div>
-              }
-            >
-              <PreviewStage
-                nativePreviewSurfaceEnabled={nativePreviewSurfaceEnabled}
-                previewLiveStatus={previewLiveStatus}
-                previewSurfaceStatus={previewSurfaceStatus}
-                onOpenPermissions={openPreviewPermissions}
-                onRetry={refreshPreview}
-              />
-              {previewHealth.tone === 'error' && previewHealth.detail ? (
-                <div className="flex items-center gap-2 rounded-row border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">
-                  <WarningCircle className="size-4 shrink-0" weight="fill" />
-                  <span className="min-w-0">{previewHealth.detail}</span>
-                </div>
-              ) : null}
-            </PanelSection>
+            <StudioPreviewPanel />
 
             <SessionPanel
               active={active}
@@ -289,26 +185,160 @@ export function StudioTab(): ReactElement {
         </PageStack>
       </div>
 
-      {chatRailOpen && chatRailAvailable ? (
-        <LiveChatRail
-          highlightedId={studio.highlightedCommentId}
-          highlightApplyingId={studio.commentHighlightApplyingId}
-          highlightFailure={studio.commentHighlightFailure}
-          highlightState={studio.commentHighlightState}
-          snapshot={studio.liveChatSnapshot}
-          windowOpen={studio.commentsWindow.open}
-          onClearLocal={studio.clearLiveChat}
-          onClose={() => setChatRailOpen(false)}
-          onHighlight={studio.toggleCommentHighlight}
-          onPopOut={studio.toggleCommentsWindow}
-          platform={studio.runtimeInfo?.platform}
-        />
-      ) : null}
+      <StudioLiveChatRail />
     </div>
   )
 }
 
-function studioBlocker(studio: ReturnType<typeof useStudio>): {
+function StudioPreviewPanel(): ReactElement {
+  const {
+    nativePreviewSurfaceEnabled,
+    openPreviewPermissions,
+    openPreviewWindow,
+    previewWindow,
+    refreshPreview,
+    runtimeInfo,
+    setPreviewWindowMode,
+    wsStatus
+  } = useStudioCore()
+  const { recording } = useStudioRecordingState()
+  const { previewLiveStatus } = useStudioPreview()
+  const { diagnosticStats, previewSurfaceStatus } = useStudioDiagnostics()
+  const active = isSessionTransportActive(recording.state)
+  const previewHealth = studioHealth(diagnosticStats, active, runtimeInfo?.platform)
+
+  return (
+    <PanelSection
+      title="Preview"
+      action={
+        <div className="flex items-center gap-1.5">
+          {/* data hook: the backend-resilience smoke reads this badge
+              (the old probe grepped for a "Status" text prefix that
+              died with the session-panel declutter). */}
+          <span data-videorc-session-status>
+            <StatusBadge
+              tone={sessionStatusTone(recording.state, wsStatus)}
+              value={sessionStatusLabel(recording.state, wsStatus)}
+            />
+          </span>
+          {previewWindow.open && previewWindow.mode === 'floating' ? (
+            <Button
+              aria-label="Stick preview into the app"
+              className="size-8"
+              size="icon"
+              title="Stick the preview into this panel"
+              variant="ghost"
+              onClick={() => void setPreviewWindowMode('docked')}
+            >
+              <PushPinSimple className="size-4" />
+            </Button>
+          ) : previewWindow.open ? (
+            <Button
+              aria-label="Pop preview out into its own window"
+              className="size-8"
+              size="icon"
+              title="Pop the preview out into its own window"
+              variant="ghost"
+              onClick={() => void setPreviewWindowMode('floating')}
+            >
+              <ArrowSquareOut className="size-4" />
+            </Button>
+          ) : (
+            <Button
+              aria-label="Open preview window"
+              className="size-8"
+              size="icon"
+              title="Open preview in its own window"
+              variant="ghost"
+              onClick={() => void openPreviewWindow()}
+            >
+              <ArrowSquareOut className="size-4" />
+            </Button>
+          )}
+        </div>
+      }
+    >
+      <PreviewStage
+        nativePreviewSurfaceEnabled={nativePreviewSurfaceEnabled}
+        previewLiveStatus={previewLiveStatus}
+        previewSurfaceStatus={previewSurfaceStatus}
+        onOpenPermissions={openPreviewPermissions}
+        onRetry={refreshPreview}
+      />
+      {previewHealth.tone === 'error' && previewHealth.detail ? (
+        <div className="flex items-center gap-2 rounded-row border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">
+          <WarningCircle className="size-4 shrink-0" weight="fill" />
+          <span className="min-w-0">{previewHealth.detail}</span>
+        </div>
+      ) : null}
+    </PanelSection>
+  )
+}
+
+function StudioLiveChatRail(): ReactElement | null {
+  const studio = useStudioCore()
+  const { recording } = useStudioRecordingState()
+  const { liveChatSnapshot } = useStudioChat()
+  const chatProvidersAttached = liveChatSnapshot.providers.length > 0
+  const chatRailAvailable = liveChatRailAvailable(recording.state, liveChatSnapshot)
+  const [chatRailOpen, setChatRailOpen] = useState(false)
+  const chatAutoOpened = useRef(false)
+
+  // Live while streaming, retained after stop while the in-memory transcript
+  // still has comments. It clears once the local chat view is cleared.
+  useEffect(() => {
+    if (!chatRailAvailable) {
+      chatAutoOpened.current = false
+      setChatRailOpen(false)
+      return
+    }
+    if (
+      shouldAutoOpenLiveChatRail({
+        alreadyAutoOpened: chatAutoOpened.current,
+        providersAttached: chatProvidersAttached,
+        recordingState: recording.state,
+        snapshot: liveChatSnapshot
+      })
+    ) {
+      chatAutoOpened.current = true
+      setChatRailOpen(true)
+    }
+  }, [chatRailAvailable, chatProvidersAttached, liveChatSnapshot, recording.state])
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key.toLowerCase() === 'j' && !event.shiftKey && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault()
+        if (chatRailAvailable) {
+          setChatRailOpen((value) => !value)
+        }
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [chatRailAvailable])
+
+  if (!chatRailOpen || !chatRailAvailable) {
+    return null
+  }
+
+  return (
+    <LiveChatRail
+      highlightedId={studio.highlightedCommentId}
+      highlightApplyingId={studio.commentHighlightApplyingId}
+      highlightFailure={studio.commentHighlightFailure}
+      highlightState={studio.commentHighlightState}
+      snapshot={liveChatSnapshot}
+      windowOpen={studio.commentsWindow.open}
+      onClearLocal={studio.clearLiveChat}
+      onClose={() => setChatRailOpen(false)}
+      onHighlight={studio.toggleCommentHighlight}
+      onPopOut={studio.toggleCommentsWindow}
+      platform={studio.runtimeInfo?.platform}
+    />
+  )
+}
+
+function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
   title: string
   jumpTo?: WorkspaceTab | StudioPanel
   jumpLabel?: string

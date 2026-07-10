@@ -16,7 +16,20 @@ export const DEFAULT_ACCEPTANCE_GATES = Object.freeze({
   maxPreviewInputToPresentLatencyP99Ms: 100, // rare spikes still need a hard ceiling
   maxPreviewInputToPresentLatencyMs: 100, // fallback hard ceiling when percentile latency is unavailable
   maxPreviewCompositorFrameLag: 2, // latest presented frame cannot trail compositor by >2 frames
+  maxRecordingQueueDepth: 16,
+  maxRecordingQueueOldestFrameAgeMs: 250,
+  maxStreamQueueDepth: 8,
+  maxStreamQueueOldestFrameAgeMs: 150
 })
+
+export function recordingPreviewAcceptanceGates(outputFps, gates = DEFAULT_ACCEPTANCE_GATES) {
+  const fps = Number.isFinite(outputFps) && outputFps > 0 ? outputFps : 1
+  return {
+    ...gates,
+    minPreviewPresentFps: Math.min(gates.minPreviewPresentFps, fps * 0.9),
+    maxPreviewIntervalP95Ms: Math.max(gates.maxPreviewIntervalP95Ms, (1000 / fps) * 1.5)
+  }
+}
 
 /**
  * @param {object} input
@@ -68,14 +81,45 @@ export function evaluateAcceptance(input, gates = DEFAULT_ACCEPTANCE_GATES) {
       `recording: ${d.encoderBridgeSyntheticFrames} synthetic filler frame(s) fed (no real source ready)`
     )
   }
+  if ((d.encoderBridgeRecordingQueueDroppedFrames ?? 0) > 0) {
+    failures.push(
+      `recording: ${d.encoderBridgeRecordingQueueDroppedFrames} frame(s) discarded by recording output backpressure (recording frames must never be dropped)`
+    )
+  }
+  if (input.requireGpuCompositor) {
+    requireBoundedQueue(failures, d, 'recording', {
+      depth: 'encoderBridgeRecordingQueueDepth',
+      oldestAge: 'encoderBridgeRecordingQueueOldestFrameAgeMs',
+      pressure: 'encoderBridgeRecordingQueueCapacityPressureEvents',
+      dropped: 'encoderBridgeRecordingQueueDroppedFrames',
+      maxDepth: gates.maxRecordingQueueDepth,
+      maxOldestAgeMs: gates.maxRecordingQueueOldestFrameAgeMs,
+      allowDrops: false
+    })
+    if (d.encoderBridgeSeparateOutputEncodersActive === true) {
+      requireBoundedQueue(failures, d, 'stream', {
+        depth: 'encoderBridgeStreamQueueDepth',
+        oldestAge: 'encoderBridgeStreamQueueOldestFrameAgeMs',
+        pressure: 'encoderBridgeStreamQueueCapacityPressureEvents',
+        dropped: 'encoderBridgeStreamQueueDroppedFrames',
+        maxDepth: gates.maxStreamQueueDepth,
+        maxOldestAgeMs: gates.maxStreamQueueOldestFrameAgeMs,
+        allowDrops: true
+      })
+    }
+  }
 
   // 2b. OBS parity needs the shared live compositor to stay on the GPU path.
   if (input.requireGpuCompositor && d.compositorBackend !== 'metal') {
     const suffix = d.compositorFallbackReason ? `: ${d.compositorFallbackReason}` : ''
-    failures.push(`compositor: expected Metal backend, got ${d.compositorBackend ?? 'unknown'}${suffix}`)
+    failures.push(
+      `compositor: expected Metal backend, got ${d.compositorBackend ?? 'unknown'}${suffix}`
+    )
   }
   if (input.requireGpuCompositor && (d.compositorCpuFallbackFrames ?? 0) > 0) {
-    failures.push(`compositor: ${d.compositorCpuFallbackFrames} CPU fallback frame(s) rendered during session`)
+    failures.push(
+      `compositor: ${d.compositorCpuFallbackFrames} CPU fallback frame(s) rendered during session`
+    )
   }
   if (input.requireGpuCompositor && (d.encoderBridgeMetalTargetFrames ?? 0) <= 0) {
     failures.push(
@@ -91,7 +135,8 @@ export function evaluateAcceptance(input, gates = DEFAULT_ACCEPTANCE_GATES) {
     input.requireGpuCompositor &&
     (d.encoderBridgeMetalTargetFrames ?? 0) > (d.encoderBridgeMetalTargetHandleFrames ?? 0)
   ) {
-    const missing = (d.encoderBridgeMetalTargetFrames ?? 0) - (d.encoderBridgeMetalTargetHandleFrames ?? 0)
+    const missing =
+      (d.encoderBridgeMetalTargetFrames ?? 0) - (d.encoderBridgeMetalTargetHandleFrames ?? 0)
     failures.push(
       `recording: ${missing} IOSurface-backed Metal target frame(s) lacked retained target handles`
     )
@@ -125,9 +170,7 @@ export function evaluateAcceptance(input, gates = DEFAULT_ACCEPTANCE_GATES) {
   // cumulative progress stalls while the decoded artifact is clean. Keep it hard only
   // when a passing final-file analyzer is not available.
   if (d.minEncoderSpeed != null && d.minEncoderSpeed < gates.minEncoderSpeed && !finalFilePassed) {
-    failures.push(
-      `encoder: speed ${d.minEncoderSpeed.toFixed(2)}x below ${gates.minEncoderSpeed}x`
-    )
+    failures.push(`encoder: speed ${d.minEncoderSpeed.toFixed(2)}x below ${gates.minEncoderSpeed}x`)
   }
 
   // 4. Audio: zero mic drops and adequate capture coverage.
@@ -140,6 +183,9 @@ export function evaluateAcceptance(input, gates = DEFAULT_ACCEPTANCE_GATES) {
         `audio: mic capture coverage ${(d.minMicCaptureCoverage * 100).toFixed(0)}% below ${(gates.minMicCaptureCoverage * 100).toFixed(0)}%`
       )
     }
+    if (!isFiniteNumber(d.minMicCaptureCoverage)) {
+      failures.push('audio: microphone capture coverage telemetry was missing')
+    }
   }
 
   // 5. Transport honesty: a "native" preview must not have fetched image-poll routes.
@@ -147,14 +193,22 @@ export function evaluateAcceptance(input, gates = DEFAULT_ACCEPTANCE_GATES) {
     failures.push('transport: preview did not report the real native Metal surface')
   }
   if (input.requireObsNativePreview && d.previewSurfaceBacking !== 'cametal-layer') {
-    failures.push(`transport: expected CAMetalLayer preview backing, got ${d.previewSurfaceBacking ?? 'unknown'}`)
+    failures.push(
+      `transport: expected CAMetalLayer preview backing, got ${d.previewSurfaceBacking ?? 'unknown'}`
+    )
   }
   if (input.requireObsNativePreview && (d.previewPendingHostCommandCount ?? 0) > 0) {
     failures.push(
       `transport: ${d.previewPendingHostCommandCount} native preview host command(s) still pending (preview host not applied)`
     )
   }
+  if (input.requireObsNativePreview && !isFiniteNumber(d.previewPendingHostCommandCount)) {
+    failures.push('transport: native preview pending-host-command telemetry was missing')
+  }
   const imagePolls = d.imagePollDuringSession?.total
+  if (input.requireObsNativePreview && !isFiniteNumber(imagePolls)) {
+    failures.push('transport: native preview image-poll telemetry was missing')
+  }
   if (input.claimsNative && imagePolls != null && imagePolls > 0) {
     failures.push(
       `transport: ${imagePolls} image-poll request(s) during a "native" preview session (not native)`
@@ -163,22 +217,47 @@ export function evaluateAcceptance(input, gates = DEFAULT_ACCEPTANCE_GATES) {
 
   // 6. Preview present path: currentness matters while recording. A native preview may
   // skip stale frames to stay current, but it may not queue old compositor frames.
-  if (input.claimsNative && d.minPreviewPresentFps != null && d.minPreviewPresentFps < gates.minPreviewPresentFps) {
+  if (input.requireObsNativePreview && input.claimsNative) {
+    requireFiniteMetrics(failures, d, [
+      ['minPreviewPresentFps', 'preview present FPS'],
+      ['previewIntervalP95Ms', 'preview p95 present interval'],
+      ['previewInputToPresentLatencyP95Ms', 'preview source-to-present p95 latency'],
+      ['previewInputToPresentLatencyP99Ms', 'preview source-to-present p99 latency'],
+      ['previewCompositorFrameLag', 'preview compositor frame lag']
+    ])
+  }
+  if (
+    input.claimsNative &&
+    d.minPreviewPresentFps != null &&
+    d.minPreviewPresentFps < gates.minPreviewPresentFps
+  ) {
     failures.push(
       `preview: present FPS ${d.minPreviewPresentFps.toFixed(1)} below ${gates.minPreviewPresentFps}`
     )
   }
-  if (input.claimsNative && d.previewIntervalP95Ms != null && d.previewIntervalP95Ms > gates.maxPreviewIntervalP95Ms) {
+  if (
+    input.claimsNative &&
+    d.previewIntervalP95Ms != null &&
+    d.previewIntervalP95Ms > gates.maxPreviewIntervalP95Ms
+  ) {
     failures.push(
       `preview: p95 present interval ${d.previewIntervalP95Ms.toFixed(1)}ms exceeds ${gates.maxPreviewIntervalP95Ms}ms`
     )
   }
-  if (input.claimsNative && d.previewInputToPresentLatencyP95Ms != null && d.previewInputToPresentLatencyP95Ms > gates.maxPreviewInputToPresentLatencyP95Ms) {
+  if (
+    input.claimsNative &&
+    d.previewInputToPresentLatencyP95Ms != null &&
+    d.previewInputToPresentLatencyP95Ms > gates.maxPreviewInputToPresentLatencyP95Ms
+  ) {
     failures.push(
       `preview: source-to-present p95 latency ${d.previewInputToPresentLatencyP95Ms.toFixed(0)}ms exceeds ${gates.maxPreviewInputToPresentLatencyP95Ms}ms`
     )
   }
-  if (input.claimsNative && d.previewInputToPresentLatencyP99Ms != null && d.previewInputToPresentLatencyP99Ms > gates.maxPreviewInputToPresentLatencyP99Ms) {
+  if (
+    input.claimsNative &&
+    d.previewInputToPresentLatencyP99Ms != null &&
+    d.previewInputToPresentLatencyP99Ms > gates.maxPreviewInputToPresentLatencyP99Ms
+  ) {
     failures.push(
       `preview: source-to-present p99 latency ${d.previewInputToPresentLatencyP99Ms.toFixed(0)}ms exceeds ${gates.maxPreviewInputToPresentLatencyP99Ms}ms`
     )
@@ -195,7 +274,11 @@ export function evaluateAcceptance(input, gates = DEFAULT_ACCEPTANCE_GATES) {
       `preview: source-to-present latency ${d.previewInputToPresentLatencyMs.toFixed(0)}ms exceeds ${gates.maxPreviewInputToPresentLatencyMs}ms`
     )
   }
-  if (input.claimsNative && d.previewCompositorFrameLag != null && d.previewCompositorFrameLag > gates.maxPreviewCompositorFrameLag) {
+  if (
+    input.claimsNative &&
+    d.previewCompositorFrameLag != null &&
+    d.previewCompositorFrameLag > gates.maxPreviewCompositorFrameLag
+  ) {
     failures.push(
       `preview: presented frame is ${d.previewCompositorFrameLag} compositor frame(s) behind (max ${gates.maxPreviewCompositorFrameLag})`
     )
@@ -204,10 +287,59 @@ export function evaluateAcceptance(input, gates = DEFAULT_ACCEPTANCE_GATES) {
   return { pass: failures.length === 0, failures }
 }
 
+function requireFiniteMetrics(failures, diagnostics, metrics) {
+  for (const [field, label] of metrics) {
+    if (!isFiniteNumber(diagnostics[field])) {
+      failures.push(`${label} telemetry was missing`)
+    }
+  }
+}
+
+function requireBoundedQueue(
+  failures,
+  diagnostics,
+  label,
+  { depth, oldestAge, pressure, dropped, maxDepth, maxOldestAgeMs, allowDrops }
+) {
+  requireFiniteMetrics(failures, diagnostics, [
+    [depth, `${label} queue depth`],
+    [pressure, `${label} queue capacity pressure`],
+    [dropped, `${label} queue dropped frames`]
+  ])
+  const actualDepth = diagnostics[depth]
+  if (isFiniteNumber(actualDepth) && actualDepth > maxDepth) {
+    failures.push(`${label}: queue depth ${actualDepth} exceeded ${maxDepth}`)
+  }
+  const age = diagnostics[oldestAge]
+  if (isFiniteNumber(actualDepth) && actualDepth > 0 && !isFiniteNumber(age)) {
+    failures.push(`${label} queue oldest-frame age telemetry was missing while non-empty`)
+  } else if (isFiniteNumber(age) && age > maxOldestAgeMs) {
+    failures.push(
+      `${label}: queue oldest-frame age ${age.toFixed(0)}ms exceeded ${maxOldestAgeMs}ms`
+    )
+  }
+  if (isFiniteNumber(diagnostics[pressure]) && diagnostics[pressure] > 0) {
+    failures.push(`${label}: queue hit capacity ${diagnostics[pressure]} time(s)`)
+  }
+  if (!allowDrops && isFiniteNumber(diagnostics[dropped]) && diagnostics[dropped] > 0) {
+    // The legacy recording-drop message above is retained for compatibility; this
+    // queue-specific failure keeps the bounded-queue contract self-contained.
+    failures.push(`${label}: queue dropped ${diagnostics[dropped]} frame(s)`)
+  }
+}
+
+function isFiniteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
 function evaluate4kMediaEvidence(mediaDimensions, requestedOutput) {
   const failures = []
   const requested = requestedOutput ?? mediaDimensions?.requestedOutput
-  if (!isAtLeast(requested?.width, 3840) || !isAtLeast(requested?.height, 2160) || !isAtLeast(requested?.fps, 30)) {
+  if (
+    !isAtLeast(requested?.width, 3840) ||
+    !isAtLeast(requested?.height, 2160) ||
+    !isAtLeast(requested?.fps, 30)
+  ) {
     failures.push(
       `4k: expected requested output at least 3840x2160@30, got ${formatDimension(requested?.width, requested?.height)}@${requested?.fps ?? 'n/a'}`
     )

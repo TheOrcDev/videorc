@@ -11,14 +11,34 @@
 // Env knobs: VIDEORC_PERF_LEAK_WINDOW_SECONDS=100, VIDEORC_PROBE_TIMEOUT_MS
 
 import { mkdtempSync, readFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { request as httpRequest } from 'node:http'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
+import {
+  collectPerformanceMetadata,
+  createPerformanceReport,
+  failingChecks,
+  observationCheck,
+  passingCheck,
+  performanceMode,
+  writePerformanceReport
+} from './lib/performance-contract.mjs'
+import {
+  ownedProcessLedgerPaths,
+  pruneDeadOwnedProcessRecords,
+  waitForCleanProcessState,
+  waitForNoLiveProcessState
+} from './lib/process-census.mjs'
 
+const mode = performanceMode()
 const timeoutMs = Number(process.env.VIDEORC_PROBE_TIMEOUT_MS ?? 180000)
 const windowSeconds = Number(process.env.VIDEORC_PERF_LEAK_WINDOW_SECONDS ?? 100)
+const maxAllocatorGrowthMbPerMinute = Number(
+  process.env.VIDEORC_PERF_MAX_ALLOCATOR_GROWTH_MB_MIN ?? 40
+)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 function smokeCommand(smoke, command, params = {}) {
@@ -107,15 +127,20 @@ function groupAllocators(allocators) {
   return groups
 }
 
-const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-mem-userdata-'))
+const stateRoot = mkdtempSync(join(tmpdir(), 'videorc-mem-probe-'))
+const appDataDir = join(stateRoot, 'app-data')
+const userDataDir = join(stateRoot, 'user-data')
+const ledgerPaths = ownedProcessLedgerPaths({ appDataDir, userDataDir, workspaceRoot: repoRoot })
 let devtoolsUrl = null
 const launched = await launchDevApp({
   requiredMarkers: ['backend-ready', 'preview-motion-ready'],
   timeoutMs,
   env: {
     VIDEORC_SMOKE_PREVIEW_MOTION: '1',
+    VIDEORC_SMOKE_STATE_DIR: stateRoot,
+    VIDEORC_APP_DATA_DIR: appDataDir,
     VIDEORC_USER_DATA_DIR: userDataDir,
-    VIDEORC_DATABASE_PATH: join(userDataDir, 'videorc.sqlite3'),
+    VIDEORC_DATABASE_PATH: join(appDataDir, 'videorc.sqlite3'),
     VIDEORC_REMOTE_DEBUG_PORT: '0'
   },
   onLine: (line) => {
@@ -226,10 +251,16 @@ const COUNTER_INSTRUMENT = `(() => {
 })()`
 
 const smoke = launched.connections['preview-motion-ready']
+const traceFiles = []
+const allocatorGrowth = []
+let matchingDumpProcesses = 0
+let runError = null
+let teardownClean = false
+let teardownRecovery = null
 
 try {
   for (const attempt of [
-    ['open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-stage]' }],
+    ['open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-card]' }],
     ['open-layout-tab', {}]
   ]) {
     try {
@@ -300,6 +331,7 @@ try {
 
   console.log('capturing baseline memory-infra dump...')
   const before = await smokeCommand(smoke, 'memory-infra-dump', { seconds: 5 })
+  traceFiles.push(before.file)
   const { dumps: beforeDumps } = parseMemoryDumps(before.file)
   console.log(`baseline dump: ${before.file} (${beforeDumps.size} processes)`)
 
@@ -308,6 +340,7 @@ try {
 
   console.log('capturing second memory-infra dump...')
   const after = await smokeCommand(smoke, 'memory-infra-dump', { seconds: 5 })
+  traceFiles.push(after.file)
   const { dumps: afterDumps, labels } = parseMemoryDumps(after.file)
   console.log(`second dump: ${after.file}`)
   for (const [window, pid] of Object.entries(after.windows ?? {})) {
@@ -345,6 +378,7 @@ try {
   for (const [pid, afterAllocators] of afterDumps) {
     const beforeAllocators = beforeDumps.get(pid)
     if (!beforeAllocators) continue
+    matchingDumpProcesses += 1
     const beforeGroups = groupAllocators(beforeAllocators)
     const afterGroups = groupAllocators(afterAllocators)
     const deltas = Object.entries(afterGroups)
@@ -352,6 +386,16 @@ try {
       .filter((entry) => Math.abs(entry.delta) > 2 * 1024 * 1024)
       .sort((a, b) => b.delta - a.delta)
     if (deltas.length === 0) continue
+    allocatorGrowth.push(
+      ...deltas.map((entry) => ({
+        pid,
+        process: labels.get(pid) ?? 'unknown process',
+        allocator: entry.name,
+        deltaBytes: entry.delta,
+        finalBytes: entry.bytes,
+        growthMbPerMinute: entry.delta / 1048576 / (windowSeconds / 60)
+      }))
+    )
     console.log(`\npid ${pid} (${labels.get(pid) ?? 'unknown process'}):`)
     for (const entry of deltas.slice(0, 10)) {
       console.log(
@@ -359,6 +403,86 @@ try {
       )
     }
   }
+} catch (error) {
+  runError = error
 } finally {
-  await launched.stop()
+  try {
+    await smokeCommand(smoke, 'app-quit').catch(() => undefined)
+    await waitForNoLiveProcessState({
+      ledgerPaths,
+      pgid: launched.process.pid,
+      timeoutMs: 10000
+    }).catch(async () => launched.stop())
+    await launched.stop()
+    const clean = await waitForCleanProcessState({
+      ledgerPaths,
+      pgid: launched.process.pid,
+      timeoutMs: 1000
+    })
+    teardownClean = clean.records.length === 0 && clean.processGroupRows.length === 0
+  } catch (error) {
+    runError ??= error
+    try {
+      teardownRecovery = await pruneDeadOwnedProcessRecords({ ledgerPaths })
+    } catch (cleanupError) {
+      teardownRecovery = { error: cleanupError?.message ?? String(cleanupError) }
+    }
+  }
+}
+
+const truthFailures = [
+  ...(runError ? [runError.message] : []),
+  ...(matchingDumpProcesses <= 0
+    ? ['memory-infra dumps had no matching process allocator data']
+    : []),
+  ...(!teardownClean ? ['memory probe process teardown was not clean'] : [])
+]
+const growthFailures = allocatorGrowth
+  .filter((entry) => entry.growthMbPerMinute > maxAllocatorGrowthMbPerMinute)
+  .map(
+    (entry) =>
+      `${entry.process} ${entry.allocator} grew ${entry.growthMbPerMinute.toFixed(1)}MiB/min; maximum ${maxAllocatorGrowthMbPerMinute}MiB/min`
+  )
+const enforcedGrowthFailures = mode === 'gate' ? growthFailures : []
+const report = createPerformanceReport({
+  scenario:
+    process.env.VIDEORC_MEM_PROBE_NO_PREVIEW === '1'
+      ? 'chromium-memory-control'
+      : 'chromium-memory-native-preview',
+  mode,
+  metadata: await collectPerformanceMetadata({ cwd: repoRoot }),
+  timing: { warmupMs: 12000, measurementMs: windowSeconds * 1000 },
+  metrics: {
+    matchingDumpProcesses,
+    allocatorGrowth,
+    maxAllocatorGrowthMbPerMinute,
+    traceFiles,
+    teardownRecovery,
+    scratchDirectory: stateRoot
+  },
+  checks: [
+    ...(!truthFailures.length ? [passingCheck('allocator dumps and teardown were complete')] : []),
+    ...failingChecks(truthFailures),
+    ...failingChecks(enforcedGrowthFailures),
+    ...(mode === 'report-only'
+      ? growthFailures.map((failure) => observationCheck(`report-only observation: ${failure}`))
+      : [])
+  ]
+})
+const reportPath = await writePerformanceReport(report)
+console.log(`Chromium memory report: ${reportPath}`)
+
+const failed = truthFailures.length > 0 || enforcedGrowthFailures.length > 0
+if (!failed && process.env.VIDEORC_PERF_RETAIN_ARTIFACTS !== '1') {
+  await Promise.all([
+    rm(stateRoot, { recursive: true, force: true }),
+    ...traceFiles.map((path) => rm(path, { force: true }))
+  ])
+} else {
+  console.log(`Chromium memory scratch retained: ${stateRoot}`)
+}
+if (failed) {
+  throw new Error(
+    `Chromium memory ${mode} failed:\n${[...truthFailures, ...enforcedGrowthFailures].join('\n')}`
+  )
 }

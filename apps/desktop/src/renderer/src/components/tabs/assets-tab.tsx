@@ -49,7 +49,7 @@ import {
   firstEmptySlotId
 } from '@/lib/background-assets'
 import { TakeoverScreensSection } from '@/components/takeover-screens-section'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import { cn } from '@/lib/utils'
 
 type BadgeVariant = NonNullable<ComponentProps<typeof Badge>['variant']>
@@ -371,7 +371,7 @@ function ActiveBackgroundBar({
   onClear: () => void
   onStyle: (assetId: string, patch: Parameters<typeof setAssetStyle>[2]) => void
 }): ReactElement {
-  const { openPreviewWindow } = useStudio()
+  const { openPreviewWindow } = useStudioCore()
   const activeSlot = registry.slots.find((slot) => slot.id === registry.activeSlotId) ?? null
   const asset = activeSlot ? slotAsset(activeSlot, registry) : null
   const sceneSrc = asset ? imageSrcOf(asset) : undefined

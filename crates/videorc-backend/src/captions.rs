@@ -710,6 +710,7 @@ pub enum CaptionOverlayPosition {
 #[derive(Clone)]
 pub struct CaptionOverlay {
     pub rgba: Arc<Vec<u8>>,
+    pub bgra: Arc<Vec<u8>>,
     pub width: u32,
     pub height: u32,
     pub position: CaptionOverlayPosition,
@@ -761,8 +762,15 @@ pub fn install_caption_overlay(
 
     let mut guard = slot.lock().expect("caption overlay lock");
     let revision = guard.as_ref().map_or(1, |overlay| overlay.revision + 1);
+    let rgba = Arc::new(image.into_raw());
+    let bgra = Arc::new(
+        rgba.chunks_exact(4)
+            .flat_map(|pixel| [pixel[2], pixel[1], pixel[0], pixel[3]])
+            .collect(),
+    );
     *guard = Some(CaptionOverlay {
-        rgba: Arc::new(image.into_raw()),
+        rgba,
+        bgra,
         width,
         height,
         position,
@@ -1931,6 +1939,14 @@ mod tests {
 
         let overlay = current_caption_overlay(&slot).expect("overlay present");
         assert_eq!(overlay.rgba.len(), 4 * 2 * 4);
+        assert_eq!(overlay.bgra.len(), overlay.rgba.len());
+        for (rgba, bgra) in overlay
+            .rgba
+            .chunks_exact(4)
+            .zip(overlay.bgra.chunks_exact(4))
+        {
+            assert_eq!(bgra, &[rgba[2], rgba[1], rgba[0], rgba[3]]);
+        }
         assert_eq!(overlay.position, CaptionOverlayPosition::Bottom);
 
         let second =

@@ -16,7 +16,12 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { useStudio } from '@/hooks/use-studio'
+import {
+  useStudioCore,
+  useStudioDiagnostics,
+  useStudioPreview,
+  useStudioRecording
+} from '@/hooks/use-studio'
 import type {
   DiagnosticBottleneck,
   DiagnosticStats,
@@ -28,29 +33,25 @@ import type {
   PreviewScreenStatus,
   PreviewSurfaceStatus,
   StreamTargetRuntime,
-  SystemPermissionPane
+  SystemPermissionPane,
+  WebSocketQueueDiagnosticStats
 } from '@/lib/backend'
 import { compactTime, formatDroppedFrames, formatMetric } from '@/lib/format'
 
 export function DiagnosticsTab(): ReactElement {
   const {
-    diagnosticStats,
-    healthEvents,
-    logs,
     openSystemPermission,
-    recording,
     sessions,
-    streamHealth,
     streamTargets,
-    previewLiveStatus,
-    previewCameraStatus,
-    previewScreenStatus,
-    previewSurfaceStatus,
     nativePreviewSurfaceEnabled,
     captureConfig,
     exportSupportBundle,
     supportBundleExportPending
-  } = useStudio()
+  } = useStudioCore()
+  const { recording } = useStudioRecording()
+  const { previewLiveStatus, previewCameraStatus, previewScreenStatus } = useStudioPreview()
+  const { diagnosticStats, healthEvents, logs, previewSurfaceStatus, streamHealth } =
+    useStudioDiagnostics()
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
   const activeSession =
     sessions.find((session) => session.id === recording.sessionId) ?? sessions[0] ?? null
@@ -238,6 +239,14 @@ export function DiagnosticsTab(): ReactElement {
               value={diagnosticStats.encoderBridgeQueueDepth.toString()}
             />
             <DiagnosticMetric
+              label="Recording queue"
+              value={`${diagnosticStats.encoderBridgeRecordingQueueDepth} · ${formatMetric(diagnosticStats.encoderBridgeRecordingQueueOldestFrameAgeMs, 'ms')} oldest · ${diagnosticStats.encoderBridgeRecordingQueueCapacityPressureEvents} pressure · ${diagnosticStats.encoderBridgeRecordingQueueDroppedFrames} dropped`}
+            />
+            <DiagnosticMetric
+              label="Stream queue"
+              value={`${diagnosticStats.encoderBridgeStreamQueueDepth} · ${formatMetric(diagnosticStats.encoderBridgeStreamQueueOldestFrameAgeMs, 'ms')} oldest · ${diagnosticStats.encoderBridgeStreamQueueCapacityPressureEvents} pressure · ${diagnosticStats.encoderBridgeStreamQueueDroppedFrames} dropped`}
+            />
+            <DiagnosticMetric
               label="Bridge FPS"
               value={formatMetric(diagnosticStats.encoderBridgeInputFps, 'fps')}
             />
@@ -248,6 +257,26 @@ export function DiagnosticsTab(): ReactElement {
             <DiagnosticMetric
               label="Bridge error"
               value={diagnosticStats.encoderBridgeError ?? 'None'}
+            />
+          </MetricGroup>
+          <MetricGroup title="WebSocket transport">
+            <DiagnosticMetric
+              label="Reliable responses"
+              value={formatWebSocketQueue(diagnosticStats.websocketTransport.reliableResponseQueue)}
+            />
+            <DiagnosticMetric
+              label="Incoming commands"
+              value={formatWebSocketQueue(diagnosticStats.websocketTransport.incomingCommandQueue)}
+            />
+            <DiagnosticMetric
+              label="Coalesced telemetry"
+              value={formatWebSocketQueue(
+                diagnosticStats.websocketTransport.coalescedTelemetryQueue
+              )}
+            />
+            <DiagnosticMetric
+              label="Slow-peer disconnects"
+              value={diagnosticStats.websocketTransport.slowPressureDisconnectCount.toString()}
             />
           </MetricGroup>
           <MetricGroup title="Preview">
@@ -1088,6 +1117,11 @@ function formatDuplicateCapture(sources: string[]): string {
 
 function formatSourceTryLocks(cameraMisses: number, screenMisses: number): string {
   return `cam ${cameraMisses}, screen ${screenMisses}`
+}
+
+export function formatWebSocketQueue(queue: WebSocketQueueDiagnosticStats): string {
+  const oldest = queue.oldestAgeMs == null ? '--' : `${queue.oldestAgeMs} ms`
+  return `${queue.currentDepth}/${queue.maxDepth} current/max · ${oldest} oldest · ${queue.coalescedCount} coalesced · ${queue.evictedOrDroppedCount} evicted/dropped`
 }
 
 function formatSourceRegistry(registry?: DiagnosticStats['sourceRegistry']): string {

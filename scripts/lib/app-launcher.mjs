@@ -12,11 +12,22 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 export const repoRoot = resolve(import.meta.dirname, '..', '..')
 
 const MARKER_PREFIX = '[smoke] '
+
+/**
+ * Resolve the explicit packaged executable used by performance scenarios.
+ * The returned shape can be passed directly to `launchDevApp({ spawnSpec })`.
+ */
+export function performanceAppSpawnSpec(env = process.env) {
+  const executable = smokeEnvValue(env, 'VIDEORC_PERF_APP_EXECUTABLE')
+  if (!executable) return undefined
+  const command = resolve(executable)
+  return { command, args: [], cwd: dirname(command) }
+}
 
 export function resolveSmokeAppDirs({ env = {}, statePrefix = 'videorc-smoke' } = {}) {
   const stateDir =
@@ -80,7 +91,8 @@ export function launchDevApp({
   env = {},
   timeoutMs = 120000,
   requiredMarkers = ['backend-ready'],
-  onLine
+  onLine,
+  spawnSpec: requestedSpawnSpec
 } = {}) {
   return new Promise((resolveLaunch, rejectLaunch) => {
     const connections = {}
@@ -88,7 +100,9 @@ export function launchDevApp({
     let stopping = false
     const recentOutput = []
     const childEnv = smokeAppEnv(env)
-    const spawnSpec = devAppSpawnSpec({ env: childEnv })
+    const spawnSpec = requestedSpawnSpec
+      ? appSpawnSpec({ ...requestedSpawnSpec, env: childEnv })
+      : devAppSpawnSpec({ env: childEnv })
 
     const child = spawn(spawnSpec.command, spawnSpec.args, spawnSpec.options)
 
@@ -160,6 +174,26 @@ export function devAppSpawnSpec({ env, platform = process.platform } = {}) {
     command: 'pnpm',
     args: ['--filter', '@videorc/desktop', 'dev'],
     options: devAppSpawnOptions({ env, platform })
+  }
+}
+
+export function appSpawnSpec({
+  command,
+  args = [],
+  cwd = repoRoot,
+  env,
+  platform = process.platform
+} = {}) {
+  if (typeof command !== 'string' || !command.trim()) {
+    throw new Error('Custom app launch requires a command.')
+  }
+  return {
+    command,
+    args,
+    options: {
+      ...devAppSpawnOptions({ env, platform }),
+      cwd
+    }
   }
 }
 

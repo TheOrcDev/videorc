@@ -252,6 +252,48 @@ describe('native preview in-process driver', () => {
     })
   })
 
+  it('queries native metrics on telemetry ticks rather than every present', async () => {
+    let nowMs = 10_000
+    let metricsCalls = 0
+    const binding: NativePreviewInProcessBinding = {
+      attach: () => undefined,
+      update: () => undefined,
+      present: () => ({ presented: true }),
+      destroy: () => undefined,
+      attached: () => true,
+      metrics: () => {
+        metricsCalls += 1
+        return emptyMetrics()
+      }
+    }
+    const driver = createNativePreviewInProcessDriver({
+      binding,
+      getNativeWindowHandle: () => Buffer.from('0100000000000000', 'hex'),
+      nowMs: () => nowMs,
+      percentileCacheTtlMs: 250
+    })
+    await driver.applyHostCommands([{ kind: 'create', bounds: bounds() }])
+
+    for (let index = 0; index < 10_000; index += 1) {
+      await driver.presentCompositorHandoff({
+        handoff: {
+          iosurfaceId: 9,
+          width: 1920,
+          height: 1080,
+          frameId: index + 1,
+          runId: 'telemetry-run'
+        },
+        bounds: bounds(),
+        scene: null,
+        suppressFramePolling: true
+      })
+      nowMs += 1
+    }
+
+    expect(metricsCalls).toBeGreaterThanOrEqual(40)
+    expect(metricsCalls).toBeLessThanOrEqual(41)
+  })
+
   it('reports a native CAMetalLayer activation only after the binding presents', async () => {
     const calls: Array<{ method: string; args: unknown[] }> = []
     const binding: NativePreviewInProcessBinding = {

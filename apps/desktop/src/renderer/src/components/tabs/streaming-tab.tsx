@@ -46,7 +46,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import type {
   PlatformAccount,
   PlatformAccountValidation,
@@ -124,7 +124,7 @@ export function StreamingTab(): ReactElement {
     refreshXNativeCapability,
     authorizeXLive,
     stopSession
-  } = useStudio()
+  } = useStudioCore()
   const streaming = captureConfig.streaming
   const { video } = captureConfig
   const streamVideo = streamOutputVideoSettings(
@@ -294,7 +294,7 @@ function LiveCaptionsSection(): ReactElement {
     isSessionActive,
     captureConfig,
     setCaptureConfig
-  } = useStudio()
+  } = useStudioCore()
   const [pending, setPending] = useState(false)
   const gate = cloudAiUploadGate(entitlements)
   const active = captionsStatus.state === 'live' || captionsStatus.state === 'degraded'

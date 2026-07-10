@@ -1108,6 +1108,7 @@ export interface PreviewLiveStatus {
   state: PreviewLiveState
   source: PreviewLiveSource
   transport: PreviewTransport
+  backing: PreviewSurfaceBacking
   targetFps?: number
   width?: number
   height?: number
@@ -1150,7 +1151,7 @@ export type PreviewSurfaceSource = 'synthetic' | 'camera' | 'screen' | 'window'
 export type PreviewSurfaceBacking = 'cametal-layer' | 'electron-browser-window' | 'none'
 export type CompositorState = 'stopped' | 'starting' | 'live' | 'failed'
 export type CompositorSourceKind = 'camera' | 'screen' | 'window'
-export type CompositorSceneSourceKind = SceneSourceKind | 'screen-image'
+export type CompositorSceneSourceKind = SceneSourceKind | 'screen-image' | 'background-image'
 export type CompositorSceneSourceFit = 'contain' | 'cover'
 
 export interface CompositorSourceStatus {
@@ -1190,6 +1191,29 @@ export interface CompositorSceneUpdateParams {
   activeScreen?: StreamScreen | null
 }
 
+export interface CompositorImageCacheStatus {
+  budgetBytes: number
+  entryBudget: number
+  entries: number
+  decodedBytes: number
+  preconvertedBgraBytes: number
+  residentBytes: number
+  pinnedEntries: number
+  pinnedBytes: number
+  hits: number
+  misses: number
+  evictions: number
+}
+
+export interface CompositorFramePipelineStatus {
+  consumer?: string
+  gpuReadbacks: number
+  bgraBytesCopied: number
+  yuvFramesConverted: number
+  immutableTextureUploads: number
+  immutableTextureReuses: number
+}
+
 export interface CompositorStatus {
   state: CompositorState
   targetFps: number
@@ -1213,8 +1237,26 @@ export interface CompositorStatus {
   metalTargetIosurfaceId?: number
   metalTargetWidth?: number
   metalTargetHeight?: number
+  imageCache?: CompositorImageCacheStatus
+  framePipeline?: CompositorFramePipelineStatus
   updatedAt: string
   message?: string
+}
+
+/** Capacity-one/latest-wins notification used by native preview presentation. */
+export interface CompositorFrameReady {
+  targetFps: number
+  width: number
+  height: number
+  runId?: string
+  sceneRevision?: number
+  frameSceneRevision?: number
+  framesRendered: number
+  frameAgeMs?: number
+  metalTargetIosurfaceId?: number
+  metalTargetWidth?: number
+  metalTargetHeight?: number
+  updatedAt: string
 }
 
 export type PreviewSurfaceSceneLayerKind = SceneSourceKind | 'screen-image' | 'background'
@@ -1268,6 +1310,8 @@ export interface PreviewSurfaceCompositorUpdateParams extends CompositorStatus {
 }
 
 export interface PreviewSurfaceStatus {
+  /** IPC-only ownership acknowledgement for renderer compositor presents. */
+  compositorUpdateAccepted?: boolean
   state: PreviewSurfaceState
   source: PreviewSurfaceSource
   transport: PreviewTransport
@@ -1294,6 +1338,12 @@ export interface PreviewSurfaceStatus {
   nativePreviewMainPresentP95Ms?: number
   nativePreviewMainQueuedBehindCount?: number
   nativePreviewMainCoalescedFrameCount?: number
+  nativePreviewMutationQueueCapacity?: number
+  nativePreviewMutationQueueDepth?: number
+  nativePreviewMutationQueueActiveCount?: number
+  nativePreviewMutationQueuePendingCount?: number
+  nativePreviewMutationQueueMaxDepth?: number
+  nativePreviewMutationQueueRejectedCount?: number
   nativePreviewHelperRoundTripP95Ms?: number
   nativePreviewMainStatusFetchP95Ms?: number
   nativePreviewMainStatusFetchFailures?: number
@@ -1564,6 +1614,21 @@ export interface SourceRegistrySnapshot {
   entries: SourceRegistryEntrySnapshot[]
 }
 
+export interface WebSocketQueueDiagnosticStats {
+  currentDepth: number
+  maxDepth: number
+  oldestAgeMs?: number
+  coalescedCount: number
+  evictedOrDroppedCount: number
+}
+
+export interface WebSocketTransportDiagnosticStats {
+  reliableResponseQueue: WebSocketQueueDiagnosticStats
+  incomingCommandQueue: WebSocketQueueDiagnosticStats
+  coalescedTelemetryQueue: WebSocketQueueDiagnosticStats
+  slowPressureDisconnectCount: number
+}
+
 export interface DiagnosticStats {
   sessionId?: string
   activeOutputMode?: string
@@ -1575,6 +1640,12 @@ export interface DiagnosticStats {
   droppedFrames: number
   encoderSpeed?: number
   encoderBridgeQueueDepth: number
+  /** Oldest frame waiting for VideoToolbox completion or FIFO output. */
+  encoderBridgeOutputQueueOldestFrameAgeMs?: number
+  /** Enqueue attempts that encountered a full bounded output queue. */
+  encoderBridgeOutputQueueCapacityPressureEvents: number
+  /** Frames intentionally discarded by output backpressure policy. */
+  encoderBridgeOutputQueueDroppedFrames: number
   encoderBridgeInputFps?: number
   encoderBridgeDroppedFrames: number
   /** Compositor frames re-fed to the encoder on under-run (duplicate frames in the final file). */
@@ -1659,6 +1730,16 @@ export interface DiagnosticStats {
   encoderBridgeRecordingInputFps?: number
   /** Stream-leg bridge input FPS for split-output sessions. */
   encoderBridgeStreamInputFps?: number
+  /** Recording-leg output queue state for split-output sessions. */
+  encoderBridgeRecordingQueueDepth: number
+  encoderBridgeRecordingQueueOldestFrameAgeMs?: number
+  encoderBridgeRecordingQueueCapacityPressureEvents: number
+  encoderBridgeRecordingQueueDroppedFrames: number
+  /** Streaming-leg output queue state for split-output sessions. */
+  encoderBridgeStreamQueueDepth: number
+  encoderBridgeStreamQueueOldestFrameAgeMs?: number
+  encoderBridgeStreamQueueCapacityPressureEvents: number
+  encoderBridgeStreamQueueDroppedFrames: number
   /** Recording-leg bridge writer p95 for split-output sessions. */
   encoderBridgeRecordingWriterLoopP95Ms?: number
   /** Stream-leg bridge writer p95 for split-output sessions. */
@@ -1684,6 +1765,7 @@ export interface DiagnosticStats {
   compositorFallbackReason?: string
   /** Cumulative frames rendered by CPU fallback during the active compositor run. */
   compositorCpuFallbackFrames: number
+  websocketTransport: WebSocketTransportDiagnosticStats
   /** Cumulative HTTP image-poll request counts; the transport-honesty gate fails when these climb during a "native" preview session. */
   previewImagePollCounts: PreviewImagePollCounts
   /** True when an active recording is being compromised by a measured problem. Drives the "Recording at risk" badge. */
@@ -2519,9 +2601,11 @@ export interface VideorcApi {
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<CommentsWindowState>
   onCommentsWindowState: (callback: (state: CommentsWindowState) => void) => () => void
   pushCommentsSnapshot: (view: CommentsViewSnapshot) => Promise<void>
+  pushCommentsDelta: (delta: CommentsSnapshotDelta) => Promise<void>
   getCommentsSnapshot: () => Promise<CommentsViewSnapshot | null>
   setCommentsViewMode: (mode: CommentsViewMode) => Promise<CommentsViewSnapshot | null>
   onCommentsSnapshot: (callback: (view: CommentsViewSnapshot) => void) => () => void
+  onCommentsDelta: (callback: (delta: CommentsSnapshotDelta) => void) => () => void
   openCaptionsWindow: () => Promise<CaptionsWindowState>
   closeCaptionsWindow: () => Promise<CaptionsWindowState>
   toggleCaptionsWindow: () => Promise<CaptionsWindowState>
@@ -2771,6 +2855,12 @@ export interface LiveChatSnapshot {
   unreadCount: number
   updatedAt: string
 }
+
+/** Incremental main-renderer -> Comments-window transport after the initial snapshot seed. */
+export type CommentsSnapshotDelta =
+  | { kind: 'message'; message: LiveChatMessage; sessionId?: string }
+  | { kind: 'provider'; provider: LiveChatProviderState; sessionId?: string; updatedAt: string }
+  | { kind: 'clear'; sessionId?: string; updatedAt: string }
 
 /** An empty snapshot for the renderer store before any chat session starts. */
 export function createEmptyLiveChatSnapshot(updatedAt: string): LiveChatSnapshot {

@@ -1,6 +1,7 @@
-use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Duration;
 
 use chrono::Utc;
 
@@ -135,6 +136,9 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         dropped_frames: 0,
         encoder_speed: None,
         encoder_bridge_queue_depth: 0,
+        encoder_bridge_output_queue_oldest_frame_age_ms: None,
+        encoder_bridge_output_queue_capacity_pressure_events: 0,
+        encoder_bridge_output_queue_dropped_frames: 0,
         encoder_bridge_input_fps: None,
         encoder_bridge_dropped_frames: 0,
         encoder_bridge_repeated_frames: 0,
@@ -184,6 +188,14 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         encoder_bridge_schedule_skipped_ms: 0,
         encoder_bridge_recording_input_fps: None,
         encoder_bridge_stream_input_fps: None,
+        encoder_bridge_recording_queue_depth: 0,
+        encoder_bridge_recording_queue_oldest_frame_age_ms: None,
+        encoder_bridge_recording_queue_capacity_pressure_events: 0,
+        encoder_bridge_recording_queue_dropped_frames: 0,
+        encoder_bridge_stream_queue_depth: 0,
+        encoder_bridge_stream_queue_oldest_frame_age_ms: None,
+        encoder_bridge_stream_queue_capacity_pressure_events: 0,
+        encoder_bridge_stream_queue_dropped_frames: 0,
         encoder_bridge_recording_writer_loop_p95_ms: None,
         encoder_bridge_stream_writer_loop_p95_ms: None,
         encoder_bridge_recording_writer_active_p95_ms: None,
@@ -197,6 +209,7 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         compositor_backend: None,
         compositor_fallback_reason: None,
         compositor_cpu_fallback_frames: 0,
+        websocket_transport: Default::default(),
         preview_image_poll_counts: PreviewImagePollCounts::default(),
         preview_target_fps: None,
         preview_frame_age_ms: None,
@@ -336,6 +349,15 @@ pub fn apply_runtime_diagnostics_snapshot(
     apply_runtime_resource_snapshot(apply_ffmpeg_work_snapshot(stats, snapshot))
 }
 
+pub fn apply_websocket_transport_stats(
+    mut stats: DiagnosticStats,
+    websocket_transport: crate::protocol::WebSocketTransportDiagnosticStats,
+) -> DiagnosticStats {
+    stats.websocket_transport = websocket_transport;
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
 pub fn apply_ffmpeg_work_snapshot(
     mut stats: DiagnosticStats,
     snapshot: FfmpegWorkSnapshot,
@@ -352,16 +374,23 @@ pub fn apply_ffmpeg_work_snapshot(
 }
 
 pub fn apply_runtime_resource_snapshot(mut stats: DiagnosticStats) -> DiagnosticStats {
-    let snapshot = collect_runtime_resource_snapshot();
-    stats.backend_rss_bytes = snapshot.backend_rss_bytes;
-    stats.active_ffmpeg_processes = snapshot.active_ffmpeg_processes;
-    stats.active_ffprobe_processes = snapshot.active_ffprobe_processes;
+    let snapshot = runtime_resource_sampler().snapshot();
+    apply_runtime_resource_snapshot_value(&mut stats, snapshot);
     stats.preview_image_poll_counts = PREVIEW_POLL_COUNTS.snapshot();
     let (at_risk, reasons) = classify_recording_risk(&stats);
     stats.recording_at_risk = at_risk;
     stats.recording_risk_reasons = reasons;
     stats.updated_at = Utc::now().to_rfc3339();
     stats
+}
+
+fn apply_runtime_resource_snapshot_value(
+    stats: &mut DiagnosticStats,
+    snapshot: RuntimeResourceSnapshot,
+) {
+    stats.backend_rss_bytes = snapshot.backend_rss_bytes;
+    stats.active_ffmpeg_processes = snapshot.active_ffmpeg_processes;
+    stats.active_ffprobe_processes = snapshot.active_ffprobe_processes;
 }
 
 /// Encoder must keep at least this fraction of real-time speed.
@@ -684,6 +713,9 @@ pub fn apply_stream_health(
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncoderBridgeDiagnosticSnapshot {
     pub queue_depth: u64,
+    pub output_queue_oldest_frame_age_ms: Option<u64>,
+    pub output_queue_capacity_pressure_events: u64,
+    pub output_queue_dropped_frames: u64,
     pub input_fps: Option<f64>,
     pub dropped_frames: u64,
     pub encoder_speed: Option<f64>,
@@ -734,6 +766,14 @@ pub struct EncoderBridgeDiagnosticSnapshot {
     pub schedule_skipped_ms: u64,
     pub recording_input_fps: Option<f64>,
     pub stream_input_fps: Option<f64>,
+    pub recording_queue_depth: u64,
+    pub recording_queue_oldest_frame_age_ms: Option<u64>,
+    pub recording_queue_capacity_pressure_events: u64,
+    pub recording_queue_dropped_frames: u64,
+    pub stream_queue_depth: u64,
+    pub stream_queue_oldest_frame_age_ms: Option<u64>,
+    pub stream_queue_capacity_pressure_events: u64,
+    pub stream_queue_dropped_frames: u64,
     pub recording_writer_loop_p95_ms: Option<f64>,
     pub stream_writer_loop_p95_ms: Option<f64>,
     pub recording_writer_active_p95_ms: Option<f64>,
@@ -751,6 +791,10 @@ pub fn apply_encoder_bridge_stats(
     target_fps: u32,
 ) -> DiagnosticStats {
     stats.encoder_bridge_queue_depth = bridge.queue_depth;
+    stats.encoder_bridge_output_queue_oldest_frame_age_ms = bridge.output_queue_oldest_frame_age_ms;
+    stats.encoder_bridge_output_queue_capacity_pressure_events =
+        bridge.output_queue_capacity_pressure_events;
+    stats.encoder_bridge_output_queue_dropped_frames = bridge.output_queue_dropped_frames;
     stats.encoder_bridge_input_fps = bridge.input_fps;
     stats.encoder_bridge_dropped_frames = bridge.dropped_frames;
     stats.encoder_bridge_repeated_frames = bridge.repeated_fed_frames;
@@ -807,6 +851,17 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_schedule_skipped_ms = bridge.schedule_skipped_ms;
     stats.encoder_bridge_recording_input_fps = bridge.recording_input_fps;
     stats.encoder_bridge_stream_input_fps = bridge.stream_input_fps;
+    stats.encoder_bridge_recording_queue_depth = bridge.recording_queue_depth;
+    stats.encoder_bridge_recording_queue_oldest_frame_age_ms =
+        bridge.recording_queue_oldest_frame_age_ms;
+    stats.encoder_bridge_recording_queue_capacity_pressure_events =
+        bridge.recording_queue_capacity_pressure_events;
+    stats.encoder_bridge_recording_queue_dropped_frames = bridge.recording_queue_dropped_frames;
+    stats.encoder_bridge_stream_queue_depth = bridge.stream_queue_depth;
+    stats.encoder_bridge_stream_queue_oldest_frame_age_ms = bridge.stream_queue_oldest_frame_age_ms;
+    stats.encoder_bridge_stream_queue_capacity_pressure_events =
+        bridge.stream_queue_capacity_pressure_events;
+    stats.encoder_bridge_stream_queue_dropped_frames = bridge.stream_queue_dropped_frames;
     stats.encoder_bridge_recording_writer_loop_p95_ms = bridge.recording_writer_loop_p95_ms;
     stats.encoder_bridge_stream_writer_loop_p95_ms = bridge.stream_writer_loop_p95_ms;
     stats.encoder_bridge_recording_writer_active_p95_ms = bridge.recording_writer_active_p95_ms;
@@ -1317,44 +1372,125 @@ struct RuntimeResourceSnapshot {
     active_ffprobe_processes: u64,
 }
 
+const RUNTIME_RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Debug)]
+struct RuntimeResourceSampler {
+    latest: Arc<RwLock<RuntimeResourceSnapshot>>,
+}
+
+impl RuntimeResourceSampler {
+    fn start() -> Self {
+        let latest = Arc::new(RwLock::new(RuntimeResourceSnapshot::default()));
+        let writer = Arc::clone(&latest);
+        std::thread::Builder::new()
+            .name("videorc-resource-sampler".to_string())
+            .spawn(move || {
+                loop {
+                    let next = collect_runtime_resource_snapshot();
+                    *writer
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+                    std::thread::sleep(RUNTIME_RESOURCE_SAMPLE_INTERVAL);
+                }
+            })
+            .expect("runtime resource sampler thread should start");
+        Self { latest }
+    }
+
+    fn snapshot(&self) -> RuntimeResourceSnapshot {
+        self.latest
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+static RUNTIME_RESOURCE_SAMPLER: OnceLock<RuntimeResourceSampler> = OnceLock::new();
+
+fn runtime_resource_sampler() -> &'static RuntimeResourceSampler {
+    RUNTIME_RESOURCE_SAMPLER.get_or_init(RuntimeResourceSampler::start)
+}
+
+/// Starts the process-wide sampler before request handling begins. Runtime diagnostics then
+/// perform only a cached read: preview-present reports never launch `ps` themselves.
+pub fn start_runtime_resource_sampler() {
+    let _ = runtime_resource_sampler();
+}
+
 fn collect_runtime_resource_snapshot() -> RuntimeResourceSnapshot {
-    RuntimeResourceSnapshot {
-        backend_rss_bytes: backend_rss_bytes(),
-        active_ffmpeg_processes: active_media_process_count("ffmpeg"),
-        active_ffprobe_processes: active_media_process_count("ffprobe"),
-    }
-}
-
-fn backend_rss_bytes() -> Option<u64> {
-    let pid = std::process::id().to_string();
     let output = Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let rss_kib = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u64>()
-        .ok()?;
-    Some(rss_kib.saturating_mul(1024))
+        .args(["-axo", "pid=,ppid=,rss=,comm="])
+        .output();
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        _ => return RuntimeResourceSnapshot::default(),
+    };
+    parse_runtime_resource_snapshot(&String::from_utf8_lossy(&output.stdout), std::process::id())
 }
 
-fn active_media_process_count(name: &str) -> u64 {
-    let output = match Command::new("ps").args(["-axo", "comm="]).output() {
-        Ok(output) if output.status.success() => output,
-        _ => return 0,
-    };
-    String::from_utf8_lossy(&output.stdout)
+#[derive(Debug)]
+struct ProcessSampleRow {
+    pid: u32,
+    parent_pid: u32,
+    rss_kib: u64,
+    command: String,
+}
+
+fn parse_runtime_resource_snapshot(output: &str, backend_pid: u32) -> RuntimeResourceSnapshot {
+    let rows = output
         .lines()
-        .filter(|line| {
-            Path::new(line.trim())
-                .file_name()
-                .and_then(|file_name| file_name.to_str())
-                .is_some_and(|file_name| file_name.eq_ignore_ascii_case(name))
-        })
-        .count() as u64
+        .filter_map(parse_process_sample_row)
+        .collect::<Vec<_>>();
+    let mut owned_pids = std::collections::HashSet::from([backend_pid]);
+    loop {
+        let previous_len = owned_pids.len();
+        for row in &rows {
+            if owned_pids.contains(&row.parent_pid) {
+                owned_pids.insert(row.pid);
+            }
+        }
+        if owned_pids.len() == previous_len {
+            break;
+        }
+    }
+
+    let mut snapshot = RuntimeResourceSnapshot {
+        backend_rss_bytes: rows
+            .iter()
+            .find(|row| row.pid == backend_pid)
+            .map(|row| row.rss_kib.saturating_mul(1024)),
+        ..RuntimeResourceSnapshot::default()
+    };
+    for row in rows
+        .iter()
+        .filter(|row| row.pid != backend_pid && owned_pids.contains(&row.pid))
+    {
+        let executable = std::path::Path::new(row.command.trim())
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if executable.eq_ignore_ascii_case("ffmpeg") {
+            snapshot.active_ffmpeg_processes = snapshot.active_ffmpeg_processes.saturating_add(1);
+        } else if executable.eq_ignore_ascii_case("ffprobe") {
+            snapshot.active_ffprobe_processes = snapshot.active_ffprobe_processes.saturating_add(1);
+        }
+    }
+    snapshot
+}
+
+fn parse_process_sample_row(line: &str) -> Option<ProcessSampleRow> {
+    let mut fields = line.split_whitespace();
+    let pid = fields.next()?.parse().ok()?;
+    let parent_pid = fields.next()?.parse().ok()?;
+    let rss_kib = fields.next()?.parse().ok()?;
+    let command = fields.collect::<Vec<_>>().join(" ");
+    (!command.is_empty()).then_some(ProcessSampleRow {
+        pid,
+        parent_pid,
+        rss_kib,
+        command,
+    })
 }
 
 #[cfg(test)]
@@ -1377,6 +1513,39 @@ mod tests {
         assert_eq!(snapshot.screen_png, 1);
         assert_eq!(snapshot.live_jpeg, 1);
         assert_eq!(snapshot.live_mjpeg, 3);
+    }
+
+    #[test]
+    fn process_snapshot_uses_one_backend_owned_descendant_tree() {
+        let snapshot = parse_runtime_resource_snapshot(
+            " 100 1 4096 /opt/videorc-backend\n\
+             101 100 1024 /opt/ffmpeg\n\
+             102 101 512 /opt/ffprobe\n\
+             200 1 9999 /other/ffmpeg\n\
+             malformed row\n",
+            100,
+        );
+
+        assert_eq!(snapshot.backend_rss_bytes, Some(4096 * 1024));
+        assert_eq!(snapshot.active_ffmpeg_processes, 1);
+        assert_eq!(snapshot.active_ffprobe_processes, 1);
+    }
+
+    #[test]
+    fn applying_a_cached_resource_sample_never_collects_processes() {
+        let mut stats = idle_diagnostics();
+        apply_runtime_resource_snapshot_value(
+            &mut stats,
+            RuntimeResourceSnapshot {
+                backend_rss_bytes: Some(42),
+                active_ffmpeg_processes: 2,
+                active_ffprobe_processes: 3,
+            },
+        );
+
+        assert_eq!(stats.backend_rss_bytes, Some(42));
+        assert_eq!(stats.active_ffmpeg_processes, 2);
+        assert_eq!(stats.active_ffprobe_processes, 3);
     }
 
     #[test]
@@ -2009,6 +2178,9 @@ mod tests {
             starting_diagnostics("bridge", 30, "encoder-bridge"),
             EncoderBridgeDiagnosticSnapshot {
                 queue_depth: 1,
+                output_queue_oldest_frame_age_ms: Some(10),
+                output_queue_capacity_pressure_events: 0,
+                output_queue_dropped_frames: 0,
                 input_fps: Some(29.8),
                 dropped_frames: 0,
                 encoder_speed: Some(1.02),
@@ -2059,6 +2231,14 @@ mod tests {
                 schedule_skipped_ms: 0,
                 recording_input_fps: None,
                 stream_input_fps: None,
+                recording_queue_depth: 1,
+                recording_queue_oldest_frame_age_ms: Some(10),
+                recording_queue_capacity_pressure_events: 0,
+                recording_queue_dropped_frames: 0,
+                stream_queue_depth: 0,
+                stream_queue_oldest_frame_age_ms: None,
+                stream_queue_capacity_pressure_events: 0,
+                stream_queue_dropped_frames: 0,
                 recording_writer_loop_p95_ms: None,
                 stream_writer_loop_p95_ms: None,
                 recording_writer_active_p95_ms: None,
@@ -2081,7 +2261,10 @@ mod tests {
         let lagging = apply_encoder_bridge_stats(
             stats,
             EncoderBridgeDiagnosticSnapshot {
-                queue_depth: 2,
+                queue_depth: 5,
+                output_queue_oldest_frame_age_ms: Some(180),
+                output_queue_capacity_pressure_events: 4,
+                output_queue_dropped_frames: 2,
                 input_fps: Some(28.0),
                 dropped_frames: 3,
                 encoder_speed: Some(0.5),
@@ -2132,6 +2315,14 @@ mod tests {
                 schedule_skipped_ms: 0,
                 recording_input_fps: Some(29.0),
                 stream_input_fps: Some(28.0),
+                recording_queue_depth: 2,
+                recording_queue_oldest_frame_age_ms: Some(180),
+                recording_queue_capacity_pressure_events: 1,
+                recording_queue_dropped_frames: 0,
+                stream_queue_depth: 3,
+                stream_queue_oldest_frame_age_ms: Some(90),
+                stream_queue_capacity_pressure_events: 3,
+                stream_queue_dropped_frames: 2,
                 recording_writer_loop_p95_ms: Some(12.0),
                 stream_writer_loop_p95_ms: Some(16.0),
                 recording_writer_active_p95_ms: Some(4.0),
@@ -2146,6 +2337,36 @@ mod tests {
         );
 
         assert_eq!(lagging.encoder_bridge_dropped_frames, 3);
+        assert_eq!(lagging.encoder_bridge_queue_depth, 5);
+        assert_eq!(
+            lagging.encoder_bridge_output_queue_oldest_frame_age_ms,
+            Some(180)
+        );
+        assert_eq!(
+            lagging.encoder_bridge_output_queue_capacity_pressure_events,
+            4
+        );
+        assert_eq!(lagging.encoder_bridge_output_queue_dropped_frames, 2);
+        assert_eq!(lagging.encoder_bridge_recording_queue_depth, 2);
+        assert_eq!(
+            lagging.encoder_bridge_recording_queue_oldest_frame_age_ms,
+            Some(180)
+        );
+        assert_eq!(
+            lagging.encoder_bridge_recording_queue_capacity_pressure_events,
+            1
+        );
+        assert_eq!(lagging.encoder_bridge_recording_queue_dropped_frames, 0);
+        assert_eq!(lagging.encoder_bridge_stream_queue_depth, 3);
+        assert_eq!(
+            lagging.encoder_bridge_stream_queue_oldest_frame_age_ms,
+            Some(90)
+        );
+        assert_eq!(
+            lagging.encoder_bridge_stream_queue_capacity_pressure_events,
+            3
+        );
+        assert_eq!(lagging.encoder_bridge_stream_queue_dropped_frames, 2);
         assert_eq!(lagging.encoder_bridge_repeated_frames, 5);
         assert_eq!(lagging.encoder_bridge_repeated_frame_bursts, 3);
         assert_eq!(lagging.encoder_bridge_max_repeated_frame_run, 2);
@@ -2239,5 +2460,37 @@ mod tests {
             Some(18.0)
         );
         assert_eq!(lagging.bottleneck, DiagnosticBottleneck::Encoder);
+    }
+
+    #[test]
+    fn websocket_transport_snapshot_is_applied_without_resource_sampling() {
+        let snapshot = crate::protocol::WebSocketTransportDiagnosticStats {
+            reliable_response_queue: crate::protocol::WebSocketQueueDiagnosticStats {
+                current_depth: 3,
+                max_depth: 8,
+                oldest_age_ms: Some(42),
+                coalesced_count: 0,
+                evicted_or_dropped_count: 1,
+            },
+            incoming_command_queue: crate::protocol::WebSocketQueueDiagnosticStats {
+                current_depth: 2,
+                max_depth: 5,
+                oldest_age_ms: Some(21),
+                coalesced_count: 0,
+                evicted_or_dropped_count: 0,
+            },
+            coalesced_telemetry_queue: crate::protocol::WebSocketQueueDiagnosticStats {
+                current_depth: 1,
+                max_depth: 4,
+                oldest_age_ms: Some(7),
+                coalesced_count: 11,
+                evicted_or_dropped_count: 2,
+            },
+            slow_pressure_disconnect_count: 6,
+        };
+
+        let stats = apply_websocket_transport_stats(idle_diagnostics(), snapshot.clone());
+
+        assert_eq!(stats.websocket_transport, snapshot);
     }
 }

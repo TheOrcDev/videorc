@@ -3,13 +3,13 @@ import { useEffect, useState, type ReactElement } from 'react'
 
 import { ObsImportDialog } from '@/components/obs-import-dialog'
 import { Button } from '@/components/ui/button'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import { OBS_NUDGE_DISMISSED_KEY, shouldShowObsNudge } from '@/lib/obs-import-nudge'
 
 /** Fresh-profile hint (O5): one quiet dismissible row in the Studio — never
  *  shown once any capture source is picked or after a dismissal. */
 export function ObsImportNudge(): ReactElement | null {
-  const { captureConfig } = useStudio()
+  const { captureConfig } = useStudioCore()
   const [obsAvailable, setObsAvailable] = useState(false)
   const [dismissed, setDismissed] = useState(
     () => localStorage.getItem(OBS_NUDGE_DISMISSED_KEY) === '1'

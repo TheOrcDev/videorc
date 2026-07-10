@@ -35,4 +35,17 @@ describe('native preview present metrics', () => {
     metrics.reset()
     expect(metrics.record({ frameAgeMs: 2 }).presentFps).toBeUndefined()
   })
+
+  it('keeps percentile and cadence assembly on telemetry ticks, not presents', () => {
+    let nowMs = 10_000
+    const metrics = new NativePreviewPresentMetrics(() => nowMs, 250)
+
+    for (let index = 0; index < 10_000; index += 1) {
+      metrics.record({ frameAgeMs: index % 4 })
+      nowMs += 1
+    }
+
+    expect(metrics.telemetryRefreshCount).toBeGreaterThanOrEqual(40)
+    expect(metrics.telemetryRefreshCount).toBeLessThanOrEqual(41)
+  })
 })

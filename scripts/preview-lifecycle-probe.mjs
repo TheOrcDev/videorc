@@ -6,22 +6,81 @@
 // cycles and that close fully suppresses detached-preview presentation work.
 
 import { mkdirSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
+import {
+  launchDevApp,
+  performanceAppSpawnSpec,
+  repoRoot,
+  stopProcess
+} from './lib/app-launcher.mjs'
+import {
+  collectPerformanceMetadata,
+  createPerformanceReport,
+  failingChecks,
+  observationCheck,
+  passingCheck,
+  performanceMode,
+  writePerformanceReport
+} from './lib/performance-contract.mjs'
+import {
+  collectProcessCensus,
+  ownedProcessLedgerPaths,
+  pruneDeadOwnedProcessRecords,
+  waitForCleanProcessState,
+  waitForNoLiveProcessState
+} from './lib/process-census.mjs'
+import {
+  evaluateProcessMemoryGate,
+  formatProcessMemorySummary,
+  summarizeProcessMemory
+} from './lib/process-memory-gate.mjs'
 import { requestSmokeCommandWithRetry } from './lib/smoke-command-client.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
+const mode = performanceMode()
 const cycles = positiveInteger(process.env.VIDEORC_PREVIEW_LIFECYCLE_CYCLES, 100)
-const outputDirectory = join(tmpdir(), `videorc-preview-lifecycle-probe-${Date.now()}`)
+const outputDirectory =
+  process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
+  join(tmpdir(), `videorc-preview-lifecycle-probe-${Date.now()}`)
 mkdirSync(outputDirectory, { recursive: true })
+const ledgerPaths = ownedProcessLedgerPaths({
+  appDataDir: join(outputDirectory, 'app-data'),
+  userDataDir: join(outputDirectory, 'user-data'),
+  workspaceRoot: repoRoot
+})
+const memoryThresholds = {
+  minSamples: expectedMemoryCheckpointCount(cycles),
+  maxTotalRssMb: Number(process.env.VIDEORC_LIFECYCLE_MAX_TOTAL_RSS_MB ?? 4096),
+  maxOwnedRssMb: Number(process.env.VIDEORC_LIFECYCLE_MAX_OWNED_RSS_MB ?? 2048),
+  maxOwnedSlopeMbPerMinute: optionalNumber('VIDEORC_LIFECYCLE_MAX_OWNED_SLOPE_MB_MIN'),
+  maxOwnedSecondHalfSlopeMbPerMinute: optionalNumber(
+    'VIDEORC_LIFECYCLE_MAX_OWNED_SECOND_HALF_SLOPE_MB_MIN'
+  ),
+  maxOwnedPlateauGrowthMb: optionalNumber('VIDEORC_LIFECYCLE_MAX_OWNED_PLATEAU_GROWTH_MB'),
+  minRoleCount: { backend: 1, 'electron-main': 1, 'electron-renderer': 1 },
+  maxRoleCount: {
+    backend: 1,
+    'electron-main': 1,
+    'electron-renderer': 3,
+    'native-preview-helper': 1
+  },
+  maxRoleSlopeMbPerMinute: lifecycleRoleThresholds('SLOPE_MB_MIN'),
+  maxRoleSecondHalfSlopeMbPerMinute: lifecycleRoleThresholds('SECOND_HALF_SLOPE_MB_MIN'),
+  maxRolePlateauGrowthMb: lifecycleRoleThresholds('PLATEAU_GROWTH_MB')
+}
 
 let launched
 let smoke
 let lastState = null
 let lastSupervisorGeneration = 0
 let exitCode = 0
+let failureMessage = null
+let teardownClean = false
+let teardownRecovery = null
+const memoryCheckpoints = []
 
 try {
   exitCode = await main()
@@ -30,19 +89,105 @@ try {
   if (lastState) {
     console.error(`last preview state: ${JSON.stringify(lastState)}`)
   }
+  failureMessage = error?.message ?? String(error)
   exitCode = 2
 } finally {
   if (launched) {
+    let gracefulQuitCompleted = false
     if (smoke) {
-      await requestSmokeCommandWithRetry(
-        smoke,
-        'preview-lifecycle-allow-app-quit',
-        {},
-        { timeoutMs: 500 }
-      ).catch(() => undefined)
+      try {
+        await requestSmokeCommandWithRetry(
+          smoke,
+          'preview-lifecycle-allow-app-quit',
+          {},
+          { timeoutMs: 500 }
+        )
+        await requestSmokeCommandWithRetry(smoke, 'app-quit', {}, { timeoutMs: 1000 })
+        await waitForNoLiveProcessState({
+          ledgerPaths,
+          pgid: launched.process.pid,
+          timeoutMs: 10000
+        })
+        gracefulQuitCompleted = true
+      } catch {
+        // The launcher fallback below still reaps the isolated process group.
+      }
     }
-    await stopProcess(launched.process)
+    try {
+      if (!gracefulQuitCompleted) {
+        await stopProcess(launched.process)
+      }
+      await waitForNoLiveProcessState({
+        ledgerPaths,
+        pgid: launched.process.pid,
+        timeoutMs: 10000
+      })
+      const clean = await waitForCleanProcessState({
+        ledgerPaths,
+        pgid: launched.process.pid,
+        timeoutMs: 1000
+      })
+      teardownClean = clean.records.length === 0 && clean.processGroupRows.length === 0
+    } catch (error) {
+      failureMessage = `Lifecycle teardown failed: ${error?.message ?? error}`
+      exitCode = 2
+      try {
+        teardownRecovery = await pruneDeadOwnedProcessRecords({ ledgerPaths })
+      } catch (cleanupError) {
+        teardownRecovery = { error: cleanupError?.message ?? String(cleanupError) }
+      }
+    }
   }
+}
+
+const memorySummary = summarizeProcessMemory(memoryCheckpoints, {
+  tailWindowMs: Number(process.env.VIDEORC_LIFECYCLE_MEMORY_TAIL_WINDOW_MS ?? 120000)
+})
+const memoryFailures = evaluateProcessMemoryGate(memorySummary, memoryThresholds)
+if (memoryCheckpoints.length > 0) {
+  console.log('\n=== Preview lifecycle memory/process checkpoints ===')
+  console.log(formatProcessMemorySummary(memorySummary))
+}
+if (mode === 'gate' && memoryFailures.length > 0) {
+  const memoryFailureMessage = `Lifecycle memory gate failed:\n${memoryFailures.join('\n')}`
+  failureMessage = failureMessage
+    ? `${failureMessage}\n${memoryFailureMessage}`
+    : memoryFailureMessage
+  exitCode = 2
+}
+if (!teardownClean) {
+  failureMessage ??= 'Lifecycle app-owned process teardown was not clean.'
+  exitCode = 2
+}
+
+const report = createPerformanceReport({
+  scenario: process.env.VIDEORC_PERF_SCENARIO ?? 'preview-lifecycle',
+  mode,
+  metadata: await collectPerformanceMetadata({ cwd: repoRoot }),
+  timing: { cycles },
+  metrics: {
+    memory: memorySummary,
+    thresholds: memoryThresholds,
+    budgetFailures: memoryFailures,
+    teardownClean,
+    teardownRecovery,
+    scratchDirectory: outputDirectory
+  },
+  checks: [
+    ...(exitCode === 0
+      ? [passingCheck(`${cycles} lifecycle cycles and exact teardown completed`)]
+      : failingChecks([failureMessage ?? 'preview lifecycle probe failed'])),
+    ...(mode === 'report-only'
+      ? memoryFailures.map((failure) => observationCheck(`report-only observation: ${failure}`))
+      : [])
+  ]
+})
+const reportPath = await writePerformanceReport(report)
+console.log(`Preview lifecycle performance report: ${reportPath}`)
+if (exitCode === 0 && process.env.VIDEORC_PERF_RETAIN_ARTIFACTS !== '1') {
+  await rm(outputDirectory, { recursive: true, force: true })
+} else {
+  console.log(`Preview lifecycle scratch retained: ${outputDirectory}`)
 }
 
 process.exit(exitCode)
@@ -50,6 +195,7 @@ process.exit(exitCode)
 async function main() {
   console.log(`Launching dev app for preview lifecycle probe (${cycles} cycles)...`)
   launched = await launchDevApp({
+    spawnSpec: performanceAppSpawnSpec(),
     timeoutMs,
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     env: {
@@ -65,6 +211,7 @@ async function main() {
   smoke = launched.connections['preview-motion-ready']
 
   const initialState = await ensureClosed('initial close')
+  await captureMemoryCheckpoint('initial')
   lastSupervisorGeneration = supervisorGeneration(initialState)
   const quitAttempt = await smokeCommand('preview-lifecycle-attempt-app-quit')
   assertProbe(
@@ -81,12 +228,15 @@ async function main() {
 
   for (let cycle = 1; cycle <= cycles; cycle += 1) {
     await toggleOpen(`cycle ${cycle}: toggle open`)
+    await setPreviewMode('docked', `cycle ${cycle}: dock`)
+    await setPreviewMode('floating', `cycle ${cycle}: undock`)
     if (cycle === 1) {
       await assertStaleDestroyIgnored('cycle 1: stale destroy is ignored')
       await assertPermissionRequiredStopsSurface('cycle 1: permission-required stops presentation')
     }
     await toggleClosed(`cycle ${cycle}: toggle close`)
     if (cycle === 1 || cycle === cycles || cycle % 10 === 0) {
+      await captureMemoryCheckpoint(`cycle-${cycle}`)
       console.log(`OK   completed ${cycle}/${cycles} preview lifecycle cycles`)
     }
   }
@@ -98,12 +248,18 @@ async function main() {
 
   await toggleOpen('final reopen')
   await toggleClosed('final close')
+  await captureMemoryCheckpoint('final')
 
   console.log('\n=== Preview lifecycle probe summary ===')
   console.log(
     `PASS - ${cycles} repeated preview toggle cycles opened, closed, tore down surfaces, and suppressed frame polling.`
   )
   return 0
+}
+
+async function setPreviewMode(mode, label) {
+  const state = await smokeCommand('preview-window-set-mode', { mode })
+  assertProbe(state?.mode === mode, `${label}: preview reports ${mode} mode`, state)
 }
 
 async function toggleOpen(label) {
@@ -344,6 +500,50 @@ function previewSurfaceBoundsFromState(state) {
 function positiveInteger(raw, fallback) {
   const value = Number(raw)
   return Number.isInteger(value) && value > 0 ? value : fallback
+}
+
+function expectedMemoryCheckpointCount(cycleCount) {
+  const checkpointCycles = new Set([1, cycleCount])
+  for (let cycle = 10; cycle <= cycleCount; cycle += 10) {
+    checkpointCycles.add(cycle)
+  }
+  // One checkpoint before the cycle loop, one after it, and the selected cycle
+  // checkpoints mirrored by main().
+  return checkpointCycles.size + 2
+}
+
+async function captureMemoryCheckpoint(label) {
+  const census = await collectProcessCensus({
+    ledgerPaths,
+    pgid: launched?.process?.pid
+  })
+  census.sampledAtMs = Date.now()
+  census.checkpoint = label
+  memoryCheckpoints.push(census)
+}
+
+function lifecycleRoleThresholds(suffix) {
+  const mapping = {
+    backend: 'BACKEND',
+    'electron-main': 'MAIN',
+    'electron-renderer': 'RENDERER',
+    'electron-gpu': 'GPU',
+    'native-preview-helper': 'HELPER'
+  }
+  return Object.fromEntries(
+    Object.entries(mapping)
+      .map(([role, envRole]) => [
+        role,
+        optionalNumber(`VIDEORC_LIFECYCLE_MAX_${envRole}_${suffix}`)
+      ])
+      .filter(([, value]) => Number.isFinite(value))
+  )
+}
+
+function optionalNumber(name) {
+  if (!(name in process.env)) return undefined
+  const value = Number(process.env[name])
+  return Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
 function sleep(ms) {

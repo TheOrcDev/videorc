@@ -16,6 +16,154 @@ export const LIVE_CHAT_PLATFORMS: StreamPlatform[] = ['youtube', 'twitch', 'x']
 /** Max persisted messages projected into the renderer at once; SQLite remains authoritative. */
 export const MAX_LIVE_CHAT_VIEW_MESSAGES = 500
 
+/**
+ * Websocket messages are coalesced for one frame before touching React state. The queue is
+ * deliberately much smaller than the retained view: a sustained burst flushes in chunks instead
+ * of growing an unbounded side buffer or scheduling one render per message.
+ */
+export const MAX_PENDING_LIVE_CHAT_MESSAGES = 128
+
+export class BoundedLiveChatMessageBatch {
+  readonly capacity: number
+  private messages: LiveChatMessage[] = []
+  private messageIds = new Set<string>()
+
+  constructor(capacity = MAX_PENDING_LIVE_CHAT_MESSAGES) {
+    if (!Number.isInteger(capacity) || capacity < 1) {
+      throw new Error('Live chat batch capacity must be a positive integer.')
+    }
+    this.capacity = capacity
+  }
+
+  get size(): number {
+    return this.messages.length
+  }
+
+  enqueue(message: LiveChatMessage): boolean {
+    if (this.messageIds.has(message.id)) {
+      return false
+    }
+    if (this.messages.length >= this.capacity) {
+      const evicted = this.messages.shift()
+      if (evicted) {
+        this.messageIds.delete(evicted.id)
+      }
+    }
+    this.messages.push(message)
+    this.messageIds.add(message.id)
+    return true
+  }
+
+  drain(): LiveChatMessage[] {
+    const messages = this.messages
+    this.messages = []
+    this.messageIds.clear()
+    return messages
+  }
+
+  clear(): void {
+    this.messages = []
+    this.messageIds.clear()
+  }
+}
+
+export interface LiveChatMessageBatcherOptions {
+  capacity?: number
+  onFlush: (messages: LiveChatMessage[]) => void
+  schedule: (flush: () => void) => () => void
+}
+
+/**
+ * Coalesces notifications around the bounded queue. Scheduling is injected so the hook can use a
+ * frame-sized timer while node-only tests can deterministically prove notification counts.
+ */
+export class LiveChatMessageBatcher {
+  private readonly batch: BoundedLiveChatMessageBatch
+  private readonly onFlush: (messages: LiveChatMessage[]) => void
+  private readonly schedule: (flush: () => void) => () => void
+  private cancelScheduledFlush: (() => void) | null = null
+  private disposed = false
+  private suspended = false
+
+  constructor({ capacity, onFlush, schedule }: LiveChatMessageBatcherOptions) {
+    this.batch = new BoundedLiveChatMessageBatch(capacity)
+    this.onFlush = onFlush
+    this.schedule = schedule
+  }
+
+  enqueue(message: LiveChatMessage): void {
+    if (this.disposed || !this.batch.enqueue(message)) {
+      return
+    }
+    if (this.suspended) {
+      return
+    }
+    if (this.batch.size >= this.batch.capacity) {
+      this.flush()
+      return
+    }
+    if (!this.cancelScheduledFlush) {
+      this.cancelScheduledFlush = this.schedule(() => {
+        this.cancelScheduledFlush = null
+        this.flush()
+      })
+    }
+  }
+
+  flush(): void {
+    if (this.disposed || this.suspended) {
+      return
+    }
+    this.cancelScheduledFlush?.()
+    this.cancelScheduledFlush = null
+    const messages = this.batch.drain()
+    if (messages.length > 0) {
+      this.onFlush(messages)
+    }
+  }
+
+  clear(): void {
+    this.cancelScheduledFlush?.()
+    this.cancelScheduledFlush = null
+    this.batch.clear()
+  }
+
+  suspend(): void {
+    this.cancelScheduledFlush?.()
+    this.cancelScheduledFlush = null
+    this.suspended = true
+  }
+
+  drainPending(): LiveChatMessage[] {
+    this.cancelScheduledFlush?.()
+    this.cancelScheduledFlush = null
+    return this.batch.drain()
+  }
+
+  resume(): void {
+    if (this.disposed) return
+    this.suspended = false
+    if (this.batch.size >= this.batch.capacity) {
+      this.flush()
+    } else if (this.batch.size > 0 && !this.cancelScheduledFlush) {
+      this.cancelScheduledFlush = this.schedule(() => {
+        this.cancelScheduledFlush = null
+        this.flush()
+      })
+    }
+  }
+
+  dispose(): void {
+    this.clear()
+    this.disposed = true
+  }
+}
+
+export type LiveChatBootstrapEvent =
+  | { kind: 'snapshot'; snapshot: LiveChatSnapshot }
+  | { kind: 'message'; message: LiveChatMessage }
+  | { kind: 'provider'; provider: LiveChatProviderState }
+
 /** An empty snapshot for initial render / after a hard reset. */
 export function emptyLiveChatSnapshot(updatedAt: string): LiveChatSnapshot {
   return { providers: [], messages: [], unreadCount: 0, updatedAt }
@@ -82,6 +230,23 @@ export function applyLiveChatProviderStatus(
     ? snapshot.providers.map((row) => (row.id === provider.id ? provider : row))
     : [...snapshot.providers, provider]
   return { ...snapshot, providers }
+}
+
+/** Replay ordered events received while the initial full snapshot was in flight. */
+export function replayLiveChatBootstrapEvents(
+  snapshot: LiveChatSnapshot,
+  events: readonly LiveChatBootstrapEvent[]
+): LiveChatSnapshot {
+  return events.reduce((current, event) => {
+    switch (event.kind) {
+      case 'snapshot':
+        return applyLiveChatSnapshot(event.snapshot)
+      case 'message':
+        return applyLiveChatMessage(current, event.message)
+      case 'provider':
+        return applyLiveChatProviderStatus(current, event.provider)
+    }
+  }, applyLiveChatSnapshot(snapshot))
 }
 
 /** Clear the local message view (keep providers + session); the `liveChat.cleared` reducer. */

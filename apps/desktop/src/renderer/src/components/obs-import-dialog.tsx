@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import type { ObsDiscovery, ObsSetup } from '@/lib/backend'
 import { createImportedAsset, firstEmptySlotId, importIntoSlot } from '@/lib/background-assets'
 import { mergeObsImportIntoConfig } from '@/lib/obs-import-apply'
@@ -46,7 +46,7 @@ export function ObsImportDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }): ReactElement {
-  const { deviceList, setCaptureConfig, setSettings } = useStudio()
+  const { deviceList, setCaptureConfig, setSettings } = useStudioCore()
   const { registry, setRegistry } = useBackgroundAssets()
   const [discovery, setDiscovery] = useState<ObsDiscovery | null>(null)
   const [collection, setCollection] = useState<string | undefined>()

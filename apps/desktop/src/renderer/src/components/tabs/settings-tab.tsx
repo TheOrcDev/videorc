@@ -33,7 +33,7 @@ import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useWorkspaceNav } from '@/components/workspace-nav'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioAudio, useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import { useUpdater } from '@/hooks/use-updater'
 import type { DirectoryFacts, UpdateStatus } from '@/lib/backend'
 import { isActiveRecordingState } from '@/lib/format'
@@ -60,14 +60,14 @@ export function SettingsTab({
     health,
     captureConfig,
     deviceList,
-    audioMeter,
     mediaAccess,
     refreshBackend,
     openSystemPermission,
     exportSupportBundle,
     supportBundleExportPending,
     runtimeInfo
-  } = useStudio()
+  } = useStudioCore()
+  const { audioMeter } = useStudioAudio()
   const { openStudioPanel } = useWorkspaceNav()
   const { theme, setTheme } = useTheme()
 
@@ -75,6 +75,7 @@ export function SettingsTab({
     const path = await window.videorc?.pickFile?.()
     if (path) {
       setSettings((current) => ({ ...current, ffmpegPath: path }))
+      await refreshBackend(path)
     }
   }
 
@@ -268,6 +269,7 @@ export function SettingsTab({
                   onChange={(event) =>
                     setSettings((current) => ({ ...current, ffmpegPath: event.target.value }))
                   }
+                  onBlur={(event) => void refreshBackend(event.currentTarget.value)}
                 />
               </Field>
               <div className="flex items-center gap-2 rounded-row border bg-muted/40 px-3 py-2 text-xs">
@@ -470,7 +472,8 @@ export function SettingsTab({
 }
 
 function AboutAndUpdates({ onShowWhatsNew }: { onShowWhatsNew: () => void }): ReactElement {
-  const { runtimeInfo, recording } = useStudio()
+  const { runtimeInfo } = useStudioCore()
+  const { recording } = useStudioRecordingState()
   const { status, check, install } = useUpdater()
   const captureActive = isActiveRecordingState(recording.state)
 

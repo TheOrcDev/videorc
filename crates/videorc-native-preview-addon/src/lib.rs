@@ -89,6 +89,10 @@ mod macos {
         cached_textures: Vec<MetalImportedIosurfaceTexture>,
         visible_requested: bool,
         presented: bool,
+        width: f64,
+        height: f64,
+        scale_factor: f64,
+        layer_hidden: bool,
     }
 
     impl Drop for InProcessPreviewHost {
@@ -143,6 +147,10 @@ mod macos {
                 cached_textures: Vec::new(),
                 visible_requested: visible,
                 presented: false,
+                width: 0.0,
+                height: 0.0,
+                scale_factor: 0.0,
+                layer_hidden: true,
             };
             host.update(width, height, scale_factor, visible);
             Ok(host)
@@ -152,25 +160,43 @@ mod macos {
             let scale_factor = scale_factor.max(1.0);
             let width = width.max(1.0);
             let height = height.max(1.0);
-            let previous_drawable = self.layer.drawableSize();
             let drawable = CGSize {
                 width: drawable_dimension(width, scale_factor),
                 height: drawable_dimension(height, scale_factor),
             };
-            let drawable_changed = previous_drawable != drawable;
+            let size_changed = self.width != width || self.height != height;
+            let scale_changed = self.scale_factor != scale_factor;
+            let visibility_transition =
+                preview_layer_visibility_transition(self.layer_hidden, visible, self.presented);
+            if !size_changed && !scale_changed && visibility_transition.is_none() {
+                self.visible_requested = visible;
+                return;
+            }
             let ca_layer: &CALayer = self.layer.as_super();
             without_implicit_layer_actions(|| {
-                if drawable_changed {
+                if size_changed || scale_changed {
                     self.layer.setDrawableSize(drawable);
                 }
-                ca_layer.setContentsScale(scale_factor);
-                ca_layer.setFrame(CGRect {
-                    origin: CGPoint { x: 0.0, y: 0.0 },
-                    size: CGSize { width, height },
-                });
-                ca_layer.setHidden(!visible || !self.presented);
+                if scale_changed {
+                    ca_layer.setContentsScale(scale_factor);
+                }
+                if size_changed {
+                    ca_layer.setFrame(CGRect {
+                        origin: CGPoint { x: 0.0, y: 0.0 },
+                        size: CGSize { width, height },
+                    });
+                }
+                if let Some(hidden) = visibility_transition {
+                    ca_layer.setHidden(hidden);
+                }
             });
             self.visible_requested = visible;
+            self.width = width;
+            self.height = height;
+            self.scale_factor = scale_factor;
+            if let Some(hidden) = visibility_transition {
+                self.layer_hidden = hidden;
+            }
         }
 
         fn present(
@@ -215,8 +241,15 @@ mod macos {
                 .try_present_imported_iosurface_to_layer(&self.layer, imported)
                 .map_err(|failure| Error::from_reason(failure.reason()))?;
             self.presented = true;
-            let ca_layer: &CALayer = self.layer.as_super();
-            without_implicit_layer_actions(|| ca_layer.setHidden(!self.visible_requested));
+            if let Some(hidden) = preview_layer_visibility_transition(
+                self.layer_hidden,
+                self.visible_requested,
+                self.presented,
+            ) {
+                let ca_layer: &CALayer = self.layer.as_super();
+                without_implicit_layer_actions(|| ca_layer.setHidden(hidden));
+                self.layer_hidden = hidden;
+            }
             Ok(())
         }
     }
@@ -370,9 +403,20 @@ mod macos {
         (points.max(1.0) * scale_factor.max(1.0)).round().max(1.0)
     }
 
+    fn preview_layer_visibility_transition(
+        layer_hidden: bool,
+        visible_requested: bool,
+        presented: bool,
+    ) -> Option<bool> {
+        let desired_hidden = !visible_requested || !presented;
+        (layer_hidden != desired_hidden).then_some(desired_hidden)
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::{NativePreviewMetricState, drawable_dimension};
+        use super::{
+            NativePreviewMetricState, drawable_dimension, preview_layer_visibility_transition,
+        };
 
         #[test]
         fn drawable_dimension_uses_physical_pixels() {
@@ -393,6 +437,30 @@ mod macos {
             assert_eq!(metrics.iosurface_imports, 1);
             assert_eq!(metrics.iosurface_invalidations, 1);
             assert_eq!(metrics.iosurface_import_failures, 1);
+        }
+
+        #[test]
+        fn visibility_transaction_happens_only_on_first_unhide_and_real_transitions() {
+            let mut layer_hidden = true;
+            assert_eq!(
+                preview_layer_visibility_transition(layer_hidden, true, false),
+                None,
+                "attachment stays hidden before the first present"
+            );
+
+            let first_unhide = preview_layer_visibility_transition(layer_hidden, true, true);
+            assert_eq!(first_unhide, Some(false));
+            layer_hidden = first_unhide.unwrap();
+            assert_eq!(
+                preview_layer_visibility_transition(layer_hidden, true, true),
+                None,
+                "unchanged presents must not commit another CA transaction"
+            );
+            assert_eq!(
+                preview_layer_visibility_transition(layer_hidden, false, true),
+                Some(true),
+                "an actual visibility transition still commits"
+            );
         }
     }
 }

@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { VideoPresetSelectItems } from '@/components/video-preset-select-items'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import type { VideoPreset } from '@/lib/backend'
 import { videoProfileCompatibility } from '@/lib/capture'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
@@ -33,7 +33,7 @@ export function RecordingTab(): ReactElement {
     applyVideoPreset,
     isSessionActive,
     entitlements
-  } = useStudio()
+  } = useStudioCore()
   const { video } = captureConfig
   const compatibility = videoProfileCompatibility(captureConfig)
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning

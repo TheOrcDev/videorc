@@ -114,7 +114,9 @@ use crate::ffmpeg::{default_ffmpeg_path, resolve_ffmpeg_path_ref};
 use crate::oauth::{OAuthCompleteParams, OAuthStartParams, OAuthStartProviderParams};
 use crate::preflight::GoLivePreflightParams;
 use crate::process_job::output_owned_tokio;
-use crate::state::AppState;
+use crate::state::{
+    AppState, TrackedWebSocketQueueMetrics, WebSocketQueueTicket, WebSocketTransportMetrics,
+};
 use crate::storage::Database;
 use crate::streaming::{
     ManualStreamKeyPlan, ManualStreamKeyRefParams, PlatformAccountStatus,
@@ -164,6 +166,7 @@ async fn main() -> Result<()> {
     }
     spawn_orphan_watchdog_thread();
     secrets::init_native_secret_store();
+    diagnostics::start_runtime_resource_sampler();
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
@@ -2303,15 +2306,33 @@ fn token_expires_soon(expires_at: Option<&str>) -> bool {
         .unwrap_or(true)
 }
 
-/// Handles connection-scoped control commands ("events.setExcluded") that
+#[derive(Default)]
+struct ConnectionEventFilter {
+    excluded: std::collections::HashSet<String>,
+    included: Option<std::collections::HashSet<String>>,
+}
+
+impl ConnectionEventFilter {
+    fn allows(&self, event: &str) -> bool {
+        !self.excluded.contains(event)
+            && self
+                .included
+                .as_ref()
+                .is_none_or(|included| included.contains(event))
+    }
+}
+
+/// Handles connection-scoped control commands ("events.setExcluded" and
+/// "events.setIncluded") that
 /// mutate this socket's event filter instead of shared app state. Returns None
 /// for everything else so the regular dispatcher runs.
 fn handle_connection_control(
-    excluded_events: &std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    event_filter: &std::sync::Arc<std::sync::Mutex<ConnectionEventFilter>>,
     text: &str,
 ) -> Option<ServerResponse> {
     let command: serde_json::Value = serde_json::from_str(text).ok()?;
-    if command.get("method").and_then(|method| method.as_str()) != Some("events.setExcluded") {
+    let method = command.get("method").and_then(|method| method.as_str())?;
+    if !matches!(method, "events.setExcluded" | "events.setIncluded") {
         return None;
     }
     let id = command
@@ -2331,27 +2352,504 @@ fn handle_connection_control(
                 .collect()
         })
         .unwrap_or_default();
-    let excluded: Vec<String> = {
-        let mut guard = excluded_events
+    let response = {
+        let mut guard = event_filter
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard = events;
-        let mut list: Vec<String> = guard.iter().cloned().collect();
+        let target = if method == "events.setExcluded" {
+            &mut guard.excluded
+        } else {
+            guard.included.get_or_insert_default()
+        };
+        *target = events;
+        let mut list: Vec<String> = target.iter().cloned().collect();
         list.sort();
-        list
+        if method == "events.setExcluded" {
+            serde_json::json!({ "excluded": list })
+        } else {
+            serde_json::json!({ "included": list })
+        }
     };
-    Some(ServerResponse::ok(
-        id,
-        serde_json::json!({ "excluded": excluded }),
-    ))
+    Some(ServerResponse::ok(id, response))
 }
 
-fn queue_websocket_response(outgoing: &mpsc::UnboundedSender<Message>, response: ServerResponse) {
+const WEBSOCKET_RELIABLE_QUEUE_CAPACITY: usize = 128;
+const WEBSOCKET_COMMAND_QUEUE_CAPACITY: usize = 64;
+const WEBSOCKET_TELEMETRY_KIND_CAPACITY: usize = 32;
+const WEBSOCKET_LAYOUT_CONCURRENCY: usize = 8;
+const WEBSOCKET_RELIABLE_BURST_LIMIT: usize = 8;
+// The desktop clients are loopback peers. Five seconds is deliberately far
+// above normal socket jitter while still bounding the lifetime of queued
+// responses when a reader or writer stalls.
+const WEBSOCKET_RELIABLE_MAX_OLDEST_AGE: Duration = Duration::from_secs(5);
+
+#[derive(Clone)]
+struct WebSocketSlowPressureSignal {
+    sender: mpsc::Sender<()>,
+    transport_metrics: std::sync::Arc<WebSocketTransportMetrics>,
+    signaled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl WebSocketSlowPressureSignal {
+    fn new(
+        sender: mpsc::Sender<()>,
+        transport_metrics: std::sync::Arc<WebSocketTransportMetrics>,
+    ) -> Self {
+        Self {
+            sender,
+            transport_metrics,
+            signaled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn signal(&self) -> bool {
+        if self
+            .signaled
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        self.transport_metrics.record_slow_pressure_disconnect();
+        let _ = self.sender.try_send(());
+        true
+    }
+}
+
+async fn queue_websocket_response(
+    outgoing: &mpsc::Sender<Message>,
+    reliable_metrics: &TrackedWebSocketQueueMetrics,
+    slow_pressure: &WebSocketSlowPressureSignal,
+    response: ServerResponse,
+) -> bool {
     match serde_json::to_string(&response) {
         Ok(text) => {
-            let _ = outgoing.send(Message::Text(text.into()));
+            send_tracked_reliable_websocket_item(
+                outgoing,
+                reliable_metrics,
+                Message::Text(text.into()),
+                slow_pressure,
+            )
+            .await
         }
-        Err(error) => tracing::error!("Could not serialize response: {error}"),
+        Err(error) => {
+            tracing::error!("Could not serialize response: {error}");
+            reliable_metrics.record_rejected_or_dropped();
+            false
+        }
+    }
+}
+
+async fn send_tracked_websocket_item<T>(
+    sender: &mpsc::Sender<T>,
+    metrics: &TrackedWebSocketQueueMetrics,
+    value: T,
+) -> bool {
+    let Ok(permit) = sender.reserve().await else {
+        metrics.record_rejected_or_dropped();
+        return false;
+    };
+    metrics.record_enqueue();
+    permit.send(value);
+    true
+}
+
+async fn send_tracked_reliable_websocket_item<T>(
+    sender: &mpsc::Sender<T>,
+    metrics: &TrackedWebSocketQueueMetrics,
+    value: T,
+    slow_pressure: &WebSocketSlowPressureSignal,
+) -> bool {
+    send_tracked_reliable_websocket_item_with_limit(
+        sender,
+        metrics,
+        value,
+        slow_pressure,
+        WEBSOCKET_RELIABLE_MAX_OLDEST_AGE,
+    )
+    .await
+}
+
+async fn send_tracked_reliable_websocket_item_with_limit<T>(
+    sender: &mpsc::Sender<T>,
+    metrics: &TrackedWebSocketQueueMetrics,
+    value: T,
+    slow_pressure: &WebSocketSlowPressureSignal,
+    oldest_age_limit: Duration,
+) -> bool {
+    let permit = loop {
+        let reserve_wait = metrics
+            .remaining_until_oldest_age(oldest_age_limit)
+            .unwrap_or(oldest_age_limit);
+        match timeout(reserve_wait, sender.reserve()).await {
+            Ok(Ok(permit)) => break permit,
+            Ok(Err(_)) => {
+                metrics.record_rejected_or_dropped();
+                return false;
+            }
+            Err(_)
+                if !metrics
+                    .remaining_until_oldest_age(oldest_age_limit)
+                    .is_some_and(|remaining| remaining.is_zero()) =>
+            {
+                // Another producer may have won newly available capacity after
+                // the former oldest item left. Recompute from the current
+                // oldest item rather than treating a stale deadline as pressure.
+                continue;
+            }
+            Err(_) => {
+                metrics.record_rejected_or_dropped();
+                if slow_pressure.signal() {
+                    tracing::warn!(
+                        oldest_age_limit_ms = oldest_age_limit.as_millis(),
+                        "Closing slow WebSocket peer after reliable queue pressure exceeded its age limit."
+                    );
+                }
+                return false;
+            }
+        }
+    };
+
+    // Capacity may open just as the oldest queued response reaches its age
+    // limit. Do not reset sustained pressure by accepting one more response.
+    if metrics
+        .remaining_until_oldest_age(oldest_age_limit)
+        .is_some_and(|remaining| remaining.is_zero())
+    {
+        drop(permit);
+        metrics.record_rejected_or_dropped();
+        if slow_pressure.signal() {
+            tracing::warn!(
+                oldest_age_limit_ms = oldest_age_limit.as_millis(),
+                "Closing slow WebSocket peer after reliable queue pressure exceeded its age limit."
+            );
+        }
+        return false;
+    }
+
+    metrics.record_enqueue();
+    permit.send(value);
+    true
+}
+
+async fn run_websocket_reliable_pressure_watchdog(
+    metrics: TrackedWebSocketQueueMetrics,
+    slow_pressure: WebSocketSlowPressureSignal,
+) {
+    run_websocket_reliable_pressure_watchdog_with_limit(
+        metrics,
+        slow_pressure,
+        WEBSOCKET_RELIABLE_MAX_OLDEST_AGE,
+    )
+    .await;
+}
+
+async fn run_websocket_reliable_pressure_watchdog_with_limit(
+    metrics: TrackedWebSocketQueueMetrics,
+    slow_pressure: WebSocketSlowPressureSignal,
+    oldest_age_limit: Duration,
+) {
+    metrics
+        .wait_until_oldest_age_reaches(oldest_age_limit)
+        .await;
+    if slow_pressure.signal() {
+        tracing::warn!(
+            oldest_age_limit_ms = oldest_age_limit.as_millis(),
+            "Closing slow WebSocket peer because its oldest reliable message exceeded the age limit."
+        );
+    }
+}
+
+#[derive(Debug)]
+struct TrackedCoalescedEvent {
+    event: ServerEvent,
+    ticket: WebSocketQueueTicket,
+}
+
+#[derive(Debug, Default)]
+struct CoalescingEventBufferState {
+    order: std::collections::VecDeque<String>,
+    latest: std::collections::HashMap<String, TrackedCoalescedEvent>,
+    coalesced: u64,
+    evicted: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CoalescingEventBuffer {
+    capacity: usize,
+    state: std::sync::Arc<std::sync::Mutex<CoalescingEventBufferState>>,
+    ready: std::sync::Arc<tokio::sync::Notify>,
+    metrics: TrackedWebSocketQueueMetrics,
+}
+
+impl CoalescingEventBuffer {
+    #[cfg(test)]
+    fn new(capacity: usize) -> Self {
+        let transport = WebSocketTransportMetrics::default();
+        let connection = transport.register_connection();
+        Self::with_metrics(capacity, connection.coalesced_telemetry_queue)
+    }
+
+    fn with_metrics(capacity: usize, metrics: TrackedWebSocketQueueMetrics) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            state: std::sync::Arc::new(
+                std::sync::Mutex::new(CoalescingEventBufferState::default()),
+            ),
+            ready: std::sync::Arc::new(tokio::sync::Notify::new()),
+            metrics,
+        }
+    }
+
+    fn push(&self, event: ServerEvent) {
+        let key = event.event.clone();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(current) = state.latest.get_mut(&key) {
+            let ticket = self.metrics.record_coalesced_replacement(current.ticket);
+            *current = TrackedCoalescedEvent { event, ticket };
+            state.coalesced = state.coalesced.saturating_add(1);
+        } else {
+            if state.latest.len() >= self.capacity
+                && let Some(oldest) = state.order.pop_front()
+            {
+                if let Some(evicted) = state.latest.remove(&oldest) {
+                    self.metrics.record_evicted_or_dropped(evicted.ticket);
+                }
+                state.evicted = state.evicted.saturating_add(1);
+            }
+            let ticket = self.metrics.record_enqueue();
+            state.order.push_back(key.clone());
+            state
+                .latest
+                .insert(key, TrackedCoalescedEvent { event, ticket });
+        }
+        drop(state);
+        self.ready.notify_one();
+    }
+
+    async fn recv(&self) -> ServerEvent {
+        loop {
+            let notified = self.ready.notified();
+            if let Some(event) = self.pop() {
+                return event;
+            }
+            notified.await;
+        }
+    }
+
+    fn pop(&self) -> Option<ServerEvent> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = state.order.pop_front()?;
+        let tracked = state.latest.remove(&key)?;
+        self.metrics.record_dequeue(tracked.ticket);
+        Some(tracked.event)
+    }
+
+    fn stats(&self) -> (usize, u64, u64) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (state.latest.len(), state.coalesced, state.evicted)
+    }
+}
+
+fn websocket_event_is_coalescible(event: &str) -> bool {
+    matches!(
+        event,
+        "preview.frameReady"
+            | "compositor.status"
+            | "diagnostics.stats"
+            | "preview.surface.status"
+            | "preview.camera.status"
+            | "preview.screen.status"
+            | "preview.live.status"
+            | "stream.health"
+            | "stream.viewers"
+    )
+}
+
+enum WebSocketWriterInput {
+    Reliable(Message),
+    Telemetry(ServerEvent),
+}
+
+#[derive(Debug)]
+struct WebSocketWriterSchedule {
+    reliable_open: bool,
+    reliable_burst: usize,
+}
+
+impl Default for WebSocketWriterSchedule {
+    fn default() -> Self {
+        Self {
+            reliable_open: true,
+            reliable_burst: 0,
+        }
+    }
+}
+
+impl WebSocketWriterSchedule {
+    fn record_reliable(&mut self) {
+        self.reliable_burst = self
+            .reliable_burst
+            .saturating_add(1)
+            .min(WEBSOCKET_RELIABLE_BURST_LIMIT);
+    }
+
+    fn record_telemetry(&mut self) {
+        self.reliable_burst = 0;
+    }
+
+    fn try_next(
+        &mut self,
+        reliable: &mut mpsc::Receiver<Message>,
+        reliable_metrics: &TrackedWebSocketQueueMetrics,
+        telemetry: &CoalescingEventBuffer,
+    ) -> Option<WebSocketWriterInput> {
+        let telemetry_due =
+            !self.reliable_open || self.reliable_burst >= WEBSOCKET_RELIABLE_BURST_LIMIT;
+        if telemetry_due && let Some(event) = telemetry.pop() {
+            self.record_telemetry();
+            return Some(WebSocketWriterInput::Telemetry(event));
+        }
+
+        if self.reliable_open {
+            match try_receive_tracked_websocket_item(reliable, reliable_metrics) {
+                Ok(message) => {
+                    self.record_reliable();
+                    return Some(WebSocketWriterInput::Reliable(message));
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.reliable_open = false;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {}
+            }
+        }
+
+        telemetry.pop().map(|event| {
+            self.record_telemetry();
+            WebSocketWriterInput::Telemetry(event)
+        })
+    }
+
+    async fn next(
+        &mut self,
+        reliable: &mut mpsc::Receiver<Message>,
+        reliable_metrics: &TrackedWebSocketQueueMetrics,
+        telemetry: &CoalescingEventBuffer,
+    ) -> WebSocketWriterInput {
+        loop {
+            if let Some(input) = self.try_next(reliable, reliable_metrics, telemetry) {
+                return input;
+            }
+
+            if !self.reliable_open {
+                let event = telemetry.recv().await;
+                self.record_telemetry();
+                return WebSocketWriterInput::Telemetry(event);
+            }
+
+            let telemetry_due = self.reliable_burst >= WEBSOCKET_RELIABLE_BURST_LIMIT;
+            let input = if telemetry_due {
+                tokio::select! {
+                    biased;
+                    event = telemetry.recv() => WebSocketWriterInput::Telemetry(event),
+                    message = receive_tracked_websocket_item(reliable, reliable_metrics) => match message {
+                        Some(message) => WebSocketWriterInput::Reliable(message),
+                        None => {
+                            self.reliable_open = false;
+                            continue;
+                        }
+                    },
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    message = receive_tracked_websocket_item(reliable, reliable_metrics) => match message {
+                        Some(message) => WebSocketWriterInput::Reliable(message),
+                        None => {
+                            self.reliable_open = false;
+                            continue;
+                        }
+                    },
+                    event = telemetry.recv() => WebSocketWriterInput::Telemetry(event),
+                }
+            };
+
+            match input {
+                WebSocketWriterInput::Reliable(_) => self.record_reliable(),
+                WebSocketWriterInput::Telemetry(_) => self.record_telemetry(),
+            }
+            return input;
+        }
+    }
+}
+
+fn try_receive_tracked_websocket_item<T>(
+    receiver: &mut mpsc::Receiver<T>,
+    metrics: &TrackedWebSocketQueueMetrics,
+) -> Result<T, mpsc::error::TryRecvError> {
+    let value = receiver.try_recv()?;
+    metrics.record_dequeue_oldest();
+    Ok(value)
+}
+
+async fn receive_tracked_websocket_item<T>(
+    receiver: &mut mpsc::Receiver<T>,
+    metrics: &TrackedWebSocketQueueMetrics,
+) -> Option<T> {
+    let value = receiver.recv().await?;
+    metrics.record_dequeue_oldest();
+    Some(value)
+}
+
+async fn next_websocket_writer_message(
+    schedule: &mut WebSocketWriterSchedule,
+    reliable: &mut mpsc::Receiver<Message>,
+    reliable_metrics: &TrackedWebSocketQueueMetrics,
+    telemetry: &CoalescingEventBuffer,
+) -> Message {
+    loop {
+        match schedule.next(reliable, reliable_metrics, telemetry).await {
+            WebSocketWriterInput::Reliable(message) => return message,
+            WebSocketWriterInput::Telemetry(event) => match serde_json::to_string(&event) {
+                Ok(text) => return Message::Text(text.into()),
+                Err(error) => tracing::error!("Could not serialize event: {error}"),
+            },
+        }
+    }
+}
+
+async fn run_websocket_writer(
+    mut sender: futures_util::stream::SplitSink<WebSocket, Message>,
+    mut reliable: mpsc::Receiver<Message>,
+    reliable_metrics: TrackedWebSocketQueueMetrics,
+    telemetry: CoalescingEventBuffer,
+) {
+    let mut schedule = WebSocketWriterSchedule::default();
+    loop {
+        let message = next_websocket_writer_message(
+            &mut schedule,
+            &mut reliable,
+            &reliable_metrics,
+            &telemetry,
+        )
+        .await;
+        if sender.send(message).await.is_err() {
+            break;
+        }
     }
 }
 
@@ -2371,7 +2869,11 @@ fn websocket_command_may_overlap(text: &str) -> bool {
         matches!(
             command.method.as_str(),
             "scene.layout.apply_live" | "scene.layout.apply_preview"
-        )
+        ) && command
+            .params
+            .get("intentId")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
     })
 }
 
@@ -2385,20 +2887,38 @@ async fn drain_websocket_layout_commands(tasks: &mut tokio::task::JoinSet<()>) {
 
 async fn run_websocket_command_dispatcher(
     state: AppState,
-    mut commands: mpsc::UnboundedReceiver<String>,
-    outgoing: mpsc::UnboundedSender<Message>,
+    mut commands: mpsc::Receiver<String>,
+    command_metrics: TrackedWebSocketQueueMetrics,
+    outgoing: mpsc::Sender<Message>,
+    reliable_metrics: TrackedWebSocketQueueMetrics,
+    slow_pressure: WebSocketSlowPressureSignal,
     command_handler: WebSocketCommandHandler,
 ) {
     let mut layout_tasks = tokio::task::JoinSet::new();
 
     while let Some(text) = commands.recv().await {
+        command_metrics.record_dequeue_oldest();
         if websocket_command_may_overlap(text.as_str()) {
+            if layout_tasks.len() >= WEBSOCKET_LAYOUT_CONCURRENCY
+                && let Some(completed) = layout_tasks.join_next().await
+                && let Err(error) = completed
+            {
+                tracing::warn!("WebSocket layout command task failed: {error}");
+            }
             let command_state = state.clone();
             let response_tx = outgoing.clone();
+            let response_metrics = reliable_metrics.clone();
+            let response_pressure = slow_pressure.clone();
             let handler = command_handler.clone();
             layout_tasks.spawn(async move {
                 let response = handler(command_state, text).await;
-                queue_websocket_response(&response_tx, response);
+                let _ = queue_websocket_response(
+                    &response_tx,
+                    &response_metrics,
+                    &response_pressure,
+                    response,
+                )
+                .await;
             });
             continue;
         }
@@ -2408,7 +2928,9 @@ async fn run_websocket_command_dispatcher(
         // until this mutation completes.
         drain_websocket_layout_commands(&mut layout_tasks).await;
         let response = command_handler(state.clone(), text).await;
-        queue_websocket_response(&outgoing, response);
+        if !queue_websocket_response(&outgoing, &reliable_metrics, &slow_pressure, response).await {
+            break;
+        }
     }
 
     drain_websocket_layout_commands(&mut layout_tasks).await;
@@ -2434,12 +2956,13 @@ struct EventsLaggedPayload {
     occurred_at: String,
 }
 
-const WEBSOCKET_EVENT_QUEUE_CAPACITY: usize = 256;
-
 async fn relay_websocket_events(
     mut events: broadcast::Receiver<ServerEvent>,
-    event_tx: mpsc::Sender<String>,
-    exclusions: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    reliable_tx: mpsc::Sender<Message>,
+    reliable_metrics: TrackedWebSocketQueueMetrics,
+    slow_pressure: WebSocketSlowPressureSignal,
+    telemetry: CoalescingEventBuffer,
+    event_filter: std::sync::Arc<std::sync::Mutex<ConnectionEventFilter>>,
 ) {
     loop {
         let (event, is_recovery) = match events.recv().await {
@@ -2465,18 +2988,29 @@ async fn relay_websocket_events(
 
         // A recovery frame is mandatory connection control, not an ordinary event a
         // renderer can exclude. Keep the pre-bounded-queue protocol behavior intact.
-        let muted = !is_recovery
-            && exclusions
+        let allowed = is_recovery
+            || event_filter
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .contains(&event.event);
-        if muted {
+                .allows(&event.event);
+        if !allowed {
+            continue;
+        }
+        if !is_recovery && websocket_event_is_coalescible(&event.event) {
+            telemetry.push(event);
             continue;
         }
 
         match serde_json::to_string(&event) {
             Ok(text) => {
-                if event_tx.send(text).await.is_err() {
+                if !send_tracked_reliable_websocket_item(
+                    &reliable_tx,
+                    &reliable_metrics,
+                    Message::Text(text.into()),
+                    &slow_pressure,
+                )
+                .await
+                {
                     break;
                 }
             }
@@ -2494,52 +3028,88 @@ async fn websocket_session_with_handler(
     state: AppState,
     command_handler: WebSocketCommandHandler,
 ) {
-    let (mut sender, mut receiver) = socket.split();
+    let (sender, mut receiver) = socket.split();
     let events = state.events.subscribe();
-    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<Message>();
-    let (event_tx, mut event_rx) = mpsc::channel::<String>(WEBSOCKET_EVENT_QUEUE_CAPACITY);
-    // Per-connection event exclusions: the renderer mutes the 60Hz
-    // compositor.status firehose while the main process drives presents
-    // (receiving+decoding those frames leaked Blink buffers at ~1.5MB/s), and
-    // unmutes instantly when it must take over as the fallback pump.
-    let excluded_events: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-    let exclusions = excluded_events.clone();
+    let connection_metrics = state.websocket_transport_metrics.register_connection();
+    let reliable_metrics = connection_metrics.reliable_response_queue.clone();
+    let command_metrics = connection_metrics.incoming_command_queue.clone();
+    let (outgoing_tx, outgoing_rx) = mpsc::channel::<Message>(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+    let event_tx = outgoing_tx.clone();
+    let telemetry = CoalescingEventBuffer::with_metrics(
+        WEBSOCKET_TELEMETRY_KIND_CAPACITY,
+        connection_metrics.coalesced_telemetry_queue.clone(),
+    );
+    let telemetry_tx = telemetry.clone();
+    let telemetry_observer = telemetry.clone();
+    let (pressure_tx, mut pressure_rx) = mpsc::channel::<()>(1);
+    let slow_pressure =
+        WebSocketSlowPressureSignal::new(pressure_tx, state.websocket_transport_metrics.clone());
+    // Per-connection event exclusions: the renderer mutes the compact 60Hz
+    // frame-ready lane while the main process drives presents, and unmutes
+    // instantly when it must take over as the fallback pump. Full compositor
+    // diagnostics remain visible at their low bounded cadence.
+    let event_filter = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter::default()));
+    let event_filter_for_events = event_filter.clone();
 
-    let writer_task = tokio::spawn(async move {
-        loop {
-            let message = tokio::select! {
-                biased;
-                Some(message) = outgoing_rx.recv() => message,
-                Some(text) = event_rx.recv() => Message::Text(text.into()),
-                else => break,
-            };
-            if sender.send(message).await.is_err() {
-                break;
-            }
-        }
-    });
+    let writer_task = tokio::spawn(run_websocket_writer(
+        sender,
+        outgoing_rx,
+        reliable_metrics.clone(),
+        telemetry,
+    ));
+    let pressure_watchdog_task = tokio::spawn(run_websocket_reliable_pressure_watchdog(
+        reliable_metrics.clone(),
+        slow_pressure.clone(),
+    ));
 
     let ready_event = ServerEvent::new(
         "backend.ready",
         backend_connection(state.port, state.token.clone()),
     );
-    if let Ok(text) = serde_json::to_string(&ready_event) {
-        let _ = outgoing_tx.send(Message::Text(text.into()));
+    if let Ok(text) = serde_json::to_string(&ready_event)
+        && !send_tracked_reliable_websocket_item(
+            &outgoing_tx,
+            &reliable_metrics,
+            Message::Text(text.into()),
+            &slow_pressure,
+        )
+        .await
+    {
+        pressure_watchdog_task.abort();
+        let _ = pressure_watchdog_task.await;
+        writer_task.abort();
+        let _ = writer_task.await;
+        return;
     }
 
-    let event_task = tokio::spawn(relay_websocket_events(events, event_tx, exclusions));
+    let event_task = tokio::spawn(relay_websocket_events(
+        events,
+        event_tx,
+        reliable_metrics.clone(),
+        slow_pressure.clone(),
+        telemetry_tx,
+        event_filter_for_events,
+    ));
 
-    let (command_tx, command_rx) = mpsc::unbounded_channel::<String>();
+    let (command_tx, command_rx) = mpsc::channel::<String>(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
     let command_dispatcher_task = tokio::spawn(run_websocket_command_dispatcher(
         state.clone(),
         command_rx,
+        command_metrics.clone(),
         outgoing_tx.clone(),
+        reliable_metrics.clone(),
+        slow_pressure.clone(),
         command_handler,
     ));
 
     loop {
-        let Some(incoming) = receiver.next().await else {
+        let incoming = tokio::select! {
+            incoming = receiver.next() => incoming,
+            _ = pressure_rx.recv() => {
+                break;
+            }
+        };
+        let Some(incoming) = incoming else {
             break;
         };
 
@@ -2547,18 +3117,38 @@ async fn websocket_session_with_handler(
             Ok(Message::Text(text)) => {
                 // Connection-local control messages never reach the shared
                 // dispatcher (the exclusion set is per socket).
-                if let Some(response) = handle_connection_control(&excluded_events, text.as_str()) {
-                    queue_websocket_response(&outgoing_tx, response);
+                if let Some(response) = handle_connection_control(&event_filter, text.as_str()) {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
                     continue;
                 }
 
-                if command_tx.send(text.to_string()).is_err() {
+                if !send_tracked_websocket_item(&command_tx, &command_metrics, text.to_string())
+                    .await
+                {
                     break;
                 }
             }
             Ok(Message::Close(_)) => break,
             Ok(Message::Ping(payload)) => {
-                let _ = outgoing_tx.send(Message::Pong(payload));
+                if !send_tracked_reliable_websocket_item(
+                    &outgoing_tx,
+                    &reliable_metrics,
+                    Message::Pong(payload),
+                    &slow_pressure,
+                )
+                .await
+                {
+                    break;
+                }
             }
             Ok(_) => {}
             Err(error) => {
@@ -2575,9 +3165,18 @@ async fn websocket_session_with_handler(
     drop(command_dispatcher_task);
     event_task.abort();
     let _ = event_task.await;
+    pressure_watchdog_task.abort();
+    let _ = pressure_watchdog_task.await;
     drop(outgoing_tx);
     writer_task.abort();
     let _ = writer_task.await;
+    let (telemetry_depth, telemetry_coalesced, telemetry_evicted) = telemetry_observer.stats();
+    tracing::debug!(
+        telemetry_depth,
+        telemetry_coalesced,
+        telemetry_evicted,
+        "WebSocket telemetry queue closed."
+    );
 }
 
 async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
@@ -4288,7 +4887,12 @@ async fn current_diagnostics_stats(state: &AppState) -> protocol::DiagnosticStat
     let stats = diagnostics::apply_active_scene_revision(stats, scene_revision);
     let source_registry = state.source_registry.lock().await.snapshot();
     let stats = diagnostics::apply_source_registry_snapshot(stats, source_registry);
-    diagnostics::apply_runtime_diagnostics_snapshot(stats, state.ffmpeg_work.snapshot())
+    let stats =
+        diagnostics::apply_runtime_diagnostics_snapshot(stats, state.ffmpeg_work.snapshot());
+    diagnostics::apply_websocket_transport_stats(
+        stats,
+        state.websocket_transport_metrics.snapshot(),
+    )
 }
 
 async fn current_recording_status(state: &AppState) -> protocol::RecordingStatus {
@@ -4377,6 +4981,18 @@ mod tests {
     use std::time::Instant;
     use tokio::sync::broadcast;
 
+    async fn receive_tracked_json(
+        receiver: &mut mpsc::Receiver<Message>,
+        metrics: &TrackedWebSocketQueueMetrics,
+    ) -> serde_json::Value {
+        let message = receiver.recv().await.expect("tracked websocket message");
+        metrics.record_dequeue_oldest();
+        let Message::Text(text) = message else {
+            panic!("expected tracked websocket text message");
+        };
+        serde_json::from_str(text.as_str()).expect("tracked websocket JSON")
+    }
+
     // Regression: OAuthCallbackQuery once carried rename_all = "camelCase",
     // which silently dropped the snake_case params providers actually send
     // (oauth_token/oauth_verifier from X's OAuth 1.0a redirect landed as None
@@ -4415,44 +5031,370 @@ mod tests {
     }
 
     #[test]
-    fn connection_control_replaces_the_exclusion_set() {
-        let excluded = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::<
-            String,
-        >::new()));
+    fn connection_control_replaces_per_socket_include_and_exclude_sets() {
+        let filter = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter::default()));
 
         // Non-control commands pass through untouched.
         assert!(
-            handle_connection_control(&excluded, r#"{"id":"a","method":"recording.start"}"#)
+            handle_connection_control(&filter, r#"{"id":"a","method":"recording.start"}"#)
                 .is_none()
         );
-        assert!(handle_connection_control(&excluded, "not json").is_none());
+        assert!(handle_connection_control(&filter, "not json").is_none());
 
         let response = handle_connection_control(
-            &excluded,
+            &filter,
             r#"{"id":"b","method":"events.setExcluded","params":{"events":["compositor.status"]}}"#,
         )
         .expect("control response");
         assert!(response.ok);
-        assert!(excluded.lock().unwrap().contains("compositor.status"));
+        assert!(
+            filter
+                .lock()
+                .unwrap()
+                .excluded
+                .contains("compositor.status")
+        );
+
+        let response = handle_connection_control(
+            &filter,
+            r#"{"id":"included","method":"events.setIncluded","params":{"events":["preview.frameReady","compositor.status"]}}"#,
+        )
+        .expect("include control response");
+        assert!(response.ok);
+        let guard = filter.lock().unwrap();
+        assert!(guard.allows("preview.frameReady"));
+        assert!(!guard.allows("recording.status"));
+        assert!(!guard.allows("compositor.status"), "exclusion still wins");
+        drop(guard);
 
         // An empty list clears the filter (fallback pump resubscribes).
         let response = handle_connection_control(
-            &excluded,
+            &filter,
             r#"{"id":"c","method":"events.setExcluded","params":{"events":[]}}"#,
         )
         .expect("control response");
         assert!(response.ok);
-        assert!(excluded.lock().unwrap().is_empty());
+        let guard = filter.lock().unwrap();
+        assert!(guard.excluded.is_empty());
+        assert!(guard.allows("compositor.status"));
+        assert!(!guard.allows("recording.status"));
+    }
+
+    #[tokio::test]
+    async fn websocket_telemetry_buffer_is_capacity_bounded_and_latest_wins() {
+        let transport = WebSocketTransportMetrics::default();
+        let connection = transport.register_connection();
+        let telemetry =
+            CoalescingEventBuffer::with_metrics(2, connection.coalesced_telemetry_queue.clone());
+        telemetry.push(ServerEvent::new(
+            "preview.frameReady",
+            json!({
+                "sceneRevision": 10,
+                "frameSceneRevision": 9,
+                "framesRendered": 1,
+            }),
+        ));
+        telemetry.push(ServerEvent::new(
+            "preview.frameReady",
+            json!({
+                "sceneRevision": 12,
+                "frameSceneRevision": 11,
+                "framesRendered": 2,
+            }),
+        ));
+        telemetry.push(ServerEvent::new(
+            "diagnostics.stats",
+            json!({ "sample": 1 }),
+        ));
+
+        assert_eq!(telemetry.stats(), (2, 1, 0));
+        let queue = transport.snapshot().coalesced_telemetry_queue;
+        assert_eq!(queue.current_depth, 2);
+        assert_eq!(queue.max_depth, 2);
+        assert_eq!(queue.coalesced_count, 1);
+        assert_eq!(queue.evicted_or_dropped_count, 0);
+        assert!(queue.oldest_age_ms.is_some());
+        let frame_ready = telemetry.recv().await;
+        assert_eq!(frame_ready.event, "preview.frameReady");
+        assert_eq!(frame_ready.payload["sceneRevision"], 12);
+        assert_eq!(frame_ready.payload["frameSceneRevision"], 11);
+        assert_eq!(frame_ready.payload["framesRendered"], 2);
+
+        telemetry.push(ServerEvent::new(
+            "preview.surface.status",
+            json!({ "frame": 3 }),
+        ));
+        telemetry.push(ServerEvent::new(
+            "recording.status",
+            json!({ "state": "live" }),
+        ));
+        let (depth, _, evicted) = telemetry.stats();
+        assert_eq!(depth, 2);
+        assert_eq!(evicted, 1);
+        let queue = transport.snapshot().coalesced_telemetry_queue;
+        assert_eq!(queue.current_depth, 2);
+        assert_eq!(queue.max_depth, 2);
+        assert_eq!(queue.coalesced_count, 1);
+        assert_eq!(queue.evicted_or_dropped_count, 1);
+    }
+
+    #[tokio::test]
+    async fn websocket_writer_services_latest_frame_ready_during_sustained_reliable_traffic() {
+        let transport = WebSocketTransportMetrics::default();
+        let connection = transport.register_connection();
+        let reliable_metrics = connection.reliable_response_queue;
+        let (reliable_tx, mut reliable_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        for sequence in 0..(WEBSOCKET_RELIABLE_BURST_LIMIT + 4) {
+            assert!(
+                send_tracked_websocket_item(
+                    &reliable_tx,
+                    &reliable_metrics,
+                    Message::Text(format!("reliable-{sequence}").into()),
+                )
+                .await
+            );
+        }
+
+        let telemetry = CoalescingEventBuffer::new(WEBSOCKET_TELEMETRY_KIND_CAPACITY);
+        telemetry.push(ServerEvent::new(
+            "preview.frameReady",
+            json!({
+                "sceneRevision": 20,
+                "frameSceneRevision": 19,
+                "framesRendered": 100,
+            }),
+        ));
+        telemetry.push(ServerEvent::new(
+            "preview.frameReady",
+            json!({
+                "sceneRevision": 22,
+                "frameSceneRevision": 21,
+                "framesRendered": 101,
+            }),
+        ));
+
+        let mut schedule = WebSocketWriterSchedule::default();
+        for sequence in 0..WEBSOCKET_RELIABLE_BURST_LIMIT {
+            let message = next_websocket_writer_message(
+                &mut schedule,
+                &mut reliable_rx,
+                &reliable_metrics,
+                &telemetry,
+            )
+            .await;
+            let Message::Text(text) = message else {
+                panic!("expected reliable text message");
+            };
+            assert_eq!(text.as_str(), format!("reliable-{sequence}"));
+        }
+
+        let message = next_websocket_writer_message(
+            &mut schedule,
+            &mut reliable_rx,
+            &reliable_metrics,
+            &telemetry,
+        )
+        .await;
+        let Message::Text(text) = message else {
+            panic!("expected serialized frame-ready event");
+        };
+        let event: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(event["event"], "preview.frameReady");
+        assert_eq!(event["payload"]["sceneRevision"], 22);
+        assert_eq!(event["payload"]["frameSceneRevision"], 21);
+        assert_eq!(event["payload"]["framesRendered"], 101);
+        assert!(
+            reliable_rx.len() > 0,
+            "telemetry must be serviced while reliable traffic remains queued"
+        );
+        let queue = transport.snapshot().reliable_response_queue;
+        assert_eq!(queue.current_depth, 4);
+        assert_eq!(queue.max_depth, 12);
+        assert!(queue.oldest_age_ms.is_some());
+        assert_eq!(queue.coalesced_count, 0);
+        assert_eq!(queue.evicted_or_dropped_count, 0);
+    }
+
+    #[tokio::test]
+    async fn websocket_reliable_queue_age_disconnects_and_releases_blocked_producer() {
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let reliable_metrics = connection.reliable_response_queue;
+        let (reliable_tx, reliable_rx) = mpsc::channel(1);
+        assert!(
+            send_tracked_websocket_item(
+                &reliable_tx,
+                &reliable_metrics,
+                Message::Text("queued".into()),
+            )
+            .await
+        );
+        let observer_metrics = reliable_metrics.clone();
+
+        let (pressure_tx, mut pressure_rx) = mpsc::channel(1);
+        let pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport.clone());
+        let watchdog = tokio::spawn(run_websocket_reliable_pressure_watchdog_with_limit(
+            reliable_metrics.clone(),
+            pressure.clone(),
+            Duration::ZERO,
+        ));
+        let blocked_producer = tokio::spawn(async move {
+            send_tracked_reliable_websocket_item_with_limit(
+                &reliable_tx,
+                &reliable_metrics,
+                Message::Text("must-not-be-silently-dropped".into()),
+                &pressure,
+                Duration::ZERO,
+            )
+            .await
+        });
+
+        timeout(Duration::from_secs(1), pressure_rx.recv())
+            .await
+            .expect("reliable oldest-age pressure should disconnect the peer")
+            .expect("pressure signal should remain open");
+        assert!(
+            !timeout(Duration::from_secs(1), blocked_producer)
+                .await
+                .expect("blocked producer should be released at the pressure deadline")
+                .expect("blocked producer task should not panic")
+        );
+        watchdog.await.expect("pressure watchdog should not panic");
+
+        let snapshot = transport.snapshot();
+        assert_eq!(snapshot.slow_pressure_disconnect_count, 1);
+        assert_eq!(
+            snapshot.reliable_response_queue.evicted_or_dropped_count, 1,
+            "the reliable item rejected at disconnect must be counted"
+        );
+        assert_eq!(snapshot.reliable_response_queue.current_depth, 1);
+
+        drop(reliable_rx);
+        drop(observer_metrics);
+        let snapshot = transport.snapshot();
+        assert_eq!(snapshot.reliable_response_queue.current_depth, 0);
+        assert_eq!(
+            snapshot.reliable_response_queue.evicted_or_dropped_count, 2,
+            "the queued reliable item discarded by connection teardown must also be counted"
+        );
+    }
+
+    #[test]
+    fn websocket_only_coalesces_state_snapshots_not_ordered_events() {
+        assert!(websocket_event_is_coalescible("preview.frameReady"));
+        assert!(websocket_event_is_coalescible("compositor.status"));
+        assert!(websocket_event_is_coalescible("preview.surface.status"));
+        assert!(!websocket_event_is_coalescible("liveChat.message"));
+        assert!(!websocket_event_is_coalescible("liveChat.snapshot"));
+        assert!(!websocket_event_is_coalescible("liveChat.providerStatus"));
+        assert!(!websocket_event_is_coalescible("recording.status"));
+        assert!(!websocket_event_is_coalescible("screens.changed"));
+        assert!(!websocket_event_is_coalescible("session.log"));
+        assert!(!websocket_event_is_coalescible(
+            "platformAccounts.oauth.callback"
+        ));
+    }
+
+    #[tokio::test]
+    async fn websocket_layout_flood_has_bounded_work_and_returns_every_response() {
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler: WebSocketCommandHandler = {
+            let active = active.clone();
+            let max_active = max_active.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let active = active.clone();
+                let max_active = max_active.clone();
+                Box::pin(async move {
+                    let command: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let now_active = active.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+                    max_active.fetch_max(now_active, std::sync::atomic::Ordering::AcqRel);
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    active.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                    ServerResponse::ok(command["id"].as_str().unwrap(), json!({}))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let command_metrics = connection.incoming_command_queue;
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport.clone());
+        let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            test_state(),
+            command_rx,
+            command_metrics.clone(),
+            outgoing_tx,
+            reliable_metrics.clone(),
+            slow_pressure,
+            handler,
+        ));
+
+        for index in 0..100 {
+            assert!(
+                send_tracked_websocket_item(
+                    &command_tx,
+                    &command_metrics,
+                    json!({
+                        "id": format!("layout-{index}"),
+                        "method": "scene.layout.apply_preview",
+                        "params": { "intentId": index + 1 }
+                    })
+                    .to_string(),
+                )
+                .await
+            );
+        }
+        drop(command_tx);
+        dispatcher.await.unwrap();
+
+        let mut response_ids = std::collections::HashSet::new();
+        while let Some(Message::Text(text)) = outgoing_rx.recv().await {
+            reliable_metrics.record_dequeue_oldest();
+            let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+            response_ids.insert(response["id"].as_str().unwrap().to_string());
+        }
+        assert_eq!(response_ids.len(), 100);
+        assert!(
+            max_active.load(std::sync::atomic::Ordering::Acquire) <= WEBSOCKET_LAYOUT_CONCURRENCY
+        );
+        let snapshot = transport.snapshot();
+        assert_eq!(snapshot.incoming_command_queue.current_depth, 0);
+        assert!(snapshot.incoming_command_queue.max_depth > 0);
+        assert_eq!(snapshot.incoming_command_queue.oldest_age_ms, None);
+        assert_eq!(snapshot.reliable_response_queue.current_depth, 0);
+        assert!(snapshot.reliable_response_queue.max_depth > 0);
+        assert_eq!(snapshot.reliable_response_queue.oldest_age_ms, None);
     }
 
     #[tokio::test]
     async fn websocket_event_relay_bounds_slow_clients_and_reports_backpressure_lag() {
         let (events_tx, events_rx) = broadcast::channel(2);
         let (outgoing_tx, mut outgoing_rx) = mpsc::channel(1);
-        let excluded = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::<
-            String,
-        >::new()));
-        let relay = tokio::spawn(relay_websocket_events(events_rx, outgoing_tx, excluded));
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let reliable_metrics = connection.reliable_response_queue;
+        let telemetry = CoalescingEventBuffer::with_metrics(
+            WEBSOCKET_TELEMETRY_KIND_CAPACITY,
+            connection.coalesced_telemetry_queue,
+        );
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport);
+        let event_filter = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter {
+            excluded: std::collections::HashSet::from(["events.lagged".to_string()]),
+            included: None,
+        }));
+        let relay = tokio::spawn(relay_websocket_events(
+            events_rx,
+            outgoing_tx,
+            reliable_metrics.clone(),
+            slow_pressure,
+            telemetry,
+            event_filter,
+        ));
 
         events_tx
             .send(ServerEvent::new("test.burst", json!({ "sequence": 0 })))
@@ -4488,20 +5430,17 @@ mod tests {
         }
         assert_eq!(outgoing_rx.len(), 1, "outbound queue exceeded its bound");
 
-        let first: serde_json::Value =
-            serde_json::from_str(&outgoing_rx.recv().await.expect("first bounded event")).unwrap();
+        let first = receive_tracked_json(&mut outgoing_rx, &reliable_metrics).await;
         assert_eq!(first["payload"]["sequence"], 0);
-        let second: serde_json::Value =
-            serde_json::from_str(&outgoing_rx.recv().await.expect("second bounded event")).unwrap();
+        let second = receive_tracked_json(&mut outgoing_rx, &reliable_metrics).await;
         assert_eq!(second["payload"]["sequence"], 1);
 
-        let lagged: serde_json::Value = serde_json::from_str(
-            &timeout(Duration::from_secs(1), outgoing_rx.recv())
-                .await
-                .expect("events.lagged timeout")
-                .expect("events.lagged frame"),
+        let lagged = timeout(
+            Duration::from_secs(1),
+            receive_tracked_json(&mut outgoing_rx, &reliable_metrics),
         )
-        .unwrap();
+        .await
+        .expect("events.lagged timeout");
         assert_eq!(lagged["event"], "events.lagged");
         assert!(lagged["payload"]["skipped"].as_u64().unwrap() > 0);
         assert!(
@@ -4512,21 +5451,18 @@ mod tests {
         // The two newest broadcast events survive the ring overrun. Once consumed, the
         // same bounded relay remains live and carries subsequent incremental events.
         for expected in [62, 63] {
-            let event: serde_json::Value =
-                serde_json::from_str(&outgoing_rx.recv().await.expect("retained post-lag event"))
-                    .unwrap();
+            let event = receive_tracked_json(&mut outgoing_rx, &reliable_metrics).await;
             assert_eq!(event["payload"]["sequence"], expected);
         }
         events_tx
             .send(ServerEvent::new("test.afterLag", json!({ "alive": true })))
             .unwrap();
-        let after_lag: serde_json::Value = serde_json::from_str(
-            &timeout(Duration::from_secs(1), outgoing_rx.recv())
-                .await
-                .expect("post-lag event timeout")
-                .expect("post-lag event"),
+        let after_lag = timeout(
+            Duration::from_secs(1),
+            receive_tracked_json(&mut outgoing_rx, &reliable_metrics),
         )
-        .unwrap();
+        .await
+        .expect("post-lag event timeout");
         assert_eq!(after_lag["event"], "test.afterLag");
         assert_eq!(after_lag["payload"]["alive"], true);
 
@@ -4838,6 +5774,88 @@ mod tests {
 
         let _ = socket.close(None).await;
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_legacy_layouts_without_intent_ids_execute_in_receipt_order() {
+        let order = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let first_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let second_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_first = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let order = order.clone();
+            let first_entered = first_entered.clone();
+            let second_entered = second_entered.clone();
+            let release_first = release_first.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let order = order.clone();
+                let first_entered = first_entered.clone();
+                let second_entered = second_entered.clone();
+                let release_first = release_first.clone();
+                Box::pin(async move {
+                    let command: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let id = command["id"].as_str().unwrap().to_string();
+                    if id == "legacy-first" {
+                        first_entered.add_permits(1);
+                        release_first.acquire().await.unwrap().forget();
+                    } else {
+                        second_entered.add_permits(1);
+                    }
+                    order.lock().await.push(id.clone());
+                    ServerResponse::ok(id, json!({}))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (outgoing_tx, _outgoing_rx) = mpsc::channel(4);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport);
+        let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            test_state(),
+            command_rx,
+            connection.incoming_command_queue,
+            outgoing_tx,
+            connection.reliable_response_queue,
+            slow_pressure,
+            handler,
+        ));
+
+        for id in ["legacy-first", "legacy-second"] {
+            command_tx
+                .send(
+                    json!({
+                        "id": id,
+                        "method": "scene.layout.apply_preview",
+                        "params": {}
+                    })
+                    .to_string(),
+                )
+                .await
+                .unwrap();
+        }
+        drop(command_tx);
+
+        timeout(Duration::from_secs(1), first_entered.acquire())
+            .await
+            .expect("first legacy layout should enter")
+            .unwrap()
+            .forget();
+        assert!(
+            timeout(Duration::from_millis(50), second_entered.acquire())
+                .await
+                .is_err(),
+            "second legacy layout must not overtake the first"
+        );
+        release_first.add_permits(1);
+        timeout(Duration::from_secs(1), second_entered.acquire())
+            .await
+            .expect("second legacy layout should run after the first")
+            .unwrap()
+            .forget();
+        dispatcher.await.unwrap();
+        assert_eq!(*order.lock().await, ["legacy-first", "legacy-second"]);
     }
 
     #[tokio::test]

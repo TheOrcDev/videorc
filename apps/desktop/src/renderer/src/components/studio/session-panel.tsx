@@ -15,7 +15,7 @@ import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { useWorkspaceNav } from '@/components/workspace-nav'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import { outputSummary, recordingQuality, streamingSummary } from '@/lib/studio-session-view'
 
 // The session's primary actions rendered as a matched pair of glassy hero
@@ -61,7 +61,7 @@ export function SessionPanel({
   onLiveStream: () => void
   onStop: () => void
 }): ReactElement {
-  const { captureConfig } = useStudio()
+  const { captureConfig } = useStudioCore()
   const { openStudioPanel, setActive } = useWorkspaceNav()
   const video = captureConfig.video
 
@@ -152,7 +152,7 @@ export function SessionPanel({
 // this flips them). Live-safe: activation only needs the backend socket, so it
 // works mid-session; a takeover replaces the output regardless of scene.
 function TakeoverControls({ onOpenAssets }: { onOpenAssets: () => void }): ReactElement {
-  const { activateScreen, activeScreen, clearActiveScreen, screens, wsStatus } = useStudio()
+  const { activateScreen, activeScreen, clearActiveScreen, screens, wsStatus } = useStudioCore()
   const ready = screens.filter((screen) => screen.status !== 'missing')
   const disconnected = wsStatus !== 'connected'
 

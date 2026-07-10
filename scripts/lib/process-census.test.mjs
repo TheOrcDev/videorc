@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import {
   classifyProcess,
   collectProcessCensus,
+  collectProcessResourceDetails,
+  compareProcessResourceCheckpoints,
   ownedProcessLedgerPaths,
   parseProcessTable,
   parseWindowsProcessTable,
@@ -90,6 +92,40 @@ test('parseProcessTable keeps command args with spaces and classifies Videorc ro
   assert.equal(classifyProcess(rows[2]), 'backend')
   assert.equal(classifyProcess(rows[3]), 'electron-renderer')
   assert.equal(classifyProcess(rows[4]), 'native-preview-helper')
+})
+
+test('classifyProcess does not count launcher wrappers as backend or preview helpers', () => {
+  assert.equal(
+    classifyProcess({
+      command: '/bin/sh',
+      args: 'sh -c /repo/target/debug/videorc-backend --port 1234'
+    }),
+    'other'
+  )
+  assert.equal(
+    classifyProcess({
+      command: '/opt/homebrew/bin/node',
+      args: 'node scripts/launch.mjs /repo/target/debug/native_preview_host_helper'
+    }),
+    'other'
+  )
+})
+
+test('classifyProcess uses the exact argv executable when macOS truncates comm', () => {
+  assert.equal(
+    classifyProcess({
+      command: 'target/debug/vid',
+      args: 'target/debug/videorc-backend --port 1234'
+    }),
+    'backend'
+  )
+  assert.equal(
+    classifyProcess({
+      command: '/Users/orcdev/pr',
+      args: '"/repo/build/native_preview_host_helper" --stdio'
+    }),
+    'native-preview-helper'
+  )
 })
 
 test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videorc roles', () => {
@@ -201,6 +237,150 @@ test('collectProcessCensus reports alive and dead ledger records without killing
   )
   assert.equal(census.processGroupRows.length, 2)
   assert.deepEqual(summarizeRows(census.processRows).cargo, { count: 1, rssKb: 2048 })
+})
+
+test('collectProcessResourceDetails records macOS physical footprint and open files at checkpoints', async () => {
+  const census = {
+    processRows: [{ pid: 111, role: 'backend' }]
+  }
+  const details = await collectProcessResourceDetails(census, {
+    platform: 'darwin',
+    exec: async (command) =>
+      command === 'footprint'
+        ? { stdout: 'Auxiliary data:\n    phys_footprint: 123456 B\n' }
+        : { stdout: 'p111\nfcwd\nftxt\nf0\nf1\n' }
+  })
+
+  assert.deepEqual(details.rows, [
+    {
+      pid: 111,
+      role: 'backend',
+      physicalFootprintBytes: 123456,
+      openFileCount: 2
+    }
+  ])
+  assert.deepEqual(details.totals, { physicalFootprintBytes: 123456, openFileCount: 2 })
+  assert.deepEqual(details.coverage, {
+    physicalFootprintBytes: {
+      requested: 1,
+      succeeded: 1,
+      complete: true,
+      byRole: { backend: { requested: 1, succeeded: 1, complete: true } }
+    },
+    openFileCount: {
+      requested: 1,
+      succeeded: 1,
+      complete: true,
+      byRole: { backend: { requested: 1, succeeded: 1, complete: true } }
+    }
+  })
+})
+
+test('resource checkpoint totals stay null when the last footprint sample is incomplete', async () => {
+  const census = {
+    processRows: [
+      { pid: 111, role: 'backend' },
+      { pid: 222, role: 'native-preview-helper' }
+    ]
+  }
+  const collect = (failedFootprintPid = null) =>
+    collectProcessResourceDetails(census, {
+      platform: 'darwin',
+      exec: async (command, args) => {
+        const pid = Number(args[command === 'footprint' ? 1 : 2])
+        if (command === 'footprint') {
+          if (pid === failedFootprintPid) throw new Error('footprint failed')
+          return { stdout: `phys_footprint: ${pid * 1000} B\n` }
+        }
+        return { stdout: `p${pid}\nfcwd\nftxt\nf0\nf1\n` }
+      }
+    })
+
+  const first = await collect()
+  const last = await collect(222)
+  const comparison = compareProcessResourceCheckpoints(first, last)
+
+  assert.equal(last.totals.physicalFootprintBytes, null)
+  assert.deepEqual(last.coverage.physicalFootprintBytes, {
+    requested: 2,
+    succeeded: 1,
+    complete: false,
+    byRole: {
+      backend: { requested: 1, succeeded: 1, complete: true },
+      'native-preview-helper': { requested: 1, succeeded: 0, complete: false }
+    }
+  })
+  assert.equal(comparison.metrics.physicalFootprintBytes.comparable, false)
+  assert.equal(comparison.metrics.physicalFootprintBytes.delta, null)
+  assert.deepEqual(comparison.metrics.physicalFootprintBytes.reasons, [
+    'last coverage incomplete (1/2)'
+  ])
+  assert.equal(comparison.metrics.openFileCount.comparable, true)
+  assert.equal(comparison.metrics.openFileCount.delta, 0)
+})
+
+test('resource checkpoint comparison reports helper PID replacement as non-comparable', async () => {
+  const collect = (helperPid) =>
+    collectProcessResourceDetails(
+      {
+        processRows: [
+          { pid: 111, role: 'backend' },
+          { pid: helperPid, role: 'native-preview-helper' }
+        ]
+      },
+      {
+        platform: 'darwin',
+        exec: async (command, args) => {
+          const pid = Number(args[command === 'footprint' ? 1 : 2])
+          return command === 'footprint'
+            ? { stdout: `phys_footprint: ${pid * 1000} B\n` }
+            : { stdout: `p${pid}\nfcwd\nftxt\nf0\n` }
+        }
+      }
+    )
+
+  const first = await collect(222)
+  const last = await collect(333)
+  const comparison = compareProcessResourceCheckpoints(first, last)
+
+  assert.deepEqual(comparison.processContinuity, {
+    comparable: false,
+    pidContinuity: false,
+    roleContinuity: true,
+    firstCount: 2,
+    lastCount: 2,
+    retainedPids: [111],
+    removedPids: [222],
+    addedPids: [333],
+    roleChanges: [],
+    replacements: [{ role: 'native-preview-helper', removedPids: [222], addedPids: [333] }],
+    byRole: {
+      backend: {
+        firstPids: [111],
+        lastPids: [111],
+        retainedPids: [111],
+        removedPids: [],
+        addedPids: [],
+        pidContinuity: true,
+        countContinuity: true
+      },
+      'native-preview-helper': {
+        firstPids: [222],
+        lastPids: [333],
+        retainedPids: [],
+        removedPids: [222],
+        addedPids: [333],
+        pidContinuity: false,
+        countContinuity: true
+      }
+    }
+  })
+  assert.equal(comparison.metrics.physicalFootprintBytes.comparable, false)
+  assert.equal(comparison.metrics.physicalFootprintBytes.delta, null)
+  assert.match(
+    comparison.metrics.physicalFootprintBytes.reasons.join('\n'),
+    /native-preview-helper 222 -> 333/
+  )
 })
 
 test('pruneDeadOwnedProcessRecords removes only records whose pids are gone', async () => {

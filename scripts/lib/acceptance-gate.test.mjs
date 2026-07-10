@@ -4,13 +4,33 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { evaluateAcceptance } from './acceptance-gate.mjs'
+import { evaluateAcceptance, recordingPreviewAcceptanceGates } from './acceptance-gate.mjs'
+
+describe('recordingPreviewAcceptanceGates', () => {
+  it('judges preview cadence against the shared recording compositor rate', () => {
+    const thirty = recordingPreviewAcceptanceGates(30)
+    const sixty = recordingPreviewAcceptanceGates(60)
+
+    assert.equal(thirty.minPreviewPresentFps, 27)
+    assert.equal(thirty.maxPreviewIntervalP95Ms, 50)
+    assert.equal(sixty.minPreviewPresentFps, 54)
+    assert.equal(sixty.maxPreviewIntervalP95Ms, 25)
+  })
+})
 
 const cleanInput = () => ({
   analyzerVerdict: { pass: true, failures: [] },
   diagnostics: {
     encoderBridgeRepeatedFrames: 0,
     encoderBridgeSyntheticFrames: 0,
+    encoderBridgeRecordingQueueDroppedFrames: 0,
+    encoderBridgeRecordingQueueDepth: 2,
+    encoderBridgeRecordingQueueOldestFrameAgeMs: 35,
+    encoderBridgeRecordingQueueCapacityPressureEvents: 0,
+    encoderBridgeStreamQueueDepth: 0,
+    encoderBridgeStreamQueueOldestFrameAgeMs: null,
+    encoderBridgeStreamQueueCapacityPressureEvents: 0,
+    encoderBridgeStreamQueueDroppedFrames: 0,
     encoderBridgeMetalTargetFrames: 120,
     encoderBridgeRawVideoCopiedFrames: 0,
     encoderBridgeMetalTargetCopiedFrames: 0,
@@ -24,16 +44,19 @@ const cleanInput = () => ({
     previewPendingHostCommandCount: 0,
     minPreviewPresentFps: 60,
     previewIntervalP95Ms: 16.7,
+    previewInputToPresentLatencyP95Ms: 18,
+    previewInputToPresentLatencyP99Ms: 24,
+    previewCompositorFrameLag: 0
   },
   claimsNative: true,
-  expectAudio: true,
+  expectAudio: true
 })
 
 const dimensions = (width, height) => ({
   latest: { width, height },
   max: { width, height },
   observed: [`${width}x${height}`],
-  sampleCount: 3,
+  sampleCount: 3
 })
 
 const clean4kInput = () => {
@@ -61,7 +84,7 @@ const clean4kInput = () => {
     screenSource: dimensions(3840, 2160),
     compositorScreenSource: dimensions(3840, 2160),
     compositorTarget: dimensions(3840, 2160),
-    compositorMetalTarget: dimensions(3840, 2160),
+    compositorMetalTarget: dimensions(3840, 2160)
   }
   return input
 }
@@ -75,7 +98,10 @@ describe('evaluateAcceptance', () => {
 
   it('fails when the final-file analyzer fails, surfacing its reasons', () => {
     const input = cleanInput()
-    input.analyzerVerdict = { pass: false, failures: ['freeze segment 250ms exceeds 100ms (1 segment(s))'] }
+    input.analyzerVerdict = {
+      pass: false,
+      failures: ['freeze segment 250ms exceeds 100ms (1 segment(s))']
+    }
     const v = evaluateAcceptance(input)
     assert.equal(v.pass, false)
     assert.match(v.failures[0], /final-file: freeze segment 250ms/)
@@ -83,7 +109,10 @@ describe('evaluateAcceptance', () => {
 
   it('fails when the startup-resolution analyzer fails, surfacing its reasons', () => {
     const input = cleanInput()
-    input.startupVerdict = { pass: false, failures: ['metadata width 640 does not match expected 1920'] }
+    input.startupVerdict = {
+      pass: false,
+      failures: ['metadata width 640 does not match expected 1920']
+    }
     const v = evaluateAcceptance(input)
     assert.equal(v.pass, false)
     assert.match(v.failures.join(' '), /startup: metadata width 640/)
@@ -117,6 +146,24 @@ describe('evaluateAcceptance', () => {
 
     assert.equal(v.pass, false)
     assert.match(v.failures.join(' '), /2 native preview host command/)
+  })
+
+  it('fails closed when required native-preview telemetry is missing', () => {
+    const input = clean4kInput()
+    delete input.diagnostics.minPreviewPresentFps
+    delete input.diagnostics.previewIntervalP95Ms
+    delete input.diagnostics.previewInputToPresentLatencyP95Ms
+    delete input.diagnostics.previewInputToPresentLatencyP99Ms
+    delete input.diagnostics.previewCompositorFrameLag
+    delete input.diagnostics.previewPendingHostCommandCount
+    delete input.diagnostics.imagePollDuringSession
+
+    const verdict = evaluateAcceptance(input)
+
+    assert.equal(verdict.pass, false)
+    assert.match(verdict.failures.join(' '), /preview present FPS telemetry was missing/)
+    assert.match(verdict.failures.join(' '), /pending-host-command telemetry was missing/)
+    assert.match(verdict.failures.join(' '), /image-poll telemetry was missing/)
   })
 
   it('fails the strict OBS compositor gate when the live compositor falls back to CPU', () => {
@@ -221,6 +268,31 @@ describe('evaluateAcceptance', () => {
     assert.match(v.failures.join(' '), /3 synthetic filler frame/)
   })
 
+  it('fails when recording output backpressure discards a frame', () => {
+    const input = cleanInput()
+    input.diagnostics.encoderBridgeRecordingQueueDroppedFrames = 2
+    const v = evaluateAcceptance(input)
+    assert.equal(v.pass, false)
+    assert.match(v.failures.join(' '), /2 frame\(s\) discarded by recording output backpressure/)
+  })
+
+  it('fails when recording or split-stream queues exceed the latency contract', () => {
+    const input = clean4kInput()
+    input.diagnostics.encoderBridgeSeparateOutputEncodersActive = true
+    input.diagnostics.encoderBridgeRecordingQueueDepth = 17
+    input.diagnostics.encoderBridgeRecordingQueueOldestFrameAgeMs = 251
+    input.diagnostics.encoderBridgeRecordingQueueCapacityPressureEvents = 1
+    input.diagnostics.encoderBridgeStreamQueueDepth = 9
+    input.diagnostics.encoderBridgeStreamQueueOldestFrameAgeMs = 151
+
+    const verdict = evaluateAcceptance(input)
+
+    assert.equal(verdict.pass, false)
+    assert.match(verdict.failures.join(' '), /recording: queue depth 17 exceeded 16/)
+    assert.match(verdict.failures.join(' '), /recording: queue hit capacity 1 time/)
+    assert.match(verdict.failures.join(' '), /stream: queue oldest-frame age 151ms exceeded 150ms/)
+  })
+
   it('fails when the encoder falls behind real-time and final-file proof is unavailable', () => {
     const input = cleanInput()
     input.analyzerVerdict = null
@@ -296,6 +368,8 @@ describe('evaluateAcceptance', () => {
     assert.match(v.failures.join(' '), /p99 latency 140ms/)
 
     const slow = cleanInput()
+    delete slow.diagnostics.previewInputToPresentLatencyP95Ms
+    delete slow.diagnostics.previewInputToPresentLatencyP99Ms
     slow.diagnostics.previewInputToPresentLatencyMs = 180
     v = evaluateAcceptance(slow)
     assert.equal(v.pass, false)
@@ -415,7 +489,7 @@ describe('evaluateAcceptance', () => {
     const input = clean4kInput()
     input.startupVerdict = {
       pass: false,
-      failures: ['first startup frame 1920x1080 does not match expected 3840x2160'],
+      failures: ['first startup frame 1920x1080 does not match expected 3840x2160']
     }
     const v = evaluateAcceptance(input)
 
@@ -425,7 +499,10 @@ describe('evaluateAcceptance', () => {
 
   it('accumulates every failure at once', () => {
     const input = cleanInput()
-    input.analyzerVerdict = { pass: false, failures: ['repeated-frame burst of 7 consecutive identical frames'] }
+    input.analyzerVerdict = {
+      pass: false,
+      failures: ['repeated-frame burst of 7 consecutive identical frames']
+    }
     input.diagnostics.encoderBridgeRepeatedFrames = 4
     input.diagnostics.minEncoderSpeed = 0.5
     input.diagnostics.micDroppedFrames = 2

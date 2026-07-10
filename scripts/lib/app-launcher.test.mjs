@@ -3,9 +3,11 @@ import test from 'node:test'
 import { resolve } from 'node:path'
 
 import {
+  appSpawnSpec,
   devAppFailureMessage,
   devAppSpawnOptions,
   devAppSpawnSpec,
+  performanceAppSpawnSpec,
   resolveSmokeAppDirs,
   smokeAppEnv,
   stopProcess
@@ -82,6 +84,35 @@ test('dev app launch targets the desktop package and uses a shell on Windows', (
   assert.equal(windowsSpec.options.detached, false)
   assert.equal(devAppSpawnOptions({ platform: 'darwin' }).detached, true)
   assert.equal(devAppSpawnOptions({ platform: 'linux' }).detached, true)
+})
+
+test('custom app launch preserves isolated env and targets a packaged executable', () => {
+  const spec = appSpawnSpec({
+    command: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+    cwd: '/Applications/Videorc.app/Contents/MacOS',
+    env: { VIDEORC_USER_DATA_DIR: '/tmp/videorc-user-data' },
+    platform: 'darwin'
+  })
+
+  assert.equal(spec.command, '/Applications/Videorc.app/Contents/MacOS/Videorc')
+  assert.deepEqual(spec.args, [])
+  assert.equal(spec.options.cwd, '/Applications/Videorc.app/Contents/MacOS')
+  assert.equal(spec.options.env.VIDEORC_USER_DATA_DIR, '/tmp/videorc-user-data')
+  assert.equal(spec.options.detached, true)
+})
+
+test('performance launch uses the exact packaged executable when configured', () => {
+  assert.deepEqual(
+    performanceAppSpawnSpec({
+      VIDEORC_PERF_APP_EXECUTABLE: '/tmp/Videorc.app/Contents/MacOS/Videorc'
+    }),
+    {
+      command: '/tmp/Videorc.app/Contents/MacOS/Videorc',
+      args: [],
+      cwd: '/tmp/Videorc.app/Contents/MacOS'
+    }
+  )
+  assert.equal(performanceAppSpawnSpec({}), undefined)
 })
 
 test('dev app launch failures include the latest child output', () => {

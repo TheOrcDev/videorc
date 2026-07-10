@@ -31,10 +31,11 @@ use crate::capture_input::{
     microphone_channels, microphone_needs_graph_gain,
 };
 use crate::compositor::{
-    CompositorAuxiliaryOutput, CompositorStartParams, CompositorStartupBarrierParams,
-    CompositorStartupBarrierResult, CompositorStartupSourceRequirements, background_stage_margin,
-    compositor_frame_store, compositor_stream_frame_store, start_synthetic_compositor,
-    update_compositor_scene, wait_for_compositor_startup_frames,
+    CompositorAuxiliaryOutput, CompositorFrameConsumer, CompositorStartParams,
+    CompositorStartupBarrierParams, CompositorStartupBarrierResult,
+    CompositorStartupSourceRequirements, background_stage_margin, compositor_frame_store,
+    compositor_stream_frame_store, start_synthetic_compositor, update_compositor_scene,
+    wait_for_compositor_startup_frames,
 };
 use crate::devices::{
     find_avfoundation_camera_index, find_avfoundation_microphone_index_for_native_name,
@@ -66,10 +67,10 @@ use crate::protocol::{
     EncodeBackend, EntitlementsSnapshot, FeatureId, HealthLevel, LayoutPreset, LayoutSettings,
     PreviewCameraState, PreviewLiveParams, PreviewLiveSource, PreviewLiveState, PreviewLiveStatus,
     PreviewScreenSourceKind, PreviewScreenState, PreviewSnapshot, PreviewSnapshotParams,
-    PreviewTransport, RecordingPipelineStage, RecordingState, RecordingStatus, RemuxSessionParams,
-    RtmpPreset, RtmpSettings, Scene, SceneConfigParams, SceneSourceKind, SceneTransform,
-    SideBySideCameraSide, SideBySideSplit, StartSessionParams, StreamHealth, StreamScreen,
-    VideoPreset, VideoSettings,
+    PreviewSurfaceBacking, PreviewTransport, RecordingPipelineStage, RecordingState,
+    RecordingStatus, RemuxSessionParams, RtmpPreset, RtmpSettings, Scene, SceneConfigParams,
+    SceneSourceKind, SceneTransform, SideBySideCameraSide, SideBySideSplit, StartSessionParams,
+    StreamHealth, StreamScreen, VideoPreset, VideoSettings,
 };
 use crate::repair::{
     GateStatus, MAINTENANCE_CANCELLED, QualityExpectations, QualityThresholds, QualityVerdict,
@@ -143,7 +144,11 @@ const CAPTURE_AUDIO_FILTER: &str = "aresample=async=1:first_pts=0";
 const MONO_TO_STEREO_FILTER: &str = "pan=stereo|c0=c0|c1=c0";
 const MICROPHONE_SYNC_OFFSET_MIN_MS: i32 = -1000;
 const MICROPHONE_SYNC_OFFSET_MAX_MS: i32 = 1000;
-const STREAM_OUTPUT_AUDIO_ADVANCE_MS: i32 = 220;
+// The isolated FLV/RTMP egress path adds about 130ms of audio latency relative
+// to its copied video stream. Two real split-output calibrations (10s and 60s)
+// agreed within 5ms; advancing by the old 220ms calibration made stream audio
+// consistently 87-92ms early even though the local recording stayed aligned.
+const STREAM_OUTPUT_AUDIO_ADVANCE_MS: i32 = 130;
 const MJPEG_BOUNDARY: &[u8] = b"--videorc";
 const MJPEG_HEADER_END: &[u8] = b"\r\n\r\n";
 const PREVIEW_READ_BUFFER_BYTES: usize = 64 * 1024;
@@ -792,10 +797,14 @@ pub async fn start_session(
                 target_fps,
                 width: params.output.video.width,
                 height: params.output.video.height,
-                publish_yuv_frames: matches!(
+                frame_consumer: if matches!(
                     encoder_bridge_video_output,
                     EncoderBridgeVideoOutput::RawYuv420p
-                ),
+                ) {
+                    CompositorFrameConsumer::RawYuvEncoder
+                } else {
+                    CompositorFrameConsumer::VideoToolboxEncoder
+                },
                 stream_output: encoder_bridge_stream_output,
                 // Per-leg overlay plan (R1): primary = recording (or the
                 // stream when stream-only), aux = the split stream leg.
@@ -1783,11 +1792,12 @@ async fn start_idle_live_preview(
             state: starting_state,
             source: PreviewLiveSource::IdlePreview,
             transport: PreviewTransport::LatestJpegPolling,
+            backing: PreviewSurfaceBacking::None,
             target_fps: Some(IDLE_PREVIEW_FPS),
             width: Some(IDLE_PREVIEW_WIDTH),
             height: Some(IDLE_PREVIEW_HEIGHT),
             url: Some(live_preview_url(&state)),
-            message: Some("Starting live preview.".to_string()),
+            message: Some("Starting explicit JPEG polling fallback preview.".to_string()),
         };
         old_process
     };
@@ -1895,11 +1905,15 @@ async fn stop_idle_live_preview_for_recording(state: AppState) {
                 state: PreviewLiveState::Connecting,
                 source: PreviewLiveSource::RecordingSession,
                 transport: PreviewTransport::LatestJpegPolling,
+                backing: PreviewSurfaceBacking::None,
                 target_fps: Some(RECORDING_PREVIEW_FPS),
                 width: Some(RECORDING_PREVIEW_WIDTH),
                 height: Some(RECORDING_PREVIEW_HEIGHT),
                 url: Some(live_preview_url(&state)),
-                message: Some("Switching preview to the recording session.".to_string()),
+                message: Some(
+                    "Switching the explicit JPEG polling fallback to the recording session."
+                        .to_string(),
+                ),
             };
         }
         process
@@ -1946,11 +1960,12 @@ async fn restart_idle_live_preview_if_desired(state: AppState) {
                 state: PreviewLiveState::Reconnecting,
                 source: PreviewLiveSource::IdlePreview,
                 transport: PreviewTransport::LatestJpegPolling,
+                backing: PreviewSurfaceBacking::None,
                 target_fps: Some(IDLE_PREVIEW_FPS),
                 width: Some(IDLE_PREVIEW_WIDTH),
                 height: Some(IDLE_PREVIEW_HEIGHT),
                 url: Some(live_preview_url(&state)),
-                message: Some("Restarting idle live preview.".to_string()),
+                message: Some("Restarting explicit JPEG polling fallback preview.".to_string()),
             };
         } else {
             guard.status =
@@ -2195,11 +2210,14 @@ async fn mark_idle_live_preview_frame_received(state: &AppState, pid: u32) {
                 state: PreviewLiveState::Live,
                 source: PreviewLiveSource::IdlePreview,
                 transport: PreviewTransport::LatestJpegPolling,
+                backing: PreviewSurfaceBacking::None,
                 target_fps: Some(IDLE_PREVIEW_FPS),
                 width: Some(IDLE_PREVIEW_WIDTH),
                 height: Some(IDLE_PREVIEW_HEIGHT),
                 url: Some(live_preview_url(state)),
-                message: Some("Live preview is receiving frames.".to_string()),
+                message: Some(
+                    "Explicit JPEG polling fallback is active and receiving frames.".to_string(),
+                ),
             };
             should_emit = true;
         }
@@ -2305,12 +2323,13 @@ fn recording_live_preview_status(state: &AppState, message: Option<String>) -> P
         state: PreviewLiveState::Live,
         source: PreviewLiveSource::RecordingSession,
         transport: PreviewTransport::LatestJpegPolling,
+        backing: PreviewSurfaceBacking::None,
         target_fps: Some(RECORDING_PREVIEW_FPS),
         width: Some(RECORDING_PREVIEW_WIDTH),
         height: Some(RECORDING_PREVIEW_HEIGHT),
         url: Some(live_preview_url(state)),
         message: Some(message.unwrap_or_else(|| {
-            "Live preview is following the active recording session.".to_string()
+            "Explicit JPEG polling fallback is following the active recording session.".to_string()
         })),
     }
 }
@@ -2328,6 +2347,7 @@ async fn recording_native_surface_preview_status(
         },
         source: PreviewLiveSource::RecordingSession,
         transport: PreviewTransport::ElectronProofSurface,
+        backing: PreviewSurfaceBacking::ElectronBrowserWindow,
         target_fps: Some(compositor.target_fps),
         width: Some(compositor.width),
         height: Some(compositor.height),
@@ -2344,6 +2364,7 @@ fn unavailable_live_preview_status(message: Option<String>) -> PreviewLiveStatus
         state: PreviewLiveState::Unavailable,
         source: PreviewLiveSource::Unavailable,
         transport: PreviewTransport::Unavailable,
+        backing: PreviewSurfaceBacking::None,
         target_fps: None,
         width: None,
         height: None,
@@ -2517,14 +2538,21 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             audio.live_peak(),
                             audio.session_peak(),
                             audio.device_name.clone(),
+                            audio.recording_window_elapsed_secs(),
                         )
                     })
                 }
                 _ => return,
             }
         };
-        let Some((captured_frames, dropped_frames, live_peak, session_peak, device_name)) =
-            counters
+        let Some((
+            captured_frames,
+            dropped_frames,
+            live_peak,
+            session_peak,
+            device_name,
+            capture_elapsed_secs,
+        )) = counters
         else {
             return;
         };
@@ -2555,11 +2583,9 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                 &message,
             );
         }
-        let coverage = audio_capture_coverage(
-            captured_frames,
-            started_at.elapsed().as_secs_f64(),
-            NATIVE_AUDIO_SAMPLE_RATE,
-        );
+        let coverage = capture_elapsed_secs.and_then(|elapsed_secs| {
+            audio_capture_coverage(captured_frames, elapsed_secs, NATIVE_AUDIO_SAMPLE_RATE)
+        });
         let diagnostic_stats = {
             let mut diagnostics = state.diagnostics.lock().await;
             let next = apply_audio_stats(
@@ -5004,15 +5030,16 @@ fn append_bridge_recording_input_args(
             // low-bitrate FIFO delays first bytes by many seconds, which
             // starves RTMP targets (LVF2 "no bytes", plan 023 L1). Record-only
             // keeps the default — shrinking it shifted A/V start alignment in
-            // smoke:dev, and a startup delay doesn't hurt a local file.
+            // smoke:dev, and a startup delay doesn't hurt a local file. Do not
+            // add `-fflags nobuffer`: on a non-seekable H.264 MPEG-TS FIFO it
+            // discards the packets consumed during probing, including the first
+            // keyframe, so video begins at the next GOP while audio begins at 0.
             if params.output.stream_enabled {
                 args.extend([
                     "-probesize".to_string(),
                     "65536".to_string(),
                     "-analyzeduration".to_string(),
                     "0".to_string(),
-                    "-fflags".to_string(),
-                    "nobuffer".to_string(),
                 ]);
             }
             args.extend([
@@ -5064,13 +5091,13 @@ fn append_bridge_encoded_video_input_args(
             args.extend([
                 // Same probe discipline as append_bridge_recording_input_args:
                 // the writer is our own bridge; default mpegts probing starves
-                // a multi-FIFO graph (LVF2 "no bytes", plan 023 L1).
+                // a multi-FIFO graph (LVF2 "no bytes", plan 023 L1). `nobuffer`
+                // is deliberately absent because it discards the first GOP on
+                // these non-seekable FIFOs and creates a deterministic A/V gap.
                 "-probesize".to_string(),
                 "65536".to_string(),
                 "-analyzeduration".to_string(),
                 "0".to_string(),
-                "-fflags".to_string(),
-                "nobuffer".to_string(),
                 "-f".to_string(),
                 "mpegts".to_string(),
                 "-i".to_string(),
@@ -6602,7 +6629,7 @@ fn recording_compositor_stream_output(
             return Ok(Some(CompositorAuxiliaryOutput {
                 width: recording.width,
                 height: recording.height,
-                publish_yuv_frames: false,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
             }));
         }
         return Ok(None);
@@ -6616,7 +6643,7 @@ fn recording_compositor_stream_output(
     Ok(Some(CompositorAuxiliaryOutput {
         width: stream.width,
         height: stream.height,
-        publish_yuv_frames: false,
+        frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
     }))
 }
 
@@ -9495,6 +9522,11 @@ mod tests {
                 Some("65536")
             );
             assert_eq!(
+                input_arg_value(&args, &fifo_path.display().to_string(), "-fflags"),
+                None,
+                "streaming MPEG-TS FIFO must preserve its initial keyframe"
+            );
+            assert_eq!(
                 input_arg_value(&args, &fifo_path.display().to_string(), "-pix_fmt"),
                 None
             );
@@ -9622,6 +9654,16 @@ mod tests {
             ),
             Some("65536")
         );
+        assert_eq!(
+            input_arg_value(&args, &recording_fifo_path.display().to_string(), "-fflags"),
+            None,
+            "non-seekable MPEG-TS input must retain its first GOP; -fflags nobuffer drops it"
+        );
+        assert_eq!(
+            input_arg_value(&args, &stream_fifo_path.display().to_string(), "-fflags"),
+            None,
+            "both split MPEG-TS FIFOs must preserve their first GOP"
+        );
         assert_eq!(arg_value(&args, "-filter_complex"), None);
     }
 
@@ -9661,7 +9703,7 @@ mod tests {
             CompositorAuxiliaryOutput {
                 width: 1920,
                 height: 1080,
-                publish_yuv_frames: false,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
             }
         );
 
@@ -9723,7 +9765,7 @@ mod tests {
         let stream_output = CompositorAuxiliaryOutput {
             width: 1920,
             height: 1080,
-            publish_yuv_frames: false,
+            frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
         };
 
         let error = bridge_compositor_split_output_ffmpeg_args(
@@ -10240,11 +10282,12 @@ mod tests {
                 state: PreviewLiveState::Connecting,
                 source: PreviewLiveSource::IdlePreview,
                 transport: PreviewTransport::LatestJpegPolling,
+                backing: PreviewSurfaceBacking::None,
                 target_fps: Some(IDLE_PREVIEW_FPS),
                 width: Some(IDLE_PREVIEW_WIDTH),
                 height: Some(IDLE_PREVIEW_HEIGHT),
                 url: Some("http://127.0.0.1:1234/preview/live.mjpeg?token=test".to_string()),
-                message: Some("Starting live preview.".to_string()),
+                message: Some("Starting explicit JPEG polling fallback preview.".to_string()),
             },
             desired_params: Some(params.clone()),
             idle_process: Some(ActiveLivePreview {
@@ -10958,6 +11001,7 @@ mod tests {
 
     #[test]
     fn stream_output_audio_settings_apply_stream_only_egress_advance() {
+        assert_eq!(STREAM_OUTPUT_AUDIO_ADVANCE_MS, 130);
         let audio = AudioSettings::default();
         let adjusted = stream_output_audio_settings(&audio);
         assert_eq!(audio.microphone_sync_offset_ms, 0);
@@ -11728,7 +11772,7 @@ mod tests {
             Some(CompositorAuxiliaryOutput {
                 width: 1920,
                 height: 1080,
-                publish_yuv_frames: false,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
             })
         );
     }
@@ -11780,7 +11824,7 @@ mod tests {
             Some(CompositorAuxiliaryOutput {
                 width: params.output.video.width,
                 height: params.output.video.height,
-                publish_yuv_frames: false,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
             })
         );
     }
@@ -12001,7 +12045,7 @@ mod tests {
             Some(CompositorAuxiliaryOutput {
                 width: 1920,
                 height: 1080,
-                publish_yuv_frames: false,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
             })
         );
         validate_outputs(&params).unwrap();

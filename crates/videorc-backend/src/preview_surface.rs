@@ -1,6 +1,6 @@
 use crate::compositor::{
-    CompositorStartParams, start_synthetic_compositor, stop_compositor_if_run_id,
-    update_compositor_surface_size,
+    CompositorFrameConsumer, CompositorStartParams, start_synthetic_compositor,
+    stop_compositor_if_run_id, update_compositor_surface_size,
 };
 use crate::diagnostics::{apply_preview_surface_resize, apply_runtime_diagnostics_snapshot};
 use crate::native_preview_host::{
@@ -105,7 +105,7 @@ pub async fn create_preview_surface(
                 target_fps,
                 width: status.width,
                 height: status.height,
-                publish_yuv_frames: true,
+                frame_consumer: CompositorFrameConsumer::NativePreview,
                 stream_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
@@ -548,6 +548,7 @@ mod tests {
             .bounds()
             .map(|bounds| bounds.drawable_size());
         drop(surface);
+        let compositor = compositor_status(&state).await;
         destroy_preview_surface(&state).await;
 
         assert_eq!(status.state, PreviewSurfaceState::Live);
@@ -557,6 +558,12 @@ mod tests {
         assert_eq!(status.width, 800);
         assert_eq!(status.height, 450);
         assert_eq!(status.pending_host_command_count, 1);
+        assert_eq!(
+            compositor.frame_pipeline.consumer.as_deref(),
+            Some("native-preview")
+        );
+        assert_eq!(compositor.frame_pipeline.gpu_readbacks, 0);
+        assert_eq!(compositor.frame_pipeline.yuv_frames_converted, 0);
         assert_eq!(
             last_command_kind,
             Some(NativePreviewHostCommandKind::Create)
@@ -625,7 +632,7 @@ mod tests {
                 target_fps: 30,
                 width: 640,
                 height: 360,
-                publish_yuv_frames: true,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
@@ -664,7 +671,7 @@ mod tests {
                 target_fps: 30,
                 width: 640,
                 height: 360,
-                publish_yuv_frames: true,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
@@ -699,7 +706,7 @@ mod tests {
                 target_fps: 30,
                 width: 640,
                 height: 360,
-                publish_yuv_frames: true,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,

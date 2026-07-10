@@ -1,12 +1,29 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
 import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import {
+  collectPerformanceMetadata,
+  createPerformanceReport,
+  failingChecks,
+  passingCheck,
+  performanceMode,
+  writePerformanceReport
+} from './lib/performance-contract.mjs'
+import {
+  evaluateRecordingArtifact,
+  evaluateRecordingPerformance,
+  summarizeRecordingDiagnostics
+} from './lib/recording-performance-gate.mjs'
+import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
+const mode = performanceMode()
+const explicitOutputDirectory = Boolean(process.env.VIDEORC_SMOKE_OUTPUT_DIR)
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
     join(tmpdir(), `videorc-recording-performance-${Date.now()}`)
@@ -20,6 +37,15 @@ const warmupMs = Number(process.env.VIDEORC_PERF_WARMUP_MS ?? 12000)
 const previewPollMs = Number(process.env.VIDEORC_PERF_PREVIEW_POLL_MS ?? 250)
 const minSpeed = Number(process.env.VIDEORC_PERF_MIN_SPEED ?? 0.98)
 const maxSkewMs = Number(process.env.VIDEORC_PERF_MAX_AV_SKEW_MS ?? 250)
+const thresholds = {
+  minSteadySamples: Number(process.env.VIDEORC_PERF_MIN_STEADY_SAMPLES ?? 1),
+  minSpeed,
+  minFpsRatio: Number(process.env.VIDEORC_PERF_MIN_FPS_RATIO ?? 0.9),
+  maxBackendRssMb: Number(process.env.VIDEORC_PERF_MAX_BACKEND_RSS_MB ?? 1024),
+  maxActiveFfmpegProcesses: Number(process.env.VIDEORC_PERF_MAX_FFMPEG_PROCESSES ?? 2),
+  maxActiveFfprobeProcesses: Number(process.env.VIDEORC_PERF_MAX_FFPROBE_PROCESSES ?? 0),
+  minPreviewPollRatio: Number(process.env.VIDEORC_PERF_MIN_PREVIEW_POLL_RATIO ?? 0.5)
+}
 
 const scenarios = [
   { label: '1440p30', width: 2560, height: 1440, fps: 30, bitrateKbps: 8000 },
@@ -28,19 +54,47 @@ const scenarios = [
 
 let appProcess
 let stopping = false
+let results = []
+let runError = null
 
 mkdirSync(outputDirectory, { recursive: true })
 
 try {
   const connection = await launchAndReadConnection()
-  await runPerformanceSmoke(connection)
+  results = await runPerformanceSmoke(connection)
+} catch (error) {
+  runError = error
 } finally {
   await stopApp()
 }
 
+const report = createPerformanceReport({
+  scenario: 'synthetic-recording-performance',
+  mode,
+  metadata: await collectPerformanceMetadata({ cwd: repoRoot }),
+  timing: { warmupMs, measurementMs: recordingMs },
+  metrics: { thresholds, scenarios: results },
+  checks: runError
+    ? failingChecks([runError.message])
+    : [
+        passingCheck(
+          'recordings had video and audio streams, frame progress, and healthy diagnostics'
+        )
+      ]
+})
+const reportPath = await writePerformanceReport(report)
+console.log(`Recording performance report: ${reportPath}`)
+if (!runError && !explicitOutputDirectory && process.env.VIDEORC_PERF_RETAIN_ARTIFACTS !== '1') {
+  await rm(outputDirectory, { recursive: true, force: true })
+} else if (runError) {
+  console.log(`Recording performance scratch retained: ${outputDirectory}`)
+}
+if (runError) throw runError
+
 async function runPerformanceSmoke(connection) {
   const ws = await connectBackend(connection, timeoutMs)
   const samples = []
+  const scenarioResults = []
   try {
     ws.addEventListener('message', (event) => {
       try {
@@ -62,8 +116,9 @@ async function runPerformanceSmoke(connection) {
     console.log(`Recording performance smoke using FFprobe: ${ffprobePath}`)
 
     for (const scenario of scenarios) {
-      await runScenario(ws, connection, samples, scenario)
+      scenarioResults.push(await runScenario(ws, connection, samples, scenario))
     }
+    return scenarioResults
   } finally {
     ws.close()
   }
@@ -81,9 +136,10 @@ async function runScenario(ws, connection, samples, scenario) {
     )
   }
 
-  const stopPreviewPolling = pollPreviewFrames(connection)
+  const previewPolling = pollPreviewFrames(connection)
   await sleep(recordingMs)
-  stopPreviewPolling()
+  previewPolling.stop()
+  const polls = await previewPolling.done
 
   const stopRequestedAt = Date.now()
   const stopped = await request(ws, timeoutMs, 'session.stop')
@@ -98,18 +154,44 @@ async function runScenario(ws, connection, samples, scenario) {
     throw new Error(`[${scenario.label}] Recording output is empty: ${outputPath}`)
   }
 
-  const stats = summarizeDiagnostics(samples, scenario.fps, scenarioStartedAt, stopRequestedAt)
-  assertStatsHealthy(scenario, stats)
-  const skew = await audioVideoSkewMs(outputPath)
-  if (skew > maxSkewMs) {
-    throw new Error(
-      `[${scenario.label}] Audio/video duration skew ${skew.toFixed(1)}ms exceeded ${maxSkewMs}ms.`
-    )
+  const stats = summarizeRecordingDiagnostics(samples, {
+    targetFps: scenario.fps,
+    scenarioStartedAt,
+    stopRequestedAt,
+    warmupMs
+  })
+  const diagnosticFailures = evaluateRecordingPerformance({ scenario, stats, polls, thresholds })
+  if (diagnosticFailures.length > 0) {
+    throw new Error(diagnosticFailures.join('\n'))
+  }
+  const artifact = await analyzeRecording(outputPath, {
+    ffmpegPath,
+    ffprobePath,
+    intendedFps: scenario.fps,
+    expectAudio: true,
+    gates: { avSyncHardFailMs: maxSkewMs }
+  })
+  const analyzerPaths = writeReports(artifact)
+  const artifactFailures = evaluateRecordingArtifact({ scenario, report: artifact })
+  if (artifactFailures.length > 0) {
+    throw new Error(artifactFailures.join('\n'))
   }
 
   console.log(
-    `Recording performance [${scenario.label}] OK: ${outputPath} (${size} bytes), min speed ${format(stats.minSpeed)}x, min FPS ${format(stats.minFps)}, A/V skew ${skew.toFixed(1)}ms, maintenance samples ${stats.maintenanceSamples}, duplicate samples ${stats.duplicateCaptureSamples}, max RSS ${formatBytes(stats.maxBackendRssBytes)}, max FFmpeg procs ${stats.maxActiveFfmpegProcesses}, max FFprobe procs ${stats.maxActiveFfprobeProcesses}`
+    `Recording performance [${scenario.label}] OK: ${outputPath} (${size} bytes), min speed ${format(stats.minSpeed)}x, capture/render FPS ${format(stats.minCaptureFps)}/${format(stats.minRenderFps)}, decoded ${artifact.metrics.observedFrames} frames at ${format(artifact.metrics.observedFps)}fps, longest freeze ${format(artifact.metrics.longestFreezeMs)}ms, A/V skew ${format(artifact.metrics.avSkewMs)}ms, preview polls ${polls.successes}/${polls.attempts}, maintenance samples ${stats.maintenanceSamples}, duplicate samples ${stats.duplicateCaptureSamples}, max RSS ${formatBytes(stats.maxBackendRssBytes)}, max FFmpeg procs ${stats.maxActiveFfmpegProcesses}, max FFprobe procs ${stats.maxActiveFfprobeProcesses}`
   )
+  return {
+    scenario,
+    outputPath,
+    size,
+    stats,
+    polls,
+    artifact: {
+      verdict: artifact.verdict,
+      metrics: artifact.metrics,
+      analyzerPaths
+    }
+  }
 }
 
 function sessionParams(scenario) {
@@ -164,157 +246,30 @@ function previewParams(scenario) {
 
 function pollPreviewFrames(connection) {
   let stopped = false
+  let attempts = 0
+  let successes = 0
   async function poll() {
     while (!stopped) {
+      attempts += 1
       const url = `http://${connection.host}:${connection.port}/preview/live.jpg?token=${encodeURIComponent(connection.token)}&t=${Date.now()}`
       try {
-        await fetch(url)
+        const response = await fetch(url)
+        if (response.ok && (await response.arrayBuffer()).byteLength > 0) successes += 1
       } catch {
-        // Preview is expendable in this smoke; diagnostics are the assertion surface.
+        // Failed fetches remain visible in the success-ratio gate.
       }
       await sleep(previewPollMs)
     }
+    return { attempts, successes }
   }
-  void poll()
-  return () => {
-    stopped = true
-  }
-}
-
-function summarizeDiagnostics(samples, targetFps, scenarioStartedAt, stopRequestedAt) {
-  const numeric = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null)
-  const activeSamples = samples.filter((sample) => {
-    const receivedAt = sample.receivedAt ?? 0
-    return (
-      sample.activeOutputMode === 'record' &&
-      receivedAt >= scenarioStartedAt &&
-      receivedAt <= stopRequestedAt
-    )
-  })
-  const steadySamples = activeSamples.filter(
-    (sample) => (sample.receivedAt ?? 0) - scenarioStartedAt >= warmupMs
-  )
-  const measuredSamples = steadySamples.length ? steadySamples : activeSamples
-  const captureFpsValues = measuredSamples
-    .map((sample) => numeric(sample.captureFps))
-    .filter((value) => value !== null)
-  const renderFpsValues = measuredSamples
-    .map((sample) => numeric(sample.renderFps))
-    .filter((value) => value !== null)
-  const fpsValues = [...captureFpsValues, ...renderFpsValues]
-  const speedValues = measuredSamples
-    .map((sample) => numeric(sample.encoderSpeed))
-    .filter((value) => value !== null)
-  const backendRssValues = measuredSamples
-    .map((sample) => numeric(sample.backendRssBytes))
-    .filter((value) => value !== null)
-  const ffmpegProcessValues = measuredSamples
-    .map((sample) => numeric(sample.activeFfmpegProcesses))
-    .filter((value) => value !== null)
-  const ffprobeProcessValues = measuredSamples
-    .map((sample) => numeric(sample.activeFfprobeProcesses))
-    .filter((value) => value !== null)
+  const done = poll()
   return {
-    minFps: fpsValues.length ? Math.min(...fpsValues) : null,
-    minCaptureFps: captureFpsValues.length ? Math.min(...captureFpsValues) : null,
-    minRenderFps: renderFpsValues.length ? Math.min(...renderFpsValues) : null,
-    minSpeed: speedValues.length ? Math.min(...speedValues) : null,
-    droppedFrames: Math.max(0, ...measuredSamples.map((sample) => sample.droppedFrames ?? 0)),
-    micDroppedFrames: Math.max(0, ...measuredSamples.map((sample) => sample.micDroppedFrames ?? 0)),
-    previewDroppedFrames: Math.max(
-      0,
-      ...measuredSamples.map((sample) => sample.previewDroppedFrames ?? 0)
-    ),
-    maintenanceSamples: measuredSamples.filter((sample) => sample.ffmpegMaintenanceRunning).length,
-    maintenanceCancelSamples: measuredSamples.filter(
-      (sample) => sample.ffmpegMaintenanceCancelRequested
-    ).length,
-    duplicateCaptureSamples: measuredSamples.filter(
-      (sample) =>
-        Array.isArray(sample.duplicateCaptureSources) && sample.duplicateCaptureSources.length > 0
-    ).length,
-    maxBackendRssBytes: backendRssValues.length ? Math.max(...backendRssValues) : null,
-    maxActiveFfmpegProcesses: ffmpegProcessValues.length ? Math.max(...ffmpegProcessValues) : 0,
-    maxActiveFfprobeProcesses: ffprobeProcessValues.length ? Math.max(...ffprobeProcessValues) : 0,
-    steadySamples: steadySamples.length,
-    targetFps
-  }
-}
-
-function assertStatsHealthy(scenario, stats) {
-  if (stats.minSpeed === null) {
-    throw new Error(
-      `[${scenario.label}] No encoder speed diagnostics were captured after ${warmupMs}ms warm-up.`
-    )
-  }
-  if (stats.minSpeed < minSpeed) {
-    throw new Error(
-      `[${scenario.label}] Encoder speed ${format(stats.minSpeed)}x fell below ${minSpeed}x.`
-    )
-  }
-  if (stats.minFps === null) {
-    throw new Error(
-      `[${scenario.label}] No FPS diagnostics were captured after ${warmupMs}ms warm-up.`
-    )
-  }
-  const minFps = scenario.fps * 0.9
-  if (stats.minFps < minFps) {
-    throw new Error(
-      `[${scenario.label}] FPS ${format(stats.minFps)} fell below ${format(minFps)} (capture ${format(stats.minCaptureFps)}, render ${format(stats.minRenderFps)}).`
-    )
-  }
-  if (stats.droppedFrames > 0) {
-    throw new Error(`[${scenario.label}] FFmpeg reported ${stats.droppedFrames} dropped frame(s).`)
-  }
-  if (stats.micDroppedFrames > 0) {
-    throw new Error(
-      `[${scenario.label}] Native microphone reported ${stats.micDroppedFrames} dropped frame(s).`
-    )
-  }
-  if (stats.maintenanceSamples > 0) {
-    throw new Error(
-      `[${scenario.label}] Recording overlapped ${stats.maintenanceSamples} maintenance FFmpeg sample(s).`
-    )
-  }
-  if (stats.duplicateCaptureSamples > 0) {
-    throw new Error(
-      `[${scenario.label}] Recording reported ${stats.duplicateCaptureSamples} duplicate capture diagnostic sample(s).`
-    )
-  }
-}
-
-async function audioVideoSkewMs(outputPath) {
-  const probe = await run(ffprobePath, [
-    '-v',
-    'error',
-    '-show_entries',
-    'stream=codec_type,duration',
-    '-show_entries',
-    'format=duration',
-    '-of',
-    'json',
-    outputPath
-  ])
-  if (probe.status !== 0) {
-    throw new Error(`ffprobe failed for ${outputPath}: ${probe.stderr.trim()}`)
-  }
-  const parsed = JSON.parse(probe.stdout)
-  const formatDuration = Number(parsed.format?.duration)
-  const durations = new Map()
-  for (const stream of parsed.streams ?? []) {
-    const duration = Number(stream.duration)
-    if (Number.isFinite(duration)) {
-      durations.set(stream.codec_type, duration)
+    done,
+    stop() {
+      stopped = true
     }
   }
-  const video = durations.get('video') ?? formatDuration
-  const audio = durations.get('audio') ?? formatDuration
-  if (!Number.isFinite(video) || !Number.isFinite(audio)) {
-    throw new Error(`Could not read audio/video durations from ${outputPath}.`)
-  }
-  return Math.abs(video - audio) * 1000
 }
-
 async function assertFfprobeAvailable() {
   try {
     const result = await run(ffprobePath, ['-version'])
@@ -323,7 +278,7 @@ async function assertFfprobeAvailable() {
     }
   } catch (error) {
     throw new Error(
-      `FFprobe is required for A/V skew checks. Set VIDEORC_SMOKE_FFPROBE_PATH. ${error.message}`
+      `FFprobe is required for final-artifact cadence and A/V checks. Set VIDEORC_SMOKE_FFPROBE_PATH. ${error.message}`
     )
   }
 }

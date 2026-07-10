@@ -12,7 +12,7 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioAudio, useStudioCore } from '@/hooks/use-studio'
 import { isWindowsPlatform, osSettingsName } from '@/lib/platform'
 import { systemAccessRows, type SystemAccessRow } from '@/lib/system-access'
 
@@ -30,7 +30,6 @@ export function PermissionsOnboardingDialog({
 }): ReactElement {
   const {
     deviceList,
-    audioMeter,
     wsStatus,
     refreshBackend,
     openSystemPermission,
@@ -38,7 +37,8 @@ export function PermissionsOnboardingDialog({
     canSampleAudio,
     runtimeInfo,
     mediaAccess
-  } = useStudio()
+  } = useStudioCore()
+  const { audioMeter } = useStudioAudio()
   const [pending, setPending] = useState<'camera' | 'microphone' | null>(null)
 
   // enableMedia awaits across renders (backend restart → reconnect), so it

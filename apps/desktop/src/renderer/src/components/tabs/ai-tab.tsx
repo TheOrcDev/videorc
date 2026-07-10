@@ -25,7 +25,7 @@ import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui
 import { Field, FieldContent, FieldLabel } from '@/components/ui/field'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import { cloudAiReadiness } from '@/lib/ai-readiness'
 import {
   activeAiWorkflowStatus,
@@ -70,7 +70,7 @@ export function AiTab({
     aiQuota,
     aiReadinessError,
     aiReadinessLoading
-  } = useStudio()
+  } = useStudioCore()
   const cloudAi = cloudAiReadiness({
     account,
     capabilities: aiCapabilities,
