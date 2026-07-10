@@ -47,6 +47,7 @@ import {
 } from './lib/process-memory-gate.mjs'
 import {
   absoluteSampleDelayMs,
+  absoluteSampleDeadlineMs,
   performanceSampleIndexAtTime,
   performanceSamplingEvidenceFailures,
   performanceSamplingInvariants
@@ -241,6 +242,7 @@ try {
   console.log(`sampling ${sampleSeconds}s...`)
   const backend = launched.connections['backend-ready']
   const samples = []
+  const sampleObservedAtMs = []
   const cpuSamples = []
   const firstResourceCensus = await collectProcessCensus({
     ledgerPaths,
@@ -273,23 +275,25 @@ try {
       Math.min(samplingInvariants.expectedSamples, effectiveSampleIndex) - sampleIndex
     sampleIndex = effectiveSampleIndex
     if (Date.now() - measurementStartedAt >= measurementMs) break
+    const sampledAtMs = absoluteSampleDeadlineMs({
+      measurementStartedAtMs: measurementStartedAt,
+      sampleIndex,
+      intervalMs: sampleIntervalMs
+    })
     const [census, cpu] = await Promise.all([
       collectProcessCensus({ ledgerPaths, pgid: launched.process.pid }),
       sampleProcessGroupCpu(launched.process.pid)
     ])
-    census.sampledAtMs = Date.now()
+    census.sampledAtMs = sampledAtMs
     samples.push(census)
     cpuSamples.push(cpu)
+    sampleObservedAtMs.push(Date.now())
     sampleIndex += 1
   }
   const remainingMeasurementMs = measurementMs - (Date.now() - measurementStartedAt)
   if (remainingMeasurementMs > 0) await sleep(remainingMeasurementMs)
   const measurementEndedAt = Date.now()
-  const sampleTimestamps = [
-    measurementStartedAt,
-    ...samples.map((sample) => sample.sampledAtMs),
-    measurementEndedAt
-  ]
+  const sampleTimestamps = [measurementStartedAt, ...sampleObservedAtMs, measurementEndedAt]
   samplingEvidence = {
     expectedSamples: samplingInvariants.expectedSamples,
     collectedSamples: samples.length,

@@ -12,15 +12,26 @@ export function performanceSamplingInvariants(measurementMs, intervalMs) {
 }
 
 export function absoluteSampleDelayMs({ measurementStartedAtMs, sampleIndex, intervalMs, nowMs }) {
-  if (!Number.isFinite(measurementStartedAtMs) || !Number.isFinite(nowMs)) {
+  if (!Number.isFinite(nowMs)) {
+    throw new Error('Performance sampling timestamps must be finite.')
+  }
+  const deadlineMs = absoluteSampleDeadlineMs({
+    measurementStartedAtMs,
+    sampleIndex,
+    intervalMs
+  })
+  return Math.max(0, deadlineMs - nowMs)
+}
+
+export function absoluteSampleDeadlineMs({ measurementStartedAtMs, sampleIndex, intervalMs }) {
+  if (!Number.isFinite(measurementStartedAtMs)) {
     throw new Error('Performance sampling timestamps must be finite.')
   }
   if (!Number.isInteger(sampleIndex) || sampleIndex < 0) {
     throw new Error(`Performance sample index must be a non-negative integer, got ${sampleIndex}.`)
   }
   assertPositiveFinite('interval', intervalMs)
-  const deadlineMs = measurementStartedAtMs + sampleIndex * intervalMs
-  return Math.max(0, deadlineMs - nowMs)
+  return measurementStartedAtMs + sampleIndex * intervalMs
 }
 
 /**

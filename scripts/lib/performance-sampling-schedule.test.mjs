@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 
 import {
   absoluteSampleDelayMs,
+  absoluteSampleDeadlineMs,
   performanceSampleIndexAtTime,
   performanceSamplingEvidenceFailures,
   performanceSamplingInvariants
@@ -34,6 +35,19 @@ describe('performance sampling schedule', () => {
       minSamples: 599,
       minDurationMs: 599_000
     })
+    assert.equal(
+      absoluteSampleDeadlineMs({
+        measurementStartedAtMs: 10_000,
+        sampleIndex: 599,
+        intervalMs: 1_000
+      }) -
+        absoluteSampleDeadlineMs({
+          measurementStartedAtMs: 10_000,
+          sampleIndex: 0,
+          intervalMs: 1_000
+        }),
+      599_000
+    )
   })
 
   it('skips host-sleep deadlines instead of backfilling them in a post-wake burst', () => {
