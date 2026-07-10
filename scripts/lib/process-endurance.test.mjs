@@ -126,6 +126,7 @@ describe('process endurance evidence', () => {
     assert.equal(evidence.sampling.maxSampleGapMs, 1_800)
     assert.deepEqual(evaluateProcessEnduranceEvidence(evidence), [
       'performance sampling skipped 2 wall-clock deadlines; host sleep or a severe scheduling stall contaminated the run',
+      'performance sampling observation span 1800ms was below 3000ms',
       'performance sampling max gap 1800ms indicated host sleep or a scheduling stall'
     ])
   })

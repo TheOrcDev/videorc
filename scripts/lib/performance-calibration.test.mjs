@@ -174,6 +174,9 @@ describe('packaged performance calibration', () => {
       for (const role of Object.values(report.metrics.memory.roles)) role.rssSamples = 599
       report.metrics.sampling.collectedSamples = 599
       report.metrics.sampling.skippedDeadlineCount = 1
+      report.metrics.sampling.observations = report.metrics.sampling.observations.filter(
+        ({ sampleIndex }) => sampleIndex !== 300
+      )
     }
 
     assert.equal(aggregatePackagedPerformanceCalibration({ reports }).summary.runCount, 3)
@@ -297,6 +300,11 @@ describe('packaged performance calibration', () => {
         for (const role of Object.values(reports[1].metrics.memory.roles)) role.rssSamples = 601
         reports[1].metrics.sampling.expectedSamples = 601
         reports[1].metrics.sampling.collectedSamples = 601
+        reports[1].metrics.sampling.observations.push({
+          sampleIndex: 600,
+          scheduledAtMs: 600_000,
+          observedAtMs: 600_050
+        })
         reports[1].metrics.sampling.measurementElapsedMs = 601_000
       },
       /timing did not match run 1/
@@ -500,6 +508,11 @@ function detailedReport(index) {
         expectedSamples: 600,
         collectedSamples: 600,
         skippedDeadlineCount: 0,
+        observations: Array.from({ length: 600 }, (_, sampleIndex) => ({
+          sampleIndex,
+          scheduledAtMs: sampleIndex * 1_000,
+          observedAtMs: sampleIndex * 1_000 + 50
+        })),
         maxSampleGapMs: 1_050,
         measurementElapsedMs: 600_000,
         powerAssertion: 'caffeinate:-d,-i,-s',

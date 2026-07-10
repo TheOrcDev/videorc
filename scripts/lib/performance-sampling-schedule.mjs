@@ -1,23 +1,22 @@
 import { performance } from 'node:perf_hooks'
 
 const DEADLINE_JITTER_SAMPLE_ALLOWANCE = 1
-const MAX_OBSERVATION_LATENCY_VARIANCE_MS = 250
+const TIMESTAMP_ALIGNMENT_EPSILON_MS = 1e-6
 
 export function performanceSamplingInvariants(measurementMs, intervalMs) {
   assertPositiveFinite('measurement', measurementMs)
   assertPositiveFinite('interval', intervalMs)
   const expectedSamples = Math.ceil(measurementMs / intervalMs)
-  // The first-to-last raw series excludes the final interval and uses actual
-  // collection completion times. A slower first census than final census can
-  // therefore shorten that span slightly even when every absolute deadline,
-  // sample, wall-clock boundary, and max-gap check is satisfied. Keep a small
-  // bounded allowance for that completion-latency variance; sleep/stalls still
-  // fail independently through skipped deadlines, max gap, and elapsed time.
-  const observationLatencyVarianceMs = Math.min(intervalMs / 4, MAX_OBSERVATION_LATENCY_VARIANCE_MS)
+  const scheduledSpanMs = Math.max(0, (expectedSamples - 1) * intervalMs)
   return {
     expectedSamples,
     minSamples: Math.max(3, expectedSamples - DEADLINE_JITTER_SAMPLE_ALLOWANCE),
-    minDurationMs: Math.max(0, measurementMs - intervalMs - observationLatencyVarianceMs)
+    // Series timestamps describe collection completion, not ideal deadlines.
+    // Reserving one scheduled interval keeps this duration proof consistent
+    // with the one-deadline sample allowance and tolerates a slow first census
+    // followed by a faster final census. Count, skipped-deadline, max-gap, and
+    // wall-clock checks remain independent and fail host sleep or long stalls.
+    minDurationMs: Math.max(0, scheduledSpanMs - intervalMs)
   }
 }
 
@@ -99,6 +98,7 @@ export async function collectPerformanceSamplesOnSchedule({
       expectedSamples: invariants.expectedSamples,
       collectedSamples: samples.length,
       skippedDeadlineCount,
+      observations: sampleTimings,
       maxSampleGapMs: maximumAdjacentGapMs([
         measurementStartedAtMs,
         ...sampleObservedAtMs,
@@ -187,6 +187,7 @@ export function performanceSamplingEvidenceFailures(evidence, measurementMs, int
       failures.push('performance sampling collected plus skipped counts did not cover the schedule')
     }
   }
+  failures.push(...performanceSamplingObservationFailures(evidence, invariants, intervalMs))
   if (!Number.isFinite(evidence.maxSampleGapMs) || evidence.maxSampleGapMs > intervalMs * 2.5) {
     failures.push(
       `performance sampling max gap ${evidence.maxSampleGapMs ?? 'missing'}ms indicated host sleep or a scheduling stall`
@@ -202,6 +203,55 @@ export function performanceSamplingEvidenceFailures(evidence, measurementMs, int
     )
   }
   return failures
+}
+
+function performanceSamplingObservationFailures(evidence, invariants, intervalMs) {
+  if (!Array.isArray(evidence.observations)) {
+    return ['performance sampling observations were missing']
+  }
+  if (evidence.observations.length !== evidence.collectedSamples) {
+    return ['performance sampling observation count disagreed with collected samples']
+  }
+
+  let scheduleOriginMs = null
+  let previousSampleIndex = -1
+  let previousObservedAtMs = -Infinity
+  for (const observation of evidence.observations) {
+    if (
+      !observation ||
+      !Number.isInteger(observation.sampleIndex) ||
+      observation.sampleIndex < 0 ||
+      observation.sampleIndex >= invariants.expectedSamples ||
+      !Number.isFinite(observation.scheduledAtMs) ||
+      !Number.isFinite(observation.observedAtMs) ||
+      observation.observedAtMs < observation.scheduledAtMs
+    ) {
+      return ['performance sampling observations were invalid']
+    }
+    const observationOriginMs =
+      observation.scheduledAtMs - observation.sampleIndex * intervalMs
+    scheduleOriginMs ??= observationOriginMs
+    if (
+      Math.abs(observationOriginMs - scheduleOriginMs) > TIMESTAMP_ALIGNMENT_EPSILON_MS ||
+      observation.sampleIndex <= previousSampleIndex ||
+      observation.observedAtMs < previousObservedAtMs
+    ) {
+      return ['performance sampling observations did not match the absolute schedule']
+    }
+    previousSampleIndex = observation.sampleIndex
+    previousObservedAtMs = observation.observedAtMs
+  }
+
+  if (evidence.observations.length > 0) {
+    const observedDurationMs =
+      evidence.observations.at(-1).observedAtMs - evidence.observations[0].observedAtMs
+    if (observedDurationMs < invariants.minDurationMs) {
+      return [
+        `performance sampling observation span ${observedDurationMs}ms was below ${invariants.minDurationMs}ms`
+      ]
+    }
+  }
+  return []
 }
 
 function assertPositiveFinite(label, value) {
