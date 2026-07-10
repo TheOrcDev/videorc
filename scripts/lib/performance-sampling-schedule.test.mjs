@@ -4,6 +4,7 @@ import { describe, it } from 'node:test'
 import {
   absoluteSampleDelayMs,
   absoluteSampleDeadlineMs,
+  collectPerformanceSamplesOnSchedule,
   performanceSampleIndexAtTime,
   performanceSamplingEvidenceFailures,
   performanceSamplingInvariants
@@ -114,6 +115,56 @@ describe('performance sampling schedule', () => {
       []
     )
   })
+
+  it('keeps the short process-memory sentinel on its absolute cadence despite collector cost', async () => {
+    const clock = fakeClock()
+    const scheduledAtMs = []
+    const result = await collectPerformanceSamplesOnSchedule({
+      measurementMs: 4_000,
+      intervalMs: 500,
+      nowMs: clock.now,
+      sleep: clock.sleep,
+      collectSample: async (sample) => {
+        scheduledAtMs.push(sample.scheduledAtMs)
+        clock.advance(300)
+        return sample.sampleIndex
+      }
+    })
+
+    assert.deepEqual(result.samples, [0, 1, 2, 3, 4, 5, 6, 7])
+    assert.deepEqual(scheduledAtMs, [0, 500, 1_000, 1_500, 2_000, 2_500, 3_000, 3_500])
+    assert.deepEqual(result.evidence, {
+      expectedSamples: 8,
+      collectedSamples: 8,
+      skippedDeadlineCount: 0,
+      maxSampleGapMs: 500,
+      measurementElapsedMs: 4_000
+    })
+  })
+
+  it('skips expired short-sentinel deadlines instead of backfilling them', async () => {
+    const clock = fakeClock()
+    let collectionCount = 0
+    const result = await collectPerformanceSamplesOnSchedule({
+      measurementMs: 4_000,
+      intervalMs: 500,
+      nowMs: clock.now,
+      sleep: clock.sleep,
+      collectSample: async ({ sampleIndex }) => {
+        clock.advance(collectionCount === 0 ? 1_300 : 100)
+        collectionCount += 1
+        return sampleIndex
+      }
+    })
+
+    assert.deepEqual(result.samples, [0, 2, 3, 4, 5, 6, 7])
+    assert.equal(result.evidence.skippedDeadlineCount, 1)
+    assert.equal(result.evidence.collectedSamples, 7)
+    assert.equal(result.evidence.maxSampleGapMs, 1_300)
+    assert.deepEqual(performanceSamplingEvidenceFailures(result.evidence, 4_000, 500), [
+      'performance sampling max gap 1300ms indicated host sleep or a scheduling stall'
+    ])
+  })
 })
 
 function simulateSchedule({
@@ -151,4 +202,17 @@ function simulateSchedule({
   }
   nowMs += Math.max(0, measurementMs - nowMs)
   return { sampledAtMs, skippedDeadlineCount, endedAtMs: nowMs }
+}
+
+function fakeClock() {
+  let nowMs = 0
+  return {
+    now: () => nowMs,
+    sleep: async (durationMs) => {
+      nowMs += durationMs
+    },
+    advance: (durationMs) => {
+      nowMs += durationMs
+    }
+  }
 }

@@ -11,6 +11,86 @@ export function performanceSamplingInvariants(measurementMs, intervalMs) {
   }
 }
 
+/**
+ * Collect on absolute deadlines so collector overhead does not reduce cadence.
+ * Deadlines that expire before collection starts are skipped and reported;
+ * they are never backfilled with a burst of adjacent observations.
+ */
+export async function collectPerformanceSamplesOnSchedule({
+  measurementMs,
+  intervalMs,
+  collectSample,
+  nowMs = Date.now,
+  sleep = defaultSleep
+}) {
+  const invariants = performanceSamplingInvariants(measurementMs, intervalMs)
+  if (typeof collectSample !== 'function') {
+    throw new Error('Performance sample collector must be a function.')
+  }
+  if (typeof nowMs !== 'function' || typeof sleep !== 'function') {
+    throw new Error('Performance sampling clock and sleep must be functions.')
+  }
+
+  const measurementStartedAtMs = nowMs()
+  const samples = []
+  const sampleObservedAtMs = []
+  let sampleIndex = 0
+  let skippedDeadlineCount = 0
+
+  while (sampleIndex < invariants.expectedSamples) {
+    const delayMs = absoluteSampleDelayMs({
+      measurementStartedAtMs,
+      sampleIndex,
+      intervalMs,
+      nowMs: nowMs()
+    })
+    if (delayMs > 0) await sleep(delayMs)
+
+    const observedBeforeCollectionMs = nowMs()
+    const effectiveSampleIndex = performanceSampleIndexAtTime({
+      measurementStartedAtMs,
+      minimumSampleIndex: sampleIndex,
+      intervalMs,
+      nowMs: observedBeforeCollectionMs
+    })
+    skippedDeadlineCount += Math.min(invariants.expectedSamples, effectiveSampleIndex) - sampleIndex
+    sampleIndex = effectiveSampleIndex
+    if (
+      sampleIndex >= invariants.expectedSamples ||
+      observedBeforeCollectionMs - measurementStartedAtMs >= measurementMs
+    ) {
+      break
+    }
+
+    const scheduledAtMs = absoluteSampleDeadlineMs({
+      measurementStartedAtMs,
+      sampleIndex,
+      intervalMs
+    })
+    samples.push(await collectSample({ sampleIndex, scheduledAtMs }))
+    sampleObservedAtMs.push(nowMs())
+    sampleIndex += 1
+  }
+
+  const remainingMeasurementMs = measurementMs - (nowMs() - measurementStartedAtMs)
+  if (remainingMeasurementMs > 0) await sleep(remainingMeasurementMs)
+  const measurementEndedAtMs = nowMs()
+  return {
+    samples,
+    evidence: {
+      expectedSamples: invariants.expectedSamples,
+      collectedSamples: samples.length,
+      skippedDeadlineCount,
+      maxSampleGapMs: maximumAdjacentGapMs([
+        measurementStartedAtMs,
+        ...sampleObservedAtMs,
+        measurementEndedAtMs
+      ]),
+      measurementElapsedMs: measurementEndedAtMs - measurementStartedAtMs
+    }
+  }
+}
+
 export function absoluteSampleDelayMs({ measurementStartedAtMs, sampleIndex, intervalMs, nowMs }) {
   if (!Number.isFinite(nowMs)) {
     throw new Error('Performance sampling timestamps must be finite.')
@@ -106,4 +186,16 @@ function assertPositiveFinite(label, value) {
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error(`Performance sampling ${label} must be positive, got ${value}.`)
   }
+}
+
+function maximumAdjacentGapMs(timestamps) {
+  let maximum = 0
+  for (let index = 1; index < timestamps.length; index += 1) {
+    maximum = Math.max(maximum, timestamps[index] - timestamps[index - 1])
+  }
+  return maximum
+}
+
+function defaultSleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
 }

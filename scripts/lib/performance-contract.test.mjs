@@ -16,6 +16,7 @@ import {
   observationCheck,
   performanceBuildMode,
   performanceHardwareClass,
+  performanceMetadataWithObservedDisplayScale,
   performanceMode,
   performanceWrapperMetadataAfterChild,
   sha256File,
@@ -85,6 +86,37 @@ describe('performanceBuildMode', () => {
     assert.equal(
       performanceBuildMode({ VIDEORC_PERF_APP_EXECUTABLE: '/Applications/Videorc.app/Videorc' }),
       'packaged'
+    )
+  })
+})
+
+describe('performance display scale reconciliation', () => {
+  it('uses an observed pipeline scale only when system metadata is absent', () => {
+    assert.deepEqual(
+      performanceMetadataWithObservedDisplayScale(
+        { displayScaleFactor: null, machineModel: 'VirtualMac2,1' },
+        1
+      ),
+      { displayScaleFactor: 1, machineModel: 'VirtualMac2,1' }
+    )
+
+    const systemMetadata = { displayScaleFactor: 2 }
+    assert.equal(performanceMetadataWithObservedDisplayScale(systemMetadata, 1), systemMetadata)
+
+    const invalidSystemMetadata = { displayScaleFactor: 0 }
+    assert.equal(
+      performanceMetadataWithObservedDisplayScale(invalidSystemMetadata, 1),
+      invalidSystemMetadata
+    )
+  })
+
+  it('reconciles a headless wrapper scale from its completed child report', () => {
+    assert.deepEqual(
+      performanceWrapperMetadataAfterChild(
+        { displayScaleFactor: null, machineModel: 'VirtualMac2,1' },
+        { displayScaleFactor: 1 }
+      ),
+      { displayScaleFactor: 1, machineModel: 'VirtualMac2,1' }
     )
   })
 })

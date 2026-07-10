@@ -121,7 +121,7 @@ export function aggregatePackagedPerformanceCalibration({ reports, reportPaths =
     machineModel: first.metadata.machineModel,
     hardwareClass: first.metadata.hardwareClass ?? null,
     operatingSystem: first.metadata.operatingSystem,
-    displayScaleFactor: first.metadata.displayScaleFactor,
+    displayScaleFactor: effectiveDisplayScaleFactor(first),
     buildMode: 'packaged',
     powerAssertion: first.metadata.powerAssertion,
     powerAssertionVerified: first.metadata.powerAssertionVerified,
@@ -177,7 +177,7 @@ export function validatePackagedPerformanceCalibrationReports(reports) {
     ['machine model', (report) => report.metadata.machineModel],
     ['hardware class', (report) => report.metadata.hardwareClass ?? null],
     ['operating system', (report) => report.metadata.operatingSystem],
-    ['display scale', (report) => report.metadata.displayScaleFactor],
+    ['display scale', (report) => effectiveDisplayScaleFactor(report)],
     ['power assertion', (report) => report.metadata.powerAssertion],
     ['power assertion verification', (report) => report.metadata.powerAssertionVerified],
     ['app role', (report) => report.metadata.appRole],
@@ -410,9 +410,7 @@ function validateDetailedReport(report, index) {
   if (!validOperatingSystem(metadata?.operatingSystem)) {
     failures.push(`${label} macOS identity was missing or invalid`)
   }
-  if (!positiveFinite(metadata?.displayScaleFactor)) {
-    failures.push(`${label} display scale factor was missing or invalid`)
-  }
+  validateDisplayScaleFactor(report, label, failures)
   if (!validSha256(metadata?.executable?.sha256)) {
     failures.push(`${label} packaged executable SHA-256 was missing or invalid`)
   }
@@ -505,6 +503,39 @@ function calibrationTiming(report) {
       report?.timing?.intervalMs ??
       report?.timing?.sampleIntervalMs ??
       report?.metrics?.processEndurance?.timing?.intervalMs
+  }
+}
+
+function effectiveDisplayScaleFactor(report) {
+  const metadataScaleFactor = report?.metadata?.displayScaleFactor
+  return metadataScaleFactor === null || metadataScaleFactor === undefined
+    ? report?.metrics?.pipeline?.bounds?.scaleFactor
+    : metadataScaleFactor
+}
+
+function validateDisplayScaleFactor(report, label, failures) {
+  const metadataScaleFactor = report?.metadata?.displayScaleFactor
+  const observedScaleFactor = report?.metrics?.pipeline?.bounds?.scaleFactor
+  const hasMetadataScaleFactor = metadataScaleFactor !== null && metadataScaleFactor !== undefined
+  const hasObservedScaleFactor = observedScaleFactor !== null && observedScaleFactor !== undefined
+
+  if (hasMetadataScaleFactor && !positiveFinite(metadataScaleFactor)) {
+    failures.push(`${label} metadata display scale factor was nonpositive or invalid`)
+  }
+  if (hasObservedScaleFactor && !positiveFinite(observedScaleFactor)) {
+    failures.push(`${label} pipeline bounds scale factor was nonpositive or invalid`)
+  }
+  if (!positiveFinite(effectiveDisplayScaleFactor(report))) {
+    failures.push(`${label} effective display scale factor was missing or invalid`)
+  }
+  if (
+    positiveFinite(metadataScaleFactor) &&
+    positiveFinite(observedScaleFactor) &&
+    Math.abs(metadataScaleFactor - observedScaleFactor) > Number.EPSILON
+  ) {
+    failures.push(
+      `${label} metadata display scale factor ${metadataScaleFactor} disagreed with pipeline bounds scale factor ${observedScaleFactor}`
+    )
   }
 }
 

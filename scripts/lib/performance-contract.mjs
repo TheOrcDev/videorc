@@ -330,13 +330,25 @@ export function macosCaffeinatePowerAssertionVerified(assertions, pid) {
 }
 
 export function performanceWrapperMetadataAfterChild(wrapperMetadata, childMetadata) {
-  if (!wrapperMetadata?.powerAssertion) return wrapperMetadata
+  const reconciledMetadata = performanceMetadataWithObservedDisplayScale(
+    wrapperMetadata,
+    childMetadata?.displayScaleFactor
+  )
+  if (!wrapperMetadata?.powerAssertion) return reconciledMetadata
   return {
-    ...wrapperMetadata,
+    ...reconciledMetadata,
     powerAssertionVerified:
       childMetadata?.powerAssertion === wrapperMetadata.powerAssertion &&
       childMetadata?.powerAssertionVerified === true
   }
+}
+
+export function performanceMetadataWithObservedDisplayScale(metadata, observedScaleFactor) {
+  if (metadata?.displayScaleFactor !== null && metadata?.displayScaleFactor !== undefined) {
+    return metadata
+  }
+  const displayScaleFactor = positiveNumber(observedScaleFactor)
+  return displayScaleFactor ? { ...metadata, displayScaleFactor } : metadata
 }
 
 export function performanceHardwareClass(env = process.env) {

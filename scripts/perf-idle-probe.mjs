@@ -20,6 +20,11 @@ import {
   loadActivePerformanceBudget
 } from './lib/performance-budget.mjs'
 import {
+  DETACHED_PREVIEW_CALIBRATION_SURFACE_SIZE,
+  DETACHED_PREVIEW_CALIBRATION_WINDOW_SIZE,
+  inspectDetachedPreviewCalibrationSample
+} from './lib/detached-preview-calibration.mjs'
+import {
   collectPerformanceMetadata,
   createPerformanceReport,
   currentMacosCaffeinatePowerAssertionVerified,
@@ -27,6 +32,7 @@ import {
   failingChecks,
   observationCheck,
   passingCheck,
+  performanceMetadataWithObservedDisplayScale,
   performanceMode,
   writePerformanceReport
 } from './lib/performance-contract.mjs'
@@ -226,7 +232,9 @@ try {
     }
   }
   await smokeCommandRetry(smoke, 'preview-window-open')
-  if (previewMode === 'docked') {
+  if (previewMode === 'detached') {
+    await prepareStableDetachedPreview(smoke)
+  } else if (previewMode === 'docked') {
     await smokeCommandRetry(smoke, 'preview-window-set-mode', { mode: 'docked' })
     // A fresh profile can mount What's New after the dock epoch changes. Let
     // both the blocking overlay and the renderer's first slot report settle
@@ -525,7 +533,10 @@ const enforcedBudgetFailures = mode === 'gate' ? budgetFailures : []
 const report = createPerformanceReport({
   scenario: reportScenario,
   mode,
-  metadata: reportMetadata,
+  metadata: performanceMetadataWithObservedDisplayScale(
+    reportMetadata,
+    pipeline?.bounds?.scaleFactor
+  ),
   timing: {
     warmupMs: warmupSeconds * 1000,
     measurementMs: sampleSeconds * 1000,
@@ -840,6 +851,53 @@ async function waitForVisibleDockedPreview(smoke) {
     await sleep(100)
   }
   throw new Error(`Timed out waiting for visible docked preview: ${JSON.stringify(state)}`)
+}
+
+async function prepareStableDetachedPreview(smoke) {
+  await smokeCommandRetry(smoke, 'preview-window-set-bounds', {
+    width: DETACHED_PREVIEW_CALIBRATION_WINDOW_SIZE.width,
+    height: DETACHED_PREVIEW_CALIBRATION_WINDOW_SIZE.height
+  })
+
+  const requiredStableSamples = 5
+  const deadline = Date.now() + 30000
+  let stableSamples = 0
+  let stableKey = null
+  let lastInspection = null
+  let lastWindowState = null
+  let lastSurfaceStatus = null
+  while (Date.now() < deadline) {
+    ;[lastWindowState, lastSurfaceStatus] = await Promise.all([
+      smokeCommandRetry(smoke, 'preview-window-state'),
+      smokeCommandRetry(smoke, 'native-preview-surface-status')
+    ])
+    lastInspection = inspectDetachedPreviewCalibrationSample(lastWindowState, lastSurfaceStatus)
+    if (!lastInspection.ready) {
+      stableSamples = 0
+      stableKey = null
+    } else if (lastInspection.stabilityKey === stableKey) {
+      stableSamples += 1
+    } else {
+      stableKey = lastInspection.stabilityKey
+      stableSamples = 1
+    }
+    if (stableSamples >= requiredStableSamples) {
+      const target = DETACHED_PREVIEW_CALIBRATION_SURFACE_SIZE
+      console.log(
+        `detached preview stable at ${target.width}x${target.height} for ${requiredStableSamples} consecutive samples`
+      )
+      return { windowState: lastWindowState, surfaceStatus: lastSurfaceStatus }
+    }
+    await sleep(250)
+  }
+
+  const target = DETACHED_PREVIEW_CALIBRATION_SURFACE_SIZE
+  throw new Error(
+    `Detached native preview did not stabilize at ${target.width}x${target.height} before warm-up. ` +
+      `Stable samples: ${stableSamples}/${requiredStableSamples}. ` +
+      `Failures: ${lastInspection?.failures?.join('; ') || 'none (bounds kept moving)'}. ` +
+      `Window: ${JSON.stringify(lastWindowState)}. Surface: ${JSON.stringify(lastSurfaceStatus)}.`
+  )
 }
 
 function roleThresholds(suffix) {

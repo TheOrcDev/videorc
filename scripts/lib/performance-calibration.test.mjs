@@ -26,6 +26,7 @@ describe('packaged performance calibration', () => {
     assert.equal(summary.provenance.executableSha256, EXECUTABLE_SHA256)
     assert.equal(summary.provenance.powerAssertion, 'caffeinate:-d,-i,-s')
     assert.equal(summary.provenance.powerAssertionVerified, true)
+    assert.equal(summary.provenance.displayScaleFactor, 2)
     assert.equal(summary.comparabilityPolicy.maxCadenceRelativeRange, 0.1)
     assert.equal(summary.observed.cadence.presentFps.median, 60)
     assert.equal(summary.observed.memoryMiB.maximumOwnedRss.median, 402)
@@ -43,6 +44,61 @@ describe('packaged performance calibration', () => {
     assert.equal(budgetCandidate.thresholds, null)
     assert.equal(budgetCandidate.activation.reviewRequired, true)
   })
+
+  it('uses the observed pipeline scale for headless reports without display metadata', () => {
+    const reports = calibrationReports()
+    for (const report of reports) {
+      report.metadata.displayScaleFactor = null
+      report.metrics.pipeline.bounds.scaleFactor = 1
+    }
+
+    const { summary, budgetCandidate } = aggregatePackagedPerformanceCalibration({ reports })
+
+    assert.equal(summary.provenance.displayScaleFactor, 1)
+    assert.equal(budgetCandidate.scope.displayScaleFactor, 1)
+  })
+
+  for (const [name, mutate, expected] of [
+    [
+      'missing display scale evidence',
+      (report) => {
+        report.metadata.displayScaleFactor = null
+        delete report.metrics.pipeline.bounds
+      },
+      /effective display scale factor was missing/
+    ],
+    [
+      'nonpositive display metadata',
+      (report) => {
+        report.metadata.displayScaleFactor = 0
+      },
+      /metadata display scale factor was nonpositive/
+    ],
+    [
+      'nonpositive observed pipeline scale',
+      (report) => {
+        report.metrics.pipeline.bounds.scaleFactor = 0
+      },
+      /pipeline bounds scale factor was nonpositive/
+    ],
+    [
+      'metadata and pipeline display scale disagreement',
+      (report) => {
+        report.metrics.pipeline.bounds.scaleFactor = 1
+      },
+      /metadata display scale factor 2 disagreed with pipeline bounds scale factor 1/
+    ]
+  ]) {
+    it(`rejects ${name}`, () => {
+      const reports = calibrationReports()
+      mutate(reports[1])
+
+      assert.throws(
+        () => aggregatePackagedPerformanceCalibration({ reports }),
+        (error) => error instanceof PerformanceCalibrationError && expected.test(error.message)
+      )
+    })
+  }
 
   it('accepts recording/device reports without pretending wire or frame-pipeline metrics exist', () => {
     for (const scenario of ['real-devices-1080p', 'record-4k', 'record-4k-stream-1080p']) {
@@ -374,6 +430,7 @@ function detailedReport(index) {
         intervalP99Ms: 22 + index,
         transport: 'native-surface',
         backing: 'cametal-layer',
+        bounds: { scaleFactor: 2 },
         framePipeline: {
           consumer: 'native-preview',
           gpuReadbacks: 0,

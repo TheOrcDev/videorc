@@ -28,6 +28,10 @@ import {
   formatProcessMemorySummary,
   summarizeProcessMemory
 } from './lib/process-memory-gate.mjs'
+import {
+  collectPerformanceSamplesOnSchedule,
+  performanceSamplingEvidenceFailures
+} from './lib/performance-sampling-schedule.mjs'
 
 const mode = performanceMode()
 const timeoutMs = numberFromEnv('VIDEORC_SMOKE_TIMEOUT_MS', 120000)
@@ -83,6 +87,7 @@ const ledgerPaths = ownedProcessLedgerPaths({
 
 let launched
 let summary = null
+let samplingEvidence = null
 let resourceCheckpoints = null
 let budgetFailures = []
 let runError = null
@@ -120,7 +125,9 @@ try {
     first: await collectProcessResourceDetails(firstResourceCensus),
     last: null
   }
-  const samples = await collectSamples()
+  const scheduledSamples = await collectSamples()
+  const samples = scheduledSamples.samples
+  samplingEvidence = scheduledSamples.evidence
   const lastResourceCensus = await collectProcessCensus({
     ledgerPaths,
     pgid: launched.process.pid
@@ -180,6 +187,7 @@ try {
 const hardFailures = [
   ...(runError ? [runError.message] : []),
   ...(teardownError ? [teardownError.message] : []),
+  ...performanceSamplingEvidenceFailures(samplingEvidence, sampleMs, intervalMs),
   ...(!teardownClean ? ['app-owned process teardown was not clean'] : [])
 ]
 const enforcedBudgetFailures = mode === 'gate' ? budgetFailures : []
@@ -202,6 +210,7 @@ const report = createPerformanceReport({
   timing: { warmupMs, measurementMs: sampleMs, intervalMs, tailWindowMs },
   metrics: {
     memory: summary,
+    sampling: samplingEvidence,
     resourceCheckpoints,
     thresholds,
     budgetFailures,
@@ -231,22 +240,18 @@ console.log(
 )
 
 async function collectSamples() {
-  const startedAt = Date.now()
-  const samples = []
-  for (;;) {
-    const census = await collectProcessCensus({
-      ledgerPaths,
-      pgid: launched.process.pid
-    })
-    census.sampledAtMs = Date.now()
-    samples.push(census)
-    const remainingMs = sampleMs - (Date.now() - startedAt)
-    if (remainingMs <= 0) {
-      break
+  return collectPerformanceSamplesOnSchedule({
+    measurementMs: sampleMs,
+    intervalMs,
+    collectSample: async ({ scheduledAtMs }) => {
+      const census = await collectProcessCensus({
+        ledgerPaths,
+        pgid: launched.process.pid
+      })
+      census.sampledAtMs = scheduledAtMs
+      return census
     }
-    await sleep(Math.min(intervalMs, remainingMs))
-  }
-  return samples
+  })
 }
 
 function roleThresholds(suffix) {
