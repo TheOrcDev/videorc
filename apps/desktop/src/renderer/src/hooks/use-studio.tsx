@@ -260,6 +260,7 @@ function sourceFallbackActiveSessionMessage(state: RecordingStatus['state']): st
 
 const NATIVE_PREVIEW_SURFACE_PRESENT_REPORT_INTERVAL_MS = 250
 const WORKSPACE_NAVIGATE_EVENT = 'videorc:navigate-workspace'
+const AI_CONSENT_STORAGE_KEY = 'videorc.aiConsent'
 
 function isRecordingQualityEvent(code: string): boolean {
   return code.startsWith('recording-quality-')
@@ -563,7 +564,8 @@ export type StudioContextValue = {
   mediaAccess: MediaAccessSnapshot | null
   // ai + jobs
   aiConsent: boolean
-  setAiConsent: Dispatch<SetStateAction<boolean>>
+  /** Persists across launches (durable preference, not a per-launch answer). */
+  setAiConsent: (consent: boolean) => void
   aiRunningSessionId: string | null
   exportRunningSessionId: string | null
   startRequestPending: boolean
@@ -1560,7 +1562,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // meter has no capture backend there, so it can't report mic permission.
   const [mediaAccess, setMediaAccess] = useState<MediaAccessSnapshot | null>(null)
   const [now, setNow] = useState(() => Date.now())
-  const [aiConsent, setAiConsent] = useState(false)
+  // Cloud-AI consent is a durable preference, not a per-launch answer: it
+  // silently resetting to off every launch was the top reason publish runs
+  // "did nothing but extract audio" (2026-07-11 report).
+  const [aiConsent, setAiConsentState] = useState(
+    () => localStorage.getItem(AI_CONSENT_STORAGE_KEY) === '1'
+  )
+  const setAiConsent = useCallback((consent: boolean) => {
+    setAiConsentState(consent)
+    localStorage.setItem(AI_CONSENT_STORAGE_KEY, consent ? '1' : '0')
+  }, [])
   const [aiRunningSessionId, setAiRunningSessionId] = useState<string | null>(null)
   const [exportRunningSessionId, setExportRunningSessionId] = useState<string | null>(null)
   const [startRequestPending, setStartRequestPending] = useState(false)
@@ -6465,7 +6476,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // FX3: the local-only run needs an explicit, named result — "nothing
         // visibly happened" was the by-eye finding. Name the produced file.
         if (aiConsent) {
-          toast.success('AI workflow finished.')
+          toast.success('Publish pack generated.')
+        } else if (
+          result.artifacts.some(
+            (artifact) => artifact.kind === 'transcript' && artifact.status === 'ready'
+          )
+        ) {
+          toast.success('Transcript ready from live captions.', {
+            description:
+              'Enable cloud consent to generate the title, description, and the rest of the pack — the transcript uploads as text only.'
+          })
         } else {
           toast.success('Local audio extracted.', {
             description: result.audioPath
@@ -6503,7 +6523,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const result = await client.request<ExportPublishPackResult>('ai.publish_pack.export', {
           sessionId
         })
-        toast.success(`Publish pack exported to ${result.markdownPath}`)
+        const fileCount = result.files?.length ?? 1
+        toast.success(
+          `Publish pack exported (${fileCount} ${fileCount === 1 ? 'file' : 'files'}).`,
+          {
+            description: result.markdownPath
+          }
+        )
       } catch (error) {
         reportError(error)
       } finally {

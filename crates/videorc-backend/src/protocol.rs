@@ -2295,6 +2295,9 @@ pub struct ExportPublishPackParams {
 pub struct ExportPublishPackResult {
     pub session_id: String,
     pub markdown_path: String,
+    /// Every file the export wrote (markdown + per-field paste-ready files).
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

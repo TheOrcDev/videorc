@@ -1943,6 +1943,8 @@ export interface AiWorkflowResult {
 export interface ExportPublishPackResult {
   sessionId: string
   markdownPath: string
+  /** Every file the export wrote (markdown + per-field paste-ready files). */
+  files?: string[]
 }
 
 export interface AiCapabilities {

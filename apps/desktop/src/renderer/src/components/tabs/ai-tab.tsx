@@ -25,11 +25,12 @@ import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui
 import { Field, FieldContent, FieldLabel } from '@/components/ui/field'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
+import { useVideorcAccount } from '@/hooks/use-account'
 import { useStudio } from '@/hooks/use-studio'
 import { cloudAiReadiness } from '@/lib/ai-readiness'
 import {
   activeAiWorkflowStatus,
-  aiRunButtonLabel,
+  aiRunButtonAction,
   latestAiProblemArtifact
 } from '@/lib/ai-workflow-status'
 import type { AiArtifact, SessionSummary } from '@/lib/backend'
@@ -208,8 +209,8 @@ export function AiTab({
               </div>
               <p className="text-xs text-muted-foreground">
                 {cloudAi.ready
-                  ? 'Recordings stay local; with consent, extracted audio uploads for transcription and the artifacts land back in your library.'
-                  : `${cloudAi.description} Local audio extraction always works without upload.`}
+                  ? 'Recordings stay local. With consent, the live-captions transcript uploads as text — or, without captions, the extracted audio — and the generated pack lands back in your library.'
+                  : `${cloudAi.description} Transcripts from live captions always work locally without upload.`}
               </p>
               {cloudAi.state === 'premium-required' ? (
                 <Button
@@ -267,6 +268,7 @@ export function AiTab({
   }
 
   function SessionActions({ session }: { session: SessionSummary }): ReactElement {
+    const { signIn } = useVideorcAccount()
     const canRunAi = Boolean(
       session.status === 'completed' && (session.mp4Path || session.outputPath)
     )
@@ -277,26 +279,47 @@ export function AiTab({
     const canExportPublishPack = hasReviewableArtifacts
     const aiRunning = aiRunningSessionId === session.id
     const exportRunning = exportRunningSessionId === session.id
-    const cloudAiBlocked = aiConsent && !cloudAi.ready
     const runningStatus = aiRunning ? activeAiWorkflowStatus(session) : null
-    const runLabel = aiRunButtonLabel({
+    // The primary button is the run OR the exact fix for whatever blocks the
+    // run — never a half-run that only extracts audio and looks dead.
+    const runAction = aiRunButtonAction({
       aiRunning,
-      cloudReady: cloudAi.ready,
       consent: aiConsent,
       hasFailedArtifacts,
-      hasReviewableArtifacts
+      hasReviewableArtifacts,
+      readinessState: cloudAi.state
     })
 
     return (
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap gap-2">
           <Button
-            disabled={!canRunAi || aiRunning || cloudAiBlocked}
-            title={cloudAiBlocked ? cloudAi.description : undefined}
-            onClick={() => runAiWorkflow(session.id)}
+            disabled={!canRunAi || aiRunning || runAction.kind === 'blocked'}
+            title={runAction.kind === 'blocked' ? cloudAi.description : undefined}
+            onClick={() => {
+              switch (runAction.kind) {
+                case 'run':
+                  runAiWorkflow(session.id)
+                  break
+                case 'enable-consent':
+                  setAiConsent(true)
+                  toast.success('Cloud consent enabled.', {
+                    description: 'Run it again — generation now uses your transcript or audio.'
+                  })
+                  break
+                case 'sign-in':
+                  signIn()
+                  break
+                case 'view-premium':
+                  openExternalUrl(VIDEORC_PREMIUM_URL)
+                  break
+                case 'blocked':
+                  break
+              }
+            }}
           >
             <Lightning data-icon="inline-start" weight="fill" />
-            {runLabel}
+            {runAction.label}
           </Button>
           <Button
             disabled={!canExportPublishPack || exportRunning}

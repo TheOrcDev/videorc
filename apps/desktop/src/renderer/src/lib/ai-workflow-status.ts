@@ -1,3 +1,4 @@
+import type { CloudAiReadinessState } from './ai-readiness'
 import type { AiArtifact, HealthEvent, SessionSummary } from './backend'
 
 export interface AiWorkflowStatus {
@@ -6,23 +7,49 @@ export interface AiWorkflowStatus {
   tone: 'neutral' | 'warning'
 }
 
-export function aiRunButtonLabel(params: {
+// The primary button is either the RUN or the FIX — never a misleading
+// "Extract local audio" that half-executes and looks like a dead feature
+// (2026-07-11 report: "Title & description just downloads sound").
+export type AiRunButtonAction =
+  | { kind: 'run'; label: string }
+  | { kind: 'enable-consent'; label: string }
+  | { kind: 'sign-in'; label: string }
+  | { kind: 'view-premium'; label: string }
+  | { kind: 'blocked'; label: string }
+
+export function aiRunButtonAction(params: {
   aiRunning: boolean
-  cloudReady: boolean
   consent: boolean
   hasFailedArtifacts: boolean
   hasReviewableArtifacts: boolean
-}): string {
+  readinessState: CloudAiReadinessState
+}): AiRunButtonAction {
   if (params.aiRunning) {
-    return 'Running...'
+    return { kind: 'run', label: 'Running…' }
   }
-  if (!params.consent || !params.cloudReady) {
-    return 'Extract local audio'
+  if (!params.consent) {
+    return { kind: 'enable-consent', label: 'Enable cloud consent' }
   }
-  if (params.hasFailedArtifacts || params.hasReviewableArtifacts) {
-    return 'Retry AI workflow'
+  switch (params.readinessState) {
+    case 'ready':
+      break
+    case 'signed-out':
+    case 'session-expired':
+      return { kind: 'sign-in', label: 'Sign in to generate' }
+    case 'premium-required':
+      return { kind: 'view-premium', label: 'View Premium' }
+    case 'checking':
+      return { kind: 'blocked', label: 'Checking cloud AI…' }
+    default:
+      return { kind: 'blocked', label: 'Cloud AI unavailable' }
   }
-  return 'Run AI workflow'
+  if (params.hasFailedArtifacts) {
+    return { kind: 'run', label: 'Retry generation' }
+  }
+  if (params.hasReviewableArtifacts) {
+    return { kind: 'run', label: 'Regenerate publish pack' }
+  }
+  return { kind: 'run', label: 'Generate publish pack' }
 }
 
 export function activeAiWorkflowStatus(session: SessionSummary): AiWorkflowStatus {
@@ -31,18 +58,20 @@ export function activeAiWorkflowStatus(session: SessionSummary): AiWorkflowStatu
     return statusForHealthEvent(latestEvent)
   }
 
-  const hasAudioExtract = session.aiArtifacts.some(
-    (artifact) => artifact.kind === 'audio-extract' && artifact.status === 'ready'
+  const hasLocalInput = session.aiArtifacts.some(
+    (artifact) =>
+      artifact.status === 'ready' &&
+      (artifact.kind === 'audio-extract' || artifact.kind === 'transcript')
   )
-  return hasAudioExtract
+  return hasLocalInput
     ? {
         description: 'Videorc is waiting for the server job to return generated artifacts.',
         title: 'Processing cloud AI',
         tone: 'neutral'
       }
     : {
-        description: 'Videorc is extracting audio locally before any cloud upload.',
-        title: 'Extracting audio',
+        description: 'Videorc is preparing the local transcript or audio before any cloud upload.',
+        title: 'Preparing recording',
         tone: 'neutral'
       }
 }
