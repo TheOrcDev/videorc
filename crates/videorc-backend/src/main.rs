@@ -33,6 +33,7 @@ mod preview_screen;
 mod preview_surface;
 mod process_job;
 mod protocol;
+mod publish_clips;
 mod recording;
 mod repair;
 mod repair_service;
@@ -4098,6 +4099,32 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
                     Ok(result) => ServerResponse::ok(command.id, result),
                     Err(error) => {
                         ServerResponse::error(command.id, "ai-workflow-failed", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "ai.clips.suggest" => {
+            match serde_json::from_value::<protocol::ClipSuggestParams>(command.params) {
+                Ok(params) => match publish_clips::suggest_clips(state.clone(), params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "clip-suggest-failed", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "ai.clip.export" => {
+            match serde_json::from_value::<protocol::ClipExportParams>(command.params) {
+                Ok(params) => match publish_clips::export_clip(state.clone(), params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "clip-export-failed", error.to_string())
                     }
                 },
                 Err(error) => {

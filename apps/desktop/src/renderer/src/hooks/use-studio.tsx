@@ -101,6 +101,8 @@ import type {
   CommentsWindowState,
   CompositorStatus,
   DiagnosticStats,
+  ClipExportResult,
+  ClipSuggestResult,
   Device,
   DeviceList,
   EntitlementsSnapshot,
@@ -664,8 +666,15 @@ export type StudioContextValue = {
   duplicateSession: (sessionId: string) => Promise<void>
   importRecording: () => Promise<void>
   sessionStorageTotals: SessionStorageTotals | null
-  runAiWorkflow: (sessionId: string) => Promise<void>
+  runAiWorkflow: (
+    sessionId: string,
+    options?: { outputs?: string[]; tone?: string }
+  ) => Promise<void>
   exportPublishPack: (sessionId: string) => Promise<void>
+  /** Rank clip-worthy moments locally (chat spikes + captions). */
+  suggestClips: (sessionId: string) => Promise<ClipSuggestResult | null>
+  /** Trim a clip out of the recording locally (ffmpeg, next to the file). */
+  exportClip: (sessionId: string, startMs: number, endMs: number) => Promise<void>
   assessRecording: (path: string) => Promise<FileAssessment>
   repairRecording: (path: string) => Promise<GateStatus>
   restoreRecording: (path: string) => Promise<boolean>
@@ -6449,7 +6458,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const runAiWorkflow = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string, options?: { outputs?: string[]; tone?: string }) => {
       if (!client) {
         // F-023: this used to be a silent no-op — the button appeared dead.
         toast.error('AI workflow', {
@@ -6470,7 +6479,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const result = await client.request<AiWorkflowResult>('ai.run_post_recording', {
           sessionId,
           consentToUploadAudio: aiConsent,
-          ffmpegPath: settings.ffmpegPath.trim() || undefined
+          ffmpegPath: settings.ffmpegPath.trim() || undefined,
+          outputs: options?.outputs,
+          tone: options?.tone
         })
         await refreshSessions(client)
         // FX3: the local-only run needs an explicit, named result — "nothing
@@ -6537,6 +6548,51 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
     },
     [client, reportError]
+  )
+
+  const suggestClips = useCallback(
+    async (sessionId: string): Promise<ClipSuggestResult | null> => {
+      if (!client) {
+        toast.error('Clips', { description: 'Backend is not connected — try again in a moment.' })
+        return null
+      }
+      try {
+        return await client.request<ClipSuggestResult>('ai.clips.suggest', { sessionId })
+      } catch (error) {
+        reportError(error)
+        return null
+      }
+    },
+    [client, reportError]
+  )
+
+  const exportClip = useCallback(
+    async (sessionId: string, startMs: number, endMs: number): Promise<void> => {
+      if (!client) {
+        toast.error('Clips', { description: 'Backend is not connected — try again in a moment.' })
+        return
+      }
+      try {
+        const result = await client.request<ClipExportResult>('ai.clip.export', {
+          sessionId,
+          startMs,
+          endMs,
+          ffmpegPath: settings.ffmpegPath.trim() || undefined
+        })
+        toast.success('Clip exported next to the recording.', {
+          description: basename(result.path),
+          action: {
+            label: 'Reveal',
+            onClick: () => {
+              void window.videorc?.revealPath?.(result.path)
+            }
+          }
+        })
+      } catch (error) {
+        reportError(error)
+      }
+    },
+    [client, reportError, settings.ffmpegPath]
   )
 
   const assessRecording = useCallback(
@@ -7073,6 +7129,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionStorageTotals,
       runAiWorkflow,
       exportPublishPack,
+      suggestClips,
+      exportClip,
       assessRecording,
       repairRecording,
       restoreRecording,
@@ -7251,6 +7309,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionStorageTotals,
       runAiWorkflow,
       exportPublishPack,
+      suggestClips,
+      exportClip,
       assessRecording,
       repairRecording,
       restoreRecording,

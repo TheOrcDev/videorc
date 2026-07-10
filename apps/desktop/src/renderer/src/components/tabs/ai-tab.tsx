@@ -12,7 +12,7 @@ import {
   Waveform,
   type Icon
 } from '@phosphor-icons/react'
-import { useEffect, type ReactElement, type ReactNode } from 'react'
+import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import { toast } from 'sonner'
 
 import { PanelSection } from '@/components/panel-section'
@@ -33,7 +33,7 @@ import {
   aiRunButtonAction,
   latestAiProblemArtifact
 } from '@/lib/ai-workflow-status'
-import type { AiArtifact, SessionSummary } from '@/lib/backend'
+import type { AiArtifact, AiCapabilities, ClipSuggestResult, SessionSummary } from '@/lib/backend'
 import {
   artifactChapters,
   artifactField,
@@ -243,7 +243,9 @@ export function AiTab({
               cloudReady={cloudAi.ready}
               running={aiRunningSessionId === selected.id}
               session={selected}
+              workflow={aiCapabilities?.workflow ?? null}
               onRun={() => runAiWorkflow(selected.id)}
+              onRunOutputs={(outputs, tone) => runAiWorkflow(selected.id, { outputs, tone })}
             />
           ) : (
             <Empty className="border-0 py-6">
@@ -359,17 +361,36 @@ function openExternalUrl(url: string): void {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
+// Which server generation block regenerates each pipeline card. Transcript has
+// no block of its own — every job returns it.
+const CARD_OUTPUT_GROUP: Partial<Record<string, string[]>> = {
+  'title-description': ['publish_pack'],
+  summary: ['publish_pack'],
+  chapters: ['publish_pack'],
+  highlights: ['creator_intelligence']
+}
+
+const TONES = ['hooky', 'informative', 'casual'] as const
+type Tone = (typeof TONES)[number]
+
 function ArtifactView({
   session,
   running,
   cloudReady,
-  onRun
+  workflow,
+  onRun,
+  onRunOutputs
 }: {
   session: SessionSummary
   running: boolean
   cloudReady: boolean
+  workflow: AiCapabilities['workflow'] | null
   onRun: () => void
+  onRunOutputs: (outputs: string[], tone?: string) => void
 }): ReactElement {
+  const perKind = Boolean(workflow?.supportsOutputsFilter)
+  const supportsTone = Boolean(workflow?.supportsTone)
+  const [tone, setTone] = useState<Tone>('hooky')
   const titleDescription = latestArtifact(session, 'title-description')
   const audioExtract = latestArtifact(session, 'audio-extract')
   const transcript = latestArtifact(session, 'transcript')
@@ -388,6 +409,12 @@ function ArtifactView({
   const healthItems = artifactObjects(healthAssistant, 'explanations')
   const title = titleDescription ? artifactField(titleDescription, 'title') : ''
   const description = titleDescription ? artifactField(titleDescription, 'description') : ''
+  const titleDescriptionContent = (titleDescription?.content ?? {}) as Record<string, unknown>
+  const titleVariants = Array.isArray(titleDescriptionContent.titleVariants)
+    ? titleDescriptionContent.titleVariants.filter(
+        (variant): variant is string => typeof variant === 'string' && variant.trim().length > 0
+      )
+    : []
   const problemArtifact = latestAiProblemArtifact(session)
 
   const pipelineContent: Record<string, ReactNode> = {
@@ -400,6 +427,25 @@ function ArtifactView({
       title || description ? (
         <>
           {title ? <p className="font-medium">{title}</p> : null}
+          {titleVariants.length > 1 ? (
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-muted-foreground">More title options</span>
+              {titleVariants
+                .filter((variant) => variant !== title)
+                .map((variant) => (
+                  <button
+                    key={variant}
+                    className="flex items-center gap-2 rounded-row px-2 py-1 text-left text-sm hover:bg-muted/40"
+                    title="Copy this title"
+                    type="button"
+                    onClick={() => void copyToClipboard(variant, 'Title')}
+                  >
+                    <CopySimple className="size-3.5 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1">{variant}</span>
+                  </button>
+                ))}
+            </div>
+          ) : null}
           {description ? <p className="text-sm text-muted-foreground">{description}</p> : null}
         </>
       ) : null,
@@ -546,17 +592,32 @@ function ArtifactView({
                     className="w-fit"
                     disabled={running}
                     size="xs"
-                    title="Artifacts are generated together in one workflow run"
+                    title={
+                      perKind && CARD_OUTPUT_GROUP[step.kind]
+                        ? undefined
+                        : 'Artifacts are generated together in one workflow run'
+                    }
                     variant="outline"
-                    onClick={onRun}
+                    onClick={() => {
+                      const group = perKind ? CARD_OUTPUT_GROUP[step.kind] : undefined
+                      if (group) {
+                        onRunOutputs(group, supportsTone ? tone : undefined)
+                      } else {
+                        onRun()
+                      }
+                    }}
                   >
                     <Lightning data-icon="inline-start" weight="fill" />
-                    {running ? 'Running…' : 'Run pipeline'}
+                    {running
+                      ? 'Running…'
+                      : perKind && CARD_OUTPUT_GROUP[step.kind]
+                        ? 'Generate'
+                        : 'Run pipeline'}
                   </Button>
                 </div>
               )}
               {content ? (
-                <div className="flex flex-wrap gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
                   {copyActionsFor(step.kind).map((action) => (
                     <Button
                       key={action.label}
@@ -568,11 +629,52 @@ function ArtifactView({
                       {action.label}
                     </Button>
                   ))}
+                  {perKind && CARD_OUTPUT_GROUP[step.kind] ? (
+                    <>
+                      {step.kind === 'title-description' && supportsTone ? (
+                        <span className="flex items-center gap-0.5 rounded-row border p-0.5">
+                          {TONES.map((option) => (
+                            <Button
+                              key={option}
+                              size="xs"
+                              variant={tone === option ? 'secondary' : 'ghost'}
+                              onClick={() => setTone(option)}
+                            >
+                              {option}
+                            </Button>
+                          ))}
+                        </span>
+                      ) : null}
+                      <Button
+                        disabled={running}
+                        size="xs"
+                        variant="outline"
+                        onClick={() =>
+                          onRunOutputs(
+                            CARD_OUTPUT_GROUP[step.kind] ?? [],
+                            supportsTone ? tone : undefined
+                          )
+                        }
+                      >
+                        <Lightning data-icon="inline-start" weight="fill" />
+                        {running ? 'Running…' : 'Regenerate'}
+                      </Button>
+                    </>
+                  ) : null}
                 </div>
               ) : null}
             </div>
           )
         })}
+
+        <SocialPostsSection
+          available={Boolean(workflow?.supportsSocialPosts)}
+          running={running}
+          session={session}
+          onGenerate={() => onRunOutputs(['social_posts'], supportsTone ? tone : undefined)}
+        />
+
+        <ClipsSection highlightItems={highlightItems} session={session} />
 
         {/* Everything experimental lives in ONE collapsed Lab section. */}
         <Collapsible className="rounded-panel border border-dashed">
@@ -731,6 +833,205 @@ function copyActionsForArtifacts({
         return []
     }
   }
+}
+
+// Announcement drafts, generated only on request (their own output kind).
+function SocialPostsSection({
+  session,
+  available,
+  running,
+  onGenerate
+}: {
+  session: SessionSummary
+  available: boolean
+  running: boolean
+  onGenerate: () => void
+}): ReactElement | null {
+  const socialPosts = latestArtifact(session, 'social-posts')
+  const xPost = socialPosts ? artifactField(socialPosts, 'xPost') : ''
+  const twitchTitle = socialPosts ? artifactField(socialPosts, 'twitchTitle') : ''
+  const socialPostsContent = (socialPosts?.content ?? {}) as Record<string, unknown>
+  const xThread = Array.isArray(socialPostsContent.xThread)
+    ? socialPostsContent.xThread.filter(
+        (post): post is string => typeof post === 'string' && post.trim().length > 0
+      )
+    : []
+  if (!available && !socialPosts) {
+    return null
+  }
+  const hasContent = Boolean(xPost || twitchTitle || xThread.length)
+
+  return (
+    <div className="flex flex-col gap-2 rounded-panel border p-3">
+      <div className="flex items-center gap-2">
+        <span className="flex-1 text-sm font-semibold">Social posts</span>
+        <Badge variant={hasContent ? 'success' : 'outline'}>
+          {hasContent ? 'Ready' : 'Not run'}
+        </Badge>
+      </div>
+      {hasContent ? (
+        <div className="flex flex-col gap-2">
+          {xPost ? <p className="text-sm whitespace-pre-line">{xPost}</p> : null}
+          {xThread.length ? (
+            <ol className="flex list-decimal flex-col gap-1 pl-5 text-sm text-muted-foreground">
+              {xThread.map((post) => (
+                <li key={post}>{post}</li>
+              ))}
+            </ol>
+          ) : null}
+          {twitchTitle ? (
+            <p className="text-xs text-muted-foreground">Twitch VOD title: {twitchTitle}</p>
+          ) : null}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Announcement drafts written from the video — an X post, a thread, and a Twitch VOD title.
+        </p>
+      )}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {xPost ? (
+          <Button size="xs" variant="outline" onClick={() => void copyToClipboard(xPost, 'X post')}>
+            <CopySimple data-icon="inline-start" />
+            Copy X post
+          </Button>
+        ) : null}
+        {xThread.length ? (
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() => void copyToClipboard(xThread.join('\n\n'), 'X thread')}
+          >
+            <CopySimple data-icon="inline-start" />
+            Copy X thread
+          </Button>
+        ) : null}
+        {twitchTitle ? (
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() => void copyToClipboard(twitchTitle, 'Twitch title')}
+          >
+            <CopySimple data-icon="inline-start" />
+            Copy Twitch title
+          </Button>
+        ) : null}
+        {available ? (
+          <Button disabled={running} size="xs" variant="outline" onClick={onGenerate}>
+            <Lightning data-icon="inline-start" weight="fill" />
+            {running ? 'Running…' : hasContent ? 'Regenerate' : 'Generate posts'}
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+function msToClock(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000)
+  return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, '0')}`
+}
+
+// Clip-worthy moments: ranked locally from chat spikes + captions, plus any
+// cloud highlights that carry timestamps. Every row exports a real file.
+function ClipsSection({
+  session,
+  highlightItems
+}: {
+  session: SessionSummary
+  highlightItems: Array<Record<string, unknown>>
+}): ReactElement {
+  const { suggestClips, exportClip } = useStudio()
+  const [suggestion, setSuggestion] = useState<ClipSuggestResult | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [exportingKey, setExportingKey] = useState<string | null>(null)
+
+  useEffect(() => {
+    setSuggestion(null)
+  }, [session.id])
+
+  const timedHighlights = highlightItems.filter(
+    (item): item is Record<string, unknown> & { startMs: number; endMs: number } =>
+      typeof item.startMs === 'number' &&
+      typeof item.endMs === 'number' &&
+      item.endMs > item.startMs
+  )
+  const rows = [
+    ...(suggestion?.moments ?? []).map((moment) => ({
+      key: `chat-${moment.startMs}`,
+      startMs: moment.startMs,
+      endMs: moment.endMs,
+      label: moment.reason,
+      detail: moment.excerpt
+    })),
+    ...timedHighlights.map((item) => ({
+      key: `highlight-${item.startMs}`,
+      startMs: item.startMs,
+      endMs: item.endMs,
+      label: typeof item.title === 'string' ? item.title : 'Highlight',
+      detail: typeof item.reason === 'string' ? item.reason : ''
+    }))
+  ]
+
+  return (
+    <div className="flex flex-col gap-2 rounded-panel border p-3">
+      <div className="flex items-center gap-2">
+        <Scissors className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
+        <span className="flex-1 text-sm font-semibold">Clips</span>
+        <Button
+          disabled={loading}
+          size="xs"
+          variant="outline"
+          onClick={() => {
+            setLoading(true)
+            void suggestClips(session.id)
+              .then((result) => setSuggestion(result))
+              .finally(() => setLoading(false))
+          }}
+        >
+          {loading ? 'Ranking…' : 'Suggest clips from chat'}
+        </Button>
+      </div>
+      {suggestion && suggestion.moments.length === 0 && timedHighlights.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          {suggestion.chatMessageCount === 0
+            ? 'No chat history for this session — clips are ranked from audience reaction. Generate Highlights instead.'
+            : 'Chat stayed steady — no stand-out spike to clip. Generate Highlights for content-based moments.'}
+        </p>
+      ) : null}
+      {!suggestion && rows.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          The strongest moments as exportable files — ranked from chat activity spikes, snapped to
+          what you were saying.
+        </p>
+      ) : null}
+      {rows.map((row) => (
+        <div key={row.key} className="flex items-center gap-3 rounded-row border px-3 py-2">
+          <time className="shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
+            {msToClock(row.startMs)}–{msToClock(row.endMs)}
+          </time>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm">{row.label}</span>
+            {row.detail ? (
+              <span className="block truncate text-xs text-muted-foreground">{row.detail}</span>
+            ) : null}
+          </span>
+          <Button
+            disabled={exportingKey !== null}
+            size="xs"
+            variant="outline"
+            onClick={() => {
+              setExportingKey(row.key)
+              void exportClip(session.id, row.startMs, row.endMs).finally(() =>
+                setExportingKey(null)
+              )
+            }}
+          >
+            {exportingKey === row.key ? 'Exporting…' : 'Export clip'}
+          </Button>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 async function copyToClipboard(text: string, label: string): Promise<void> {

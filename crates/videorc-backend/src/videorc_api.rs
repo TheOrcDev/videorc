@@ -85,6 +85,10 @@ pub struct AiAudioJobRequest<'a> {
     pub diagnostic_summary: Option<&'a str>,
     pub health_events_json: &'a str,
     pub session_client_id: &'a str,
+    /// Per-kind generation extras; only sent when the server advertises them.
+    pub outputs: Option<&'a [String]>,
+    pub tone: Option<&'a str>,
+    pub chat_context_json: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -300,6 +304,15 @@ impl VideorcApiClient {
 
         if let Some(summary) = request.diagnostic_summary {
             form = form.text("diagnosticSummary", summary.to_string());
+        }
+        if let Some(outputs) = request.outputs {
+            form = form.text("outputs", outputs.join(","));
+        }
+        if let Some(tone) = request.tone {
+            form = form.text("tone", tone.to_string());
+        }
+        if let Some(chat_context) = request.chat_context_json {
+            form = form.text("chatContext", chat_context.to_string());
         }
 
         let response = self

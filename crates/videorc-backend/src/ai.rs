@@ -31,6 +31,10 @@ struct WebAiJobContext<'a> {
     client_request_id: &'a str,
     diagnostic_summary: Option<&'a str>,
     health_events: &'a [HealthEvent],
+    /// Server-capability-gated extras (None when unsupported or not requested).
+    outputs: Option<Vec<String>>,
+    tone: Option<String>,
+    chat_context: Option<Value>,
 }
 
 pub async fn run_ai_workflow(
@@ -98,6 +102,10 @@ pub async fn run_ai_workflow(
             &state,
             &params.session_id,
             AiJobInput::Transcript(&transcript_text),
+            AiJobOptions {
+                outputs: params.outputs.clone(),
+                tone: params.tone.clone(),
+            },
         )
         .await;
         return finish_workflow(
@@ -153,8 +161,16 @@ pub async fn run_ai_workflow(
         });
     }
 
-    let cloud_result =
-        run_web_ai_job(&state, &params.session_id, AiJobInput::Audio(&audio_path)).await;
+    let cloud_result = run_web_ai_job(
+        &state,
+        &params.session_id,
+        AiJobInput::Audio(&audio_path),
+        AiJobOptions {
+            outputs: params.outputs.clone(),
+            tone: params.tone.clone(),
+        },
+    )
+    .await;
     finish_workflow(
         &state,
         params.session_id,
@@ -232,15 +248,33 @@ enum AiJobInput<'a> {
     Transcript(&'a str),
 }
 
+/// Per-kind generation options; silently dropped when the server does not
+/// advertise the matching capability, so older servers keep working.
+#[derive(Default, Clone)]
+struct AiJobOptions {
+    outputs: Option<Vec<String>>,
+    tone: Option<String>,
+}
+
 async fn run_web_ai_job(
     state: &AppState,
     session_id: &str,
     input: AiJobInput<'_>,
+    options: AiJobOptions,
 ) -> Result<Vec<AiArtifact>> {
     let token = account::stored_session_token().context("Sign in to use cloud AI.")?;
     let client = VideorcApiClient::new()?;
     let capabilities = client.get_ai_capabilities(&token).await?;
     validate_cloud_ai_capabilities(&capabilities)?;
+    let outputs = options
+        .outputs
+        .filter(|_| capabilities.workflow.supports_outputs_filter);
+    let tone = options.tone.filter(|_| capabilities.workflow.supports_tone);
+    let chat_context = if capabilities.workflow.supports_chat_context {
+        build_chat_context(state, session_id)
+    } else {
+        None
+    };
     let client_request_id = match &input {
         AiJobInput::Audio(audio_path) => ai_client_request_id(session_id, audio_path).await?,
         AiJobInput::Transcript(transcript) => {
@@ -257,6 +291,9 @@ async fn run_web_ai_job(
         client_request_id: &client_request_id,
         diagnostic_summary: diagnostic_summary.as_deref(),
         health_events: &health_events,
+        outputs,
+        tone,
+        chat_context,
     };
 
     let initial_job = match input {
@@ -273,6 +310,10 @@ async fn run_web_ai_job(
                 .len();
             let audio_intake_error = audio_intake_error(&capabilities, audio_size);
             if capabilities.features.multipart_audio_jobs_enabled && audio_intake_error.is_none() {
+                let chat_context_json = job_context
+                    .chat_context
+                    .as_ref()
+                    .and_then(|value| serde_json::to_string(value).ok());
                 client
                     .create_ai_job_from_audio(
                         &token,
@@ -283,6 +324,9 @@ async fn run_web_ai_job(
                             diagnostic_summary: job_context.diagnostic_summary,
                             health_events_json: &health_events_json,
                             session_client_id: session_id,
+                            outputs: job_context.outputs.as_deref(),
+                            tone: job_context.tone.as_deref(),
+                            chat_context_json: chat_context_json.as_deref(),
                         },
                     )
                     .await?
@@ -403,14 +447,21 @@ async fn create_object_backed_ai_job(
     client.upload_ai_object(&upload.ticket, audio_path).await?;
 
     let mut job_request = upload.job_request;
-    let input_json = json!({
+    let mut input_json = json!({
         "diagnosticSummary": job_context.diagnostic_summary,
         "healthEvents": job_context.health_events,
     });
+    if let (Some(object), Some(chat_context)) = (
+        input_json.as_object_mut(),
+        job_context.chat_context.as_ref(),
+    ) {
+        object.insert("chatContext".to_string(), chat_context.clone());
+    }
     let object = job_request
         .as_object_mut()
         .context("AI object upload response did not include a job request object.")?;
     object.insert("inputJson".to_string(), input_json);
+    apply_job_options(&mut job_request, job_context);
     Ok(client.create_ai_job(token, &job_request).await?.job)
 }
 
@@ -420,18 +471,39 @@ async fn create_transcript_backed_ai_job(
     job_context: &WebAiJobContext<'_>,
     transcript: &str,
 ) -> Result<AiJobSnapshot> {
-    let body = json!({
+    let mut input_json = json!({
+        "diagnosticSummary": job_context.diagnostic_summary,
+        "healthEvents": job_context.health_events,
+        "transcript": transcript,
+    });
+    if let (Some(object), Some(chat_context)) = (
+        input_json.as_object_mut(),
+        job_context.chat_context.as_ref(),
+    ) {
+        object.insert("chatContext".to_string(), chat_context.clone());
+    }
+    let mut body = json!({
         "clientRequestId": job_context.client_request_id,
         "clientVersion": DESKTOP_CLIENT_VERSION,
-        "inputJson": {
-            "diagnosticSummary": job_context.diagnostic_summary,
-            "healthEvents": job_context.health_events,
-            "transcript": transcript,
-        },
+        "inputJson": input_json,
         "sessionClientId": job_context.session_id,
         "workflowKind": AI_WORKFLOW_KIND_POST_RECORDING,
     });
+    apply_job_options(&mut body, job_context);
     Ok(client.create_ai_job(token, &body).await?.job)
+}
+
+/// Attach capability-gated per-kind options to a job create body.
+fn apply_job_options(body: &mut Value, job_context: &WebAiJobContext<'_>) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    if let Some(outputs) = &job_context.outputs {
+        object.insert("outputs".to_string(), json!(outputs));
+    }
+    if let Some(tone) = &job_context.tone {
+        object.insert("tone".to_string(), json!(tone));
+    }
 }
 
 async fn wait_for_ai_job(
@@ -518,44 +590,67 @@ fn save_completed_web_ai_artifacts(
         )?);
     }
 
+    // Per-kind jobs return only the requested generation blocks — an absent
+    // block must never overwrite a previously generated artifact with empties.
     let publish_pack = object_or_empty(&owner_artifacts.publish_pack);
-    saved.push(state.database.save_ai_artifact(
-        session_id,
-        AiArtifactKind::TitleDescription,
-        AiArtifactStatus::Ready,
-        json!({
-            "description": string_field(publish_pack, "description"),
-            "jobId": job.id,
-            "model": job.model,
-            "provider": job.provider,
-            "title": string_field(publish_pack, "title"),
-        }),
-        None,
-    )?);
-    saved.push(state.database.save_ai_artifact(
-        session_id,
-        AiArtifactKind::Summary,
-        AiArtifactStatus::Ready,
-        json!({
-            "jobId": job.id,
-            "model": job.model,
-            "provider": job.provider,
-            "text": string_field(publish_pack, "summary"),
-        }),
-        None,
-    )?);
-    saved.push(state.database.save_ai_artifact(
-        session_id,
-        AiArtifactKind::Chapters,
-        AiArtifactStatus::Ready,
-        json!({
-            "chapters": value_field(publish_pack, "chapters"),
-            "jobId": job.id,
-            "model": job.model,
-            "provider": job.provider,
-        }),
-        None,
-    )?);
+    if !publish_pack.is_empty() {
+        saved.push(state.database.save_ai_artifact(
+            session_id,
+            AiArtifactKind::TitleDescription,
+            AiArtifactStatus::Ready,
+            json!({
+                "description": string_field(publish_pack, "description"),
+                "jobId": job.id,
+                "model": job.model,
+                "provider": job.provider,
+                "title": string_field(publish_pack, "title"),
+                "titleVariants": value_field(publish_pack, "titleVariants"),
+            }),
+            None,
+        )?);
+        saved.push(state.database.save_ai_artifact(
+            session_id,
+            AiArtifactKind::Summary,
+            AiArtifactStatus::Ready,
+            json!({
+                "jobId": job.id,
+                "model": job.model,
+                "provider": job.provider,
+                "text": string_field(publish_pack, "summary"),
+            }),
+            None,
+        )?);
+        saved.push(state.database.save_ai_artifact(
+            session_id,
+            AiArtifactKind::Chapters,
+            AiArtifactStatus::Ready,
+            json!({
+                "chapters": value_field(publish_pack, "chapters"),
+                "jobId": job.id,
+                "model": job.model,
+                "provider": job.provider,
+            }),
+            None,
+        )?);
+    }
+
+    let social_posts = object_or_empty(&owner_artifacts.social_posts);
+    if !social_posts.is_empty() {
+        saved.push(state.database.save_ai_artifact(
+            session_id,
+            AiArtifactKind::SocialPosts,
+            AiArtifactStatus::Ready,
+            json!({
+                "jobId": job.id,
+                "model": job.model,
+                "provider": job.provider,
+                "twitchTitle": string_field(social_posts, "twitchTitle"),
+                "xPost": string_field(social_posts, "xPost"),
+                "xThread": value_field(social_posts, "xThread"),
+            }),
+            None,
+        )?);
+    }
 
     saved.extend(save_creator_intelligence_value_artifacts(
         state,
@@ -654,6 +749,60 @@ fn save_creator_intelligence_value_artifacts(
             None,
         )?,
     ])
+}
+
+const CHAT_CONTEXT_MAX_ENTRIES: usize = 100;
+const CHAT_CONTEXT_MAX_TEXT_CHARS: usize = 500;
+
+/// Top chat moments for grounding titles/highlights in audience reaction.
+/// Evenly sampled when the session has more messages than the server cap.
+fn build_chat_context(state: &AppState, session_id: &str) -> Option<Value> {
+    let session_started_ms = state
+        .database
+        .list_sessions(500)
+        .ok()?
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| {
+            chrono::DateTime::parse_from_rfc3339(&session.started_at)
+                .ok()
+                .map(|started| started.timestamp_millis())
+        })?;
+    let messages = state.database.list_live_chat_messages(session_id).ok()?;
+    if messages.is_empty() {
+        return None;
+    }
+    let step = messages.len().div_ceil(CHAT_CONTEXT_MAX_ENTRIES).max(1);
+    let entries: Vec<Value> = messages
+        .iter()
+        .step_by(step)
+        .take(CHAT_CONTEXT_MAX_ENTRIES)
+        .filter_map(|message| {
+            let text: String = message
+                .message_text
+                .chars()
+                .take(CHAT_CONTEXT_MAX_TEXT_CHARS)
+                .collect();
+            if text.trim().is_empty() {
+                return None;
+            }
+            let at_ms = chrono::DateTime::parse_from_rfc3339(&message.received_at)
+                .ok()
+                .and_then(|received| {
+                    u64::try_from(received.timestamp_millis() - session_started_ms).ok()
+                });
+            Some(json!({
+                "atMs": at_ms,
+                "platform": message.platform,
+                "author": message.author_name,
+                "text": text,
+            }))
+        })
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    Some(Value::Array(entries))
 }
 
 fn diagnostic_summary_for_session(state: &AppState, session_id: &str) -> Option<String> {

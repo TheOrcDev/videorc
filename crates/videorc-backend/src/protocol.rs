@@ -2282,6 +2282,13 @@ pub struct RunAiWorkflowParams {
     pub session_id: String,
     pub consent_to_upload_audio: bool,
     pub ffmpeg_path: Option<String>,
+    /// Per-kind generation: subset of {publish_pack, creator_intelligence,
+    /// social_posts}. None = the full atomic bundle (older servers too).
+    #[serde(default)]
+    pub outputs: Option<Vec<String>>,
+    /// Title/description/social register: hooky | informative | casual.
+    #[serde(default)]
+    pub tone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2298,6 +2305,47 @@ pub struct ExportPublishPackResult {
     /// Every file the export wrote (markdown + per-field paste-ready files).
     #[serde(default)]
     pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipSuggestParams {
+    pub session_id: String,
+}
+
+/// A clip-worthy time range, ranked locally from chat activity + captions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipMoment {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub reason: String,
+    pub excerpt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipSuggestResult {
+    pub session_id: String,
+    pub moments: Vec<ClipMoment>,
+    pub chat_message_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipExportParams {
+    pub session_id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    #[serde(default)]
+    pub ffmpeg_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipExportResult {
+    pub session_id: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2458,6 +2506,20 @@ pub struct AiCapabilitiesWorkflow {
     pub kind: String,
     #[serde(default)]
     pub outputs: Vec<String>,
+    // Per-kind generation contract (videorc-web PR #1). All default false so
+    // an older server simply behaves like the original atomic bundle.
+    #[serde(default)]
+    pub supports_outputs_filter: bool,
+    #[serde(default)]
+    pub supports_tone: bool,
+    #[serde(default)]
+    pub supports_title_variants: bool,
+    #[serde(default)]
+    pub supports_chat_context: bool,
+    #[serde(default)]
+    pub supports_social_posts: bool,
+    #[serde(default)]
+    pub supports_highlight_timestamps: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2539,6 +2601,9 @@ pub struct AiJobSnapshot {
 pub struct AiJobOwnerArtifacts {
     pub creator_intelligence: serde_json::Value,
     pub publish_pack: serde_json::Value,
+    /// Present only when the job requested the social_posts output kind.
+    #[serde(default)]
+    pub social_posts: serde_json::Value,
     pub transcript: Option<AiJobTranscriptArtifact>,
     pub transcription_metadata: serde_json::Value,
 }
@@ -2621,6 +2686,7 @@ pub enum AiArtifactKind {
     Summary,
     Chapters,
     Highlights,
+    SocialPosts,
     SmartZoom,
     NoiseCleanup,
     SilenceRemoval,
