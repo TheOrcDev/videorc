@@ -118,13 +118,15 @@ function DockedPreviewFrame({
     title: previewSupervisorDisplay(true, supervisor, previewSurfaceStatus).title,
     detail: previewSupervisorDisplay(true, supervisor, previewSurfaceStatus).detail
   }
-  const transportLabel = previewTransportLabel(supervisor.transport, supervisor.backing)
   const showPermissionAction = supervisor.lifecycleState === 'permission-required'
   const aspectRatio = previewAspectRatio(aspect)
 
   return (
+    // No border and no panel rounding here: the native surface is a separate
+    // window glued over the slot with square corners — CSS cannot clip it, so
+    // any rounded frame leaves a dark corner wedge peeking around the video.
     <div
-      className={cn('flex w-full flex-col overflow-hidden rounded-panel border', className)}
+      className={cn('flex w-full flex-col overflow-hidden', className)}
       data-videorc-preview-card
       data-videorc-preview-docked
     >
@@ -143,30 +145,25 @@ function DockedPreviewFrame({
           <span className="text-xs text-[#A1A1AA]">{status.detail}</span>
         </div>
       </div>
-      <div className="flex items-center justify-between gap-2 border-t px-3 py-1.5">
-        <span className="text-xs text-muted-foreground">
-          {transportLabel ?? 'Preview docked in the app'}
-        </span>
-        <div className="flex items-center gap-1">
-          {showPermissionAction && onOpenPermissions ? (
-            <Button size="sm" variant="outline" onClick={onOpenPermissions}>
-              Open permissions
-            </Button>
-          ) : null}
-          <Button
-            data-videorc-preview-pop-out
-            size="sm"
-            title="Pop the preview out into its own window"
-            variant="ghost"
-            onClick={onPopOut}
-          >
-            <ArrowSquareOut className="size-4" />
-            Pop out
+      <div className="flex items-center justify-end gap-1.5 px-3 py-1.5">
+        {showPermissionAction && onOpenPermissions ? (
+          <Button size="sm" variant="outline" onClick={onOpenPermissions}>
+            Open permissions
           </Button>
-          <Button size="sm" variant="ghost" onClick={onClose}>
-            Close
-          </Button>
-        </div>
+        ) : null}
+        <Button
+          data-videorc-preview-pop-out
+          size="sm"
+          title="Pop the preview out into its own window"
+          variant="secondary"
+          onClick={onPopOut}
+        >
+          <ArrowSquareOut className="size-4" />
+          Pop out
+        </Button>
+        <Button size="sm" variant="secondary" onClick={onClose}>
+          Close
+        </Button>
       </div>
     </div>
   )
