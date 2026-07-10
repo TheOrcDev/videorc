@@ -4,6 +4,8 @@ import { resolve } from 'node:path'
 
 import {
   buildPerformanceScenario,
+  MACOS_PERFORMANCE_POWER_ASSERTION,
+  performanceScenarioLaunchSpec,
   performanceScenarioReportPaths
 } from './performance-scenarios.mjs'
 
@@ -132,5 +134,51 @@ describe('performanceScenarioReportPaths', () => {
       performanceScenarioReportPaths({ scenario: 'ui-idle', outputPath: '/tmp/result' }),
       { wrapper: resolve('/tmp/result'), child: resolve('/tmp/result.child.json') }
     )
+  })
+})
+
+describe('performanceScenarioLaunchSpec', () => {
+  const scenario = {
+    command: 'node',
+    args: ['scripts/perf-idle-probe.mjs', '--gate'],
+    env: { VIDEORC_PERF_SCENARIO: 'detached-native-preview' }
+  }
+
+  it('holds and records display plus system sleep assertions on macOS', () => {
+    const launch = performanceScenarioLaunchSpec(scenario, {
+      platform: 'darwin',
+      caffeinatePath: '/usr/bin/caffeinate'
+    })
+
+    assert.equal(launch.command, '/usr/bin/caffeinate')
+    assert.deepEqual(launch.args, [
+      '-d',
+      '-i',
+      '-s',
+      'node',
+      'scripts/perf-idle-probe.mjs',
+      '--gate'
+    ])
+    assert.equal(launch.env.VIDEORC_PERF_POWER_ASSERTION, MACOS_PERFORMANCE_POWER_ASSERTION)
+    assert.deepEqual(launch.powerAssertion, {
+      provider: 'caffeinate',
+      flags: ['-d', '-i', '-s']
+    })
+  })
+
+  it('leaves non-macOS commands unchanged and records no false assertion', () => {
+    const launch = performanceScenarioLaunchSpec(
+      {
+        ...scenario,
+        env: { ...scenario.env, VIDEORC_PERF_POWER_ASSERTION: 'ambient-false-claim' }
+      },
+      { platform: 'win32' }
+    )
+
+    assert.equal(launch.command, scenario.command)
+    assert.deepEqual(launch.args, scenario.args)
+    assert.equal(launch.env.VIDEORC_PERF_SCENARIO, 'detached-native-preview')
+    assert.equal(launch.env.VIDEORC_PERF_POWER_ASSERTION, '')
+    assert.equal(launch.powerAssertion, null)
   })
 })

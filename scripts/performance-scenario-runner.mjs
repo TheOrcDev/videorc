@@ -13,11 +13,13 @@ import {
   passingCheck,
   performanceBuildMode,
   performanceMode,
+  performanceWrapperMetadataAfterChild,
   writePerformanceReport
 } from './lib/performance-contract.mjs'
 import {
   buildPerformanceScenario,
   PERFORMANCE_SCENARIOS,
+  performanceScenarioLaunchSpec,
   performanceScenarioReportPaths
 } from './lib/performance-scenarios.mjs'
 
@@ -38,12 +40,6 @@ const expectedBuildMode = process.env.VIDEORC_PERF_EXPECT_BUILD_MODE ?? performa
 if (!['development', 'packaged'].includes(expectedBuildMode)) {
   throw new Error(`Invalid expected performance build mode: ${expectedBuildMode}.`)
 }
-const provenanceEnvironment = {
-  ...process.env,
-  VIDEORC_PERF_RUN_NONCE: runNonce,
-  VIDEORC_PERF_EXPECT_BUILD_MODE: expectedBuildMode
-}
-const metadata = await collectPerformanceMetadata({ env: provenanceEnvironment })
 const paths = performanceScenarioReportPaths({
   scenario: args.scenario,
   outputPath: args.output,
@@ -58,10 +54,23 @@ const scenario = buildPerformanceScenario({
   runNonce,
   expectedBuildMode
 })
+const launch = performanceScenarioLaunchSpec(scenario)
+const provenanceEnvironment = {
+  ...process.env,
+  ...launch.env,
+  VIDEORC_PERF_RUN_NONCE: runNonce,
+  VIDEORC_PERF_EXPECT_BUILD_MODE: expectedBuildMode
+}
+const metadata = await collectPerformanceMetadata({ env: provenanceEnvironment })
 
 console.log(
-  `Performance scenario ${args.scenario} (${mode}): ${scenario.command} ${scenario.args.join(' ')}`
+  `Performance scenario ${args.scenario} (${mode}): ${launch.command} ${launch.args.join(' ')}`
 )
+if (launch.powerAssertion) {
+  console.log(
+    `Power assertion: ${launch.powerAssertion.provider} ${launch.powerAssertion.flags.join(' ')}`
+  )
+}
 if (scenario.timing) {
   console.log(`Lifecycle cycles: ${scenario.timing.cycles}`)
 } else {
@@ -74,7 +83,7 @@ if (scenario.deviceRequired) {
 const startedAt = Date.now()
 let exit = { code: 1, signal: null, error: null }
 try {
-  exit = await runChild(scenario)
+  exit = await runChild(launch)
 } catch (error) {
   exit.error = error.message
 }
@@ -91,7 +100,7 @@ const childEvaluation = evaluateChildPerformanceRun({
 const report = createPerformanceReport({
   scenario: args.scenario,
   mode,
-  metadata,
+  metadata: performanceWrapperMetadataAfterChild(metadata, childReport?.metadata),
   timing: scenario.timing
     ? { ...scenario.timing, elapsedMs: Date.now() - startedAt }
     : {
@@ -100,7 +109,13 @@ const report = createPerformanceReport({
         elapsedMs: Date.now() - startedAt
       },
   metrics: {
-    command: { command: scenario.command, args: scenario.args },
+    command: {
+      command: scenario.command,
+      args: scenario.args,
+      launchCommand: launch.command,
+      launchArgs: launch.args,
+      powerAssertion: launch.powerAssertion
+    },
     deviceRequired: scenario.deviceRequired,
     childExit: exit,
     childReport

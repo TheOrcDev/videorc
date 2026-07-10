@@ -6,18 +6,77 @@ import { describe, it } from 'node:test'
 
 import {
   createPerformanceReport,
+  currentMacosCaffeinatePowerAssertionVerified,
   evaluateChildPerformanceRun,
   evaluateChildPerformanceMetadata,
   evaluateExplicitFallbackStatus,
   evaluateScenarioTruth,
   evaluateSeriesGate,
+  macosCaffeinatePowerAssertionVerified,
   observationCheck,
   performanceBuildMode,
   performanceHardwareClass,
   performanceMode,
+  performanceWrapperMetadataAfterChild,
   sha256File,
   summarizeNumericSeries
 } from './performance-contract.mjs'
+
+describe('macOS caffeinate assertion verification', () => {
+  const assertions = `
+Listed by owning process:
+   pid 900(caffeinate): [0x1] PreventUserIdleSystemSleep named: "caffeinate command-line tool"
+\tDetails: caffeinate asserting on behalf of '/usr/local/bin/node' (pid 4242)
+   pid 900(caffeinate): [0x2] PreventUserIdleDisplaySleep named: "caffeinate command-line tool"
+\tDetails: caffeinate asserting on behalf of '/usr/local/bin/node' (pid 4242)
+   pid 900(caffeinate): [0x3] PreventSystemSleep named: "caffeinate command-line tool"
+\tDetails: caffeinate asserting on behalf of '/usr/local/bin/node' (pid 4242)
+`
+
+  it('requires all three assertions to name the current scenario process', () => {
+    assert.equal(macosCaffeinatePowerAssertionVerified(assertions, 4242), true)
+    assert.equal(macosCaffeinatePowerAssertionVerified(assertions, 4243), false)
+    assert.equal(
+      macosCaffeinatePowerAssertionVerified(
+        assertions.replace('PreventSystemSleep', 'Other'),
+        4242
+      ),
+      false
+    )
+  })
+
+  it('never trusts a marker on a non-macOS host', async () => {
+    assert.equal(
+      await currentMacosCaffeinatePowerAssertionVerified({
+        env: { VIDEORC_PERF_POWER_ASSERTION: 'caffeinate:-d,-i,-s' },
+        pid: 4242,
+        osPlatform: 'linux'
+      }),
+      false
+    )
+  })
+
+  it('lets a wrapper claim verification only after its matching child proves it', () => {
+    const wrapper = {
+      powerAssertion: 'caffeinate:-d,-i,-s',
+      powerAssertionVerified: false
+    }
+    assert.equal(
+      performanceWrapperMetadataAfterChild(wrapper, {
+        powerAssertion: 'caffeinate:-d,-i,-s',
+        powerAssertionVerified: true
+      }).powerAssertionVerified,
+      true
+    )
+    assert.equal(
+      performanceWrapperMetadataAfterChild(wrapper, {
+        powerAssertion: 'wrong',
+        powerAssertionVerified: true
+      }).powerAssertionVerified,
+      false
+    )
+  })
+})
 
 describe('performanceBuildMode', () => {
   it('recognizes both packaged-app launch markers', () => {
@@ -280,13 +339,15 @@ describe('packaged performance provenance', () => {
     expectedBuildMode: 'packaged',
     runNonce: 'run-1234567890',
     hardwareClass: 'github-hosted-macos-15-arm64-standard',
+    powerAssertion: 'caffeinate:-d,-i,-s',
+    powerAssertionVerified: false,
     executable: { sha256: executableSha256 }
   }
 
   it('accepts only the same packaged bytes, nonce, and clean commit', () => {
     assert.deepEqual(
       evaluateChildPerformanceMetadata({
-        actual: { ...expected },
+        actual: { ...expected, powerAssertionVerified: true },
         expected,
         requireCleanProvenance: true
       }),
@@ -301,6 +362,8 @@ describe('packaged performance provenance', () => {
         expectedBuildMode: 'development',
         runNonce: 'wrong-run',
         hardwareClass: 'wrong-hardware',
+        powerAssertion: null,
+        powerAssertionVerified: false,
         executable: { sha256: 'd'.repeat(64) }
       },
       expected,
@@ -311,6 +374,7 @@ describe('packaged performance provenance', () => {
     assert.ok(failures.some((failure) => /child build mode/.test(failure)))
     assert.ok(failures.some((failure) => /run nonce/.test(failure)))
     assert.ok(failures.some((failure) => /hardware class/.test(failure)))
+    assert.ok(failures.some((failure) => /power assertion/.test(failure)))
     assert.ok(failures.some((failure) => /did not match wrapper commit/.test(failure)))
     assert.ok(failures.some((failure) => /child commit provenance was dirty/.test(failure)))
     assert.ok(failures.some((failure) => /SHA-256 did not match/.test(failure)))

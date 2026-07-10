@@ -231,6 +231,8 @@ function profile() {
       calibrationId: 'a'.repeat(24),
       commit: 'b'.repeat(40),
       executableSha256: 'c'.repeat(64),
+      powerAssertion: 'caffeinate:-d,-i,-s',
+      powerAssertionVerified: true,
       runCount: 3
     },
     thresholds: {

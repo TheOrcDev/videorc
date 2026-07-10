@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto'
 
 import { PERFORMANCE_REPORT_SCHEMA_VERSION } from './performance-contract.mjs'
+import {
+  performanceSamplingEvidenceFailures,
+  performanceSamplingInvariants
+} from './performance-sampling-schedule.mjs'
 
 export const PERFORMANCE_CALIBRATION_SCHEMA_VERSION = 1
 export const PERFORMANCE_BUDGET_CANDIDATE_SCHEMA_VERSION = 1
@@ -119,6 +123,8 @@ export function aggregatePackagedPerformanceCalibration({ reports, reportPaths =
     operatingSystem: first.metadata.operatingSystem,
     displayScaleFactor: first.metadata.displayScaleFactor,
     buildMode: 'packaged',
+    powerAssertion: first.metadata.powerAssertion,
+    powerAssertionVerified: first.metadata.powerAssertionVerified,
     appRole: first.metadata.appRole,
     source: first.metadata.source,
     outputs: first.metadata.outputs
@@ -172,6 +178,8 @@ export function validatePackagedPerformanceCalibrationReports(reports) {
     ['hardware class', (report) => report.metadata.hardwareClass ?? null],
     ['operating system', (report) => report.metadata.operatingSystem],
     ['display scale', (report) => report.metadata.displayScaleFactor],
+    ['power assertion', (report) => report.metadata.powerAssertion],
+    ['power assertion verification', (report) => report.metadata.powerAssertionVerified],
     ['app role', (report) => report.metadata.appRole],
     ['source', (report) => report.metadata.source],
     ['outputs', (report) => report.metadata.outputs],
@@ -220,6 +228,8 @@ export function createPerformanceBudgetCandidate(calibration) {
     evidence: {
       commit: calibration.provenance.commit,
       executableSha256: calibration.provenance.executableSha256,
+      powerAssertion: calibration.provenance.powerAssertion,
+      powerAssertionVerified: calibration.provenance.powerAssertionVerified,
       runCount: calibration.runCount,
       runNonces: calibration.runs.map((run) => run.runNonce),
       reportPaths: calibration.runs.map((run) => run.reportPath)
@@ -390,6 +400,12 @@ function validateDetailedReport(report, index) {
   if (!validGitCommit(metadata?.commit)) failures.push(`${label} commit was missing or invalid`)
   if (metadata?.dirty !== false) failures.push(`${label} commit provenance was dirty`)
   if (!nonEmptyString(metadata?.runNonce)) failures.push(`${label} run nonce was missing`)
+  if (metadata?.powerAssertion !== 'caffeinate:-d,-i,-s') {
+    failures.push(`${label} macOS display/system power assertion was missing or invalid`)
+  }
+  if (metadata?.powerAssertionVerified !== true) {
+    failures.push(`${label} macOS display/system power assertion was not verified at runtime`)
+  }
   if (!nonEmptyString(metadata?.machineModel)) failures.push(`${label} machine model was missing`)
   if (!validOperatingSystem(metadata?.operatingSystem)) {
     failures.push(`${label} macOS identity was missing or invalid`)
@@ -419,10 +435,37 @@ function validateDetailedReport(report, index) {
   if (metrics?.teardownClean !== true) failures.push(`${label} teardown was not clean`)
   validatePipeline(metrics?.pipeline, report?.scenario, label, failures)
   validateMemory(metrics?.memory, timing, label, failures)
+  if (PREVIEW_SCENARIOS.has(report?.scenario)) {
+    validateSampling(metrics?.sampling, metrics?.memory, timing, metadata, label, failures)
+  }
   validateCpu(metrics?.cpuAveragePercentByRole, label, failures)
   validateResources(metrics?.resourceCheckpoints, label, failures)
   if (!isRecord(metrics?.thresholds)) failures.push(`${label} measurement thresholds were missing`)
   return failures
+}
+
+function validateSampling(sampling, memory, timing, metadata, label, failures) {
+  if (!isRecord(sampling)) {
+    failures.push(`${label} wall-clock sampling evidence was missing`)
+    return
+  }
+  if (!positiveFinite(timing?.measurementMs) || !positiveFinite(timing?.intervalMs)) {
+    return
+  }
+  failures.push(
+    ...performanceSamplingEvidenceFailures(sampling, timing.measurementMs, timing.intervalMs).map(
+      (failure) => `${label} ${failure}`
+    )
+  )
+  if (sampling.collectedSamples !== memory?.samples) {
+    failures.push(`${label} sampling collectedSamples disagreed with memory samples`)
+  }
+  if (sampling.powerAssertion !== metadata?.powerAssertion) {
+    failures.push(`${label} sampling power assertion disagreed with provenance`)
+  }
+  if (sampling.powerAssertionVerified !== true) {
+    failures.push(`${label} sampling power assertion was not verified at measurement end`)
+  }
 }
 
 function validatePipeline(pipeline, scenario, label, failures) {
@@ -477,7 +520,10 @@ function validateMemory(memory, timing, label, failures) {
     }
   }
   const minimumDuration = (timing?.measurementMs ?? 0) - (timing?.intervalMs ?? 0)
-  const minimumSamples = Math.floor((timing?.measurementMs ?? 0) / (timing?.intervalMs ?? 1))
+  const minimumSamples =
+    positiveFinite(timing?.measurementMs) && positiveFinite(timing?.intervalMs)
+      ? performanceSamplingInvariants(timing.measurementMs, timing.intervalMs).minSamples
+      : 0
   for (const name of ['totalRss', 'ownedRss']) {
     if ((memory?.[name]?.durationMs ?? 0) < minimumDuration) {
       failures.push(`${label} memory.${name} did not cover the declared duration`)

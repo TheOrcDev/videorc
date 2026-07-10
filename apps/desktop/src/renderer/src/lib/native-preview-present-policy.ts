@@ -24,6 +24,48 @@ export type NativePreviewSceneProofPresentationOwner =
   | 'renderer-fallback'
   | 'unavailable'
 
+export function rendererFallbackSeedCompositorStatus({
+  wasMainPumpActive,
+  nextMainPumpActive,
+  latestStatus
+}: {
+  wasMainPumpActive: boolean
+  nextMainPumpActive: boolean
+  latestStatus: CompositorStatus | null
+}): CompositorStatus | null {
+  // While main owns presentation the renderer's connection deliberately mutes
+  // compact frame events. Its cached status can therefore carry an expired
+  // IOSurface handoff. On takeover, wait for the first newly unmuted frameReady
+  // event instead of presenting that stale main-era target.
+  return wasMainPumpActive && !nextMainPumpActive ? null : latestStatus
+}
+
+export function rendererFallbackOwnsPresentation({
+  mainPumpActive
+}: {
+  mainPumpActive: boolean
+  recordingState: RecordingStatus['state']
+}): boolean {
+  // Recording changes polling/report fields, not ownership. If main's socket
+  // drops mid-recording, renderer fallback remains the only live presentation
+  // path and must keep the user's preview current until main reconnects.
+  return !mainPumpActive
+}
+
+export function rendererFallbackCompositorStatusIsFresh({
+  fallbackActivatedAtMs,
+  statusUpdatedAt
+}: {
+  fallbackActivatedAtMs: number
+  statusUpdatedAt: string
+}): boolean {
+  if (!(fallbackActivatedAtMs > 0)) {
+    return true
+  }
+  const statusUpdatedAtMs = Date.parse(statusUpdatedAt)
+  return Number.isFinite(statusUpdatedAtMs) && statusUpdatedAtMs >= fallbackActivatedAtMs
+}
+
 export function nativePreviewSceneProofPresentationOwner(input: {
   mainPumpActive: boolean
   statusReaderAvailable: boolean

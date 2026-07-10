@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 
-import { parseArgs } from '../aggregate-performance-calibration.mjs'
+import { parseArgs, portableCalibrationReportPaths } from '../aggregate-performance-calibration.mjs'
 import {
   aggregatePackagedPerformanceCalibration,
   PerformanceCalibrationError,
@@ -24,6 +24,8 @@ describe('packaged performance calibration', () => {
     assert.equal(summary.schemaVersion, 1)
     assert.equal(summary.runCount, 3)
     assert.equal(summary.provenance.executableSha256, EXECUTABLE_SHA256)
+    assert.equal(summary.provenance.powerAssertion, 'caffeinate:-d,-i,-s')
+    assert.equal(summary.provenance.powerAssertionVerified, true)
     assert.equal(summary.comparabilityPolicy.maxCadenceRelativeRange, 0.1)
     assert.equal(summary.observed.cadence.presentFps.median, 60)
     assert.equal(summary.observed.memoryMiB.maximumOwnedRss.median, 402)
@@ -34,6 +36,8 @@ describe('packaged performance calibration', () => {
     assert.equal(summary.observed.resources.physicalFootprintMiB.growth.median, 8)
     assert.equal(summary.observed.resources.physicalFootprintMiB.perRole.backend.growth.median, 2)
     assert.equal(budgetCandidate.schemaVersion, 1)
+    assert.equal(budgetCandidate.evidence.powerAssertion, 'caffeinate:-d,-i,-s')
+    assert.equal(budgetCandidate.evidence.powerAssertionVerified, true)
     assert.equal(budgetCandidate.status, 'candidate')
     assert.equal(budgetCandidate.enforcement, 'disabled')
     assert.equal(budgetCandidate.thresholds, null)
@@ -71,6 +75,20 @@ describe('packaged performance calibration', () => {
       () => aggregatePackagedPerformanceCalibration({ reports }),
       /wireKibPerSecond was missing|frame-pipeline metrics were missing/
     )
+  })
+
+  it('accepts the shared one-deadline jitter allowance with truthful counts', () => {
+    const reports = calibrationReports()
+    for (const report of reports) {
+      report.metrics.memory.samples = 599
+      report.metrics.memory.totalRss.samples = 599
+      report.metrics.memory.ownedRss.samples = 599
+      for (const role of Object.values(report.metrics.memory.roles)) role.rssSamples = 599
+      report.metrics.sampling.collectedSamples = 599
+      report.metrics.sampling.skippedDeadlineCount = 1
+    }
+
+    assert.equal(aggregatePackagedPerformanceCalibration({ reports }).summary.runCount, 3)
   })
 
   it('rejects materially inconsistent cadence, RSS, footprint, and trend runs', () => {
@@ -171,6 +189,9 @@ describe('packaged performance calibration', () => {
         reports[1].metrics.memory.totalRss.durationMs = 600_000
         reports[1].metrics.memory.totalRss.samples = 601
         for (const role of Object.values(reports[1].metrics.memory.roles)) role.rssSamples = 601
+        reports[1].metrics.sampling.expectedSamples = 601
+        reports[1].metrics.sampling.collectedSamples = 601
+        reports[1].metrics.sampling.measurementElapsedMs = 601_000
       },
       /timing did not match run 1/
     ],
@@ -185,6 +206,24 @@ describe('packaged performance calibration', () => {
       /slopeRssKbPerMinute was missing/
     ],
     [
+      'missing sampling evidence',
+      (reports) => delete reports[1].metrics.sampling,
+      /sampling evidence/
+    ],
+    [
+      'sleep-contaminated sampling evidence',
+      (reports) => {
+        reports[1].metrics.sampling.skippedDeadlineCount = 197
+        reports[1].metrics.sampling.maxSampleGapMs = 198_000
+      },
+      /sampling skipped too many|sampling max gap/
+    ],
+    [
+      'impossible sampling counts',
+      (reports) => (reports[1].metrics.sampling.skippedDeadlineCount = 1),
+      /collected plus skipped counts/
+    ],
+    [
       'incomparable footprint',
       (reports) => {
         reports[1].metrics.resourceCheckpoints.comparison.metrics.physicalFootprintBytes.comparable = false
@@ -195,6 +234,21 @@ describe('packaged performance calibration', () => {
       'duplicate run nonce',
       (reports) => (reports[1].metadata.runNonce = reports[0].metadata.runNonce),
       /run nonces were not unique/
+    ],
+    [
+      'missing power assertion',
+      (reports) => (reports[1].metadata.powerAssertion = null),
+      /power assertion/
+    ],
+    [
+      'unverified power assertion',
+      (reports) => (reports[1].metadata.powerAssertionVerified = false),
+      /not verified at runtime/
+    ],
+    [
+      'power assertion missing at measurement end',
+      (reports) => (reports[1].metrics.sampling.powerAssertionVerified = false),
+      /not verified at measurement end/
     ],
     [
       'inconsistent role population',
@@ -224,6 +278,20 @@ describe('performance calibration CLI arguments', () => {
       budgetCandidatePath: '/tmp/calibration.budget-candidate.json'
     })
     assert.throws(() => parseArgs(['a', 'b']), /exactly 3 detailed child report paths/)
+  })
+
+  it('stores report references relative to the portable artifact bundle', () => {
+    assert.deepEqual(
+      portableCalibrationReportPaths({
+        reportPaths: [
+          '/tmp/evidence/run-1.child.json',
+          '/tmp/evidence/run-2.child.json',
+          '/tmp/evidence/run-3.child.json'
+        ],
+        outputPath: '/tmp/evidence/calibration.json'
+      }),
+      ['run-1.child.json', 'run-2.child.json', 'run-3.child.json']
+    )
   })
 })
 
@@ -275,6 +343,8 @@ function detailedReport(index) {
       buildMode: 'packaged',
       expectedBuildMode: 'packaged',
       runNonce: `run-${index}-1234567890`,
+      powerAssertion: 'caffeinate:-d,-i,-s',
+      powerAssertionVerified: true,
       executable: {
         path: '/Applications/Videorc.app/Contents/MacOS/Videorc',
         sha256: EXECUTABLE_SHA256
@@ -286,6 +356,15 @@ function detailedReport(index) {
     timing: { warmupMs: 60_000, measurementMs: 600_000, intervalMs: 1_000 },
     metrics: {
       teardownClean: true,
+      sampling: {
+        expectedSamples: 600,
+        collectedSamples: 600,
+        skippedDeadlineCount: 0,
+        maxSampleGapMs: 1_050,
+        measurementElapsedMs: 600_000,
+        powerAssertion: 'caffeinate:-d,-i,-s',
+        powerAssertionVerified: true
+      },
       pipeline: {
         frames: 35_400,
         framesPerSecond: 58 + index,

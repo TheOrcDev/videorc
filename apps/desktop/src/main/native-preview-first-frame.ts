@@ -17,6 +17,8 @@ export interface FirstFrameSnapshot {
   nativePresenting: boolean
   /** compositor framesRendered advanced since the previous tick */
   framesAdvancing: boolean
+  /** native presentedFrameId advanced since the previous tick */
+  presentationAdvancing: boolean
   /** revision of the scene the renderer last pushed (null before first push) */
   rendererSceneRevision: number | null
   compositorSceneRevision: number | null
@@ -106,6 +108,9 @@ export function firstFrameBlockedReason(snapshot: FirstFrameSnapshot): string {
   if (!snapshot.framesAdvancing) {
     return 'Compositor frames are not advancing.'
   }
+  if (!snapshot.presentationAdvancing) {
+    return 'Native presentation is not advancing.'
+  }
   if (!snapshot.nativePresenting) {
     return 'Native presenter has not confirmed a frame yet.'
   }
@@ -127,7 +132,7 @@ function preferredAction(snapshot: FirstFrameSnapshot): FirstFrameHealingAction 
     snapshot.surfaceLive &&
     snapshot.metalTargetPresent &&
     snapshot.framesAdvancing &&
-    !snapshot.nativePresenting
+    (!snapshot.nativePresenting || !snapshot.presentationAdvancing)
   ) {
     return 'reset-native-path'
   }
@@ -224,7 +229,7 @@ export function assessPresenting(
   tickMs: number,
   budgets: PresentingWatchBudgets = DEFAULT_PRESENTING_WATCH_BUDGETS
 ): { assessment: PresentingAssessment; watch: PresentingWatchState } {
-  if (firstFrameContractMet(snapshot)) {
+  if (firstFrameContractMet(snapshot) && snapshot.presentationAdvancing) {
     // Recovery resets everything, so the next stall gets a fresh ladder.
     return { assessment: { kind: 'presenting' }, watch: emptyPresentingWatch() }
   }
@@ -246,7 +251,8 @@ export function assessPresenting(
   const { assessment, ledger } = assessFirstFrame(
     { ...snapshot, elapsedMs: next.stallElapsedMs },
     next.ledger,
-    budgets.healing
+    budgets.healing,
+    { requirePresentationAdvancing: true }
   )
   next.ledger = ledger
 
@@ -272,9 +278,13 @@ export function assessPresenting(
 export function assessFirstFrame(
   snapshot: FirstFrameSnapshot,
   ledger: FirstFrameLedger,
-  budgets: FirstFrameBudgets = DEFAULT_FIRST_FRAME_BUDGETS
+  budgets: FirstFrameBudgets = DEFAULT_FIRST_FRAME_BUDGETS,
+  { requirePresentationAdvancing = false }: { requirePresentationAdvancing?: boolean } = {}
 ): { assessment: FirstFrameAssessment; ledger: FirstFrameLedger } {
-  if (firstFrameContractMet(snapshot)) {
+  if (
+    firstFrameContractMet(snapshot) &&
+    (!requirePresentationAdvancing || snapshot.presentationAdvancing)
+  ) {
     return { assessment: { kind: 'met' }, ledger }
   }
 

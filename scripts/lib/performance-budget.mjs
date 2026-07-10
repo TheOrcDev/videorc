@@ -354,6 +354,12 @@ function validateEvidence(evidence, label, failures) {
   if (!/^[0-9a-f]{64}$/i.test(evidence.executableSha256 ?? '')) {
     failures.push(`${label} evidence executableSha256 was invalid`)
   }
+  if (evidence.powerAssertion !== 'caffeinate:-d,-i,-s') {
+    failures.push(`${label} evidence powerAssertion was missing or invalid`)
+  }
+  if (evidence.powerAssertionVerified !== true) {
+    failures.push(`${label} evidence powerAssertionVerified was not true`)
+  }
   if (evidence.runCount !== 3) failures.push(`${label} evidence runCount was not 3`)
 }
 

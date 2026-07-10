@@ -124,6 +124,10 @@ import {
   type PresentingAssessment,
   type PresentingWatchState
 } from './native-preview-first-frame'
+import {
+  DEFAULT_MAIN_PUMP_FRAME_STALL_TIMEOUT_MS,
+  mainPumpFrameDeliveryStalled
+} from './native-preview-main-pump-health'
 import { discoverObs, readObsSetup, readObsStreamKey } from './obs-import'
 import { initAutoUpdater, registerUpdaterIpc } from './updater'
 import {
@@ -563,6 +567,7 @@ let firstFrameWatchdogTimer: NodeJS.Timeout | null = null
 let firstFrameWatchdogStartedAtMs = 0
 let firstFrameLedger: FirstFrameLedger = emptyFirstFrameLedger()
 let firstFrameLastFramesRendered: number | null = null
+let firstFrameLastPresentedFrameId: number | null = null
 let firstFrameLastHint: string | null = null
 let firstFrameTickInFlight = false
 // After the first frame lands the watchdog does NOT stop: it flips into the
@@ -577,6 +582,7 @@ function startFirstFrameWatchdog(): void {
   firstFrameWatchdogStartedAtMs = Date.now()
   firstFrameLedger = emptyFirstFrameLedger()
   firstFrameLastFramesRendered = null
+  firstFrameLastPresentedFrameId = null
   firstFrameLastHint = null
   firstFrameWatchdogMode = 'first-frame'
   presentingWatch = emptyPresentingWatch()
@@ -688,12 +694,41 @@ async function runFirstFrameWatchdogTick(): Promise<void> {
     if (framesRendered != null) {
       firstFrameLastFramesRendered = framesRendered
     }
+    const presentedFrameId = nativePreviewSurfaceStatus.presentedFrameId ?? null
+    const presentationAdvancing =
+      presentedFrameId != null &&
+      firstFrameLastPresentedFrameId != null &&
+      presentedFrameId > firstFrameLastPresentedFrameId
+    if (presentedFrameId != null) {
+      firstFrameLastPresentedFrameId = presentedFrameId
+    }
+    const mainPumpSocket = backendEventSocket
+    const mainPumpConnection = backendConnection
+    if (
+      mainPumpSocket &&
+      mainPumpConnection &&
+      mainPumpFrameDeliveryStalled({
+        active: nativePreviewMainPumpActive,
+        surfaceLive: nativePreviewSurfaceStatus.state === 'live',
+        compositorFramesAdvancing: framesAdvancing,
+        activatedAtMs: nativePreviewMainPumpActivatedAtMs,
+        lastPresentDrivingEventAtMs: nativePreviewMainLastPresentDrivingEventAtMs,
+        nowMs: Date.now()
+      })
+    ) {
+      retireBackendEventSocket(
+        mainPumpSocket,
+        mainPumpConnection,
+        `presentation event heartbeat stalled for ${Math.max(0, Date.now() - Math.max(nativePreviewMainPumpActivatedAtMs, nativePreviewMainLastPresentDrivingEventAtMs))}ms while compositor frames advanced`
+      )
+    }
 
     const snapshot: FirstFrameSnapshot = {
       elapsedMs: Date.now() - firstFrameWatchdogStartedAtMs,
       surfaceLive: nativePreviewSurfaceStatus.state === 'live',
       nativePresenting: nativePreviewSurfaceStatusIsRealSurface(nativePreviewSurfaceStatus),
       framesAdvancing,
+      presentationAdvancing,
       rendererSceneRevision: nativePreviewSurfaceScene?.revision ?? null,
       compositorSceneRevision: compositor?.sceneRevision ?? null,
       compositorFrameSceneRevision: compositor?.frameSceneRevision ?? null,
@@ -6199,6 +6234,13 @@ let backendEventSocketRetryTimer: ReturnType<typeof setTimeout> | null = null
 let mainPresentReportLastSentAtMs = 0
 let nativePreviewMainLatestCompositorStatus: CompositorStatus | null = null
 let nativePreviewMainLastFrameReadyAtMs = 0
+let nativePreviewMainLastPresentDrivingEventAtMs = 0
+let nativePreviewMainSmokeDropPresentEvents = false
+let nativePreviewMainPumpActivatedAtMs = 0
+let nativePreviewMainPumpActivationCount = 0
+let nativePreviewMainPumpRendererFallbackCount = 0
+let nativePreviewMainPumpDisconnectCount = 0
+let nativePreviewMainPumpLastDisconnectReason: string | null = null
 const nativePreviewMainStatusPump = new NativePreviewLatestPump<CompositorStatus>({
   apply: handleMainPumpCompositorStatus,
   onSuperseded: () => {
@@ -6226,10 +6268,18 @@ async function setNativePreviewMainPumpActive(active: boolean): Promise<void> {
   if (!changed) {
     return
   }
+  if (active) {
+    nativePreviewMainPumpActivatedAtMs = Date.now()
+    nativePreviewMainPumpActivationCount += 1
+  }
   if (nativePreviewMainPumpActive === active) {
     return
   }
   nativePreviewMainPumpActive = active
+  if (!active) {
+    nativePreviewMainPumpActivatedAtMs = 0
+    nativePreviewMainPumpRendererFallbackCount += 1
+  }
   if (!active) {
     clearNativePreviewMainPumpWork()
   }
@@ -6239,6 +6289,7 @@ async function setNativePreviewMainPumpActive(active: boolean): Promise<void> {
 function clearNativePreviewMainPumpWork(): void {
   nativePreviewMainLatestCompositorStatus = null
   nativePreviewMainLastFrameReadyAtMs = 0
+  nativePreviewMainLastPresentDrivingEventAtMs = 0
   nativePreviewMainStatusPump.cancelPending()
 }
 
@@ -6258,6 +6309,40 @@ function disconnectBackendEventSocket(): void {
       // Already closed.
     }
   }
+}
+
+function scheduleBackendEventSocketRetry(connection: BackendConnection): void {
+  if (backendConnection !== connection || backendEventSocketRetryTimer) {
+    return
+  }
+  backendEventSocketRetryTimer = setTimeout(() => {
+    backendEventSocketRetryTimer = null
+    if (backendConnection === connection) {
+      connectBackendEventSocket(connection)
+    }
+  }, 2000)
+}
+
+function retireBackendEventSocket(
+  socket: WebSocket,
+  connection: BackendConnection,
+  reason: string
+): void {
+  if (backendEventSocket !== socket) {
+    return
+  }
+  backendEventSocket = null
+  nativePreviewMainPumpDisconnectCount += 1
+  nativePreviewMainPumpLastDisconnectReason = reason
+  clearNativePreviewMainPumpWork()
+  void setNativePreviewMainPumpActive(false)
+  logBackend('warn', `Main present pump retired: ${reason}`)
+  try {
+    socket.close()
+  } catch {
+    // Already closed.
+  }
+  scheduleBackendEventSocketRetry(connection)
 }
 
 function connectBackendEventSocket(connection: BackendConnection): void {
@@ -6308,6 +6393,12 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       }
       return
     }
+    if (
+      nativePreviewMainSmokeDropPresentEvents &&
+      (parsed.event === 'preview.frameReady' || parsed.event === 'compositor.status')
+    ) {
+      return
+    }
     // Responses to the fire-and-forget present reports also arrive here. The
     // compact frame lane drives presentation; full status stays on its slow
     // diagnostics cadence and is retained only as expansion context.
@@ -6317,7 +6408,9 @@ function connectBackendEventSocket(connection: BackendConnection): void {
     // age p95 is the content-freshness gate, and it IMPROVED vs the renderer
     // pump (57ms vs 77ms).
     if (parsed.event === 'preview.frameReady' && parsed.payload) {
-      nativePreviewMainLastFrameReadyAtMs = Date.now()
+      const receivedAtMs = Date.now()
+      nativePreviewMainLastFrameReadyAtMs = receivedAtMs
+      nativePreviewMainLastPresentDrivingEventAtMs = receivedAtMs
       const status = compositorStatusFromFrameReady(
         parsed.payload as CompositorFrameReady,
         nativePreviewMainLatestCompositorStatus
@@ -6332,26 +6425,14 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       // Compatibility for a backend without the compact event. Current
       // backends never enter this branch after frame-ready starts flowing.
       if (Date.now() - nativePreviewMainLastFrameReadyAtMs > 1000) {
+        nativePreviewMainLastPresentDrivingEventAtMs = Date.now()
         nativePreviewMainStatusPump.enqueue(status)
       }
     }
   }
-  socket.onclose = () => {
-    if (backendEventSocket !== socket) {
-      return
-    }
-    backendEventSocket = null
-    void setNativePreviewMainPumpActive(false)
-    // Transient close with the backend still up: retry; the renderer pump
-    // covers presents in the meantime.
-    if (backendConnection === connection) {
-      backendEventSocketRetryTimer = setTimeout(() => {
-        backendEventSocketRetryTimer = null
-        if (backendConnection === connection) {
-          connectBackendEventSocket(connection)
-        }
-      }, 2000)
-    }
+  socket.onclose = (event) => {
+    const detail = event.reason ? `: ${event.reason}` : ''
+    retireBackendEventSocket(socket, connection, `socket closed (${event.code})${detail}`)
   }
   socket.onerror = () => {
     // onclose follows and owns the retry.
@@ -7375,6 +7456,110 @@ async function runSmokePreviewMotionCommand(
 
   if (command === 'native-preview-surface-status') {
     return nativePreviewSurfaceStatus
+  }
+
+  if (command === 'main-present-pump-diagnostics') {
+    return {
+      active: nativePreviewMainPumpActive,
+      socketReadyState: backendEventSocket?.readyState ?? null,
+      activationCount: nativePreviewMainPumpActivationCount,
+      rendererFallbackCount: nativePreviewMainPumpRendererFallbackCount,
+      disconnectCount: nativePreviewMainPumpDisconnectCount,
+      lastDisconnectReason: nativePreviewMainPumpLastDisconnectReason,
+      activatedAgeMs:
+        nativePreviewMainPumpActivatedAtMs > 0
+          ? Date.now() - nativePreviewMainPumpActivatedAtMs
+          : null,
+      lastFrameReadyAgeMs:
+        nativePreviewMainLastFrameReadyAtMs > 0
+          ? Date.now() - nativePreviewMainLastFrameReadyAtMs
+          : null,
+      lastPresentDrivingEventAgeMs:
+        nativePreviewMainLastPresentDrivingEventAtMs > 0
+          ? Date.now() - nativePreviewMainLastPresentDrivingEventAtMs
+          : null
+    }
+  }
+
+  if (command === 'exercise-main-present-pump-reconnect') {
+    if (!previewWindowIsOpenForSurface() || nativePreviewSurfaceStatus.state !== 'live') {
+      throw new Error('Native preview surface must be live before exercising pump reconnect.')
+    }
+    const socket = backendEventSocket
+    const connection = backendConnection
+    if (!socket || !connection || !nativePreviewMainPumpActive) {
+      throw new Error('Main present pump must be connected before exercising reconnect.')
+    }
+    const before = {
+      frameId:
+        nativePreviewSurfaceStatus.presentedFrameId ?? nativePreviewSurfaceStatus.framesRendered,
+      activationCount: nativePreviewMainPumpActivationCount,
+      rendererFallbackCount: nativePreviewMainPumpRendererFallbackCount,
+      disconnectCount: nativePreviewMainPumpDisconnectCount
+    }
+    nativePreviewMainSmokeDropPresentEvents = true
+    nativePreviewMainLastPresentDrivingEventAtMs =
+      Date.now() - DEFAULT_MAIN_PUMP_FRAME_STALL_TIMEOUT_MS
+    const watchdogDeadline = Date.now() + FIRST_FRAME_TICK_MS * 5
+    try {
+      while (
+        Date.now() < watchdogDeadline &&
+        nativePreviewMainPumpDisconnectCount <= before.disconnectCount
+      ) {
+        await delay(50)
+      }
+    } finally {
+      nativePreviewMainSmokeDropPresentEvents = false
+    }
+    const watchdogDetected =
+      nativePreviewMainPumpDisconnectCount > before.disconnectCount &&
+      /presentation event heartbeat stalled/.test(nativePreviewMainPumpLastDisconnectReason ?? '')
+    if (!watchdogDetected) {
+      throw new Error(
+        `Main present pump watchdog did not retire the simulated half-open event lane: ${nativePreviewMainPumpLastDisconnectReason ?? 'no disconnect'}`
+      )
+    }
+
+    // Observe the renderer-owned interval before main's two-second retry. A
+    // single retiring in-flight present is insufficient proof: require at least
+    // ten advancing native frames while ownership is published as renderer.
+    await delay(1200)
+    const fallbackFrameId =
+      nativePreviewSurfaceStatus.presentedFrameId ?? nativePreviewSurfaceStatus.framesRendered
+    const fallback = {
+      frameId: fallbackFrameId,
+      frameDelta: fallbackFrameId - before.frameId,
+      observed:
+        nativePreviewMainPumpRendererFallbackCount > before.rendererFallbackCount &&
+        !nativePreviewMainPumpActive
+    }
+
+    const reconnectDeadline = Date.now() + 5000
+    while (
+      Date.now() < reconnectDeadline &&
+      (!nativePreviewMainPumpActive ||
+        nativePreviewMainPumpActivationCount <= before.activationCount ||
+        (nativePreviewSurfaceStatus.presentedFrameId ??
+          nativePreviewSurfaceStatus.framesRendered) <= fallbackFrameId)
+    ) {
+      await delay(50)
+    }
+    const finalFrameId =
+      nativePreviewSurfaceStatus.presentedFrameId ?? nativePreviewSurfaceStatus.framesRendered
+    return {
+      before,
+      watchdogDetected,
+      fallback,
+      reconnected:
+        nativePreviewMainPumpActive &&
+        nativePreviewMainPumpActivationCount > before.activationCount,
+      finalFrameId,
+      finalFrameDelta: finalFrameId - before.frameId,
+      activationCount: nativePreviewMainPumpActivationCount,
+      rendererFallbackCount: nativePreviewMainPumpRendererFallbackCount,
+      disconnectCount: nativePreviewMainPumpDisconnectCount,
+      lastDisconnectReason: nativePreviewMainPumpLastDisconnectReason
+    }
   }
 
   if (command === 'exercise-main-present-scene-mismatch') {

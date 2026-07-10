@@ -9,6 +9,12 @@ import { promisify } from 'node:util'
 const execFileAsync = promisify(execFile)
 
 export const PERFORMANCE_REPORT_SCHEMA_VERSION = 1
+export const MACOS_CAFFEINATE_POWER_ASSERTION = 'caffeinate:-d,-i,-s'
+const MACOS_CAFFEINATE_REQUIRED_ASSERTION_TYPES = [
+  'PreventUserIdleDisplaySleep',
+  'PreventUserIdleSystemSleep',
+  'PreventSystemSleep'
+]
 
 export function performanceBuildMode(env = process.env) {
   return env.VIDEORC_SMOKE_PACKAGED_APP === '1' || env.VIDEORC_PERF_APP_EXECUTABLE
@@ -229,15 +235,24 @@ export async function collectPerformanceMetadata({ cwd = process.cwd(), env = pr
   const executablePath = env.VIDEORC_PERF_APP_EXECUTABLE
     ? resolve(cwd, env.VIDEORC_PERF_APP_EXECUTABLE)
     : null
-  const [commit, dirty, machineModel, macosVersion, displayScale, executableSha256] =
-    await Promise.all([
-      commandOutput('git', ['rev-parse', 'HEAD'], cwd),
-      commandOutput('git', ['status', '--porcelain'], cwd),
-      commandOutput('sysctl', ['-n', 'hw.model']),
-      commandOutput('sw_vers', ['-productVersion']),
-      displayScaleFactor(),
-      executablePath ? sha256FileOrNull(executablePath) : null
-    ])
+  const powerAssertion = nonEmptyString(env.VIDEORC_PERF_POWER_ASSERTION)
+  const [
+    commit,
+    dirty,
+    machineModel,
+    macosVersion,
+    displayScale,
+    executableSha256,
+    powerAssertionVerified
+  ] = await Promise.all([
+    commandOutput('git', ['rev-parse', 'HEAD'], cwd),
+    commandOutput('git', ['status', '--porcelain'], cwd),
+    commandOutput('sysctl', ['-n', 'hw.model']),
+    commandOutput('sw_vers', ['-productVersion']),
+    displayScaleFactor(),
+    executablePath ? sha256FileOrNull(executablePath) : null,
+    currentMacosCaffeinatePowerAssertionVerified({ env })
+  ])
   return {
     capturedAt: new Date().toISOString(),
     commit: commit || null,
@@ -254,6 +269,8 @@ export async function collectPerformanceMetadata({ cwd = process.cwd(), env = pr
     buildMode: performanceBuildMode(env),
     expectedBuildMode: nonEmptyString(env.VIDEORC_PERF_EXPECT_BUILD_MODE),
     runNonce: nonEmptyString(env.VIDEORC_PERF_RUN_NONCE),
+    powerAssertion,
+    powerAssertionVerified,
     executable: executablePath
       ? {
           path: executablePath,
@@ -267,6 +284,58 @@ export async function collectPerformanceMetadata({ cwd = process.cwd(), env = pr
       fps: positiveNumber(env.VIDEORC_PERF_SOURCE_FPS)
     },
     outputs: jsonArray(env.VIDEORC_PERF_OUTPUTS_JSON)
+  }
+}
+
+export async function currentMacosCaffeinatePowerAssertionVerified({
+  env = process.env,
+  pid = process.pid,
+  osPlatform = platform()
+} = {}) {
+  const declaredAssertion = nonEmptyString(env.VIDEORC_PERF_POWER_ASSERTION)
+  if (!declaredAssertion) return null
+  if (osPlatform !== 'darwin' || declaredAssertion !== MACOS_CAFFEINATE_POWER_ASSERTION) {
+    return false
+  }
+  const assertions = await commandOutput('/usr/bin/pmset', ['-g', 'assertions'])
+  return macosCaffeinatePowerAssertionVerified(assertions, pid)
+}
+
+export function macosCaffeinatePowerAssertionVerified(assertions, pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  const assertionTypes = new Set()
+  let currentAssertionType = null
+  for (const line of String(assertions ?? '').split('\n')) {
+    const owner =
+      /^\s*pid \d+\(caffeinate\):.*\b(Prevent(?:UserIdle)?(?:Display|System)Sleep)\b.*named: "caffeinate command-line tool"/.exec(
+        line
+      )
+    if (owner) {
+      currentAssertionType = owner[1]
+      continue
+    }
+    if (/^\s*pid \d+\(/.test(line)) {
+      currentAssertionType = null
+      continue
+    }
+    if (
+      currentAssertionType &&
+      line.includes('caffeinate asserting on behalf of') &&
+      line.includes(`(pid ${pid})`)
+    ) {
+      assertionTypes.add(currentAssertionType)
+    }
+  }
+  return MACOS_CAFFEINATE_REQUIRED_ASSERTION_TYPES.every((type) => assertionTypes.has(type))
+}
+
+export function performanceWrapperMetadataAfterChild(wrapperMetadata, childMetadata) {
+  if (!wrapperMetadata?.powerAssertion) return wrapperMetadata
+  return {
+    ...wrapperMetadata,
+    powerAssertionVerified:
+      childMetadata?.powerAssertion === wrapperMetadata.powerAssertion &&
+      childMetadata?.powerAssertionVerified === true
   }
 }
 
@@ -309,6 +378,14 @@ export function evaluateChildPerformanceMetadata({ actual, expected, requireClea
     failures.push(
       `child hardware class was ${actual?.hardwareClass ?? 'missing'}; expected ${expected?.hardwareClass ?? 'missing'}`
     )
+  }
+  if ((actual?.powerAssertion ?? null) !== (expected?.powerAssertion ?? null)) {
+    failures.push(
+      `child power assertion was ${actual?.powerAssertion ?? 'missing'}; expected ${expected?.powerAssertion ?? 'missing'}`
+    )
+  }
+  if (expected?.powerAssertion && actual?.powerAssertionVerified !== true) {
+    failures.push('child macOS power assertion was declared but not verified at runtime')
   }
 
   if (requireCleanProvenance) {

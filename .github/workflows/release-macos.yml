@@ -121,7 +121,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: videorc-macos-performance-${{ github.run_id }}
-          path: docs/acceptance/artifacts/performance/release/packaged-native-preview.json
+          path: |
+            docs/acceptance/artifacts/performance/release/packaged-native-preview.json
+            docs/acceptance/artifacts/performance/release/packaged-native-preview.child.json
           if-no-files-found: error
           retention-days: 90
 

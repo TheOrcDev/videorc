@@ -11,6 +11,40 @@ export const PERFORMANCE_SCENARIOS = [
   'record-4k-stream-1080p'
 ]
 
+export const MACOS_PERFORMANCE_POWER_ASSERTION = 'caffeinate:-d,-i,-s'
+
+/**
+ * Keep wall-clock endurance evidence comparable on macOS. A sleeping display
+ * can suspend ScreenCaptureKit/CAMetalLayer and a clamshell host can then enter
+ * system sleep while Date.now() continues to advance. Wrap the complete
+ * scenario (not just the app child) so warm-up, measurement, and teardown are
+ * covered by the same explicit assertion and recorded in child provenance.
+ */
+export function performanceScenarioLaunchSpec(
+  scenario,
+  { platform = process.platform, caffeinatePath = '/usr/bin/caffeinate' } = {}
+) {
+  if (platform !== 'darwin') {
+    return {
+      ...scenario,
+      env: { ...scenario.env, VIDEORC_PERF_POWER_ASSERTION: '' },
+      powerAssertion: null
+    }
+  }
+
+  const flags = ['-d', '-i', '-s']
+  return {
+    ...scenario,
+    command: caffeinatePath,
+    args: [...flags, scenario.command, ...scenario.args],
+    env: {
+      ...scenario.env,
+      VIDEORC_PERF_POWER_ASSERTION: MACOS_PERFORMANCE_POWER_ASSERTION
+    },
+    powerAssertion: { provider: 'caffeinate', flags }
+  }
+}
+
 export function buildPerformanceScenario({
   scenario,
   mode,

@@ -62,11 +62,20 @@
     "evidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["calibrationId", "commit", "executableSha256", "runCount"],
+      "required": [
+        "calibrationId",
+        "commit",
+        "executableSha256",
+        "powerAssertion",
+        "powerAssertionVerified",
+        "runCount"
+      ],
       "properties": {
         "calibrationId": { "type": "string", "pattern": "^[0-9a-f]{24}$" },
         "commit": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
         "executableSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "powerAssertion": { "const": "caffeinate:-d,-i,-s" },
+        "powerAssertionVerified": { "const": true },
         "runCount": { "const": 3 }
       }
     },

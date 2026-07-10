@@ -22,6 +22,7 @@ import {
 import {
   collectPerformanceMetadata,
   createPerformanceReport,
+  currentMacosCaffeinatePowerAssertionVerified,
   evaluateScenarioTruth,
   failingChecks,
   observationCheck,
@@ -46,6 +47,8 @@ import {
 } from './lib/process-memory-gate.mjs'
 import {
   absoluteSampleDelayMs,
+  performanceSampleIndexAtTime,
+  performanceSamplingEvidenceFailures,
   performanceSamplingInvariants
 } from './lib/performance-sampling-schedule.mjs'
 
@@ -169,6 +172,8 @@ let statusBefore = null
 let statusAfter = null
 let proofWindowState = null
 let proofFallbackState = null
+let samplingEvidence = null
+let mainPumpDiagnostics = null
 let memorySummary = null
 let resourceCheckpoints = null
 let cpuSummary = {}
@@ -248,7 +253,9 @@ try {
   }
   wireTap = await openBackendWireTap(backend)
   const measurementStartedAt = Date.now()
-  for (let sampleIndex = 0; sampleIndex < samplingInvariants.expectedSamples; sampleIndex += 1) {
+  let sampleIndex = 0
+  let skippedDeadlineCount = 0
+  while (sampleIndex < samplingInvariants.expectedSamples) {
     const delayMs = absoluteSampleDelayMs({
       measurementStartedAtMs: measurementStartedAt,
       sampleIndex,
@@ -256,6 +263,15 @@ try {
       nowMs: Date.now()
     })
     if (delayMs > 0) await sleep(delayMs)
+    const effectiveSampleIndex = performanceSampleIndexAtTime({
+      measurementStartedAtMs: measurementStartedAt,
+      minimumSampleIndex: sampleIndex,
+      intervalMs: sampleIntervalMs,
+      nowMs: Date.now()
+    })
+    skippedDeadlineCount +=
+      Math.min(samplingInvariants.expectedSamples, effectiveSampleIndex) - sampleIndex
+    sampleIndex = effectiveSampleIndex
     if (Date.now() - measurementStartedAt >= measurementMs) break
     const [census, cpu] = await Promise.all([
       collectProcessCensus({ ledgerPaths, pgid: launched.process.pid }),
@@ -264,11 +280,29 @@ try {
     census.sampledAtMs = Date.now()
     samples.push(census)
     cpuSamples.push(cpu)
+    sampleIndex += 1
   }
   const remainingMeasurementMs = measurementMs - (Date.now() - measurementStartedAt)
   if (remainingMeasurementMs > 0) await sleep(remainingMeasurementMs)
   const measurementEndedAt = Date.now()
+  const sampleTimestamps = [
+    measurementStartedAt,
+    ...samples.map((sample) => sample.sampledAtMs),
+    measurementEndedAt
+  ]
+  samplingEvidence = {
+    expectedSamples: samplingInvariants.expectedSamples,
+    collectedSamples: samples.length,
+    skippedDeadlineCount,
+    maxSampleGapMs: maximumAdjacentGapMs(sampleTimestamps),
+    measurementElapsedMs: measurementEndedAt - measurementStartedAt,
+    powerAssertion: reportMetadata.powerAssertion,
+    powerAssertionVerified: await currentMacosCaffeinatePowerAssertionVerified({
+      env: reportMetadataEnvironment
+    })
+  }
   statusAfter = await smokeCommand(smoke, 'native-preview-surface-status')
+  mainPumpDiagnostics = await smokeCommand(smoke, 'main-present-pump-diagnostics')
   measuredWireBytes = wireTap.bytes()
   diagnosticStatusAfter = await wireTap.request('diagnostics.stats')
   wireTap.close()
@@ -322,6 +356,7 @@ try {
     framePipeline: compositorStatusAfter?.framePipeline ?? null,
     imageCache: compositorStatusAfter?.imageCache ?? null,
     runtimeDiagnostics: diagnosticStatusAfter,
+    mainPumpDiagnostics,
     proofAnimationSuspended: proofWindowState?.animationSuspended,
     proofWindowVisible: proofWindowState?.visible,
     explicitFallback: {
@@ -454,6 +489,10 @@ const truthFailures = [
   ...(runError ? [runError.message] : []),
   ...(teardownError ? [teardownError.message] : []),
   ...activeBudgetMetricFailures,
+  ...performanceSamplingEvidenceFailures(samplingEvidence, measurementMs, sampleIntervalMs),
+  ...(reportMetadata.powerAssertion && samplingEvidence?.powerAssertionVerified !== true
+    ? ['macOS power assertion was declared but not verified through the measurement boundary']
+    : []),
   ...evaluateScenarioTruth({
     frames: pipeline?.frames ?? 0,
     expectedTransport,
@@ -493,6 +532,7 @@ const report = createPerformanceReport({
     pipeline,
     cpuAveragePercentByRole: cpuSummary,
     memory: memorySummary,
+    sampling: samplingEvidence,
     resourceCheckpoints,
     teardownRecovery,
     activeBudget: activeBudget
@@ -555,6 +595,14 @@ function cadenceFailures({ presentFps, framesPerSecond, intervalP95Ms, statusFet
     )
   }
   return failures
+}
+
+function maximumAdjacentGapMs(timestamps) {
+  let maximum = 0
+  for (let index = 1; index < timestamps.length; index += 1) {
+    maximum = Math.max(maximum, timestamps[index] - timestamps[index - 1])
+  }
+  return maximum
 }
 
 async function sampleProcessGroupCpu(pgid) {

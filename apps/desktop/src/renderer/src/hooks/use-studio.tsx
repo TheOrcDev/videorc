@@ -206,6 +206,9 @@ import {
   compositorStatusHasRenderedSceneRevision,
   decideNativePreviewCompositorPresent,
   nativePreviewDroppedFramesWithSuppressed,
+  rendererFallbackCompositorStatusIsFresh,
+  rendererFallbackSeedCompositorStatus,
+  rendererFallbackOwnsPresentation,
   nativePreviewSceneProofPresentationOwner,
   pendingCompositorStatusSupersedes,
   type NativePreviewRendererTimingFields
@@ -1885,6 +1888,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // relay stays dormant then (it leaked IPC serialization buffers at scale).
   const mainPumpActiveRef = useRef(false)
   const nativePreviewRendererPumpOwnershipGenerationRef = useRef(0)
+  const nativePreviewRendererFallbackActivatedAtRef = useRef(0)
   const [mainPumpActive, setMainPumpActive] = useState(false)
   const previewSurfaceStatusCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previewSurfaceStatusLastCommitAtRef = useRef(0)
@@ -2401,8 +2405,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     let cancelled = false
     const applyMainPumpActive = (active: boolean): void => {
       const nextActive = active === true
-      if (mainPumpActiveRef.current !== nextActive) {
+      const wasActive = mainPumpActiveRef.current
+      if (wasActive !== nextActive) {
         nativePreviewRendererPumpOwnershipGenerationRef.current += 1
+        nativePreviewRendererFallbackActivatedAtRef.current =
+          wasActive && !nextActive ? Date.now() : 0
+        nativePreviewCompositorLatestStatusRef.current = rendererFallbackSeedCompositorStatus({
+          wasMainPumpActive: wasActive,
+          nextMainPumpActive: nextActive,
+          latestStatus: nativePreviewCompositorLatestStatusRef.current
+        })
       }
       mainPumpActiveRef.current = nextActive
       if (nextActive) {
@@ -3285,12 +3297,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('compositor.status', (payload) => {
         bootstrapGuard.mark('compositor')
         const status = payload as CompositorStatus
-        nativePreviewCompositorLastEventAtRef.current = Date.now()
+        const receivedAtMs = Date.now()
+        const fallbackOwnsPresentation = rendererFallbackOwnsPresentation({
+          mainPumpActive: mainPumpActiveRef.current,
+          recordingState: recordingRef.current.state
+        })
+        if (
+          fallbackOwnsPresentation &&
+          !rendererFallbackCompositorStatusIsFresh({
+            fallbackActivatedAtMs: nativePreviewRendererFallbackActivatedAtRef.current,
+            statusUpdatedAt: status.updatedAt
+          })
+        ) {
+          return
+        }
+        nativePreviewCompositorLastEventAtRef.current = receivedAtMs
         nativePreviewCompositorLatestStatusRef.current = status
         if (
-          mainPumpActiveRef.current ||
-          isActiveRecordingState(recordingRef.current.state) ||
-          Date.now() - nativePreviewFrameReadyLastEventAtRef.current <= 1000
+          !fallbackOwnsPresentation ||
+          receivedAtMs - nativePreviewFrameReadyLastEventAtRef.current <= 1000
         ) {
           return
         }
@@ -3298,14 +3323,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('preview.frameReady', (payload) => {
         bootstrapGuard.mark('compositor')
-        nativePreviewFrameReadyLastEventAtRef.current = Date.now()
+        const frame = payload as CompositorFrameReady
+        const fallbackOwnsPresentation = rendererFallbackOwnsPresentation({
+          mainPumpActive: mainPumpActiveRef.current,
+          recordingState: recordingRef.current.state
+        })
+        if (
+          fallbackOwnsPresentation &&
+          !rendererFallbackCompositorStatusIsFresh({
+            fallbackActivatedAtMs: nativePreviewRendererFallbackActivatedAtRef.current,
+            statusUpdatedAt: frame.updatedAt
+          })
+        ) {
+          return
+        }
+        const receivedAtMs = Date.now()
+        nativePreviewFrameReadyLastEventAtRef.current = receivedAtMs
         const status = compositorStatusFromFrameReady(
-          payload as CompositorFrameReady,
+          frame,
           nativePreviewCompositorLatestStatusRef.current
         )
-        nativePreviewCompositorLastEventAtRef.current = Date.now()
+        nativePreviewCompositorLastEventAtRef.current = receivedAtMs
         nativePreviewCompositorLatestStatusRef.current = status
-        if (mainPumpActiveRef.current || isActiveRecordingState(recordingRef.current.state)) {
+        if (!fallbackOwnsPresentation) {
           return
         }
         queueNativePreviewCompositorPresent(nextClient, status)
@@ -3794,6 +3834,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nativePreviewCompositorPendingRef.current = null
       nativePreviewCompositorLatestStatusRef.current = null
       nativePreviewFrameReadyLastEventAtRef.current = 0
+      nativePreviewRendererFallbackActivatedAtRef.current = 0
       nativePreviewCompositorPresentingRef.current = false
       nativePreviewCompositorSuppressedPresentsRef.current = 0
       nativePreviewCompositorLastEventAtRef.current = 0

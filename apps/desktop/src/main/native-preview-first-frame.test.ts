@@ -19,6 +19,7 @@ function snapshot(overrides: Partial<FirstFrameSnapshot> = {}): FirstFrameSnapsh
     surfaceLive: true,
     nativePresenting: true,
     framesAdvancing: true,
+    presentationAdvancing: true,
     rendererSceneRevision: 42,
     compositorSceneRevision: 42,
     compositorFrameSceneRevision: 42,
@@ -33,6 +34,9 @@ describe('firstFrameContractMet', () => {
     expect(firstFrameContractMet(snapshot({ surfaceLive: false }))).toBe(false)
     expect(firstFrameContractMet(snapshot({ nativePresenting: false }))).toBe(false)
     expect(firstFrameContractMet(snapshot({ framesAdvancing: false }))).toBe(false)
+    // A first frame can satisfy startup before a second native frame exists;
+    // steady-state assessment below adds the advancement requirement.
+    expect(firstFrameContractMet(snapshot({ presentationAdvancing: false }))).toBe(true)
     expect(firstFrameContractMet(snapshot({ metalTargetPresent: false }))).toBe(false)
     expect(firstFrameContractMet(snapshot({ rendererSceneRevision: null }))).toBe(false)
     expect(firstFrameContractMet(snapshot({ compositorSceneRevision: 41 }))).toBe(false)
@@ -61,6 +65,9 @@ describe('firstFrameBlockedReason', () => {
     )
     expect(firstFrameBlockedReason(snapshot({ framesAdvancing: false }))).toMatch(
       /frames are not advancing/
+    )
+    expect(firstFrameBlockedReason(snapshot({ presentationAdvancing: false }))).toMatch(
+      /native presentation is not advancing/i
     )
     expect(firstFrameBlockedReason(snapshot({ nativePresenting: false }))).toMatch(
       /Native presenter/
@@ -186,6 +193,18 @@ describe('assessPresenting', () => {
   it('observes a transient stall without healing before the tick threshold', () => {
     const { kinds } = run([broken(), broken()])
     expect(kinds).toEqual(['observing', 'observing'])
+  })
+
+  it('treats advancing compositor frames with a frozen native presentation as a stall', () => {
+    const frozenPresentation = snapshot({ presentationAdvancing: false })
+    const { kinds, last } = run([frozenPresentation, frozenPresentation, frozenPresentation])
+
+    expect(kinds).toEqual(['observing', 'observing', 'heal'])
+    expect(last.assessment).toMatchObject({
+      kind: 'heal',
+      action: 'present-kick',
+      reason: 'Native presentation is not advancing.'
+    })
   })
 
   it('a healthy tick resets the stall counter', () => {

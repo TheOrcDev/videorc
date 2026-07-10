@@ -110,6 +110,8 @@ async function runPreviewSurfaceSmoke(connection, smoke) {
       durationMs: measurementMs
     })
     assertNativeMeasurement(firstMeasurement, 'initial')
+    const pumpReconnect = await smokeCommand(smoke, 'exercise-main-present-pump-reconnect')
+    assertMainPumpReconnect(pumpReconnect)
 
     const firstDiagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
     if (firstDiagnostics.previewTransport !== expectedSurfaceTransport) {
@@ -170,7 +172,8 @@ async function runPreviewSurfaceSmoke(connection, smoke) {
       sceneExercise,
       sceneReattach,
       reattachedStatus,
-      reattachedMainStatus
+      reattachedMainStatus,
+      pumpReconnect
     })
 
     console.log(
@@ -304,7 +307,10 @@ async function waitForBackgroundSceneExercise(smoke) {
       await sleep(150)
     }
   }
-  throw lastError ?? new Error(`Background scene exercise did not complete: ${JSON.stringify(lastResult)}`)
+  throw (
+    lastError ??
+    new Error(`Background scene exercise did not complete: ${JSON.stringify(lastResult)}`)
+  )
 }
 
 function assertNativeMeasurement(measurement, label) {
@@ -556,6 +562,7 @@ function writePreviewSurfaceGateReport(summary) {
           restored: measurementSummary(summary.restoredMeasurement, summary.restoredStatus),
           reattached: statusSummary(summary.reattachedStatus),
           reattachedMain: statusSummary(summary.reattachedMainStatus),
+          mainPumpReconnect: summary.pumpReconnect,
           resizeCount: summary.resizedDiagnostics.previewSurfaceResizeCount,
           sceneUpdateLatencyMs: summary.sceneExercise.updateLatencyMs,
           sceneReattachLatencyMs: summary.sceneReattach.updateLatencyMs
@@ -603,6 +610,28 @@ function statusSummary(status) {
     framesRendered: status.framesRendered,
     droppedFrames: status.droppedFrames,
     bounds: status.bounds
+  }
+}
+
+function assertMainPumpReconnect(result) {
+  if (result.watchdogDetected !== true) {
+    throw new Error(
+      `Main present pump watchdog did not detect the stalled event lane: ${JSON.stringify(result)}`
+    )
+  }
+  if (result.fallback?.observed !== true) {
+    throw new Error(`Renderer fallback ownership was not observed: ${JSON.stringify(result)}`)
+  }
+  if ((result.fallback?.frameDelta ?? 0) < 10) {
+    throw new Error(
+      `Renderer fallback advanced only ${result.fallback?.frameDelta ?? 'missing'} native frames; expected at least 10.`
+    )
+  }
+  if (result.reconnected !== true) {
+    throw new Error(`Main present pump did not reconnect: ${JSON.stringify(result)}`)
+  }
+  if ((result.finalFrameDelta ?? 0) <= result.fallback.frameDelta) {
+    throw new Error(`Native frames stopped after main retook ownership: ${JSON.stringify(result)}`)
   }
 }
 

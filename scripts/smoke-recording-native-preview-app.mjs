@@ -209,6 +209,10 @@ async function runNativePreviewRecordingScenario(
   }
   await assertSameRunningSession(ws, started.sessionId)
   await waitForActiveSceneDiagnostics(ws, activeSceneRevision, 'record')
+  if (expectsPreview) {
+    const pumpReconnect = await smokeCommand(smoke, 'exercise-main-present-pump-reconnect')
+    assertMainPumpReconnectDuringRecording(scenario, pumpReconnect)
+  }
 
   const measurementPromise = expectsPreview
     ? smokeCommand(smoke, 'measure-native-preview-surface', {
@@ -323,6 +327,23 @@ async function runNativePreviewRecordingScenario(
     `Native-preview recording [${scenario.label}] OK: ${outputPath} (${size} bytes), ${previewSummary}${handoffSummary}, startup repeat ${format(startupReport.metrics.maxRepeatedFrameRun, 0)}, final repeat ${format(recordingReport.metrics.maxRepeatedFrameRun, 0)}, ${bridgeSummary}, A/V skew ${skew.toFixed(1)}ms, layout stress ${layoutStressUpdates} update(s), maintenance samples ${stats.maintenanceSamples}, duplicate samples ${stats.duplicateCaptureSamples}, max RSS ${formatBytes(stats.maxBackendRssBytes)}, max FFmpeg procs ${stats.maxActiveFfmpegProcesses}, max FFprobe procs ${stats.maxActiveFfprobeProcesses}, startup report ${startupReportPaths.mdPath}, quality report ${recordingReportPaths.mdPath}`
   )
   return surfaceDuring
+}
+
+function assertMainPumpReconnectDuringRecording(scenario, result) {
+  if (
+    result.watchdogDetected !== true ||
+    result.fallback?.observed !== true ||
+    (result.fallback?.frameDelta ?? 0) < 10 ||
+    result.reconnected !== true ||
+    (result.finalFrameDelta ?? 0) <= result.fallback.frameDelta
+  ) {
+    throw new Error(
+      `[${scenario.label}] Native preview pump handoff failed during recording: ${JSON.stringify(result)}`
+    )
+  }
+  console.log(
+    `[${scenario.label}] Native preview pump handoff advanced ${result.fallback.frameDelta} renderer-fallback frames and reconnected main at +${result.finalFrameDelta} frames.`
+  )
 }
 
 async function showNativePreviewSurface(ws, smoke, samples) {

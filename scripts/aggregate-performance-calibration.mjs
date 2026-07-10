@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import { dirname, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import {
@@ -21,7 +21,10 @@ async function main(argv) {
   )
   const { summary, budgetCandidate } = aggregatePackagedPerformanceCalibration({
     reports,
-    reportPaths: args.reportPaths.map((path) => resolve(path))
+    reportPaths: portableCalibrationReportPaths({
+      reportPaths: args.reportPaths,
+      outputPath: args.outputPath
+    })
   })
 
   await Promise.all([
@@ -31,6 +34,11 @@ async function main(argv) {
   console.log(formatPerformanceCalibrationSummary(summary))
   console.log(`Calibration summary: ${resolve(args.outputPath)}`)
   console.log(`Unenforced budget candidate: ${resolve(args.budgetCandidatePath)}`)
+}
+
+export function portableCalibrationReportPaths({ reportPaths, outputPath }) {
+  const artifactDirectory = dirname(resolve(outputPath))
+  return reportPaths.map((path) => relative(artifactDirectory, resolve(path)).split(sep).join('/'))
 }
 
 export function parseArgs(argv) {

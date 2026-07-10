@@ -42,10 +42,20 @@
     "evidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["commit", "executableSha256", "runCount", "runNonces", "reportPaths"],
+      "required": [
+        "commit",
+        "executableSha256",
+        "powerAssertion",
+        "powerAssertionVerified",
+        "runCount",
+        "runNonces",
+        "reportPaths"
+      ],
       "properties": {
         "commit": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
         "executableSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "powerAssertion": { "const": "caffeinate:-d,-i,-s" },
+        "powerAssertionVerified": { "const": true },
         "runCount": { "const": 3 },
         "runNonces": {
           "type": "array",
