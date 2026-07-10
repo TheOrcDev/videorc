@@ -44,6 +44,10 @@ import {
   formatProcessMemorySummary,
   summarizeProcessMemory
 } from './lib/process-memory-gate.mjs'
+import {
+  absoluteSampleDelayMs,
+  performanceSamplingInvariants
+} from './lib/performance-sampling-schedule.mjs'
 
 const execFileAsync = promisify(execFile)
 const mode = performanceMode()
@@ -51,6 +55,8 @@ const timeoutMs = numberFromEnv('VIDEORC_PROBE_TIMEOUT_MS', 180000)
 const warmupSeconds = numberFromEnv('VIDEORC_PERF_WARMUP_SECONDS', 8)
 const sampleSeconds = numberFromEnv('VIDEORC_PERF_SAMPLE_SECONDS', 30)
 const sampleIntervalMs = numberFromEnv('VIDEORC_PERF_SAMPLE_INTERVAL_MS', 1000)
+const measurementMs = sampleSeconds * 1000
+const samplingInvariants = performanceSamplingInvariants(measurementMs, sampleIntervalMs)
 const previewMode = process.env.VIDEORC_PERF_PREVIEW_MODE ?? 'detached'
 const expectedTransport = process.env.VIDEORC_PERF_EXPECT_TRANSPORT ?? 'native-surface'
 const expectedBacking = process.env.VIDEORC_PERF_EXPECT_BACKING ?? 'cametal-layer'
@@ -76,8 +82,8 @@ if (packagedExecutable && !existsSync(packagedExecutable)) {
 }
 
 const invariantMemoryThresholds = {
-  minSamples: Math.max(3, Math.floor((sampleSeconds * 1000) / Math.max(1, sampleIntervalMs))),
-  minDurationMs: Math.max(0, sampleSeconds * 1000 - sampleIntervalMs),
+  minSamples: samplingInvariants.minSamples,
+  minDurationMs: samplingInvariants.minDurationMs,
   minRoleCount: {
     backend: 1,
     'electron-main': 1,
@@ -242,7 +248,15 @@ try {
   }
   wireTap = await openBackendWireTap(backend)
   const measurementStartedAt = Date.now()
-  while (Date.now() - measurementStartedAt < sampleSeconds * 1000) {
+  for (let sampleIndex = 0; sampleIndex < samplingInvariants.expectedSamples; sampleIndex += 1) {
+    const delayMs = absoluteSampleDelayMs({
+      measurementStartedAtMs: measurementStartedAt,
+      sampleIndex,
+      intervalMs: sampleIntervalMs,
+      nowMs: Date.now()
+    })
+    if (delayMs > 0) await sleep(delayMs)
+    if (Date.now() - measurementStartedAt >= measurementMs) break
     const [census, cpu] = await Promise.all([
       collectProcessCensus({ ledgerPaths, pgid: launched.process.pid }),
       sampleProcessGroupCpu(launched.process.pid)
@@ -250,9 +264,9 @@ try {
     census.sampledAtMs = Date.now()
     samples.push(census)
     cpuSamples.push(cpu)
-    const remainingMs = sampleSeconds * 1000 - (Date.now() - measurementStartedAt)
-    if (remainingMs > 0) await sleep(Math.min(sampleIntervalMs, remainingMs))
   }
+  const remainingMeasurementMs = measurementMs - (Date.now() - measurementStartedAt)
+  if (remainingMeasurementMs > 0) await sleep(remainingMeasurementMs)
   const measurementEndedAt = Date.now()
   statusAfter = await smokeCommand(smoke, 'native-preview-surface-status')
   measuredWireBytes = wireTap.bytes()
