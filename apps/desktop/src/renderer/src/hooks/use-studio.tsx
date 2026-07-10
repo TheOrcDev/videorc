@@ -75,6 +75,7 @@ import {
   layoutTransactionFailureReconciliation,
   layoutTransactionProofDisposition,
   layoutTransactionUnprovenSeverity,
+  liveBackgroundCommitDecision,
   NativePreviewPresentationProofError,
   shouldReloadSceneFromCaptureConfig
 } from '@/lib/layout-transaction-policy'
@@ -3792,7 +3793,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client])
 
   const requestLayoutTransaction = useCallback(
-    (layout: LayoutSettings) => {
+    (layout: LayoutSettings, options?: { pendingIndicator?: boolean }) => {
       const sessionActive = isActiveRecordingState(recordingRef.current.state)
       if (!client || wsStatus !== 'connected') {
         toast.error('Backend socket is not connected — layout unchanged.')
@@ -3802,7 +3803,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const intentId = Math.max(layoutIntentIdRef.current + 1, Date.now())
       layoutIntentIdRef.current = intentId
       layoutIntentAwaitingProofRef.current = intentId
-      setLayoutSwitchPending(layout.layoutPreset)
+      // Background-only commits keep the same preset; flashing the layout
+      // controls into "Switching…" for them reads as an unrelated change.
+      if (options?.pendingIndicator !== false) {
+        setLayoutSwitchPending(layout.layoutPreset)
+      }
 
       void (async () => {
         try {
@@ -3922,6 +3927,30 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       wsStatus
     ]
   )
+
+  // Instant background apply while live (2026-07-10 report: clicking an asset
+  // only changed the local registry — the stream kept the old background until
+  // the next layout-preset change re-committed the scene). Idle stays with the
+  // debounced scene reload effect; an active session commits through the same
+  // layout-transaction machinery (scene revision, latest-wins, proof).
+  // Fingerprint by VALUE: the registry memo yields a new object on unrelated
+  // edits (rename, import into an inactive slot) which must not commit.
+  const liveBackgroundFingerprintRef = useRef<string | null>(null)
+  const activeSceneBackgroundFingerprint = useMemo(
+    () => JSON.stringify(activeSceneBackground ?? null),
+    [activeSceneBackground]
+  )
+  useEffect(() => {
+    const decision = liveBackgroundCommitDecision({
+      sessionActive: isActiveRecordingState(recording.state),
+      armedFingerprint: liveBackgroundFingerprintRef.current,
+      fingerprint: activeSceneBackgroundFingerprint
+    })
+    liveBackgroundFingerprintRef.current = decision.next
+    if (decision.commit) {
+      requestLayoutTransaction(captureConfigRef.current.layout, { pendingIndicator: false })
+    }
+  }, [activeSceneBackgroundFingerprint, recording.state, requestLayoutTransaction])
 
   const applyLayoutPatch = useCallback(
     (patch: Partial<LayoutSettings>) => {

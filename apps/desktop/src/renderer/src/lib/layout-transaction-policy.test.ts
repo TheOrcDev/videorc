@@ -6,6 +6,7 @@ import {
   layoutTransactionFailureReconciliation,
   layoutTransactionProofDisposition,
   layoutTransactionUnprovenSeverity,
+  liveBackgroundCommitDecision,
   NativePreviewPresentationProofError,
   shouldReloadSceneFromCaptureConfig
 } from './layout-transaction-policy'
@@ -39,6 +40,33 @@ describe('layout transaction policy', () => {
         proofSucceeded: false
       })
     ).toBe('ignore-stale')
+  })
+
+  it('live-commits a background change only after the session armed the watcher', () => {
+    // Idle: never commit, stay disarmed.
+    expect(
+      liveBackgroundCommitDecision({
+        sessionActive: false,
+        armedFingerprint: 'a',
+        fingerprint: 'b'
+      })
+    ).toEqual({ next: null, commit: false })
+    // Session rising edge: start params already carry the background — arm only.
+    expect(
+      liveBackgroundCommitDecision({
+        sessionActive: true,
+        armedFingerprint: null,
+        fingerprint: 'a'
+      })
+    ).toEqual({ next: 'a', commit: false })
+    // Unchanged value (registry edited an inactive slot): no commit.
+    expect(
+      liveBackgroundCommitDecision({ sessionActive: true, armedFingerprint: 'a', fingerprint: 'a' })
+    ).toEqual({ next: 'a', commit: false })
+    // The visible background actually changed while live: commit once.
+    expect(
+      liveBackgroundCommitDecision({ sessionActive: true, armedFingerprint: 'a', fingerprint: 'b' })
+    ).toEqual({ next: 'b', commit: true })
   })
 
   it('downgrades a preview-only presentation miss to a warning', () => {
