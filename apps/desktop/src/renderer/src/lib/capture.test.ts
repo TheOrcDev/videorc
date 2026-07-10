@@ -17,6 +17,7 @@ import {
   hasSelectedScreenSource,
   isCapturePickerDevice,
   isNativeCaptureDevice,
+  microphonePickerDevices,
   isScreenCaptureKitCaptureDevice,
   isSelectableCaptureDevice,
   layoutPresetNeedsCamera,
@@ -349,6 +350,66 @@ describe('reconcileSourceSelection', () => {
     expect(next.screenName).toBeUndefined()
     expect(next.windowId).toBeUndefined()
     expect(next.windowName).toBeUndefined()
+  })
+})
+
+describe('microphone picker and fallback migration', () => {
+  const nativeMicrophone: Device = {
+    id: 'microphone:coreaudio:42',
+    name: 'Shure MV7+',
+    kind: 'microphone',
+    status: 'available'
+  }
+  const avfoundationMicrophone: Device = {
+    id: 'microphone:avfoundation:2',
+    name: 'Shure MV7+',
+    kind: 'microphone',
+    status: 'available'
+  }
+
+  it('hides avfoundation microphone rows whenever a native row exists', () => {
+    expect(microphonePickerDevices([avfoundationMicrophone, nativeMicrophone])).toEqual([
+      nativeMicrophone
+    ])
+  })
+
+  it('keeps avfoundation microphones only when they are the sole rows', () => {
+    expect(microphonePickerDevices([avfoundationMicrophone])).toEqual([avfoundationMicrophone])
+  })
+
+  it('never defaults a fresh profile to an avfoundation fallback microphone', () => {
+    // Older backends listed the avfoundation duplicate FIRST, which made
+    // microphones[0] a broken "Fallback - X" default on fresh profiles.
+    const next = reconcileSourceSelection({}, [avfoundationMicrophone, nativeMicrophone])
+
+    expect(next.microphoneId).toBe('microphone:coreaudio:42')
+    expect(next.microphoneName).toBe('Shure MV7+')
+  })
+
+  it('migrates a persisted fallback microphone selection to its native device', () => {
+    const next = reconcileSourceSelection(
+      {
+        microphoneId: 'microphone:avfoundation:2',
+        microphoneName: 'Fallback - Shure MV7+'
+      },
+      [nativeMicrophone]
+    )
+
+    expect(next.microphoneId).toBe('microphone:coreaudio:42')
+    expect(next.microphoneName).toBe('Shure MV7+')
+  })
+
+  it('keeps a persisted avfoundation selection when no native input exists', () => {
+    const next = reconcileSourceSelection(
+      {
+        microphoneId: 'microphone:avfoundation:2',
+        microphoneName: 'Shure MV7+'
+      },
+      [avfoundationMicrophone]
+    )
+
+    expect(next.microphoneId).toBe('microphone:avfoundation:2')
+    expect(next.microphoneName).toBe('Shure MV7+')
   })
 })
 

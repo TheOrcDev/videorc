@@ -36,7 +36,7 @@ try {
     loadCaptureConfig,
     persistableCaptureConfig,
     reconcileSourceSelection,
-    sourceSelectionChangeMessages,
+    sourceSelectionChangeEvents,
     STORAGE_KEYS
   } = require(tempModule)
   assert.equal(typeof reconcileSourceSelection, 'function')
@@ -90,11 +90,17 @@ try {
     microphoneName: 'Podcast Mic',
     testPattern: false
   })
-  assert.deepEqual(sourceSelectionChangeMessages(loaded.sources, reloadedSources), [
-    'Capture source "Built-in Display" was restored by name because its system ID changed.',
-    'Camera "FaceTime HD Camera" was restored by name because its system ID changed.',
-    'Microphone "Podcast Mic" was restored by name because its system ID changed.'
-  ])
+  assert.deepEqual(
+    sourceSelectionChangeEvents(loaded.sources, reloadedSources).map((event) => ({
+      sourceKind: event.sourceKind,
+      reason: event.reason
+    })),
+    [
+      { sourceKind: 'capture', reason: 'restored-by-name' },
+      { sourceKind: 'camera', reason: 'restored-by-name' },
+      { sourceKind: 'microphone', reason: 'restored-by-name' }
+    ]
+  )
 
   localStorage.setItem(
     STORAGE_KEYS.captureConfig,
@@ -190,14 +196,18 @@ try {
     microphoneName: 'Podcast Mic'
   })
   assert.deepEqual(
-    sourceSelectionChangeMessages(
+    sourceSelectionChangeEvents(
       missingSources,
       reconcileSourceSelection(missingSources, devices)
-    ),
+    ).map((event) => ({
+      sourceKind: event.sourceKind,
+      reason: event.reason,
+      nextName: event.nextName
+    })),
     [
-      'Capture source "Missing Display" is unavailable, so Videorc selected "Built-in Display".',
-      'Camera "Missing Camera" is unavailable, so Videorc selected "FaceTime HD Camera".',
-      'Microphone "Missing Mic" is unavailable, so Videorc selected "Podcast Mic".'
+      { sourceKind: 'capture', reason: 'unavailable-selected', nextName: 'Built-in Display' },
+      { sourceKind: 'camera', reason: 'unavailable-selected', nextName: 'FaceTime HD Camera' },
+      { sourceKind: 'microphone', reason: 'unavailable-selected', nextName: 'Podcast Mic' }
     ]
   )
 
@@ -225,8 +235,31 @@ try {
     }
   )
 
+  // Zombie "Fallback - X" avfoundation microphone rows (pre-0.9.27 backends)
+  // must never win the default, and selections persisted onto them must
+  // migrate to the matching native CoreAudio device by unprefixed name.
+  const fallbackMicDevices = [
+    device('microphone:avfoundation:2', 'Shure MV7+', 'microphone'),
+    device('microphone:coreaudio:shure', 'Shure MV7+', 'microphone')
+  ]
+  const migratedFromFallback = reconcileSourceSelection(
+    { microphoneId: 'microphone:avfoundation:2', microphoneName: 'Fallback - Shure MV7+' },
+    fallbackMicDevices
+  )
+  assert.equal(migratedFromFallback.microphoneId, 'microphone:coreaudio:shure')
+  assert.equal(migratedFromFallback.microphoneName, 'Shure MV7+')
+
+  const freshDefaultMic = reconcileSourceSelection({}, fallbackMicDevices)
+  assert.equal(freshDefaultMic.microphoneId, 'microphone:coreaudio:shure')
+
+  const avfoundationOnly = reconcileSourceSelection(
+    { microphoneId: 'microphone:avfoundation:2', microphoneName: 'Shure MV7+' },
+    [device('microphone:avfoundation:2', 'Shure MV7+', 'microphone')]
+  )
+  assert.equal(avfoundationOnly.microphoneId, 'microphone:avfoundation:2')
+
   console.log(
-    'Source reconciliation smoke OK - persisted IDs, name rematch, and fallback behavior verified.'
+    'Source reconciliation smoke OK - persisted IDs, name rematch, fallback behavior, and fallback-mic migration verified.'
   )
 } finally {
   await rm(tempDir, { recursive: true, force: true })

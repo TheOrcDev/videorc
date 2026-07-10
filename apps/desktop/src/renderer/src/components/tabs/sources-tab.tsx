@@ -31,6 +31,7 @@ import {
   buildCaptureSources,
   buildMicrophoneSources,
   capturePickerDevices,
+  microphonePickerDevices,
   audioSyncCalibrationState,
   normalizeMicrophoneSyncOffsetMs,
   parseAudioSyncRecommendationJson,
@@ -131,7 +132,7 @@ export function SourcesTab(): ReactElement {
     : null
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
-  const microphones = deviceList.devices.filter((device) => device.kind === 'microphone')
+  const microphones = microphonePickerDevices(deviceList.devices)
   const hasCapturePermissionRequired = captureDevices.some(
     (device) => device.status === 'permission-required'
   )

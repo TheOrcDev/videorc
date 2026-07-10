@@ -1292,6 +1292,30 @@ function isAvFoundationScreenSourceId(sourceId: string | undefined): boolean {
   return sourceId?.startsWith('screen:avfoundation:') === true
 }
 
+export function isAvFoundationMicrophoneId(sourceId: string | undefined): boolean {
+  return sourceId?.startsWith('microphone:avfoundation:') === true
+}
+
+// Older builds published every avfoundation microphone as a selectable
+// "Fallback - X" duplicate of its CoreAudio device; the prefix survives in
+// persisted selections and must map back to the native device name.
+const FALLBACK_MICROPHONE_NAME_PREFIX = 'Fallback - '
+
+function nativeMicrophoneNameFor(name: string | undefined): string | undefined {
+  return name?.startsWith(FALLBACK_MICROPHONE_NAME_PREFIX)
+    ? name.slice(FALLBACK_MICROPHONE_NAME_PREFIX.length)
+    : name
+}
+
+// Mirrors the backend picker rule (and guards against older backends that
+// still list them): avfoundation microphones are the internal silent-mic
+// retry path and are only selectable when no native input row exists at all.
+export function microphonePickerDevices(devices: Device[]): Device[] {
+  const microphones = devices.filter((device) => device.kind === 'microphone')
+  const nativeMicrophones = microphones.filter((device) => !isAvFoundationMicrophoneId(device.id))
+  return nativeMicrophones.length > 0 ? nativeMicrophones : microphones
+}
+
 const SCREEN_CAPTUREKIT_STATUS_IDS = new Set([
   'screen:screencapturekit-permission',
   'screen:screencapturekit-unavailable',
@@ -1439,8 +1463,8 @@ export function reconcileSourceSelection(
   const cameras = devices.filter(
     (device) => device.kind === 'camera' && device.status === 'available'
   )
-  const microphones = devices.filter(
-    (device) => device.kind === 'microphone' && device.status === 'available'
+  const microphones = microphonePickerDevices(devices).filter(
+    (device) => device.status === 'available'
   )
 
   // Auto-defaulting must never grab a window: with Screen Recording denied the
@@ -1479,9 +1503,22 @@ export function reconcileSourceSelection(
 
   const selectedCamera =
     findRememberedSource(nextSources.cameraId, nextSources.cameraName, cameras) ?? cameras[0]
+  // Migrate selections persisted onto the retired "Fallback - X" avfoundation
+  // rows: drop the synthetic id when native rows exist and match the native
+  // device by its unprefixed name instead of re-pinning the broken fallback.
+  const nativeMicrophoneAvailable = microphones.some(
+    (device) => !isAvFoundationMicrophoneId(device.id)
+  )
+  const rememberedMicrophoneId =
+    nativeMicrophoneAvailable && isAvFoundationMicrophoneId(nextSources.microphoneId)
+      ? undefined
+      : nextSources.microphoneId
   const selectedMicrophone =
-    findRememberedSource(nextSources.microphoneId, nextSources.microphoneName, microphones) ??
-    microphones[0]
+    findRememberedSource(
+      rememberedMicrophoneId,
+      nativeMicrophoneNameFor(nextSources.microphoneName),
+      microphones
+    ) ?? microphones[0]
 
   const cameraIdentity = sourceIdentityFor(selectedCamera)
   nextSources.cameraId = cameraIdentity.id
