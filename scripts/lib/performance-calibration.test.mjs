@@ -4,6 +4,12 @@ import { describe, it } from 'node:test'
 
 import { parseArgs, portableCalibrationReportPaths } from '../aggregate-performance-calibration.mjs'
 import {
+  createDetachedPreviewCalibrationEvidence,
+  detachedPreviewCalibrationProvenance,
+  DETACHED_PREVIEW_CALIBRATION_PHASE_SAMPLE_COUNTS,
+  inspectDetachedPreviewCalibrationSample
+} from './detached-preview-calibration.mjs'
+import {
   aggregatePackagedPerformanceCalibration,
   PerformanceCalibrationError,
   validatePackagedPerformanceCalibrationReports
@@ -27,6 +33,7 @@ describe('packaged performance calibration', () => {
     assert.equal(summary.provenance.powerAssertion, 'caffeinate:-d,-i,-s')
     assert.equal(summary.provenance.powerAssertionVerified, true)
     assert.equal(summary.provenance.displayScaleFactor, 2)
+    assert.equal(summary.provenance.detachedPreviewGeometry.stableAcrossMeasurement, true)
     assert.equal(summary.comparabilityPolicy.maxCadenceRelativeRange, 0.1)
     assert.equal(summary.observed.cadence.presentFps.median, 60)
     assert.equal(summary.observed.memoryMiB.maximumOwnedRss.median, 402)
@@ -50,6 +57,10 @@ describe('packaged performance calibration', () => {
     for (const report of reports) {
       report.metadata.displayScaleFactor = null
       report.metrics.pipeline.bounds.scaleFactor = 1
+      report.metrics.detachedPreviewGeometry = completeDetachedPreviewGeometry({ scaleFactor: 1 })
+      report.metadata.detachedPreviewGeometry = detachedPreviewCalibrationProvenance(
+        report.metrics.detachedPreviewGeometry
+      )
     }
 
     const { summary, budgetCandidate } = aggregatePackagedPerformanceCalibration({ reports })
@@ -112,6 +123,10 @@ describe('packaged performance calibration', () => {
         report.metrics.processEndurance = { timing: { intervalMs: 1_000 } }
         delete report.metrics.pipeline.wireKibPerSecond
         delete report.metrics.pipeline.framePipeline
+        delete report.metadata.detachedPreviewGeometry
+        delete report.metrics.detachedPreviewGeometry
+        delete report.metrics.sampling.powerAssertion
+        delete report.metrics.sampling.powerAssertionVerified
         return report
       })
       const { summary } = aggregatePackagedPerformanceCalibration({ reports })
@@ -119,6 +134,23 @@ describe('packaged performance calibration', () => {
       assert.equal(summary.scenario, scenario)
       assert.equal(summary.timing.intervalMs, 1_000)
       assert.equal('wireKibPerSecond' in summary.observed.cadence, false)
+    }
+  })
+
+  it('requires valid wall-clock sampling evidence for every recording/device scenario', () => {
+    for (const scenario of ['real-devices-1080p', 'record-4k', 'record-4k-stream-1080p']) {
+      const reports = calibrationReports().map((report) => {
+        report.scenario = scenario
+        delete report.metrics.sampling
+        return report
+      })
+
+      assert.throws(
+        () => aggregatePackagedPerformanceCalibration({ reports }),
+        (error) =>
+          error instanceof PerformanceCalibrationError &&
+          /wall-clock sampling evidence was missing/.test(error.message)
+      )
     }
   })
 
@@ -193,6 +225,24 @@ describe('packaged performance calibration', () => {
 
     assert.deepEqual(validatePackagedPerformanceCalibrationReports(reports), [])
   })
+
+  for (const [field, label] of [
+    ['plateauGrowthRssKb', 'backend RSS plateau growth'],
+    ['slopeRssKbPerMinute', 'backend RSS slope'],
+    ['secondHalfSlopeRssKbPerMinute', 'backend RSS second-half slope']
+  ]) {
+    it(`rejects per-role ${field} spread even when the owned aggregate cancels`, () => {
+      const reports = calibrationReports()
+      reports[0].metrics.memory.roles.backend[field] = -4 * 1024
+      reports[1].metrics.memory.roles.backend[field] = 0
+      reports[2].metrics.memory.roles.backend[field] = 8 * 1024
+
+      assert.throws(
+        () => aggregatePackagedPerformanceCalibration({ reports }),
+        (error) => error instanceof PerformanceCalibrationError && error.message.includes(label)
+      )
+    })
+  }
 
   it('rejects missing or extra reports before considering their contents', () => {
     assert.deepEqual(
@@ -313,6 +363,38 @@ describe('packaged performance calibration', () => {
         reports[1].metrics.cpuAveragePercentByRole['native-preview-helper'] = 1
       },
       /memory roles did not match run 1/
+    ],
+    [
+      'missing detached preview geometry evidence',
+      (reports) => delete reports[1].metrics.detachedPreviewGeometry,
+      /detached preview geometry evidence was missing/
+    ],
+    [
+      'wrong detached preview measurement-end size',
+      (reports) => {
+        reports[1].metrics.detachedPreviewGeometry.phases.measurementEnd.samples[0].nativeBounds = {
+          x: 100,
+          y: 128,
+          width: 440,
+          height: 247
+        }
+      },
+      /measurementEnd sample 1 native bounds were not exact 960x540/
+    ],
+    [
+      'hidden detached preview measurement-end surface',
+      (reports) => {
+        reports[1].metrics.detachedPreviewGeometry.phases.measurementEnd.samples[0].surface.visible = false
+      },
+      /measurementEnd sample 1 native surface was not live, visible CAMetalLayer geometry/
+    ],
+    [
+      'detached preview geometry drift',
+      (reports) => {
+        reports[1].metrics.detachedPreviewGeometry.phases.measurementEnd.samples[0].stabilityKey =
+          'drifted-geometry'
+      },
+      /measurementEnd sample 1 stability key did not match the run geometry/
     ]
   ]) {
     it(`rejects ${name}`, () => {
@@ -377,6 +459,7 @@ function detailedReport(index) {
   const lastRows = resourceRows(100 * MIB + footprintGrowthBytes)
   const totalRss = memorySeries(index, 690)
   const ownedRss = memorySeries(index, 390)
+  const detachedPreviewGeometry = completeDetachedPreviewGeometry()
   return {
     schemaVersion: 1,
     scenario: 'detached-native-preview',
@@ -407,7 +490,8 @@ function detailedReport(index) {
       },
       appRole: 'detached-native-preview',
       source: { width: 1280, height: 720, fps: 60 },
-      outputs: [{ role: 'preview', width: 1280, height: 720, fps: 60 }]
+      outputs: [{ role: 'preview', width: 1280, height: 720, fps: 60 }],
+      detachedPreviewGeometry: detachedPreviewCalibrationProvenance(detachedPreviewGeometry)
     },
     timing: { warmupMs: 60_000, measurementMs: 600_000, intervalMs: 1_000 },
     metrics: {
@@ -421,6 +505,7 @@ function detailedReport(index) {
         powerAssertion: 'caffeinate:-d,-i,-s',
         powerAssertionVerified: true
       },
+      detachedPreviewGeometry,
       pipeline: {
         frames: 35_400,
         framesPerSecond: 58 + index,
@@ -475,6 +560,52 @@ function detailedReport(index) {
       thresholds: { minSamples: 600, minDurationMs: 599_000 }
     }
   }
+}
+
+function completeDetachedPreviewGeometry({ scaleFactor = 2 } = {}) {
+  const phases = Object.fromEntries(
+    Object.entries(DETACHED_PREVIEW_CALIBRATION_PHASE_SAMPLE_COUNTS).map(
+      ([phaseName, requiredSamples]) => {
+        const samples = Array.from({ length: requiredSamples }, (_, index) => ({
+          observedAt: `2026-07-10T12:00:${String(index).padStart(2, '0')}.000Z`,
+          ...inspectDetachedPreviewCalibrationSample(
+            {
+              open: true,
+              visible: true,
+              mode: 'floating',
+              nativeOwnsPlacement: true,
+              contentBounds: { x: 100, y: 128, width: 960, height: 540 }
+            },
+            {
+              state: 'live',
+              transport: 'native-surface',
+              backing: 'cametal-layer',
+              bounds: {
+                screenX: 100,
+                screenY: 128,
+                width: 960,
+                height: 540,
+                scaleFactor,
+                visible: true
+              }
+            }
+          )
+        }))
+        return [
+          phaseName,
+          {
+            phase: phaseName,
+            requiredSamples,
+            attempts: requiredSamples,
+            pass: true,
+            failure: null,
+            samples
+          }
+        ]
+      }
+    )
+  )
+  return createDetachedPreviewCalibrationEvidence(phases)
 }
 
 function memorySeries(index, baseMiB) {

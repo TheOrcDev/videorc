@@ -8,6 +8,11 @@ import {
   compareProcessResourceCheckpoints
 } from './process-census.mjs'
 import { summarizeProcessMemory } from './process-memory-gate.mjs'
+import {
+  collectPerformanceSamplesOnSchedule,
+  monotonicNowMs,
+  performanceSamplingEvidenceFailures
+} from './performance-sampling-schedule.mjs'
 
 const execFileAsync = promisify(execFile)
 const REQUIRED_RESOURCE_METRICS = ['physicalFootprintBytes', 'openFileCount']
@@ -22,7 +27,7 @@ export async function collectProcessEndurance({
   collectCensus = collectProcessCensus,
   collectResources = collectProcessResourceDetails,
   collectCpu = sampleProcessGroupCpu,
-  now = Date.now,
+  now = monotonicNowMs,
   sleep = sleepMs
 }) {
   if (!Number.isInteger(pgid) || pgid <= 1) {
@@ -43,28 +48,45 @@ export async function collectProcessEndurance({
 
   const firstCensus = await collectCensus({ ledgerPaths, pgid })
   const firstResourceCheckpoint = await collectResources(firstCensus)
-  const measurementStartedAtMs = now()
   const censuses = []
   const memorySamples = []
   const cpuSamples = []
 
-  for (;;) {
-    const sampledAtMs = now()
-    const [census, cpuByRole] = await Promise.all([
-      collectCensus({ ledgerPaths, pgid }),
-      collectCpu(pgid)
-    ])
-    census.sampledAtMs = sampledAtMs
+  const scheduledSamples = await collectPerformanceSamplesOnSchedule({
+    measurementMs,
+    intervalMs,
+    nowMs: now,
+    sleep,
+    collectSample: async () => {
+      const [censusObservation, cpuByRole] = await Promise.all([
+        collectCensus({ ledgerPaths, pgid }).then((census) => ({
+          census,
+          observedAtMs: now()
+        })),
+        collectCpu(pgid)
+      ])
+      return { censusObservation, cpuByRole }
+    }
+  })
+  for (const [index, sample] of scheduledSamples.samples.entries()) {
+    const timing = scheduledSamples.sampleTimings[index]
+    const census = sample.censusObservation.census
+    census.sampledAtMs = sample.censusObservation.observedAtMs
+    census.scheduledAtMs = timing.scheduledAtMs
     censuses.push(census)
     memorySamples.push(compactProcessMemorySample(census))
-    cpuSamples.push({ sampledAtMs, byRole: cpuByRole })
-
-    const remainingMs = measurementMs - (now() - measurementStartedAtMs)
-    if (remainingMs <= 0) break
-    await sleep(Math.min(intervalMs, remainingMs))
+    cpuSamples.push({
+      sampledAtMs: timing.observedAtMs,
+      scheduledAtMs: timing.scheduledAtMs,
+      byRole: sample.cpuByRole
+    })
   }
-
-  const measurementEndedAtMs = now()
+  const sampling = {
+    ...scheduledSamples.evidence,
+    observations: scheduledSamples.sampleTimings
+  }
+  const measurementStartedAtMs = scheduledSamples.measurementStartedAtMs
+  const measurementEndedAtMs = scheduledSamples.measurementEndedAtMs
   const lastCensus = await collectCensus({ ledgerPaths, pgid })
   const lastResourceCheckpoint = await collectResources(lastCensus)
   const resourceCheckpoints = {
@@ -83,6 +105,7 @@ export async function collectProcessEndurance({
       measurementStartedAtMs,
       measurementEndedAtMs
     },
+    sampling,
     memory: {
       samples: memorySamples,
       summary: summarizeProcessMemory(censuses, { tailWindowMs })
@@ -105,6 +128,7 @@ export function compactProcessMemorySample(census) {
   }
   return {
     sampledAtMs: finiteNumberOrNull(census?.sampledAtMs),
+    scheduledAtMs: finiteNumberOrNull(census?.scheduledAtMs),
     totalRssKb,
     ownedRssKb,
     aliveOwnedProcessCount: census?.aliveRecords?.length ?? 0,
@@ -174,6 +198,21 @@ export function evaluateProcessEnduranceEvidence(
   const failures = []
   if (!evidence || typeof evidence !== 'object') {
     return ['process endurance evidence was missing']
+  }
+
+  const requestedMeasurementMs = evidence.timing?.requestedMeasurementMs
+  const intervalMs = evidence.timing?.intervalMs
+  if (
+    !Number.isFinite(requestedMeasurementMs) ||
+    requestedMeasurementMs <= 0 ||
+    !Number.isFinite(intervalMs) ||
+    intervalMs <= 0
+  ) {
+    failures.push('process endurance sampling timing was missing or invalid')
+  } else {
+    failures.push(
+      ...performanceSamplingEvidenceFailures(evidence.sampling, requestedMeasurementMs, intervalMs)
+    )
   }
 
   const memorySummary = evidence.memory?.summary
@@ -257,6 +296,7 @@ export function performanceEnduranceMetrics({ evidence, teardown, pipeline, thre
     pipeline: pipeline ?? null,
     memory: evidence?.memory?.summary ?? null,
     memorySamples: evidence?.memory?.samples ?? null,
+    sampling: evidence?.sampling ?? null,
     cpuAveragePercentByRole: Object.fromEntries(
       Object.entries(evidence?.cpu?.summary?.byRole ?? {}).map(([role, summary]) => [
         role,

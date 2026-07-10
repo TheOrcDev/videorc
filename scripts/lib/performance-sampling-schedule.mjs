@@ -1,3 +1,5 @@
+import { performance } from 'node:perf_hooks'
+
 const DEADLINE_JITTER_SAMPLE_ALLOWANCE = 1
 
 export function performanceSamplingInvariants(measurementMs, intervalMs) {
@@ -14,13 +16,15 @@ export function performanceSamplingInvariants(measurementMs, intervalMs) {
 /**
  * Collect on absolute deadlines so collector overhead does not reduce cadence.
  * Deadlines that expire before collection starts are skipped and reported;
- * they are never backfilled with a burst of adjacent observations.
+ * they are never backfilled with a burst of adjacent observations. Returned
+ * sample timings keep the ideal deadline separate from the monotonic time at
+ * which collection actually completed.
  */
 export async function collectPerformanceSamplesOnSchedule({
   measurementMs,
   intervalMs,
   collectSample,
-  nowMs = Date.now,
+  nowMs = monotonicNowMs,
   sleep = defaultSleep
 }) {
   const invariants = performanceSamplingInvariants(measurementMs, intervalMs)
@@ -34,6 +38,7 @@ export async function collectPerformanceSamplesOnSchedule({
   const measurementStartedAtMs = nowMs()
   const samples = []
   const sampleObservedAtMs = []
+  const sampleTimings = []
   let sampleIndex = 0
   let skippedDeadlineCount = 0
 
@@ -68,7 +73,9 @@ export async function collectPerformanceSamplesOnSchedule({
       intervalMs
     })
     samples.push(await collectSample({ sampleIndex, scheduledAtMs }))
-    sampleObservedAtMs.push(nowMs())
+    const observedAtMs = nowMs()
+    sampleObservedAtMs.push(observedAtMs)
+    sampleTimings.push({ sampleIndex, scheduledAtMs, observedAtMs })
     sampleIndex += 1
   }
 
@@ -77,6 +84,9 @@ export async function collectPerformanceSamplesOnSchedule({
   const measurementEndedAtMs = nowMs()
   return {
     samples,
+    sampleTimings,
+    measurementStartedAtMs,
+    measurementEndedAtMs,
     evidence: {
       expectedSamples: invariants.expectedSamples,
       collectedSamples: samples.length,
@@ -89,6 +99,10 @@ export async function collectPerformanceSamplesOnSchedule({
       measurementElapsedMs: measurementEndedAtMs - measurementStartedAtMs
     }
   }
+}
+
+export function monotonicNowMs() {
+  return performance.now()
 }
 
 export function absoluteSampleDelayMs({ measurementStartedAtMs, sampleIndex, intervalMs, nowMs }) {

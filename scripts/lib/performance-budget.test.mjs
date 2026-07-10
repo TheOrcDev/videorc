@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 
 import {
@@ -8,6 +9,9 @@ import {
   CROSS_MACHINE_NATIVE_CADENCE,
   evaluateActivePerformanceBudget,
   loadActivePerformanceBudget,
+  preflightActivePerformanceBudget,
+  readActivePerformanceBudget,
+  selectActivePerformanceBudget,
   validateActivePerformanceBudgetDocument
 } from './performance-budget.mjs'
 
@@ -33,7 +37,154 @@ describe('active performance budget request', () => {
 })
 
 describe('active performance budget loading', () => {
-  it('selects one profile matching scenario, machine, build, and optional OS scope', async () => {
+  it('rejects missing, malformed, and schema-invalid budgets during the read phase', async () => {
+    await assert.rejects(
+      readActivePerformanceBudget({
+        path: '/tmp/missing-budget.json',
+        read: async () => {
+          throw new Error('ENOENT')
+        }
+      }),
+      /could not read active budget.*ENOENT/
+    )
+    await assert.rejects(
+      readActivePerformanceBudget({
+        path: '/tmp/malformed-budget.json',
+        read: async () => '{'
+      }),
+      /could not read active budget.*JSON/
+    )
+    const invalid = budgetDocument()
+    delete invalid.profiles[0].approval
+    await assert.rejects(
+      readActivePerformanceBudget({
+        path: '/tmp/invalid-budget.json',
+        read: async () => JSON.stringify(invalid)
+      }),
+      /approval was missing or invalid/
+    )
+  })
+
+  it('selects only after surface context exists and rejects a scale mismatch', async () => {
+    const budget = await readActivePerformanceBudget({
+      path: '/tmp/active-budget.json',
+      read: async () => JSON.stringify(budgetDocument())
+    })
+
+    assert.equal(budget.path, '/tmp/active-budget.json')
+    assert.equal(budget.document.profiles.length, 1)
+    const selected = selectActivePerformanceBudget({ budget, context: runContext() })
+    assert.equal(selected.profile.id, 'mac16-packaged-detached')
+    assert.equal(selected.probeConfig.memory.maxOwnedRssMb, 512)
+    assert.throws(
+      () =>
+        selectActivePerformanceBudget({
+          budget,
+          context: { ...runContext(), displayScaleFactor: 1 }
+        }),
+      /did not contain a matching profile.*displayScaleFactor=1/
+    )
+  })
+
+  it('rejects a missing explicit profile and every non-scale static scope mismatch', async () => {
+    const budget = await readBudgetDocument(budgetDocument())
+    assert.throws(
+      () =>
+        preflightActivePerformanceBudget({
+          budget,
+          profileId: 'missing-profile',
+          context: staticRunContext()
+        }),
+      /did not contain profile missing-profile/
+    )
+
+    for (const [context, expected] of [
+      [{ ...staticRunContext(), scenario: 'record-4k' }, /scenario record-4k != detached/],
+      [{ ...staticRunContext(), machineModel: 'Mac99,9' }, /machineModel Mac99,9 != Mac16,1/],
+      [{ ...staticRunContext(), buildMode: 'development' }, /buildMode development != packaged/],
+      [
+        {
+          ...staticRunContext(),
+          operatingSystem: { ...staticRunContext().operatingSystem, arch: 'x64' }
+        },
+        /operatingSystem.arch x64 != arm64/
+      ]
+    ]) {
+      assert.throws(
+        () =>
+          preflightActivePerformanceBudget({
+            budget,
+            profileId: 'mac16-packaged-detached',
+            context
+          }),
+        expected
+      )
+    }
+
+    const hardwareDocument = budgetDocument()
+    delete hardwareDocument.profiles[0].scope.machineModel
+    hardwareDocument.profiles[0].scope.hardwareClass = 'hosted-arm64'
+    const hardwareBudget = await readBudgetDocument(hardwareDocument)
+    assert.throws(
+      () =>
+        preflightActivePerformanceBudget({
+          budget: hardwareBudget,
+          profileId: 'mac16-packaged-detached',
+          context: { ...staticRunContext(), hardwareClass: 'other-host' }
+        }),
+      /hardwareClass other-host != hosted-arm64/
+    )
+  })
+
+  it('rejects zero automatic static matches before launch', async () => {
+    const budget = await readBudgetDocument(budgetDocument())
+
+    assert.throws(
+      () =>
+        preflightActivePerformanceBudget({
+          budget,
+          context: { ...staticRunContext(), machineModel: 'Mac99,9' }
+        }),
+      /did not contain a statically matching profile.*machine=Mac99,9/
+    )
+  })
+
+  it('retains automatic candidates only when otherwise-identical scopes differ by display scale', async () => {
+    const document = budgetDocument()
+    document.profiles.push({
+      ...profile(),
+      id: 'mac16-packaged-detached-1x',
+      scope: { ...profile().scope, displayScaleFactor: 1 }
+    })
+    const budget = await readBudgetDocument(document)
+    const preflight = preflightActivePerformanceBudget({ budget, context: staticRunContext() })
+
+    assert.deepEqual(preflight.candidateProfileIds, [
+      'mac16-packaged-detached',
+      'mac16-packaged-detached-1x'
+    ])
+    assert.equal(
+      selectActivePerformanceBudget({
+        budget,
+        context: { ...staticRunContext(), displayScaleFactor: 1 }
+      }).profile.id,
+      'mac16-packaged-detached-1x'
+    )
+
+    const ambiguousDocument = budgetDocument()
+    ambiguousDocument.profiles.push({ ...profile(), id: 'duplicate-static-and-scale' })
+    const ambiguousBudget = await readBudgetDocument(ambiguousDocument)
+    assert.throws(
+      () =>
+        preflightActivePerformanceBudget({
+          budget: ambiguousBudget,
+          context: staticRunContext()
+        }),
+      /multiple static profiles did not differ only by displayScaleFactor/
+    )
+  })
+
+  it('selects one profile matching scenario, machine, build, display scale, and optional OS scope', async () => {
     const document = budgetDocument()
     document.profiles.push({
       ...profile(),
@@ -83,6 +234,29 @@ describe('active performance budget loading', () => {
     await assert.rejects(load(ambiguous, { context: runContext() }), /multiple matching profiles/)
   })
 
+  it('fails closed when the display scale is missing or differs from the profile', async () => {
+    await assert.rejects(
+      load(budgetDocument(), { context: { ...runContext(), displayScaleFactor: 1 } }),
+      /did not contain a matching profile.*displayScaleFactor=1/
+    )
+    await assert.rejects(
+      load(budgetDocument(), {
+        profileId: 'mac16-packaged-detached',
+        context: { ...runContext(), displayScaleFactor: 1 }
+      }),
+      /displayScaleFactor 1 != 2/
+    )
+    const contextWithoutScale = runContext()
+    delete contextWithoutScale.displayScaleFactor
+    await assert.rejects(
+      load(budgetDocument(), {
+        profileId: 'mac16-packaged-detached',
+        context: contextWithoutScale
+      }),
+      /displayScaleFactor missing != 2/
+    )
+  })
+
   it('rejects incomplete schema-aligned threshold and approval data', () => {
     const document = budgetDocument()
     delete document.profiles[0].thresholds.memoryMiB.maximumOwnedSecondHalfSlopePerMinute
@@ -91,6 +265,26 @@ describe('active performance budget loading', () => {
 
     assert.ok(failures.some((failure) => /maximumOwnedSecondHalfSlopePerMinute/.test(failure)))
     assert.ok(failures.some((failure) => /approval was missing/.test(failure)))
+  })
+
+  it('requires a positive display scale in both runtime and JSON schema validation', () => {
+    const document = budgetDocument()
+    document.profiles[0].scope.displayScaleFactor = 0
+
+    assert.ok(
+      validateActivePerformanceBudgetDocument(document).some((failure) =>
+        /scope displayScaleFactor was missing or invalid/.test(failure)
+      )
+    )
+
+    const schema = JSON.parse(
+      readFileSync(
+        new URL('../../config/performance-budgets/v1/active-budget.schema.json', import.meta.url),
+        'utf8'
+      )
+    )
+    assert.ok(schema.$defs.scope.required.includes('displayScaleFactor'))
+    assert.equal(schema.$defs.scope.properties.displayScaleFactor.exclusiveMinimum, 0)
   })
 
   it('rejects wildcard/ambiguous hardware bindings and profiles that weaken the product floor', () => {
@@ -209,6 +403,13 @@ function load(document, options) {
   })
 }
 
+function readBudgetDocument(document) {
+  return readActivePerformanceBudget({
+    path: '/tmp/active-budget.json',
+    read: async () => JSON.stringify(document)
+  })
+}
+
 function budgetDocument() {
   return {
     schemaVersion: 1,
@@ -225,6 +426,7 @@ function profile() {
       scenario: 'detached-native-preview',
       machineModel: 'Mac16,1',
       buildMode: 'packaged',
+      displayScaleFactor: 2,
       operatingSystem: { platform: 'darwin', arch: 'arm64' }
     },
     evidence: {
@@ -274,8 +476,15 @@ function runContext() {
     scenario: 'detached-native-preview',
     machineModel: 'Mac16,1',
     buildMode: 'packaged',
+    displayScaleFactor: 2,
     operatingSystem: { platform: 'darwin', arch: 'arm64', macosVersion: '26.5.1' }
   }
+}
+
+function staticRunContext() {
+  const context = runContext()
+  delete context.displayScaleFactor
+  return context
 }
 
 function metrics() {

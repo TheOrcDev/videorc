@@ -31,7 +31,7 @@ export function activePerformanceBudgetRequest(env = process.env) {
   return path ? { path, profileId } : null
 }
 
-export async function loadActivePerformanceBudget({ path, profileId, context, read = readFile }) {
+export async function readActivePerformanceBudget({ path, read = readFile }) {
   let document
   try {
     document = JSON.parse(await read(path, 'utf8'))
@@ -42,6 +42,58 @@ export async function loadActivePerformanceBudget({ path, profileId, context, re
   }
   const failures = validateActivePerformanceBudgetDocument(document)
   if (failures.length > 0) throw new ActivePerformanceBudgetError(failures)
+  return Object.freeze({ path, document: deepFreeze(document) })
+}
+
+export function preflightActivePerformanceBudget({ budget, profileId, context }) {
+  const path = budget?.path
+  const document = budget?.document
+  if (!isRecord(document)) {
+    throw new ActivePerformanceBudgetError([
+      'validated active budget document was missing during static profile preflight'
+    ])
+  }
+
+  if (profileId) {
+    const profile = document.profiles.find((candidate) => candidate.id === profileId)
+    if (!profile) {
+      throw new ActivePerformanceBudgetError([
+        `active budget did not contain profile ${profileId} for ${formatStaticContext(context)}`
+      ])
+    }
+    const scopeFailures = performanceBudgetStaticScopeMismatches(profile.scope, context)
+    if (scopeFailures.length > 0) {
+      throw new ActivePerformanceBudgetError([
+        `active budget profile ${profile.id} did not match the prelaunch run: ${scopeFailures.join('; ')}`
+      ])
+    }
+    return staticPreflightResult(path, profileId, [profile])
+  }
+
+  const candidates = document.profiles.filter(
+    (profile) => performanceBudgetStaticScopeMismatches(profile.scope, context).length === 0
+  )
+  if (candidates.length === 0) {
+    throw new ActivePerformanceBudgetError([
+      `active budget did not contain a statically matching profile for ${formatStaticContext(context)}`
+    ])
+  }
+  if (candidates.length > 1 && !profilesDifferOnlyByDisplayScale(candidates)) {
+    throw new ActivePerformanceBudgetError([
+      `active budget multiple static profiles did not differ only by displayScaleFactor for ${formatStaticContext(context)}: ${candidates.map((profile) => profile.id).join(', ')}`
+    ])
+  }
+  return staticPreflightResult(path, null, candidates)
+}
+
+export function selectActivePerformanceBudget({ budget, profileId, context }) {
+  const path = budget?.path
+  const document = budget?.document
+  if (!isRecord(document)) {
+    throw new ActivePerformanceBudgetError([
+      'validated active budget document was missing during profile selection'
+    ])
+  }
 
   const candidates = profileId
     ? document.profiles.filter((profile) => profile.id === profileId)
@@ -69,6 +121,11 @@ export async function loadActivePerformanceBudget({ path, profileId, context, re
     profile,
     probeConfig: activePerformanceBudgetProbeConfig(profile)
   }
+}
+
+export async function loadActivePerformanceBudget({ path, profileId, context, read = readFile }) {
+  const budget = await readActivePerformanceBudget({ path, read })
+  return selectActivePerformanceBudget({ budget, profileId, context })
 }
 
 export function validateActivePerformanceBudgetDocument(document) {
@@ -279,6 +336,16 @@ export function evaluateActivePerformanceBudget({ profile, metrics }) {
 }
 
 function performanceBudgetScopeMismatches(scope, context) {
+  const failures = performanceBudgetStaticScopeMismatches(scope, context)
+  if (scope?.displayScaleFactor !== context?.displayScaleFactor) {
+    failures.push(
+      `displayScaleFactor ${context?.displayScaleFactor ?? 'missing'} != ${scope?.displayScaleFactor ?? 'missing'}`
+    )
+  }
+  return failures
+}
+
+function performanceBudgetStaticScopeMismatches(scope, context) {
   const failures = []
   for (const field of ['scenario', 'buildMode']) {
     if (scope?.[field] !== context?.[field]) {
@@ -306,6 +373,25 @@ function performanceBudgetScopeMismatches(scope, context) {
   return failures
 }
 
+function profilesDifferOnlyByDisplayScale(profiles) {
+  const staticScopes = new Set(profiles.map((profile) => stableJson(staticScope(profile.scope))))
+  const displayScales = new Set(profiles.map((profile) => profile.scope.displayScaleFactor))
+  return staticScopes.size === 1 && displayScales.size === profiles.length
+}
+
+function staticScope(scope) {
+  const { displayScaleFactor: _displayScaleFactor, ...value } = scope
+  return value
+}
+
+function staticPreflightResult(path, profileId, candidates) {
+  return Object.freeze({
+    path,
+    profileId,
+    candidateProfileIds: Object.freeze(candidates.map((profile) => profile.id))
+  })
+}
+
 function validateScope(scope, label, failures) {
   if (!isRecord(scope)) {
     failures.push(`${label} scope was missing`)
@@ -327,6 +413,9 @@ function validateScope(scope, label, failures) {
   }
   if (!['development', 'packaged'].includes(scope.buildMode)) {
     failures.push(`${label} scope buildMode was invalid`)
+  }
+  if (!Number.isFinite(scope.displayScaleFactor) || scope.displayScaleFactor <= 0) {
+    failures.push(`${label} scope displayScaleFactor was missing or invalid`)
   }
   if (!isRecord(scope.operatingSystem)) {
     failures.push(`${label} scope operatingSystem was invalid`)
@@ -506,6 +595,10 @@ function requireComparableDelta(
 }
 
 function formatContext(context) {
+  return `scenario=${context?.scenario ?? 'missing'}, machine=${context?.machineModel ?? 'missing'}, hardwareClass=${context?.hardwareClass ?? 'missing'}, build=${context?.buildMode ?? 'missing'}, displayScaleFactor=${context?.displayScaleFactor ?? 'missing'}`
+}
+
+function formatStaticContext(context) {
   return `scenario=${context?.scenario ?? 'missing'}, machine=${context?.machineModel ?? 'missing'}, hardwareClass=${context?.hardwareClass ?? 'missing'}, build=${context?.buildMode ?? 'missing'}`
 }
 
@@ -547,4 +640,21 @@ function validIsoDate(value) {
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function deepFreeze(value) {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value
+  for (const child of Object.values(value)) deepFreeze(child)
+  return Object.freeze(value)
 }

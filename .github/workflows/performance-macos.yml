@@ -69,6 +69,18 @@ jobs:
       - name: Build packaged app
         run: pnpm package:desktop
 
+      # Prime macOS capture, Electron, and GPU caches outside the three-run
+      # calibration set. This keeps cold-host initialization out of run 1.
+      - name: Prime detached native-preview workload
+        run: >-
+          pnpm perf:scenario --scenario detached-native-preview --report-only
+          --warmup-seconds 60
+          --measurement-seconds 120
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-primer.json"
+        env:
+          VIDEORC_PERF_MIN_PRESENT_FPS: '58'
+          VIDEORC_PERF_MAX_INTERVAL_P95_MS: '30'
+
       - name: Detached native-preview endurance
         id: native_preview
         continue-on-error: true

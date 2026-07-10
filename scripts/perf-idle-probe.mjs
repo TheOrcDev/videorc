@@ -17,9 +17,14 @@ import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
 import {
   activePerformanceBudgetRequest,
   evaluateActivePerformanceBudget,
-  loadActivePerformanceBudget
+  preflightActivePerformanceBudget,
+  readActivePerformanceBudget,
+  selectActivePerformanceBudget
 } from './lib/performance-budget.mjs'
 import {
+  createDetachedPreviewCalibrationEvidence,
+  detachedPreviewCalibrationProvenance,
+  DETACHED_PREVIEW_CALIBRATION_PHASE_SAMPLE_COUNTS,
   DETACHED_PREVIEW_CALIBRATION_SURFACE_SIZE,
   DETACHED_PREVIEW_CALIBRATION_WINDOW_SIZE,
   inspectDetachedPreviewCalibrationSample
@@ -52,9 +57,7 @@ import {
   summarizeProcessMemory
 } from './lib/process-memory-gate.mjs'
 import {
-  absoluteSampleDelayMs,
-  absoluteSampleDeadlineMs,
-  performanceSampleIndexAtTime,
+  collectPerformanceSamplesOnSchedule,
   performanceSamplingEvidenceFailures,
   performanceSamplingInvariants
 } from './lib/performance-sampling-schedule.mjs'
@@ -144,28 +147,22 @@ const reportMetadata = await collectPerformanceMetadata({
   cwd: repoRoot,
   env: reportMetadataEnvironment
 })
-const activeBudget = budgetRequest
-  ? await loadActivePerformanceBudget({
-      path: resolve(repoRoot, budgetRequest.path),
-      profileId: budgetRequest.profileId,
-      context: {
-        scenario: reportScenario,
-        machineModel: reportMetadata.machineModel,
-        hardwareClass: reportMetadata.hardwareClass,
-        buildMode: reportMetadata.buildMode,
-        operatingSystem: reportMetadata.operatingSystem
-      }
-    })
+const performanceBudgetStaticContext = {
+  scenario: reportScenario,
+  machineModel: reportMetadata.machineModel,
+  hardwareClass: reportMetadata.hardwareClass,
+  buildMode: reportMetadata.buildMode,
+  operatingSystem: reportMetadata.operatingSystem
+}
+const validatedActiveBudget = budgetRequest
+  ? await readActivePerformanceBudget({ path: resolve(repoRoot, budgetRequest.path) })
   : null
-if (activeBudget) {
-  const config = activeBudget.probeConfig
-  minPresentFps = config.cadence.minPresentFps
-  maxIntervalP95Ms = config.cadence.maxIntervalP95Ms
-  maxStatusFetchesPerSecond = config.pipeline.maxStatusFetchesPerSecond
-  maxWireKibPerSecond = config.pipeline.maxWireKibPerSecond
-  maxOpenFileGrowth = config.resources.maxOpenFileGrowth
-  maxFootprintGrowthMb = config.resources.maxPhysicalFootprintGrowthMb
-  Object.assign(thresholds, config.memory)
+if (validatedActiveBudget) {
+  preflightActivePerformanceBudget({
+    budget: validatedActiveBudget,
+    profileId: budgetRequest.profileId,
+    context: performanceBudgetStaticContext
+  })
 }
 
 const stateRoot = mkdtempSync(join(tmpdir(), 'videorc-native-perf-'))
@@ -190,12 +187,16 @@ let diagnosticStatusAfter = null
 let wireTap = null
 let measuredWireBytes = 0
 let budgetFailures = []
+let activeBudget = null
 let activeBudgetEvaluation = null
 let activeBudgetMetricFailures = []
 let runError = null
 let teardownError = null
 let teardownClean = false
 let teardownRecovery = null
+const detachedPreviewGeometryPhases = {}
+let detachedPreviewGeometryEvidence =
+  previewMode === 'detached' ? createDetachedPreviewCalibrationEvidence() : null
 
 try {
   launched = await launchDevApp({
@@ -232,8 +233,12 @@ try {
     }
   }
   await smokeCommandRetry(smoke, 'preview-window-open')
+  let budgetSurfaceStatus = null
   if (previewMode === 'detached') {
-    await prepareStableDetachedPreview(smoke)
+    const beforeWarmup = await prepareStableDetachedPreview(smoke)
+    recordDetachedPreviewGeometryPhase('beforeWarmup', beforeWarmup.phase)
+    assertDetachedPreviewGeometryPhase(beforeWarmup.phase)
+    budgetSurfaceStatus = beforeWarmup.lastSurfaceStatus
   } else if (previewMode === 'docked') {
     await smokeCommandRetry(smoke, 'preview-window-set-mode', { mode: 'docked' })
     // A fresh profile can mount What's New after the dock epoch changes. Let
@@ -241,16 +246,38 @@ try {
     // before the performance window starts.
     await dismissBlockingLaunchDialogs(smoke)
     await waitForVisibleDockedPreview(smoke)
+    budgetSurfaceStatus = await smokeCommand(smoke, 'native-preview-surface-status')
+  }
+
+  if (budgetRequest) {
+    activeBudget = selectActivePerformanceBudget({
+      budget: validatedActiveBudget,
+      profileId: budgetRequest.profileId,
+      context: {
+        ...performanceBudgetStaticContext,
+        displayScaleFactor:
+          budgetSurfaceStatus?.bounds?.scaleFactor ?? reportMetadata.displayScaleFactor
+      }
+    })
+    const config = activeBudget.probeConfig
+    minPresentFps = config.cadence.minPresentFps
+    maxIntervalP95Ms = config.cadence.maxIntervalP95Ms
+    maxStatusFetchesPerSecond = config.pipeline.maxStatusFetchesPerSecond
+    maxWireKibPerSecond = config.pipeline.maxWireKibPerSecond
+    maxOpenFileGrowth = config.resources.maxOpenFileGrowth
+    maxFootprintGrowthMb = config.resources.maxPhysicalFootprintGrowthMb
+    Object.assign(thresholds, config.memory)
   }
 
   console.log(`warming ${warmupSeconds}s for ${previewMode} native preview...`)
   await sleep(warmupSeconds * 1000)
-  statusBefore = await smokeCommand(smoke, 'native-preview-surface-status')
+  if (previewMode === 'docked') {
+    statusBefore = await smokeCommand(smoke, 'native-preview-surface-status')
+  }
 
   console.log(`sampling ${sampleSeconds}s...`)
   const backend = launched.connections['backend-ready']
   const samples = []
-  const sampleObservedAtMs = []
   const cpuSamples = []
   const firstResourceCensus = await collectProcessCensus({
     ledgerPaths,
@@ -262,60 +289,66 @@ try {
     comparison: null
   }
   wireTap = await openBackendWireTap(backend)
-  const measurementStartedAt = Date.now()
-  let sampleIndex = 0
-  let skippedDeadlineCount = 0
-  while (sampleIndex < samplingInvariants.expectedSamples) {
-    const delayMs = absoluteSampleDelayMs({
-      measurementStartedAtMs: measurementStartedAt,
-      sampleIndex,
-      intervalMs: sampleIntervalMs,
-      nowMs: Date.now()
+  if (previewMode === 'detached') {
+    const measurementStart = await captureDetachedPreviewGeometryPhase(smoke, {
+      phaseName: 'measurementStart',
+      requiredSamples: DETACHED_PREVIEW_CALIBRATION_PHASE_SAMPLE_COUNTS.measurementStart,
+      expectedStabilityKey: detachedPreviewGeometryReferenceKey()
     })
-    if (delayMs > 0) await sleep(delayMs)
-    const effectiveSampleIndex = performanceSampleIndexAtTime({
-      measurementStartedAtMs: measurementStartedAt,
-      minimumSampleIndex: sampleIndex,
-      intervalMs: sampleIntervalMs,
-      nowMs: Date.now()
-    })
-    skippedDeadlineCount +=
-      Math.min(samplingInvariants.expectedSamples, effectiveSampleIndex) - sampleIndex
-    sampleIndex = effectiveSampleIndex
-    if (Date.now() - measurementStartedAt >= measurementMs) break
-    const sampledAtMs = absoluteSampleDeadlineMs({
-      measurementStartedAtMs: measurementStartedAt,
-      sampleIndex,
-      intervalMs: sampleIntervalMs
-    })
-    const [census, cpu] = await Promise.all([
-      collectProcessCensus({ ledgerPaths, pgid: launched.process.pid }),
-      sampleProcessGroupCpu(launched.process.pid)
-    ])
-    census.sampledAtMs = sampledAtMs
-    samples.push(census)
-    cpuSamples.push(cpu)
-    sampleObservedAtMs.push(Date.now())
-    sampleIndex += 1
+    recordDetachedPreviewGeometryPhase('measurementStart', measurementStart.phase)
+    assertDetachedPreviewGeometryPhase(measurementStart.phase)
+    statusBefore = measurementStart.firstSurfaceStatus
   }
-  const remainingMeasurementMs = measurementMs - (Date.now() - measurementStartedAt)
-  if (remainingMeasurementMs > 0) await sleep(remainingMeasurementMs)
-  const measurementEndedAt = Date.now()
-  const sampleTimestamps = [measurementStartedAt, ...sampleObservedAtMs, measurementEndedAt]
+  const scheduledSamples = await collectPerformanceSamplesOnSchedule({
+    measurementMs,
+    intervalMs: sampleIntervalMs,
+    collectSample: async () => {
+      const [census, cpu] = await Promise.all([
+        collectProcessCensus({ ledgerPaths, pgid: launched.process.pid }),
+        sampleProcessGroupCpu(launched.process.pid)
+      ])
+      return { census, cpu }
+    }
+  })
+  for (const [index, sample] of scheduledSamples.samples.entries()) {
+    const timing = scheduledSamples.sampleTimings[index]
+    sample.census.sampledAtMs = timing.observedAtMs
+    sample.census.scheduledAtMs = timing.scheduledAtMs
+    samples.push(sample.census)
+    cpuSamples.push(sample.cpu)
+  }
+  const measurementStartedAt = scheduledSamples.measurementStartedAtMs
+  const measurementEndedAt = scheduledSamples.measurementEndedAtMs
+  let detachedMeasurementWireBytes = null
+  if (previewMode === 'detached') {
+    detachedMeasurementWireBytes = wireTap.bytes()
+    const measurementEnd = await captureDetachedPreviewGeometryPhase(smoke, {
+      phaseName: 'measurementEnd',
+      requiredSamples: DETACHED_PREVIEW_CALIBRATION_PHASE_SAMPLE_COUNTS.measurementEnd,
+      expectedStabilityKey: detachedPreviewGeometryReferenceKey()
+    })
+    recordDetachedPreviewGeometryPhase('measurementEnd', measurementEnd.phase)
+    assertDetachedPreviewGeometryPhase(measurementEnd.phase)
+    statusAfter = measurementEnd.firstSurfaceStatus
+    if (!detachedPreviewGeometryEvidence.pass) {
+      throw new Error(
+        `Detached preview geometry changed across the measurement boundary: ${detachedPreviewGeometryEvidence.failures.join('; ')}`
+      )
+    }
+  }
   samplingEvidence = {
-    expectedSamples: samplingInvariants.expectedSamples,
-    collectedSamples: samples.length,
-    skippedDeadlineCount,
-    maxSampleGapMs: maximumAdjacentGapMs(sampleTimestamps),
-    measurementElapsedMs: measurementEndedAt - measurementStartedAt,
+    ...scheduledSamples.evidence,
+    observations: scheduledSamples.sampleTimings,
     powerAssertion: reportMetadata.powerAssertion,
     powerAssertionVerified: await currentMacosCaffeinatePowerAssertionVerified({
       env: reportMetadataEnvironment
     })
   }
-  statusAfter = await smokeCommand(smoke, 'native-preview-surface-status')
+  if (previewMode === 'docked') {
+    statusAfter = await smokeCommand(smoke, 'native-preview-surface-status')
+  }
   mainPumpDiagnostics = await smokeCommand(smoke, 'main-present-pump-diagnostics')
-  measuredWireBytes = wireTap.bytes()
+  measuredWireBytes = previewMode === 'detached' ? detachedMeasurementWireBytes : wireTap.bytes()
   diagnosticStatusAfter = await wireTap.request('diagnostics.stats')
   wireTap.close()
   const lastResourceCensus = await collectProcessCensus({
@@ -497,10 +530,18 @@ try {
   }
 }
 
+if (previewMode === 'detached') {
+  detachedPreviewGeometryEvidence = createDetachedPreviewCalibrationEvidence(
+    detachedPreviewGeometryPhases
+  )
+}
 const truthFailures = [
   ...(runError ? [runError.message] : []),
   ...(teardownError ? [teardownError.message] : []),
   ...activeBudgetMetricFailures,
+  ...(detachedPreviewGeometryEvidence?.failures ?? []).map(
+    (failure) => `detached preview geometry: ${failure}`
+  ),
   ...performanceSamplingEvidenceFailures(samplingEvidence, measurementMs, sampleIntervalMs),
   ...(reportMetadata.powerAssertion && samplingEvidence?.powerAssertionVerified !== true
     ? ['macOS power assertion was declared but not verified through the measurement boundary']
@@ -530,13 +571,22 @@ const truthFailures = [
     : [])
 ]
 const enforcedBudgetFailures = mode === 'gate' ? budgetFailures : []
+const metadataWithDisplayScale = performanceMetadataWithObservedDisplayScale(
+  reportMetadata,
+  pipeline?.bounds?.scaleFactor
+)
 const report = createPerformanceReport({
   scenario: reportScenario,
   mode,
-  metadata: performanceMetadataWithObservedDisplayScale(
-    reportMetadata,
-    pipeline?.bounds?.scaleFactor
-  ),
+  metadata:
+    previewMode === 'detached'
+      ? {
+          ...metadataWithDisplayScale,
+          detachedPreviewGeometry: detachedPreviewCalibrationProvenance(
+            detachedPreviewGeometryEvidence
+          )
+        }
+      : metadataWithDisplayScale,
   timing: {
     warmupMs: warmupSeconds * 1000,
     measurementMs: sampleSeconds * 1000,
@@ -550,6 +600,9 @@ const report = createPerformanceReport({
     sampling: samplingEvidence,
     resourceCheckpoints,
     teardownRecovery,
+    ...(previewMode === 'detached'
+      ? { detachedPreviewGeometry: detachedPreviewGeometryEvidence }
+      : {}),
     activeBudget: activeBudget
       ? {
           path: activeBudget.path,
@@ -610,14 +663,6 @@ function cadenceFailures({ presentFps, framesPerSecond, intervalP95Ms, statusFet
     )
   }
   return failures
-}
-
-function maximumAdjacentGapMs(timestamps) {
-  let maximum = 0
-  for (let index = 1; index < timestamps.length; index += 1) {
-    maximum = Math.max(maximum, timestamps[index] - timestamps[index - 1])
-  }
-  return maximum
 }
 
 async function sampleProcessGroupCpu(pgid) {
@@ -859,45 +904,101 @@ async function prepareStableDetachedPreview(smoke) {
     height: DETACHED_PREVIEW_CALIBRATION_WINDOW_SIZE.height
   })
 
-  const requiredStableSamples = 5
+  return captureDetachedPreviewGeometryPhase(smoke, {
+    phaseName: 'beforeWarmup',
+    requiredSamples: DETACHED_PREVIEW_CALIBRATION_PHASE_SAMPLE_COUNTS.beforeWarmup,
+    allowSettle: true
+  })
+}
+
+async function captureDetachedPreviewGeometryPhase(
+  smoke,
+  { phaseName, requiredSamples, expectedStabilityKey = null, allowSettle = false }
+) {
   const deadline = Date.now() + 30000
-  let stableSamples = 0
-  let stableKey = null
-  let lastInspection = null
-  let lastWindowState = null
-  let lastSurfaceStatus = null
+  let attempts = 0
+  let stableSamples = []
+  let stableSurfaceStatuses = []
+  let failure = null
+
   while (Date.now() < deadline) {
-    ;[lastWindowState, lastSurfaceStatus] = await Promise.all([
+    const [windowState, surfaceStatus] = await Promise.all([
       smokeCommandRetry(smoke, 'preview-window-state'),
       smokeCommandRetry(smoke, 'native-preview-surface-status')
     ])
-    lastInspection = inspectDetachedPreviewCalibrationSample(lastWindowState, lastSurfaceStatus)
-    if (!lastInspection.ready) {
-      stableSamples = 0
-      stableKey = null
-    } else if (lastInspection.stabilityKey === stableKey) {
-      stableSamples += 1
-    } else {
-      stableKey = lastInspection.stabilityKey
-      stableSamples = 1
+    attempts += 1
+    const inspection = {
+      observedAt: new Date().toISOString(),
+      ...inspectDetachedPreviewCalibrationSample(windowState, surfaceStatus)
     }
-    if (stableSamples >= requiredStableSamples) {
+
+    const priorKey = stableSamples.at(-1)?.stabilityKey ?? null
+    const expectedKey = expectedStabilityKey ?? priorKey
+    const invalid = inspection.ready !== true
+    const drifted = Boolean(expectedKey && inspection.stabilityKey !== expectedKey)
+    if (invalid || drifted) {
+      failure = invalid
+        ? inspection.failures.join('; ')
+        : `geometry drifted from ${expectedKey} to ${inspection.stabilityKey}`
+      if (!allowSettle) {
+        stableSamples.push(inspection)
+        stableSurfaceStatuses.push(surfaceStatus)
+        break
+      }
+      stableSamples = invalid ? [] : [inspection]
+      stableSurfaceStatuses = invalid ? [] : [surfaceStatus]
+      await sleep(250)
+      continue
+    }
+
+    failure = null
+    stableSamples.push(inspection)
+    stableSurfaceStatuses.push(surfaceStatus)
+    if (stableSamples.length >= requiredSamples) {
       const target = DETACHED_PREVIEW_CALIBRATION_SURFACE_SIZE
       console.log(
-        `detached preview stable at ${target.width}x${target.height} for ${requiredStableSamples} consecutive samples`
+        `detached preview ${phaseName} stable at ${target.width}x${target.height} for ${requiredSamples} consecutive sample(s)`
       )
-      return { windowState: lastWindowState, surfaceStatus: lastSurfaceStatus }
+      break
     }
     await sleep(250)
   }
 
-  const target = DETACHED_PREVIEW_CALIBRATION_SURFACE_SIZE
-  throw new Error(
-    `Detached native preview did not stabilize at ${target.width}x${target.height} before warm-up. ` +
-      `Stable samples: ${stableSamples}/${requiredStableSamples}. ` +
-      `Failures: ${lastInspection?.failures?.join('; ') || 'none (bounds kept moving)'}. ` +
-      `Window: ${JSON.stringify(lastWindowState)}. Surface: ${JSON.stringify(lastSurfaceStatus)}.`
+  const pass = stableSamples.length >= requiredSamples && failure === null
+  const phaseFailure = pass
+    ? null
+    : (failure ??
+      `timed out with ${stableSamples.length}/${requiredSamples} stable geometry samples`)
+  return {
+    phase: {
+      phase: phaseName,
+      requiredSamples,
+      attempts,
+      pass,
+      failure: phaseFailure,
+      samples: stableSamples.slice(-requiredSamples)
+    },
+    firstSurfaceStatus: stableSurfaceStatuses.at(-stableSamples.length) ?? null,
+    lastSurfaceStatus: stableSurfaceStatuses.at(-1) ?? null
+  }
+}
+
+function recordDetachedPreviewGeometryPhase(phaseName, phase) {
+  detachedPreviewGeometryPhases[phaseName] = phase
+  detachedPreviewGeometryEvidence = createDetachedPreviewCalibrationEvidence(
+    detachedPreviewGeometryPhases
   )
+}
+
+function assertDetachedPreviewGeometryPhase(phase) {
+  if (phase?.pass === true) return
+  throw new Error(
+    `Detached preview geometry ${phase?.phase ?? 'unknown'} failed: ${phase?.failure ?? 'evidence missing'}`
+  )
+}
+
+function detachedPreviewGeometryReferenceKey() {
+  return detachedPreviewGeometryPhases.beforeWarmup?.samples?.[0]?.stabilityKey ?? null
 }
 
 function roleThresholds(suffix) {

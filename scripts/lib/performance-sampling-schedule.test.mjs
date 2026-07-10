@@ -133,6 +133,18 @@ describe('performance sampling schedule', () => {
 
     assert.deepEqual(result.samples, [0, 1, 2, 3, 4, 5, 6, 7])
     assert.deepEqual(scheduledAtMs, [0, 500, 1_000, 1_500, 2_000, 2_500, 3_000, 3_500])
+    assert.deepEqual(result.sampleTimings, [
+      { sampleIndex: 0, scheduledAtMs: 0, observedAtMs: 300 },
+      { sampleIndex: 1, scheduledAtMs: 500, observedAtMs: 800 },
+      { sampleIndex: 2, scheduledAtMs: 1_000, observedAtMs: 1_300 },
+      { sampleIndex: 3, scheduledAtMs: 1_500, observedAtMs: 1_800 },
+      { sampleIndex: 4, scheduledAtMs: 2_000, observedAtMs: 2_300 },
+      { sampleIndex: 5, scheduledAtMs: 2_500, observedAtMs: 2_800 },
+      { sampleIndex: 6, scheduledAtMs: 3_000, observedAtMs: 3_300 },
+      { sampleIndex: 7, scheduledAtMs: 3_500, observedAtMs: 3_800 }
+    ])
+    assert.equal(result.measurementStartedAtMs, 0)
+    assert.equal(result.measurementEndedAtMs, 4_000)
     assert.deepEqual(result.evidence, {
       expectedSamples: 8,
       collectedSamples: 8,
@@ -158,6 +170,22 @@ describe('performance sampling schedule', () => {
     })
 
     assert.deepEqual(result.samples, [0, 2, 3, 4, 5, 6, 7])
+    assert.deepEqual(
+      result.sampleTimings.map(({ sampleIndex, scheduledAtMs, observedAtMs }) => ({
+        sampleIndex,
+        scheduledAtMs,
+        observedAtMs
+      })),
+      [
+        { sampleIndex: 0, scheduledAtMs: 0, observedAtMs: 1_300 },
+        { sampleIndex: 2, scheduledAtMs: 1_000, observedAtMs: 1_400 },
+        { sampleIndex: 3, scheduledAtMs: 1_500, observedAtMs: 1_600 },
+        { sampleIndex: 4, scheduledAtMs: 2_000, observedAtMs: 2_100 },
+        { sampleIndex: 5, scheduledAtMs: 2_500, observedAtMs: 2_600 },
+        { sampleIndex: 6, scheduledAtMs: 3_000, observedAtMs: 3_100 },
+        { sampleIndex: 7, scheduledAtMs: 3_500, observedAtMs: 3_600 }
+      ]
+    )
     assert.equal(result.evidence.skippedDeadlineCount, 1)
     assert.equal(result.evidence.collectedSamples, 7)
     assert.equal(result.evidence.maxSampleGapMs, 1_300)

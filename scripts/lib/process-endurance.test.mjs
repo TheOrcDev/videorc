@@ -25,7 +25,11 @@ describe('process endurance evidence', () => {
       sleep: async (ms) => {
         nowMs += ms
       },
-      collectCensus: async () => fakeCensus(++censusSequence),
+      collectCensus: async () => {
+        censusSequence += 1
+        if (censusSequence === 2 || censusSequence === 3) nowMs += 30
+        return fakeCensus(censusSequence)
+      },
       collectCpu: async () => ({
         backend: 10,
         'electron-main': 5,
@@ -36,23 +40,98 @@ describe('process endurance evidence', () => {
 
     assert.equal(evidence.timing.measurementStartedAtMs, 100)
     assert.equal(evidence.timing.measuredDurationMs, 200)
-    assert.equal(evidence.memory.samples.length, 3)
-    assert.equal(evidence.memory.summary.samples, 3)
-    assert.equal(evidence.cpu.samples.length, 3)
+    assert.equal(evidence.memory.samples.length, 2)
+    assert.equal(evidence.memory.summary.samples, 2)
+    assert.deepEqual(
+      evidence.memory.samples.map(({ sampledAtMs, scheduledAtMs }) => ({
+        sampledAtMs,
+        scheduledAtMs
+      })),
+      [
+        { sampledAtMs: 130, scheduledAtMs: 100 },
+        { sampledAtMs: 230, scheduledAtMs: 200 }
+      ]
+    )
+    assert.equal(evidence.cpu.samples.length, 2)
     assert.equal(evidence.cpu.summary.byRole.backend.averagePercent, 10)
+    assert.deepEqual(evidence.sampling, {
+      expectedSamples: 2,
+      collectedSamples: 2,
+      skippedDeadlineCount: 0,
+      maxSampleGapMs: 100,
+      measurementElapsedMs: 200,
+      observations: [
+        { sampleIndex: 0, scheduledAtMs: 100, observedAtMs: 130 },
+        { sampleIndex: 1, scheduledAtMs: 200, observedAtMs: 230 }
+      ]
+    })
     assert.equal(evidence.resourceCheckpoints.comparison.processContinuity.comparable, true)
     assert.deepEqual(
       evaluateProcessEnduranceEvidence(evidence, {
-        minimumSamples: 3,
-        minimumDurationMs: 200
+        minimumSamples: 2,
+        minimumDurationMs: 100
       }),
       []
     )
   })
 
+  it('skips host-sleep deadlines, retains actual observations, and fails the stall evidence', async () => {
+    let nowMs = 0
+    let censusSequence = 0
+    const evidence = await collectProcessEndurance({
+      ledgerPaths: ['/tmp/owned.json'],
+      pgid: 700,
+      warmupMs: 0,
+      measurementMs: 4_000,
+      intervalMs: 500,
+      now: () => nowMs,
+      sleep: async (ms) => {
+        nowMs += ms
+      },
+      collectCensus: async () => {
+        censusSequence += 1
+        if (censusSequence === 2) nowMs += 1_800
+        else if (censusSequence >= 3 && censusSequence <= 7) nowMs += 100
+        return fakeCensus(censusSequence)
+      },
+      collectCpu: async () => ({
+        backend: 10,
+        'electron-main': 5,
+        'electron-renderer': 7
+      }),
+      collectResources: async (census) => resourceCheckpoint(census.processRows)
+    })
+
+    assert.deepEqual(
+      evidence.sampling.observations.map((sample) => sample.sampleIndex),
+      [0, 3, 4, 5, 6, 7]
+    )
+    assert.deepEqual(evidence.memory.samples[0], {
+      sampledAtMs: 1_800,
+      scheduledAtMs: 0,
+      totalRssKb: 606,
+      ownedRssKb: 102,
+      aliveOwnedProcessCount: 1,
+      deadOwnedProcessCount: 0,
+      processGroupCount: 3,
+      byRole: {
+        backend: { count: 1, rssKb: 102 },
+        'electron-main': { count: 1, rssKb: 202 },
+        'electron-renderer': { count: 1, rssKb: 302 }
+      }
+    })
+    assert.equal(evidence.sampling.skippedDeadlineCount, 2)
+    assert.equal(evidence.sampling.maxSampleGapMs, 1_800)
+    assert.deepEqual(evaluateProcessEnduranceEvidence(evidence), [
+      'performance sampling skipped 2 wall-clock deadlines; host sleep or a severe scheduling stall contaminated the run',
+      'performance sampling max gap 1800ms indicated host sleep or a scheduling stall'
+    ])
+  })
+
   it('summarizes compact RSS and per-role CPU time series', () => {
     const census = {
       sampledAtMs: 1_000,
+      scheduledAtMs: 900,
       aliveRecords: [{ pid: 2 }],
       deadRecords: [],
       processRows: [
@@ -64,6 +143,7 @@ describe('process endurance evidence', () => {
     }
     assert.deepEqual(compactProcessMemorySample(census), {
       sampledAtMs: 1_000,
+      scheduledAtMs: 900,
       totalRssKb: 300,
       ownedRssKb: 200,
       aliveOwnedProcessCount: 1,
@@ -138,6 +218,7 @@ describe('process endurance evidence', () => {
     assert.equal(metrics.teardownClean, true)
     assert.equal(metrics.memory, evidence.memory.summary)
     assert.equal(metrics.memorySamples, evidence.memory.samples)
+    assert.equal(metrics.sampling, evidence.sampling)
     assert.equal(metrics.cpuAveragePercentByRole.backend, 10)
     assert.equal(metrics.resourceCheckpoints, evidence.resourceCheckpoints)
     assert.equal(metrics.processEndurance, evidence)
@@ -156,6 +237,21 @@ function completeEvidence() {
     ])
   )
   return {
+    timing: {
+      requestedMeasurementMs: 2_000,
+      intervalMs: 1_000
+    },
+    sampling: {
+      expectedSamples: 2,
+      collectedSamples: 2,
+      skippedDeadlineCount: 0,
+      maxSampleGapMs: 1_000,
+      measurementElapsedMs: 2_000,
+      observations: [
+        { sampleIndex: 0, scheduledAtMs: 0, observedAtMs: 100 },
+        { sampleIndex: 1, scheduledAtMs: 1_000, observedAtMs: 1_100 }
+      ]
+    },
     memory: {
       samples: [{}, {}],
       summary: {

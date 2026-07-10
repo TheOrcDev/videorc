@@ -240,18 +240,27 @@ console.log(
 )
 
 async function collectSamples() {
-  return collectPerformanceSamplesOnSchedule({
+  const scheduledSamples = await collectPerformanceSamplesOnSchedule({
     measurementMs: sampleMs,
     intervalMs,
-    collectSample: async ({ scheduledAtMs }) => {
-      const census = await collectProcessCensus({
+    collectSample: async () =>
+      collectProcessCensus({
         ledgerPaths,
         pgid: launched.process.pid
       })
-      census.sampledAtMs = scheduledAtMs
-      return census
-    }
   })
+  for (const [index, census] of scheduledSamples.samples.entries()) {
+    const timing = scheduledSamples.sampleTimings[index]
+    census.sampledAtMs = timing.observedAtMs
+    census.scheduledAtMs = timing.scheduledAtMs
+  }
+  return {
+    samples: scheduledSamples.samples,
+    evidence: {
+      ...scheduledSamples.evidence,
+      observations: scheduledSamples.sampleTimings
+    }
+  }
 }
 
 function roleThresholds(suffix) {

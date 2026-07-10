@@ -55,6 +55,18 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
+      # Prime macOS capture, Electron, and GPU caches outside the three-run
+      # calibration set so a cold hosted runner cannot make run 1 incomparable.
+      - name: Prime detached native-preview workload
+        env:
+          VIDEORC_PERF_MAX_INTERVAL_P95_MS: '30'
+          VIDEORC_PERF_MIN_PRESENT_FPS: '58'
+        run: >-
+          pnpm perf:scenario --scenario detached-native-preview --report-only
+          --warmup-seconds 60
+          --measurement-seconds 120
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-primer.json"
+
       # This is intentionally not an active-budget run. The only numeric
       # performance limits are the established cross-machine cadence floor.
       - name: Run exactly three sequential detached native-preview scenarios

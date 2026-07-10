@@ -98,6 +98,7 @@ export function launchDevApp({
     const connections = {}
     let settled = false
     let stopping = false
+    let timer = null
     const recentOutput = []
     const childEnv = smokeAppEnv(env)
     const spawnSpec = requestedSpawnSpec
@@ -108,13 +109,30 @@ export function launchDevApp({
 
     const stop = () => stopProcess(child, () => (stopping = true))
     const launchError = (message) => new Error(devAppFailureMessage(message, recentOutput))
-
-    const timer = setTimeout(() => {
+    const rejectAfterStop = async (message) => {
       if (settled) return
       settled = true
-      void stop()
+      if (timer) clearTimeout(timer)
+
+      let cleanupFailure = null
+      try {
+        await stop()
+      } catch (error) {
+        cleanupFailure = error?.message ?? String(error)
+      }
+
       rejectLaunch(
-        launchError(`Timed out waiting for [${requiredMarkers.join(', ')}] after ${timeoutMs}ms.`)
+        launchError(
+          cleanupFailure
+            ? `${message}\n\nFailed to stop launched process group: ${cleanupFailure}`
+            : message
+        )
+      )
+    }
+
+    timer = setTimeout(() => {
+      void rejectAfterStop(
+        `Timed out waiting for [${requiredMarkers.join(', ')}] after ${timeoutMs}ms.`
       )
     }, timeoutMs)
 
@@ -153,17 +171,11 @@ export function launchDevApp({
     child.stdout.on('data', handle)
     child.stderr.on('data', handle)
     child.on('error', (error) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      rejectLaunch(launchError(error.message))
+      void rejectAfterStop(error.message)
     })
     child.on('exit', (code, signal) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      rejectLaunch(
-        launchError(`Dev app exited before handshake completed: code=${code} signal=${signal}`)
+      void rejectAfterStop(
+        `Dev app exited before handshake completed: code=${code} signal=${signal}`
       )
     })
   })

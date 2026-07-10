@@ -2,6 +2,12 @@ import { createHash } from 'node:crypto'
 
 import { PERFORMANCE_REPORT_SCHEMA_VERSION } from './performance-contract.mjs'
 import {
+  detachedPreviewCalibrationProvenance,
+  DETACHED_PREVIEW_CALIBRATION_PHASE_SAMPLE_COUNTS,
+  DETACHED_PREVIEW_CALIBRATION_SURFACE_SIZE,
+  DETACHED_PREVIEW_CALIBRATION_WINDOW_SIZE
+} from './detached-preview-calibration.mjs'
+import {
   performanceSamplingEvidenceFailures,
   performanceSamplingInvariants
 } from './performance-sampling-schedule.mjs'
@@ -28,6 +34,7 @@ export const PERFORMANCE_CALIBRATION_COMPARABILITY_POLICY = Object.freeze({
 })
 
 const PREVIEW_SCENARIOS = new Set(['docked-native-preview', 'detached-native-preview'])
+const DETACHED_PREVIEW_SCENARIO = 'detached-native-preview'
 const RECORDING_SCENARIOS = new Set(['real-devices-1080p', 'record-4k', 'record-4k-stream-1080p'])
 const SUPPORTED_SCENARIOS = new Set([...PREVIEW_SCENARIOS, ...RECORDING_SCENARIOS])
 const REQUIRED_MEMORY_ROLES = ['backend', 'electron-main', 'electron-renderer']
@@ -127,7 +134,10 @@ export function aggregatePackagedPerformanceCalibration({ reports, reportPaths =
     powerAssertionVerified: first.metadata.powerAssertionVerified,
     appRole: first.metadata.appRole,
     source: first.metadata.source,
-    outputs: first.metadata.outputs
+    outputs: first.metadata.outputs,
+    ...(first.scenario === DETACHED_PREVIEW_SCENARIO
+      ? { detachedPreviewGeometry: first.metadata.detachedPreviewGeometry }
+      : {})
   }
   const timing = calibrationTiming(first)
   const runs = reports.map((report, index) => ({
@@ -188,6 +198,12 @@ export function validatePackagedPerformanceCalibrationReports(reports) {
     ['CPU roles', (report) => Object.keys(report.metrics.cpuAveragePercentByRole).sort()],
     ['measurement thresholds', (report) => report.metrics.thresholds]
   ]
+  if (first.scenario === DETACHED_PREVIEW_SCENARIO) {
+    consistentFields.push([
+      'detached preview geometry',
+      (report) => report.metadata.detachedPreviewGeometry
+    ])
+  }
   for (const [label, select] of consistentFields) {
     const expected = stableJson(select(first))
     reports.slice(1).forEach((report, index) => {
@@ -279,6 +295,20 @@ function validateObservedComparability(reports) {
       reports.map((report) => report.metrics.memory.roles[role].maxRssKb),
       policy.maxRoleRssRelativeRange
     )
+    const roleRssScale = median(reports.map((report) => report.metrics.memory.roles[role].maxRssKb))
+    for (const [label, select] of [
+      [
+        `${role} RSS plateau growth`,
+        (report) => report.metrics.memory.roles[role].plateauGrowthRssKb
+      ],
+      [`${role} RSS slope`, (report) => report.metrics.memory.roles[role].slopeRssKbPerMinute],
+      [
+        `${role} RSS second-half slope`,
+        (report) => report.metrics.memory.roles[role].secondHalfSlopeRssKbPerMinute
+      ]
+    ]) {
+      addSignedTrendSpreadFailure(failures, label, reports.map(select), roleRssScale, policy)
+    }
   }
 
   const ownedRssScale = median(reports.map((report) => report.metrics.memory.maxOwnedRssKb))
@@ -433,8 +463,11 @@ function validateDetailedReport(report, index) {
   if (metrics?.teardownClean !== true) failures.push(`${label} teardown was not clean`)
   validatePipeline(metrics?.pipeline, report?.scenario, label, failures)
   validateMemory(metrics?.memory, timing, label, failures)
-  if (PREVIEW_SCENARIOS.has(report?.scenario)) {
-    validateSampling(metrics?.sampling, metrics?.memory, timing, metadata, label, failures)
+  validateSampling(metrics?.sampling, metrics?.memory, timing, metadata, label, failures, {
+    requirePowerAssertionBoundary: PREVIEW_SCENARIOS.has(report?.scenario)
+  })
+  if (report?.scenario === DETACHED_PREVIEW_SCENARIO) {
+    validateDetachedPreviewGeometry(report, label, failures)
   }
   validateCpu(metrics?.cpuAveragePercentByRole, label, failures)
   validateResources(metrics?.resourceCheckpoints, label, failures)
@@ -442,7 +475,15 @@ function validateDetailedReport(report, index) {
   return failures
 }
 
-function validateSampling(sampling, memory, timing, metadata, label, failures) {
+function validateSampling(
+  sampling,
+  memory,
+  timing,
+  metadata,
+  label,
+  failures,
+  { requirePowerAssertionBoundary }
+) {
   if (!isRecord(sampling)) {
     failures.push(`${label} wall-clock sampling evidence was missing`)
     return
@@ -458,12 +499,195 @@ function validateSampling(sampling, memory, timing, metadata, label, failures) {
   if (sampling.collectedSamples !== memory?.samples) {
     failures.push(`${label} sampling collectedSamples disagreed with memory samples`)
   }
-  if (sampling.powerAssertion !== metadata?.powerAssertion) {
-    failures.push(`${label} sampling power assertion disagreed with provenance`)
+  if (requirePowerAssertionBoundary) {
+    if (sampling.powerAssertion !== metadata?.powerAssertion) {
+      failures.push(`${label} sampling power assertion disagreed with provenance`)
+    }
+    if (sampling.powerAssertionVerified !== true) {
+      failures.push(`${label} sampling power assertion was not verified at measurement end`)
+    }
   }
-  if (sampling.powerAssertionVerified !== true) {
-    failures.push(`${label} sampling power assertion was not verified at measurement end`)
+}
+
+function validateDetachedPreviewGeometry(report, label, failures) {
+  const evidence = report?.metrics?.detachedPreviewGeometry
+  const provenance = report?.metadata?.detachedPreviewGeometry
+  if (!isRecord(evidence)) {
+    failures.push(`${label} detached preview geometry evidence was missing`)
+    return
   }
+  if (!isRecord(provenance)) {
+    failures.push(`${label} detached preview geometry provenance was missing`)
+  }
+
+  const expectedContract = {
+    mode: 'detached',
+    surfaceSize: DETACHED_PREVIEW_CALIBRATION_SURFACE_SIZE,
+    windowSize: DETACHED_PREVIEW_CALIBRATION_WINDOW_SIZE,
+    phaseSampleCounts: DETACHED_PREVIEW_CALIBRATION_PHASE_SAMPLE_COUNTS,
+    transport: 'native-surface',
+    backing: 'cametal-layer'
+  }
+  if (evidence.schemaVersion !== 1) {
+    failures.push(`${label} detached preview geometry schema version was missing or unsupported`)
+  }
+  if (stableJson(evidence.contract) !== stableJson(expectedContract)) {
+    failures.push(`${label} detached preview geometry contract was missing or inconsistent`)
+  }
+  if (evidence.pass !== true) {
+    failures.push(`${label} detached preview geometry did not pass across the measurement boundary`)
+  }
+  if (!nonEmptyString(evidence.stabilityKey)) {
+    failures.push(`${label} detached preview geometry stability key was missing`)
+  }
+  if (!Array.isArray(evidence.failures) || evidence.failures.length > 0) {
+    failures.push(`${label} detached preview geometry contained failures`)
+  }
+
+  const expectedScaleFactor = effectiveDisplayScaleFactor(report)
+  for (const [phaseName, requiredSamples] of Object.entries(
+    DETACHED_PREVIEW_CALIBRATION_PHASE_SAMPLE_COUNTS
+  )) {
+    validateDetachedPreviewGeometryPhase(
+      evidence?.phases?.[phaseName],
+      phaseName,
+      requiredSamples,
+      evidence.stabilityKey,
+      expectedScaleFactor,
+      label,
+      failures
+    )
+  }
+
+  if (isRecord(provenance) && Array.isArray(evidence?.phases?.measurementEnd?.samples)) {
+    const derivedProvenance = detachedPreviewCalibrationProvenance(evidence)
+    if (stableJson(provenance) !== stableJson(derivedProvenance)) {
+      failures.push(
+        `${label} detached preview geometry provenance disagreed with detailed evidence`
+      )
+    }
+    if (provenance.scaleFactor !== expectedScaleFactor) {
+      failures.push(`${label} detached preview geometry scale disagreed with display provenance`)
+    }
+  }
+}
+
+function validateDetachedPreviewGeometryPhase(
+  phase,
+  phaseName,
+  requiredSamples,
+  stabilityKey,
+  expectedScaleFactor,
+  label,
+  failures
+) {
+  if (!isRecord(phase)) {
+    failures.push(`${label} detached preview geometry ${phaseName} phase was missing`)
+    return
+  }
+  if (
+    phase.phase !== phaseName ||
+    phase.requiredSamples !== requiredSamples ||
+    phase.pass !== true ||
+    phase.failure !== null
+  ) {
+    failures.push(`${label} detached preview geometry ${phaseName} phase did not pass its contract`)
+  }
+  if (!Number.isInteger(phase.attempts) || phase.attempts < requiredSamples) {
+    failures.push(`${label} detached preview geometry ${phaseName} attempts were incomplete`)
+  }
+  if (!Array.isArray(phase.samples) || phase.samples.length < requiredSamples) {
+    failures.push(
+      `${label} detached preview geometry ${phaseName} captured ${phase?.samples?.length ?? 0}/${requiredSamples} required samples`
+    )
+    return
+  }
+  phase.samples.forEach((sample, index) => {
+    validateDetachedPreviewGeometrySample(
+      sample,
+      `${label} detached preview geometry ${phaseName} sample ${index + 1}`,
+      stabilityKey,
+      expectedScaleFactor,
+      failures
+    )
+  })
+}
+
+function validateDetachedPreviewGeometrySample(
+  sample,
+  sampleLabel,
+  stabilityKey,
+  expectedScaleFactor,
+  failures
+) {
+  if (!isRecord(sample) || sample.ready !== true) {
+    failures.push(`${sampleLabel} was not ready`)
+    return
+  }
+  if (!Array.isArray(sample.failures) || sample.failures.length > 0) {
+    failures.push(`${sampleLabel} contained inspection failures`)
+  }
+  if (sample.stabilityKey !== stabilityKey) {
+    failures.push(`${sampleLabel} stability key did not match the run geometry`)
+  }
+
+  const previewBounds = sample.previewBounds
+  const nativeBounds = sample.nativeBounds
+  if (!exactDetachedPreviewBounds(previewBounds)) {
+    failures.push(`${sampleLabel} preview bounds were not exact 960x540 geometry`)
+  }
+  if (!exactDetachedPreviewBounds(nativeBounds)) {
+    failures.push(`${sampleLabel} native bounds were not exact 960x540 geometry`)
+  }
+  if (
+    !isRecord(previewBounds) ||
+    !isRecord(nativeBounds) ||
+    previewBounds.x !== nativeBounds.x ||
+    previewBounds.y !== nativeBounds.y
+  ) {
+    failures.push(`${sampleLabel} preview and native origins were not aligned`)
+  }
+
+  const window = sample.window
+  if (
+    window?.open !== true ||
+    window?.visible !== true ||
+    window?.mode !== 'floating' ||
+    window?.nativeOwnsPlacement !== true
+  ) {
+    failures.push(`${sampleLabel} detached preview window was not open, visible, and native-owned`)
+  }
+  const surface = sample.surface
+  if (
+    surface?.state !== 'live' ||
+    surface?.transport !== 'native-surface' ||
+    surface?.backing !== 'cametal-layer' ||
+    surface?.visible !== true
+  ) {
+    failures.push(`${sampleLabel} native surface was not live, visible CAMetalLayer geometry`)
+  }
+  if (!positiveFinite(surface?.scaleFactor) || surface.scaleFactor !== expectedScaleFactor) {
+    failures.push(`${sampleLabel} native surface scale disagreed with display provenance`)
+  }
+
+  const derivedStabilityKey = JSON.stringify({
+    previewBounds,
+    nativeBounds,
+    scaleFactor: surface?.scaleFactor
+  })
+  if (sample.stabilityKey !== derivedStabilityKey) {
+    failures.push(`${sampleLabel} stability key disagreed with its geometry fields`)
+  }
+}
+
+function exactDetachedPreviewBounds(bounds) {
+  return (
+    isRecord(bounds) &&
+    Number.isFinite(bounds.x) &&
+    Number.isFinite(bounds.y) &&
+    bounds.width === DETACHED_PREVIEW_CALIBRATION_SURFACE_SIZE.width &&
+    bounds.height === DETACHED_PREVIEW_CALIBRATION_SURFACE_SIZE.height
+  )
 }
 
 function validatePipeline(pipeline, scenario, label, failures) {
