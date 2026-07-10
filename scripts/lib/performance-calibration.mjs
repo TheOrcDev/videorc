@@ -774,11 +774,12 @@ function validateMemory(memory, timing, label, failures) {
       }
     }
   }
-  const minimumDuration = (timing?.measurementMs ?? 0) - (timing?.intervalMs ?? 0)
-  const minimumSamples =
+  const samplingInvariants =
     positiveFinite(timing?.measurementMs) && positiveFinite(timing?.intervalMs)
-      ? performanceSamplingInvariants(timing.measurementMs, timing.intervalMs).minSamples
-      : 0
+      ? performanceSamplingInvariants(timing.measurementMs, timing.intervalMs)
+      : null
+  const minimumDuration = samplingInvariants?.minDurationMs ?? 0
+  const minimumSamples = samplingInvariants?.minSamples ?? 0
   for (const name of ['totalRss', 'ownedRss']) {
     if ((memory?.[name]?.durationMs ?? 0) < minimumDuration) {
       failures.push(`${label} memory.${name} did not cover the declared duration`)

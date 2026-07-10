@@ -66,6 +66,7 @@ import {
   passingCheck,
   writePerformanceReport
 } from './lib/performance-contract.mjs'
+import { performanceSamplingInvariants } from './lib/performance-sampling-schedule.mjs'
 
 const argv = process.argv.slice(2).filter((arg) => arg !== '--')
 const config = {
@@ -131,10 +132,9 @@ if (process.env.VIDEORC_PERF_REPORT_PATH) {
       ...streamAcceptance
     } = performanceResult ?? {}
     const measurementMs = Math.max(0, config.recordingMs - config.warmupMs)
-    const minimumSamples = Math.max(
-      2,
-      Math.floor(measurementMs / Number(process.env.VIDEORC_BASELINE_SAMPLE_MS ?? 2_000))
-    )
+    const sampleIntervalMs = Number(process.env.VIDEORC_BASELINE_SAMPLE_MS ?? 2_000)
+    const samplingInvariants = performanceSamplingInvariants(measurementMs, sampleIntervalMs)
+    const minimumSamples = Math.max(2, samplingInvariants.minSamples)
     const processEnduranceFailures = [
       ...(!performanceResult?.recordStreamPerformanceReport
         ? ['split-output real-source child performance report was missing']
@@ -149,10 +149,7 @@ if (process.env.VIDEORC_PERF_REPORT_PATH) {
         : []),
       ...evaluateProcessEnduranceEvidence(nestedProcessEndurance, {
         minimumSamples,
-        minimumDurationMs: Math.max(
-          0,
-          measurementMs - Number(process.env.VIDEORC_BASELINE_SAMPLE_MS ?? 2_000)
-        )
+        minimumDurationMs: samplingInvariants.minDurationMs
       }),
       ...evaluateOwnedTeardown(nestedTeardown)
     ]

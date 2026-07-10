@@ -21,7 +21,7 @@ describe('performance sampling schedule', () => {
     assert.deepEqual(performanceSamplingInvariants(20_000, 1_000), {
       expectedSamples: 20,
       minSamples: 19,
-      minDurationMs: 19_000
+      minDurationMs: 18_750
     })
   })
 
@@ -34,7 +34,7 @@ describe('performance sampling schedule', () => {
     assert.deepEqual(performanceSamplingInvariants(600_000, 1_000), {
       expectedSamples: 600,
       minSamples: 599,
-      minDurationMs: 599_000
+      minDurationMs: 598_750
     })
     assert.equal(
       absoluteSampleDeadlineMs({

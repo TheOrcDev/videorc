@@ -30,7 +30,8 @@ import {
 } from './lib/process-memory-gate.mjs'
 import {
   collectPerformanceSamplesOnSchedule,
-  performanceSamplingEvidenceFailures
+  performanceSamplingEvidenceFailures,
+  performanceSamplingInvariants
 } from './lib/performance-sampling-schedule.mjs'
 
 const mode = performanceMode()
@@ -38,18 +39,16 @@ const timeoutMs = numberFromEnv('VIDEORC_SMOKE_TIMEOUT_MS', 120000)
 const warmupMs = numberFromEnv('VIDEORC_PROCESS_MEMORY_WARMUP_MS', 2000)
 const sampleMs = numberFromEnv('VIDEORC_PROCESS_MEMORY_SAMPLE_MS', 5000)
 const intervalMs = numberFromEnv('VIDEORC_PROCESS_MEMORY_INTERVAL_MS', 1000)
+const samplingInvariants = performanceSamplingInvariants(sampleMs, intervalMs)
 const tailWindowMs = numberFromEnv(
   'VIDEORC_PROCESS_MEMORY_TAIL_WINDOW_MS',
   Math.min(120000, Math.max(intervalMs, sampleMs / 3))
 )
 const thresholds = {
-  minSamples: numberFromEnv(
-    'VIDEORC_PROCESS_MEMORY_MIN_SAMPLES',
-    Math.max(3, Math.floor(sampleMs / Math.max(1, intervalMs)))
-  ),
+  minSamples: numberFromEnv('VIDEORC_PROCESS_MEMORY_MIN_SAMPLES', samplingInvariants.minSamples),
   minDurationMs: numberFromEnv(
     'VIDEORC_PROCESS_MEMORY_MIN_DURATION_MS',
-    Math.max(0, sampleMs - intervalMs)
+    samplingInvariants.minDurationMs
   ),
   maxTotalRssMb: numberFromEnv('VIDEORC_PROCESS_MEMORY_MAX_TOTAL_MB', 4096),
   maxOwnedRssMb: numberFromEnv('VIDEORC_PROCESS_MEMORY_MAX_OWNED_MB', 1024),

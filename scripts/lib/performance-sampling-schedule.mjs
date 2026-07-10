@@ -1,15 +1,23 @@
 import { performance } from 'node:perf_hooks'
 
 const DEADLINE_JITTER_SAMPLE_ALLOWANCE = 1
+const MAX_OBSERVATION_LATENCY_VARIANCE_MS = 250
 
 export function performanceSamplingInvariants(measurementMs, intervalMs) {
   assertPositiveFinite('measurement', measurementMs)
   assertPositiveFinite('interval', intervalMs)
   const expectedSamples = Math.ceil(measurementMs / intervalMs)
+  // The first-to-last raw series excludes the final interval and uses actual
+  // collection completion times. A slower first census than final census can
+  // therefore shorten that span slightly even when every absolute deadline,
+  // sample, wall-clock boundary, and max-gap check is satisfied. Keep a small
+  // bounded allowance for that completion-latency variance; sleep/stalls still
+  // fail independently through skipped deadlines, max gap, and elapsed time.
+  const observationLatencyVarianceMs = Math.min(intervalMs / 4, MAX_OBSERVATION_LATENCY_VARIANCE_MS)
   return {
     expectedSamples,
     minSamples: Math.max(3, expectedSamples - DEADLINE_JITTER_SAMPLE_ALLOWANCE),
-    minDurationMs: Math.max(0, measurementMs - intervalMs)
+    minDurationMs: Math.max(0, measurementMs - intervalMs - observationLatencyVarianceMs)
   }
 }
 

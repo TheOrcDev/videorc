@@ -107,6 +107,7 @@ import {
   passingCheck,
   writePerformanceReport
 } from './lib/performance-contract.mjs'
+import { performanceSamplingInvariants } from './lib/performance-sampling-schedule.mjs'
 
 const config = {
   recordingMs: Number(process.env.VIDEORC_BASELINE_RECORDING_MS ?? 60000),
@@ -254,17 +255,15 @@ if (process.env.VIDEORC_PERF_REPORT_PATH) {
         : [])
     ]
     const measurementMs = Math.max(0, config.recordingMs - config.warmupMs)
-    const minimumSamples = Math.max(
-      2,
-      Math.floor(measurementMs / Math.max(1, config.sampleIntervalMs))
-    )
+    const samplingInvariants = performanceSamplingInvariants(measurementMs, config.sampleIntervalMs)
+    const minimumSamples = Math.max(2, samplingInvariants.minSamples)
     const enduranceFailures = [
       ...(processEnduranceError
         ? [`process endurance collection failed: ${processEnduranceError}`]
         : []),
       ...evaluateProcessEnduranceEvidence(processEndurance, {
         minimumSamples,
-        minimumDurationMs: Math.max(0, measurementMs - config.sampleIntervalMs)
+        minimumDurationMs: samplingInvariants.minDurationMs
       }),
       ...evaluateOwnedTeardown(teardownEvidence)
     ]
