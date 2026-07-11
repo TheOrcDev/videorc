@@ -4734,6 +4734,92 @@ mod tests {
         )
     }
 
+    // The publish workflow must reuse a live-captions transcript: Transcript
+    // Ready from the .srt, no audio extraction, no consent needed — the exact
+    // fix for "Title & description just downloads sound" (2026-07-11).
+    #[tokio::test]
+    async fn publish_workflow_reuses_live_captions_transcript_without_consent() {
+        let state = test_state();
+        let dir = std::env::temp_dir().join(format!("videorc-ai-srt-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let recording = dir.join("session-a.mp4");
+        std::fs::write(&recording, b"stub-video").unwrap();
+        std::fs::write(
+            dir.join("session-a.srt"),
+            "1\n00:00:01,000 --> 00:00:02,000\nhello from captions\n\n",
+        )
+        .unwrap();
+        state
+            .database
+            .create_session(&crate::storage::NewSession {
+                id: "session-a".to_string(),
+                title: "Captions session".to_string(),
+                started_at: "2026-07-11T00:00:00Z".to_string(),
+                mode: "record".to_string(),
+                output_path: Some(recording.display().to_string()),
+                container: None,
+                stream_preset: None,
+                sources: serde_json::from_str("{}").unwrap(),
+                layout: protocol::default_layout_settings(),
+                output: serde_json::from_value(serde_json::json!({
+                    "recordEnabled": true,
+                    "streamEnabled": false,
+                    "video": {
+                        "preset": "tutorial-1080p30",
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 30,
+                        "bitrateKbps": 6000
+                    },
+                    "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
+                }))
+                .unwrap(),
+            })
+            .unwrap();
+
+        let result = ai::run_ai_workflow(
+            state.clone(),
+            protocol::RunAiWorkflowParams {
+                session_id: "session-a".to_string(),
+                consent_to_upload_audio: false,
+                ffmpeg_path: None,
+                outputs: None,
+                tone: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.audio_path.is_empty(),
+            "captions transcript must skip audio extraction"
+        );
+        let artifacts = state.database.list_ai_artifacts("session-a").unwrap();
+        assert!(
+            artifacts
+                .iter()
+                .all(|artifact| artifact.kind != protocol::AiArtifactKind::AudioExtract)
+        );
+        let transcript = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == protocol::AiArtifactKind::Transcript)
+            .expect("transcript artifact");
+        assert_eq!(transcript.status, protocol::AiArtifactStatus::Ready);
+        assert_eq!(
+            transcript.content.get("source").and_then(|v| v.as_str()),
+            Some("live-captions")
+        );
+        assert!(
+            transcript
+                .content
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .contains("hello from captions")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[derive(Clone)]
     struct TestWebSocketState {
         app: AppState,

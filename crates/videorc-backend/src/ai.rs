@@ -1061,7 +1061,7 @@ pub fn parse_srt(content: &str) -> Vec<CaptionCue> {
 fn srt_timestamp_ms(value: &str) -> Option<u64> {
     // "HH:MM:SS,mmm" (SRT) or "HH:MM:SS.mmm".
     let value = value.trim();
-    let mut clock_and_millis = value.split(|ch| ch == ',' || ch == '.');
+    let mut clock_and_millis = value.split([',', '.']);
     let clock = clock_and_millis.next()?;
     let millis: u64 = clock_and_millis.next().unwrap_or("0").trim().parse().ok()?;
     let mut parts = clock.split(':').rev();

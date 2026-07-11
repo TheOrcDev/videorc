@@ -116,7 +116,7 @@ pub fn rank_chat_spike_moments(
         .filter(|(_, count)| f64::from(**count) >= threshold)
         .map(|(index, count)| (index, *count))
         .collect();
-    spikes.sort_by(|a, b| b.1.cmp(&a.1));
+    spikes.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
 
     let mut chosen: Vec<(usize, u32)> = Vec::new();
     for (index, count) in spikes {
