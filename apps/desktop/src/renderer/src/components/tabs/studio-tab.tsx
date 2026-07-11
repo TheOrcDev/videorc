@@ -11,6 +11,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { AudioMixer } from '@/components/studio/audio-mixer'
 import { QuickSettings } from '@/components/studio/quick-settings'
 import { ScenesGallery } from '@/components/studio/scenes-gallery'
+import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
 import { SessionPanel } from '@/components/studio/session-panel'
 import { Button } from '@/components/ui/button'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
@@ -196,12 +197,14 @@ export function StudioTab(): ReactElement {
 
 function StudioPreviewPanel(): ReactElement {
   const {
+    captureConfig,
     nativePreviewSurfaceEnabled,
     openPreviewPermissions,
     openPreviewWindow,
     previewWindow,
     refreshPreview,
     runtimeInfo,
+    selectedMicrophone,
     setPreviewWindowMode,
     wsStatus
   } = useStudioCore()
@@ -215,13 +218,22 @@ function StudioPreviewPanel(): ReactElement {
 
   // data hook: the backend-resilience smoke reads this badge (the old probe
   // grepped for a "Status" text prefix that died with the session-panel
-  // declutter). It must exist in every preview mode, docked included.
+  // declutter). It must exist in every preview mode, docked included. The mic
+  // sliver rides the same cluster so it has exactly one home wherever the
+  // status renders (panel header or docked control row).
   const sessionStatusBadge = (
-    <span data-videorc-session-status>
-      <StatusBadge
-        tone={sessionStatusTone(recording.state, wsStatus)}
-        value={sessionStatusLabel(recording.state, wsStatus)}
+    <span className="flex items-center gap-1.5">
+      <SessionMicSliver
+        deviceName={selectedMicrophone?.name}
+        muted={captureConfig.audio.microphoneMuted}
+        sessionActive={active}
       />
+      <span data-videorc-session-status>
+        <StatusBadge
+          tone={sessionStatusTone(recording.state, wsStatus)}
+          value={sessionStatusLabel(recording.state, wsStatus)}
+        />
+      </span>
     </span>
   )
 

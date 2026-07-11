@@ -1,24 +1,32 @@
 import { Microphone, SpeakerHigh, SpeakerSlash, WaveSine } from '@phosphor-icons/react'
-import type { ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
+import { BarVisualizer } from '@/components/ui/bar-visualizer'
 import { Button } from '@/components/ui/button'
 import { useWorkspaceNav } from '@/components/workspace-nav'
-import { useMicLevelMeter, type MicLevelMeter } from '@/hooks/use-mic-level-meter'
+import { useDocumentVisible } from '@/hooks/use-document-visible'
+import { useMicLevelMeter } from '@/hooks/use-mic-level-meter'
+import { useMicStream } from '@/hooks/use-mic-stream'
 import { useStudioAudio, useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
 import { formatDb } from '@/lib/format'
+import { advanceClipHoldDeadline, fallbackBandLevels } from '@/lib/mic-meter'
 import { cn } from '@/lib/utils'
 
+const MIXER_BAR_COUNT = 28
+
 /**
- * Audio mixer (SD4 + post-0.9.4 fix F7 + 2026-07-10 live-meter fix). The
- * VISUAL meter runs on a renderer WebAudio analyser at display rate, driven
- * imperatively (use-mic-level-meter) — instant response with peak hold, both
- * idle and in-session. The backend stays the capture/health authority: its
- * 1 Hz `micLiveLevel` and the on-demand 700 ms "Check level" sample remain
- * the fallback whenever the analyser cannot open the selected device.
- * System audio shows its honest "unavailable — pending native adapter" state;
- * real capture is Phase-2 (F3).
+ * Audio mixer (SD4 + post-0.9.4 fix F7 + 2026-07-10 live-meter fix + Studio
+ * audio ElevenLabs rework S3). The VISUAL is a multi-band bar visualizer over
+ * the shared renderer mic stream (use-mic-stream) at display rate, with the
+ * WebAudio ballistics meter kept for the peak-dB label and clip hold. The
+ * backend stays the capture/health authority: its 1 Hz `micLiveLevel` and the
+ * on-demand 700 ms "Check level" sample drive a deterministic coarse-band
+ * fallback whenever the analyser cannot open the selected device. The stream
+ * releases while the document is hidden (idle-CPU discipline). System audio
+ * shows its honest "unavailable — pending native adapter" state; real capture
+ * is Phase-2 (F3).
  */
 export function AudioMixer(): ReactElement {
   const { captureConfig, setCaptureConfig, selectedMicrophone, sampleAudioMeter, deviceList } =
@@ -28,11 +36,14 @@ export function AudioMixer(): ReactElement {
   const { openStudioPanel } = useWorkspaceNav()
 
   const muted = captureConfig.audio.microphoneMuted
-  const micMeter = useMicLevelMeter({
+  const documentVisible = useDocumentVisible()
+  const micStream = useMicStream({
     deviceName: selectedMicrophone?.name,
-    enabled: Boolean(selectedMicrophone),
-    muted
+    enabled: Boolean(selectedMicrophone) && documentVisible
   })
+  const micMeter = useMicLevelMeter({ stream: micStream.stream, muted })
+  const clipping = useClipIndicator(micMeter.peakDb)
+
   const liveLevel =
     typeof diagnosticStats?.micLiveLevel === 'number' ? diagnosticStats.micLiveLevel : null
   const hasReading = audioMeter !== null && typeof audioMeter.level === 'number'
@@ -46,6 +57,28 @@ export function AudioMixer(): ReactElement {
           ? formatDb(audioMeter.peakDb)
           : formatDb(captureConfig.audio.microphoneGainDb)
   const systemAudio = deviceList.devices.find((device) => device.kind === 'system-audio')
+
+  // Explicit visual state map (plan S3) — every path states what drives it:
+  // - live analyser: bars from the stream, chrome tone;
+  // - muted: flat dim bars (the analyser sees pre-mute signal — dancing bars
+  //   under a mute would lie about the recording);
+  // - coarse fallback (backend 1 Hz / sampled level): deterministic
+  //   center-weighted bands from the real level;
+  // - silent/no-frames: warning tone over whatever level path is active;
+  // - no mic: flat dim bars.
+  const meterStatus = micMeter.active || liveLevel !== null ? 'ready' : audioMeter?.status
+  const analyserDriven = micStream.active && !muted
+  const visualLevels = analyserDriven
+    ? undefined
+    : fallbackBandLevels(muted || !selectedMicrophone ? 0 : level, MIXER_BAR_COUNT)
+  const meterTone =
+    muted || !selectedMicrophone
+      ? 'text-muted-foreground/50'
+      : meterStatus === 'silent' || meterStatus === 'no-frames'
+        ? 'text-warning'
+        : meterStatus === 'ready'
+          ? 'text-foreground/80'
+          : 'text-muted-foreground/70'
 
   return (
     <PanelSection
@@ -66,6 +99,18 @@ export function AudioMixer(): ReactElement {
             </span>
           </span>
           <span className="flex shrink-0 items-center gap-1.5">
+            {/* Clip hold keeps its width reserved so the label row never shifts. */}
+            <span
+              aria-hidden={!clipping}
+              className={cn(
+                'flex items-center gap-1 text-xs font-medium text-warning transition-opacity duration-150',
+                clipping ? 'opacity-100' : 'opacity-0'
+              )}
+              data-videorc-mic-clip={clipping || undefined}
+            >
+              <span className="size-1.5 rounded-full bg-warning" />
+              Clip
+            </span>
             <span className="text-xs tabular-nums text-muted-foreground">{dbLabel}</span>
             {selectedMicrophone ? (
               <Button
@@ -90,12 +135,16 @@ export function AudioMixer(): ReactElement {
             ) : null}
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <MeterBar
-            level={micMeter.active ? null : level}
-            live={micMeter.active ? micMeter : undefined}
-            muted={muted}
-            status={micMeter.active || liveLevel !== null ? 'ready' : audioMeter?.status}
+        <div className="flex items-center gap-3">
+          <BarVisualizer
+            centerAlign
+            barCount={MIXER_BAR_COUNT}
+            className={cn('h-12 min-w-0 flex-1', meterTone)}
+            data-videorc-mic-visualizer
+            levels={visualLevels}
+            mediaStream={micStream.stream}
+            minHeight={8}
+            state="speaking"
           />
           {micMeter.active || liveLevel !== null ? (
             <span className="shrink-0 text-xs text-muted-foreground">Live</span>
@@ -111,6 +160,17 @@ export function AudioMixer(): ReactElement {
             </Button>
           )}
         </div>
+        {meterStatus === 'silent' || meterStatus === 'no-frames' ? (
+          <span className="text-xs text-warning">
+            {meterStatus === 'silent'
+              ? 'The mic delivered only silence on the last check.'
+              : 'The mic opened but did not send audio frames.'}
+          </span>
+        ) : meterStatus === 'permission-required' ? (
+          <span className="text-xs text-warning">
+            Microphone permission is required before levels can be read.
+          </span>
+        ) : null}
       </div>
 
       {/* System audio — honest unavailable state until the native adapter lands. */}
@@ -132,49 +192,34 @@ export function AudioMixer(): ReactElement {
   )
 }
 
-function MeterBar({
-  level,
-  live,
-  status,
-  muted
-}: {
-  /** Static level for the fallback paths; null while the analyser drives the bar. */
-  level: number | null
-  /** When set, fill width and peak marker are written imperatively at rAF rate. */
-  live?: Pick<MicLevelMeter, 'fillRef' | 'peakRef'>
-  status?: string
-  muted: boolean
-}): ReactElement {
-  const pct = level === null ? 0 : Math.min(100, Math.max(0, Math.round(level * 100)))
-  const tone = muted
-    ? 'bg-muted-foreground/40'
-    : status === 'ready'
-      ? 'bg-success'
-      : status === 'silent' || status === 'no-frames'
-        ? 'bg-warning'
-        : 'bg-muted-foreground/40'
-  return (
-    <span className="relative h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
-      <span
-        ref={live?.fillRef}
-        // The analyser's own ballistics animate the live bar; a CSS width
-        // transition would smear every frame. Keep it only on the 1 Hz
-        // fallback paths so their jumps stay readable.
-        className={cn(
-          'block h-full rounded-full',
-          !live && 'transition-[width] duration-100',
-          tone
-        )}
-        style={live ? undefined : { width: `${pct}%` }}
-      />
-      {live ? (
-        <span
-          ref={live.peakRef}
-          aria-hidden
-          className="absolute top-0 h-full w-0.5 rounded-full bg-foreground/70"
-          style={{ left: 0, opacity: 0 }}
-        />
-      ) : null}
-    </span>
-  )
+/**
+ * Clip indicator with hold: peaks at/above the clip threshold arm it and the
+ * deadline extends while the input stays hot (advanceClipHoldDeadline), so a
+ * single hot transient stays readable for MIC_CLIP_HOLD_MS.
+ */
+function useClipIndicator(peakDb: number | null): boolean {
+  const deadlineRef = useRef(0)
+  const [clipping, setClipping] = useState(false)
+
+  useEffect(() => {
+    const now = performance.now()
+    deadlineRef.current = advanceClipHoldDeadline(deadlineRef.current, peakDb, now)
+    if (now < deadlineRef.current) {
+      setClipping(true)
+    }
+  }, [peakDb])
+
+  useEffect(() => {
+    if (!clipping) {
+      return
+    }
+    const interval = window.setInterval(() => {
+      if (performance.now() >= deadlineRef.current) {
+        setClipping(false)
+      }
+    }, 250)
+    return () => window.clearInterval(interval)
+  }, [clipping])
+
+  return clipping
 }

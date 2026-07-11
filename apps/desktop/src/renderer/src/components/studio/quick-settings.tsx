@@ -9,7 +9,7 @@ import {
   SpeakerSlash,
   type Icon
 } from '@phosphor-icons/react'
-import type { ReactElement, ReactNode } from 'react'
+import { Suspense, lazy, type ReactElement, type ReactNode } from 'react'
 
 import { SourceSelect } from '@/components/source-select'
 import { Button } from '@/components/ui/button'
@@ -37,6 +37,13 @@ import {
   layoutPresetNeedsCamera,
   layoutPresetNeedsScreen
 } from '@/lib/capture'
+
+// Lazy like the tab chunks (app-shell): the preview (and the live-waveform it
+// pulls in) loads on first popover open, keeping it out of the eager renderer
+// bundle (check:renderer-assets budget).
+const MicPickerPreview = lazy(async () => ({
+  default: (await import('@/components/studio/mic-picker-preview')).MicPickerPreview
+}))
 
 const QUICK_PRESETS: { id: LayoutPreset; label: string }[] = [
   { id: 'screen-camera', label: 'Screen + Cam' },
@@ -218,6 +225,12 @@ export function QuickSettings(): ReactElement {
                 }))
               }
             />
+            {/* See-before-you-pick: live waveform of the selected mic while the
+                popover is open. Mounted only with the popover, so the preview
+                stream releases the device on close. */}
+            <Suspense fallback={<div className="h-[38px] rounded-row border bg-muted/20" />}>
+              <MicPickerPreview deviceName={selectedMicrophone?.name} />
+            </Suspense>
             {selectedMicrophone ? (
               <Button
                 aria-pressed={muted}
