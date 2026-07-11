@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  assessProofSourceFrame,
   assessFirstFrame,
   assessPresenting,
   DEFAULT_FIRST_FRAME_BUDGETS,
@@ -9,6 +10,7 @@ import {
   emptyPresentingWatch,
   firstFrameBlockedReason,
   firstFrameContractMet,
+  nativePreviewFirstFrameWatchdogEnabled,
   type FirstFrameSnapshot,
   type PresentingWatchState
 } from './native-preview-first-frame'
@@ -27,6 +29,82 @@ function snapshot(overrides: Partial<FirstFrameSnapshot> = {}): FirstFrameSnapsh
     ...overrides
   }
 }
+
+describe('nativePreviewFirstFrameWatchdogEnabled', () => {
+  it('runs the Metal first-frame contract only on macOS', () => {
+    expect(nativePreviewFirstFrameWatchdogEnabled('darwin')).toBe(true)
+    expect(nativePreviewFirstFrameWatchdogEnabled('win32')).toBe(false)
+    expect(nativePreviewFirstFrameWatchdogEnabled('linux')).toBe(false)
+  })
+})
+
+describe('assessProofSourceFrame', () => {
+  it('treats fresh Windows source frames as live and sustained gaps as stalled', () => {
+    expect(
+      assessProofSourceFrame({
+        platform: 'win32',
+        framePollingSuppressed: false,
+        sourcePollerCount: 1,
+        freshSourceLayerCount: 1,
+        sourceFrameAgeMs: 125
+      })
+    ).toBe('met')
+    expect(
+      assessProofSourceFrame({
+        platform: 'win32',
+        framePollingSuppressed: false,
+        sourcePollerCount: 1,
+        freshSourceLayerCount: 0,
+        sourceFrameAgeMs: 1_501
+      })
+    ).toBe('stalled')
+  })
+
+  it('does not diagnose intentional suppression or apply the proof contract to macOS', () => {
+    expect(
+      assessProofSourceFrame({
+        platform: 'win32',
+        framePollingSuppressed: true,
+        sourcePollerCount: 1,
+        freshSourceLayerCount: 0,
+        sourceFrameAgeMs: 10_000
+      })
+    ).toBe('paused')
+    expect(
+      assessProofSourceFrame({
+        platform: 'darwin',
+        framePollingSuppressed: false,
+        sourcePollerCount: 1,
+        freshSourceLayerCount: 0,
+        sourceFrameAgeMs: 10_000
+      })
+    ).toBe('not-applicable')
+  })
+
+  it('does not report a stale prior source after switching to a static scene', () => {
+    expect(
+      assessProofSourceFrame({
+        platform: 'win32',
+        framePollingSuppressed: false,
+        sourcePollerCount: 0,
+        freshSourceLayerCount: 0,
+        sourceFrameAgeMs: 10_000
+      })
+    ).toBe('not-applicable')
+  })
+
+  it('requires every active source poller to remain fresh', () => {
+    expect(
+      assessProofSourceFrame({
+        platform: 'win32',
+        framePollingSuppressed: false,
+        sourcePollerCount: 2,
+        freshSourceLayerCount: 1,
+        sourceFrameAgeMs: 1_501
+      })
+    ).toBe('stalled')
+  })
+})
 
 describe('firstFrameContractMet', () => {
   it('is met only when the whole chain agrees and advances', () => {

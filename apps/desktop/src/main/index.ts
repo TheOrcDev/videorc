@@ -116,15 +116,21 @@ import {
 } from './avatar-cache'
 import { DARK_WINDOW_PALETTE, windowPalette } from './window-palette'
 import {
+  assessProofSourceFrame,
   assessFirstFrame,
   assessPresenting,
   emptyFirstFrameLedger,
   emptyPresentingWatch,
+  nativePreviewFirstFrameWatchdogEnabled,
   type FirstFrameLedger,
   type FirstFrameSnapshot,
   type PresentingAssessment,
   type PresentingWatchState
 } from './native-preview-first-frame'
+import {
+  nativePreviewProofPollingProfile,
+  nativePreviewProofPollingProfileKey
+} from '../shared/native-preview-proof-polling'
 import {
   DEFAULT_MAIN_PUMP_FRAME_STALL_TIMEOUT_MS,
   mainPumpFrameDeliveryStalled,
@@ -297,6 +303,9 @@ const nativePreviewPlacementQueue = new NativePreviewPlacementQueue(
 )
 let nativePreviewSurfaceStatus: PreviewSurfaceStatus = idleNativePreviewSurfaceStatus()
 let nativePreviewSurfaceFramePollingSuppressed = false
+let nativePreviewProofPollingRecordingActive = false
+let nativePreviewAppliedProofPollingProfile: string | null = null
+let nativePreviewProofPollingProfileSerial = 0
 let nativePreviewNativeOwnsProofPollingSuppression = false
 let nativePreviewNativeFailureFallbackActive = false
 let nativePreviewAppliedProofPollingSuppression: boolean | null = null
@@ -2951,8 +2960,17 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   void setNativePreviewSurfaceFramePollingSuppressed(false)
   pushPreviewWindowPlacement()
   emitPreviewWindowState()
-  // The first-frame contract clock starts the moment the window is up.
-  startFirstFrameWatchdog()
+  // The first-frame watchdog proves and heals the macOS CAMetalLayer chain.
+  // Windows uses the Electron proof surface; running the Metal watchdog there
+  // guarantees false resets because an IOSurface can never appear.
+  if (nativePreviewFirstFrameWatchdogEnabled(process.platform)) {
+    startFirstFrameWatchdog()
+  } else {
+    stopFirstFrameWatchdog()
+    firstFrameLastHint = null
+    setFirstFrameStatus('pending', 'Waiting for the Windows preview surface to deliver pixels.')
+    updatePreviewWindowWaitDetail('Waiting for the Windows preview surface to deliver pixels.')
+  }
   return previewWindowState()
 }
 
@@ -3193,6 +3211,16 @@ function backendPreviewFrameUrl(
     !backendConnection
   ) {
     return undefined
+  }
+  if (process.env.VIDEORC_SMOKE_PREVIEW_FRAME_POLLING === '1') {
+    const address = smokePreviewMotionServer?.address()
+    if (address && typeof address !== 'string') {
+      const params = new URLSearchParams()
+      if (typeof maxWidth === 'number' && Number.isFinite(maxWidth) && maxWidth > 0) {
+        params.set('maxWidth', String(Math.max(1, Math.round(maxWidth))))
+      }
+      return `http://${address.address}:${address.port}/preview-frame.png?${params.toString()}`
+    }
   }
   const params = new URLSearchParams({ token: backendConnection.token })
   if (typeof maxWidth === 'number' && Number.isFinite(maxWidth) && maxWidth > 0) {
@@ -3637,6 +3665,8 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         const pollers = new Map();
         const sourceFrames = new Map();
         let framePollingSuppressed = false;
+        let framePollingIntervalMs = 40;
+        let framePollingMaxWidth = 1920;
         let proofSurfaceSuspended = false;
         let animationFrameId = null;
         let compositorStatus = null;
@@ -3661,6 +3691,20 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           return url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
         }
 
+        function profiledFrameUrl(url) {
+          try {
+            const parsed = new URL(url);
+            const requested = Number(parsed.searchParams.get('maxWidth'));
+            const maxWidth = Number.isFinite(requested) && requested > 0
+              ? Math.min(requested, framePollingMaxWidth)
+              : framePollingMaxWidth;
+            parsed.searchParams.set('maxWidth', String(Math.max(1, Math.round(maxWidth))));
+            return parsed.toString();
+          } catch {
+            return url;
+          }
+        }
+
         function cropStyle(transform) {
           const cropLeft = Math.max(0, Number(transform?.cropLeft ?? 0));
           const cropRight = Math.max(0, Number(transform?.cropRight ?? 0));
@@ -3678,6 +3722,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
 
         function markLive(kind, sourceId) {
           sourceFrames.set(sourceId, (sourceFrames.get(sourceId) ?? 0) + 1);
+          const poller = pollers.get(sourceId);
+          if (poller) {
+            poller.lastSuccessAt = performance.now();
+          }
           liveLayerCount = [...layers.values()].filter(({ image }) => image?.dataset.live === '1').length;
           if (liveLayerCount > 0) {
             document.body.classList.add('surface-live');
@@ -3715,6 +3763,17 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           }
         }
 
+        function setFramePollingProfile(profile) {
+          const intervalMs = Number(profile?.intervalMs);
+          const maxWidth = Number(profile?.maxWidth);
+          if (Number.isFinite(intervalMs) && intervalMs >= 20) {
+            framePollingIntervalMs = Math.round(intervalMs);
+          }
+          if (Number.isFinite(maxWidth) && maxWidth >= 1) {
+            framePollingMaxWidth = Math.round(maxWidth);
+          }
+        }
+
         function startFramePolling(id, kind, image, url) {
           if (framePollingSuppressed) {
             stopLayerPoller(id);
@@ -3729,7 +3788,14 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           if (existing) {
             existing.cancelled = true;
           }
-          const poller = { url, image, cancelled: false, pending: false };
+          const poller = {
+            url,
+            image,
+            cancelled: false,
+            pending: false,
+            startedAt: performance.now(),
+            lastSuccessAt: null
+          };
           pollers.set(id, poller);
 
           const poll = () => {
@@ -3737,7 +3803,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               return;
             }
             if (poller.pending) {
-              window.setTimeout(poll, 40);
+              window.setTimeout(poll, framePollingIntervalMs);
               return;
             }
             poller.pending = true;
@@ -3750,17 +3816,13 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
                 markLive(kind, id);
               }
               poller.pending = false;
-              // ~25fps idle poll ceiling: trims idle CPU now that preview frames
-              // render at a higher resolution (preview-sizing fix), while staying
-              // visually smooth. Frame polling is suppressed entirely while
-              // recording (the compositor surface takes over).
-              window.setTimeout(poll, 40);
+              window.setTimeout(poll, framePollingIntervalMs);
             };
             next.onerror = () => {
               poller.pending = false;
-              window.setTimeout(poll, 250);
+              window.setTimeout(poll, Math.max(250, framePollingIntervalMs));
             };
-            next.src = cacheBust(url);
+            next.src = cacheBust(profiledFrameUrl(url));
           };
 
           poll();
@@ -3859,6 +3921,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
 
         window.__videorcSetPreviewScene = applyScene;
         window.__videorcSetFramePollingSuppressed = setFramePollingSuppressed;
+        window.__videorcSetFramePollingProfile = setFramePollingProfile;
 
         function applyCompositorStatus(nextStatus) {
           pendingCompositorStatus = nextStatus;
@@ -3965,6 +4028,17 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               return sorted[index];
             };
             const elapsed = Math.max(1, performance.now() - startedAt);
+            const sourceFrameAges = [...pollers.values()].map((poller) =>
+              Math.max(0, performance.now() - (poller.lastSuccessAt ?? poller.startedAt))
+            );
+            const sourceFrameAgeMs = sourceFrameAges.length > 0
+              ? Math.max(...sourceFrameAges)
+              : null;
+            const sourceFreshnessBudgetMs = Math.max(1500, framePollingIntervalMs * 8);
+            const freshSourceLayerCount = [...pollers.values()].filter((poller) =>
+              poller.lastSuccessAt != null &&
+              performance.now() - poller.lastSuccessAt <= sourceFreshnessBudgetMs
+            ).length;
             return {
               frames,
               measuredFps: frames / elapsed * 1000,
@@ -3984,12 +4058,17 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               inputToPresentLatencyP99Ms: percentile(inputToPresentLatencies, 99),
               compositorSources: compositorStatus?.sources ?? [],
               layerCount: layers.size,
+              sourcePollerCount: pollers.size,
               liveLayerCount,
+              freshSourceLayerCount,
               sourceFrames: Object.fromEntries(sourceFrames),
+              sourceFrameAgeMs,
               intervalP50Ms: percentile(intervals, 50),
               intervalP95Ms: percentile(intervals, 95),
               intervalP99Ms: percentile(intervals, 99),
               framePollingSuppressed,
+              framePollingIntervalMs,
+              framePollingMaxWidth,
               proofSurfaceSuspended,
               sourcePixelsPresent: liveLayerCount > 0,
               blankFrames: 0,
@@ -4072,6 +4151,7 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
       if (nativePreviewSurfaceWindow === surfaceWindow) {
         nativePreviewSurfaceWindow = null
         nativePreviewAppliedProofPollingSuppression = null
+        nativePreviewAppliedProofPollingProfile = null
         nativePreviewProofAnimationSuspended = null
         nativePreviewSurfaceStatus = idleNativePreviewSurfaceStatus()
       }
@@ -4103,6 +4183,7 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
         }
         return
       }
+      await syncNativePreviewProofPollingProfile()
       const proofPollingSuppressed = nativePreviewProofPollingIsSuppressed()
       if (proofPollingSuppressed) {
         await waitForNativePreviewSurfaceScript(surfaceWindow)
@@ -4243,6 +4324,8 @@ async function createNativePreviewSurface(
     intervalP99Ms: nativePreviewSurfaceStatus.intervalP99Ms,
     framePollingSuppressed: nativePreviewProofPollingIsSuppressed(),
     sourcePixelsPresent: nativePreviewSurfaceStatus.sourcePixelsPresent,
+    firstFrameContract: nativePreviewSurfaceStatus.firstFrameContract,
+    firstFrameReason: nativePreviewSurfaceStatus.firstFrameReason,
     nativePreviewHostKind: preserveNativeSurface
       ? nativePreviewSurfaceStatus.nativePreviewHostKind
       : 'proof-surface',
@@ -4816,7 +4899,9 @@ async function presentNativePreviewSurfaceCompositor(
   const presentFps = finiteMetric(metrics?.measuredFps)
   const intervalP95Ms = finiteMetric(metrics?.intervalP95Ms)
   const intervalP99Ms = finiteMetric(metrics?.intervalP99Ms)
-  const liveLayerCount = finiteMetric(metrics?.liveLayerCount) ?? 0
+  const freshSourceLayerCount = finiteMetric(metrics?.freshSourceLayerCount) ?? 0
+  const sourcePollerCount = finiteMetric(metrics?.sourcePollerCount) ?? 0
+  const sourceFrameAgeMs = finiteMetric(metrics?.sourceFrameAgeMs)
   nativePreviewSurfaceStatus = {
     ...nativePreviewSurfaceStatus,
     ...nativePreviewRendererTimingStatusFields(effectiveStatus),
@@ -4839,7 +4924,7 @@ async function presentNativePreviewSurfaceCompositor(
     intervalP95Ms,
     intervalP99Ms,
     framePollingSuppressed: nativePreviewProofPollingIsSuppressed(),
-    sourcePixelsPresent: liveLayerCount > 0,
+    sourcePixelsPresent: freshSourceLayerCount > 0,
     nativePreviewHostKind: 'proof-surface',
     nativePreviewHostAttached: false,
     updatedAt: new Date().toISOString(),
@@ -4848,6 +4933,27 @@ async function presentNativePreviewSurfaceCompositor(
       realSurfaceAttempt.reason,
       process.platform
     )
+  }
+  const proofSourceAssessment = assessProofSourceFrame({
+    platform: process.platform,
+    framePollingSuppressed: nativePreviewProofPollingIsSuppressed(),
+    sourcePollerCount,
+    freshSourceLayerCount,
+    sourceFrameAgeMs
+  })
+  if (proofSourceAssessment === 'met') {
+    if (nativePreviewSurfaceStatus.firstFrameContract !== 'met') {
+      setFirstFrameStatus('met', 'Windows preview pixels are live.')
+      updatePreviewWindowWaitDetail(null)
+      logBackend('info', '[proof-preview] source frame delivery is live')
+    }
+  } else if (proofSourceAssessment === 'stalled') {
+    if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
+      const reason = `Windows preview source frames have not advanced for ${Math.round(sourceFrameAgeMs ?? 0)}ms; keeping the last good frame while polling retries.`
+      setFirstFrameStatus('fallback', reason)
+      updatePreviewWindowWaitDetail(reason)
+      logBackend('warn', `[proof-preview] ${reason}`)
+    }
   }
   previewSupervisor.surfaceFallback(
     previewWindowSurfaceGeneration(),
@@ -5172,20 +5278,69 @@ async function tryPresentNativePreviewRealSurfaceCompositor(
 }
 
 async function setNativePreviewSurfaceFramePollingSuppressed(
-  suppressed: boolean
+  suppressed: boolean,
+  recordingActive?: boolean
 ): Promise<PreviewSurfaceStatus> {
+  if (typeof recordingActive === 'boolean') {
+    nativePreviewProofPollingRecordingActive = recordingActive
+  }
   const wasSuppressed = nativePreviewSurfaceFramePollingSuppressed
   nativePreviewSurfaceFramePollingSuppressed = suppressed
   if (suppressed && !wasSuppressed) {
     resetNativePreviewMainHandoffMetrics()
     nativePreviewRealSurfaceDriver?.resetMetrics?.()
   }
+  await syncNativePreviewProofPollingProfile()
   const effectiveSuppression = await syncNativePreviewProofPollingSuppression()
   nativePreviewSurfaceStatus = nativePreviewFramePollingSuppressionStatus(
     nativePreviewSurfaceStatus,
     effectiveSuppression
   )
   return nativePreviewSurfaceStatus
+}
+
+async function syncNativePreviewProofPollingProfile(): Promise<void> {
+  const profile = nativePreviewProofPollingProfile(nativePreviewProofPollingRecordingActive)
+  const surfaceWindow = nativePreviewSurfaceWindow
+  if (!surfaceWindow || surfaceWindow.isDestroyed()) {
+    nativePreviewAppliedProofPollingProfile = null
+    return
+  }
+  const profileKey = nativePreviewProofPollingProfileKey(surfaceWindow.id, profile)
+  if (nativePreviewAppliedProofPollingProfile === profileKey) {
+    return
+  }
+  const requestSerial = ++nativePreviewProofPollingProfileSerial
+  await waitForNativePreviewSurfaceScript(surfaceWindow)
+  if (
+    requestSerial !== nativePreviewProofPollingProfileSerial ||
+    profileKey !==
+      nativePreviewProofPollingProfileKey(
+        surfaceWindow.id,
+        nativePreviewProofPollingProfile(nativePreviewProofPollingRecordingActive)
+      ) ||
+    surfaceWindow.isDestroyed() ||
+    nativePreviewSurfaceWindow !== surfaceWindow
+  ) {
+    nativePreviewAppliedProofPollingProfile = null
+    return
+  }
+  await surfaceWindow.webContents.executeJavaScript(
+    `window.__videorcSetFramePollingProfile?.(${jsonForInlineScript(profile)})`,
+    true
+  )
+  if (
+    requestSerial === nativePreviewProofPollingProfileSerial &&
+    profileKey ===
+      nativePreviewProofPollingProfileKey(
+        surfaceWindow.id,
+        nativePreviewProofPollingProfile(nativePreviewProofPollingRecordingActive)
+      ) &&
+    !surfaceWindow.isDestroyed() &&
+    nativePreviewSurfaceWindow === surfaceWindow
+  ) {
+    nativePreviewAppliedProofPollingProfile = profileKey
+  }
 }
 
 function nativePreviewProofPollingIsSuppressed(): boolean {
@@ -5269,6 +5424,20 @@ async function readNativePreviewSurfaceMetricsAfterPaint(): Promise<Record<
 
 function finiteMetric(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function proofSourceFrameTotal(metrics: unknown): number {
+  if (!metrics || typeof metrics !== 'object') {
+    return 0
+  }
+  const sourceFrames = (metrics as { sourceFrames?: unknown }).sourceFrames
+  if (!sourceFrames || typeof sourceFrames !== 'object') {
+    return 0
+  }
+  return Object.values(sourceFrames).reduce<number>(
+    (total, value) => total + (typeof value === 'number' && Number.isFinite(value) ? value : 0),
+    0
+  )
 }
 
 // The renderer hands main the backend's own per-frame compositor.status with
@@ -5582,6 +5751,8 @@ function destroyNativePreviewSurface(
   nativePreviewNativeOwnsProofPollingSuppression = false
   nativePreviewNativeFailureFallbackActive = false
   nativePreviewAppliedProofPollingSuppression = null
+  nativePreviewAppliedProofPollingProfile = null
+  nativePreviewProofPollingProfileSerial += 1
   nativePreviewProofAnimationSuspended = null
   clearNativePreviewNativePlacementAuthority()
   void applyNativePreviewRealSurfaceHostCommands([{ kind: 'destroy' }], { startIfNeeded: false })
@@ -6718,6 +6889,19 @@ async function handleSmokePreviewMotionRequest(
   request: IncomingMessage,
   response: HttpResponse
 ): Promise<void> {
+  if (request.method === 'GET' && request.url?.startsWith('/preview-frame.png')) {
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64'
+    )
+    response.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Content-Length': String(png.length),
+      'Cache-Control': 'no-store'
+    })
+    response.end(png)
+    return
+  }
   if (request.method === 'GET' && request.url === '/health') {
     writeSmokeJson(response, 200, { ok: true })
     return
@@ -6925,6 +7109,15 @@ async function runSmokePreviewMotionCommand(
     const durationMs = typeof params.durationMs === 'number' ? params.durationMs : 2500
     resetNativePreviewMainHandoffMetrics()
     nativePreviewRealSurfaceDriver?.resetMetrics?.()
+    const measuringProofSurface = !nativePreviewSurfaceStatusIsRealSurface(
+      nativePreviewSurfaceStatus
+    )
+    const initialProofMetrics = measuringProofSurface
+      ? await nativePreviewSurfaceWindow.webContents.executeJavaScript(
+          'window.__videorcNativePreviewMetrics?.() ?? null',
+          true
+        )
+      : null
     await new Promise((resolveMeasure) => setTimeout(resolveMeasure, durationMs))
     if (nativePreviewSurfaceStatusIsRealSurface(nativePreviewSurfaceStatus)) {
       return nativePreviewSurfaceStatusMetrics(nativePreviewSurfaceStatus)
@@ -6937,7 +7130,11 @@ async function runSmokePreviewMotionCommand(
       throw new Error('Native preview surface did not expose metrics.')
     }
     const presentedFrameId = finiteMetric(metrics.presentedCompositorFrame)
-    const liveLayerCount = finiteMetric(metrics.liveLayerCount) ?? 0
+    const freshSourceLayerCount = finiteMetric(metrics.freshSourceLayerCount) ?? 0
+    const sourceFrameDelta = Math.max(
+      0,
+      proofSourceFrameTotal(metrics) - proofSourceFrameTotal(initialProofMetrics)
+    )
     nativePreviewSurfaceStatus = {
       ...nativePreviewSurfaceStatus,
       framesRendered: Number(metrics.frames ?? nativePreviewSurfaceStatus.framesRendered),
@@ -6957,11 +7154,12 @@ async function runSmokePreviewMotionCommand(
       intervalP95Ms: finiteMetric(metrics.intervalP95Ms),
       intervalP99Ms: finiteMetric(metrics.intervalP99Ms),
       framePollingSuppressed: Boolean(metrics.framePollingSuppressed),
-      sourcePixelsPresent: liveLayerCount > 0,
+      sourcePixelsPresent: freshSourceLayerCount > 0,
       updatedAt: new Date().toISOString()
     }
     return {
       ...metrics,
+      sourceFrameDelta,
       status: nativePreviewSurfaceStatus
     }
   }
@@ -9537,15 +9735,23 @@ app.whenReady().then(async () => {
         : rejectedNativePreviewCompositorUpdateStatus()
     }
   )
-  ipcMain.handle('preview-surface:set-frame-polling-suppressed', (_event, suppressed: boolean) => {
-    // With the preview window closed, polling stays suppressed no matter what
-    // the renderer's (possibly stale, post-close) state events request — an
-    // un-suppress race here left polling running against a destroyed surface.
-    if (!suppressed && (!previewWindow || previewWindow.isDestroyed())) {
-      return nativePreviewSurfaceFramePollingSuppressed
+  ipcMain.handle(
+    'preview-surface:set-frame-polling-suppressed',
+    (_event, suppressed: boolean, recordingActive?: boolean) => {
+      if (typeof recordingActive === 'boolean') {
+        nativePreviewProofPollingRecordingActive = recordingActive
+      }
+      // With the preview window closed, polling stays suppressed no matter what
+      // the renderer's (possibly stale, post-close) state events request — an
+      // un-suppress race here left polling running against a destroyed surface.
+      // Keep the recording state above so a preview opened mid-recording starts
+      // with the contained Windows proof-polling profile.
+      if (!suppressed && (!previewWindow || previewWindow.isDestroyed())) {
+        return nativePreviewSurfaceFramePollingSuppressed
+      }
+      return setNativePreviewSurfaceFramePollingSuppressed(suppressed, recordingActive)
     }
-    return setNativePreviewSurfaceFramePollingSuppressed(suppressed)
-  })
+  )
   ipcMain.handle('preview-surface:destroy', (_event, generation) => {
     nativePreviewPlacementQueue.cancelPending()
     return runNativePreviewSurfaceMutation(() =>

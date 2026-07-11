@@ -1102,6 +1102,8 @@ pub enum EncodeBackend {
     HardwareVideotoolbox,
     /// h264_mf (MediaFoundation hardware/software hybrid), used by Windows builds.
     HardwareMediaFoundation,
+    /// h264_mf's software MFT fallback after the exact hardware profile probe failed.
+    SoftwareMediaFoundation,
 }
 
 /// Which compositor rendered the active shared-compositor frame.
@@ -3084,6 +3086,18 @@ mod tests {
         assert_eq!(
             serde_json::to_value(LayoutPreset::SideBySide).unwrap(),
             serde_json::json!("side-by-side")
+        );
+    }
+
+    #[test]
+    fn media_foundation_backends_match_the_desktop_wire_contract() {
+        assert_eq!(
+            serde_json::to_value(EncodeBackend::HardwareMediaFoundation).unwrap(),
+            serde_json::json!("hardware-media-foundation")
+        );
+        assert_eq!(
+            serde_json::to_value(EncodeBackend::SoftwareMediaFoundation).unwrap(),
+            serde_json::json!("software-media-foundation")
         );
     }
 

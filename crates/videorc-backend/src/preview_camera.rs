@@ -791,6 +791,18 @@ pub async fn latest_preview_camera_png(
         (guard.frame_store.latest()?, layout)
     };
 
+    let max_width = preview_camera_png_max_width(requested_max_width);
+    tokio::task::spawn_blocking(move || encode_preview_camera_png(frame, layout, max_width))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn encode_preview_camera_png(
+    frame: FrameHandle<PreviewCameraPixelFormat>,
+    layout: LayoutSettings,
+    max_width: u32,
+) -> Option<Vec<u8>> {
     let expected_len = frame.width as usize * frame.height as usize * 4;
     if frame.bytes.len() < expected_len {
         return None;
@@ -802,12 +814,8 @@ pub async fn latest_preview_camera_png(
     if layout.camera_mirror {
         mirror_rgba_in_place(&mut rgba, frame.width as usize, frame.height as usize);
     }
-    let (rgba, width, height) = downscale_rgba_for_preview(
-        rgba,
-        frame.width,
-        frame.height,
-        preview_camera_png_max_width(requested_max_width),
-    );
+    let (rgba, width, height) =
+        downscale_rgba_for_preview(rgba, frame.width, frame.height, max_width);
 
     let mut png = Vec::new();
     let encoder = PngEncoder::new(&mut png);

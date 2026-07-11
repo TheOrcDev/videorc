@@ -14,7 +14,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::JoinHandle as TokioJoinHandle;
 use tokio::time::{Duration, MissedTickBehavior};
 use uuid::Uuid;
@@ -59,7 +59,15 @@ const STREAM_OUTPUT_QUEUE_COALESCE_FRAMES: usize = 4;
 const STREAM_OUTPUT_QUEUE_COALESCE_AGE: Duration = Duration::from_millis(100);
 const STREAM_OUTPUT_QUEUE_MAX_FRAMES: usize = 8;
 const STREAM_OUTPUT_QUEUE_MAX_AGE: Duration = Duration::from_millis(150);
-const RAW_VIDEO_FIFO_QUEUE_MAX_FRAMES: usize = 4;
+// Raw frames receive wall-clock PTS at FFmpeg demux. Keep no stale waiting
+// frames: the writer accepts the latest scheduler frame only when it is ready
+// for another complete write; busy ticks are explicitly coalesced and the
+// decoder holds the last VFR frame across the wall-time gap.
+const RAW_VIDEO_FIFO_QUEUE_MAX_FRAMES: usize = 0;
+const FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
+const RAW_VIDEO_FIFO_STARTUP_PRIME_TIMEOUT: Duration = Duration::from_millis(2500);
+const FIFO_WRITE_PROGRESS_YIELD_BUDGET: u32 = 64;
+const FIFO_WRITE_STALL_BACKOFF: Duration = Duration::from_micros(250);
 const VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK: usize = 8;
 const VIDEOTOOLBOX_PROBE_ENV: &str = "VIDEORC_ENCODER_BRIDGE_VIDEOTOOLBOX_PROBE";
 
@@ -360,11 +368,10 @@ fn classify_bridge_frame(last_fed: Option<u64>, fed: Option<u64>) -> BridgeFrame
     }
 }
 
-/// Lag past which the schedule stops trying to catch up frame-by-frame. A
-/// timestamped output re-anchors with an explicit counted gap; untimestamped
-/// rawvideo fails explicitly because neither skipping nor bursting frames is
-/// safe (app nap, display sleep). Below this, late loops converge by feeding
-/// repeats with a zero fresh-frame wait.
+/// Lag past which the schedule stops trying to catch up frame-by-frame and
+/// re-anchors with an explicit counted wall-time gap (app nap, display sleep).
+/// Raw FIFO frames are demuxed with wall-clock PTS, so they can use the same
+/// honest re-anchor as timestamped encoded outputs.
 const ENCODER_BRIDGE_STALL_REANCHOR_THRESHOLD: Duration = Duration::from_secs(2);
 
 /// Per-tick schedule decision (plan 026). The writer schedule is ABSOLUTE
@@ -383,48 +390,25 @@ struct BridgeTickPlan {
     /// Whole intervals dropped from the schedule as an explicit stall gap.
     /// Zero in every healthy tick.
     reanchor_skipped_intervals: u64,
-    /// Untimestamped rawvideo cannot represent a wall-time gap without either
-    /// compressing the recording or bursting stale frames into the encoder.
-    /// Stop that output explicitly when the bridge misses the bounded stall
-    /// threshold instead of manufacturing a glitchy catch-up burst.
-    fail_untimestamped_output: bool,
 }
 
-fn plan_bridge_tick(
-    video_output: EncoderBridgeVideoOutput,
-    lag: Duration,
-    frame_interval: Duration,
-) -> BridgeTickPlan {
+fn plan_bridge_tick(lag: Duration, frame_interval: Duration) -> BridgeTickPlan {
     if frame_interval.is_zero() {
         return BridgeTickPlan {
             skip_fresh_wait: false,
             reanchor_skipped_intervals: 0,
-            fail_untimestamped_output: false,
         };
     }
-    if video_output == EncoderBridgeVideoOutput::RawYuv420p
-        && lag >= ENCODER_BRIDGE_STALL_REANCHOR_THRESHOLD
-    {
-        return BridgeTickPlan {
-            skip_fresh_wait: false,
-            reanchor_skipped_intervals: 0,
-            fail_untimestamped_output: true,
-        };
-    }
-    if video_output != EncoderBridgeVideoOutput::RawYuv420p
-        && lag >= ENCODER_BRIDGE_STALL_REANCHOR_THRESHOLD
-    {
+    if lag >= ENCODER_BRIDGE_STALL_REANCHOR_THRESHOLD {
         let skipped = (lag.as_nanos() / frame_interval.as_nanos()) as u64;
         return BridgeTickPlan {
             skip_fresh_wait: true,
             reanchor_skipped_intervals: skipped,
-            fail_untimestamped_output: false,
         };
     }
     BridgeTickPlan {
         skip_fresh_wait: lag > Duration::ZERO,
         reanchor_skipped_intervals: 0,
-        fail_untimestamped_output: false,
     }
 }
 
@@ -467,10 +451,20 @@ fn read_encoder_bridge_terminal_failure(signal: &Arc<StdMutex<Option<String>>>) 
         .clone()
 }
 
+fn signal_encoder_bridge_startup(
+    sender: &mut Option<oneshot::Sender<std::result::Result<(), String>>>,
+    result: std::result::Result<(), String>,
+) {
+    if let Some(sender) = sender.take() {
+        let _ = sender.send(result);
+    }
+}
+
 #[derive(Debug)]
 pub struct EncoderBridgeRecordingSession {
     stop: Arc<AtomicBool>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
+    startup_ready: Option<oneshot::Receiver<std::result::Result<(), String>>>,
     fifo_path: PathBuf,
     writer: Option<thread::JoinHandle<()>>,
     diagnostics_task: Option<TokioJoinHandle<()>>,
@@ -488,6 +482,18 @@ impl EncoderBridgeRecordingSession {
     /// this signal so that a shortened file is not published as successful.
     pub fn terminal_failure(&self) -> Option<String> {
         read_encoder_bridge_terminal_failure(&self.terminal_failure)
+    }
+
+    pub async fn wait_until_ready(&mut self) -> Result<()> {
+        let Some(startup_ready) = self.startup_ready.take() else {
+            return Ok(());
+        };
+        match tokio::time::timeout(Duration::from_secs(4), startup_ready).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(message))) => bail!(message),
+            Ok(Err(_)) => bail!("Encoder bridge stopped before its first frame was ready"),
+            Err(_) => bail!("Encoder bridge first-frame priming timed out"),
+        }
     }
 }
 
@@ -702,6 +708,7 @@ pub fn start_synthetic_recording_bridge(
     let byte_len = raw_yuv420p_len(width, height)?;
     let stop = Arc::new(AtomicBool::new(false));
     let terminal_failure = Arc::new(StdMutex::new(None));
+    let (startup_ready_tx, startup_ready_rx) = oneshot::channel();
     let writer_stop = stop.clone();
     let writer_terminal_failure = terminal_failure.clone();
     let writer_fifo_path = fifo_path.clone();
@@ -740,6 +747,7 @@ pub fn start_synthetic_recording_bridge(
                 diagnostics_context,
                 stop: writer_stop,
                 terminal_failure: writer_terminal_failure,
+                startup_ready_tx: Some(startup_ready_tx),
                 diagnostics_tx,
                 video_epoch,
             };
@@ -750,6 +758,7 @@ pub fn start_synthetic_recording_bridge(
     Ok(EncoderBridgeRecordingSession {
         stop,
         terminal_failure,
+        startup_ready: Some(startup_ready_rx),
         fifo_path,
         writer: Some(writer),
         diagnostics_task: Some(diagnostics_task),
@@ -927,6 +936,7 @@ struct SyntheticRecordingWriterParams {
     byte_len: usize,
     stop: Arc<AtomicBool>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
+    startup_ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
     fifo_path: PathBuf,
     frame_store: Option<CompositorFrameStore>,
     video_output: EncoderBridgeVideoOutput,
@@ -954,6 +964,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         byte_len,
         stop,
         terminal_failure,
+        mut startup_ready_tx,
         fifo_path,
         frame_store,
         video_output,
@@ -973,6 +984,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     fifo_path.display()
                 ),
             );
+            signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
             emit_encoder_bridge_diagnostics_from_thread(
                 &diagnostics_tx,
                 session_id.clone(),
@@ -1122,6 +1134,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             &terminal_failure,
             format!("Could not prepare VideoToolbox encoder bridge output: {error}"),
         );
+        signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
         emit_encoder_bridge_diagnostics_from_thread(
             &diagnostics_tx,
             session_id.clone(),
@@ -1196,6 +1209,152 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         };
     }
 
+    if matches!(video_output, EncoderBridgeVideoOutput::RawYuv420p) {
+        // FFmpeg can take hundreds of milliseconds to initialise its input
+        // graph and hardware encoder after opening the raw FIFO. Advancing the
+        // 30fps clock during that one-time warmup creates avoidable pressure
+        // before the wall-clock-stamped input has delivered any usable video.
+        // Deliver exactly one complete priming frame first; only then start the
+        // wall-clock input schedule and publish the recording as ready.
+        let prime_wait_started_at = Instant::now();
+        let prime_frame = copy_next_compositor_frame(
+            frame_store.as_ref(),
+            &mut bytes,
+            first_frame_wait_sequence,
+            frame_interval + frame_interval,
+        );
+        compositor_wait_times_ms.push(prime_wait_started_at.elapsed().as_secs_f64() * 1000.0);
+        if prime_frame.is_none() {
+            synthetic_fallback_frames = synthetic_fallback_frames.saturating_add(1);
+            let frame = source.render(1, width, height);
+            render_synthetic_yuv420p_frame(&frame, &mut bytes);
+        }
+        let submitted_at = Instant::now();
+        let next_buffer = recycled_raw_buffers
+            .pop()
+            .unwrap_or_else(|| vec![0; byte_len]);
+        let frame_bytes = std::mem::replace(&mut bytes, next_buffer);
+        let had_metal_target = prime_frame
+            .as_ref()
+            .is_some_and(|frame| frame.has_metal_iosurface_target);
+        let had_metal_export_handle = prime_frame
+            .as_ref()
+            .is_some_and(|frame| frame.has_metal_export_handle);
+        let prime_enqueue = raw_fifo_writer
+            .as_ref()
+            .expect("raw encoder bridge FIFO writer must be running")
+            .enqueue_startup(QueuedRawVideoFrame {
+                bytes: frame_bytes,
+                submitted_at,
+                had_metal_target,
+                had_metal_export_handle,
+            });
+        if let Err(error) = prime_enqueue {
+            let error = record_encoder_bridge_terminal_failure(
+                &terminal_failure,
+                format!(
+                    "{} raw-video encoder startup prime failed: {error}",
+                    encoder_bridge_output_role_label(output_queue_policy.role)
+                ),
+            );
+            signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
+            emit_encoder_bridge_diagnostics_from_thread(
+                &diagnostics_tx,
+                session_id.clone(),
+                target_fps,
+                current_runtime_stats!(0),
+                diagnostics_context,
+                Some(error),
+            );
+            return;
+        }
+        pending_raw_fifo_frames = 1;
+        pending_raw_fifo_started_at.push_back(submitted_at);
+        let prime_deadline = Instant::now() + RAW_VIDEO_FIFO_STARTUP_PRIME_TIMEOUT;
+        while pending_raw_fifo_frames > 0 && !stop.load(Ordering::Relaxed) {
+            let writer = raw_fifo_writer
+                .as_mut()
+                .expect("raw encoder bridge FIFO writer must be running");
+            if let Err(error) = drain_raw_video_fifo_writer_results(
+                writer,
+                &mut pending_raw_fifo_frames,
+                &mut pending_raw_fifo_started_at,
+                &mut recycled_raw_buffers,
+                &mut raw_video_copied_frames,
+                &mut metal_target_frames,
+                &mut metal_target_copied_frames,
+                &mut metal_target_handle_frames,
+                &mut raw_video_fifo_write_times_ms,
+            ) {
+                let error = record_encoder_bridge_terminal_failure(
+                    &terminal_failure,
+                    format!(
+                        "{} raw-video encoder startup prime stopped: {error}",
+                        encoder_bridge_output_role_label(output_queue_policy.role)
+                    ),
+                );
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
+                emit_encoder_bridge_diagnostics_from_thread(
+                    &diagnostics_tx,
+                    session_id.clone(),
+                    target_fps,
+                    current_runtime_stats!(pending_raw_fifo_frames),
+                    diagnostics_context,
+                    Some(error),
+                );
+                return;
+            }
+            if pending_raw_fifo_frames == 0 {
+                break;
+            }
+            if Instant::now() >= prime_deadline {
+                let error = record_encoder_bridge_terminal_failure(
+                    &terminal_failure,
+                    format!(
+                        "{} raw-video encoder did not accept a complete startup frame within {}ms",
+                        encoder_bridge_output_role_label(output_queue_policy.role),
+                        RAW_VIDEO_FIFO_STARTUP_PRIME_TIMEOUT.as_millis()
+                    ),
+                );
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
+                emit_encoder_bridge_diagnostics_from_thread(
+                    &diagnostics_tx,
+                    session_id.clone(),
+                    target_fps,
+                    current_runtime_stats!(pending_raw_fifo_frames),
+                    diagnostics_context,
+                    Some(error),
+                );
+                return;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        if stop.load(Ordering::Relaxed) {
+            signal_encoder_bridge_startup(
+                &mut startup_ready_tx,
+                Err("Encoder bridge stopped during raw-video startup priming".to_string()),
+            );
+            return;
+        }
+        if let Some(frame) = prime_frame {
+            last_fed_sequence = Some(frame.sequence);
+            let source_age_ms = frame.captured_at.elapsed().as_millis() as u64;
+            max_source_to_encode_age_ms = Some(source_age_ms);
+            source_to_encode_age_times_ms.push(source_age_ms as f64);
+        }
+        // Audio captured while FFmpeg was initialising is pre-roll. Start its
+        // shared epoch only after the complete video prime reached the reader.
+        let _ = video_epoch.set(Instant::now());
+        sequence = 1;
+        frames_in_window = 1;
+        window_started_at = Instant::now();
+        next_frame_at = window_started_at + frame_interval;
+        first_frame_wait_sequence = None;
+        signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+    } else {
+        signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+    }
+
     while !stop.load(Ordering::Relaxed) {
         if let Some(writer) = raw_fifo_writer.as_mut()
             && let Err(error) = drain_raw_video_fifo_writer_results(
@@ -1238,27 +1397,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 Some(max_deadline_lag_ms.map_or(lag_ms, |current| current.max(lag_ms)));
             late_deadline_ticks = late_deadline_ticks.saturating_add(1);
         }
-        let tick_plan = plan_bridge_tick(video_output, tick_lag, frame_interval);
-        if tick_plan.fail_untimestamped_output {
-            let error = record_encoder_bridge_terminal_failure(
-                &terminal_failure,
-                format!(
-                    "{} raw-video encoder schedule stalled for {}ms; stopping instead of bursting untimestamped frames into the recording",
-                    encoder_bridge_output_role_label(output_queue_policy.role),
-                    tick_lag.as_millis()
-                ),
-            );
-            terminal_writer_error = Some(error.clone());
-            emit_encoder_bridge_diagnostics_from_thread(
-                &diagnostics_tx,
-                session_id.clone(),
-                target_fps,
-                current_runtime_stats!(pending_raw_fifo_frames),
-                diagnostics_context,
-                Some(error),
-            );
-            break;
-        }
+        let tick_plan = plan_bridge_tick(tick_lag, frame_interval);
         if tick_plan.reanchor_skipped_intervals > 0 {
             // Pathological stall: drop whole intervals as an EXPLICIT gap. The
             // schedule stays wall-true (sequence advances by the same count,
@@ -1562,7 +1701,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                         .pop()
                         .unwrap_or_else(|| vec![0; byte_len]);
                     let frame_bytes = std::mem::replace(&mut bytes, next_buffer);
-                    raw_fifo_writer
+                    match raw_fifo_writer
                         .as_ref()
                         .expect("raw encoder bridge FIFO writer must be running")
                         .enqueue(
@@ -1573,11 +1712,20 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                 had_metal_export_handle: wrote_metal_target_handle,
                             },
                             &mut output_queue_capacity_pressure_events,
-                        )
-                        .map(|()| {
+                        ) {
+                        Ok(RawVideoFifoEnqueueOutcome::Enqueued) => {
                             pending_raw_fifo_frames = pending_raw_fifo_frames.saturating_add(1);
                             pending_raw_fifo_started_at.push_back(submitted_at);
-                        })
+                            Ok(())
+                        }
+                        Ok(RawVideoFifoEnqueueOutcome::Coalesced(frame)) => {
+                            output_queue_dropped_frames =
+                                output_queue_dropped_frames.saturating_add(1);
+                            recycled_raw_buffers.push(frame.bytes);
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
                 EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
                 | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => {
@@ -2255,8 +2403,6 @@ struct RawVideoFifoWriter {
     frame_tx: Option<std_mpsc::SyncSender<QueuedRawVideoFrame>>,
     result_rx: std_mpsc::Receiver<RawVideoFifoWriterResult>,
     join: Option<thread::JoinHandle<()>>,
-    max_frames: usize,
-    role: EncoderBridgeOutputRole,
 }
 
 struct QueuedRawVideoFrame {
@@ -2264,6 +2410,11 @@ struct QueuedRawVideoFrame {
     submitted_at: Instant,
     had_metal_target: bool,
     had_metal_export_handle: bool,
+}
+
+enum RawVideoFifoEnqueueOutcome {
+    Enqueued,
+    Coalesced(QueuedRawVideoFrame),
 }
 
 #[derive(Debug)]
@@ -2287,7 +2438,7 @@ impl RawVideoFifoWriter {
         stop: Arc<AtomicBool>,
         terminal_failure: Arc<StdMutex<Option<String>>>,
     ) -> Self {
-        let max_frames = policy.max_frames.min(RAW_VIDEO_FIFO_QUEUE_MAX_FRAMES);
+        let max_frames = RAW_VIDEO_FIFO_QUEUE_MAX_FRAMES;
         let (frame_tx, frame_rx) = std_mpsc::sync_channel(max_frames);
         // Queue + one in-flight result + one terminal flush result.
         let (result_tx, result_rx) = std_mpsc::sync_channel(max_frames + 2);
@@ -2309,8 +2460,6 @@ impl RawVideoFifoWriter {
             frame_tx: Some(frame_tx),
             result_rx,
             join: Some(join),
-            max_frames,
-            role: policy.role,
         }
     }
 
@@ -2318,25 +2467,33 @@ impl RawVideoFifoWriter {
         &self,
         frame: QueuedRawVideoFrame,
         capacity_pressure_events: &mut u64,
-    ) -> io::Result<()> {
+    ) -> io::Result<RawVideoFifoEnqueueOutcome> {
         let tx = self.frame_tx.as_ref().ok_or_else(|| {
             io::Error::new(io::ErrorKind::BrokenPipe, "raw-video FIFO writer closed")
         })?;
         match offer_preserving_output_frame(tx, frame) {
-            Ok(PreservingOutputFrameOffer::Enqueued) => Ok(()),
-            Ok(PreservingOutputFrameOffer::CapacityPressure(_frame)) => {
+            Ok(PreservingOutputFrameOffer::Enqueued) => Ok(RawVideoFifoEnqueueOutcome::Enqueued),
+            Ok(PreservingOutputFrameOffer::CapacityPressure(frame)) => {
                 *capacity_pressure_events = capacity_pressure_events.saturating_add(1);
-                Err(io::Error::other(format!(
-                    "{} raw-video FIFO reached its {}-frame safety ceiling; stopping this output because untimestamped raw frames cannot be dropped or coalesced safely",
-                    encoder_bridge_output_role_label(self.role),
-                    self.max_frames
-                )))
+                Ok(RawVideoFifoEnqueueOutcome::Coalesced(frame))
             }
             Err(_) => Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "raw-video FIFO writer stopped",
             )),
         }
+    }
+
+    fn enqueue_startup(&self, frame: QueuedRawVideoFrame) -> io::Result<()> {
+        let tx = self.frame_tx.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "raw-video FIFO writer closed")
+        })?;
+        tx.send(frame).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "raw-video FIFO writer stopped during startup priming",
+            )
+        })
     }
 
     fn try_recv_result(&mut self) -> Option<RawVideoFifoWriterResult> {
@@ -2373,7 +2530,15 @@ fn run_raw_video_fifo_writer_loop<W: StdWrite>(
         // misalign every following YUV plane and can corrupt the final file.
         // Finish the in-flight frame within its existing age deadline; closing
         // the queue prevents any new work from being admitted during stop.
-        match write_all_until(&mut sink, &frame.bytes, &stop, deadline, false) {
+        match write_all_until(
+            &mut sink,
+            &frame.bytes,
+            &stop,
+            deadline,
+            max_frame_age,
+            FIFO_FRAME_WRITE_HARD_TIMEOUT,
+            false,
+        ) {
             Ok(()) => {
                 let _ = result_tx.send(RawVideoFifoWriterResult::FrameWritten {
                     buffer: frame.bytes,
@@ -2599,7 +2764,13 @@ fn run_video_toolbox_fifo_writer_loop<W: StdWrite>(
         let encoded_bytes = queued.frame.bytes.len() as u64;
         let write_started_at = Instant::now();
         let deadline = queued.submitted_at + max_frame_age;
-        match h264_pipe_writer.write_frame_until(&mut sink, &queued.frame, &stop, deadline) {
+        match h264_pipe_writer.write_frame_until(
+            &mut sink,
+            &queued.frame,
+            &stop,
+            deadline,
+            max_frame_age,
+        ) {
             Ok(()) => {
                 let _ = result_tx.send(VideoToolboxFifoWriterResult::FrameWritten {
                     encoded_bytes,
@@ -2659,9 +2830,18 @@ impl VideoToolboxH264PipeWriter {
         frame: &VideoToolboxH264AnnexBFrame,
         stop: &AtomicBool,
         deadline: Instant,
+        max_frame_age: Duration,
     ) -> io::Result<()> {
         let bytes = self.frame_bytes(frame)?;
-        write_all_until(sink, bytes, stop, deadline, true)
+        write_all_until(
+            sink,
+            bytes,
+            stop,
+            deadline,
+            max_frame_age,
+            FIFO_FRAME_WRITE_HARD_TIMEOUT,
+            true,
+        )
     }
 
     fn frame_bytes<'a>(
@@ -2703,9 +2883,15 @@ fn write_all_until<W: StdWrite>(
     sink: &mut W,
     mut bytes: &[u8],
     stop: &AtomicBool,
-    deadline: Instant,
+    mut deadline: Instant,
+    progress_timeout: Duration,
+    hard_timeout: Duration,
     cancel_on_stop: bool,
 ) -> io::Result<()> {
+    let hard_deadline = Instant::now()
+        .checked_add(hard_timeout)
+        .unwrap_or_else(Instant::now);
+    let mut consecutive_no_progress = 0_u32;
     while !bytes.is_empty() {
         if cancel_on_stop && stop.load(Ordering::Relaxed) {
             return Err(io::Error::new(
@@ -2713,27 +2899,58 @@ fn write_all_until<W: StdWrite>(
                 "Encoder FIFO writer stopped during a bounded write",
             ));
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= deadline || Instant::now() >= hard_deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "Encoder FIFO write exceeded the output queue age budget",
+                "Encoder FIFO write exceeded the complete-frame delivery budget",
             ));
         }
         match sink.write(bytes) {
             Ok(0) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                thread::sleep(remaining.min(Duration::from_millis(2)));
+                consecutive_no_progress = consecutive_no_progress.saturating_add(1);
+                wait_for_fifo_write_progress(consecutive_no_progress, deadline.min(hard_deadline));
             }
-            Ok(written) => bytes = &bytes[written..],
+            Ok(written) => {
+                bytes = &bytes[written..];
+                consecutive_no_progress = 0;
+                // Raw frames are indivisible. Once part of one reaches FFmpeg,
+                // aborting on the original queue-age deadline leaves a terminal
+                // short packet and corrupts/truncates the recording. Continued
+                // byte progress proves the reader is alive, so use a sliding
+                // no-progress deadline until this frame is complete.
+                if !bytes.is_empty() {
+                    deadline = Instant::now()
+                        .checked_add(progress_timeout)
+                        .unwrap_or_else(Instant::now)
+                        .min(hard_deadline);
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                thread::sleep(remaining.min(Duration::from_millis(2)));
+                consecutive_no_progress = consecutive_no_progress.saturating_add(1);
+                wait_for_fifo_write_progress(consecutive_no_progress, deadline.min(hard_deadline));
             }
             Err(error) => return Err(error),
         }
     }
     Ok(())
+}
+
+fn wait_for_fifo_write_progress(consecutive_no_progress: u32, deadline: Instant) {
+    // A 1080p YUV420 frame is 3.11 MiB, while Unix FIFOs commonly accept only
+    // a few KiB per nonblocking write. Sleeping milliseconds after every full
+    // pipe therefore turns one frame into hundreds of sleeps (~800ms in the
+    // Windows regression repro). While the reader is actively draining, yield
+    // so it can run and retry immediately. Only back off once repeated attempts
+    // show that no progress is being made; the caller's deadlines stay binding.
+    if consecutive_no_progress <= FIFO_WRITE_PROGRESS_YIELD_BUDGET {
+        thread::yield_now();
+        return;
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if !remaining.is_zero() {
+        thread::sleep(remaining.min(FIFO_WRITE_STALL_BACKOFF));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -3652,11 +3869,42 @@ mod tests {
     }
 
     #[test]
+    fn busy_raw_fifo_coalesces_the_current_frame_without_stopping_wall_time() {
+        let (frame_tx, _frame_rx) = std_mpsc::sync_channel(0);
+        let (_result_tx, result_rx) = std_mpsc::sync_channel(1);
+        let writer = RawVideoFifoWriter {
+            frame_tx: Some(frame_tx),
+            result_rx,
+            join: None,
+        };
+        let mut pressure_events = 0;
+
+        let outcome = writer
+            .enqueue(
+                QueuedRawVideoFrame {
+                    bytes: vec![1, 2, 3, 4],
+                    submitted_at: Instant::now(),
+                    had_metal_target: false,
+                    had_metal_export_handle: false,
+                },
+                &mut pressure_events,
+            )
+            .expect("a busy timestamped raw writer coalesces instead of failing");
+
+        let RawVideoFifoEnqueueOutcome::Coalesced(frame) = outcome else {
+            panic!("zero-waiting-frame FIFO must retain only the in-flight frame")
+        };
+        assert_eq!(frame.bytes, vec![1, 2, 3, 4]);
+        assert_eq!(pressure_events, 1);
+    }
+
+    #[test]
     fn recording_session_exposes_the_first_terminal_bridge_failure() {
         let terminal_failure = Arc::new(StdMutex::new(None));
         let session = EncoderBridgeRecordingSession {
             stop: Arc::new(AtomicBool::new(false)),
             terminal_failure: terminal_failure.clone(),
+            startup_ready: None,
             fifo_path: std::env::temp_dir().join(format!(
                 "videorc-missing-terminal-signal-test-{}",
                 Uuid::new_v4()
@@ -3748,6 +3996,100 @@ mod tests {
     }
 
     #[test]
+    fn raw_fifo_writer_finishes_a_frame_while_the_reader_keeps_making_progress() {
+        let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(3);
+        let written = SharedCountingSink::default();
+        let frame = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        frame_tx
+            .send(QueuedRawVideoFrame {
+                bytes: frame.clone(),
+                submitted_at: Instant::now(),
+                had_metal_target: false,
+                had_metal_export_handle: false,
+            })
+            .expect("queue raw frame");
+        drop(frame_tx);
+
+        run_raw_video_fifo_writer_loop(
+            SlowProgressSink {
+                written: written.clone(),
+                chunk_size: 2,
+                delay: Duration::from_millis(12),
+            },
+            frame_rx,
+            result_tx,
+            Arc::new(AtomicBool::new(false)),
+            Duration::from_millis(20),
+            Arc::new(StdMutex::new(None)),
+            EncoderBridgeOutputRole::Recording,
+        );
+
+        assert_eq!(written.bytes(), frame);
+        let result = result_rx.recv().expect("raw writer result");
+        assert!(matches!(
+            result,
+            RawVideoFifoWriterResult::FrameWritten { .. }
+        ));
+    }
+
+    #[test]
+    fn intermittent_pipe_pressure_does_not_throttle_a_full_hd_raw_frame() {
+        for pressure in [PipePressure::WouldBlock, PipePressure::ZeroWrite] {
+            let mut sink = AlternatingBackpressureSink {
+                written: 0,
+                chunk_size: 8 * 1024,
+                pressure_next: true,
+                pressure,
+            };
+            let stop = AtomicBool::new(false);
+            let bytes = vec![7; raw_yuv420p_len(1920, 1080).expect("1080p frame size")];
+            let deadline = Instant::now() + Duration::from_millis(250);
+
+            write_all_until(
+                &mut sink,
+                &bytes,
+                &stop,
+                deadline,
+                Duration::from_millis(250),
+                Duration::from_millis(250),
+                false,
+            )
+            .expect("active FIFO draining must not pay a millisecond sleep per pipe-sized chunk");
+
+            assert_eq!(sink.written, bytes.len());
+        }
+    }
+
+    #[test]
+    fn progressing_fifo_write_still_honors_a_complete_frame_hard_limit() {
+        let written = SharedCountingSink::default();
+        let mut sink = SlowProgressSink {
+            written: written.clone(),
+            chunk_size: 1,
+            delay: Duration::from_millis(10),
+        };
+        let stop = AtomicBool::new(false);
+        let bytes = vec![7; 100];
+        let started_at = Instant::now();
+
+        let error = write_all_until(
+            &mut sink,
+            &bytes,
+            &stop,
+            Instant::now() + Duration::from_millis(20),
+            Duration::from_millis(20),
+            Duration::from_millis(55),
+            false,
+        )
+        .expect_err("continuous one-byte progress must not keep shutdown blocked forever");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started_at.elapsed() < Duration::from_millis(250));
+        assert!(written.bytes().len() < bytes.len());
+    }
+
+    #[test]
     fn stalled_raw_fifo_writer_times_out_without_blocking_the_scheduler() {
         let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
         let (result_tx, result_rx) = std_mpsc::sync_channel(3);
@@ -3778,7 +4120,7 @@ mod tests {
         let RawVideoFifoWriterResult::Error { message, .. } = result else {
             panic!("stalled raw writer must fail explicitly")
         };
-        assert!(message.contains("queue age budget"));
+        assert!(message.contains("complete-frame delivery budget"));
         assert_eq!(
             read_encoder_bridge_terminal_failure(&terminal_failure).as_deref(),
             Some(message.as_str())
@@ -4508,7 +4850,7 @@ mod tests {
         let VideoToolboxFifoWriterResult::Error(error) = result else {
             panic!("stalled writer must fail explicitly")
         };
-        assert!(error.contains("queue age budget"));
+        assert!(error.contains("complete-frame delivery budget"));
     }
 
     struct AlwaysWouldBlockSink;
@@ -4553,6 +4895,62 @@ mod tests {
         written: SharedCountingSink,
         stop: Arc<AtomicBool>,
         first_write: bool,
+    }
+
+    struct SlowProgressSink {
+        written: SharedCountingSink,
+        chunk_size: usize,
+        delay: Duration,
+    }
+
+    #[derive(Clone, Copy)]
+    enum PipePressure {
+        WouldBlock,
+        ZeroWrite,
+    }
+
+    struct AlternatingBackpressureSink {
+        written: usize,
+        chunk_size: usize,
+        pressure_next: bool,
+        pressure: PipePressure,
+    }
+
+    impl StdWrite for AlternatingBackpressureSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.pressure_next {
+                self.pressure_next = false;
+                return match self.pressure {
+                    PipePressure::WouldBlock => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+                    PipePressure::ZeroWrite => Ok(0),
+                };
+            }
+            self.pressure_next = true;
+            let written = bytes.len().min(self.chunk_size);
+            self.written += written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl StdWrite for SlowProgressSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            thread::sleep(self.delay);
+            let written = bytes.len().min(self.chunk_size);
+            self.written
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(&bytes[..written]);
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     impl StdWrite for StopAfterPartialWriteSink {
@@ -4754,12 +5152,11 @@ mod tests {
 
         while wall < simulated {
             let lag = wall.saturating_sub(next_frame_at);
-            let plan = plan_bridge_tick(EncoderBridgeVideoOutput::RawYuv420p, lag, interval);
+            let plan = plan_bridge_tick(lag, interval);
             assert_eq!(
                 plan.reanchor_skipped_intervals, 0,
                 "a merely-slow compositor must never trigger the stall gap"
             );
-            assert!(!plan.fail_untimestamped_output);
             if wall < next_frame_at {
                 wall = next_frame_at; // sleep to the deadline
             }
@@ -4790,56 +5187,31 @@ mod tests {
         let interval = Duration::from_nanos(1_000_000_000 / 30);
 
         // Sub-threshold lag: catch up with repeats, never drop intervals.
-        let behind = plan_bridge_tick(
-            EncoderBridgeVideoOutput::RawYuv420p,
-            Duration::from_millis(500),
-            interval,
-        );
+        let behind = plan_bridge_tick(Duration::from_millis(500), interval);
         assert!(behind.skip_fresh_wait);
         assert_eq!(behind.reanchor_skipped_intervals, 0);
-        assert!(!behind.fail_untimestamped_output);
 
         // On schedule: normal fresh-frame wait.
-        let on_time = plan_bridge_tick(
-            EncoderBridgeVideoOutput::RawYuv420p,
-            Duration::ZERO,
-            interval,
-        );
+        let on_time = plan_bridge_tick(Duration::ZERO, interval);
         assert!(!on_time.skip_fresh_wait);
         assert_eq!(on_time.reanchor_skipped_intervals, 0);
-        assert!(!on_time.fail_untimestamped_output);
 
         // Pathological stall (app nap): drop WHOLE intervals as an explicit,
         // counted gap so PTS stay wall-true instead of compressing.
-        let raw_stalled = plan_bridge_tick(
-            EncoderBridgeVideoOutput::RawYuv420p,
-            Duration::from_secs(5),
-            interval,
-        );
-        assert!(!raw_stalled.skip_fresh_wait);
-        assert_eq!(raw_stalled.reanchor_skipped_intervals, 0);
-        assert!(raw_stalled.fail_untimestamped_output);
+        let raw_stalled = plan_bridge_tick(Duration::from_secs(5), interval);
+        assert!(raw_stalled.skip_fresh_wait);
+        assert_eq!(raw_stalled.reanchor_skipped_intervals, 150);
 
         let raw_just_below_threshold = plan_bridge_tick(
-            EncoderBridgeVideoOutput::RawYuv420p,
             ENCODER_BRIDGE_STALL_REANCHOR_THRESHOLD - Duration::from_nanos(1),
             interval,
         );
-        assert!(!raw_just_below_threshold.fail_untimestamped_output);
-        let raw_at_threshold = plan_bridge_tick(
-            EncoderBridgeVideoOutput::RawYuv420p,
-            ENCODER_BRIDGE_STALL_REANCHOR_THRESHOLD,
-            interval,
-        );
-        assert!(raw_at_threshold.fail_untimestamped_output);
+        assert_eq!(raw_just_below_threshold.reanchor_skipped_intervals, 0);
+        let raw_at_threshold = plan_bridge_tick(ENCODER_BRIDGE_STALL_REANCHOR_THRESHOLD, interval);
+        assert!(raw_at_threshold.reanchor_skipped_intervals > 0);
 
-        let timestamped_stalled = plan_bridge_tick(
-            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
-            Duration::from_secs(5),
-            interval,
-        );
+        let timestamped_stalled = plan_bridge_tick(Duration::from_secs(5), interval);
         assert!(timestamped_stalled.skip_fresh_wait);
         assert_eq!(timestamped_stalled.reanchor_skipped_intervals, 150); // 5s / 33.33ms
-        assert!(!timestamped_stalled.fail_untimestamped_output);
     }
 }

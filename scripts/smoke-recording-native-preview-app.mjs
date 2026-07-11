@@ -9,6 +9,7 @@ import { assertSourceCompleteCompositorHealthy } from './lib/native-preview-sour
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { summarizeNativePreviewRecordingDiagnostics } from './lib/native-preview-diagnostics.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
+import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 import {
   analyzeStartupResolution,
   writeStartupReports
@@ -66,6 +67,7 @@ const expectedSurfaceTransport = expectNativeMetalPreview
 const expectedSurfaceBacking = expectNativeMetalPreview
   ? 'cametal-layer'
   : 'electron-browser-window'
+const exerciseProofFramePolling = process.env.VIDEORC_NATIVE_PREVIEW_EXERCISE_PROOF_POLLING === '1'
 
 const visibleScenarios = [
   ...(process.env.VIDEORC_NATIVE_PREVIEW_INCLUDE_1440 === '1'
@@ -702,6 +704,26 @@ function assertNativeMeasurement(scenario, measurement) {
   if ((measurement.blankFrames ?? 0) > 0) {
     throw new Error(`Native preview reported ${measurement.blankFrames} blank frame(s).`)
   }
+  if (!expectNativeMetalPreview && exerciseProofFramePolling) {
+    if ((measurement.sourceFrameDelta ?? 0) < 2) {
+      throw new Error(
+        `Windows proof preview source frames did not advance during recording: delta ${measurement.sourceFrameDelta ?? 0}.`
+      )
+    }
+    if (measurement.framePollingIntervalMs !== 125 || measurement.framePollingMaxWidth !== 960) {
+      throw new Error(
+        `Windows recording preview did not apply the contained 125ms/960px polling profile: ${JSON.stringify({ intervalMs: measurement.framePollingIntervalMs, maxWidth: measurement.framePollingMaxWidth })}`
+      )
+    }
+    if (
+      (measurement.freshSourceLayerCount ?? 0) <= 0 ||
+      (measurement.sourceFrameAgeMs ?? Number.POSITIVE_INFINITY) > 1500
+    ) {
+      throw new Error(
+        `Windows proof preview source liveness failed during recording: ${JSON.stringify({ freshLayers: measurement.freshSourceLayerCount, sourceFrameAgeMs: measurement.sourceFrameAgeMs })}`
+      )
+    }
+  }
 }
 
 function nativeMeasurementMinFps(scenario) {
@@ -751,6 +773,13 @@ function assertRecordingDurationHealthy(scenario, report, expectedDurationMs) {
   const duration = report.metrics.durationSeconds
   if (!Number.isFinite(duration)) {
     throw new Error(`[${scenario.label}] Final recording duration was unavailable.`)
+  }
+  const wallDurationFailures = evaluateRecordingWallDuration({
+    expectedDurationMs,
+    actualDurationSeconds: duration
+  })
+  if (wallDurationFailures.length > 0) {
+    throw new Error(`[${scenario.label}] ${wallDurationFailures.join('; ')}`)
   }
   const toleranceSeconds = 1.5
   if (
@@ -815,7 +844,7 @@ function assertStatsHealthyStrict(scenario, stats, reports = {}, options = {}) {
   if (stats.droppedFrames > 0) {
     throw new Error(`[${scenario.label}] FFmpeg reported ${stats.droppedFrames} dropped frame(s).`)
   }
-  if ((stats.maxEncoderBridgeMetalTargetFrames ?? 0) <= 0) {
+  if (expectNativeMetalPreview && (stats.maxEncoderBridgeMetalTargetFrames ?? 0) <= 0) {
     throw new Error(
       `[${scenario.label}] Recording diagnostics never observed IOSurface-backed Metal target frames.`
     )
@@ -1068,12 +1097,19 @@ function launchAndReadConnections() {
 
     appProcess = spawn('pnpm', ['dev'], {
       cwd: repoRoot,
-      detached: true,
+      // Windows loses the pnpm child's marker pipes when launched as a detached
+      // process group. stopProcess uses taskkill there, so detachment is only
+      // needed for Unix process-group cleanup.
+      detached: process.platform !== 'win32',
+      shell: process.platform === 'win32',
       env: smokeAppEnv({
         VIDEORC_USER_DATA_DIR: userDataDir,
         VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
         VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
-        VIDEORC_SMOKE_PREVIEW_MOTION: '1',
+        VIDEORC_SMOKE_COMMAND_SERVER: '1',
+        ...(exerciseProofFramePolling
+          ? { VIDEORC_SMOKE_PREVIEW_FRAME_POLLING: '1' }
+          : { VIDEORC_SMOKE_PREVIEW_MOTION: '1' }),
         VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
       }),
       stdio: ['ignore', 'pipe', 'pipe']

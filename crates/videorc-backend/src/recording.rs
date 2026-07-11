@@ -612,6 +612,7 @@ pub async fn start_session(
     }
 
     let ffmpeg_path = resolve_ffmpeg_path(params.output.ffmpeg_path.clone());
+    select_windows_media_foundation_encoder(&state, &ffmpeg_path, &params.output.video).await;
     let output_dir = resolve_output_directory(params.output.output_directory.as_deref())?;
 
     if params.output.record_enabled {
@@ -1163,6 +1164,18 @@ pub async fn start_session(
         child.stdin.take()
     };
     let pid = child.id().unwrap_or_default();
+    // FFmpeg opens every declared input before it starts draining raw video.
+    // Attach the native-audio FIFO now, before waiting for the raw-video prime,
+    // or FFmpeg can block opening audio while the bridge waits for video bytes
+    // to be consumed. The writer already waits on `video_epoch`, so pre-roll is
+    // still trimmed at the completed priming frame.
+    let attached_native_audio = native_audio_source.take().map(|prepared| {
+        attach_fifo_writer(
+            prepared.source,
+            prepared.fifo_path,
+            use_encoder_bridge.then(|| video_epoch.clone()),
+        )
+    });
     let (encoder_bridge, encoder_bridge_stream) = if use_encoder_bridge {
         let bridge_fifo_path = encoder_bridge_fifo
             .clone()
@@ -1178,7 +1191,7 @@ pub async fn start_session(
             encoder_bridge_video_output,
             encoder_bridge_stream_profile.is_some(),
         );
-        let recording_bridge = start_synthetic_recording_bridge(
+        let mut recording_bridge = start_synthetic_recording_bridge(
             state.clone(),
             session_id.clone(),
             params.output.video.fps,
@@ -1191,7 +1204,7 @@ pub async fn start_session(
             recording_diagnostics_context,
             video_epoch.clone(),
         )?;
-        let stream_bridge = match (
+        let mut stream_bridge = match (
             encoder_bridge_stream_fifo.clone(),
             encoder_bridge_stream_profile.as_ref(),
             encoder_bridge_stream_frame_store.clone(),
@@ -1220,6 +1233,10 @@ pub async fn start_session(
             }
             _ => None,
         };
+        recording_bridge.wait_until_ready().await?;
+        if let Some(stream_bridge) = stream_bridge.as_mut() {
+            stream_bridge.wait_until_ready().await?;
+        }
         (Some(recording_bridge), stream_bridge)
     } else {
         (None, None)
@@ -1251,13 +1268,7 @@ pub async fn start_session(
         mode: mode.to_string(),
         audio_tracks,
         pipeline,
-        native_audio: native_audio_source.map(|prepared| {
-            attach_fifo_writer(
-                prepared.source,
-                prepared.fifo_path,
-                use_encoder_bridge.then(|| video_epoch.clone()),
-            )
-        }),
+        native_audio: attached_native_audio,
         screen_overlay: match screen_overlay_fifo {
             Some(screen_overlay_fifo) => Some(ScreenOverlaySession::start(
                 screen_overlay_fifo,
@@ -4418,8 +4429,41 @@ fn bool_label(value: bool) -> &'static str {
 #[allow(dead_code)]
 enum FfmpegH264Platform {
     Macos,
-    Windows,
+    WindowsHardware,
+    WindowsSoftware,
     Other,
+}
+
+#[cfg(target_os = "windows")]
+static WINDOWS_MEDIA_FOUNDATION_HARDWARE_SELECTED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "windows")]
+static WINDOWS_MEDIA_FOUNDATION_PROBE_CACHE: std::sync::OnceLock<
+    StdMutex<std::collections::HashMap<WindowsMediaFoundationProbeKey, bool>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WindowsMediaFoundationProbeKey {
+    ffmpeg_path: PathBuf,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_media_foundation_probe_key(
+    ffmpeg_path: &str,
+    video: &VideoSettings,
+) -> WindowsMediaFoundationProbeKey {
+    let path = PathBuf::from(ffmpeg_path);
+    WindowsMediaFoundationProbeKey {
+        ffmpeg_path: std::fs::canonicalize(&path).unwrap_or(path),
+        width: video.width,
+        height: video.height,
+        fps: video.fps,
+        bitrate_kbps: video.bitrate_kbps,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4436,7 +4480,11 @@ fn current_ffmpeg_h264_platform() -> FfmpegH264Platform {
     }
     #[cfg(target_os = "windows")]
     {
-        FfmpegH264Platform::Windows
+        if WINDOWS_MEDIA_FOUNDATION_HARDWARE_SELECTED.load(Ordering::Relaxed) {
+            FfmpegH264Platform::WindowsHardware
+        } else {
+            FfmpegH264Platform::WindowsSoftware
+        }
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
@@ -4451,12 +4499,17 @@ fn ffmpeg_h264_encoder(platform: FfmpegH264Platform) -> FfmpegH264Encoder {
             pix_fmt: "yuv420p",
             backend: EncodeBackend::HardwareVideotoolbox,
         },
-        FfmpegH264Platform::Windows => FfmpegH264Encoder {
+        FfmpegH264Platform::WindowsHardware => FfmpegH264Encoder {
             codec: "h264_mf",
             // FFmpeg's MediaFoundation wrapper accepts yuv420p on some encoders,
             // but nv12 is the safer input shape for hardware-backed devices.
             pix_fmt: "nv12",
             backend: EncodeBackend::HardwareMediaFoundation,
+        },
+        FfmpegH264Platform::WindowsSoftware => FfmpegH264Encoder {
+            codec: "h264_mf",
+            pix_fmt: "nv12",
+            backend: EncodeBackend::SoftwareMediaFoundation,
         },
         FfmpegH264Platform::Other => FfmpegH264Encoder {
             codec: "libx264",
@@ -4464,6 +4517,125 @@ fn ffmpeg_h264_encoder(platform: FfmpegH264Platform) -> FfmpegH264Encoder {
             backend: EncodeBackend::SoftwareX264,
         },
     }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_media_foundation_hardware_probe_args(video: &VideoSettings) -> Vec<String> {
+    vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-f".to_string(),
+        "lavfi".to_string(),
+        "-i".to_string(),
+        format!(
+            "color=c=black:s={}x{}:r={}",
+            video.width.max(1),
+            video.height.max(1),
+            video.fps.max(1)
+        ),
+        "-frames:v".to_string(),
+        "3".to_string(),
+        "-an".to_string(),
+        "-pix_fmt".to_string(),
+        "nv12".to_string(),
+        "-c:v".to_string(),
+        "h264_mf".to_string(),
+        "-hw_encoding".to_string(),
+        "1".to_string(),
+        "-rate_control".to_string(),
+        "ld_vbr".to_string(),
+        "-scenario".to_string(),
+        "live_streaming".to_string(),
+        "-b:v".to_string(),
+        format!("{}k", video.bitrate_kbps.max(1)),
+        "-f".to_string(),
+        "null".to_string(),
+        "-".to_string(),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+async fn select_windows_media_foundation_encoder(
+    state: &AppState,
+    ffmpeg_path: &str,
+    video: &VideoSettings,
+) {
+    let probe_key = windows_media_foundation_probe_key(ffmpeg_path, video);
+    let probe_cache = WINDOWS_MEDIA_FOUNDATION_PROBE_CACHE
+        .get_or_init(|| StdMutex::new(std::collections::HashMap::new()));
+    if let Some(hardware_selected) = probe_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&probe_key)
+        .copied()
+    {
+        WINDOWS_MEDIA_FOUNDATION_HARDWARE_SELECTED.store(hardware_selected, Ordering::Relaxed);
+        state.emit_log(
+            "info",
+            if hardware_selected {
+                "Using the cached Media Foundation hardware H.264 probe result."
+            } else {
+                "Using the cached Media Foundation software H.264 fallback result."
+            },
+        );
+        return;
+    }
+    let mut command = Command::new(ffmpeg_path);
+    command
+        .args(windows_media_foundation_hardware_probe_args(video))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let probe = timeout(Duration::from_secs(8), command.output()).await;
+    let (hardware_selected, detail) = match probe {
+        Ok(Ok(output)) if output.status.success() => (
+            true,
+            format!(
+                "Media Foundation hardware H.264 passed the {}x{}@{} startup probe.",
+                video.width, video.height, video.fps
+            ),
+        ),
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            (
+                false,
+                format!(
+                    "Media Foundation hardware H.264 was unavailable for {}x{}@{} ({}); using the software MFT fallback.",
+                    video.width,
+                    video.height,
+                    video.fps,
+                    stderr.trim().chars().take(240).collect::<String>()
+                ),
+            )
+        }
+        Ok(Err(error)) => (
+            false,
+            format!(
+                "Media Foundation hardware H.264 probe could not start ({error}); using the software MFT fallback."
+            ),
+        ),
+        Err(_) => (
+            false,
+            "Media Foundation hardware H.264 probe timed out; using the software MFT fallback."
+                .to_string(),
+        ),
+    };
+    probe_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(probe_key, hardware_selected);
+    WINDOWS_MEDIA_FOUNDATION_HARDWARE_SELECTED.store(hardware_selected, Ordering::Relaxed);
+    state.emit_log(if hardware_selected { "info" } else { "warn" }, &detail);
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn select_windows_media_foundation_encoder(
+    _state: &AppState,
+    _ffmpeg_path: &str,
+    _video: &VideoSettings,
+) {
 }
 
 fn default_h264_encode_backend() -> EncodeBackend {
@@ -4474,15 +4646,38 @@ fn append_h264_encoding_args(args: &mut Vec<String>, video: &VideoSettings) {
     append_h264_encoding_args_for_platform(args, video, current_ffmpeg_h264_platform());
 }
 
+fn append_h264_encoding_args_preserving_input_timestamps(
+    args: &mut Vec<String>,
+    video: &VideoSettings,
+) {
+    append_h264_encoding_args_for_platform_with_timing(
+        args,
+        video,
+        current_ffmpeg_h264_platform(),
+        false,
+    );
+    args.extend(["-fps_mode".to_string(), "vfr".to_string()]);
+}
+
 fn append_h264_encoding_args_for_platform(
     args: &mut Vec<String>,
     video: &VideoSettings,
     platform: FfmpegH264Platform,
 ) {
+    append_h264_encoding_args_for_platform_with_timing(args, video, platform, true);
+}
+
+fn append_h264_encoding_args_for_platform_with_timing(
+    args: &mut Vec<String>,
+    video: &VideoSettings,
+    platform: FfmpegH264Platform,
+    force_output_fps: bool,
+) {
     let encoder = ffmpeg_h264_encoder(platform);
+    if force_output_fps {
+        args.extend(["-r".to_string(), video.fps.to_string()]);
+    }
     args.extend([
-        "-r".to_string(),
-        video.fps.to_string(),
         "-pix_fmt".to_string(),
         encoder.pix_fmt.to_string(),
         "-c:v".to_string(),
@@ -4499,11 +4694,19 @@ fn append_h264_encoding_args_for_platform(
                 "1".to_string(),
             ]);
         }
-        FfmpegH264Platform::Windows => {
+        FfmpegH264Platform::WindowsHardware => {
+            args.extend(["-hw_encoding".to_string(), "1".to_string()]);
+            args.extend([
+                "-rate_control".to_string(),
+                "ld_vbr".to_string(),
+                "-scenario".to_string(),
+                "live_streaming".to_string(),
+            ]);
+        }
+        FfmpegH264Platform::WindowsSoftware => {
             // Keep the low-delay Media Foundation profile, but let the encoder
-            // select an available implementation. Forcing hardware encoding
-            // makes h264_mf fail outright on systems without a compatible
-            // hardware MFT.
+            // select its software implementation only after the exact hardware
+            // probe failed for this output profile.
             args.extend([
                 "-rate_control".to_string(),
                 "ld_vbr".to_string(),
@@ -4550,7 +4753,8 @@ fn compositor_backend_label(backend: Option<CompositorBackend>) -> &'static str 
 fn encode_backend_label(backend: Option<EncodeBackend>) -> &'static str {
     match backend {
         Some(EncodeBackend::HardwareVideotoolbox) => "hardware-videotoolbox",
-        Some(EncodeBackend::HardwareMediaFoundation) => "hardware-mediafoundation",
+        Some(EncodeBackend::HardwareMediaFoundation) => "hardware-media-foundation",
+        Some(EncodeBackend::SoftwareMediaFoundation) => "software-media-foundation",
         Some(EncodeBackend::SoftwareX264) => "software-x264",
         None => "unknown",
     }
@@ -5061,7 +5265,10 @@ fn bridge_compositor_ffmpeg_args(
         append_audio_output_args(&mut args, &input_layout);
         match video_output {
             EncoderBridgeVideoOutput::RawYuv420p => {
-                append_h264_encoding_args(&mut args, &params.output.video);
+                append_h264_encoding_args_preserving_input_timestamps(
+                    &mut args,
+                    &params.output.video,
+                );
             }
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => {
@@ -5322,14 +5529,16 @@ fn append_bridge_recording_input_args(
     let video_input_index = next_input_index;
     match video_output {
         EncoderBridgeVideoOutput::RawYuv420p => {
-            // rawvideo carries pixels only—there are no per-frame timestamps to
-            // preserve. `-use_wallclock_as_timestamps` therefore collapses or
-            // otherwise retimes FIFO input on Windows. Keep the declared CFR
-            // timestamps and require the selected encoder to sustain the output
-            // cadence instead.
+            // Raw frames carry no source PTS. Timestamp each complete FIFO frame
+            // at demux arrival so transport pressure cannot compress wall duration.
+            // The downstream fps filter fills isolated missing source ticks at the
+            // requested cadence; rendezvous/latest admission in encoder_bridge.rs
+            // prevents a stale raw backlog from accumulating behind it.
             args.extend([
                 "-thread_queue_size".to_string(),
                 ENCODER_BRIDGE_RAW_VIDEO_INPUT_QUEUE_FRAMES.to_string(),
+                "-use_wallclock_as_timestamps".to_string(),
+                "1".to_string(),
                 "-f".to_string(),
                 "rawvideo".to_string(),
                 "-pix_fmt".to_string(),
@@ -8262,7 +8471,11 @@ mod tests {
         );
         assert_eq!(
             encode_backend_label(Some(EncodeBackend::HardwareMediaFoundation)),
-            "hardware-mediafoundation"
+            "hardware-media-foundation"
+        );
+        assert_eq!(
+            encode_backend_label(Some(EncodeBackend::SoftwareMediaFoundation)),
+            "software-media-foundation"
         );
         assert_eq!(
             encode_backend_label(Some(EncodeBackend::SoftwareX264)),
@@ -8293,13 +8506,23 @@ mod tests {
         append_h264_encoding_args_for_platform(
             &mut windows_args,
             &video,
-            FfmpegH264Platform::Windows,
+            FfmpegH264Platform::WindowsHardware,
         );
         assert_eq!(arg_value(&windows_args, "-c:v"), Some("h264_mf"));
         assert_eq!(arg_value(&windows_args, "-pix_fmt"), Some("nv12"));
+        assert_eq!(arg_value(&windows_args, "-hw_encoding"), Some("1"));
         assert_eq!(arg_value(&windows_args, "-allow_sw"), None);
         assert_eq!(arg_value(&windows_args, "-realtime"), None);
         assert_eq!(arg_value(&windows_args, "-prio_speed"), None);
+
+        let mut windows_software_args = Vec::new();
+        append_h264_encoding_args_for_platform(
+            &mut windows_software_args,
+            &video,
+            FfmpegH264Platform::WindowsSoftware,
+        );
+        assert_eq!(arg_value(&windows_software_args, "-c:v"), Some("h264_mf"));
+        assert_eq!(arg_value(&windows_software_args, "-hw_encoding"), None);
 
         let mut fallback_args = Vec::new();
         append_h264_encoding_args_for_platform(
@@ -8312,7 +8535,12 @@ mod tests {
         assert_eq!(arg_value(&fallback_args, "-preset"), Some("ultrafast"));
         assert_eq!(arg_value(&fallback_args, "-tune"), Some("zerolatency"));
 
-        for args in [&macos_args, &windows_args, &fallback_args] {
+        for args in [
+            &macos_args,
+            &windows_args,
+            &windows_software_args,
+            &fallback_args,
+        ] {
             assert_eq!(arg_value(args, "-b:v"), Some("6000k"));
             assert_eq!(arg_value(args, "-maxrate"), Some("6000k"));
             assert_eq!(arg_value(args, "-bufsize"), Some("12000k"));
@@ -8332,12 +8560,51 @@ mod tests {
             EncodeBackend::HardwareVideotoolbox
         );
         assert_eq!(
-            ffmpeg_h264_encoder(FfmpegH264Platform::Windows).backend,
+            ffmpeg_h264_encoder(FfmpegH264Platform::WindowsHardware).backend,
             EncodeBackend::HardwareMediaFoundation
+        );
+        assert_eq!(
+            ffmpeg_h264_encoder(FfmpegH264Platform::WindowsSoftware).backend,
+            EncodeBackend::SoftwareMediaFoundation
         );
         assert_eq!(
             ffmpeg_h264_encoder(FfmpegH264Platform::Other).backend,
             EncodeBackend::SoftwareX264
+        );
+    }
+
+    #[test]
+    fn windows_hardware_encoder_probe_uses_the_exact_output_profile() {
+        let video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+        };
+        let args = windows_media_foundation_hardware_probe_args(&video);
+
+        assert_eq!(arg_value(&args, "-c:v"), Some("h264_mf"));
+        assert_eq!(arg_value(&args, "-hw_encoding"), Some("1"));
+        assert_eq!(arg_value(&args, "-b:v"), Some("6000k"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "color=c=black:s=1920x1080:r=30")
+        );
+        assert_eq!(arg_value(&args, "-frames:v"), Some("3"));
+
+        let key = windows_media_foundation_probe_key("ffmpeg", &video);
+        let mut higher_fps = video.clone();
+        higher_fps.fps = 60;
+        assert_ne!(
+            key,
+            windows_media_foundation_probe_key("ffmpeg", &higher_fps),
+            "hardware results must not leak across output profiles"
+        );
+        assert_ne!(
+            key,
+            windows_media_foundation_probe_key("alternate-ffmpeg", &video),
+            "hardware results must not leak across FFmpeg binaries"
         );
     }
 
@@ -9515,11 +9782,19 @@ mod tests {
                 assert_eq!(arg_value(args, "-realtime"), Some("1"));
                 assert_eq!(arg_value(args, "-prio_speed"), Some("1"));
             }
-            FfmpegH264Platform::Windows => {
+            FfmpegH264Platform::WindowsHardware => {
                 assert_eq!(arg_value(args, "-allow_sw"), None);
                 assert_eq!(arg_value(args, "-realtime"), None);
                 assert_eq!(arg_value(args, "-prio_speed"), None);
+                assert_eq!(arg_value(args, "-hw_encoding"), Some("1"));
                 assert_eq!(encoder.backend, EncodeBackend::HardwareMediaFoundation);
+            }
+            FfmpegH264Platform::WindowsSoftware => {
+                assert_eq!(arg_value(args, "-allow_sw"), None);
+                assert_eq!(arg_value(args, "-realtime"), None);
+                assert_eq!(arg_value(args, "-prio_speed"), None);
+                assert_eq!(arg_value(args, "-hw_encoding"), None);
+                assert_eq!(encoder.backend, EncodeBackend::SoftwareMediaFoundation);
             }
             FfmpegH264Platform::Other => {
                 assert_eq!(arg_value(args, "-allow_sw"), None);
@@ -9582,8 +9857,8 @@ mod tests {
                 &fifo_path.display().to_string(),
                 "-use_wallclock_as_timestamps"
             ),
-            None,
-            "rawvideo carries no per-frame timestamps, so it must retain its declared CFR timeline"
+            Some("1"),
+            "rawvideo must derive PTS from FIFO arrival so slow delivery preserves wall duration"
         );
         assert!(!input_has_arg(
             &args,
@@ -9599,6 +9874,8 @@ mod tests {
 
         let filter = arg_value(&args, "-filter_complex").unwrap();
         assert_eq!(filter, "[0:v]fps=30[v_main]");
+        assert_eq!(arg_value(&args, "-fps_mode"), Some("vfr"));
+        assert_eq!(arg_value(&args, "-r"), None);
         assert!(!args.iter().any(|arg| arg == "pipe:1"));
         assert!(!args.iter().any(|arg| arg == "pipe:0"));
     }

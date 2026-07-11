@@ -106,6 +106,32 @@ jobs:
         # testers will see a SmartScreen warning until signing lands.
         run: pnpm dist:desktop:windows
 
+      - name: Verify packaged 1080p recording duration and A/V
+        run: pnpm smoke:packaged:bundled
+        env:
+          VIDEORC_PACKAGED_APP_EXECUTABLE: apps/desktop/release/win-unpacked/Videorc.exe
+          VIDEORC_SMOKE_OUTPUT_DIR: ${{ runner.temp }}/videorc-windows-recording-smoke
+          VIDEORC_SMOKE_RECORDING_MS: '5000'
+          VIDEORC_SMOKE_TIMEOUT_MS: '120000'
+          VIDEORC_SMOKE_VIDEO_WIDTH: '1920'
+          VIDEORC_SMOKE_VIDEO_HEIGHT: '1080'
+          VIDEORC_SMOKE_VIDEO_FPS: '30'
+          VIDEORC_SMOKE_VIDEO_BITRATE_KBPS: '6000'
+
+      - name: Verify Windows preview stays live while recording
+        run: pnpm smoke:recording-native-preview
+        env:
+          VIDEORC_SMOKE_OUTPUT_DIR: ${{ runner.temp }}/videorc-windows-preview-recording-smoke
+          VIDEORC_SMOKE_FFMPEG_PATH: ${{ github.workspace }}\apps\desktop\release\win-unpacked\resources\ffmpeg\bin\ffmpeg.exe
+          VIDEORC_SMOKE_FFPROBE_PATH: ${{ github.workspace }}\apps\desktop\release\win-unpacked\resources\ffmpeg\bin\ffprobe.exe
+          VIDEORC_SMOKE_TIMEOUT_MS: '180000'
+          VIDEORC_NATIVE_PREVIEW_RECORDING_MS: '8000'
+          VIDEORC_NATIVE_PREVIEW_WARMUP_MS: '2000'
+          VIDEORC_NATIVE_PREVIEW_MEASUREMENT_MS: '4000'
+          VIDEORC_EXPECT_NATIVE_METAL_PREVIEW: '0'
+          VIDEORC_NATIVE_PREVIEW_EXERCISE_PROOF_POLLING: '1'
+          VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: raw-yuv420p
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:

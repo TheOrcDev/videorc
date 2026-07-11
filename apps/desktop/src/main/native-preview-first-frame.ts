@@ -55,6 +55,50 @@ export const DEFAULT_FIRST_FRAME_BUDGETS: FirstFrameBudgets = {
   declareFallbackAfterMs: 15000
 }
 
+/**
+ * This watchdog proves a CAMetalLayer/IOSurface chain and may reset that native
+ * presenter while healing. Windows uses the Electron proof surface instead, so
+ * running the Metal contract there guarantees false healing and visible resets.
+ */
+export function nativePreviewFirstFrameWatchdogEnabled(platform: NodeJS.Platform): boolean {
+  return platform === 'darwin'
+}
+
+export const DEFAULT_PROOF_SOURCE_FRAME_STALE_MS = 1500
+
+export type ProofSourceFrameAssessment = 'not-applicable' | 'paused' | 'pending' | 'met' | 'stalled'
+
+export function assessProofSourceFrame(params: {
+  platform: NodeJS.Platform
+  framePollingSuppressed: boolean
+  sourcePollerCount: number
+  freshSourceLayerCount: number
+  sourceFrameAgeMs?: number
+  staleAfterMs?: number
+}): ProofSourceFrameAssessment {
+  if (params.platform === 'darwin') {
+    return 'not-applicable'
+  }
+  if (params.framePollingSuppressed) {
+    return 'paused'
+  }
+  if (params.sourcePollerCount <= 0) {
+    return 'not-applicable'
+  }
+  const staleAfterMs = params.staleAfterMs ?? DEFAULT_PROOF_SOURCE_FRAME_STALE_MS
+  if (
+    params.freshSourceLayerCount >= params.sourcePollerCount &&
+    params.sourceFrameAgeMs != null &&
+    params.sourceFrameAgeMs <= staleAfterMs
+  ) {
+    return 'met'
+  }
+  if (params.sourceFrameAgeMs != null && params.sourceFrameAgeMs > staleAfterMs) {
+    return 'stalled'
+  }
+  return 'pending'
+}
+
 export type FirstFrameAssessment =
   | { kind: 'met' }
   | { kind: 'pending'; reason: string }

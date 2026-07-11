@@ -1109,7 +1109,11 @@ export type PreviewTransport =
 /** Which encoder a recording session requested. Hardware encoders may still fall back
  * internally, so this is the requested backend; the final-file codec/encoder tag is the
  * corroborating output-side signal. */
-export type EncodeBackend = 'software-x264' | 'hardware-videotoolbox' | 'hardware-mediafoundation'
+export type EncodeBackend =
+  | 'software-x264'
+  | 'hardware-videotoolbox'
+  | 'hardware-media-foundation'
+  | 'software-media-foundation'
 export type CompositorBackend = 'metal' | 'cpu' | 'cpu-fallback'
 
 /** Cumulative request counts for the HTTP image-polling preview transports. A native
@@ -2720,7 +2724,8 @@ export interface VideorcApi {
   getNativePreviewMainPumpActive: () => Promise<boolean>
   onNativePreviewMainPumpActive: (callback: (active: boolean) => void) => () => void
   setNativePreviewSurfaceFramePollingSuppressed: (
-    suppressed: boolean
+    suppressed: boolean,
+    recordingActive?: boolean
   ) => Promise<PreviewSurfaceStatus>
   destroyNativePreviewSurface: (generation?: number) => Promise<PreviewSurfaceStatus>
   getNativePreviewSurfaceStatus: () => Promise<PreviewSurfaceStatus>
