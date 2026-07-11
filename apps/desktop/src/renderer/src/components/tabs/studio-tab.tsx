@@ -210,21 +210,58 @@ function StudioPreviewPanel(): ReactElement {
   const { diagnosticStats, previewSurfaceStatus } = useStudioDiagnostics()
   const active = isSessionTransportActive(recording.state)
   const previewHealth = studioHealth(diagnosticStats, active, runtimeInfo?.platform)
+  const docked =
+    nativePreviewSurfaceEnabled && previewWindow.open && previewWindow.mode === 'docked'
+
+  // data hook: the backend-resilience smoke reads this badge (the old probe
+  // grepped for a "Status" text prefix that died with the session-panel
+  // declutter). It must exist in every preview mode, docked included.
+  const sessionStatusBadge = (
+    <span data-videorc-session-status>
+      <StatusBadge
+        tone={sessionStatusTone(recording.state, wsStatus)}
+        value={sessionStatusLabel(recording.state, wsStatus)}
+      />
+    </span>
+  )
+
+  const healthErrorRow =
+    previewHealth.tone === 'error' && previewHealth.detail ? (
+      <div className="flex items-center gap-2 rounded-row border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">
+        <WarningCircle className="size-4 shrink-0" weight="fill" />
+        <span className="min-w-0">{previewHealth.detail}</span>
+      </div>
+    ) : null
+
+  const previewStage = (
+    <PreviewStage
+      dockedFooterStart={sessionStatusBadge}
+      nativePreviewSurfaceEnabled={nativePreviewSurfaceEnabled}
+      previewLiveStatus={previewLiveStatus}
+      previewSurfaceStatus={previewSurfaceStatus}
+      onOpenPermissions={openPreviewPermissions}
+      onRetry={refreshPreview}
+    />
+  )
+
+  // Docked ("stick") mode: the preview stands alone — no glass card, no
+  // border, no panel header. The native surface and its black frame ARE the
+  // panel; the docked frame's own control row carries status and dock actions.
+  if (docked) {
+    return (
+      <div className="flex min-w-0 flex-col gap-3">
+        {previewStage}
+        {healthErrorRow}
+      </div>
+    )
+  }
 
   return (
     <PanelSection
       title="Preview"
       action={
         <div className="flex items-center gap-1.5">
-          {/* data hook: the backend-resilience smoke reads this badge
-              (the old probe grepped for a "Status" text prefix that
-              died with the session-panel declutter). */}
-          <span data-videorc-session-status>
-            <StatusBadge
-              tone={sessionStatusTone(recording.state, wsStatus)}
-              value={sessionStatusLabel(recording.state, wsStatus)}
-            />
-          </span>
+          {sessionStatusBadge}
           {previewWindow.open && previewWindow.mode === 'floating' ? (
             <Button
               aria-label="Stick preview into the app"
@@ -262,19 +299,8 @@ function StudioPreviewPanel(): ReactElement {
         </div>
       }
     >
-      <PreviewStage
-        nativePreviewSurfaceEnabled={nativePreviewSurfaceEnabled}
-        previewLiveStatus={previewLiveStatus}
-        previewSurfaceStatus={previewSurfaceStatus}
-        onOpenPermissions={openPreviewPermissions}
-        onRetry={refreshPreview}
-      />
-      {previewHealth.tone === 'error' && previewHealth.detail ? (
-        <div className="flex items-center gap-2 rounded-row border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">
-          <WarningCircle className="size-4 shrink-0" weight="fill" />
-          <span className="min-w-0">{previewHealth.detail}</span>
-        </div>
-      ) : null}
+      {previewStage}
+      {healthErrorRow}
     </PanelSection>
   )
 }
