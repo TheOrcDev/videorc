@@ -4924,6 +4924,7 @@ mod tests {
             bytes: vec![0, 0, 0, 255],
             source_iosurface: None,
             source_pixel_buffer: None,
+            recycle_pool: None,
             captured_at: Instant::now(),
         });
         assert!(!should_blocking_refresh_live_source(1, Some(&fresh_frame)));
@@ -4941,6 +4942,7 @@ mod tests {
             bytes: vec![0, 0, 0, 255],
             source_iosurface: None,
             source_pixel_buffer: None,
+            recycle_pool: None,
             captured_at: Instant::now()
                 - COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_AFTER
                 - Duration::from_millis(1),
@@ -4963,6 +4965,7 @@ mod tests {
             bytes: vec![0, 0, 0, 255],
             source_iosurface: None,
             source_pixel_buffer: None,
+            recycle_pool: None,
             captured_at: Instant::now()
                 - COMPOSITOR_LIVE_SOURCE_STALE_RECOVERY_AFTER
                 - Duration::from_millis(1),
@@ -5439,6 +5442,7 @@ mod tests {
             bytes: [255, 0, 0, 255].repeat(16),
             source_iosurface: None,
             source_pixel_buffer: None,
+            recycle_pool: None,
             captured_at: Instant::now(),
         });
         let camera_frame = Arc::new(crate::frame_store::StoredFrame {
@@ -5450,6 +5454,7 @@ mod tests {
             bytes: [0, 0, 255, 255].repeat(16),
             source_iosurface: None,
             source_pixel_buffer: None,
+            recycle_pool: None,
             captured_at: Instant::now(),
         });
 
@@ -5543,6 +5548,7 @@ mod tests {
             bytes: [255, 0, 0, 255].repeat(100 * 100),
             source_iosurface: None,
             source_pixel_buffer: None,
+            recycle_pool: None,
             captured_at: Instant::now(),
         });
 
@@ -7647,6 +7653,7 @@ mod tests {
             bytes: [255, 0, 0, 255].repeat(100 * 100),
             source_iosurface: None,
             source_pixel_buffer: None,
+            recycle_pool: None,
             captured_at: Instant::now(),
         });
         let mut bytes = vec![0; raw_yuv420p_len(100, 100)];
@@ -7843,6 +7850,7 @@ mod tests {
             bytes: [0, 0, 255, 255].repeat(16),
             source_iosurface: None,
             source_pixel_buffer: None,
+            recycle_pool: None,
             captured_at: Instant::now(),
         });
         let mut bytes = vec![0; raw_yuv420p_len(4, 4)];
@@ -8019,6 +8027,7 @@ mod tests {
             bytes: [0, 0, 255, 255].repeat(16),
             source_iosurface: None,
             source_pixel_buffer: None,
+            recycle_pool: None,
             captured_at: camera_captured_at,
         });
         let mut live_sources = CompositorLiveSources {

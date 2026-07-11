@@ -47,6 +47,7 @@ import {
   preparedYouTubeCompletionTargets,
   readyStreamTargetLabels,
   reconcileSourceSelection,
+  reconcileSourceSelectionForLayoutTransaction,
   rtmpDefaults,
   smokePreviewCompositorCaptureConfig,
   sourceSelectionChangeEvents,
@@ -83,6 +84,7 @@ import {
   shouldReloadSceneFromCaptureConfig
 } from '@/lib/layout-transaction-policy'
 import {
+  nativePreviewFramePollingShouldSuppress,
   nativePreviewSurfaceSyncCanCommit,
   nativePreviewSurfaceSyncNeedsCreate
 } from '@/lib/native-preview-surface-lifecycle'
@@ -2502,8 +2504,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             nativePreviewCompositorPendingRef.current = null
             const updateParams = buildNativePreviewCompositorUpdateParams(
               nextStatus,
-              recordingRef.current.state,
-              nativePreviewRendererTimingStatusFields()
+              nativePreviewRendererTimingStatusFields(),
+              {
+                recordingActive: isActiveRecordingState(recordingRef.current.state),
+                windowOpen: previewWindowRef.current.open,
+                status: previewSurfaceStatusRef.current
+              }
             )
             const presentStartedAt = performance.now()
             const surfaceStatus = await updateCompositor(updateParams)
@@ -3182,6 +3188,34 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [appendLog])
 
+  const recordAutomaticSourceFallbacks = useCallback(
+    (previous: SourceSelection, next: SourceSelection) => {
+      const fallbackEvents = sourceSelectionChangeEvents(previous, next)
+      if (fallbackEvents.length === 0) {
+        return
+      }
+      const occurredAt = new Date().toISOString()
+      const sessionState = recordingRef.current.state
+      const enrichedEvents = fallbackEvents.map((event) => ({
+        ...event,
+        occurredAt,
+        sessionState
+      }))
+      automaticSourceFallbacks.current = [
+        ...automaticSourceFallbacks.current,
+        ...enrichedEvents
+      ].slice(-50)
+
+      if (isActiveRecordingState(sessionState)) {
+        toast.warning(sourceFallbackActiveSessionMessage(sessionState), {
+          duration: 10_000,
+          id: 'source-reconciliation:active-session'
+        })
+      }
+    },
+    []
+  )
+
   useEffect(() => {
     setCaptureConfig((current) => {
       const nextSources = reconcileSourceSelection(current.sources, deviceList.devices)
@@ -3190,30 +3224,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return current
       }
 
-      const fallbackEvents = sourceSelectionChangeEvents(current.sources, nextSources)
-      if (fallbackEvents.length > 0) {
-        const occurredAt = new Date().toISOString()
-        const sessionState = recordingRef.current.state
-        const enrichedEvents = fallbackEvents.map((event) => ({
-          ...event,
-          occurredAt,
-          sessionState
-        }))
-        automaticSourceFallbacks.current = [
-          ...automaticSourceFallbacks.current,
-          ...enrichedEvents
-        ].slice(-50)
-
-        if (isActiveRecordingState(sessionState)) {
-          toast.warning(sourceFallbackActiveSessionMessage(sessionState), {
-            duration: 10_000,
-            id: 'source-reconciliation:active-session'
-          })
-        }
-      }
+      recordAutomaticSourceFallbacks(current.sources, nextSources)
       return { ...current, sources: nextSources }
     })
-  }, [deviceList])
+  }, [deviceList, recordAutomaticSourceFallbacks])
 
   useEffect(() => {
     if (!connection) {
@@ -4690,12 +4704,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
       void (async () => {
         try {
-          const requestedConfig = captureConfigRef.current
           const protectedOverlayWindowIds = await currentProtectedOverlayWindowIds()
+          const requestedConfig = captureConfigRef.current
+          const requestedSources = reconcileSourceSelectionForLayoutTransaction(
+            requestedConfig.sources,
+            deviceListRef.current.devices
+          )
+          if (JSON.stringify(requestedSources) !== JSON.stringify(requestedConfig.sources)) {
+            recordAutomaticSourceFallbacks(requestedConfig.sources, requestedSources)
+            setCaptureConfig((current) =>
+              JSON.stringify(current.sources) === JSON.stringify(requestedConfig.sources)
+                ? { ...current, sources: requestedSources }
+                : current
+            )
+          }
           const method = sessionActive ? 'scene.layout.apply_live' : 'scene.layout.apply_preview'
           const status = await client.request<LayoutTransactionStatus>(method, {
             intentId,
-            sources: requestedConfig.sources,
+            sources: requestedSources,
             layout,
             video: requestedConfig.video,
             background: activeSceneBackground,
@@ -4800,6 +4826,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applyLayoutTransactionState,
       client,
       readLayoutTransactionBackendTruth,
+      recordAutomaticSourceFallbacks,
       rememberLayoutCommit,
       rememberLayoutTransactionSnapshot,
       reportError,
@@ -5388,9 +5415,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [wsStatus])
 
-  // Frame polling serves the Electron proof surface; it is pure overhead while a
-  // session records (the compositor feeds the encoder directly) and while the
-  // detached preview window is closed (nothing presents at all) — UI rewrite U2.
+  // Frame polling serves the Electron proof surface. It is redundant during a
+  // recording only when an attached native layer owns presentation; Windows
+  // relies on proof polling for its visible preview. A closed window always
+  // suppresses polling — UI rewrite U2.
   const syncFramePollingSuppression = useCallback(() => {
     if (
       !nativePreviewSurfaceEnabled ||
@@ -5398,8 +5426,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     ) {
       return
     }
-    const suppress =
-      isActiveRecordingState(recordingRef.current.state) || !previewWindowRef.current.open
+    const suppress = nativePreviewFramePollingShouldSuppress({
+      recordingActive: isActiveRecordingState(recordingRef.current.state),
+      windowOpen: previewWindowRef.current.open,
+      status: previewSurfaceStatusRef.current
+    })
     if (nativePreviewFramePollingSuppressionRequestedRef.current === suppress) {
       return
     }

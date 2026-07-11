@@ -96,6 +96,7 @@ import {
   writeGpuFallbackState
 } from './gpu-fallback'
 import { createMediaPermissionGrantWatcher } from './system-permission-watch'
+import { isPathInsideAnyRoot } from './managed-asset-paths'
 import { PreviewSupervisorModel, previewWindowTargetAction } from './preview-supervisor'
 import {
   composeDockedScreenRect,
@@ -8992,9 +8993,7 @@ function backgroundAssetFileExists(assetPath: unknown): boolean {
     return false
   }
   const normalized = resolve(assetPath)
-  const inManagedRoot = managedBackgroundRoots().some((root) =>
-    normalized.startsWith(`${resolve(root)}/`)
-  )
+  const inManagedRoot = isPathInsideAnyRoot(normalized, managedBackgroundRoots())
   return inManagedRoot && existsSync(normalized)
 }
 

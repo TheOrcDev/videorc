@@ -1,11 +1,63 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  nativePreviewFramePollingShouldSuppress,
   nativePreviewSurfaceSyncCanCommit,
   nativePreviewSurfaceSyncNeedsCreate
 } from './native-preview-surface-lifecycle'
 
 describe('native preview surface lifecycle', () => {
+  it('keeps the Windows proof surface polling while a recording is active', () => {
+    expect(
+      nativePreviewFramePollingShouldSuppress({
+        recordingActive: true,
+        windowOpen: true,
+        status: {
+          state: 'live',
+          transport: 'electron-proof-surface',
+          backing: 'electron-browser-window',
+          sourcePixelsPresent: true,
+          nativePreviewHostAttached: false,
+          nativePreviewHostKind: 'proof-surface'
+        }
+      })
+    ).toBe(false)
+  })
+
+  it('suppresses the hidden proof poller when an attached CAMetalLayer owns pixels', () => {
+    expect(
+      nativePreviewFramePollingShouldSuppress({
+        recordingActive: true,
+        windowOpen: true,
+        status: {
+          state: 'live',
+          transport: 'native-surface',
+          backing: 'cametal-layer',
+          sourcePixelsPresent: true,
+          nativePreviewHostAttached: true,
+          nativePreviewHostKind: 'in-process'
+        }
+      })
+    ).toBe(true)
+  })
+
+  it('always suppresses polling when the preview window is closed', () => {
+    expect(
+      nativePreviewFramePollingShouldSuppress({
+        recordingActive: false,
+        windowOpen: false,
+        status: {
+          state: 'live',
+          transport: 'electron-proof-surface',
+          backing: 'electron-browser-window',
+          sourcePixelsPresent: true,
+          nativePreviewHostAttached: false,
+          nativePreviewHostKind: 'proof-surface'
+        }
+      })
+    ).toBe(true)
+  })
+
   it('rejects an old sync after close even when the supervisor generation is unchanged', () => {
     expect(
       nativePreviewSurfaceSyncCanCommit(

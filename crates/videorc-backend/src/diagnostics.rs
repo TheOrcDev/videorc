@@ -176,6 +176,7 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         encoder_bridge_separate_output_encoders_active: false,
         encoder_bridge_compositor_wait_p95_ms: None,
         encoder_bridge_video_toolbox_submit_p95_ms: None,
+        encoder_bridge_raw_video_fifo_write_p95_ms: None,
         encoder_bridge_video_toolbox_fifo_write_p95_ms: None,
         encoder_bridge_video_toolbox_fifo_enqueue_p95_ms: None,
         encoder_bridge_video_toolbox_fifo_enqueue_max_ms: None,
@@ -754,6 +755,7 @@ pub struct EncoderBridgeDiagnosticSnapshot {
     pub separate_output_encoders_active: bool,
     pub compositor_wait_p95_ms: Option<f64>,
     pub video_toolbox_submit_p95_ms: Option<f64>,
+    pub raw_video_fifo_write_p95_ms: Option<f64>,
     pub video_toolbox_fifo_write_p95_ms: Option<f64>,
     pub video_toolbox_fifo_enqueue_p95_ms: Option<f64>,
     pub video_toolbox_fifo_enqueue_max_ms: Option<f64>,
@@ -837,6 +839,7 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_separate_output_encoders_active = bridge.separate_output_encoders_active;
     stats.encoder_bridge_compositor_wait_p95_ms = bridge.compositor_wait_p95_ms;
     stats.encoder_bridge_video_toolbox_submit_p95_ms = bridge.video_toolbox_submit_p95_ms;
+    stats.encoder_bridge_raw_video_fifo_write_p95_ms = bridge.raw_video_fifo_write_p95_ms;
     stats.encoder_bridge_video_toolbox_fifo_write_p95_ms = bridge.video_toolbox_fifo_write_p95_ms;
     stats.encoder_bridge_video_toolbox_fifo_enqueue_p95_ms =
         bridge.video_toolbox_fifo_enqueue_p95_ms;
@@ -2219,6 +2222,7 @@ mod tests {
                 separate_output_encoders_active: false,
                 compositor_wait_p95_ms: None,
                 video_toolbox_submit_p95_ms: None,
+                raw_video_fifo_write_p95_ms: None,
                 video_toolbox_fifo_write_p95_ms: None,
                 video_toolbox_fifo_enqueue_p95_ms: None,
                 video_toolbox_fifo_enqueue_max_ms: None,
@@ -2303,6 +2307,7 @@ mod tests {
                 separate_output_encoders_active: true,
                 compositor_wait_p95_ms: Some(5.0),
                 video_toolbox_submit_p95_ms: Some(2.0),
+                raw_video_fifo_write_p95_ms: Some(11.0),
                 video_toolbox_fifo_write_p95_ms: Some(3.0),
                 video_toolbox_fifo_enqueue_p95_ms: Some(7.0),
                 video_toolbox_fifo_enqueue_max_ms: Some(14.0),
@@ -2415,6 +2420,10 @@ mod tests {
             4096
         );
         assert!(lagging.encoder_bridge_separate_output_encoders_active);
+        assert_eq!(
+            lagging.encoder_bridge_raw_video_fifo_write_p95_ms,
+            Some(11.0)
+        );
         assert_eq!(lagging.encoder_bridge_deadline_lag_p95_ms, Some(4.0));
         assert_eq!(lagging.encoder_bridge_deadline_lag_max_ms, Some(9.0));
         assert_eq!(
@@ -2459,6 +2468,8 @@ mod tests {
             lagging.encoder_bridge_stream_video_toolbox_fifo_enqueue_max_ms,
             Some(18.0)
         );
+        let wire = serde_json::to_value(&lagging).expect("serialize diagnostics");
+        assert_eq!(wire["encoderBridgeRawVideoFifoWriteP95Ms"], 11.0);
         assert_eq!(lagging.bottleneck, DiagnosticBottleneck::Encoder);
     }
 

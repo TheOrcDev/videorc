@@ -1724,6 +1724,8 @@ export interface DiagnosticStats {
   encoderBridgeCompositorWaitP95Ms?: number
   /** P95 time spent submitting retained targets into VideoToolbox. */
   encoderBridgeVideoToolboxSubmitP95Ms?: number
+  /** P95 time the raw-video FIFO worker spent writing one frame into FFmpeg. */
+  encoderBridgeRawVideoFifoWriteP95Ms?: number
   /** P95 time spent writing completed VideoToolbox H.264 access units into FFmpeg. */
   encoderBridgeVideoToolboxFifoWriteP95Ms?: number
   /** P95 time spent waiting to enqueue encoded VideoToolbox frames for the FIFO writer. */

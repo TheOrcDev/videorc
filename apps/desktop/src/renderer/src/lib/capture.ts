@@ -1593,6 +1593,19 @@ export function reconcileSourceSelection(
   return nextSources
 }
 
+/**
+ * Layout commands revalidate at dispatch time because the device snapshot and
+ * React config update on separate ticks. Without this final pass, a persisted
+ * pre-DXGI Windows id can reach the backend after discovery already supplied a
+ * valid replacement, triggering the native-compositor source blocker.
+ */
+export function reconcileSourceSelectionForLayoutTransaction(
+  sources: SourceSelection,
+  devices: Device[]
+): SourceSelection {
+  return reconcileSourceSelection(sources, devices)
+}
+
 export function sourceSelectionChangeEvents(
   previous: SourceSelection,
   next: SourceSelection

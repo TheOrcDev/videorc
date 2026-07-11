@@ -4,7 +4,9 @@
 //! durations probed, posters extracted.
 
 use anyhow::{Context, Result, bail};
+use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Output as ProcessOutput;
 
 use crate::process_job::output_owned_tokio;
 use crate::state::AppState;
@@ -104,13 +106,20 @@ pub(crate) async fn probe_duration_ms(ffmpeg_path: &str, file: &Path) -> Option<
         .arg(file)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = output_owned_tokio(&mut command).await.ok()?;
+    let output = output_duration_probe(&mut command).await.ok()?;
     if !output.status.success() {
         return None;
     }
     let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
     let seconds: f64 = parsed["format"]["duration"].as_str()?.parse().ok()?;
     (seconds.is_finite() && seconds > 0.0).then_some((seconds * 1000.0) as i64)
+}
+
+async fn output_duration_probe(command: &mut tokio::process::Command) -> io::Result<ProcessOutput> {
+    // Finalization bounds this probe with `tokio::time::timeout`. Without this,
+    // dropping `wait_with_output` leaves ffprobe running after that timeout.
+    command.kill_on_drop(true);
+    output_owned_tokio(command).await
 }
 
 /// Duplicate the session's VISIBLE file + row. Returns the new session id.
@@ -272,6 +281,75 @@ pub async fn import_recording(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn long_running_probe_command(pid_file: &Path) -> tokio::process::Command {
+        #[cfg(target_os = "windows")]
+        {
+            let escaped_pid_file = pid_file.display().to_string().replace('\'', "''");
+            let script = format!(
+                "[System.IO.File]::WriteAllText('{escaped_pid_file}', [string]$PID); Start-Sleep -Seconds 30"
+            );
+            let mut command = tokio::process::Command::new("powershell.exe");
+            command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+            command
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut command = tokio::process::Command::new("sh");
+            command
+                .args([
+                    "-c",
+                    "printf '%s\\n' \"$$\" > \"$1\"; exec sleep 30",
+                    "videorc-duration-probe-test",
+                ])
+                .arg(pid_file);
+            command
+        }
+    }
+
+    #[tokio::test]
+    async fn timed_out_duration_probe_terminates_its_child() {
+        let base = std::env::temp_dir().join(format!(
+            "videorc-duration-probe-timeout-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let pid_file = base.join("pid");
+        let mut command = long_running_probe_command(&pid_file);
+        command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            output_duration_probe(&mut command),
+        )
+        .await;
+        assert!(result.is_err(), "probe child should exceed the timeout");
+
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("probe child should publish its pid before sleeping")
+            .trim()
+            .parse::<u32>()
+            .expect("probe child pid should be numeric");
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !crate::process_job::process_is_running(pid).expect("probe child liveness") {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        if !stopped {
+            let _ = crate::process_job::terminate_process(pid, true);
+        }
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(stopped, "timed-out duration probe child {pid} stayed alive");
+    }
 
     #[test]
     fn duplicate_names_count_upward() {

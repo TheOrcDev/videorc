@@ -1281,6 +1281,9 @@ pub struct DiagnosticStats {
     /// P95 time the bridge writer spent submitting a retained target to VideoToolbox.
     #[serde(default)]
     pub encoder_bridge_video_toolbox_submit_p95_ms: Option<f64>,
+    /// P95 time the raw-video FIFO worker spent writing one frame into FFmpeg.
+    #[serde(default)]
+    pub encoder_bridge_raw_video_fifo_write_p95_ms: Option<f64>,
     /// P95 time the bridge writer spent writing encoded H.264 bytes into FFmpeg.
     #[serde(default)]
     pub encoder_bridge_video_toolbox_fifo_write_p95_ms: Option<f64>,

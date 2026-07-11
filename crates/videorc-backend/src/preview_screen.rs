@@ -1101,8 +1101,14 @@ fn windows_screen_preview_ffmpeg_args(
         "-an".to_string(),
         "-vf".to_string(),
         format!(
-            "fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=bgra"
+            "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=bgra"
         ),
+        // Preserve the capture filter's real cadence. FFmpeg's default output
+        // sync can otherwise manufacture duplicate raw frames when desktop
+        // capture misses a requested tick, hiding the stall from diagnostics
+        // and making the Windows preview/recording visibly hitch.
+        "-fps_mode".to_string(),
+        "passthrough".to_string(),
         "-f".to_string(),
         "rawvideo".to_string(),
         "-pix_fmt".to_string(),
@@ -1638,16 +1644,15 @@ mod windows {
         let stop_thread = spawn_stop_killer(Arc::clone(&child), Arc::clone(&done), stop_rx);
 
         let mut startup_sent = false;
-        let mut buffer = vec![0; frame_len];
+        let mut buffer = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .frame_store
+            .checkout_overwrite_buffer(frame_len);
         loop {
             match stdout.read_exact(&mut buffer) {
                 Ok(()) => {
-                    publish_bgra_frame(
-                        &shared,
-                        width,
-                        height,
-                        std::mem::replace(&mut buffer, vec![0; frame_len]),
-                    );
+                    buffer = publish_bgra_frame(&shared, width, height, buffer);
                     if !startup_sent {
                         let _ = startup_tx.send(NativeScreenStartup::Live {
                             native_width: width,
@@ -1740,10 +1745,11 @@ mod windows {
         width: u32,
         height: u32,
         bytes: Vec<u8>,
-    ) {
+    ) -> Vec<u8> {
         let callback_started_at = Instant::now();
         let publish_started_at = Instant::now();
-        let frame_bytes = bytes.len() as u64;
+        let frame_len = bytes.len();
+        let frame_bytes = frame_len as u64;
         let mut guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1771,10 +1777,12 @@ mod windows {
             now,
             bytes,
         );
+        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard
             .capture_timings
             .record_valid_frame(0.0, 0.0, publish_ms, frame_bytes);
+        next_buffer
     }
 
     fn stderr_suffix(stderr: &Arc<StdMutex<Vec<u8>>>) -> String {
@@ -2899,6 +2907,11 @@ mod tests {
         assert!(args.iter().any(|arg| arg.contains("ddagrab=output_idx=2")));
         assert!(args.iter().any(|arg| arg.contains("draw_mouse=1")));
         assert!(args.iter().any(|arg| arg.contains("scale=1920:1080")));
+        assert!(!args.iter().any(|arg| arg.starts_with("fps=")));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-fps_mode", "passthrough"])
+        );
         assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "bgra"]));
         assert!(args.windows(2).any(|pair| pair == ["-f", "rawvideo"]));
         assert_eq!(args.last().map(String::as_str), Some("-"));

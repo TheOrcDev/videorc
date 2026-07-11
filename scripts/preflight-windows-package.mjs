@@ -15,6 +15,18 @@ import { probeWindowsFfmpegCapabilities } from './lib/windows-ffmpeg-capabilitie
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const ffmpegExe = join(repoRoot, 'vendor', 'ffmpeg', 'windows-x64', 'bin', 'ffmpeg.exe')
+const bundledBackgrounds = [
+  'code-demo.webp',
+  'dark-mode.webp',
+  'focus.webp',
+  'light-mode.webp',
+  'livestream.webp',
+  'minimal-desk.webp',
+  'podcast.webp',
+  'product-launch.webp',
+  'tutorial.webp',
+  'webinar.webp'
+]
 
 const inputs = [
   {
@@ -30,7 +42,21 @@ const inputs = [
     // (ffmpeg.rs); repair/import/probe break without it.
     path: join(repoRoot, 'vendor', 'ffmpeg', 'windows-x64', 'bin', 'ffprobe.exe'),
     remedy: 'pnpm ffmpeg:fetch:windows'
-  }
+  },
+  ...bundledBackgrounds.map((fileName) => ({
+    path: join(
+      repoRoot,
+      'apps',
+      'desktop',
+      'src',
+      'renderer',
+      'src',
+      'assets',
+      'backgrounds',
+      fileName
+    ),
+    remedy: 'restore the bundled background assets before packaging'
+  }))
 ]
 
 const missing = inputs.filter((input) => !existsSync(input.path))

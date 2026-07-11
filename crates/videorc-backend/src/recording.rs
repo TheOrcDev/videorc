@@ -59,7 +59,10 @@ use crate::preview_camera::{
     preview_camera_latest_frame_info, reset_preview_camera_capture_timings,
 };
 use crate::preview_screen::preview_screen_latest_frame_info;
-use crate::process_job::{spawn_owned_tokio, status_owned_tokio};
+use crate::process_job::{
+    process_is_running as process_is_running_by_pid, spawn_owned_tokio, status_owned_tokio,
+    terminate_process,
+};
 use crate::protocol::{
     AudioProcessingUpdateParams, AudioProcessingUpdateResult, AudioSettings, AudioTrack,
     AudioTrackSource, BackgroundFit, CameraAspect, CameraCorner, CameraFit, CameraShape,
@@ -197,6 +200,7 @@ const IDLE_PREVIEW_JPEG_QUALITY: u32 = 4;
 const CAMERA_REFERENCE_WIDTH: u32 = 1280;
 const CAMERA_REFERENCE_HEIGHT: u32 = 720;
 const STOP_FINALIZE_TIMEOUT: Duration = Duration::from_secs(20);
+const FINAL_DURATION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TERM_DELAY: Duration = Duration::from_secs(3);
 const STOP_KILL_DELAY: Duration = Duration::from_secs(3);
 // Sessions with a live RTMP leg get a longer quit grace: the tee/fifo leg
@@ -367,6 +371,17 @@ impl ActiveRecording {
             overlay.set_image_path(path)?;
         }
         Ok(())
+    }
+
+    fn encoder_bridge_terminal_failure(&self) -> Option<String> {
+        self.encoder_bridge
+            .as_ref()
+            .and_then(EncoderBridgeRecordingSession::terminal_failure)
+            .or_else(|| {
+                self.encoder_bridge_stream
+                    .as_ref()
+                    .and_then(EncoderBridgeRecordingSession::terminal_failure)
+            })
     }
 }
 
@@ -2672,22 +2687,12 @@ async fn wait_for_final_recording_status(
 }
 
 async fn send_process_signal(pid: u32, signal: &str) -> Result<()> {
-    Command::new("kill")
-        .arg(format!("-{signal}"))
-        .arg(pid.to_string())
-        .status()
-        .await
-        .with_context(|| format!("Could not send SIG{signal} to FFmpeg"))?;
-    Ok(())
+    terminate_process(pid, signal.eq_ignore_ascii_case("KILL"))
+        .with_context(|| format!("Could not send {signal} termination to FFmpeg process {pid}"))
 }
 
 async fn process_is_running(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .status()
-        .await
-        .is_ok_and(|status| status.success())
+    process_is_running_by_pid(pid).unwrap_or(false)
 }
 
 async fn wait_for_process_exit(pid: u32, wait: Duration) -> bool {
@@ -2833,6 +2838,7 @@ async fn monitor_session(
             });
             MonitoredRecording {
                 stop_requested: active.stop_requested,
+                encoder_bridge_terminal_failure: active.encoder_bridge_terminal_failure(),
                 ffmpeg_path: active.ffmpeg_path.clone(),
                 started_at: active.started_at.clone(),
                 pipeline: active.pipeline.clone(),
@@ -2939,8 +2945,16 @@ async fn monitor_session(
     let ended_at = Utc::now().to_rfc3339();
     let duration_ms = recording_duration_ms(&monitored_recording.started_at, &ended_at);
     let final_diagnostics = final_session_diagnostics_snapshot(&state, &session_id).await;
+    let encoder_bridge_terminal_failure =
+        monitored_recording.encoder_bridge_terminal_failure.clone();
     match status {
-        Ok(exit_status) if exit_status.success() || monitored_recording.stop_requested => {
+        Ok(exit_status)
+            if should_finalize_recording_session(
+                exit_status.success(),
+                monitored_recording.stop_requested,
+                encoder_bridge_terminal_failure.as_deref(),
+            ) =>
+        {
             let message = if exit_status.success() {
                 "Capture session finalized.".to_string()
             } else {
@@ -3030,12 +3044,28 @@ async fn monitor_session(
             // timeline than wall time, so persist the probed finalized duration
             // and retain elapsed time only as a fallback when probing fails.
             let duration_ms = match mp4_path.as_ref().or(output_path.as_ref()) {
-                Some(final_path) => crate::session_ops::probe_duration_ms(
-                    &monitored_recording.ffmpeg_path,
-                    final_path,
+                Some(final_path) => match timeout(
+                    FINAL_DURATION_PROBE_TIMEOUT,
+                    crate::session_ops::probe_duration_ms(
+                        &monitored_recording.ffmpeg_path,
+                        final_path,
+                    ),
                 )
                 .await
-                .or(duration_ms),
+                {
+                    Ok(probed) => probed.or(duration_ms),
+                    Err(_) => {
+                        state.emit_log(
+                            "warn",
+                            format!(
+                                "Final duration probe timed out after {}s for {}; keeping the wall-duration fallback.",
+                                FINAL_DURATION_PROBE_TIMEOUT.as_secs(),
+                                final_path.display()
+                            ),
+                        );
+                        duration_ms
+                    }
+                },
                 None => duration_ms,
             };
             let _ = state.database.finish_session(
@@ -3104,10 +3134,26 @@ async fn monitor_session(
             }
         }
         Ok(exit_status) => {
-            let message = format!("FFmpeg exited with {exit_status}");
+            let (failed_stage, health_code, message) = if let Some(error) =
+                encoder_bridge_terminal_failure.as_deref()
+            {
+                (
+                    RecordingPipelineStage::VideoEncoder,
+                    "encoder-bridge-failed",
+                    format!(
+                        "Encoder bridge stopped before capture finalization: {error} (FFmpeg exit: {exit_status})"
+                    ),
+                )
+            } else {
+                (
+                    RecordingPipelineStage::Muxer,
+                    "ffmpeg-exit",
+                    format!("FFmpeg exited with {exit_status}"),
+                )
+            };
             monitored_recording
                 .pipeline
-                .mark_failed(RecordingPipelineStage::Muxer, &message);
+                .mark_failed(failed_stage, &message);
             state.emit_log("error", &message);
             let _ = state.database.finish_session(
                 &session_id,
@@ -3123,7 +3169,7 @@ async fn monitor_session(
                 &state,
                 Some(&session_id),
                 HealthLevel::Error,
-                "ffmpeg-exit",
+                health_code,
                 &message,
             );
             state.emit_event(
@@ -3780,11 +3826,20 @@ struct NativeAudioStats {
 #[derive(Debug)]
 struct MonitoredRecording {
     stop_requested: bool,
+    encoder_bridge_terminal_failure: Option<String>,
     ffmpeg_path: String,
     started_at: String,
     pipeline: RecordingPipeline,
     captioned_copy_requested: bool,
     native_audio_stats: Option<NativeAudioStats>,
+}
+
+fn should_finalize_recording_session(
+    ffmpeg_exit_success: bool,
+    stop_requested: bool,
+    encoder_bridge_terminal_failure: Option<&str>,
+) -> bool {
+    encoder_bridge_terminal_failure.is_none() && (ffmpeg_exit_success || stop_requested)
 }
 
 fn should_begin_captioned_copy_render(requested: bool, caption_chunk_count: usize) -> bool {
@@ -10848,6 +10903,23 @@ mod tests {
 
         assert!(matches!(status.state, RecordingState::Idle));
         assert_eq!(status.output_path.as_deref(), Some("/tmp/videorc-test.mkv"));
+    }
+
+    #[test]
+    fn bridge_terminal_failure_prevents_successful_ffmpeg_exit_from_finalizing() {
+        assert!(should_finalize_recording_session(true, false, None));
+        assert!(should_finalize_recording_session(false, true, None));
+
+        assert!(!should_finalize_recording_session(
+            true,
+            false,
+            Some("recording raw-video encoder output stopped: FIFO timed out")
+        ));
+        assert!(!should_finalize_recording_session(
+            false,
+            true,
+            Some("recording raw-video encoder output stopped: FIFO timed out")
+        ));
     }
 
     #[test]

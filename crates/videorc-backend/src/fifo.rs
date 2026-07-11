@@ -189,7 +189,9 @@ pub fn open_writer(
     use std::os::windows::io::AsRawHandle;
     use std::sync::atomic::Ordering;
     use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, ERROR_PIPE_LISTENING, HANDLE};
-    use windows::Win32::System::Pipes::{ConnectNamedPipe, PIPE_READMODE_BYTE, PIPE_WAIT};
+    use windows::Win32::System::Pipes::{
+        ConnectNamedPipe, PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_WAIT,
+    };
 
     let owned = {
         let mut registry = pipe_registry()
@@ -222,13 +224,17 @@ pub fn open_writer(
         }
     }
 
-    // Always restore blocking writes, even when the Unix arm would honour
-    // `clear_nonblock = false`: a PIPE_NOWAIT write against a full buffer
-    // reports success with zero bytes written, which callers must treat as
-    // WriteZero corruption. Blocking writes on the dedicated writer threads
-    // degrade to reader backpressure instead.
-    let _ = clear_nonblock;
-    let mode = PIPE_READMODE_BYTE | PIPE_WAIT;
+    // Bounded media writers keep PIPE_NOWAIT so cancellation/deadline checks
+    // remain observable when FFmpeg stops draining. Windows reports a full
+    // byte pipe as a zero-byte write; their write loop treats that as transient
+    // pressure until its explicit deadline. Other FIFO users retain blocking
+    // behavior through `clear_nonblock = true`.
+    let wait_mode = if clear_nonblock {
+        PIPE_WAIT
+    } else {
+        PIPE_NOWAIT
+    };
+    let mode = PIPE_READMODE_BYTE | wait_mode;
     unsafe { SetNamedPipeHandleStateChecked(handle, mode) }?;
 
     Ok(File::from(owned))

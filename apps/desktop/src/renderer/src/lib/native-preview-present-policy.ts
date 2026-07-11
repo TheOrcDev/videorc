@@ -4,7 +4,10 @@ import type {
   PreviewSurfaceStatus,
   RecordingStatus
 } from './backend'
-import { isActiveRecordingState } from './format'
+import {
+  nativePreviewFramePollingShouldSuppress,
+  type NativePreviewFramePollingSuppressionInput
+} from './native-preview-surface-lifecycle'
 
 export type NativePreviewRendererTimingFields = Pick<
   PreviewSurfaceCompositorUpdateParams,
@@ -93,17 +96,14 @@ export function decideNativePreviewCompositorPresent(input: {
 
 export function buildNativePreviewCompositorUpdateParams(
   status: CompositorStatus,
-  recordingState: RecordingStatus['state'],
-  rendererTimingFields: NativePreviewRendererTimingFields
+  rendererTimingFields: NativePreviewRendererTimingFields,
+  framePolling: NativePreviewFramePollingSuppressionInput
 ): PreviewSurfaceCompositorUpdateParams {
-  const suppressFramePolling = isActiveRecordingState(recordingState)
-  return suppressFramePolling
-    ? {
-        ...status,
-        suppressFramePolling: true,
-        ...rendererTimingFields
-      }
-    : { ...status, ...rendererTimingFields }
+  return {
+    ...status,
+    suppressFramePolling: nativePreviewFramePollingShouldSuppress(framePolling),
+    ...rendererTimingFields
+  }
 }
 
 export function pendingCompositorStatusSupersedes(

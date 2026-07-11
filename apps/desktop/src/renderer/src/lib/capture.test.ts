@@ -33,6 +33,7 @@ import {
   previewDeviceRefreshSignature,
   persistableCaptureConfig,
   reconcileSourceSelection,
+  reconcileSourceSelectionForLayoutTransaction,
   resetAudioSyncCalibration,
   smokePreviewCompositorCaptureConfig,
   streamOutputVideoForTarget,
@@ -240,6 +241,28 @@ describe('reconcileSourceSelection', () => {
     expect(next.screenId).toBe('screen:screencapturekit:222')
     expect(next.screenName).toBe('Display 2')
     expect(next.windowId).toBeUndefined()
+  })
+
+  it('revalidates a stale persisted Windows source immediately before a layout transaction', () => {
+    const stale: SourceSelection = {
+      screenId: 'screen:legacy-desktop:0',
+      screenName: 'Old display'
+    }
+    const devices: Device[] = [
+      {
+        id: 'screen:dxgi:00000000000003f1:2',
+        name: 'Display 1',
+        kind: 'screen',
+        status: 'available'
+      }
+    ]
+
+    expect(reconcileSourceSelectionForLayoutTransaction(stale, devices)).toMatchObject({
+      screenId: 'screen:dxgi:00000000000003f1:2',
+      screenName: 'Display 1',
+      windowId: undefined,
+      windowName: undefined
+    })
   })
 
   it('keeps a legacy avfoundation screen source as a recording fallback when no native capture source is available', () => {

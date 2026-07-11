@@ -34,6 +34,8 @@ import {
   defaultBackgroundStyle,
   importIntoSlot,
   backgroundAssetDisplayUrl,
+  checkableBackgroundAssetPath,
+  markSlotMissingIfAssetMatches,
   markSlotStatus,
   removeSlotAsset,
   renameAsset,
@@ -94,12 +96,14 @@ export function AssetsTab(): ReactElement {
   const markMissing = (slotId: string): void => {
     const slot = registry.slots.find((entry) => entry.id === slotId)
     const asset = slot ? slotAsset(slot, registry) : null
-    const checkablePath =
-      asset?.kind === 'imported' && asset.assetPath?.startsWith('/') ? asset.assetPath : null
-    if (checkablePath && window.videorc?.backgroundAssetExists) {
+    const checkablePath = checkableBackgroundAssetPath(asset)
+    const checkedAssetId = asset?.id
+    if (checkablePath && checkedAssetId && window.videorc?.backgroundAssetExists) {
       void window.videorc.backgroundAssetExists(checkablePath).then((exists) => {
         if (!exists) {
-          setRegistry((current) => markSlotStatus(current, slotId, 'missing-file'))
+          setRegistry((current) =>
+            markSlotMissingIfAssetMatches(current, slotId, checkedAssetId, checkablePath)
+          )
         }
       })
       return

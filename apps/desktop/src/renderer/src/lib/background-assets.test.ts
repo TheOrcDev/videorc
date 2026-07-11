@@ -6,6 +6,7 @@ import {
   applySlot,
   backgroundAssetDisplayUrl,
   canApplySlot,
+  checkableBackgroundAssetPath,
   clearActiveSlot,
   createDefaultRegistry,
   createImportedAsset,
@@ -13,6 +14,7 @@ import {
   effectiveSceneBackground,
   importIntoSlot,
   markSlotStatus,
+  markSlotMissingIfAssetMatches,
   reconcileRegistry,
   removeSlotAsset,
   renameAsset,
@@ -325,6 +327,30 @@ describe('background asset import and editing', () => {
     expect(registry.activeSlotId).toBe('bg-02')
     expect(slotDisplayStatus(slotById(registry, 'bg-02'), registry)).toBe('missing-file')
   })
+
+  it('does not let a stale existence result mark a replacement asset missing', () => {
+    const first = importedAsset('a1', 'Sunset')
+    const replacement = importedAsset('a2', 'Ocean')
+    let registry = importIntoSlot(createDefaultRegistry(), 'bg-02', first)
+    registry = importIntoSlot(registry, 'bg-02', replacement)
+
+    const unchanged = markSlotMissingIfAssetMatches(
+      registry,
+      'bg-02',
+      first.id,
+      first.assetPath ?? ''
+    )
+    expect(unchanged).toBe(registry)
+    expect(slotById(unchanged, 'bg-02').status).toBe('ready')
+
+    const missing = markSlotMissingIfAssetMatches(
+      registry,
+      'bg-02',
+      replacement.id,
+      replacement.assetPath ?? ''
+    )
+    expect(slotById(missing, 'bg-02').status).toBe('missing-file')
+  })
 })
 
 describe('reconcileRegistry with imported assets', () => {
@@ -449,6 +475,49 @@ describe('backgroundAssetDisplayUrl', () => {
     expect(backgroundAssetDisplayUrl('C:\\Users\\me\\videorc\\background-assets\\abc.png')).toBe(
       'videorc-asset://background/abc.png'
     )
+    expect(backgroundAssetDisplayUrl('C:/Users/me/videorc/background-assets/abc.png')).toBe(
+      'videorc-asset://background/abc.png'
+    )
+    expect(
+      backgroundAssetDisplayUrl('\\\\server\\share\\videorc\\background-assets\\abc.png')
+    ).toBe('videorc-asset://background/abc.png')
+    expect(backgroundAssetDisplayUrl('//server/share/videorc/background-assets/abc.png')).toBe(
+      'videorc-asset://background/abc.png'
+    )
+  })
+
+  it('only exposes absolute imported files to the existence oracle', () => {
+    for (const assetPath of [
+      '/managed/abc.png',
+      'C:\\Users\\me\\videorc\\background-assets\\abc.png',
+      'C:/Users/me/videorc/background-assets/abc.png',
+      '\\\\server\\share\\videorc\\background-assets\\abc.png',
+      '//server/share/videorc/background-assets/abc.png'
+    ]) {
+      expect(checkableBackgroundAssetPath({ ...readyAsset('abc', 'ABC'), assetPath })).toBe(
+        assetPath
+      )
+    }
+
+    expect(
+      checkableBackgroundAssetPath({
+        ...readyAsset('abc', 'ABC'),
+        assetPath: 'C:background-assets\\abc.png'
+      })
+    ).toBeNull()
+    expect(
+      checkableBackgroundAssetPath({
+        ...readyAsset('abc', 'ABC'),
+        assetPath: 'background-assets/abc.png'
+      })
+    ).toBeNull()
+    expect(
+      checkableBackgroundAssetPath({
+        ...readyAsset('abc', 'ABC'),
+        kind: 'builtin',
+        assetPath: '/assets/backgrounds/abc.webp'
+      })
+    ).toBeNull()
   })
 
   it('encodes basenames safely', () => {
@@ -468,6 +537,7 @@ describe('backgroundAssetDisplayUrl', () => {
       'https://example.com/img.png',
       'file:///already/url.png',
       'videorc-asset://background/five.png',
+      'C:drive-relative.png',
       'plain-name.png'
     ]) {
       expect(backgroundAssetDisplayUrl(passthrough)).toBe(passthrough)

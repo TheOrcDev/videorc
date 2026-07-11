@@ -48,21 +48,60 @@ describe('native preview present policy', () => {
     ).toEqual({ kind: 'disabled' })
   })
 
-  it('suppresses frame polling during active recording states', () => {
+  it('keeps Windows proof-surface polling live in fallback compositor updates while recording', () => {
     expect(
-      buildNativePreviewCompositorUpdateParams(compositorStatus(), 'recording', {
-        nativePreviewRendererPollIntervalP95Ms: 17,
-        nativePreviewRendererPollRoundTripP95Ms: 4,
-        nativePreviewRendererPresentRoundTripP95Ms: 3,
-        nativePreviewRendererPollInFlightSkips: 2
-      })
+      buildNativePreviewCompositorUpdateParams(
+        compositorStatus(),
+        {
+          nativePreviewRendererPollIntervalP95Ms: 17,
+          nativePreviewRendererPollRoundTripP95Ms: 4,
+          nativePreviewRendererPresentRoundTripP95Ms: 3,
+          nativePreviewRendererPollInFlightSkips: 2
+        },
+        {
+          recordingActive: true,
+          windowOpen: true,
+          status: {
+            state: 'live',
+            transport: 'electron-proof-surface',
+            backing: 'electron-browser-window',
+            sourcePixelsPresent: true,
+            nativePreviewHostAttached: false,
+            nativePreviewHostKind: 'proof-surface'
+          }
+        }
+      )
     ).toMatchObject({
       framesRendered: 100,
-      suppressFramePolling: true,
+      suppressFramePolling: false,
       nativePreviewRendererPollIntervalP95Ms: 17,
       nativePreviewRendererPollRoundTripP95Ms: 4,
       nativePreviewRendererPresentRoundTripP95Ms: 3,
       nativePreviewRendererPollInFlightSkips: 2
+    })
+  })
+
+  it('still suppresses fallback polling when an attached CAMetalLayer owns recording pixels', () => {
+    expect(
+      buildNativePreviewCompositorUpdateParams(
+        compositorStatus(),
+        {},
+        {
+          recordingActive: true,
+          windowOpen: true,
+          status: {
+            state: 'live',
+            transport: 'native-surface',
+            backing: 'cametal-layer',
+            sourcePixelsPresent: true,
+            nativePreviewHostAttached: true,
+            nativePreviewHostKind: 'in-process'
+          }
+        }
+      )
+    ).toMatchObject({
+      framesRendered: 100,
+      suppressFramePolling: true
     })
   })
 

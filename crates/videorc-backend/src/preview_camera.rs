@@ -38,6 +38,8 @@ const CAMERA_OVERLAY_CAPTURE_MIN_WIDTH: u32 = 1280;
 const CAMERA_OVERLAY_CAPTURE_MIN_HEIGHT: u32 = 720;
 const CAMERA_CAPTURE_CPU_COPY_ENV: &str = "VIDEORC_CAMERA_CAPTURE_CPU_COPY";
 const WINDOWS_CAMERA_PREVIEW_STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_CAMERA_RATE_CAP_EPSILON_SECONDS: f64 = 0.000_001;
 
 fn native_camera_preview_thread_startup_timeout() -> Duration {
     if cfg!(target_os = "windows") {
@@ -1341,12 +1343,25 @@ fn windows_camera_preview_ffmpeg_args_opts(
         &config.unique_id,
         request_fps,
     );
+    let mut filters = Vec::with_capacity(3);
+    if request_fps.is_none() {
+        // The retry lets dshow negotiate a native cadence. Cap devices whose
+        // default exceeds the session target without manufacturing duplicates
+        // for 10/15/25fps cameras (the `fps` filter does both).
+        filters.push(format!(
+            "select='isnan(prev_selected_t)+gte(t-prev_selected_t+{WINDOWS_CAMERA_RATE_CAP_EPSILON_SECONDS:.6}\\,1/{fps})'"
+        ));
+    }
+    filters.push(format!(
+        "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+    ));
+    filters.push("format=bgra".to_string());
     args.extend([
         "-an".to_string(),
         "-vf".to_string(),
-        format!(
-            "fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=bgra"
-        ),
+        filters.join(","),
+        "-fps_mode".to_string(),
+        "passthrough".to_string(),
         "-f".to_string(),
         "rawvideo".to_string(),
         "-pix_fmt".to_string(),
@@ -1597,17 +1612,16 @@ mod windows {
             spawn_stop_flag_killer(Arc::clone(&child), Arc::clone(&done), Arc::clone(stop_flag));
 
         let mut startup_sent = false;
-        let mut buffer = vec![0; frame_len];
+        let mut buffer = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .frame_store
+            .checkout_overwrite_buffer(frame_len);
         let mut outcome = CameraPreviewAttempt::FailedBeforeFirstFrame;
         loop {
             match stdout.read_exact(&mut buffer) {
                 Ok(()) => {
-                    publish_bgra_frame(
-                        shared,
-                        width,
-                        height,
-                        std::mem::replace(&mut buffer, vec![0; frame_len]),
-                    );
+                    buffer = publish_bgra_frame(shared, width, height, buffer);
                     if !startup_sent {
                         let _ = startup_tx.send(NativeCameraStartup::Live {
                             requested_width: width,
@@ -1699,10 +1713,11 @@ mod windows {
         width: u32,
         height: u32,
         bytes: Vec<u8>,
-    ) {
+    ) -> Vec<u8> {
         let callback_started_at = Instant::now();
         let publish_started_at = Instant::now();
-        let frame_bytes = bytes.len() as u64;
+        let frame_len = bytes.len();
+        let frame_bytes = frame_len as u64;
         let mut guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1730,10 +1745,12 @@ mod windows {
             now,
             bytes,
         );
+        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard
             .capture_timings
             .record_valid_frame(0.0, 0.0, publish_ms, frame_bytes);
+        next_buffer
     }
 
     fn stderr_suffix(stderr: &Arc<StdMutex<Vec<u8>>>) -> String {
@@ -2765,9 +2782,61 @@ mod tests {
                 .any(|pair| pair == ["-i", "video=USB Camera"])
         );
         assert!(args.iter().any(|arg| arg.contains("scale=1920:1080")));
+        assert!(!args.iter().any(|arg| arg.starts_with("fps=")));
         assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "bgra"]));
         assert!(args.windows(2).any(|pair| pair == ["-f", "rawvideo"]));
         assert_eq!(args.last().map(String::as_str), Some("-"));
+    }
+
+    #[test]
+    fn windows_camera_default_format_retry_caps_high_fps_without_duplicating_low_fps() {
+        fn selected_frame_count(source_fps: u32, target_fps: u32) -> usize {
+            let mut previous_selected_t = None;
+            let mut selected = 0;
+            for frame_index in 0..source_fps {
+                let timestamp = f64::from(frame_index) / f64::from(source_fps);
+                let should_select = previous_selected_t.is_none_or(|previous| {
+                    timestamp - previous + WINDOWS_CAMERA_RATE_CAP_EPSILON_SECONDS
+                        >= 1.0 / f64::from(target_fps)
+                });
+                if should_select {
+                    previous_selected_t = Some(timestamp);
+                    selected += 1;
+                }
+            }
+            selected
+        }
+
+        let config = NativeCameraPreviewConfig {
+            camera_id: "camera:windows-dshow:5553422043616d657261".to_string(),
+            unique_id: "USB Camera".to_string(),
+            ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
+            video: test_video(),
+            layout: test_layout(false),
+        };
+
+        let args = windows_camera_preview_ffmpeg_args_opts(&config, 1920, 1080, 30, None);
+        let filter = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-vf").then_some(pair[1].as_str()))
+            .expect("video filter");
+
+        assert!(!args.iter().any(|arg| arg == "-framerate"));
+        assert!(filter.contains("select='isnan(prev_selected_t)"));
+        assert!(filter.contains("gte(t-prev_selected_t+0.000001\\,1/30)"));
+        assert!(!filter.starts_with("fps="));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-fps_mode", "passthrough"])
+        );
+        assert_eq!(selected_frame_count(60, 30), 30);
+        assert_eq!(selected_frame_count(15, 30), 15);
+
+        let just_below_boundary = (1.0 / 30.0) - (WINDOWS_CAMERA_RATE_CAP_EPSILON_SECONDS / 2.0);
+        assert!(
+            just_below_boundary + WINDOWS_CAMERA_RATE_CAP_EPSILON_SECONDS >= 1.0 / 30.0,
+            "the epsilon must retain a frame whose timestamp rounds just below the boundary"
+        );
     }
 
     #[test]

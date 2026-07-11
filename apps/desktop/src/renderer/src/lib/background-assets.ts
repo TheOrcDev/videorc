@@ -433,18 +433,33 @@ export function removeSlotAsset(
  */
 export function backgroundAssetDisplayUrl(path: string): string {
   if (
-    /^(blob|data|file|https?|videorc-asset):/.test(path) ||
+    /^(blob|data|file|https?|videorc-asset):/i.test(path) ||
     path.startsWith('/assets/') ||
     path.startsWith('/src/') ||
     path.startsWith('./') ||
     path.startsWith('../') ||
-    (!path.startsWith('/') && !/^[A-Za-z]:/.test(path))
+    !isAbsoluteBackgroundAssetPath(path)
   ) {
     return path
   }
   const normalized = path.replace(/\\/g, '/')
   const baseName = normalized.slice(normalized.lastIndexOf('/') + 1)
   return `videorc-asset://background/${encodeURIComponent(baseName)}`
+}
+
+/** Browser-safe absolute-path detection for paths returned by Electron. */
+export function isAbsoluteBackgroundAssetPath(path: string): boolean {
+  return (
+    path.startsWith('/') ||
+    /^[A-Za-z]:[\\/]/.test(path) ||
+    /^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(path)
+  )
+}
+
+/** Only imported absolute files are safe and useful for the main-process existence oracle. */
+export function checkableBackgroundAssetPath(asset: BackgroundAsset | null): string | null {
+  const path = asset?.assetPath
+  return asset?.kind === 'imported' && path && isAbsoluteBackgroundAssetPath(path) ? path : null
 }
 
 // Set a slot's intrinsic status — used when an <img> fails to load to surface
@@ -465,6 +480,25 @@ export function markSlotStatus(
       (entry): BackgroundAssetSlot => (entry.id === slotId ? { ...entry, status } : entry)
     )
   }
+}
+
+/** Apply an async missing-file result only while the checked asset still owns the slot. */
+export function markSlotMissingIfAssetMatches(
+  registry: BackgroundAssetRegistry,
+  slotId: string,
+  expectedAssetId: string,
+  expectedAssetPath: string
+): BackgroundAssetRegistry {
+  const slot = registry.slots.find((entry) => entry.id === slotId)
+  const currentAsset = slot ? slotAsset(slot, registry) : null
+  if (
+    currentAsset?.id !== expectedAssetId ||
+    currentAsset.assetPath !== expectedAssetPath ||
+    currentAsset.kind !== 'imported'
+  ) {
+    return registry
+  }
+  return markSlotStatus(registry, slotId, 'missing-file')
 }
 
 function numberOr(value: unknown, fallback: number): number {
