@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { summarizeNativePreviewRecordingDiagnostics } from './native-preview-diagnostics.mjs'
+import {
+  resolveNativePreviewLatencyBudgets,
+  summarizeNativePreviewRecordingDiagnostics
+} from './native-preview-diagnostics.mjs'
 
 const baseOptions = {
   targetFps: 30,
@@ -11,6 +14,54 @@ const baseOptions = {
   expectedSurfaceTransport: 'electron-proof-surface',
   expectedSurfaceBacking: 'electron-browser-window'
 }
+
+test('native preview latency budgets distinguish native Metal from contained proof polling', () => {
+  const configured = {
+    configuredP95Ms: 50,
+    configuredP99Ms: 100
+  }
+
+  assert.deepEqual(
+    resolveNativePreviewLatencyBudgets({
+      ...configured,
+      expectNativeMetalPreview: true,
+      exerciseProofFramePolling: true
+    }),
+    { p95Ms: 50, p99Ms: 100 }
+  )
+  assert.deepEqual(
+    resolveNativePreviewLatencyBudgets({
+      ...configured,
+      expectNativeMetalPreview: false,
+      exerciseProofFramePolling: false
+    }),
+    { p95Ms: 50, p99Ms: 100 }
+  )
+  assert.deepEqual(
+    resolveNativePreviewLatencyBudgets({
+      ...configured,
+      expectNativeMetalPreview: false,
+      exerciseProofFramePolling: true
+    }),
+    { p95Ms: 100, p99Ms: 150 }
+  )
+  assert.deepEqual(
+    resolveNativePreviewLatencyBudgets({
+      ...configured,
+      sourceCompleteScene: true
+    }),
+    { p95Ms: 100, p99Ms: 150 }
+  )
+  assert.deepEqual(
+    resolveNativePreviewLatencyBudgets({
+      configuredP95Ms: 125,
+      configuredP99Ms: 200,
+      expectNativeMetalPreview: false,
+      exerciseProofFramePolling: true
+    }),
+    { p95Ms: 125, p99Ms: 200 }
+  )
+})
 
 test('native preview diagnostics summarize only steady active recording samples when available', () => {
   const summary = summarizeNativePreviewRecordingDiagnostics(

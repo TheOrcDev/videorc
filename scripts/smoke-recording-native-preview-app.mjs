@@ -7,7 +7,10 @@ import { assertEncoderBridgeVideoOutputHealthy } from './lib/encoder-bridge-outp
 import { performanceAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
 import { assertSourceCompleteCompositorHealthy } from './lib/native-preview-source-gates.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
-import { summarizeNativePreviewRecordingDiagnostics } from './lib/native-preview-diagnostics.mjs'
+import {
+  resolveNativePreviewLatencyBudgets,
+  summarizeNativePreviewRecordingDiagnostics
+} from './lib/native-preview-diagnostics.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 import {
@@ -68,6 +71,13 @@ const expectedSurfaceBacking = expectNativeMetalPreview
   ? 'cametal-layer'
   : 'electron-browser-window'
 const exerciseProofFramePolling = process.env.VIDEORC_NATIVE_PREVIEW_EXERCISE_PROOF_POLLING === '1'
+const previewLatencyBudgets = resolveNativePreviewLatencyBudgets({
+  configuredP95Ms: maxPreviewInputToPresentLatencyP95Ms,
+  configuredP99Ms: maxPreviewInputToPresentLatencyP99Ms,
+  sourceCompleteScene,
+  expectNativeMetalPreview,
+  exerciseProofFramePolling
+})
 
 const visibleScenarios = [
   ...(process.env.VIDEORC_NATIVE_PREVIEW_INCLUDE_1440 === '1'
@@ -739,15 +749,11 @@ function nativeMeasurementMaxIntervalP95Ms() {
 }
 
 function previewInputToPresentP95BudgetMs() {
-  return sourceCompleteScene
-    ? Math.max(maxPreviewInputToPresentLatencyP95Ms, 100)
-    : maxPreviewInputToPresentLatencyP95Ms
+  return previewLatencyBudgets.p95Ms
 }
 
 function previewInputToPresentP99BudgetMs() {
-  return sourceCompleteScene
-    ? Math.max(maxPreviewInputToPresentLatencyP99Ms, 150)
-    : maxPreviewInputToPresentLatencyP99Ms
+  return previewLatencyBudgets.p99Ms
 }
 
 function formatBridgeCopySummary(stats) {

@@ -1,3 +1,23 @@
+export function resolveNativePreviewLatencyBudgets({
+  configuredP95Ms,
+  configuredP99Ms,
+  sourceCompleteScene = false,
+  expectNativeMetalPreview = true,
+  exerciseProofFramePolling = false
+}) {
+  const usesContainedProofSurface =
+    !expectNativeMetalPreview && exerciseProofFramePolling
+  const usesExpandedBudget = sourceCompleteScene || usesContainedProofSurface
+
+  // The Electron proof surface shares renderer/main-loop scheduling and is not
+  // governed by the CAMetal presenter contract. Keep it firmly bounded while
+  // the smoke separately proves advancing, fresh source pixels and no blanks.
+  return {
+    p95Ms: usesExpandedBudget ? Math.max(configuredP95Ms, 100) : configuredP95Ms,
+    p99Ms: usesExpandedBudget ? Math.max(configuredP99Ms, 150) : configuredP99Ms
+  }
+}
+
 export function summarizeNativePreviewRecordingDiagnostics(
   samples,
   {
