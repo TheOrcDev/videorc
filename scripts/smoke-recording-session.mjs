@@ -3,8 +3,12 @@ import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
+import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 
-const SMOKE_VIDEO_FPS = 30
+const SMOKE_VIDEO_FPS = positiveInteger(process.env.VIDEORC_SMOKE_VIDEO_FPS, 30)
+const SMOKE_VIDEO_WIDTH = positiveInteger(process.env.VIDEORC_SMOKE_VIDEO_WIDTH, 640)
+const SMOKE_VIDEO_HEIGHT = positiveInteger(process.env.VIDEORC_SMOKE_VIDEO_HEIGHT, 360)
+const SMOKE_VIDEO_BITRATE_KBPS = positiveInteger(process.env.VIDEORC_SMOKE_VIDEO_BITRATE_KBPS, 2000)
 const TEST_PATTERN_GATES = Object.freeze({
   // Synthetic source/layout smoke proves file health and timing. Some synthetic
   // layouts are intentionally static, so motion artifacts remain warnings here.
@@ -144,6 +148,16 @@ async function recordScenario({
   if (!quality.verdict.pass) {
     throw new Error(
       `[${scenario.label}] Recording quality gate failed: ${quality.verdict.failures.join('; ')} ` +
+        `(report: ${reportPaths.mdPath})`
+    )
+  }
+  const durationFailures = evaluateRecordingWallDuration({
+    expectedDurationMs: recordingMs,
+    actualDurationSeconds: quality.metrics.durationSeconds
+  })
+  if (durationFailures.length > 0) {
+    throw new Error(
+      `[${scenario.label}] Recording duration gate failed: ${durationFailures.join('; ')} ` +
         `(report: ${reportPaths.mdPath})`
     )
   }
@@ -330,10 +344,10 @@ function sessionParams({ outputDirectory, ffmpegPath, preset = 'screen-camera', 
       ffmpegPath,
       video: {
         preset: 'custom',
-        width: 640,
-        height: 360,
-        fps: 30,
-        bitrateKbps: 2000
+        width: SMOKE_VIDEO_WIDTH,
+        height: SMOKE_VIDEO_HEIGHT,
+        fps: SMOKE_VIDEO_FPS,
+        bitrateKbps: SMOKE_VIDEO_BITRATE_KBPS
       },
       rtmp: {
         preset: 'custom',
@@ -343,6 +357,11 @@ function sessionParams({ outputDirectory, ffmpegPath, preset = 'screen-camera', 
     },
     scene: background ? sceneWithAssetBackground(background) : undefined
   }
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
 function sceneWithAssetBackground(background) {

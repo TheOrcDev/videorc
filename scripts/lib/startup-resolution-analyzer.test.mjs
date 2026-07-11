@@ -17,12 +17,24 @@ import {
   parseBlackframe,
   parseCropdetect,
   renderStartupMarkdownReport,
+  startupReportBaseName,
   summarizeDimensionRuns,
 } from './startup-resolution-analyzer.mjs'
 import { ffmpegAvailable } from './ffmpeg-available.mjs'
 
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
+
+describe('startupReportBaseName', () => {
+  it('extracts a report stem from an absolute Windows path on every host', () => {
+    assert.equal(
+      startupReportBaseName(
+        String.raw`D:\a\_temp\videorc-windows-preview-recording-smoke\videorc-session-20260711-230120.mp4`
+      ),
+      'videorc-session-20260711-230120'
+    )
+  })
+})
 
 describe('parseBlackframe', () => {
   it('parses frame number, pblack and timestamp', () => {

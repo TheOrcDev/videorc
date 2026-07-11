@@ -4,11 +4,15 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
 import { assertEncoderBridgeVideoOutputHealthy } from './lib/encoder-bridge-output-gates.mjs'
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { performanceAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
 import { assertSourceCompleteCompositorHealthy } from './lib/native-preview-source-gates.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
-import { summarizeNativePreviewRecordingDiagnostics } from './lib/native-preview-diagnostics.mjs'
+import {
+  resolveNativePreviewLatencyBudgets,
+  summarizeNativePreviewRecordingDiagnostics
+} from './lib/native-preview-diagnostics.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
+import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 import {
   analyzeStartupResolution,
   writeStartupReports
@@ -66,6 +70,14 @@ const expectedSurfaceTransport = expectNativeMetalPreview
 const expectedSurfaceBacking = expectNativeMetalPreview
   ? 'cametal-layer'
   : 'electron-browser-window'
+const exerciseProofFramePolling = process.env.VIDEORC_NATIVE_PREVIEW_EXERCISE_PROOF_POLLING === '1'
+const previewLatencyBudgets = resolveNativePreviewLatencyBudgets({
+  configuredP95Ms: maxPreviewInputToPresentLatencyP95Ms,
+  configuredP99Ms: maxPreviewInputToPresentLatencyP99Ms,
+  sourceCompleteScene,
+  expectNativeMetalPreview,
+  exerciseProofFramePolling
+})
 
 const visibleScenarios = [
   ...(process.env.VIDEORC_NATIVE_PREVIEW_INCLUDE_1440 === '1'
@@ -209,7 +221,7 @@ async function runNativePreviewRecordingScenario(
   }
   await assertSameRunningSession(ws, started.sessionId)
   await waitForActiveSceneDiagnostics(ws, activeSceneRevision, 'record')
-  if (expectsPreview) {
+  if (expectsPreview && expectNativeMetalPreview) {
     const pumpReconnect = await smokeCommand(smoke, 'exercise-main-present-pump-reconnect')
     assertMainPumpReconnectDuringRecording(scenario, pumpReconnect)
   }
@@ -664,13 +676,17 @@ function assertNativeMeasurement(scenario, measurement) {
   const maxMeasurementIntervalP95Ms = nativeMeasurementMaxIntervalP95Ms()
   const maxInputToPresentP95Ms = previewInputToPresentP95BudgetMs()
   const maxInputToPresentP99Ms = previewInputToPresentP99BudgetMs()
+  const requireAnimationCadence = expectNativeMetalPreview || !exerciseProofFramePolling
 
-  if ((measurement.measuredFps ?? 0) < minMeasurementFps) {
+  if (requireAnimationCadence && (measurement.measuredFps ?? 0) < minMeasurementFps) {
     throw new Error(
       `Native preview measured ${format(measurement.measuredFps)}fps, below ${format(minMeasurementFps)}.`
     )
   }
-  if ((measurement.intervalP95Ms ?? Number.POSITIVE_INFINITY) > maxMeasurementIntervalP95Ms) {
+  if (
+    requireAnimationCadence &&
+    (measurement.intervalP95Ms ?? Number.POSITIVE_INFINITY) > maxMeasurementIntervalP95Ms
+  ) {
     throw new Error(
       `Native preview p95 interval ${format(measurement.intervalP95Ms)}ms exceeded ${format(maxMeasurementIntervalP95Ms)}ms.`
     )
@@ -702,6 +718,26 @@ function assertNativeMeasurement(scenario, measurement) {
   if ((measurement.blankFrames ?? 0) > 0) {
     throw new Error(`Native preview reported ${measurement.blankFrames} blank frame(s).`)
   }
+  if (!expectNativeMetalPreview && exerciseProofFramePolling) {
+    if ((measurement.sourceFrameDelta ?? 0) < 2) {
+      throw new Error(
+        `Windows proof preview source frames did not advance during recording: delta ${measurement.sourceFrameDelta ?? 0}.`
+      )
+    }
+    if (measurement.framePollingIntervalMs !== 125 || measurement.framePollingMaxWidth !== 960) {
+      throw new Error(
+        `Windows recording preview did not apply the contained 125ms/960px polling profile: ${JSON.stringify({ intervalMs: measurement.framePollingIntervalMs, maxWidth: measurement.framePollingMaxWidth })}`
+      )
+    }
+    if (
+      (measurement.freshSourceLayerCount ?? 0) <= 0 ||
+      (measurement.sourceFrameAgeMs ?? Number.POSITIVE_INFINITY) > 1500
+    ) {
+      throw new Error(
+        `Windows proof preview source liveness failed during recording: ${JSON.stringify({ freshLayers: measurement.freshSourceLayerCount, sourceFrameAgeMs: measurement.sourceFrameAgeMs })}`
+      )
+    }
+  }
 }
 
 function nativeMeasurementMinFps(scenario) {
@@ -713,15 +749,11 @@ function nativeMeasurementMaxIntervalP95Ms() {
 }
 
 function previewInputToPresentP95BudgetMs() {
-  return sourceCompleteScene
-    ? Math.max(maxPreviewInputToPresentLatencyP95Ms, 100)
-    : maxPreviewInputToPresentLatencyP95Ms
+  return previewLatencyBudgets.p95Ms
 }
 
 function previewInputToPresentP99BudgetMs() {
-  return sourceCompleteScene
-    ? Math.max(maxPreviewInputToPresentLatencyP99Ms, 150)
-    : maxPreviewInputToPresentLatencyP99Ms
+  return previewLatencyBudgets.p99Ms
 }
 
 function formatBridgeCopySummary(stats) {
@@ -751,6 +783,13 @@ function assertRecordingDurationHealthy(scenario, report, expectedDurationMs) {
   const duration = report.metrics.durationSeconds
   if (!Number.isFinite(duration)) {
     throw new Error(`[${scenario.label}] Final recording duration was unavailable.`)
+  }
+  const wallDurationFailures = evaluateRecordingWallDuration({
+    expectedDurationMs,
+    actualDurationSeconds: duration
+  })
+  if (wallDurationFailures.length > 0) {
+    throw new Error(`[${scenario.label}] ${wallDurationFailures.join('; ')}`)
   }
   const toleranceSeconds = 1.5
   if (
@@ -815,7 +854,7 @@ function assertStatsHealthyStrict(scenario, stats, reports = {}, options = {}) {
   if (stats.droppedFrames > 0) {
     throw new Error(`[${scenario.label}] FFmpeg reported ${stats.droppedFrames} dropped frame(s).`)
   }
-  if ((stats.maxEncoderBridgeMetalTargetFrames ?? 0) <= 0) {
+  if (expectNativeMetalPreview && (stats.maxEncoderBridgeMetalTargetFrames ?? 0) <= 0) {
     throw new Error(
       `[${scenario.label}] Recording diagnostics never observed IOSurface-backed Metal target frames.`
     )
@@ -1065,15 +1104,27 @@ function launchAndReadConnections() {
       rejectConnections(new Error(`Timed out waiting for smoke connections after ${timeoutMs}ms.`))
     }, timeoutMs)
     const connections = { backend: null, smoke: null }
+    const packagedSpawnSpec = performanceAppSpawnSpec()
+    const spawnCommand = packagedSpawnSpec?.command ?? 'pnpm'
+    const spawnArgs = packagedSpawnSpec?.args ?? ['dev']
 
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
-      detached: true,
+    appProcess = spawn(spawnCommand, spawnArgs, {
+      cwd: packagedSpawnSpec?.cwd ?? repoRoot,
+      // Windows loses the pnpm child's marker pipes when launched as a detached
+      // process group. A packaged executable also launches directly without a
+      // shell, avoiding a redundant debug Rust build in the Windows installer
+      // job. stopProcess uses taskkill there, so detachment is only needed for
+      // Unix process-group cleanup.
+      detached: process.platform !== 'win32',
+      shell: process.platform === 'win32' && !packagedSpawnSpec,
       env: smokeAppEnv({
         VIDEORC_USER_DATA_DIR: userDataDir,
         VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
         VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
-        VIDEORC_SMOKE_PREVIEW_MOTION: '1',
+        VIDEORC_SMOKE_COMMAND_SERVER: '1',
+        ...(exerciseProofFramePolling
+          ? { VIDEORC_SMOKE_PREVIEW_FRAME_POLLING: '1' }
+          : { VIDEORC_SMOKE_PREVIEW_MOTION: '1' }),
         VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
       }),
       stdio: ['ignore', 'pipe', 'pipe']

@@ -30,6 +30,7 @@ const ffmpegPath =
   process.env.VIDEORC_SMOKE_FFMPEG_PATH ??
   (existsSync(bundledFfmpegPath) ? bundledFfmpegPath : 'ffmpeg')
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 45000)
+const recordingMs = Number(process.env.VIDEORC_SMOKE_RECORDING_MS ?? 2000)
 const launchAttempts = Number(process.env.VIDEORC_PACKAGED_SMOKE_LAUNCH_ATTEMPTS ?? 2)
 
 if (!existsSync(appExecutable)) {
@@ -45,6 +46,7 @@ try {
     ffmpegPath,
     outputDirectory,
     timeoutMs,
+    recordingMs,
     label: 'Packaged app',
     onHealth: async () => {
       if (

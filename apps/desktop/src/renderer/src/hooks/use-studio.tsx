@@ -2094,7 +2094,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Late-bound mirror so applyRecordingStatus (declared earlier) can trigger the
   // consolidated frame-polling suppression defined with the preview window state.
   const syncFramePollingSuppressionRef = useRef<(() => void) | null>(null)
-  const nativePreviewFramePollingSuppressionRequestedRef = useRef<boolean | null>(null)
+  const nativePreviewFramePollingRequestKeyRef = useRef<string | null>(null)
   const nativePreviewCameraKeyRef = useRef<string | null>(null)
   const nativePreviewScreenKeyRef = useRef<string | null>(null)
   const nativePreviewCommittedSceneRef = useRef<{
@@ -5426,25 +5426,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     ) {
       return
     }
+    const recordingActive = isActiveRecordingState(recordingRef.current.state)
     const suppress = nativePreviewFramePollingShouldSuppress({
-      recordingActive: isActiveRecordingState(recordingRef.current.state),
+      recordingActive,
       windowOpen: previewWindowRef.current.open,
       status: previewSurfaceStatusRef.current
     })
-    if (nativePreviewFramePollingSuppressionRequestedRef.current === suppress) {
+    const requestKey = `${suppress}:${recordingActive}`
+    if (nativePreviewFramePollingRequestKeyRef.current === requestKey) {
       return
     }
-    nativePreviewFramePollingSuppressionRequestedRef.current = suppress
+    nativePreviewFramePollingRequestKeyRef.current = requestKey
     void window.videorc
-      .setNativePreviewSurfaceFramePollingSuppressed(suppress)
+      .setNativePreviewSurfaceFramePollingSuppressed(suppress, recordingActive)
       .then((status) => {
-        if (nativePreviewFramePollingSuppressionRequestedRef.current === suppress) {
+        if (nativePreviewFramePollingRequestKeyRef.current === requestKey) {
           applyPreviewSurfaceStatus(status)
         }
       })
       .catch((error: unknown) => {
-        if (nativePreviewFramePollingSuppressionRequestedRef.current === suppress) {
-          nativePreviewFramePollingSuppressionRequestedRef.current = null
+        if (nativePreviewFramePollingRequestKeyRef.current === requestKey) {
+          nativePreviewFramePollingRequestKeyRef.current = null
         }
         console.error('Native preview frame-polling suppression failed:', error)
       })
