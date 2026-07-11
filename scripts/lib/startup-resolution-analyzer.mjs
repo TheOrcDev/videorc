@@ -337,7 +337,7 @@ export async function runStartupCropdetect(filePath, { ffmpegPath = 'ffmpeg', fr
 export async function writeStartupThumbnailSheet(report, { ffmpegPath = 'ffmpeg', outDir } = {}) {
   const dir = outDir ?? dirname(report.file)
   mkdirSync(dir, { recursive: true })
-  const base = report.file.split('/').pop().replace(/\.[^.]+$/, '')
+  const base = startupReportBaseName(report.file)
   const imagePath = join(dir, `${base}.startup-thumbnails.jpg`)
   const columns = 10
   const rows = Math.ceil(report.metrics.hashes.length / columns) || 1
