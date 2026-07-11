@@ -211,7 +211,7 @@ async function runNativePreviewRecordingScenario(
   }
   await assertSameRunningSession(ws, started.sessionId)
   await waitForActiveSceneDiagnostics(ws, activeSceneRevision, 'record')
-  if (expectsPreview) {
+  if (expectsPreview && expectNativeMetalPreview) {
     const pumpReconnect = await smokeCommand(smoke, 'exercise-main-present-pump-reconnect')
     assertMainPumpReconnectDuringRecording(scenario, pumpReconnect)
   }
