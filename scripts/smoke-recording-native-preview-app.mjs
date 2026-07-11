@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
 import { assertEncoderBridgeVideoOutputHealthy } from './lib/encoder-bridge-output-gates.mjs'
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { performanceAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
 import { assertSourceCompleteCompositorHealthy } from './lib/native-preview-source-gates.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { summarizeNativePreviewRecordingDiagnostics } from './lib/native-preview-diagnostics.mjs'
@@ -1094,14 +1094,19 @@ function launchAndReadConnections() {
       rejectConnections(new Error(`Timed out waiting for smoke connections after ${timeoutMs}ms.`))
     }, timeoutMs)
     const connections = { backend: null, smoke: null }
+    const packagedSpawnSpec = performanceAppSpawnSpec()
+    const spawnCommand = packagedSpawnSpec?.command ?? 'pnpm'
+    const spawnArgs = packagedSpawnSpec?.args ?? ['dev']
 
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
+    appProcess = spawn(spawnCommand, spawnArgs, {
+      cwd: packagedSpawnSpec?.cwd ?? repoRoot,
       // Windows loses the pnpm child's marker pipes when launched as a detached
-      // process group. stopProcess uses taskkill there, so detachment is only
-      // needed for Unix process-group cleanup.
+      // process group. A packaged executable also launches directly without a
+      // shell, avoiding a redundant debug Rust build in the Windows installer
+      // job. stopProcess uses taskkill there, so detachment is only needed for
+      // Unix process-group cleanup.
       detached: process.platform !== 'win32',
-      shell: process.platform === 'win32',
+      shell: process.platform === 'win32' && !packagedSpawnSpec,
       env: smokeAppEnv({
         VIDEORC_USER_DATA_DIR: userDataDir,
         VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,

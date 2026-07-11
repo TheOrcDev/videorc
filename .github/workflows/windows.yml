@@ -121,6 +121,7 @@ jobs:
       - name: Verify Windows preview stays live while recording
         run: pnpm smoke:recording-native-preview
         env:
+          VIDEORC_PERF_APP_EXECUTABLE: apps/desktop/release/win-unpacked/Videorc.exe
           VIDEORC_SMOKE_OUTPUT_DIR: ${{ runner.temp }}/videorc-windows-preview-recording-smoke
           VIDEORC_SMOKE_FFMPEG_PATH: ${{ github.workspace }}\apps\desktop\release\win-unpacked\resources\ffmpeg\bin\ffmpeg.exe
           VIDEORC_SMOKE_FFPROBE_PATH: ${{ github.workspace }}\apps\desktop\release\win-unpacked\resources\ffmpeg\bin\ffprobe.exe
