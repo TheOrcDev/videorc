@@ -128,3 +128,39 @@ export function matchMicrophoneDeviceId(
     return label.length > 0 && (label.includes(wanted) || wanted.includes(label))
   })?.deviceId
 }
+
+export const MIC_CLIP_THRESHOLD_DB = -1
+export const MIC_CLIP_HOLD_MS = 1500
+
+/**
+ * Clip-hold deadline: a peak at/above the clip threshold arms (or extends)
+ * the indicator for MIC_CLIP_HOLD_MS; quieter peaks leave the running
+ * deadline untouched so a brief hot transient stays visible.
+ */
+export function advanceClipHoldDeadline(
+  deadline: number,
+  peakDb: number | null,
+  now: number
+): number {
+  if (peakDb !== null && peakDb >= MIC_CLIP_THRESHOLD_DB) {
+    return now + MIC_CLIP_HOLD_MS
+  }
+  return deadline
+}
+
+/**
+ * Deterministic band heights for the coarse fallback meter paths (backend
+ * 1 Hz level, on-demand sample): a center-weighted hump scaled by the real
+ * level — never fake noise. The center band equals the level exactly.
+ */
+export function fallbackBandLevels(level: number, bands: number): number[] {
+  if (bands <= 0) {
+    return []
+  }
+  const clamped = Math.min(1, Math.max(0, level))
+  const center = (bands - 1) / 2
+  return Array.from({ length: bands }, (_, index) => {
+    const distance = center === 0 ? 0 : Math.abs(index - center) / center
+    return clamped * (1 - 0.6 * distance)
+  })
+}
