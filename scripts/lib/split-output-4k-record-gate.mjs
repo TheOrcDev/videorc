@@ -3,15 +3,19 @@ export const SPLIT_OUTPUT_4K_RECORD_GATES = Object.freeze({
     width: 3840,
     height: 2160,
     fps: 30,
-    bitrateKbps: 30000,
+    bitrateKbps: 30000
   }),
   stream: Object.freeze({
     width: 1920,
     height: 1080,
     fps: 30,
-    maxBitrateKbps: 6000,
+    maxBitrateKbps: 6000
   }),
   activeVideoToolboxOutputEncoders: 2,
+  maxRecordingQueueDepth: 16,
+  maxRecordingQueueOldestFrameAgeMs: 250,
+  maxStreamQueueDepth: 8,
+  maxStreamQueueOldestFrameAgeMs: 150
 })
 
 export function evaluateSplitOutput4kRecordEvidence(
@@ -63,9 +67,7 @@ export function evaluateSplitOutput4kRecordEvidence(
   if (result.startupPass !== true) {
     failures.push('local recording startup-resolution gate failed')
   }
-  if (
-    !['record-stream-split-output', '4k-accepted'].includes(result.mediaQualityMode)
-  ) {
+  if (!['record-stream-split-output', '4k-accepted'].includes(result.mediaQualityMode)) {
     failures.push(
       `media quality mode ${formatValue(result.mediaQualityMode)} did not prove split output`
     )
@@ -115,6 +117,24 @@ export function evaluateSplitOutput4kRecordEvidence(
     0
   )
   requirePositive(failures, 'zero-copy frames', diagnostics.encoderBridgeZeroCopyFrames)
+  requireQueueContract(failures, diagnostics, 'recording', {
+    depth: 'encoderBridgeRecordingQueueDepth',
+    oldestAge: 'encoderBridgeRecordingQueueOldestFrameAgeMs',
+    pressure: 'encoderBridgeRecordingQueueCapacityPressureEvents',
+    dropped: 'encoderBridgeRecordingQueueDroppedFrames',
+    maxDepth: gates.maxRecordingQueueDepth,
+    maxOldestAgeMs: gates.maxRecordingQueueOldestFrameAgeMs,
+    allowDrops: false
+  })
+  requireQueueContract(failures, diagnostics, 'stream', {
+    depth: 'encoderBridgeStreamQueueDepth',
+    oldestAge: 'encoderBridgeStreamQueueOldestFrameAgeMs',
+    pressure: 'encoderBridgeStreamQueueCapacityPressureEvents',
+    dropped: 'encoderBridgeStreamQueueDroppedFrames',
+    maxDepth: gates.maxStreamQueueDepth,
+    maxOldestAgeMs: gates.maxStreamQueueOldestFrameAgeMs,
+    allowDrops: true
+  })
 
   const repeatedRun = diagnostics.finalFile?.maxRepeatedFrameRun
   if (isFiniteNumber(repeatedRun) && repeatedRun > 2) {
@@ -150,15 +170,14 @@ export function evaluateSplitOutput4kRecordEvidence(
             width: receivedStreamProbe.video.width ?? null,
             height: receivedStreamProbe.video.height ?? null,
             avgFps: receivedStreamProbe.video.avgFps ?? null,
-            nominalFps: receivedStreamProbe.video.nominalFps ?? null,
+            nominalFps: receivedStreamProbe.video.nominalFps ?? null
           }
         : null,
       activeVideoToolboxOutputEncoders:
         diagnostics.encoderBridgeActiveVideoToolboxOutputEncoders ?? null,
-      separateOutputEncodersActive:
-        diagnostics.encoderBridgeSeparateOutputEncodersActive ?? null,
-      mediaQualityMode: result.mediaQualityMode ?? null,
-    },
+      separateOutputEncodersActive: diagnostics.encoderBridgeSeparateOutputEncodersActive ?? null,
+      mediaQualityMode: result.mediaQualityMode ?? null
+    }
   }
 }
 
@@ -179,15 +198,48 @@ function requireStreamProfile(failures, label, actual, expected) {
   if (!isFiniteNumber(actual?.bitrateKbps)) {
     failures.push(`${label} bitrate was not reported`)
   } else if (actual.bitrateKbps > expected.maxBitrateKbps) {
-    failures.push(
-      `${label} bitrate ${actual.bitrateKbps} exceeded ${expected.maxBitrateKbps}`
-    )
+    failures.push(`${label} bitrate ${actual.bitrateKbps} exceeded ${expected.maxBitrateKbps}`)
   }
 }
 
 function requirePositive(failures, label, actual) {
   if (!isFiniteNumber(actual) || actual <= 0) {
     failures.push(`${label} was not positive: ${formatValue(actual)}`)
+  }
+}
+
+function requireQueueContract(
+  failures,
+  diagnostics,
+  label,
+  { depth, oldestAge, pressure, dropped, maxDepth, maxOldestAgeMs, allowDrops }
+) {
+  for (const [field, metric] of [
+    [depth, 'depth'],
+    [pressure, 'capacity pressure'],
+    [dropped, 'dropped frames']
+  ]) {
+    if (!isFiniteNumber(diagnostics[field])) {
+      failures.push(`${label} queue ${metric} was not reported`)
+    }
+  }
+  const actualDepth = diagnostics[depth]
+  if (isFiniteNumber(actualDepth) && actualDepth > maxDepth) {
+    failures.push(`${label} queue depth ${actualDepth} exceeded ${maxDepth}`)
+  }
+  const actualAge = diagnostics[oldestAge]
+  if (isFiniteNumber(actualDepth) && actualDepth > 0 && !isFiniteNumber(actualAge)) {
+    failures.push(`${label} queue oldest-frame age was not reported while non-empty`)
+  } else if (isFiniteNumber(actualAge) && actualAge > maxOldestAgeMs) {
+    failures.push(
+      `${label} queue oldest-frame age ${actualAge.toFixed(0)}ms exceeded ${maxOldestAgeMs}ms`
+    )
+  }
+  if (isFiniteNumber(diagnostics[pressure]) && diagnostics[pressure] > 0) {
+    failures.push(`${label} queue hit capacity ${diagnostics[pressure]} time(s)`)
+  }
+  if (!allowDrops && isFiniteNumber(diagnostics[dropped]) && diagnostics[dropped] > 0) {
+    failures.push(`${label} queue dropped ${diagnostics[dropped]} frame(s)`)
   }
 }
 

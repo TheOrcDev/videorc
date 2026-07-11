@@ -22,6 +22,7 @@ export class NativePreviewPresentMetrics {
   private cachedPercentiles:
     | { computedAtMs: number; fields: NativePreviewPresentMetricSnapshot }
     | undefined
+  private refreshCount = 0
 
   constructor(
     private readonly nowMs: () => number = () => Date.now(),
@@ -41,21 +42,15 @@ export class NativePreviewPresentMetrics {
       recordLimited(this.inputLatenciesMs, inputToPresentLatencyMs)
     }
 
-    const percentileFields = this.percentileFields(nowMs)
-    const firstPresentMs = this.presentTimestampsMs[0]
-    const elapsedMs = nowMs - firstPresentMs
+    const telemetryFields = this.telemetryFields(nowMs)
     return {
-      presentFps:
-        this.presentTimestampsMs.length > 1 && elapsedMs > 0
-          ? ((this.presentTimestampsMs.length - 1) * 1000) / elapsedMs
-          : undefined,
-      intervalP95Ms: percentileFields.intervalP95Ms,
-      intervalP99Ms: percentileFields.intervalP99Ms,
-      inputToPresentLatencyMs,
-      inputToPresentLatencyP50Ms: percentileFields.inputToPresentLatencyP50Ms,
-      inputToPresentLatencyP95Ms: percentileFields.inputToPresentLatencyP95Ms,
-      inputToPresentLatencyP99Ms: percentileFields.inputToPresentLatencyP99Ms
+      ...telemetryFields,
+      inputToPresentLatencyMs
     }
+  }
+
+  get telemetryRefreshCount(): number {
+    return this.refreshCount
   }
 
   reset(): void {
@@ -63,14 +58,25 @@ export class NativePreviewPresentMetrics {
     this.presentIntervalsMs = []
     this.inputLatenciesMs = []
     this.cachedPercentiles = undefined
+    this.refreshCount = 0
   }
 
-  private percentileFields(nowMs: number): NativePreviewPresentMetricSnapshot {
+  private telemetryFields(nowMs: number): NativePreviewPresentMetricSnapshot {
     const cached = this.cachedPercentiles
-    if (cached && nowMs - cached.computedAtMs < this.percentileCacheTtlMs) {
+    if (
+      cached &&
+      nowMs >= cached.computedAtMs &&
+      nowMs - cached.computedAtMs < this.percentileCacheTtlMs
+    ) {
       return cached.fields
     }
+    const firstPresentMs = this.presentTimestampsMs[0]
+    const elapsedMs = nowMs - firstPresentMs
     const fields = {
+      presentFps:
+        this.presentTimestampsMs.length > 1 && elapsedMs > 0
+          ? ((this.presentTimestampsMs.length - 1) * 1000) / elapsedMs
+          : undefined,
       intervalP95Ms: percentile(this.presentIntervalsMs, 0.95),
       intervalP99Ms: percentile(this.presentIntervalsMs, 0.99),
       inputToPresentLatencyP50Ms: percentile(this.inputLatenciesMs, 0.5),
@@ -78,6 +84,7 @@ export class NativePreviewPresentMetrics {
       inputToPresentLatencyP99Ms: percentile(this.inputLatenciesMs, 0.99)
     }
     this.cachedPercentiles = { computedAtMs: nowMs, fields }
+    this.refreshCount += 1
     return fields
   }
 }

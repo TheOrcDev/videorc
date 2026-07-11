@@ -1,11 +1,20 @@
-import { spawn } from 'node:child_process'
+import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp, performanceAppSpawnSpec, repoRoot } from './lib/app-launcher.mjs'
+import {
+  collectPerformanceMetadata,
+  createPerformanceReport,
+  evaluateExplicitFallbackStatus,
+  failingChecks,
+  passingCheck,
+  performanceMode,
+  writePerformanceReport
+} from './lib/performance-contract.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
-const repoRoot = resolve(import.meta.dirname, '..')
+const mode = performanceMode()
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 const warmupMs = Number(process.env.VIDEORC_PREVIEW_WARMUP_MS ?? 2500)
@@ -16,20 +25,57 @@ const maxFrameAgeMs = Number(process.env.VIDEORC_PREVIEW_MAX_FRAME_AGE_MS ?? 500
 const maxCadenceMs = Number(process.env.VIDEORC_PREVIEW_MAX_CADENCE_MS ?? 300)
 const minTargetFps = Number(process.env.VIDEORC_PREVIEW_MIN_TARGET_FPS ?? 10)
 const expectedTransport = process.env.VIDEORC_PREVIEW_EXPECT_TRANSPORT ?? 'latest-jpeg-polling'
+const expectedBacking = process.env.VIDEORC_PREVIEW_EXPECT_BACKING ?? 'none'
+const explicitOutputDirectory = Boolean(process.env.VIDEORC_SMOKE_OUTPUT_DIR)
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
     join(tmpdir(), `videorc-preview-performance-${Date.now()}`)
 )
 
-let appProcess
-let stopping = false
+let launched
+let result = null
+let runError = null
 
 try {
   const connection = await launchAndReadConnection()
-  await runPreviewSmoke(connection)
+  result = await runPreviewSmoke(connection)
+} catch (error) {
+  runError = error
 } finally {
   await stopApp()
 }
+
+const report = createPerformanceReport({
+  scenario: process.env.VIDEORC_PERF_SCENARIO ?? 'jpeg-fallback-preview',
+  mode,
+  metadata: await collectPerformanceMetadata({
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      VIDEORC_PERF_APP_ROLE: process.env.VIDEORC_PERF_APP_ROLE ?? 'jpeg-fallback-preview',
+      VIDEORC_PERF_SOURCE_WIDTH: process.env.VIDEORC_PERF_SOURCE_WIDTH ?? '1280',
+      VIDEORC_PERF_SOURCE_HEIGHT: process.env.VIDEORC_PERF_SOURCE_HEIGHT ?? '720',
+      VIDEORC_PERF_SOURCE_FPS: process.env.VIDEORC_PERF_SOURCE_FPS ?? '60'
+    }
+  }),
+  timing: { warmupMs, measurementMs: sampleMs, pollIntervalMs: pollMs },
+  metrics: result,
+  checks: runError
+    ? failingChecks([runError.message])
+    : [
+        passingCheck(
+          `explicit JPEG fallback proved transport=${result.previewContract.actualTransport}, backing=${result.previewContract.actualBacking}, reason=${JSON.stringify(result.previewContract.fallbackMessage)}`
+        )
+      ]
+})
+const reportPath = await writePerformanceReport(report)
+console.log(`JPEG fallback performance report: ${reportPath}`)
+if (!runError && !explicitOutputDirectory && process.env.VIDEORC_PERF_RETAIN_ARTIFACTS !== '1') {
+  await rm(outputDirectory, { recursive: true, force: true })
+} else if (runError) {
+  console.log(`JPEG fallback scratch retained: ${outputDirectory}`)
+}
+if (runError) throw runError
 
 async function runPreviewSmoke(connection) {
   const ws = await connectBackend(connection, timeoutMs)
@@ -63,8 +109,22 @@ async function runPreviewSmoke(connection) {
     assertDiagnosticsHealthy(finalDiagnostics, diagnostics)
 
     console.log(
-      `Preview performance OK: ${liveStatus.transport} ${liveStatus.width}x${liveStatus.height} @ ${liveStatus.targetFps}fps, ${polls.successes}/${polls.attempts} frame polls, age ${format(finalDiagnostics.previewFrameAgeMs)}ms, cadence ${format(finalDiagnostics.previewLatencyMs)}ms`
+      `Preview performance OK: ${liveStatus.transport}/${liveStatus.backing} ${liveStatus.width}x${liveStatus.height} @ ${liveStatus.targetFps}fps, ${polls.successes}/${polls.attempts} frame polls, age ${format(finalDiagnostics.previewFrameAgeMs)}ms, cadence ${format(finalDiagnostics.previewLatencyMs)}ms, reason ${JSON.stringify(liveStatus.message)}`
     )
+    return {
+      liveStatus,
+      polls,
+      finalDiagnostics,
+      previewContract: {
+        expectedTransport,
+        actualTransport: liveStatus.transport,
+        diagnosticTransport: finalDiagnostics.previewTransport,
+        expectedBacking,
+        actualBacking: liveStatus.backing,
+        diagnosticBacking: finalDiagnostics.previewSurfaceBacking,
+        fallbackMessage: liveStatus.message
+      }
+    }
   } finally {
     try {
       await request(ws, 5000, 'preview.live.stop')
@@ -89,8 +149,16 @@ async function waitForLivePreview(ws) {
 }
 
 function assertPreviewStatus(status) {
-  if (status.transport !== expectedTransport) {
-    throw new Error(`Expected preview transport ${expectedTransport}, got ${status.transport}.`)
+  const failures = evaluateExplicitFallbackStatus({
+    expectedTransport,
+    actualTransport: status.transport,
+    expectedBacking,
+    actualBacking: status.backing,
+    fallbackMessage: status.message,
+    fallbackLabel: 'JPEG'
+  })
+  if (failures.length > 0) {
+    throw new Error(`JPEG fallback status contract failed: ${failures.join('; ')}.`)
   }
   if ((status.targetFps ?? 0) < minTargetFps) {
     throw new Error(
@@ -103,6 +171,11 @@ function assertPreviewStatus(status) {
 }
 
 function assertPollsHealthy(polls) {
+  if (polls.attempts <= 0 || polls.successes <= 0) {
+    throw new Error(
+      `JPEG fallback made no frame progress: ${polls.successes}/${polls.attempts} successful polls.`
+    )
+  }
   const minSuccesses = Math.ceil(polls.attempts * minSuccessfulPollRatio)
   if (polls.successes < minSuccesses) {
     throw new Error(
@@ -115,6 +188,11 @@ function assertDiagnosticsHealthy(finalDiagnostics, samples) {
   if (finalDiagnostics.previewTransport !== expectedTransport) {
     throw new Error(
       `Expected diagnostic preview transport ${expectedTransport}, got ${finalDiagnostics.previewTransport}.`
+    )
+  }
+  if (finalDiagnostics.previewSurfaceBacking !== expectedBacking) {
+    throw new Error(
+      `Expected diagnostic preview backing ${expectedBacking}, got ${finalDiagnostics.previewSurfaceBacking}.`
     )
   }
   if ((finalDiagnostics.previewTargetFps ?? 0) < minTargetFps) {
@@ -202,62 +280,24 @@ function previewParams() {
 }
 
 function launchAndReadConnection() {
-  return new Promise((resolveConnection, rejectConnection) => {
-    const timer = setTimeout(() => {
-      rejectConnection(new Error(`Timed out waiting for dev backend READY after ${timeoutMs}ms.`))
-    }, timeoutMs)
-
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
-      detached: true,
-      env: smokeAppEnv({
-        VIDEORC_NATIVE_PREVIEW_SURFACE: '0',
-        VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
-        VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
-      }),
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-
-    appProcess.stdout.setEncoding('utf8')
-    appProcess.stderr.setEncoding('utf8')
-    appProcess.stdout.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.stderr.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.on('error', (error) => {
-      clearTimeout(timer)
-      rejectConnection(error)
-    })
-    appProcess.on('exit', (code, signal) => {
-      clearTimeout(timer)
-      rejectConnection(
-        new Error(`Dev app exited before preview smoke completed: code=${code} signal=${signal}`)
-      )
-    })
+  return launchDevApp({
+    timeoutMs,
+    requiredMarkers: ['backend-ready'],
+    spawnSpec: performanceAppSpawnSpec(),
+    env: {
+      VIDEORC_NATIVE_PREVIEW_SURFACE: '0',
+      VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
+      VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
+    },
+    onLine: (line) => console.log(line)
+  }).then((app) => {
+    launched = app
+    return app.connections['backend-ready']
   })
 }
 
-function handleAppOutput(text, resolveConnection, timer) {
-  for (const line of text.split(/\r?\n/)) {
-    if (line.trim() && !stopping) {
-      console.log(line)
-    }
-
-    const marker = '[smoke] backend-ready '
-    const index = line.indexOf(marker)
-    if (index === -1) {
-      continue
-    }
-
-    clearTimeout(timer)
-    resolveConnection(JSON.parse(line.slice(index + marker.length)))
-  }
-}
-
 async function stopApp() {
-  if (!appProcess?.pid || appProcess.killed) {
-    return
-  }
-  stopping = true
-  await stopProcess(appProcess)
+  await launched?.stop()
 }
 
 function sleep(ms) {

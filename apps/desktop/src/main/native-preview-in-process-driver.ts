@@ -88,6 +88,12 @@ export function createNativePreviewInProcessDriver(
     options.nowMs,
     options.percentileCacheTtlMs
   )
+  const telemetryNowMs = options.nowMs ?? (() => Date.now())
+  const telemetryIntervalMs = Math.max(0, options.percentileCacheTtlMs ?? 250)
+  let telemetryComputedAtMs: number | undefined
+  let cachedPlacementRoundTripP95Ms: number | undefined
+  let cachedPresentRoundTripP95Ms: number | undefined
+  let cachedBindingMetrics: NativePreviewInProcessMetrics = emptyNativeMetrics()
 
   const applyBounds = (bounds: PreviewSurfaceBounds): void => {
     placementEventsReceived += 1
@@ -116,6 +122,8 @@ export function createNativePreviewInProcessDriver(
       lastPresentedFrameId = 0
       lastPresentedStatus = null
       runAuthority.clear()
+      telemetryComputedAtMs = undefined
+      cachedBindingMetrics = emptyNativeMetrics()
       return
     }
     if (surfaceAttachmentChanged(attachment, next)) {
@@ -142,6 +150,8 @@ export function createNativePreviewInProcessDriver(
           lastPresentedFrameId = 0
           lastPresentedStatus = null
           runAuthority.clear()
+          telemetryComputedAtMs = undefined
+          cachedBindingMetrics = emptyNativeMetrics()
           continue
         }
         if (!command.bounds) {
@@ -220,15 +230,28 @@ export function createNativePreviewInProcessDriver(
         droppedFrames += 1
         return null
       }
+      // Attachment is a presentation invariant, not telemetry. Keep checking
+      // it on every frame even though the heavier native metrics and percentile
+      // sorts are cached below.
       if (!options.binding.attached()) {
         droppedFrames += 1
         throw new Error('Native preview layer is no longer attached after presentation.')
       }
-      const metrics = options.binding.metrics()
       const cadence = presentMetrics.record({
         frameAgeMs: request.frameAgeMs,
         compositorUpdatedAt: request.compositorUpdatedAt
       })
+      const telemetryTimestampMs = telemetryNowMs()
+      if (
+        telemetryComputedAtMs === undefined ||
+        telemetryTimestampMs < telemetryComputedAtMs ||
+        telemetryTimestampMs - telemetryComputedAtMs >= telemetryIntervalMs
+      ) {
+        cachedBindingMetrics = options.binding.metrics()
+        cachedPlacementRoundTripP95Ms = percentile95(placementRoundTripSamplesMs)
+        cachedPresentRoundTripP95Ms = percentile95(presentRoundTripSamplesMs)
+        telemetryComputedAtMs = telemetryTimestampMs
+      }
       const source = request.scene?.sources.some(
         (item) => item.kind === 'screen' || item.kind === 'window'
       )
@@ -263,15 +286,15 @@ export function createNativePreviewInProcessDriver(
         nativePreviewPlacementEventsReceived: placementEventsReceived,
         nativePreviewPlacementsApplied: placementsApplied,
         nativePreviewPlacementsCoalesced: placementsCoalesced,
-        nativePreviewPlacementRoundTripP95Ms: percentile95(placementRoundTripSamplesMs),
-        nativePreviewPresentRoundTripP95Ms: percentile95(presentRoundTripSamplesMs),
-        nativePreviewIosurfaceCacheHits: metrics.iosurfaceCacheHits,
-        nativePreviewIosurfaceImports: metrics.iosurfaceImports,
-        nativePreviewIosurfaceInvalidations: metrics.iosurfaceInvalidations,
-        nativePreviewIosurfaceImportFailures: metrics.iosurfaceImportFailures,
-        nativePreviewDrawableWidth: metrics.drawableWidth,
-        nativePreviewDrawableHeight: metrics.drawableHeight,
-        nativePreviewContentsScale: metrics.contentsScale,
+        nativePreviewPlacementRoundTripP95Ms: cachedPlacementRoundTripP95Ms,
+        nativePreviewPresentRoundTripP95Ms: cachedPresentRoundTripP95Ms,
+        nativePreviewIosurfaceCacheHits: cachedBindingMetrics.iosurfaceCacheHits,
+        nativePreviewIosurfaceImports: cachedBindingMetrics.iosurfaceImports,
+        nativePreviewIosurfaceInvalidations: cachedBindingMetrics.iosurfaceInvalidations,
+        nativePreviewIosurfaceImportFailures: cachedBindingMetrics.iosurfaceImportFailures,
+        nativePreviewDrawableWidth: cachedBindingMetrics.drawableWidth,
+        nativePreviewDrawableHeight: cachedBindingMetrics.drawableHeight,
+        nativePreviewContentsScale: cachedBindingMetrics.contentsScale,
         nativePreviewPresentedSceneRevision: request.scene?.revision,
         nativePreviewCompositorRunId: request.handoff.runId,
         bounds: lastBounds,
@@ -288,6 +311,9 @@ export function createNativePreviewInProcessDriver(
       presentMetrics.reset()
       presentRoundTripSamplesMs.splice(0)
       droppedFrames = 0
+      telemetryComputedAtMs = undefined
+      cachedPresentRoundTripP95Ms = undefined
+      cachedBindingMetrics = emptyNativeMetrics()
     },
     stop(): void {
       options.binding.destroy()
@@ -297,6 +323,8 @@ export function createNativePreviewInProcessDriver(
       lastPresentedFrameId = 0
       lastPresentedStatus = null
       runAuthority.clear()
+      telemetryComputedAtMs = undefined
+      cachedBindingMetrics = emptyNativeMetrics()
     }
   }
 }
@@ -349,6 +377,15 @@ function percentile95(samples: number[]): number | undefined {
   }
   const sorted = [...samples].sort((left, right) => left - right)
   return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]
+}
+
+function emptyNativeMetrics(): NativePreviewInProcessMetrics {
+  return {
+    iosurfaceCacheHits: 0,
+    iosurfaceImports: 0,
+    iosurfaceInvalidations: 0,
+    iosurfaceImportFailures: 0
+  }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

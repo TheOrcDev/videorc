@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "kind": "videorc.cross-machine-native-cadence-invariant",
+  "minimumPresentFps": 58,
+  "maximumIntervalP95Ms": 30
+}

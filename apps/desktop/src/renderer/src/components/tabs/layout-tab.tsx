@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/button'
 import { Field, FieldContent, FieldLabel } from '@/components/ui/field'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import type {
   CameraAspect,
   CameraCorner,
@@ -61,7 +61,7 @@ export function LayoutTab(): ReactElement {
     setSceneSourceVisible,
     isSessionActive,
     layoutSwitchPending
-  } = useStudio()
+  } = useStudioCore()
   const layout = captureConfig.layout
   const selectedSource = scene?.sources.find((source) => source.id === selectedSceneSourceId)
   // SC2: the inspector follows the stage selection; default to the camera

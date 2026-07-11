@@ -11,6 +11,7 @@ import type {
   CommentsViewSnapshot,
   CaptionsUpdate,
   CaptionsWindowState,
+  CommentsSnapshotDelta,
   CommentsWindowState,
   GlassWallpaperState,
   NotesDocument,
@@ -130,6 +131,7 @@ const api: VideorcApi = {
     return () => ipcRenderer.removeListener('comments-window:state', listener)
   },
   pushCommentsSnapshot: (view) => ipcRenderer.invoke('comments-window:push-snapshot', view),
+  pushCommentsDelta: (delta) => ipcRenderer.invoke('comments-window:push-delta', delta),
   getCommentsSnapshot: () => ipcRenderer.invoke('comments-window:get-snapshot'),
   setCommentsViewMode: (mode) => ipcRenderer.invoke('comments-window:set-view-mode', mode),
   onCommentsSnapshot: (callback) => {
@@ -137,6 +139,12 @@ const api: VideorcApi = {
       callback(view)
     ipcRenderer.on('comments-window:snapshot', listener)
     return () => ipcRenderer.removeListener('comments-window:snapshot', listener)
+  },
+  onCommentsDelta: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, delta: CommentsSnapshotDelta): void =>
+      callback(delta)
+    ipcRenderer.on('comments-window:delta', listener)
+    return () => ipcRenderer.removeListener('comments-window:delta', listener)
   },
   openCaptionsWindow: () => ipcRenderer.invoke('captions-window:open'),
   closeCaptionsWindow: () => ipcRenderer.invoke('captions-window:close'),

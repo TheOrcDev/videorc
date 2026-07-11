@@ -10,7 +10,7 @@ describe('evaluateSplitOutput4kRecordEvidence', () => {
     const verdict = evaluateSplitOutput4kRecordEvidence({
       manifest: goodManifest(),
       receivedStreamProbe: goodReceivedStreamProbe(),
-      streamAvSyncVerdict: { pass: true, failures: [], warnings: [] },
+      streamAvSyncVerdict: { pass: true, failures: [], warnings: [] }
     })
 
     assert.equal(verdict.pass, true, verdict.failures.join('; '))
@@ -24,7 +24,7 @@ describe('evaluateSplitOutput4kRecordEvidence', () => {
 
     const verdict = evaluateSplitOutput4kRecordEvidence({
       manifest,
-      receivedStreamProbe: goodReceivedStreamProbe(),
+      receivedStreamProbe: goodReceivedStreamProbe()
     })
 
     assert.equal(verdict.pass, false)
@@ -35,8 +35,8 @@ describe('evaluateSplitOutput4kRecordEvidence', () => {
     const verdict = evaluateSplitOutput4kRecordEvidence({
       manifest: goodManifest(),
       receivedStreamProbe: {
-        video: { width: 3840, height: 2160, avgFps: 30, nominalFps: 30 },
-      },
+        video: { width: 3840, height: 2160, avgFps: 30, nominalFps: 30 }
+      }
     })
 
     assert.equal(verdict.pass, false)
@@ -51,7 +51,7 @@ describe('evaluateSplitOutput4kRecordEvidence', () => {
 
     const verdict = evaluateSplitOutput4kRecordEvidence({
       manifest,
-      receivedStreamProbe: goodReceivedStreamProbe(),
+      receivedStreamProbe: goodReceivedStreamProbe()
     })
 
     assert.equal(verdict.pass, false)
@@ -67,12 +67,29 @@ describe('evaluateSplitOutput4kRecordEvidence', () => {
       streamAvSyncVerdict: {
         pass: false,
         failures: ['RTMP-received FLV A/V offset +95ms exceeds plan gate 60ms'],
-        warnings: [],
-      },
+        warnings: []
+      }
     })
 
     assert.equal(verdict.pass, false)
     assert.match(verdict.failures.join('; '), /stream A\/V sync gate failed/)
+  })
+
+  it('fails when either encoded output queue exceeds its latency contract', () => {
+    const manifest = goodManifest()
+    manifest.diagnostics.encoderBridgeRecordingQueueDepth = 17
+    manifest.diagnostics.encoderBridgeRecordingQueueOldestFrameAgeMs = 251
+    manifest.diagnostics.encoderBridgeStreamQueueDepth = 9
+    manifest.diagnostics.encoderBridgeStreamQueueOldestFrameAgeMs = 151
+
+    const verdict = evaluateSplitOutput4kRecordEvidence({
+      manifest,
+      receivedStreamProbe: goodReceivedStreamProbe()
+    })
+
+    assert.equal(verdict.pass, false)
+    assert.match(verdict.failures.join('; '), /recording queue depth 17 exceeded 16/)
+    assert.match(verdict.failures.join('; '), /stream queue oldest-frame age 151ms exceeded 150ms/)
   })
 })
 
@@ -85,7 +102,7 @@ function goodManifest() {
       bitrateKbps: 30000,
       streamEnabled: true,
       streamingSettingsEnabled: true,
-      streamOutputPreset: 'stream-safe-1080p30',
+      streamOutputPreset: 'stream-safe-1080p30'
     },
     result: {
       blockedBeforeEncoding: false,
@@ -93,7 +110,7 @@ function goodManifest() {
       acceptanceFailures: [],
       finalFilePass: true,
       startupPass: true,
-      mediaQualityMode: 'record-stream-split-output',
+      mediaQualityMode: 'record-stream-split-output'
     },
     diagnostics: {
       finalFile: {
@@ -101,7 +118,7 @@ function goodManifest() {
         height: 2160,
         observedFps: 30,
         maxRepeatedFrameRun: 1,
-        longestFreezeMs: 0,
+        longestFreezeMs: 0
       },
       recordingOutput: { width: 3840, height: 2160, fps: 30, bitrateKbps: 30000 },
       streamOutput: { width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 },
@@ -114,7 +131,15 @@ function goodManifest() {
       encoderBridgeRawVideoCopiedFrames: 0,
       encoderBridgeMetalTargetCopiedFrames: 0,
       encoderBridgeZeroCopyFrames: 120,
-    },
+      encoderBridgeRecordingQueueDepth: 2,
+      encoderBridgeRecordingQueueOldestFrameAgeMs: 35,
+      encoderBridgeRecordingQueueCapacityPressureEvents: 0,
+      encoderBridgeRecordingQueueDroppedFrames: 0,
+      encoderBridgeStreamQueueDepth: 2,
+      encoderBridgeStreamQueueOldestFrameAgeMs: 35,
+      encoderBridgeStreamQueueCapacityPressureEvents: 0,
+      encoderBridgeStreamQueueDroppedFrames: 0
+    }
   }
 }
 
@@ -124,7 +149,7 @@ function goodReceivedStreamProbe() {
       width: 1920,
       height: 1080,
       avgFps: 30,
-      nominalFps: 30,
-    },
+      nominalFps: 30
+    }
   }
 }

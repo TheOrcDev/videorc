@@ -21,7 +21,12 @@ import { Badge } from '@/components/ui/badge'
 import { PowerSlider } from '@/components/power-slider'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
-import { useStudio } from '@/hooks/use-studio'
+import {
+  useStudioAudio,
+  useStudioCore,
+  useStudioDiagnostics,
+  useStudioPreview
+} from '@/hooks/use-studio'
 import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camera-format-shortfall'
 import {
   MICROPHONE_SYNC_OFFSET_MAX_MS,
@@ -106,24 +111,21 @@ export function SourcesTab(): ReactElement {
     setCaptureConfig,
     refreshBackend,
     sampleAudioMeter,
-    audioMeter,
-    audioMeterLoading,
-    meterLevel,
     canSampleAudio,
     selectedMicrophone,
     isSessionActive,
     layoutSwitchPending,
     sourceDeviceSwitchPending,
     switchSourceDeviceLive,
-    previewCameraStatus,
-    previewScreenStatus,
     openSystemPermission,
     openPreviewPermissions,
     revealPermissionTarget,
     runtimeInfo,
-    wsStatus,
-    diagnosticStats
-  } = useStudio()
+    wsStatus
+  } = useStudioCore()
+  const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
+  const { audioMeter, audioMeterLoading, meterLevel } = useStudioAudio()
+  const { diagnosticStats } = useStudioDiagnostics()
   // Q6 (plan 022): explicit select states while device discovery is pending.
   const discoveryPending = wsStatus !== 'connected'
   // S5 (plan 024): the selected camera format can't meet the requested fps/res.
@@ -228,7 +230,7 @@ export function SourcesTab(): ReactElement {
     <ConfigGrid>
       <PanelSection
         action={
-          <Button size="sm" variant="outline" onClick={refreshBackend}>
+          <Button size="sm" variant="outline" onClick={() => void refreshBackend()}>
             <ArrowsClockwise data-icon="inline-start" />
             Refresh
           </Button>

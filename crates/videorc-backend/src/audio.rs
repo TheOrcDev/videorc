@@ -100,6 +100,17 @@ pub struct AudioCaptureStats {
     // error — frames keep counting while the track holds nothing. This is the
     // truthful "did the mic capture any sound at all" signal (plan 021 F3).
     session_peak_milli: AtomicU64,
+    // Coverage must use the same window as the counters. The FIFO writer resets the
+    // counters after discarding audio captured before the first video frame, and stop
+    // freezes them before FFmpeg finishes flushing. Tracking that exact window avoids
+    // counting either startup or finalization latency as a microphone capture gap.
+    recording_window: std::sync::Mutex<AudioCaptureWindow>,
+}
+
+#[derive(Debug, Default)]
+struct AudioCaptureWindow {
+    started_at: Option<Instant>,
+    finished_elapsed: Option<Duration>,
 }
 
 impl AudioCaptureStats {
@@ -127,21 +138,69 @@ impl AudioCaptureStats {
     }
 
     fn reset_recording_window(&self) {
+        self.reset_recording_window_at(Instant::now());
+    }
+
+    fn reset_recording_window_at(&self, started_at: Instant) {
+        let mut window = self
+            .recording_window
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Prevent the realtime callback from adding a frame between the counter reset and
+        // the new epoch becoming authoritative.
+        self.recording_window_finished
+            .store(true, Ordering::Relaxed);
         self.captured_frames.store(0, Ordering::Relaxed);
         self.dropped_frames.store(0, Ordering::Relaxed);
         self.fifo_write_errors.store(0, Ordering::Relaxed);
         self.session_peak_milli.store(0, Ordering::Relaxed);
+        *window = AudioCaptureWindow {
+            started_at: Some(started_at),
+            finished_elapsed: None,
+        };
         self.recording_window_finished
             .store(false, Ordering::Relaxed);
     }
 
     fn finish_recording_window(&self) {
+        self.finish_recording_window_at(Instant::now());
+    }
+
+    fn finish_recording_window_at(&self, finished_at: Instant) {
+        let mut window = self
+            .recording_window
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if window.finished_elapsed.is_some() {
+            return;
+        }
         self.recording_window_finished
             .store(true, Ordering::Relaxed);
+        window.finished_elapsed = window
+            .started_at
+            .map(|started_at| finished_at.saturating_duration_since(started_at));
     }
 
     fn recording_window_finished(&self) -> bool {
         self.recording_window_finished.load(Ordering::Relaxed)
+    }
+
+    fn recording_window_elapsed_secs(&self) -> Option<f64> {
+        self.recording_window_elapsed_at(Instant::now())
+            .map(|elapsed| elapsed.as_secs_f64())
+    }
+
+    fn recording_window_elapsed_at(&self, sampled_at: Instant) -> Option<Duration> {
+        let window = self
+            .recording_window
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let started_at = window.started_at?;
+        Some(
+            window
+                .finished_elapsed
+                .unwrap_or_else(|| sampled_at.saturating_duration_since(started_at)),
+        )
     }
 
     fn record_captured_frames(&self, frames: u64) {
@@ -241,6 +300,10 @@ impl NativeAudioCaptureSession {
 
     pub fn session_peak(&self) -> f32 {
         self.stats.session_peak()
+    }
+
+    pub fn recording_window_elapsed_secs(&self) -> Option<f64> {
+        self.stats.recording_window_elapsed_secs()
     }
 
     pub fn finish_recording_window(&self) {
@@ -1347,6 +1410,42 @@ mod tests {
 
         assert_eq!(stats.captured_frames(), 240);
         assert_eq!(stats.dropped_frames(), 0);
+    }
+
+    #[test]
+    fn recording_audio_coverage_uses_the_counter_window_and_freezes_at_stop() {
+        let stats = AudioCaptureStats::default();
+        let sampler_started_at = Instant::now();
+        let counter_window_started_at = sampler_started_at + Duration::from_millis(500);
+        stats.reset_recording_window_at(counter_window_started_at);
+        stats.record_captured_frames(9 * u64::from(NATIVE_AUDIO_SAMPLE_RATE));
+
+        let stopped_at = counter_window_started_at + Duration::from_secs(9);
+        stats.finish_recording_window_at(stopped_at);
+        let sampled_after_finalization = stopped_at + Duration::from_millis(700);
+        let capture_elapsed = stats
+            .recording_window_elapsed_at(sampled_after_finalization)
+            .expect("recording counter window is available");
+
+        assert_eq!(capture_elapsed, Duration::from_secs(9));
+        let aligned_coverage = audio_capture_coverage(
+            stats.captured_frames(),
+            capture_elapsed.as_secs_f64(),
+            NATIVE_AUDIO_SAMPLE_RATE,
+        )
+        .unwrap();
+        assert!((aligned_coverage - 1.0).abs() < f64::EPSILON);
+
+        // The old sampler-task clock included both the delayed counter reset and FFmpeg
+        // finalization. The same gap-free capture therefore failed the honest 95% gate.
+        let old_sampler_elapsed = sampled_after_finalization.duration_since(sampler_started_at);
+        let old_coverage = audio_capture_coverage(
+            stats.captured_frames(),
+            old_sampler_elapsed.as_secs_f64(),
+            NATIVE_AUDIO_SAMPLE_RATE,
+        )
+        .unwrap();
+        assert!(old_coverage < 0.95, "old coverage was {old_coverage}");
     }
 
     #[test]

@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, SystemTime};
 
@@ -29,7 +30,8 @@ use crate::preview_screen::{
     preview_screen_frame_source, try_preview_screen_frame_source,
 };
 use crate::protocol::{
-    BackgroundFit, CameraFit, CameraShape, CompositorBackend, CompositorSceneSourceFit,
+    BackgroundFit, CameraFit, CameraShape, CompositorBackend, CompositorFramePipelineStatus,
+    CompositorFrameReady, CompositorImageCacheStatus, CompositorSceneSourceFit,
     CompositorSceneSourceKind, CompositorSceneSourceStatus, CompositorSceneUpdateParams,
     CompositorSourceKind, CompositorSourceStatus, CompositorState, CompositorStatus,
     DiagnosticStats, EffectiveSceneBackground, LayoutPreset, LayoutSettings, PreviewCameraState,
@@ -49,6 +51,21 @@ const COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_MISSES: u32 = 1;
 const COMPOSITOR_MISSING_SOURCE_PLACEHOLDER_AFTER: Duration = Duration::from_secs(2);
 const MISSING_SOURCE_PLACEHOLDER_WIDTH: usize = 16;
 const MISSING_SOURCE_PLACEHOLDER_HEIGHT: usize = 9;
+const COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+const COMPOSITOR_IMAGE_CACHE_ENTRY_BUDGET: usize = 256;
+const COMPOSITOR_IMAGE_CACHE_MAX_PINNED_ENTRIES: usize = 2;
+// Bound the transient RGBA allocation before resizing. Image metadata is read
+// first, so a malformed or enormous asset cannot force an unbounded decode.
+const COMPOSITOR_IMAGE_DECODE_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
+const COMPOSITOR_IMAGE_DECODER_ALLOCATION_BUDGET_BYTES: u64 = 192 * 1024 * 1024;
+const COMPOSITOR_MAX_OUTPUT_WIDTH: u32 = 3840;
+const COMPOSITOR_MAX_OUTPUT_HEIGHT: u32 = 2160;
+// Cached image bytes are BGRA-only and the CPU compositor reads that format
+// directly. Splitting the resident ceiling evenly keeps both pinned image
+// roles bounded without retaining a duplicate RGBA copy.
+const COMPOSITOR_IMAGE_CACHE_MAX_SOURCE_PIXELS: u64 =
+    (COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES / COMPOSITOR_IMAGE_CACHE_MAX_PINNED_ENTRIES / 4) as u64;
+const COMPOSITOR_WORKER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 // Stage margin per side for a scene background: `visibility_percent / 200`, so
 // the default visibility of 20 yields the classic 0.10 margin (80% stage) and
 // 0 keeps the recording full-canvas (the asset only fills letterbox gaps).
@@ -178,13 +195,42 @@ impl CompositorPixelFormat {
 pub struct CompositorRuntime {
     pub status: CompositorStatus,
     scene: Option<CompositorSceneSnapshot>,
-    image_sources: HashMap<String, CompositorImageSource>,
+    image_sources: CompositorImageCache,
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
     latest_frame_evidence: Option<CompositorFrameEvidence>,
     run_id: Option<String>,
     stop_tx: Option<watch::Sender<bool>>,
     render_task: Option<JoinHandle<()>>,
+    worker_activity: Arc<CompositorWorkerActivity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositorFrameConsumer {
+    NativePreview,
+    VideoToolboxEncoder,
+    RawYuvEncoder,
+    #[allow(dead_code)] // Reserved for the explicit JPEG debug/fallback attachment path.
+    JpegFallback,
+}
+
+impl CompositorFrameConsumer {
+    const fn publishes_cpu_yuv(self) -> bool {
+        matches!(self, Self::RawYuvEncoder | Self::JpegFallback)
+    }
+
+    const fn requires_cpu_fallback(self) -> bool {
+        !matches!(self, Self::NativePreview)
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::NativePreview => "native-preview",
+            Self::VideoToolboxEncoder => "videotoolbox-encoder",
+            Self::RawYuvEncoder => "raw-yuv-encoder",
+            Self::JpegFallback => "jpeg-fallback",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -192,7 +238,7 @@ pub struct CompositorStartParams {
     pub target_fps: u32,
     pub width: u32,
     pub height: u32,
-    pub publish_yuv_frames: bool,
+    pub frame_consumer: CompositorFrameConsumer,
     pub stream_output: Option<CompositorAuxiliaryOutput>,
     /// Per-leg caption overlay plan (R1): `primary` is the recording (or the
     /// stream when stream-only); `aux` is the split stream leg.
@@ -208,7 +254,7 @@ pub struct CompositorStartParams {
 pub struct CompositorAuxiliaryOutput {
     pub width: u32,
     pub height: u32,
-    pub publish_yuv_frames: bool,
+    pub frame_consumer: CompositorFrameConsumer,
 }
 
 #[derive(Debug, Clone)]
@@ -217,7 +263,7 @@ struct CompositorRenderLoopParams {
     target_fps: u32,
     width: u32,
     height: u32,
-    publish_yuv_frames: bool,
+    frame_consumer: CompositorFrameConsumer,
     stream_output: Option<CompositorAuxiliaryOutput>,
     caption_overlay_on_primary: bool,
     caption_overlay_on_aux: bool,
@@ -276,6 +322,7 @@ struct CompositorMetrics {
     frame_time_p95_ms: f64,
     metal_target_handoff: Option<CompositorMetalTargetHandoff>,
     sources: Vec<CompositorSourceStatus>,
+    frame_pipeline: CompositorFramePipelineStatus,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -533,7 +580,7 @@ fn scene_needs_live_screen_frame(
 }
 
 fn active_image_source_is_cached(active_image_source: Option<&CompositorImageSource>) -> bool {
-    active_image_source.is_some_and(|source| source.rgba.is_some())
+    active_image_source.is_some_and(|source| source.rgba.is_some() || source.bgra.is_some())
 }
 
 fn same_camera_source(
@@ -567,21 +614,224 @@ struct CompositorImageSource {
     width: Option<u32>,
     height: Option<u32>,
     rgba: Option<Arc<Vec<u8>>>,
+    bgra: Option<Arc<Vec<u8>>>,
+    content_revision: u64,
     state: String,
     message: Option<String>,
+}
+
+impl CompositorImageSource {
+    fn decoded_bytes(&self) -> usize {
+        self.rgba
+            .as_ref()
+            .or(self.bgra.as_ref())
+            .map_or(0, |bytes| bytes.len())
+    }
+
+    fn preconverted_bgra_bytes(&self) -> usize {
+        if self.rgba.is_some() {
+            self.bgra.as_ref().map_or(0, |bytes| bytes.len())
+        } else {
+            0
+        }
+    }
+
+    fn resident_bytes(&self) -> usize {
+        self.decoded_bytes()
+            .saturating_add(self.preconverted_bgra_bytes())
+    }
+}
+
+#[derive(Debug)]
+struct CachedCompositorImage {
+    source: CompositorImageSource,
+    last_used: u64,
+}
+
+#[derive(Debug)]
+struct CompositorImageCache {
+    entries: HashMap<String, CachedCompositorImage>,
+    pinned_keys: HashSet<String>,
+    byte_budget: usize,
+    entry_budget: usize,
+    clock: u64,
+    content_revision: u64,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+}
+
+impl CompositorImageCache {
+    fn new(byte_budget: usize, entry_budget: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            pinned_keys: HashSet::new(),
+            byte_budget,
+            entry_budget,
+            clock: 0,
+            content_revision: 0,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&CompositorImageSource> {
+        self.entries.get(key).map(|entry| &entry.source)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn set_pinned_keys(&mut self, pinned_keys: HashSet<String>) {
+        assert!(
+            pinned_keys.len() <= COMPOSITOR_IMAGE_CACHE_MAX_PINNED_ENTRIES,
+            "compositor scenes may pin at most an active image and a background"
+        );
+        self.pinned_keys = pinned_keys;
+        self.enforce_budget();
+    }
+
+    fn matching_source(
+        &mut self,
+        key: &str,
+        image_path: &str,
+        file_revision: &Option<String>,
+    ) -> Option<CompositorImageSource> {
+        let matches = self.entries.get(key).is_some_and(|entry| {
+            entry.source.image_path == image_path && entry.source.file_revision == *file_revision
+        });
+        if !matches {
+            self.misses = self.misses.saturating_add(1);
+            return None;
+        }
+        self.clock = self.clock.saturating_add(1);
+        self.hits = self.hits.saturating_add(1);
+        let entry = self.entries.get_mut(key)?;
+        entry.last_used = self.clock;
+        Some(entry.source.clone())
+    }
+
+    fn next_content_revision(&mut self) -> u64 {
+        self.content_revision = self.content_revision.saturating_add(1);
+        self.content_revision
+    }
+
+    fn insert(&mut self, key: String, source: CompositorImageSource) {
+        self.clock = self.clock.saturating_add(1);
+        self.entries.insert(
+            key,
+            CachedCompositorImage {
+                source,
+                last_used: self.clock,
+            },
+        );
+        self.enforce_budget();
+    }
+
+    fn enforce_budget(&mut self) {
+        while self.resident_bytes() > self.byte_budget || self.entries.len() > self.entry_budget {
+            let Some(eviction_key) = self
+                .entries
+                .iter()
+                .filter(|(key, _)| !self.pinned_keys.contains(key.as_str()))
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&eviction_key);
+            self.evictions = self.evictions.saturating_add(1);
+        }
+    }
+
+    fn resident_bytes(&self) -> usize {
+        self.entries
+            .values()
+            .map(|entry| entry.source.resident_bytes())
+            .sum()
+    }
+
+    fn status(&self) -> CompositorImageCacheStatus {
+        let decoded_bytes = self
+            .entries
+            .values()
+            .map(|entry| entry.source.decoded_bytes())
+            .sum::<usize>();
+        let preconverted_bgra_bytes = self
+            .entries
+            .values()
+            .map(|entry| entry.source.preconverted_bgra_bytes())
+            .sum::<usize>();
+        let pinned_entries = self
+            .entries
+            .keys()
+            .filter(|key| self.pinned_keys.contains(key.as_str()))
+            .count();
+        let pinned_bytes = self
+            .entries
+            .iter()
+            .filter(|(key, _)| self.pinned_keys.contains(key.as_str()))
+            .map(|(_, entry)| entry.source.resident_bytes())
+            .sum::<usize>();
+        CompositorImageCacheStatus {
+            budget_bytes: self.byte_budget as u64,
+            entry_budget: self.entry_budget as u64,
+            entries: self.entries.len() as u64,
+            decoded_bytes: decoded_bytes as u64,
+            preconverted_bgra_bytes: preconverted_bgra_bytes as u64,
+            resident_bytes: decoded_bytes.saturating_add(preconverted_bgra_bytes) as u64,
+            pinned_entries: pinned_entries as u64,
+            pinned_bytes: pinned_bytes as u64,
+            hits: self.hits,
+            misses: self.misses,
+            evictions: self.evictions,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct CompositorWorkerActivity {
+    active: AtomicU64,
+    max_active: AtomicU64,
+    stop_timeouts: AtomicU64,
+}
+
+struct CompositorWorkerActivityGuard {
+    activity: Arc<CompositorWorkerActivity>,
+}
+
+impl CompositorWorkerActivityGuard {
+    fn begin(activity: Arc<CompositorWorkerActivity>) -> Self {
+        let active = activity.active.fetch_add(1, Ordering::AcqRel) + 1;
+        activity.max_active.fetch_max(active, Ordering::AcqRel);
+        Self { activity }
+    }
+}
+
+impl Drop for CompositorWorkerActivityGuard {
+    fn drop(&mut self) {
+        self.activity.active.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 pub fn initial_compositor_state() -> CompositorRuntime {
     CompositorRuntime {
         status: stopped_status(Some("Compositor is not running.".to_string())),
         scene: None,
-        image_sources: HashMap::new(),
+        image_sources: CompositorImageCache::new(
+            COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES,
+            COMPOSITOR_IMAGE_CACHE_ENTRY_BUDGET,
+        ),
         frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
         stream_frame_store: None,
         latest_frame_evidence: None,
         run_id: None,
         stop_tx: None,
         render_task: None,
+        worker_activity: Arc::new(CompositorWorkerActivity::default()),
     }
 }
 
@@ -589,7 +839,10 @@ pub async fn start_synthetic_compositor(
     state: AppState,
     params: CompositorStartParams,
 ) -> CompositorStatus {
-    stop_current_compositor(&state).await;
+    let _lifecycle = state.compositor_lifecycle.lock().await;
+    if !stop_current_compositor(&state).await {
+        return state.compositor.lock().await.status.clone();
+    }
 
     let previous_scene_status = {
         let compositor = state.compositor.lock().await;
@@ -599,6 +852,8 @@ pub async fn start_synthetic_compositor(
             compositor.status.scene_layout.clone(),
             compositor.status.active_screen_id.clone(),
             compositor.status.scene_sources.clone(),
+            compositor.image_sources.status(),
+            compositor.worker_activity.clone(),
         )
     };
     let run_id = Uuid::new_v4().to_string();
@@ -625,6 +880,11 @@ pub async fn start_synthetic_compositor(
         metal_target_iosurface_id: None,
         metal_target_width: None,
         metal_target_height: None,
+        image_cache: previous_scene_status.5,
+        frame_pipeline: CompositorFramePipelineStatus {
+            consumer: Some(params.frame_consumer.label().to_string()),
+            ..CompositorFramePipelineStatus::default()
+        },
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Synthetic compositor running.".to_string()),
     };
@@ -641,33 +901,26 @@ pub async fn start_synthetic_compositor(
         compositor.status = status.clone();
         compositor.run_id = Some(run_id.clone());
         compositor.stop_tx = Some(stop_tx);
-        compositor.render_task = None;
-    }
-
-    let render_task = spawn_compositor_render_loop(
-        state.clone(),
-        CompositorRenderLoopParams {
-            run_id: run_id.clone(),
-            target_fps,
-            width: status.width,
-            height: status.height,
-            publish_yuv_frames: params.publish_yuv_frames,
-            stream_output: params.stream_output,
-            caption_overlay_on_primary: params.caption_overlay_on_primary,
-            caption_overlay_on_aux: params.caption_overlay_on_aux,
-            highlight_overlay_on_primary: params.highlight_overlay_on_primary,
-            highlight_overlay_on_aux: params.highlight_overlay_on_aux,
-        },
-        stop_rx,
-    );
-
-    {
-        let mut compositor = state.compositor.lock().await;
-        if compositor.run_id.as_deref() == Some(run_id.as_str()) {
-            compositor.render_task = Some(render_task);
-        } else {
-            render_task.abort();
-        }
+        // Spawn and publish the worker handle while holding the ownership lock. A concurrent
+        // replacement can therefore never observe a live run id without the handle it must
+        // await, avoiding the ineffective `abort` race of `spawn_blocking` workers.
+        compositor.render_task = Some(spawn_compositor_render_loop(
+            state.clone(),
+            CompositorRenderLoopParams {
+                run_id: run_id.clone(),
+                target_fps,
+                width: status.width,
+                height: status.height,
+                frame_consumer: params.frame_consumer,
+                stream_output: params.stream_output,
+                caption_overlay_on_primary: params.caption_overlay_on_primary,
+                caption_overlay_on_aux: params.caption_overlay_on_aux,
+                highlight_overlay_on_primary: params.highlight_overlay_on_primary,
+                highlight_overlay_on_aux: params.highlight_overlay_on_aux,
+            },
+            stop_rx,
+            previous_scene_status.6,
+        ));
     }
 
     state.emit_event("compositor.status", status.clone());
@@ -702,20 +955,26 @@ pub async fn update_compositor_surface_size(
 
 #[cfg(test)]
 pub async fn stop_compositor(state: &AppState) -> CompositorStatus {
-    stop_current_compositor(state).await;
-    let status = stopped_status(Some("Compositor stopped.".to_string()));
-    {
+    let _lifecycle = state.compositor_lifecycle.lock().await;
+    if !stop_current_compositor(state).await {
+        return state.compositor.lock().await.status.clone();
+    }
+    let status = {
         let mut compositor = state.compositor.lock().await;
+        let mut status = stopped_status(Some("Compositor stopped.".to_string()));
+        status.image_cache = compositor.image_sources.status();
         compositor.status = status.clone();
         compositor.latest_frame_evidence = None;
         compositor.stream_frame_store = None;
-    }
+        status
+    };
     state.emit_event("compositor.status", status.clone());
     status
 }
 
 pub async fn stop_compositor_if_run_id(state: &AppState, run_id: &str) -> Option<CompositorStatus> {
-    let (previous_task, status) = {
+    let _lifecycle = state.compositor_lifecycle.lock().await;
+    let previous_task = {
         let mut compositor = state.compositor.lock().await;
         if compositor.run_id.as_deref() != Some(run_id) {
             return None;
@@ -723,18 +982,24 @@ pub async fn stop_compositor_if_run_id(state: &AppState, run_id: &str) -> Option
         if let Some(stop_tx) = compositor.stop_tx.take() {
             let _ = stop_tx.send(true);
         }
-        compositor.run_id = None;
-        let previous_task = compositor.render_task.take();
-        compositor.latest_frame_evidence = None;
-        compositor.stream_frame_store = None;
-        let status = stopped_status(Some("Compositor stopped.".to_string()));
-        compositor.status = status.clone();
-        (previous_task, status)
+        compositor.render_task.take()
     };
 
-    if let Some(task) = previous_task {
-        task.abort();
+    if !await_compositor_task(state, run_id, previous_task).await {
+        return Some(state.compositor.lock().await.status.clone());
     }
+    let status = {
+        let mut compositor = state.compositor.lock().await;
+        if compositor.run_id.as_deref() == Some(run_id) {
+            compositor.run_id = None;
+        }
+        compositor.latest_frame_evidence = None;
+        compositor.stream_frame_store = None;
+        let mut status = stopped_status(Some("Compositor stopped.".to_string()));
+        status.image_cache = compositor.image_sources.status();
+        compositor.status = status.clone();
+        status
+    };
     state.emit_event("compositor.status", status.clone());
     Some(status)
 }
@@ -743,8 +1008,10 @@ fn spawn_compositor_render_loop(
     state: AppState,
     params: CompositorRenderLoopParams,
     stop_rx: watch::Receiver<bool>,
+    worker_activity: Arc<CompositorWorkerActivity>,
 ) -> JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
+        let _activity_guard = CompositorWorkerActivityGuard::begin(worker_activity);
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -968,11 +1235,14 @@ pub async fn update_compositor_scene(
             layout: params.layout,
             active_screen: params.active_screen,
         };
+        compositor
+            .image_sources
+            .set_pinned_keys(image_cache_pinned_keys(&snapshot));
         let active_image_source = snapshot
             .active_screen
             .as_ref()
             .map(|screen| compositor.cache_image_source(screen));
-        let _background_image_source = snapshot
+        let background_image_source = snapshot
             .scene
             .as_ref()
             .and_then(|scene| scene.background.as_ref())
@@ -984,8 +1254,12 @@ pub async fn update_compositor_scene(
             .active_screen
             .as_ref()
             .map(|screen| screen.id.clone());
-        compositor.status.scene_sources =
-            compositor_scene_sources(&snapshot, active_image_source.as_ref());
+        compositor.status.scene_sources = compositor_scene_sources(
+            &snapshot,
+            active_image_source.as_ref(),
+            background_image_source.as_ref(),
+        );
+        compositor.status.image_cache = compositor.image_sources.status();
         compositor.status.updated_at = Utc::now().to_rfc3339();
         compositor.scene = Some(snapshot);
         compositor.status.clone()
@@ -1065,25 +1339,30 @@ impl CompositorRuntime {
     ) -> CompositorImageSource {
         let path = Path::new(image_path);
         let file_revision = image_file_revision(path);
-        if let Some(cached) = self.image_sources.get(cache_key)
-            && cached.image_path == image_path
-            && cached.file_revision == file_revision
+        if let Some(cached) =
+            self.image_sources
+                .matching_source(cache_key, image_path, &file_revision)
         {
-            return cached.clone();
+            return cached;
         }
 
+        let content_revision = self.image_sources.next_content_revision();
         let source = if file_revision.is_some() {
-            match image::open(path).map(|image| image.into_rgba8()) {
-                Ok(image) => {
+            match decode_bounded_cache_image(path) {
+                Ok((image, optimization_message)) => {
                     let (width, height) = image.dimensions();
+                    let mut bgra = image.into_raw();
+                    rgba_to_bgra_in_place(&mut bgra);
                     CompositorImageSource {
                         image_path: image_path.to_string(),
                         file_revision,
                         width: Some(width),
                         height: Some(height),
-                        rgba: Some(Arc::new(image.into_raw())),
+                        rgba: None,
+                        bgra: Some(Arc::new(bgra)),
+                        content_revision,
                         state: "live".to_string(),
-                        message: None,
+                        message: optimization_message,
                     }
                 }
                 Err(error) => CompositorImageSource {
@@ -1092,6 +1371,8 @@ impl CompositorRuntime {
                     width: None,
                     height: None,
                     rgba: None,
+                    bgra: None,
+                    content_revision,
                     state: "source-missing".to_string(),
                     message: Some(format!("{read_error_prefix}: {error}")),
                 },
@@ -1103,6 +1384,8 @@ impl CompositorRuntime {
                 width: None,
                 height: None,
                 rgba: None,
+                bgra: None,
+                content_revision,
                 state: "source-missing".to_string(),
                 message: Some(missing_message.to_string()),
             }
@@ -1113,22 +1396,152 @@ impl CompositorRuntime {
     }
 }
 
-async fn stop_current_compositor(state: &AppState) {
-    let previous_task = {
+fn decode_bounded_cache_image(path: &Path) -> Result<(image::RgbaImage, Option<String>), String> {
+    let metadata_reader = image::ImageReader::open(path)
+        .map_err(|error| error.to_string())?
+        .with_guessed_format()
+        .map_err(|error| error.to_string())?;
+    let (width, height) = metadata_reader
+        .into_dimensions()
+        .map_err(|error| error.to_string())?;
+    ensure_image_decode_fits_budget(width, height)?;
+
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|error| error.to_string())?
+        .with_guessed_format()
+        .map_err(|error| error.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(COMPOSITOR_IMAGE_DECODER_ALLOCATION_BUDGET_BYTES);
+    reader.limits(limits);
+    let image = reader
+        .decode()
+        .map_err(|error| error.to_string())?
+        .into_rgba8();
+    let original_dimensions = image.dimensions();
+    let image = bounded_cache_image(image)?;
+    let optimized_dimensions = image.dimensions();
+    let message = (optimized_dimensions != original_dimensions).then(|| {
+        format!(
+            "Image dimensions changed unexpectedly from {}x{} to {}x{}.",
+            original_dimensions.0,
+            original_dimensions.1,
+            optimized_dimensions.0,
+            optimized_dimensions.1
+        )
+    });
+    Ok((image, message))
+}
+
+fn ensure_image_decode_fits_budget(width: u32, height: u32) -> Result<(), String> {
+    let decoded_bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "image dimensions overflow the decode budget".to_string())?;
+    if decoded_bytes > COMPOSITOR_IMAGE_DECODE_BUDGET_BYTES {
+        return Err(format!(
+            "image {width}x{height} needs {decoded_bytes} decoded bytes, exceeding the {}-byte decode budget",
+            COMPOSITOR_IMAGE_DECODE_BUDGET_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn bounded_cache_image(image: image::RgbaImage) -> Result<image::RgbaImage, String> {
+    let (width, height) = image.dimensions();
+    let (bounded_width, bounded_height) = bounded_cache_image_dimensions(width, height)?;
+    if (bounded_width, bounded_height) == (width, height) {
+        return Ok(image);
+    }
+    Ok(image::imageops::resize(
+        &image,
+        bounded_width,
+        bounded_height,
+        image::imageops::FilterType::Lanczos3,
+    ))
+}
+
+fn bounded_cache_image_dimensions(width: u32, height: u32) -> Result<(u32, u32), String> {
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if pixels <= COMPOSITOR_IMAGE_CACHE_MAX_SOURCE_PIXELS || width == 0 || height == 0 {
+        return Ok((width, height));
+    }
+
+    let width_scale = (f64::from(COMPOSITOR_MAX_OUTPUT_WIDTH) / f64::from(width)).min(1.0);
+    let height_scale = (f64::from(COMPOSITOR_MAX_OUTPUT_HEIGHT) / f64::from(height)).min(1.0);
+    let scale = width_scale.max(height_scale);
+    let bounded_width = ((f64::from(width) * scale).floor() as u32).max(1);
+    let bounded_height = ((f64::from(height) * scale).floor() as u32).max(1);
+    let bounded_pixels = u64::from(bounded_width).saturating_mul(u64::from(bounded_height));
+    if bounded_pixels > COMPOSITOR_IMAGE_CACHE_MAX_SOURCE_PIXELS {
+        return Err(format!(
+            "image {width}x{height} cannot retain 4K cover resolution within the per-source cache budget"
+        ));
+    }
+    Ok((bounded_width, bounded_height))
+}
+
+async fn stop_current_compositor(state: &AppState) -> bool {
+    let (previous_run_id, previous_task) = {
         let mut compositor = state.compositor.lock().await;
         if let Some(stop_tx) = compositor.stop_tx.take() {
             let _ = stop_tx.send(true);
         }
-        compositor.run_id = None;
-        compositor.render_task.take()
+        (compositor.run_id.clone(), compositor.render_task.take())
     };
 
-    if let Some(task) = previous_task {
-        task.abort();
+    let previous_run_id = previous_run_id.as_deref().unwrap_or("unknown-run");
+    if !await_compositor_task(state, previous_run_id, previous_task).await {
+        return false;
     }
     let mut compositor = state.compositor.lock().await;
+    compositor.run_id = None;
     compositor.latest_frame_evidence = None;
     compositor.stream_frame_store = None;
+    true
+}
+
+async fn await_compositor_task(
+    state: &AppState,
+    run_id: &str,
+    previous_task: Option<JoinHandle<()>>,
+) -> bool {
+    let Some(mut task) = previous_task else {
+        return true;
+    };
+    match tokio::time::timeout(COMPOSITOR_WORKER_STOP_TIMEOUT, &mut task).await {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            state.emit_log(
+                "warn",
+                format!("Compositor worker {run_id} stopped with a join error: {error}"),
+            );
+            true
+        }
+        Err(_) => {
+            let message = format!(
+                "Compositor worker {run_id} did not stop within {}ms; replacement was refused to prevent overlapping workers.",
+                COMPOSITOR_WORKER_STOP_TIMEOUT.as_millis()
+            );
+            state.emit_log("error", message.clone());
+            let status = {
+                let mut compositor = state.compositor.lock().await;
+                compositor
+                    .worker_activity
+                    .stop_timeouts
+                    .fetch_add(1, Ordering::AcqRel);
+                if compositor.run_id.as_deref() == Some(run_id) && compositor.render_task.is_none()
+                {
+                    compositor.render_task = Some(task);
+                }
+                compositor.status.state = CompositorState::Failed;
+                compositor.status.message = Some(message);
+                compositor.status.updated_at = Utc::now().to_rfc3339();
+                compositor.status.clone()
+            };
+            state.emit_event("compositor.status", status);
+            false
+        }
+    }
 }
 
 fn emit_runtime_diagnostics_event(state: &AppState, diagnostic_stats: DiagnosticStats) {
@@ -1152,7 +1565,7 @@ async fn run_synthetic_compositor_loop(
         target_fps,
         width,
         height,
-        publish_yuv_frames,
+        frame_consumer,
         stream_output,
         caption_overlay_on_primary,
         caption_overlay_on_aux,
@@ -1199,6 +1612,10 @@ async fn run_synthetic_compositor_loop(
     let mut latest_source_statuses: Vec<CompositorSourceStatus> = Vec::new();
     let mut cpu_fallback_frames = 0_u64;
     let mut source_import_stats = CompositorSourceImportStats::default();
+    let mut frame_pipeline = CompositorFramePipelineStatus {
+        consumer: Some(frame_consumer.label().to_string()),
+        ..CompositorFramePipelineStatus::default()
+    };
 
     loop {
         tokio::select! {
@@ -1242,7 +1659,7 @@ async fn run_synthetic_compositor_loop(
                         &mut live_sources,
                         &mut render_cache,
                         gpu_compositor.as_mut(),
-                        publish_yuv_frames,
+                        frame_consumer,
                         stream_output,
                         stream_gpu_compositor.as_mut(),
                         caption_overlay_on_primary,
@@ -1271,6 +1688,21 @@ async fn run_synthetic_compositor_loop(
                 gpu_source_texture_times_ms.push(published.timings.gpu_source_texture_ms);
                 source_import_times_ms.push(published.timings.source_import_stats.import_time_ms);
                 source_import_stats.merge(published.timings.source_import_stats);
+                frame_pipeline.gpu_readbacks = frame_pipeline
+                    .gpu_readbacks
+                    .saturating_add(published.timings.gpu_readbacks);
+                frame_pipeline.bgra_bytes_copied = frame_pipeline
+                    .bgra_bytes_copied
+                    .saturating_add(published.timings.bgra_bytes_copied);
+                frame_pipeline.yuv_frames_converted = frame_pipeline
+                    .yuv_frames_converted
+                    .saturating_add(published.timings.yuv_frames_converted);
+                frame_pipeline.immutable_texture_uploads = frame_pipeline
+                    .immutable_texture_uploads
+                    .saturating_add(published.timings.immutable_texture_uploads);
+                frame_pipeline.immutable_texture_reuses = frame_pipeline
+                    .immutable_texture_reuses
+                    .saturating_add(published.timings.immutable_texture_reuses);
                 gpu_command_wait_times_ms.push(published.timings.gpu_command_wait_ms);
                 gpu_total_times_ms.push(published.timings.gpu_total_ms);
                 frame_store_publish_times_ms.push(published.timings.frame_store_publish_ms);
@@ -1307,8 +1739,8 @@ async fn run_synthetic_compositor_loop(
                         fallback_frame_age_ms,
                         published.metal_target_handoff,
                     ) {
-                        Ok(Some(status)) => {
-                            state.emit_event("compositor.status", status);
+                        Ok(Some(frame_ready)) => {
+                            state.emit_event("preview.frameReady", frame_ready);
                         }
                         Ok(None) => break,
                         Err(()) => {
@@ -1371,6 +1803,7 @@ async fn run_synthetic_compositor_loop(
                             frame_time_p95_ms: p95,
                             metal_target_handoff: published.metal_target_handoff,
                             sources,
+                            frame_pipeline: frame_pipeline.clone(),
                         },
                     ) {
                         Ok(Some(status)) => status,
@@ -1593,6 +2026,11 @@ struct GpuCompositorTimings {
     source_import_stats: CompositorSourceImportStats,
     command_wait_ms: f64,
     total_ms: f64,
+    gpu_readbacks: u64,
+    bgra_bytes_copied: u64,
+    yuv_frames_converted: u64,
+    immutable_texture_uploads: u64,
+    immutable_texture_reuses: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1607,6 +2045,29 @@ struct CompositorPublishTimings {
     gpu_command_wait_ms: f64,
     gpu_total_ms: f64,
     frame_store_publish_ms: f64,
+    gpu_readbacks: u64,
+    bgra_bytes_copied: u64,
+    yuv_frames_converted: u64,
+    immutable_texture_uploads: u64,
+    immutable_texture_reuses: u64,
+}
+
+impl CompositorPublishTimings {
+    fn merge_gpu(&mut self, timings: GpuCompositorTimings) {
+        self.gpu_readbacks = self.gpu_readbacks.saturating_add(timings.gpu_readbacks);
+        self.bgra_bytes_copied = self
+            .bgra_bytes_copied
+            .saturating_add(timings.bgra_bytes_copied);
+        self.yuv_frames_converted = self
+            .yuv_frames_converted
+            .saturating_add(timings.yuv_frames_converted);
+        self.immutable_texture_uploads = self
+            .immutable_texture_uploads
+            .saturating_add(timings.immutable_texture_uploads);
+        self.immutable_texture_reuses = self
+            .immutable_texture_reuses
+            .saturating_add(timings.immutable_texture_reuses);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1629,6 +2090,7 @@ impl<'a> PreparedGpuSourcePixels<'a> {
 struct PreparedGpuSource<'a> {
     pixels: PreparedGpuSourcePixels<'a>,
     kind: crate::metal_compositor::GpuSourceKind,
+    content_key: Option<crate::metal_compositor::GpuSourceContentKey>,
     iosurface: Option<&'a crate::frame_store::RetainedIoSurface>,
     pixel_buffer: Option<&'a crate::frame_store::RetainedPixelBuffer>,
     width: usize,
@@ -1645,6 +2107,7 @@ impl<'a> PreparedGpuSource<'a> {
         crate::metal_compositor::GpuSource {
             kind: self.kind,
             bgra: self.pixels.as_slice(),
+            content_key: self.content_key,
             iosurface: self.iosurface.map(|retained| retained.surface()),
             pixel_buffer: self.pixel_buffer.map(|retained| retained.pixel_buffer()),
             width: self.width,
@@ -1725,11 +2188,12 @@ fn scene_source_kind_label(kind: &SceneSourceKind) -> &'static str {
 /// consumes Metal-composited surfaces directly, so the overlay must ride the
 /// GPU path (forcing CPU starves the VideoToolbox encoder — exit 187).
 #[cfg(target_os = "macos")]
-fn push_caption_overlay_gpu_source(
-    prepared_sources: &mut Vec<PreparedGpuSource<'_>>,
-    overlay: &crate::captions::CaptionOverlay,
+fn push_caption_overlay_gpu_source<'a>(
+    prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
+    overlay: &'a crate::captions::CaptionOverlay,
     canvas_width: u32,
     canvas_height: u32,
+    content_namespace: u64,
 ) {
     let overlay_width = overlay.width as usize;
     let overlay_height = overlay.height as usize;
@@ -1744,14 +2208,19 @@ fn push_caption_overlay_gpu_source(
         overlay.position,
     );
     let draw_height = overlay_height.min(canvas_height.max(1) as usize);
-    // Extract the (possibly center-cropped) bar region as BGRA.
-    let mut bgra = Vec::with_capacity(draw_width * draw_height * 4);
-    for row in 0..draw_height {
-        let row_start = (row * overlay_width + source_left) * 4;
-        for pixel in overlay.rgba[row_start..row_start + draw_width * 4].chunks_exact(4) {
-            bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    // Channel conversion happens once when the overlay revision is installed. Crop only
+    // when the canvas is narrower than the overlay; the common path borrows immutable BGRA.
+    let pixels = if source_left == 0 && draw_width == overlay_width && draw_height == overlay_height
+    {
+        PreparedGpuSourcePixels::Borrowed(&overlay.bgra)
+    } else {
+        let mut bgra = Vec::with_capacity(draw_width * draw_height * 4);
+        for row in 0..draw_height {
+            let row_start = (row * overlay_width + source_left) * 4;
+            bgra.extend_from_slice(&overlay.bgra[row_start..row_start + draw_width * 4]);
         }
-    }
+        PreparedGpuSourcePixels::Owned(bgra)
+    };
     let Some((dest, crop)) = gpu_source_placement(
         draw_width as u32,
         draw_height as u32,
@@ -1769,8 +2238,15 @@ fn push_caption_overlay_gpu_source(
         return;
     };
     prepared_sources.push(PreparedGpuSource {
-        pixels: PreparedGpuSourcePixels::Owned(bgra),
+        pixels,
         kind: crate::metal_compositor::GpuSourceKind::Image,
+        content_key: Some(crate::metal_compositor::GpuSourceContentKey {
+            namespace: content_namespace,
+            revision: overlay.revision,
+            variant: ((source_left as u64) << 32)
+                | ((draw_width as u64) << 16)
+                | draw_height as u64,
+        }),
         iosurface: None,
         pixel_buffer: None,
         width: draw_width,
@@ -1807,11 +2283,15 @@ fn try_gpu_compose(
     let mut prepared_sources = Vec::new();
     let background_active = if let Some(scene) = scene {
         if let Some(background) = scene.background.as_ref() {
-            if let Some((rgba, (image_width, image_height))) = inputs
-                .background_image_source
-                .and_then(|source| source.rgba.as_ref().zip(source.width.zip(source.height)))
+            if let Some((bgra, (image_width, image_height), content_revision)) =
+                inputs.background_image_source.and_then(|source| {
+                    source
+                        .bgra
+                        .as_ref()
+                        .zip(source.width.zip(source.height))
+                        .map(|(bgra, dimensions)| (bgra, dimensions, source.content_revision))
+                })
             {
-                let bgra = rgba_to_bgra_bytes(rgba);
                 let (dest, crop) = gpu_source_placement(
                     image_width,
                     image_height,
@@ -1828,8 +2308,13 @@ fn try_gpu_compose(
                 )
                 .ok_or("background source placement failed")?;
                 prepared_sources.push(PreparedGpuSource {
-                    pixels: PreparedGpuSourcePixels::Owned(bgra),
+                    pixels: PreparedGpuSourcePixels::Borrowed(bgra),
                     kind: crate::metal_compositor::GpuSourceKind::Image,
+                    content_key: Some(crate::metal_compositor::GpuSourceContentKey {
+                        namespace: 1,
+                        revision: content_revision,
+                        variant: 0,
+                    }),
                     iosurface: None,
                     pixel_buffer: None,
                     width: image_width as usize,
@@ -1857,12 +2342,14 @@ fn try_gpu_compose(
         0.0
     };
 
-    if let Some(image) = inputs
-        .active_image_source
-        .and_then(|source| source.rgba.as_ref().zip(source.width.zip(source.height)))
-    {
-        let (rgba, (image_width, image_height)) = image;
-        let bgra = rgba_to_bgra_bytes(rgba);
+    if let Some(image) = inputs.active_image_source.and_then(|source| {
+        source
+            .bgra
+            .as_ref()
+            .zip(source.width.zip(source.height))
+            .map(|(bgra, dimensions)| (bgra, dimensions, source.content_revision))
+    }) {
+        let (bgra, (image_width, image_height), content_revision) = image;
         // Screen-image stand-ins are screen-like: contain, never crop.
         let (dest, crop) = gpu_source_placement(
             image_width,
@@ -1878,8 +2365,13 @@ fn try_gpu_compose(
         )
         .ok_or("cached image placement failed")?;
         prepared_sources.push(PreparedGpuSource {
-            pixels: PreparedGpuSourcePixels::Owned(bgra),
+            pixels: PreparedGpuSourcePixels::Borrowed(bgra),
             kind: crate::metal_compositor::GpuSourceKind::Image,
+            content_key: Some(crate::metal_compositor::GpuSourceContentKey {
+                namespace: 1,
+                revision: content_revision,
+                variant: 0,
+            }),
             iosurface: None,
             pixel_buffer: None,
             width: image_width as usize,
@@ -1895,6 +2387,7 @@ fn try_gpu_compose(
                 overlay,
                 inputs.width,
                 inputs.height,
+                2,
             );
         }
         if let Some(overlay) = inputs.highlight_overlay {
@@ -1903,6 +2396,7 @@ fn try_gpu_compose(
                 overlay,
                 inputs.width,
                 inputs.height,
+                3,
             );
         }
         let sources = prepared_sources
@@ -1939,6 +2433,7 @@ fn try_gpu_compose(
         prepared_sources.push(PreparedGpuSource {
             pixels: PreparedGpuSourcePixels::Owned(placeholder.bytes),
             kind: crate::metal_compositor::GpuSourceKind::Image,
+            content_key: None,
             iosurface: None,
             pixel_buffer: None,
             width: placeholder.width,
@@ -1954,6 +2449,7 @@ fn try_gpu_compose(
                 overlay,
                 inputs.width,
                 inputs.height,
+                2,
             );
         }
         if let Some(overlay) = inputs.highlight_overlay {
@@ -1962,6 +2458,7 @@ fn try_gpu_compose(
                 overlay,
                 inputs.width,
                 inputs.height,
+                3,
             );
         }
         let sources = prepared_sources
@@ -2006,6 +2503,7 @@ fn try_gpu_compose(
                     prepared_sources.push(PreparedGpuSource {
                         pixels: PreparedGpuSourcePixels::Borrowed(&frame.bytes),
                         kind: crate::metal_compositor::GpuSourceKind::Camera,
+                        content_key: None,
                         iosurface: frame.source_iosurface.as_ref(),
                         pixel_buffer: frame.source_pixel_buffer.as_ref(),
                         width: frame.width as usize,
@@ -2031,6 +2529,7 @@ fn try_gpu_compose(
                     prepared_sources.push(PreparedGpuSource {
                         pixels: PreparedGpuSourcePixels::Owned(placeholder.bytes),
                         kind: crate::metal_compositor::GpuSourceKind::Camera,
+                        content_key: None,
                         iosurface: None,
                         pixel_buffer: None,
                         width: placeholder.width,
@@ -2077,6 +2576,7 @@ fn try_gpu_compose(
                     prepared_sources.push(PreparedGpuSource {
                         pixels: PreparedGpuSourcePixels::Borrowed(&frame.bytes),
                         kind: source_kind,
+                        content_key: None,
                         iosurface: frame.source_iosurface.as_ref(),
                         pixel_buffer: frame.source_pixel_buffer.as_ref(),
                         width: frame.width as usize,
@@ -2102,6 +2602,7 @@ fn try_gpu_compose(
                     prepared_sources.push(PreparedGpuSource {
                         pixels: PreparedGpuSourcePixels::Owned(placeholder.bytes),
                         kind: source_kind,
+                        content_key: None,
                         iosurface: None,
                         pixel_buffer: None,
                         width: placeholder.width,
@@ -2128,6 +2629,7 @@ fn try_gpu_compose(
                 prepared_sources.push(PreparedGpuSource {
                     pixels: PreparedGpuSourcePixels::Owned(pattern.bytes),
                     kind: crate::metal_compositor::GpuSourceKind::TestPattern,
+                    content_key: None,
                     iosurface: None,
                     pixel_buffer: None,
                     width: pattern.width,
@@ -2149,6 +2651,7 @@ fn try_gpu_compose(
             overlay,
             inputs.width,
             inputs.height,
+            2,
         );
     }
     if let Some(overlay) = inputs.highlight_overlay {
@@ -2157,6 +2660,7 @@ fn try_gpu_compose(
             overlay,
             inputs.width,
             inputs.height,
+            3,
         );
     }
     let sources = prepared_sources
@@ -2221,6 +2725,17 @@ fn compose_gpu_sources(
                     ),
                     command_wait_ms: output.timings.command_wait_ms,
                     total_ms: output.timings.total_ms,
+                    gpu_readbacks: output.timings.gpu_readbacks,
+                    bgra_bytes_copied: output.timings.bgra_bytes_copied,
+                    yuv_frames_converted: output.timings.yuv_frames_converted,
+                    immutable_texture_uploads: output
+                        .timings
+                        .source_import_stats
+                        .immutable_texture_uploads,
+                    immutable_texture_reuses: output
+                        .timings
+                        .source_import_stats
+                        .immutable_texture_reuses,
                     ..GpuCompositorTimings::default()
                 },
             })
@@ -2235,6 +2750,11 @@ fn compose_gpu_sources(
                 source_import_stats: source_import_stats_from_metal(timings.source_import_stats),
                 command_wait_ms: timings.command_wait_ms,
                 total_ms: timings.total_ms,
+                gpu_readbacks: timings.gpu_readbacks,
+                bgra_bytes_copied: timings.bgra_bytes_copied,
+                yuv_frames_converted: timings.yuv_frames_converted,
+                immutable_texture_uploads: timings.source_import_stats.immutable_texture_uploads,
+                immutable_texture_reuses: timings.source_import_stats.immutable_texture_reuses,
                 ..GpuCompositorTimings::default()
             },
         })
@@ -2429,13 +2949,19 @@ fn gpu_source_placement(
     Some((dest, crop))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(test)]
 fn rgba_to_bgra_bytes(rgba: &[u8]) -> Vec<u8> {
     let mut bgra = Vec::with_capacity(rgba.len());
     for pixel in rgba.chunks_exact(4) {
         bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
     }
     bgra
+}
+
+fn rgba_to_bgra_in_place(bytes: &mut [u8]) {
+    for pixel in bytes.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
 }
 #[cfg(not(target_os = "macos"))]
 fn try_gpu_compose(
@@ -2457,7 +2983,7 @@ async fn publish_compositor_frame(
     live_sources: &mut CompositorLiveSources,
     render_cache: &mut CompositorRenderCache,
     gpu: Option<&mut GpuCompositor>,
-    publish_yuv_frame: bool,
+    frame_consumer: CompositorFrameConsumer,
     stream_output: Option<CompositorAuxiliaryOutput>,
     stream_gpu: Option<&mut GpuCompositor>,
     caption_overlay_on_primary: bool,
@@ -2503,7 +3029,7 @@ async fn publish_compositor_frame(
     };
     let has_image_source = active_image_source
         .as_ref()
-        .is_some_and(|source| source.rgba.is_some());
+        .is_some_and(|source| source.rgba.is_some() || source.bgra.is_some());
     let fingerprint = evidence_fingerprint(
         camera_frame
             .as_ref()
@@ -2558,7 +3084,7 @@ async fn publish_compositor_frame(
             },
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
-        match try_gpu_compose(gpu, &inputs, publish_yuv_frame) {
+        match try_gpu_compose(gpu, &inputs, frame_consumer.publishes_cpu_yuv()) {
             Ok(frame) => {
                 bytes = frame.yuv;
                 pixel_format = frame.pixel_format;
@@ -2568,6 +3094,7 @@ async fn publish_compositor_frame(
                 timings.source_import_stats = frame.timings.source_import_stats;
                 timings.gpu_command_wait_ms = frame.timings.command_wait_ms;
                 timings.gpu_total_ms = frame.timings.total_ms;
+                timings.merge_gpu(frame.timings);
                 compositor_backend = CompositorBackend::Metal;
             }
             Err(reason) => {
@@ -2579,11 +3106,15 @@ async fn publish_compositor_frame(
                 } else {
                     let _ = reason;
                 }
-                let mut store = frame_store
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                bytes = store.checkout_buffer(raw_yuv420p_len(width, height));
-                render_compositor_yuv420p_frame(inputs, &mut bytes);
+                if frame_consumer.requires_cpu_fallback() {
+                    let mut store = frame_store
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    bytes = store.checkout_buffer(raw_yuv420p_len(width, height));
+                    render_compositor_yuv420p_frame(inputs, &mut bytes);
+                } else {
+                    bytes = Vec::new();
+                }
             }
         }
         let mut store = frame_store
@@ -2624,14 +3155,16 @@ async fn publish_compositor_frame(
                 None
             },
         };
-        publish_auxiliary_compositor_frame(
+        if let Some(aux_timings) = publish_auxiliary_compositor_frame(
             sequence,
             captured_at,
             stream_frame_store,
             inputs,
             stream_gpu,
-            stream_output.publish_yuv_frames,
-        );
+            stream_output.frame_consumer,
+        ) {
+            timings.merge_gpu(aux_timings);
+        }
     }
     let evidence = CompositorFrameEvidence {
         sequence,
@@ -2686,19 +3219,21 @@ fn publish_auxiliary_compositor_frame(
     frame_store: CompositorFrameStore,
     inputs: CompositorRenderInputs<'_>,
     gpu: Option<&mut GpuCompositor>,
-    publish_yuv_frame: bool,
-) {
+    frame_consumer: CompositorFrameConsumer,
+) -> Option<GpuCompositorTimings> {
     let width = inputs.width;
     let height = inputs.height;
     let mut pixel_format = CompositorPixelFormat::yuv420p_cpu_buffer();
     let mut export_handle = CompositorFrameExportHandle::default();
-    let bytes = match try_gpu_compose(gpu, &inputs, publish_yuv_frame) {
+    let mut gpu_timings = None;
+    let bytes = match try_gpu_compose(gpu, &inputs, frame_consumer.publishes_cpu_yuv()) {
         Ok(frame) => {
             pixel_format = frame.pixel_format;
             export_handle = frame.export_handle;
+            gpu_timings = Some(frame.timings);
             frame.yuv
         }
-        Err(_) if publish_yuv_frame => {
+        Err(_) if frame_consumer.requires_cpu_fallback() => {
             let mut bytes = {
                 let mut store = frame_store
                     .lock()
@@ -2708,7 +3243,7 @@ fn publish_auxiliary_compositor_frame(
             render_compositor_yuv420p_frame(inputs, &mut bytes);
             bytes
         }
-        Err(_) => return,
+        Err(_) => return None,
     };
     let mut store = frame_store
         .lock()
@@ -2722,6 +3257,7 @@ fn publish_auxiliary_compositor_frame(
         captured_at,
         bytes,
     );
+    gpu_timings
 }
 
 #[derive(Clone, Copy)]
@@ -2793,16 +3329,14 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         0.0
     };
 
-    if let Some(image) = active_image_source
-        .and_then(|source| source.rgba.as_ref().zip(source.width.zip(source.height)))
-    {
-        let (rgba, (image_width, image_height)) = image;
-        if blit_rgba_to_yuv420p(
+    if let Some((pixels, (image_width, image_height), format)) =
+        active_image_source.and_then(cached_image_cpu_pixels)
+        && blit_rgba_to_yuv420p(
             &RgbaSource {
-                bytes: rgba,
+                bytes: pixels,
                 width: image_width,
                 height: image_height,
-                format: SourcePixelFormat::Rgba,
+                format,
             },
             bytes,
             width,
@@ -2818,9 +3352,9 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                 mirror_x: false,
                 mask: SourceMask::None,
             },
-        ) {
-            return;
-        }
+        )
+    {
+        return;
     }
 
     let mut rendered_sources = 0_u32;
@@ -2842,16 +3376,15 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                     compositor_scene_source_fit(&source.kind, &snapshot.layout),
                     CompositorSceneSourceFit::Contain
                 );
-                if let Some(image) = active_image_source
-                    .and_then(|source| source.rgba.as_ref().zip(source.width.zip(source.height)))
+                if let Some((pixels, (image_width, image_height), format)) =
+                    active_image_source.and_then(cached_image_cpu_pixels)
                 {
-                    let (rgba, (image_width, image_height)) = image;
                     blit_rgba_to_yuv420p(
                         &RgbaSource {
-                            bytes: rgba,
+                            bytes: pixels,
                             width: image_width,
                             height: image_height,
-                            format: SourcePixelFormat::Rgba,
+                            format,
                         },
                         bytes,
                         width,
@@ -2940,7 +3473,7 @@ fn try_update_compositor_frame_progress(
     frames_rendered: u64,
     frame_age_ms: u64,
     metal_target_handoff: Option<CompositorMetalTargetHandoff>,
-) -> Result<Option<CompositorStatus>, ()> {
+) -> Result<Option<CompositorFrameReady>, ()> {
     let Ok(mut compositor) = state.compositor.try_lock() else {
         return Err(());
     };
@@ -2957,7 +3490,20 @@ fn try_update_compositor_frame_progress(
     compositor.status.frame_age_ms = Some(frame_age_ms);
     apply_compositor_status_metal_target_handoff(&mut compositor.status, metal_target_handoff);
     compositor.status.updated_at = Utc::now().to_rfc3339();
-    Ok(Some(compositor.status.clone()))
+    Ok(Some(CompositorFrameReady {
+        target_fps: compositor.status.target_fps,
+        width: compositor.status.width,
+        height: compositor.status.height,
+        run_id: compositor.status.run_id.clone(),
+        scene_revision: compositor.status.scene_revision,
+        frame_scene_revision: compositor.status.frame_scene_revision,
+        frames_rendered: compositor.status.frames_rendered,
+        frame_age_ms: compositor.status.frame_age_ms,
+        metal_target_iosurface_id: compositor.status.metal_target_iosurface_id,
+        metal_target_width: compositor.status.metal_target_width,
+        metal_target_height: compositor.status.metal_target_height,
+        updated_at: compositor.status.updated_at.clone(),
+    }))
 }
 
 fn try_update_compositor_status(
@@ -2988,6 +3534,8 @@ fn try_update_compositor_status(
         metrics.metal_target_handoff,
     );
     compositor.status.sources = metrics.sources;
+    compositor.status.frame_pipeline = metrics.frame_pipeline;
+    compositor.status.image_cache = compositor.image_sources.status();
     compositor.status.updated_at = Utc::now().to_rfc3339();
     Ok(Some(compositor.status.clone()))
 }
@@ -3172,6 +3720,19 @@ struct RgbaSource<'a> {
     format: SourcePixelFormat,
 }
 
+fn cached_image_cpu_pixels(
+    source: &CompositorImageSource,
+) -> Option<(&[u8], (u32, u32), SourcePixelFormat)> {
+    let dimensions = source.width.zip(source.height)?;
+    if let Some(bgra) = source.bgra.as_ref() {
+        return Some((bgra, dimensions, SourcePixelFormat::Bgra));
+    }
+    source
+        .rgba
+        .as_ref()
+        .map(|rgba| (rgba.as_slice(), dimensions, SourcePixelFormat::Rgba))
+}
+
 fn render_scene_background(
     background: Option<&EffectiveSceneBackground>,
     background_image_source: Option<&CompositorImageSource>,
@@ -3182,17 +3743,17 @@ fn render_scene_background(
     let Some(background) = background else {
         return false;
     };
-    let Some((rgba, (image_width, image_height))) = background_image_source
-        .and_then(|source| source.rgba.as_ref().zip(source.width.zip(source.height)))
+    let Some((pixels, (image_width, image_height), format)) =
+        background_image_source.and_then(cached_image_cpu_pixels)
     else {
         return false;
     };
     blit_rgba_to_yuv420p(
         &RgbaSource {
-            bytes: rgba,
+            bytes: pixels,
             width: image_width,
             height: image_height,
-            format: SourcePixelFormat::Rgba,
+            format,
         },
         bytes,
         width,
@@ -3813,6 +4374,12 @@ fn stopped_status(message: Option<String>) -> CompositorStatus {
         metal_target_iosurface_id: None,
         metal_target_width: None,
         metal_target_height: None,
+        image_cache: CompositorImageCacheStatus {
+            budget_bytes: COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES as u64,
+            entry_budget: COMPOSITOR_IMAGE_CACHE_ENTRY_BUDGET as u64,
+            ..CompositorImageCacheStatus::default()
+        },
+        frame_pipeline: CompositorFramePipelineStatus::default(),
         updated_at: Utc::now().to_rfc3339(),
         message,
     }
@@ -3821,14 +4388,23 @@ fn stopped_status(message: Option<String>) -> CompositorStatus {
 fn compositor_scene_sources(
     snapshot: &CompositorSceneSnapshot,
     active_image_source: Option<&CompositorImageSource>,
+    background_image_source: Option<&CompositorImageSource>,
 ) -> Vec<CompositorSceneSourceStatus> {
     let scene_source_count = snapshot
         .scene
         .as_ref()
         .map(|scene| scene.sources.len())
         .unwrap_or(0);
-    let mut sources =
-        Vec::with_capacity(scene_source_count + usize::from(snapshot.active_screen.is_some()));
+    let mut sources = Vec::with_capacity(
+        scene_source_count
+            + usize::from(snapshot.active_screen.is_some())
+            + usize::from(
+                snapshot
+                    .scene
+                    .as_ref()
+                    .is_some_and(|scene| scene.background.is_some()),
+            ),
+    );
     if let Some(scene) = &snapshot.scene {
         sources.extend(
             scene
@@ -3867,6 +4443,35 @@ fn compositor_scene_sources(
                 }),
         );
     }
+    if let Some(background) = snapshot
+        .scene
+        .as_ref()
+        .and_then(|scene| scene.background.as_ref())
+    {
+        sources.push(CompositorSceneSourceStatus {
+            id: format!("background-image:{}", background.asset_id),
+            name: "Scene background".to_string(),
+            kind: CompositorSceneSourceKind::BackgroundImage,
+            state: background_image_source
+                .map(|source| source.state.clone())
+                .unwrap_or_else(|| "source-missing".to_string()),
+            device_id: None,
+            visible: true,
+            transform: full_frame_transform(),
+            fit: if matches!(background.fit, BackgroundFit::Fit) {
+                CompositorSceneSourceFit::Contain
+            } else {
+                CompositorSceneSourceFit::Cover
+            },
+            mirror: false,
+            shape: None,
+            image_path: background_image_source.map(|source| source.image_path.clone()),
+            file_revision: background_image_source.and_then(|source| source.file_revision.clone()),
+            width: background_image_source.and_then(|source| source.width),
+            height: background_image_source.and_then(|source| source.height),
+            message: background_image_source.and_then(|source| source.message.clone()),
+        });
+    }
     if let Some(active_screen) = &snapshot.active_screen {
         sources.push(CompositorSceneSourceStatus {
             id: format!("screen-image:{}", active_screen.id),
@@ -3893,17 +4498,32 @@ fn compositor_scene_sources(
 
 fn image_file_revision(path: &Path) -> Option<String> {
     let metadata = std::fs::metadata(path).ok()?;
-    let modified_ms = metadata
+    let modified_ns = metadata
         .modified()
         .ok()
         .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis())
+        .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    Some(format!("{}:{modified_ms}", metadata.len()))
+    Some(format!("{}:{modified_ns}", metadata.len()))
 }
 
 fn background_cache_key(background: &EffectiveSceneBackground) -> String {
     format!("background:{}", background.asset_id)
+}
+
+fn image_cache_pinned_keys(snapshot: &CompositorSceneSnapshot) -> HashSet<String> {
+    let mut keys = HashSet::with_capacity(2);
+    if let Some(screen) = snapshot.active_screen.as_ref() {
+        keys.insert(screen.id.clone());
+    }
+    if let Some(background) = snapshot
+        .scene
+        .as_ref()
+        .and_then(|scene| scene.background.as_ref())
+    {
+        keys.insert(background_cache_key(background));
+    }
+    keys
 }
 
 fn compositor_scene_source_kind(kind: &SceneSourceKind) -> CompositorSceneSourceKind {
@@ -4296,6 +4916,8 @@ mod tests {
             width: Some(1),
             height: Some(1),
             rgba: Some(Arc::new(vec![255, 0, 0, 255])),
+            bgra: Some(Arc::new(vec![0, 0, 255, 255])),
+            content_revision: 1,
             state: "live".to_string(),
             message: None,
         };
@@ -4815,6 +5437,8 @@ mod tests {
             width: Some(2),
             height: Some(2),
             rgba: Some(Arc::new([255, 0, 0, 255].repeat(4))),
+            bgra: Some(Arc::new([0, 0, 255, 255].repeat(4))),
+            content_revision: 1,
             state: "live".to_string(),
             message: None,
         };
@@ -4901,7 +5525,7 @@ mod tests {
             &mut live_sources,
             &mut render_cache,
             Some(&mut gpu),
-            true,
+            CompositorFrameConsumer::RawYuvEncoder,
             None,
             None,
             false,
@@ -4926,6 +5550,9 @@ mod tests {
         assert!(latest.metadata.has_metal_iosurface_target());
         assert_eq!(latest.metadata.metal_target_dimensions(), Some((8, 4)));
         assert!(latest.metadata.metal_target_pixel_buffer().is_some());
+        assert_eq!(result.timings.gpu_readbacks, 1);
+        assert_eq!(result.timings.bgra_bytes_copied, 8 * 4 * 4);
+        assert_eq!(result.timings.yuv_frames_converted, 1);
         let handoff = result
             .metal_target_handoff
             .expect("Metal target should expose IOSurface handoff metadata");
@@ -4986,7 +5613,7 @@ mod tests {
             &mut live_sources,
             &mut render_cache,
             Some(&mut gpu),
-            false,
+            CompositorFrameConsumer::VideoToolboxEncoder,
             None,
             None,
             false,
@@ -5011,6 +5638,69 @@ mod tests {
         assert!(latest.metadata.has_metal_iosurface_target());
         assert_eq!(latest.metadata.metal_target_dimensions(), Some((8, 4)));
         assert!(latest.metadata.metal_target_pixel_buffer().is_some());
+        assert_eq!(result.timings.gpu_readbacks, 0);
+        assert_eq!(result.timings.bgra_bytes_copied, 0);
+        assert_eq!(result.timings.yuv_frames_converted, 0);
+    }
+
+    #[tokio::test]
+    async fn native_preview_skips_cpu_fallback_while_explicit_jpeg_consumer_gets_fresh_yuv() {
+        let state = test_state();
+        let mut live_sources = CompositorLiveSources::default();
+        let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
+
+        publish_compositor_frame(
+            &state,
+            "native-preview-test",
+            1,
+            16,
+            8,
+            &mut live_sources,
+            &mut render_cache,
+            None,
+            CompositorFrameConsumer::NativePreview,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+        )
+        .await;
+        let store = compositor_frame_store(&state).await;
+        let native = store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .latest()
+            .expect("native preview metadata frame");
+        assert!(native.bytes.is_empty());
+
+        publish_compositor_frame(
+            &state,
+            "jpeg-fallback-test",
+            2,
+            16,
+            8,
+            &mut live_sources,
+            &mut render_cache,
+            None,
+            CompositorFrameConsumer::JpegFallback,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+        )
+        .await;
+        let jpeg_source = store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .latest()
+            .expect("JPEG fallback YUV source frame");
+        assert_eq!(jpeg_source.sequence, 2);
+        assert_eq!(jpeg_source.bytes.len(), raw_yuv420p_len(16, 8));
+        assert!(jpeg_source.bytes.iter().any(|byte| *byte != 0));
     }
 
     #[cfg(target_os = "macos")]
@@ -5103,6 +5793,8 @@ mod tests {
             width: None,
             height: None,
             rgba: None,
+            bgra: None,
+            content_revision: 1,
             state: "source-missing".to_string(),
             message: Some("Uploaded screen image file is missing.".to_string()),
         };
@@ -5172,7 +5864,7 @@ mod tests {
             compositor.run_id = Some("run".to_string());
         }
 
-        let status = try_update_compositor_frame_progress(
+        let frame_ready = try_update_compositor_frame_progress(
             &state,
             "run",
             42,
@@ -5186,6 +5878,14 @@ mod tests {
         .expect("progress lock")
         .expect("progress status");
 
+        assert_eq!(frame_ready.frames_rendered, 42);
+        assert_eq!(frame_ready.frame_scene_revision, Some(12));
+        assert_eq!(frame_ready.frame_age_ms, Some(4));
+        assert_eq!(frame_ready.metal_target_iosurface_id, Some(123));
+        assert_eq!(frame_ready.metal_target_width, Some(640));
+        assert_eq!(frame_ready.metal_target_height, Some(360));
+
+        let status = state.compositor.lock().await.status.clone();
         assert_eq!(status.state, CompositorState::Live);
         assert_eq!(status.frames_rendered, 42);
         assert_eq!(status.render_fps, Some(58.0));
@@ -5194,9 +5894,6 @@ mod tests {
         assert_eq!(status.frame_scene_revision, Some(12));
         assert_eq!(status.frame_age_ms, Some(4));
         assert_eq!(status.frame_time_p95_ms, Some(12.5));
-        assert_eq!(status.metal_target_iosurface_id, Some(123));
-        assert_eq!(status.metal_target_width, Some(640));
-        assert_eq!(status.metal_target_height, Some(360));
         assert!(
             try_update_compositor_frame_progress(&state, "stale-run", 43, 5, None)
                 .expect("progress lock")
@@ -5409,7 +6106,7 @@ mod tests {
                 target_fps: 60,
                 width: 640,
                 height: 360,
-                publish_yuv_frames: true,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
@@ -5459,11 +6156,11 @@ mod tests {
                 target_fps: 30,
                 width: 640,
                 height: 360,
-                publish_yuv_frames: true,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: Some(CompositorAuxiliaryOutput {
                     width: 320,
                     height: 180,
-                    publish_yuv_frames: true,
+                    frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 }),
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
@@ -5594,11 +6291,11 @@ mod tests {
             &mut live_sources,
             &mut render_cache,
             Some(&mut recording_gpu),
-            false,
+            CompositorFrameConsumer::VideoToolboxEncoder,
             Some(CompositorAuxiliaryOutput {
                 width: 32,
                 height: 18,
-                publish_yuv_frames: false,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
             }),
             Some(&mut stream_gpu),
             false,
@@ -5981,7 +6678,7 @@ mod tests {
                 target_fps: 30,
                 width: 1920,
                 height: 1080,
-                publish_yuv_frames: true,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
@@ -5997,6 +6694,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rapid_compositor_replacement_awaits_the_previous_blocking_worker() {
+        let state = test_state();
+        let params = |width| CompositorStartParams {
+            target_fps: 60,
+            width,
+            height: 36,
+            frame_consumer: CompositorFrameConsumer::NativePreview,
+            stream_output: None,
+            caption_overlay_on_primary: false,
+            caption_overlay_on_aux: false,
+            highlight_overlay_on_primary: false,
+            highlight_overlay_on_aux: false,
+        };
+
+        let first = start_synthetic_compositor(state.clone(), params(64)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let second = start_synthetic_compositor(state.clone(), params(96)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        stop_compositor(&state).await;
+
+        let activity = state.compositor.lock().await.worker_activity.clone();
+        assert_ne!(first.run_id, second.run_id);
+        assert_eq!(second.width, 96);
+        assert_eq!(activity.active.load(Ordering::Acquire), 0);
+        assert_eq!(activity.max_active.load(Ordering::Acquire), 1);
+        assert_eq!(activity.stop_timeouts.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_compositor_starts_serialize_the_full_worker_handoff() {
+        let state = test_state();
+        let params = |width| CompositorStartParams {
+            target_fps: 60,
+            width,
+            height: 36,
+            frame_consumer: CompositorFrameConsumer::NativePreview,
+            stream_output: None,
+            caption_overlay_on_primary: false,
+            caption_overlay_on_aux: false,
+            highlight_overlay_on_primary: false,
+            highlight_overlay_on_aux: false,
+        };
+        let (left, right) = tokio::join!(
+            start_synthetic_compositor(state.clone(), params(64)),
+            start_synthetic_compositor(state.clone(), params(96))
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let current = compositor_status(&state).await;
+        stop_compositor(&state).await;
+
+        let activity = state.compositor.lock().await.worker_activity.clone();
+        assert_ne!(left.run_id, right.run_id);
+        assert!(current.run_id == left.run_id || current.run_id == right.run_id);
+        assert_eq!(activity.active.load(Ordering::Acquire), 0);
+        assert_eq!(activity.max_active.load(Ordering::Acquire), 1);
+        assert_eq!(activity.stop_timeouts.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
     async fn compositor_restart_publishes_requested_recording_dimensions_after_preview_size() {
         let state = test_state();
         start_synthetic_compositor(
@@ -6005,7 +6761,7 @@ mod tests {
                 target_fps: 30,
                 width: 703,
                 height: 395,
-                publish_yuv_frames: true,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
@@ -6039,7 +6795,7 @@ mod tests {
                 target_fps: 30,
                 width: 1920,
                 height: 1080,
-                publish_yuv_frames: true,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
@@ -6158,6 +6914,12 @@ mod tests {
         assert_eq!(first_source.height, Some(1));
         assert!(first_source.file_revision.is_some());
         let first_revision = first_source.file_revision.clone();
+        assert_eq!(first.image_cache.entries, 1);
+        assert_eq!(first.image_cache.decoded_bytes, 4);
+        assert_eq!(first.image_cache.preconverted_bgra_bytes, 0);
+        assert_eq!(first.image_cache.resident_bytes, 4);
+        assert_eq!(first.image_cache.pinned_entries, 1);
+        assert_eq!(first.image_cache.misses, 1);
 
         let second = update_compositor_scene(
             &state,
@@ -6171,6 +6933,7 @@ mod tests {
         .await;
 
         assert_eq!(second.scene_sources[0].file_revision, first_revision);
+        assert_eq!(second.image_cache.hits, 1);
         assert_eq!(state.compositor.lock().await.image_sources.len(), 1);
 
         std::fs::remove_file(&image_path).unwrap();
@@ -6187,7 +6950,170 @@ mod tests {
 
         assert_eq!(missing.scene_sources[0].state, "source-missing");
         assert!(missing.scene_sources[0].message.is_some());
+        assert_eq!(missing.image_cache.resident_bytes, 0);
+        assert_eq!(missing.image_cache.misses, 2);
         assert_eq!(state.compositor.lock().await.image_sources.len(), 1);
+    }
+
+    #[test]
+    fn background_image_status_surfaces_cache_errors_and_quality_dimensions() {
+        let mut snapshot = test_scene_snapshot(LayoutPreset::ScreenOnly, None, None);
+        snapshot.scene.as_mut().unwrap().background = Some(EffectiveSceneBackground {
+            asset_id: "background-1".to_string(),
+            managed_asset_path: "/missing/background.webp".to_string(),
+            fit: BackgroundFit::Fill,
+            scale: 200.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+        });
+        let background = CompositorImageSource {
+            image_path: "/missing/background.webp".to_string(),
+            file_revision: None,
+            width: Some(7680),
+            height: Some(4320),
+            rgba: None,
+            bgra: None,
+            content_revision: 1,
+            state: "source-missing".to_string(),
+            message: Some("Background exceeds a decode limit.".to_string()),
+        };
+
+        let sources = compositor_scene_sources(&snapshot, None, Some(&background));
+        let status = sources
+            .iter()
+            .find(|source| source.kind == CompositorSceneSourceKind::BackgroundImage)
+            .expect("background status");
+
+        assert_eq!(status.id, "background-image:background-1");
+        assert_eq!(status.state, "source-missing");
+        assert_eq!(status.width, Some(7680));
+        assert_eq!(status.height, Some(4320));
+        assert_eq!(
+            status.message.as_deref(),
+            Some("Background exceeds a decode limit.")
+        );
+    }
+
+    #[test]
+    fn decoded_image_cache_obeys_resident_byte_budget_and_never_evicts_pins() {
+        fn source(name: &str, revision: u64) -> CompositorImageSource {
+            CompositorImageSource {
+                image_path: format!("/{name}.png"),
+                file_revision: Some(format!("revision-{revision}")),
+                width: Some(2),
+                height: Some(2),
+                rgba: Some(Arc::new(vec![revision as u8; 16])),
+                bgra: Some(Arc::new(vec![revision as u8; 16])),
+                content_revision: revision,
+                state: "live".to_string(),
+                message: None,
+            }
+        }
+
+        let mut cache = CompositorImageCache::new(64, 8);
+        cache.set_pinned_keys(HashSet::from(["current".to_string()]));
+        cache.insert("current".to_string(), source("current", 1));
+        cache.insert("candidate-1".to_string(), source("candidate-1", 2));
+        cache.insert("candidate-2".to_string(), source("candidate-2", 3));
+        cache.insert("candidate-3".to_string(), source("candidate-3", 4));
+
+        let status = cache.status();
+        assert_eq!(status.resident_bytes, 64);
+        assert_eq!(status.entries, 2);
+        assert_eq!(status.pinned_entries, 1);
+        assert_eq!(status.pinned_bytes, 32);
+        assert_eq!(status.evictions, 2);
+        assert!(cache.get("current").is_some(), "current asset stays pinned");
+        assert!(
+            cache.get("candidate-3").is_some(),
+            "newest inactive asset stays hot"
+        );
+        assert!(cache.get("candidate-1").is_none());
+
+        let candidate = cache
+            .matching_source(
+                "candidate-3",
+                "/candidate-3.png",
+                &Some("revision-4".to_string()),
+            )
+            .expect("hot candidate is a cache hit");
+        assert_eq!(candidate.content_revision, 4);
+        assert!(
+            cache
+                .matching_source(
+                    "candidate-1",
+                    "/candidate-1.png",
+                    &Some("revision-2".to_string()),
+                )
+                .is_none(),
+            "evicted asset must be decoded again"
+        );
+
+        cache.set_pinned_keys(HashSet::from(["candidate-3".to_string()]));
+        cache.insert("candidate-1".to_string(), source("candidate-1", 5));
+        assert!(cache.get("candidate-3").is_some());
+        assert!(cache.get("candidate-1").is_some());
+        assert!(cache.status().resident_bytes <= 64);
+        assert_eq!(cache.status().hits, 1);
+        assert_eq!(cache.status().misses, 1);
+    }
+
+    #[test]
+    fn decoded_image_dimensions_preserve_8k_zoom_quality_within_two_pinned_sources() {
+        assert_eq!(
+            bounded_cache_image_dimensions(3840, 2160).unwrap(),
+            (3840, 2160)
+        );
+        assert_eq!(
+            bounded_cache_image_dimensions(7680, 4320).unwrap(),
+            (7680, 4320),
+            "an 8K background must retain enough detail for 200% zoom on 4K output"
+        );
+        assert_eq!(
+            bounded_cache_image_dimensions(5000, 5000).unwrap(),
+            (5000, 5000),
+            "square sources remain at their requested quality"
+        );
+
+        assert_eq!(
+            bounded_cache_image_dimensions(10_000, 1_000).unwrap(),
+            (10_000, 1_000),
+            "an already height-limited ultrawide must not lose usable source resolution"
+        );
+        assert_eq!(
+            bounded_cache_image_dimensions(10_000, 2_000).unwrap(),
+            (10_000, 2_000),
+            "wide sources below the decode ceiling remain unchanged"
+        );
+
+        let maximum_pinned_resident = COMPOSITOR_IMAGE_CACHE_MAX_SOURCE_PIXELS
+            * 4
+            * COMPOSITOR_IMAGE_CACHE_MAX_PINNED_ENTRIES as u64;
+        assert!(maximum_pinned_resident <= COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES as u64);
+    }
+
+    #[test]
+    fn image_decode_budget_rejects_oversized_transient_rgba_allocations() {
+        assert!(ensure_image_decode_fits_budget(7680, 4320).is_ok());
+        let error = ensure_image_decode_fits_budget(10_000, 10_000)
+            .expect_err("100 megapixel input must be rejected before decode");
+        assert!(error.contains("exceeding"));
+    }
+
+    #[test]
+    fn rgba_to_bgra_conversion_reuses_the_decoded_allocation() {
+        let mut bytes = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        let allocation = bytes.as_ptr();
+
+        rgba_to_bgra_in_place(&mut bytes);
+
+        assert_eq!(bytes, vec![30, 20, 10, 40, 70, 60, 50, 80]);
+        assert_eq!(bytes.as_ptr(), allocation);
     }
 
     #[test]
@@ -6227,6 +7153,10 @@ mod tests {
             rgba: Some(Arc::new(vec![
                 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
             ])),
+            bgra: Some(Arc::new(vec![
+                0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+            ])),
+            content_revision: 1,
             state: "live".to_string(),
             message: None,
         };
@@ -6262,12 +7192,12 @@ mod tests {
         rgba_pixel: [u8; 4],
         position: crate::captions::CaptionOverlayPosition,
     ) -> crate::captions::CaptionOverlay {
+        let rgba = std::iter::repeat_n(rgba_pixel, (width * height) as usize)
+            .flatten()
+            .collect::<Vec<_>>();
         crate::captions::CaptionOverlay {
-            rgba: std::sync::Arc::new(
-                std::iter::repeat_n(rgba_pixel, (width * height) as usize)
-                    .flatten()
-                    .collect(),
-            ),
+            bgra: std::sync::Arc::new(rgba_to_bgra_bytes(&rgba)),
+            rgba: std::sync::Arc::new(rgba),
             width,
             height,
             position,
@@ -6524,6 +7454,8 @@ mod tests {
             width: Some(2),
             height: Some(2),
             rgba: Some(Arc::new([255, 0, 0, 255].repeat(4))),
+            bgra: Some(Arc::new([0, 0, 255, 255].repeat(4))),
+            content_revision: 1,
             state: "live".to_string(),
             message: None,
         };
@@ -6925,7 +7857,7 @@ mod tests {
             &mut live_sources,
             &mut render_cache,
             None,
-            true,
+            CompositorFrameConsumer::RawYuvEncoder,
             None,
             None,
             false,

@@ -1,0 +1,243 @@
+name: macOS performance endurance
+
+on:
+  workflow_dispatch:
+    inputs:
+      warmup_seconds:
+        description: 'Warm-up before measurement'
+        required: false
+        default: '60'
+      measurement_seconds:
+        description: 'Measurement/endurance window'
+        required: false
+        default: '600'
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-performance-endurance
+  cancel-in-progress: false
+
+jobs:
+  endurance:
+    name: Native preview and real-device endurance
+    # This runner must be a logged-in macOS session with Screen Recording,
+    # Camera, and Microphone permission already granted to the harness/app.
+    runs-on: [self-hosted, macOS, videorc-performance]
+    timeout-minutes: 240
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      VIDEORC_PERF_ARTIFACT_DIR: docs/acceptance/artifacts/performance/endurance
+      VIDEORC_PERF_APP_EXECUTABLE: apps/desktop/release/mac-arm64/Videorc.app/Contents/MacOS/Videorc
+      WARMUP_SECONDS: ${{ inputs.warmup_seconds || '60' }}
+      MEASUREMENT_SECONDS: ${{ inputs.measurement_seconds || '600' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify FFmpeg and FFprobe
+        run: |
+          command -v ffmpeg
+          command -v ffprobe
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+
+      - name: Build packaged app
+        run: pnpm package:desktop
+
+      # Prime macOS capture, Electron, and GPU caches outside the three-run
+      # calibration set. This keeps cold-host initialization out of run 1.
+      - name: Prime detached native-preview workload
+        run: >-
+          pnpm perf:scenario --scenario detached-native-preview --report-only
+          --warmup-seconds 60
+          --measurement-seconds 120
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-primer.json"
+        env:
+          VIDEORC_PERF_MIN_PRESENT_FPS: '58'
+          VIDEORC_PERF_MAX_INTERVAL_P95_MS: '30'
+
+      - name: Detached native-preview endurance
+        id: native_preview
+        continue-on-error: true
+        run: |
+          failed=0
+          for calibration_run in 1 2 3; do
+            pnpm perf:scenario --scenario detached-native-preview --gate \
+              --warmup-seconds "$WARMUP_SECONDS" \
+              --measurement-seconds "$MEASUREMENT_SECONDS" \
+              --output "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-run-${calibration_run}.json" \
+              || failed=1
+          done
+          exit "$failed"
+        env:
+          VIDEORC_PERF_MIN_PRESENT_FPS: '58'
+          VIDEORC_PERF_MAX_INTERVAL_P95_MS: '30'
+
+      - name: Aggregate packaged native-preview calibration
+        id: native_preview_calibration
+        if: always() && steps.native_preview.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          pnpm perf:calibrate
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-calibration.json"
+          --budget-output "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-budget-candidate.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-run-1.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-run-2.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-run-3.child.json"
+
+      - name: Preview lifecycle endurance
+        id: preview_lifecycle
+        continue-on-error: true
+        run: >-
+          pnpm perf:scenario --scenario preview-lifecycle --gate
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/preview-lifecycle.json"
+        env:
+          VIDEORC_PREVIEW_LIFECYCLE_CYCLES: '100'
+
+      - name: Real 4K recording endurance
+        id: record_4k
+        continue-on-error: true
+        run: |
+          failed=0
+          for calibration_run in 1 2 3; do
+            VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-4k-media/run-${calibration_run}" \
+              pnpm perf:scenario --scenario record-4k --gate \
+                --warmup-seconds "$WARMUP_SECONDS" \
+                --measurement-seconds "$MEASUREMENT_SECONDS" \
+                --output "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-run-${calibration_run}.json" \
+              || failed=1
+          done
+          exit "$failed"
+
+      - name: Aggregate packaged 4K recording calibration
+        id: record_4k_calibration
+        if: always() && steps.record_4k.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          pnpm perf:calibrate
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-calibration.json"
+          --budget-output "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-budget-candidate.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-run-1.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-run-2.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-run-3.child.json"
+
+      - name: Real 4K record plus 1080p stream endurance
+        id: record_stream
+        continue-on-error: true
+        run: |
+          failed=0
+          for calibration_run in 1 2 3; do
+            VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-stream-media/run-${calibration_run}" \
+              pnpm perf:scenario --scenario record-4k-stream-1080p --gate \
+                --warmup-seconds "$WARMUP_SECONDS" \
+                --measurement-seconds "$MEASUREMENT_SECONDS" \
+                --output "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-run-${calibration_run}.json" \
+              || failed=1
+          done
+          exit "$failed"
+
+      - name: Aggregate packaged 4K record plus 1080p stream calibration
+        id: record_stream_calibration
+        if: always() && steps.record_stream.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          pnpm perf:calibrate
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-calibration.json"
+          --budget-output "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-budget-candidate.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-run-1.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-run-2.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-run-3.child.json"
+
+      - name: Real screen, camera, and microphone artifact endurance
+        id: native_devices
+        continue-on-error: true
+        run: |
+          failed=0
+          for calibration_run in 1 2 3; do
+            VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/real-device-media/run-${calibration_run}" \
+              pnpm perf:scenario --scenario real-devices-1080p --gate \
+                --warmup-seconds "$WARMUP_SECONDS" \
+                --measurement-seconds "$MEASUREMENT_SECONDS" \
+                --output "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-run-${calibration_run}.json" \
+              || failed=1
+          done
+          exit "$failed"
+
+      - name: Aggregate packaged real-device calibration
+        id: native_devices_calibration
+        if: always() && steps.native_devices.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          pnpm perf:calibrate
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-calibration.json"
+          --budget-output "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-budget-candidate.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-run-1.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-run-2.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-run-3.child.json"
+
+      - name: Upload performance JSON and media evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-performance-endurance-${{ github.run_id }}
+          path: |
+            docs/acceptance/artifacts/performance/**/*.json
+            docs/acceptance/artifacts/performance/**/*.mp4
+            docs/acceptance/artifacts/performance/**/*.mov
+            docs/acceptance/artifacts/performance/**/*.mkv
+            docs/acceptance/artifacts/performance/**/*.flv
+            docs/acceptance/artifacts/performance/**/*.md
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce complete endurance matrix
+        if: always()
+        run: |
+          outcomes=(
+            "native-preview=${{ steps.native_preview.outcome }}"
+            "native-preview-calibration=${{ steps.native_preview_calibration.outcome }}"
+            "preview-lifecycle=${{ steps.preview_lifecycle.outcome }}"
+            "record-4k=${{ steps.record_4k.outcome }}"
+            "record-4k-calibration=${{ steps.record_4k_calibration.outcome }}"
+            "record-stream=${{ steps.record_stream.outcome }}"
+            "record-stream-calibration=${{ steps.record_stream_calibration.outcome }}"
+            "native-devices=${{ steps.native_devices.outcome }}"
+            "native-devices-calibration=${{ steps.native_devices_calibration.outcome }}"
+          )
+          failed=0
+          for outcome in "${outcomes[@]}"; do
+            echo "$outcome"
+            if [[ "$outcome" != *=success ]]; then
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+      - name: Clean successful endurance evidence from runner
+        if: success()
+        run: rm -rf "$VIDEORC_PERF_ARTIFACT_DIR"

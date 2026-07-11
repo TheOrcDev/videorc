@@ -22,7 +22,7 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import type {
   CommentsReadState,
   CommentsWriteState,
@@ -51,11 +51,11 @@ export function GoLiveConfirmationDialog({
 }: {
   open: boolean
   pending: boolean
-  partialSetup: ReturnType<typeof useStudio>['goLivePartialSetup']
-  preflight: ReturnType<typeof useStudio>['goLivePreflight']
+  partialSetup: ReturnType<typeof useStudioCore>['goLivePartialSetup']
+  preflight: ReturnType<typeof useStudioCore>['goLivePreflight']
   entitlementGate: EntitlementUiGate
-  draft: ReturnType<typeof useStudio>['streamMetadataDraft']
-  onPatchDraft: ReturnType<typeof useStudio>['patchStreamMetadataDraft']
+  draft: ReturnType<typeof useStudioCore>['streamMetadataDraft']
+  onPatchDraft: ReturnType<typeof useStudioCore>['patchStreamMetadataDraft']
   onCancel: () => void
   onConfirm: () => void
   onContinuePartial: () => void

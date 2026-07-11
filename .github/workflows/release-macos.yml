@@ -33,7 +33,7 @@ jobs:
   macos:
     name: Build signed macOS artifact
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Check out repository
@@ -53,6 +53,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -107,6 +109,23 @@ jobs:
 
       - name: Validate signed macOS artifact
         run: pnpm release:validate:macos
+
+      - name: Short packaged native-preview performance sentinel
+        run: pnpm smoke:packaged:native-preview:performance
+        env:
+          VIDEORC_PERF_ACTIVE_BUDGET_PATH: config/performance-budgets/v1/active/macos-release.json
+          VIDEORC_PERF_HARDWARE_CLASS: github-hosted-macos-15-arm64-standard
+
+      - name: Upload packaged performance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: videorc-macos-performance-${{ github.run_id }}
+          path: |
+            docs/acceptance/artifacts/performance/release/packaged-native-preview.json
+            docs/acceptance/artifacts/performance/release/packaged-native-preview.child.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4

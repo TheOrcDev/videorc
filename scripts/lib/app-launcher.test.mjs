@@ -3,9 +3,12 @@ import test from 'node:test'
 import { resolve } from 'node:path'
 
 import {
+  appSpawnSpec,
   devAppFailureMessage,
   devAppSpawnOptions,
   devAppSpawnSpec,
+  launchDevApp,
+  performanceAppSpawnSpec,
   resolveSmokeAppDirs,
   smokeAppEnv,
   stopProcess
@@ -84,6 +87,36 @@ test('dev app launch targets the desktop package and uses a shell on Windows', (
   assert.equal(devAppSpawnOptions({ platform: 'linux' }).detached, true)
 })
 
+test('custom app launch preserves isolated env and targets a packaged executable', () => {
+  const spec = appSpawnSpec({
+    command: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+    cwd: '/Applications/Videorc.app/Contents/MacOS',
+    env: { VIDEORC_USER_DATA_DIR: '/tmp/videorc-user-data' },
+    platform: 'darwin'
+  })
+
+  assert.equal(spec.command, '/Applications/Videorc.app/Contents/MacOS/Videorc')
+  assert.deepEqual(spec.args, [])
+  assert.equal(spec.options.cwd, '/Applications/Videorc.app/Contents/MacOS')
+  assert.equal(spec.options.env.VIDEORC_USER_DATA_DIR, '/tmp/videorc-user-data')
+  assert.equal(spec.options.detached, true)
+})
+
+test('performance launch uses the exact packaged executable when configured', () => {
+  const executable = resolve('/tmp/Videorc.app/Contents/MacOS/Videorc')
+  assert.deepEqual(
+    performanceAppSpawnSpec({
+      VIDEORC_PERF_APP_EXECUTABLE: '/tmp/Videorc.app/Contents/MacOS/Videorc'
+    }),
+    {
+      command: executable,
+      args: [],
+      cwd: resolve('/tmp/Videorc.app/Contents/MacOS')
+    }
+  )
+  assert.equal(performanceAppSpawnSpec({}), undefined)
+})
+
 test('dev app launch failures include the latest child output', () => {
   const message = devAppFailureMessage('Dev app exited before handshake completed', [
     '',
@@ -97,6 +130,53 @@ test('dev app launch failures include the latest child output', () => {
   assert.match(message, /electron-vite exited with code 1/)
   assert.equal(devAppFailureMessage('plain failure', []), 'plain failure')
 })
+
+test(
+  'launchDevApp finishes exact process-group cleanup before rejecting a marker timeout',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const descendantScript = `
+      process.on('SIGTERM', () => setTimeout(() => process.exit(0), 150))
+      setInterval(() => {}, 1_000)
+    `
+    const fixtureScript = `
+      const { spawn } = require('node:child_process')
+      spawn(process.execPath, ['-e', ${JSON.stringify(descendantScript)}], { stdio: 'ignore' })
+      console.log('launcher-fixture-pid=' + process.pid)
+      process.on('SIGTERM', () => setTimeout(() => process.exit(0), 150))
+      setInterval(() => {}, 1_000)
+    `
+    let fixturePid = null
+
+    try {
+      let launchError = null
+      await assert.rejects(
+        launchDevApp({
+          timeoutMs: 1_000,
+          requiredMarkers: ['never-ready'],
+          spawnSpec: {
+            command: process.execPath,
+            args: ['-e', fixtureScript],
+            cwd: process.cwd()
+          }
+        }),
+        (error) => {
+          launchError = error
+          return /Timed out waiting for \[never-ready\]/.test(error.message)
+        }
+      )
+
+      const match = /launcher-fixture-pid=(\d+)/.exec(launchError?.message ?? '')
+      assert.ok(match, `expected fixture pid in launcher diagnostics: ${launchError?.message}`)
+      fixturePid = Number(match[1])
+      assert.equal(exactProcessGroupExists(fixturePid), false)
+    } finally {
+      if (fixturePid && exactProcessGroupExists(fixturePid)) {
+        process.kill(-fixturePid, 'SIGKILL')
+      }
+    }
+  }
+)
 
 test('stopProcess reports a graceful process-group stop', async () => {
   const child = fakeChild(123)
@@ -180,6 +260,15 @@ test('stopProcess reports leaked children when SIGKILL cannot finish teardown', 
 
 function fakeChild(pid) {
   return { pid, exitCode: null, signalCode: null }
+}
+
+function exactProcessGroupExists(pid) {
+  try {
+    process.kill(-pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
 }
 
 function withCleanSmokeEnv(callback) {

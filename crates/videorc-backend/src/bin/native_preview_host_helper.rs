@@ -70,6 +70,7 @@ mod macos {
 
     use anyhow::{Context, Result, bail};
     use objc2::MainThreadMarker;
+    use objc2::rc::autoreleasepool;
     use objc2_app_kit::NSApplication;
     use serde::{Deserialize, Serialize};
 
@@ -78,6 +79,18 @@ mod macos {
         NativePreviewHostActivation, NativePreviewHostBounds, NativePreviewHostCommand,
         NativePreviewHostCommandKind, NativePreviewIosurfacePresenterRunner,
     };
+
+    const HELPER_IDLE_PUMP_INTERVAL: Duration = Duration::from_millis(16);
+    /// Keep stdin request buffering bounded so a stalled AppKit/Metal operation
+    /// backpressures the parent through the OS pipe instead of retaining an
+    /// unbounded number of request lines in the helper. `SyncSender::send`
+    /// preserves FIFO ordering and wakes with an error when the receiver exits.
+    const HELPER_STDIN_QUEUE_CAPACITY: usize = 32;
+
+    enum HelperLoopControl {
+        Continue,
+        Exit,
+    }
 
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -205,22 +218,33 @@ mod macos {
             },
         )?;
         loop {
-            let line = match request_rx.recv_timeout(Duration::from_millis(1)) {
-                Ok(Ok(line)) => line,
-                Ok(Err(error)) => return Err(error).context("native preview helper stdin failed"),
-                Err(RecvTimeoutError::Timeout) => {
-                    pump_core_animation(&app);
-                    continue;
-                }
-                Err(RecvTimeoutError::Disconnected) => break,
-            };
-            if !line.trim().is_empty() {
-                let should_exit = handle_request_line(mtm, &mut runner, line, &mut stdout)?;
+            let control = autoreleasepool(|_| -> Result<HelperLoopControl> {
+                let line = match request_rx.recv_timeout(HELPER_IDLE_PUMP_INTERVAL) {
+                    Ok(Ok(line)) => line,
+                    Ok(Err(error)) => {
+                        return Err(error).context("native preview helper stdin failed");
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        pump_core_animation(&app);
+                        return Ok(HelperLoopControl::Continue);
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return Ok(HelperLoopControl::Exit),
+                };
+                let should_exit = if line.trim().is_empty() {
+                    false
+                } else {
+                    handle_request_line(mtm, &mut runner, line, &mut stdout)?
+                };
+                pump_core_animation(&app);
                 if should_exit {
-                    break;
+                    Ok(HelperLoopControl::Exit)
+                } else {
+                    Ok(HelperLoopControl::Continue)
                 }
+            })?;
+            if matches!(control, HelperLoopControl::Exit) {
+                break;
             }
-            pump_core_animation(&app);
         }
 
         Ok(())
@@ -230,14 +254,14 @@ mod macos {
     /// transactions (layer attachment, window/layer frame changes) would never be
     /// committed to the render server — the window then composites as an empty
     /// (black) layer no matter how many drawables were presented. Flush explicitly
-    /// on every loop tick.
+    /// on each request or display-paced idle tick.
     fn pump_core_animation(app: &NSApplication) {
         app.updateWindows();
         objc2_quartz_core::CATransaction::flush();
     }
 
     fn spawn_stdin_reader() -> mpsc::Receiver<io::Result<String>> {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = helper_stdin_channel();
         thread::spawn(move || {
             let stdin = io::stdin();
             for line in stdin.lock().lines() {
@@ -247,6 +271,10 @@ mod macos {
             }
         });
         rx
+    }
+
+    fn helper_stdin_channel<T>() -> (mpsc::SyncSender<T>, mpsc::Receiver<T>) {
+        mpsc::sync_channel(HELPER_STDIN_QUEUE_CAPACITY)
     }
 
     fn handle_request_line(
@@ -359,6 +387,7 @@ mod macos {
         let source = GpuSource {
             kind: GpuSourceKind::Image,
             bgra: &red,
+            content_key: None,
             iosurface: None,
             pixel_buffer: None,
             width: 1,
@@ -438,6 +467,7 @@ mod macos {
         let source = GpuSource {
             kind: GpuSourceKind::Image,
             bgra: &red,
+            content_key: None,
             iosurface: None,
             pixel_buffer: None,
             width: 1,
@@ -645,6 +675,42 @@ mod macos {
         stdout.write_all(b"\n")?;
         stdout.flush()?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{HELPER_IDLE_PUMP_INTERVAL, HELPER_STDIN_QUEUE_CAPACITY, helper_stdin_channel};
+        use std::sync::mpsc::TrySendError;
+        use std::time::Duration;
+
+        #[test]
+        fn idle_pump_is_display_paced_instead_of_a_one_millisecond_spin() {
+            assert!(HELPER_IDLE_PUMP_INTERVAL >= Duration::from_millis(8));
+            assert!(HELPER_IDLE_PUMP_INTERVAL <= Duration::from_millis(17));
+        }
+
+        #[test]
+        fn stdin_queue_is_bounded_and_preserves_request_order() {
+            let (tx, rx) = helper_stdin_channel();
+            for value in 0..HELPER_STDIN_QUEUE_CAPACITY {
+                tx.try_send(value)
+                    .expect("queue should accept up to its declared capacity");
+            }
+            assert!(matches!(
+                tx.try_send(HELPER_STDIN_QUEUE_CAPACITY),
+                Err(TrySendError::Full(value)) if value == HELPER_STDIN_QUEUE_CAPACITY
+            ));
+
+            for expected in 0..HELPER_STDIN_QUEUE_CAPACITY {
+                assert_eq!(
+                    rx.recv().expect("queued request should remain available"),
+                    expected
+                );
+            }
+
+            drop(rx);
+            assert!(tx.send(HELPER_STDIN_QUEUE_CAPACITY).is_err());
+        }
     }
 
     #[cfg(unix)]

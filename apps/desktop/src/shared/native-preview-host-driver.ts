@@ -34,6 +34,27 @@ export interface NativePreviewRealSurfaceDriver {
 }
 
 export const DEFAULT_NATIVE_PREVIEW_MAX_HANDOFF_AGE_MS = 250
+export const DEFAULT_NATIVE_PREVIEW_STALE_HANDOFF_DIAGNOSTIC_GRACE_MS = 1_000
+export const DEFAULT_NATIVE_PREVIEW_STALE_HANDOFF_DIAGNOSTIC_ATTEMPTS = 3
+
+export function staleNativePreviewHandoffShouldDeclareFallback({
+  attemptCount,
+  elapsedMs,
+  minimumAttempts = DEFAULT_NATIVE_PREVIEW_STALE_HANDOFF_DIAGNOSTIC_ATTEMPTS,
+  graceMs = DEFAULT_NATIVE_PREVIEW_STALE_HANDOFF_DIAGNOSTIC_GRACE_MS
+}: {
+  attemptCount: number
+  elapsedMs: number
+  minimumAttempts?: number
+  graceMs?: number
+}): boolean {
+  return (
+    Number.isInteger(attemptCount) &&
+    attemptCount >= minimumAttempts &&
+    Number.isFinite(elapsedMs) &&
+    elapsedMs >= graceMs
+  )
+}
 
 export function compositorStatusMetalTargetHandoff(
   status: PreviewSurfaceCompositorUpdateParams,

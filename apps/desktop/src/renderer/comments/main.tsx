@@ -18,6 +18,7 @@ import {
   commentsSendTransportFailureCanReplace
 } from '../../shared/comments-send-operation'
 import { emptyLiveChatSnapshot } from '@/lib/live-chat-view'
+import { applyCommentsSnapshotDelta } from '../../shared/comments-snapshot-delta'
 import '@/styles.css'
 
 // Long-lived second window: drop React's dev perf-track measures, which buffer
@@ -127,6 +128,13 @@ function CommentsWindowApp(): ReactElement {
       .then((state) => state && setAlwaysOnTop(state.alwaysOnTop))
       .catch(() => {})
     const offSnapshot = window.videorc?.onCommentsSnapshot?.((next) => applyView(next))
+    const offDelta = window.videorc?.onCommentsDelta?.((delta) => {
+      const current = viewRef.current
+      if (current.mode.kind !== 'live') return
+      const snapshot = applyCommentsSnapshotDelta(current.snapshot, delta)
+      if (snapshot === current.snapshot) return
+      applyView({ ...current, snapshot })
+    })
     void window.videorc
       ?.getViewerSample?.()
       .then((sample) => setViewerSample(sample ?? null))
@@ -147,6 +155,7 @@ function CommentsWindowApp(): ReactElement {
     })
     return () => {
       offSnapshot?.()
+      offDelta?.()
       offViewers?.()
       offState?.()
       offHighlight?.()

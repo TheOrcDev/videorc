@@ -906,6 +906,7 @@ pub struct PreviewLiveStatus {
     pub state: PreviewLiveState,
     pub source: PreviewLiveSource,
     pub transport: PreviewTransport,
+    pub backing: PreviewSurfaceBacking,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_fps: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1072,6 +1073,26 @@ pub struct PreviewImagePollCounts {
     pub live_mjpeg: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSocketQueueDiagnosticStats {
+    pub current_depth: u64,
+    pub max_depth: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_age_ms: Option<u64>,
+    pub coalesced_count: u64,
+    pub evicted_or_dropped_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSocketTransportDiagnosticStats {
+    pub reliable_response_queue: WebSocketQueueDiagnosticStats,
+    pub incoming_command_queue: WebSocketQueueDiagnosticStats,
+    pub coalesced_telemetry_queue: WebSocketQueueDiagnosticStats,
+    pub slow_pressure_disconnect_count: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticStats {
@@ -1085,6 +1106,15 @@ pub struct DiagnosticStats {
     pub dropped_frames: u64,
     pub encoder_speed: Option<f64>,
     pub encoder_bridge_queue_depth: u64,
+    /// Oldest frame currently waiting for VideoToolbox completion or FIFO output.
+    #[serde(default)]
+    pub encoder_bridge_output_queue_oldest_frame_age_ms: Option<u64>,
+    /// Cumulative enqueue attempts that encountered a full bounded output queue.
+    #[serde(default)]
+    pub encoder_bridge_output_queue_capacity_pressure_events: u64,
+    /// Cumulative frames intentionally discarded by output backpressure policy.
+    #[serde(default)]
+    pub encoder_bridge_output_queue_dropped_frames: u64,
     pub encoder_bridge_input_fps: Option<f64>,
     pub encoder_bridge_dropped_frames: u64,
     /// Compositor frames re-fed to the encoder on under-run (duplicate frames in the
@@ -1235,6 +1265,24 @@ pub struct DiagnosticStats {
     /// Stream-leg bridge input FPS for split-output sessions.
     #[serde(default)]
     pub encoder_bridge_stream_input_fps: Option<f64>,
+    /// Recording-leg output queue state for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_recording_queue_depth: u64,
+    #[serde(default)]
+    pub encoder_bridge_recording_queue_oldest_frame_age_ms: Option<u64>,
+    #[serde(default)]
+    pub encoder_bridge_recording_queue_capacity_pressure_events: u64,
+    #[serde(default)]
+    pub encoder_bridge_recording_queue_dropped_frames: u64,
+    /// Streaming-leg output queue state for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_depth: u64,
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_oldest_frame_age_ms: Option<u64>,
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_capacity_pressure_events: u64,
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_dropped_frames: u64,
     /// Recording-leg bridge writer p95 for split-output sessions.
     #[serde(default)]
     pub encoder_bridge_recording_writer_loop_p95_ms: Option<f64>,
@@ -1273,6 +1321,8 @@ pub struct DiagnosticStats {
     /// Cumulative frames rendered by CPU fallback during the active compositor run.
     #[serde(default)]
     pub compositor_cpu_fallback_frames: u64,
+    #[serde(default)]
+    pub websocket_transport: WebSocketTransportDiagnosticStats,
     /// Cumulative HTTP image-poll request counts. The transport-honesty gate fails when
     /// these climb during a session the UI claims is rendering a native preview.
     #[serde(default)]
@@ -1827,6 +1877,60 @@ fn default_preview_surface_target_fps() -> u32 {
     60
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositorImageCacheStatus {
+    pub budget_bytes: u64,
+    pub entry_budget: u64,
+    pub entries: u64,
+    pub decoded_bytes: u64,
+    pub preconverted_bgra_bytes: u64,
+    pub resident_bytes: u64,
+    pub pinned_entries: u64,
+    pub pinned_bytes: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositorFramePipelineStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<String>,
+    pub gpu_readbacks: u64,
+    pub bgra_bytes_copied: u64,
+    pub yuv_frames_converted: u64,
+    pub immutable_texture_uploads: u64,
+    pub immutable_texture_reuses: u64,
+}
+
+/// Small latest-wins event used by native preview presentation. Full
+/// compositor diagnostics remain on their bounded diagnostic cadence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositorFrameReady {
+    pub target_fps: u32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_scene_revision: Option<u64>,
+    pub frames_rendered: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_age_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metal_target_iosurface_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metal_target_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metal_target_height: Option<u32>,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompositorStatus {
@@ -1867,6 +1971,10 @@ pub struct CompositorStatus {
     pub metal_target_width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metal_target_height: Option<u32>,
+    #[serde(default)]
+    pub image_cache: CompositorImageCacheStatus,
+    #[serde(default)]
+    pub frame_pipeline: CompositorFramePipelineStatus,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -1959,6 +2067,7 @@ pub enum CompositorSceneSourceKind {
     Camera,
     TestPattern,
     ScreenImage,
+    BackgroundImage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

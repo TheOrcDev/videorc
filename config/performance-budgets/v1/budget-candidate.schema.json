@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://videorc.dev/schemas/performance-budget-candidate-v1.json",
+  "title": "Videorc performance budget candidate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "status",
+    "enforcement",
+    "generatedAt",
+    "calibrationId",
+    "scope",
+    "evidence",
+    "comparabilityPolicy",
+    "observed",
+    "thresholds",
+    "activation"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "videorc.performance-budget-candidate" },
+    "status": { "const": "candidate" },
+    "enforcement": { "const": "disabled" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "calibrationId": { "type": "string", "pattern": "^[0-9a-f]{24}$" },
+    "scope": {
+      "type": "object",
+      "required": [
+        "scenario",
+        "buildMode",
+        "machineModel",
+        "operatingSystem",
+        "displayScaleFactor",
+        "appRole",
+        "source",
+        "outputs",
+        "timing"
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit",
+        "executableSha256",
+        "powerAssertion",
+        "powerAssertionVerified",
+        "runCount",
+        "runNonces",
+        "reportPaths"
+      ],
+      "properties": {
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+        "executableSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "powerAssertion": { "const": "caffeinate:-d,-i,-s" },
+        "powerAssertionVerified": { "const": true },
+        "runCount": { "const": 3 },
+        "runNonces": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "reportPaths": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "comparabilityPolicy": { "type": "object" },
+    "observed": { "type": "object" },
+    "thresholds": { "type": "null" },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reviewRequired", "note"],
+      "properties": {
+        "reviewRequired": { "const": true },
+        "note": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

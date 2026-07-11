@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://videorc.dev/schemas/active-performance-budget-v1.json",
+  "title": "Videorc active performance budget set v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "status", "profiles"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "videorc.performance-budget-set" },
+    "status": { "const": "active" },
+    "profiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/profile" }
+    }
+  },
+  "$defs": {
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scope", "evidence", "thresholds", "approval"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "scope": { "$ref": "#/$defs/scope" },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "thresholds": { "$ref": "#/$defs/thresholds" },
+        "approval": { "$ref": "#/$defs/approval" }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario", "buildMode", "displayScaleFactor", "operatingSystem"],
+      "oneOf": [
+        {
+          "required": ["machineModel"],
+          "not": { "required": ["hardwareClass"] }
+        },
+        {
+          "required": ["hardwareClass"],
+          "not": { "required": ["machineModel"] }
+        }
+      ],
+      "properties": {
+        "scenario": { "type": "string", "minLength": 1 },
+        "machineModel": { "type": "string", "minLength": 1, "pattern": "^[^*?]+$" },
+        "hardwareClass": { "type": "string", "minLength": 1, "pattern": "^[^*?]+$" },
+        "buildMode": { "enum": ["development", "packaged"] },
+        "displayScaleFactor": { "type": "number", "exclusiveMinimum": 0 },
+        "operatingSystem": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["platform", "arch"],
+          "properties": {
+            "platform": { "type": "string", "minLength": 1 },
+            "arch": { "type": "string", "minLength": 1 },
+            "macosVersion": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calibrationId",
+        "commit",
+        "executableSha256",
+        "powerAssertion",
+        "powerAssertionVerified",
+        "runCount"
+      ],
+      "properties": {
+        "calibrationId": { "type": "string", "pattern": "^[0-9a-f]{24}$" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+        "executableSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "powerAssertion": { "const": "caffeinate:-d,-i,-s" },
+        "powerAssertionVerified": { "const": true },
+        "runCount": { "const": 3 }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cadence", "pipeline", "memoryMiB", "resources", "perRoleMemoryMiB"],
+      "properties": {
+        "cadence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["minimumPresentFps", "maximumIntervalP95Ms"],
+          "properties": {
+            "minimumPresentFps": { "type": "number", "exclusiveMinimum": 0 },
+            "maximumIntervalP95Ms": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        },
+        "pipeline": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["maximumStatusFetchesPerSecond", "maximumWireKibPerSecond"],
+          "properties": {
+            "maximumStatusFetchesPerSecond": { "type": "number", "minimum": 0 },
+            "maximumWireKibPerSecond": { "type": "number", "minimum": 0 }
+          }
+        },
+        "memoryMiB": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "maximumTotalRss",
+            "maximumOwnedRss",
+            "maximumOwnedSlopePerMinute",
+            "maximumOwnedSecondHalfSlopePerMinute",
+            "maximumOwnedPlateauGrowth"
+          ],
+          "properties": {
+            "maximumTotalRss": { "type": "number", "exclusiveMinimum": 0 },
+            "maximumOwnedRss": { "type": "number", "exclusiveMinimum": 0 },
+            "maximumOwnedSlopePerMinute": { "type": "number", "minimum": 0 },
+            "maximumOwnedSecondHalfSlopePerMinute": { "type": "number", "minimum": 0 },
+            "maximumOwnedPlateauGrowth": { "type": "number", "minimum": 0 }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["maximumPhysicalFootprintGrowthMiB", "maximumOpenFileGrowth"],
+          "properties": {
+            "maximumPhysicalFootprintGrowthMiB": { "type": "number", "minimum": 0 },
+            "maximumOpenFileGrowth": { "type": "number", "minimum": 0 }
+          }
+        },
+        "perRoleMemoryMiB": {
+          "type": "object",
+          "minProperties": 3,
+          "additionalProperties": { "$ref": "#/$defs/roleThresholds" }
+        }
+      }
+    },
+    "roleThresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maximumRss",
+        "maximumSlopePerMinute",
+        "maximumSecondHalfSlopePerMinute",
+        "maximumPlateauGrowth"
+      ],
+      "properties": {
+        "maximumRss": { "type": "number", "exclusiveMinimum": 0 },
+        "maximumSlopePerMinute": { "type": "number", "minimum": 0 },
+        "maximumSecondHalfSlopePerMinute": { "type": "number", "minimum": 0 },
+        "maximumPlateauGrowth": { "type": "number", "minimum": 0 }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reviewedBy", "reviewedAt", "rationale"],
+      "properties": {
+        "reviewedBy": { "type": "string", "minLength": 1 },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "rationale": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

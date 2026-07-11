@@ -1,5 +1,5 @@
 import { ChatCircle } from '@phosphor-icons/react'
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { CommandPalette } from '@/components/command-palette'
 import { FooterActionBar, FooterActionDivider } from '@/components/footer-action-bar'
@@ -9,15 +9,6 @@ import { Button } from '@/components/ui/button'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
 
 import type { StatusDotTone } from '@/components/status-dot'
-import { AiTab } from '@/components/tabs/ai-tab'
-import { AssetsTab } from '@/components/tabs/assets-tab'
-import { DiagnosticsTab } from '@/components/tabs/diagnostics-tab'
-import { LayoutTab } from '@/components/tabs/layout-tab'
-import { LibraryTab } from '@/components/tabs/library-tab'
-import { RecordingTab } from '@/components/tabs/recording-tab'
-import { SettingsTab } from '@/components/tabs/settings-tab'
-import { SourcesTab } from '@/components/tabs/sources-tab'
-import { StreamingTab } from '@/components/tabs/streaming-tab'
 import { StudioTab } from '@/components/tabs/studio-tab'
 import {
   WORKSPACE_SHORTCUTS,
@@ -29,54 +20,70 @@ import {
   type WorkspaceTab
 } from '@/components/workspace-nav'
 import { WhatsNewDialog } from '@/components/whats-new-dialog'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioAudio, useStudioCore, useStudioShell } from '@/hooks/use-studio'
 import { useWhatsNew } from '@/hooks/use-whats-new'
 import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from '@/lib/capture'
 import { displayKeyGlyph } from '@/lib/platform'
 import { shouldShowPermissionsOnboarding, systemAccessRows } from '@/lib/system-access'
 import { cn } from '@/lib/utils'
 
-export function AppShell(): ReactElement {
-  const {
-    connection,
-    wsStatus,
-    deviceList,
-    audioMeter,
-    mediaAccess,
-    recording,
-    runtimeInfo,
-    entitlements,
-    previewWindow,
-    togglePreviewWindow,
-    notesWindow,
-    openNotesWindow,
-    closeNotesWindow,
-    commentsWindow,
-    openCommentsWindow,
-    closeCommentsWindow,
-    toggleCommentsWindow
-  } = useStudio()
-  const [active, setActive] = useState<WorkspaceTab>('studio')
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
-  const [commandOpen, setCommandOpen] = useState(false)
-  const [onboardingOpen, setOnboardingOpen] = useState(false)
-  const whatsNew = useWhatsNew(runtimeInfo?.version)
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
-  const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
+// Studio is the launch surface and stays eager. Every other workspace is loaded
+// only on first navigation, then retained by the browser module cache. This keeps
+// AI, Library, Diagnostics, and their heavier dependencies out of first paint.
+const AiTab = lazy(async () => ({ default: (await import('@/components/tabs/ai-tab')).AiTab }))
+const AssetsTab = lazy(async () => ({
+  default: (await import('@/components/tabs/assets-tab')).AssetsTab
+}))
+const DiagnosticsTab = lazy(async () => ({
+  default: (await import('@/components/tabs/diagnostics-tab')).DiagnosticsTab
+}))
+const loadLayoutTab = () => import('@/components/tabs/layout-tab')
+const LayoutTab = lazy(async () => ({ default: (await loadLayoutTab()).LayoutTab }))
+const LibraryTab = lazy(async () => ({
+  default: (await import('@/components/tabs/library-tab')).LibraryTab
+}))
+const RecordingTab = lazy(async () => ({
+  default: (await import('@/components/tabs/recording-tab')).RecordingTab
+}))
+const loadSettingsTab = () => import('@/components/tabs/settings-tab')
+const SettingsTab = lazy(async () => ({ default: (await loadSettingsTab()).SettingsTab }))
+const loadSourcesTab = () => import('@/components/tabs/sources-tab')
+const SourcesTab = lazy(async () => ({ default: (await loadSourcesTab()).SourcesTab }))
+const StreamingTab = lazy(async () => ({
+  default: (await import('@/components/tabs/streaming-tab')).StreamingTab
+}))
 
-  // Permissions onboarding gate: evaluated ONCE per launch, and only after the
-  // backend has connected and real device enumeration arrived — before that
-  // every state reads first-use and the dialog would flash on machines that
-  // already granted everything. The check is passive (last-known audio meter,
-  // current device list); it must never itself open a device and trigger an
-  // uninvited TCC prompt.
-  const onboardingEvaluatedRef = useRef(false)
+function WorkspaceTabFallback(): ReactElement {
+  return (
+    <div
+      aria-live="polite"
+      className="flex min-h-40 items-center justify-center text-xs text-muted-foreground"
+      role="status"
+    >
+      Loading workspace…
+    </div>
+  )
+}
+
+function PermissionsOnboardingGate({
+  open,
+  onOpen,
+  onComplete
+}: {
+  open: boolean
+  onOpen: () => void
+  onComplete: () => void
+}): ReactElement {
+  const { wsStatus, deviceList, mediaAccess, runtimeInfo } = useStudioCore()
+  const { audioMeter } = useStudioAudio()
+  const evaluatedRef = useRef(false)
   const backendReady = wsStatus === 'connected' && deviceList.devices.length > 0
+
   useEffect(() => {
-    if (onboardingEvaluatedRef.current || !backendReady) {
+    if (evaluatedRef.current || !backendReady) {
       return
     }
-    onboardingEvaluatedRef.current = true
+    evaluatedRef.current = true
     const dismissed = localStorage.getItem(STORAGE_KEYS.onboarding) !== null
     const rows = systemAccessRows({
       deviceList,
@@ -85,9 +92,52 @@ export function AppShell(): ReactElement {
       mediaAccess
     })
     if (shouldShowPermissionsOnboarding({ rows, dismissed, backendReady })) {
-      setOnboardingOpen(true)
+      onOpen()
     }
-  }, [audioMeter, backendReady, deviceList, mediaAccess, runtimeInfo?.platform])
+  }, [audioMeter, backendReady, deviceList, mediaAccess, onOpen, runtimeInfo?.platform])
+
+  return <PermissionsOnboardingDialog open={open} onComplete={onComplete} />
+}
+
+export function AppShell(): ReactElement {
+  const {
+    wsStatus,
+    backendConnected,
+    recordingState,
+    runtimeInfo,
+    entitlementTier,
+    previewWindowOpen,
+    togglePreviewWindow,
+    notesWindowOpen,
+    openNotesWindow,
+    closeNotesWindow,
+    commentsWindowOpen,
+    openCommentsWindow,
+    closeCommentsWindow,
+    toggleCommentsWindow
+  } = useStudioShell()
+  const [active, setActive] = useState<WorkspaceTab>('studio')
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [commandOpen, setCommandOpen] = useState(false)
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
+  const whatsNew = useWhatsNew(runtimeInfo?.version)
+  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
+  const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
+
+  // Keep first paint Studio-only, then warm the three most common setup pages
+  // from local app assets once Chromium is idle. Navigation stays instant
+  // without putting these modules into the eager entry chunk.
+  useEffect(() => {
+    const prefetch = (): void => {
+      void Promise.allSettled([loadSourcesTab(), loadLayoutTab(), loadSettingsTab()])
+    }
+    if (typeof window.requestIdleCallback === 'function') {
+      const requestId = window.requestIdleCallback(prefetch, { timeout: 5000 })
+      return () => window.cancelIdleCallback(requestId)
+    }
+    const timer = window.setTimeout(prefetch, 2000)
+    return () => window.clearTimeout(timer)
+  }, [])
 
   // Studio control pages are ordinary tabs grouped under "Studio" in the sidebar.
   const openStudioPanel = useCallback((panel: StudioPanel) => {
@@ -142,7 +192,7 @@ export function AppShell(): ReactElement {
         (event.metaKey || event.ctrlKey)
       ) {
         event.preventDefault()
-        if (notesWindow.open) {
+        if (notesWindowOpen) {
           void closeNotesWindow()
         } else {
           void openNotesWindow()
@@ -162,7 +212,7 @@ export function AppShell(): ReactElement {
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [
     closeNotesWindow,
-    notesWindow.open,
+    notesWindowOpen,
     openNotesWindow,
     runtimeInfo?.commentsWindowEnabled,
     runtimeInfo?.notesWindowEnabled,
@@ -201,15 +251,15 @@ export function AppShell(): ReactElement {
     return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
   }, [])
 
-  const live = recording.state === 'recording' || recording.state === 'streaming'
+  const live = recordingState === 'recording' || recordingState === 'streaming'
   const statusTone: StatusDotTone = live
     ? 'error'
-    : connection && wsStatus === 'connected'
+    : backendConnected
       ? 'good'
       : wsStatus === 'failed'
         ? 'error'
         : 'warn'
-  const statusLabel = live ? recording.state : wsStatus
+  const statusLabel = live ? recordingState : wsStatus
 
   return (
     <WorkspaceNavContext.Provider
@@ -230,7 +280,7 @@ export function AppShell(): ReactElement {
         <Sidebar
           active={active}
           activeStudioPanel={isStudioPanel(active) ? active : null}
-          accountTier={entitlements?.tier ?? null}
+          accountTier={entitlementTier}
           onSelect={setActive}
           onSelectStudioPanel={openStudioPanel}
           statusTone={statusTone}
@@ -258,26 +308,28 @@ export function AppShell(): ReactElement {
                 active === 'library' ? 'flex min-h-0 flex-1 flex-col pb-4' : 'pb-8'
               )}
             >
-              {active === 'studio' ? <StudioTab /> : null}
-              {active === 'sources' ? <SourcesTab /> : null}
-              {active === 'layouts' ? <LayoutTab /> : null}
-              {active === 'assets' ? <AssetsTab /> : null}
-              {active === 'live' ? <StreamingTab /> : null}
-              {active === 'recording' ? <RecordingTab /> : null}
-              {active === 'library' ? <LibraryTab onOpenInAi={openInAi} /> : null}
-              {active === 'ai' ? (
-                <AiTab
-                  selectedSessionId={selectedSessionId}
-                  setSelectedSessionId={setSelectedSessionId}
-                />
-              ) : null}
-              {active === 'diagnostics' ? <DiagnosticsTab /> : null}
-              {active === 'settings' ? (
-                <SettingsTab
-                  onOpenPermissionsSetup={openPermissionsSetup}
-                  onShowWhatsNew={whatsNew.showLatest}
-                />
-              ) : null}
+              <Suspense fallback={<WorkspaceTabFallback />}>
+                {active === 'studio' ? <StudioTab /> : null}
+                {active === 'sources' ? <SourcesTab /> : null}
+                {active === 'layouts' ? <LayoutTab /> : null}
+                {active === 'assets' ? <AssetsTab /> : null}
+                {active === 'live' ? <StreamingTab /> : null}
+                {active === 'recording' ? <RecordingTab /> : null}
+                {active === 'library' ? <LibraryTab onOpenInAi={openInAi} /> : null}
+                {active === 'ai' ? (
+                  <AiTab
+                    selectedSessionId={selectedSessionId}
+                    setSelectedSessionId={setSelectedSessionId}
+                  />
+                ) : null}
+                {active === 'diagnostics' ? <DiagnosticsTab /> : null}
+                {active === 'settings' ? (
+                  <SettingsTab
+                    onOpenPermissionsSetup={openPermissionsSetup}
+                    onShowWhatsNew={whatsNew.showLatest}
+                  />
+                ) : null}
+              </Suspense>
             </div>
           </div>
           {/* Global footer action bar: the shell's real shortcuts, always
@@ -295,7 +347,7 @@ export function AppShell(): ReactElement {
             </Button>
             <FooterActionDivider />
             <Button size="sm" variant="ghost" onClick={() => void togglePreviewWindow()}>
-              {previewWindow.open ? 'Close Preview' : 'Open Preview'}
+              {previewWindowOpen ? 'Close Preview' : 'Open Preview'}
               <KbdGroup>
                 <Kbd>{modKey}</Kbd>
                 <Kbd>P</Kbd>
@@ -311,10 +363,10 @@ export function AppShell(): ReactElement {
                   size="sm"
                   variant="ghost"
                   onClick={() =>
-                    notesWindow.open ? void closeNotesWindow() : void openNotesWindow()
+                    notesWindowOpen ? void closeNotesWindow() : void openNotesWindow()
                   }
                 >
-                  {notesWindow.open ? 'Close Notes' : 'Open Notes'}
+                  {notesWindowOpen ? 'Close Notes' : 'Open Notes'}
                   <KbdGroup>
                     <Kbd>{modKey}</Kbd>
                     <Kbd>{shiftKey}</Kbd>
@@ -330,11 +382,11 @@ export function AppShell(): ReactElement {
                   size="sm"
                   variant="ghost"
                   onClick={() =>
-                    commentsWindow.open ? void closeCommentsWindow() : void openCommentsWindow()
+                    commentsWindowOpen ? void closeCommentsWindow() : void openCommentsWindow()
                   }
                 >
                   <ChatCircle data-icon="inline-start" />
-                  {commentsWindow.open ? 'Close Comments' : 'Open Comments'}
+                  {commentsWindowOpen ? 'Close Comments' : 'Open Comments'}
                   <KbdGroup>
                     <Kbd>{modKey}</Kbd>
                     <Kbd>{shiftKey}</Kbd>
@@ -347,7 +399,11 @@ export function AppShell(): ReactElement {
         </main>
 
         <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
-        <PermissionsOnboardingDialog open={onboardingOpen} onComplete={completeOnboarding} />
+        <PermissionsOnboardingGate
+          open={onboardingOpen}
+          onOpen={openPermissionsSetup}
+          onComplete={completeOnboarding}
+        />
         {/* Post-update highlights; suppressed behind onboarding on first run
             (first run initializes the last-seen version silently). */}
         <WhatsNewDialog

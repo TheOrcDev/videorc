@@ -4,7 +4,7 @@ import type { ReactElement } from 'react'
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import { useWorkspaceNav } from '@/components/workspace-nav'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import type { LayoutPreset } from '@/lib/backend'
 import { layoutPresetNeedsCamera, layoutPresetNeedsScreen } from '@/lib/capture'
 import { cn } from '@/lib/utils'
@@ -21,7 +21,7 @@ const SCENE_PRESETS: { id: LayoutPreset; label: string }[] = [
 ]
 
 export function ScenesGallery(): ReactElement {
-  const { captureConfig, applyCameraPreset, layoutSwitchPending } = useStudio()
+  const { captureConfig, applyCameraPreset, layoutSwitchPending } = useStudioCore()
   const { openStudioPanel } = useWorkspaceNav()
   const hasCamera = Boolean(captureConfig.sources.cameraId)
   const hasScreen = Boolean(captureConfig.sources.screenId ?? captureConfig.sources.windowId)

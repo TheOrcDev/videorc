@@ -50,6 +50,33 @@ jobs:
         # ffmpeg binary and no capture devices.
         run: cargo test -p videorc-backend
 
+      - name: Set up pnpm for process/memory sentinel
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node for process/memory sentinel
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies for process/memory sentinel
+        run: pnpm install --frozen-lockfile
+
+      - name: Short no-device process/memory sentinel
+        run: pnpm smoke:process-memory:sentinel
+
+      - name: Upload process/memory sentinel report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: process-memory-sentinel-${{ github.run_id }}
+          path: docs/acceptance/artifacts/performance/**/*.json
+          if-no-files-found: error
+          retention-days: 30
+
   js:
     name: JS (format + lint + tests)
     runs-on: ubuntu-latest
@@ -84,6 +111,12 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
+
+      - name: Build renderer for initial asset budget
+        run: pnpm build
+
+      - name: Initial renderer asset budget
+        run: pnpm check:renderer-assets
 
       - name: Desktop tests
         run: pnpm --filter @videorc/desktop test

@@ -6,7 +6,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useMicLevelMeter, type MicLevelMeter } from '@/hooks/use-mic-level-meter'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioAudio, useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
 import { formatDb } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
@@ -21,16 +21,10 @@ import { cn } from '@/lib/utils'
  * real capture is Phase-2 (F3).
  */
 export function AudioMixer(): ReactElement {
-  const {
-    captureConfig,
-    setCaptureConfig,
-    selectedMicrophone,
-    audioMeter,
-    audioMeterLoading,
-    sampleAudioMeter,
-    deviceList,
-    diagnosticStats
-  } = useStudio()
+  const { captureConfig, setCaptureConfig, selectedMicrophone, sampleAudioMeter, deviceList } =
+    useStudioCore()
+  const { audioMeter, audioMeterLoading } = useStudioAudio()
+  const { diagnosticStats } = useStudioDiagnostics()
   const { openStudioPanel } = useWorkspaceNav()
 
   const muted = captureConfig.audio.microphoneMuted

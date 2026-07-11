@@ -1,24 +1,169 @@
 import type { PreviewSurfaceBounds } from '../shared/backend'
 import { previewSurfaceBoundsChanged } from '../shared/native-preview-bounds'
 
+export type NativePreviewPumpOwner = 'main' | 'renderer'
+
+export interface NativePreviewPumpOwnershipTicket {
+  owner: NativePreviewPumpOwner
+  generation: number
+}
+
+/** Fences in-flight presents whenever ownership moves between main and renderer. */
+export class NativePreviewPumpOwnership {
+  private generation = 0
+  private mainActive = false
+  private handoff = false
+
+  setMainActive(active: boolean): boolean {
+    if (this.mainActive === active) {
+      return false
+    }
+    this.mainActive = active
+    this.generation += 1
+    return true
+  }
+
+  ticket(owner: NativePreviewPumpOwner): NativePreviewPumpOwnershipTicket {
+    return { owner, generation: this.generation }
+  }
+
+  accepts(ticket: NativePreviewPumpOwnershipTicket): boolean {
+    return (
+      !this.handoff &&
+      ticket.generation === this.generation &&
+      (ticket.owner === 'main' ? this.mainActive : !this.mainActive)
+    )
+  }
+
+  beginHandoff(): number {
+    this.handoff = true
+    this.generation += 1
+    return this.generation
+  }
+
+  finishHandoff(handoffGeneration: number, mainActive: boolean): boolean {
+    if (!this.handoff || handoffGeneration !== this.generation) {
+      return false
+    }
+    this.mainActive = mainActive
+    this.handoff = false
+    // Tickets created while neither owner was allowed must stay invalid.
+    this.generation += 1
+    return true
+  }
+}
+
+export async function handoffNativePreviewPumpOwnership(
+  ownership: NativePreviewPumpOwnership,
+  mainActive: boolean,
+  waitForActivePresent: () => Promise<void>
+): Promise<boolean> {
+  const generation = ownership.beginHandoff()
+  await waitForActivePresent()
+  return ownership.finishHandoff(generation, mainActive)
+}
+
+/**
+ * Reliable lifecycle/present mutations are infrequent and upstream present
+ * pumps are already latest-wins. This limit prevents a stalled native host
+ * call from retaining an unbounded promise/closure chain while leaving enough
+ * room for lifecycle bursts to preserve their ordering.
+ */
+export const NATIVE_PREVIEW_MUTATION_QUEUE_CAPACITY = 32
+
+export interface NativePreviewMutationQueueMetrics {
+  capacity: number
+  accepted: number
+  rejected: number
+  currentDepth: number
+  activeCount: number
+  pendingCount: number
+  maxDepth: number
+}
+
+export class NativePreviewMutationQueueCapacityError extends Error {
+  readonly name = 'NativePreviewMutationQueueCapacityError'
+
+  constructor(
+    readonly capacity: number,
+    readonly activeCount: number,
+    readonly pendingCount: number
+  ) {
+    super(
+      `Native preview mutation queue capacity ${capacity} exceeded ` +
+        `(${activeCount} active, ${pendingCount} waiting).`
+    )
+  }
+}
+
 export class NativePreviewMutationQueue {
   private tail: Promise<void> = Promise.resolve()
   private queuedCount = 0
+  private operationActive = false
+  private acceptedCount = 0
+  private rejectedCount = 0
+  private maxDepth = 0
+
+  constructor(readonly capacity = NATIVE_PREVIEW_MUTATION_QUEUE_CAPACITY) {
+    if (!Number.isSafeInteger(capacity) || capacity < 1) {
+      throw new RangeError('Native preview mutation queue capacity must be a positive integer.')
+    }
+  }
 
   get depth(): number {
     return this.queuedCount
   }
 
+  get activeCount(): number {
+    return Number(this.operationActive)
+  }
+
+  /** Work waiting behind the operation that already owns the host. */
+  get pendingCount(): number {
+    return Math.max(0, this.queuedCount - this.activeCount)
+  }
+
+  metrics(): NativePreviewMutationQueueMetrics {
+    return {
+      capacity: this.capacity,
+      accepted: this.acceptedCount,
+      rejected: this.rejectedCount,
+      currentDepth: this.depth,
+      activeCount: this.activeCount,
+      pendingCount: this.pendingCount,
+      maxDepth: this.maxDepth
+    }
+  }
+
   run<Result>(operation: () => Result | Promise<Result>): Promise<Result> {
+    if (this.queuedCount >= this.capacity) {
+      this.rejectedCount += 1
+      return Promise.reject(
+        new NativePreviewMutationQueueCapacityError(
+          this.capacity,
+          this.activeCount,
+          this.pendingCount
+        )
+      )
+    }
     this.queuedCount += 1
-    const result = this.tail.then(operation, operation)
+    this.acceptedCount += 1
+    this.maxDepth = Math.max(this.maxDepth, this.queuedCount)
+    const invoke = async (): Promise<Result> => {
+      this.operationActive = true
+      try {
+        return await operation()
+      } finally {
+        this.operationActive = false
+        this.queuedCount = Math.max(0, this.queuedCount - 1)
+      }
+    }
+    const result = this.tail.then(invoke, invoke)
     this.tail = result.then(
       () => undefined,
       () => undefined
     )
-    return result.finally(() => {
-      this.queuedCount = Math.max(0, this.queuedCount - 1)
-    })
+    return result
   }
 
   async waitForIdle(): Promise<void> {
@@ -83,11 +228,15 @@ export class NativePreviewPlacementQueue {
   private appliedCount = 0
   private maxRequestDepth = 0
   private readonly roundTripSamplesMs: number[] = []
+  private cachedMetrics: NativePreviewPlacementMetrics | undefined
+  private metricsComputedAtMs: number | undefined
+  private metricsRefreshes = 0
 
   constructor(
     private readonly apply: NativePreviewPlacementApply,
     private readonly onError: NativePreviewPlacementErrorHandler = () => undefined,
-    private readonly nowMs: () => number = () => Date.now()
+    private readonly nowMs: () => number = () => Date.now(),
+    private readonly metricsTtlMs = 250
   ) {}
 
   get requestDepth(): number {
@@ -124,14 +273,29 @@ export class NativePreviewPlacementQueue {
   }
 
   metrics(): NativePreviewPlacementMetrics {
-    return {
-      received: this.receivedCount,
-      coalesced: this.coalescedCount,
-      applied: this.appliedCount,
-      currentRequestDepth: this.requestDepth,
-      maxRequestDepth: this.maxRequestDepth,
-      roundTripP95Ms: percentile(this.roundTripSamplesMs, 0.95)
+    const nowMs = this.nowMs()
+    if (
+      !this.cachedMetrics ||
+      this.metricsComputedAtMs === undefined ||
+      nowMs < this.metricsComputedAtMs ||
+      nowMs - this.metricsComputedAtMs >= this.metricsTtlMs
+    ) {
+      this.metricsRefreshes += 1
+      this.cachedMetrics = {
+        received: this.receivedCount,
+        coalesced: this.coalescedCount,
+        applied: this.appliedCount,
+        currentRequestDepth: this.requestDepth,
+        maxRequestDepth: this.maxRequestDepth,
+        roundTripP95Ms: percentile(this.roundTripSamplesMs, 0.95)
+      }
+      this.metricsComputedAtMs = nowMs
     }
+    return { ...this.cachedMetrics, currentRequestDepth: this.requestDepth }
+  }
+
+  get telemetryRefreshCount(): number {
+    return this.metricsRefreshes
   }
 
   waitForIdle(): Promise<void> {

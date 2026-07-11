@@ -46,12 +46,12 @@
 //   VIDEORC_BASELINE_LAYOUT_PRESET  force layout preset; otherwise inferred from selected sources
 //   VIDEORC_SMOKE_FFMPEG_PATH / VIDEORC_SMOKE_FFPROBE_PATH
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { deflateSync } from 'node:zlib'
 
-import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp, repoRoot, stopProcess } from './lib/app-launcher.mjs'
 import { launchAvSyncStimulus, stopAvSyncStimulus } from './lib/av-sync-stimulus.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import {
@@ -72,7 +72,7 @@ import {
   appendNotesOverlayFailures,
   formatNotesOverlayArtifactSummary
 } from './lib/notes-overlay-artifact-gate.mjs'
-import { DEFAULT_ACCEPTANCE_GATES, evaluateAcceptance } from './lib/acceptance-gate.mjs'
+import { evaluateAcceptance, recordingPreviewAcceptanceGates } from './lib/acceptance-gate.mjs'
 import { classifyMediaQualityMode } from './lib/media-quality-mode.mjs'
 import { classifyObsParityEvidence } from './lib/obs-parity-evidence.mjs'
 import { requiredSourceBlocker } from './lib/required-source-blockers.mjs'
@@ -86,6 +86,28 @@ import {
   strongestPreviewTransport
 } from './lib/native-preview-claim.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
+import {
+  collectProcessCensus,
+  ownedProcessLedgerPaths,
+  pruneDeadOwnedProcessRecords,
+  waitForCleanProcessState,
+  waitForNoLiveProcessState
+} from './lib/process-census.mjs'
+import {
+  collectProcessEndurance,
+  evaluateOwnedTeardown,
+  evaluateProcessEnduranceEvidence,
+  performanceEnduranceMetrics
+} from './lib/process-endurance.mjs'
+import {
+  collectPerformanceMetadata,
+  createPerformanceReport,
+  failingChecks,
+  observationCheck,
+  passingCheck,
+  writePerformanceReport
+} from './lib/performance-contract.mjs'
+import { performanceSamplingInvariants } from './lib/performance-sampling-schedule.mjs'
 
 const config = {
   recordingMs: Number(process.env.VIDEORC_BASELINE_RECORDING_MS ?? 60000),
@@ -161,7 +183,15 @@ const config = {
   ),
   gate: process.argv.includes('--gate'),
   screenRecordingGate: process.argv.includes('--screen-recording-gate'),
-  notesOverlayGate: process.argv.includes('--notes-overlay-gate')
+  notesOverlayGate: process.argv.includes('--notes-overlay-gate'),
+  packagedExecutable: process.env.VIDEORC_PERF_APP_EXECUTABLE
+    ? resolve(process.env.VIDEORC_PERF_APP_EXECUTABLE)
+    : null,
+  performanceReportRequested: Boolean(process.env.VIDEORC_PERF_REPORT_PATH)
+}
+
+if (config.packagedExecutable && !existsSync(config.packagedExecutable)) {
+  throw new Error(`Packaged app executable not found: ${config.packagedExecutable}`)
 }
 
 const NATIVE_PREFIX = {
@@ -176,11 +206,22 @@ let avSyncStimulus
 let notesOverlayState
 let notesOverlayBounds
 const previewSurfaceOutputGuard = createPreviewSurfaceOutputGuard()
+const performanceLedgerPaths = ownedProcessLedgerPaths({
+  appDataDir: join(config.outputDirectory, 'app-data'),
+  userDataDir: join(config.outputDirectory, 'user-data'),
+  workspaceRoot: repoRoot
+})
 mkdirSync(config.outputDirectory, { recursive: true })
 
 let exitCode = 0
+let verdict = null
+let runError = null
+let processEndurance = null
+let processEnduranceError = null
+let teardownEvidence = null
+let performancePipeline = null
 try {
-  const verdict = await main()
+  verdict = await main()
   exitCode =
     (config.gate || config.screenRecordingGate || config.notesOverlayGate) &&
     verdict &&
@@ -188,21 +229,123 @@ try {
       ? 1
       : 0
 } catch (error) {
+  runError = error
   console.error(`real-source baseline failed: ${error?.message ?? error}`)
   exitCode = 2
 } finally {
   if (motionStimulus) await stopScreenMotionStimulus(motionStimulus)
   if (avSyncStimulus) await stopAvSyncStimulus(avSyncStimulus)
-  if (launched) await stopProcess(launched.process)
+  if (launched) {
+    if (config.performanceReportRequested) {
+      teardownEvidence = await teardownPerformanceApp()
+    } else {
+      await stopProcess(launched.process)
+    }
+  }
+}
+if (process.env.VIDEORC_PERF_REPORT_PATH) {
+  try {
+    const acceptanceFailures = [
+      ...(runError ? [runError?.message ?? String(runError)] : []),
+      ...(!runError && !verdict ? ['real-source acceptance verdict was missing'] : []),
+      ...(!runError && verdict && !verdict.pass
+        ? verdict.failures?.length
+          ? verdict.failures
+          : ['real-source acceptance failed']
+        : [])
+    ]
+    const measurementMs = Math.max(0, config.recordingMs - config.warmupMs)
+    const samplingInvariants = performanceSamplingInvariants(measurementMs, config.sampleIntervalMs)
+    const minimumSamples = Math.max(2, samplingInvariants.minSamples)
+    const enduranceFailures = [
+      ...(processEnduranceError
+        ? [`process endurance collection failed: ${processEnduranceError}`]
+        : []),
+      ...evaluateProcessEnduranceEvidence(processEndurance, {
+        minimumSamples,
+        minimumDurationMs: samplingInvariants.minDurationMs
+      }),
+      ...evaluateOwnedTeardown(teardownEvidence)
+    ]
+    const enforcedEnduranceFailures = config.gate ? enduranceFailures : []
+    const performanceReport = createPerformanceReport({
+      scenario:
+        process.env.VIDEORC_PERF_SCENARIO ??
+        (config.streamEnabled ? 'record-4k-stream-1080p' : 'record-4k'),
+      mode: config.gate ? 'gate' : 'report-only',
+      metadata: await collectPerformanceMetadata(),
+      timing: {
+        warmupMs: config.warmupMs,
+        measurementMs,
+        sampleIntervalMs: config.sampleIntervalMs
+      },
+      metrics: {
+        ...performanceEnduranceMetrics({
+          evidence: processEndurance,
+          teardown: teardownEvidence,
+          pipeline: performancePipeline
+        }),
+        requestedOutput: {
+          width: config.width,
+          height: config.height,
+          fps: config.fps,
+          bitrateKbps: config.bitrateKbps
+        },
+        streamEnabled: config.streamEnabled,
+        streamOutputPreset: config.streamEnabled ? config.streamOutputPreset : null,
+        outputDirectory: config.outputDirectory,
+        acceptance: verdict,
+        processEnduranceError
+      },
+      checks: [
+        ...failingChecks(acceptanceFailures),
+        ...failingChecks(enforcedEnduranceFailures),
+        ...(!config.gate
+          ? enduranceFailures.map((failure) =>
+              observationCheck(`report-only process endurance observation: ${failure}`)
+            )
+          : []),
+        ...(acceptanceFailures.length === 0 && enduranceFailures.length === 0
+          ? [
+              passingCheck(
+                'real-source artifacts, process endurance, resources, and teardown passed'
+              )
+            ]
+          : [])
+      ]
+    })
+    await writePerformanceReport(performanceReport)
+    if (config.gate && enduranceFailures.length > 0) exitCode = 1
+  } catch (error) {
+    console.error(`could not write performance child report: ${error?.message ?? error}`)
+    exitCode = 2
+  }
+}
+if (
+  config.performanceReportRequested &&
+  exitCode === 0 &&
+  process.env.VIDEORC_PERF_RETAIN_ARTIFACTS !== '1'
+) {
+  rmSync(join(config.outputDirectory, 'app-data'), { recursive: true, force: true })
+  rmSync(join(config.outputDirectory, 'user-data'), { recursive: true, force: true })
 }
 process.exit(exitCode)
 
 async function main() {
-  console.log('Launching dev app for real-source baseline (no preview-motion synthetic mode)…')
+  console.log(
+    `Launching ${config.packagedExecutable ? 'packaged' : 'dev'} app for real-source baseline (no preview-motion synthetic mode)…`
+  )
   const requiresPreviewHostCommandServer = !config.noPreviewSurface && !config.fallbackLivePreview
   const needsSmokeCommandServer = requiresPreviewHostCommandServer || config.notesOverlay
   launched = await launchDevApp({
     timeoutMs: config.timeoutMs,
+    spawnSpec: config.packagedExecutable
+      ? {
+          command: config.packagedExecutable,
+          args: [],
+          cwd: dirname(config.packagedExecutable)
+        }
+      : undefined,
     requiredMarkers: needsSmokeCommandServer
       ? ['backend-ready', 'preview-motion-ready']
       : ['backend-ready'],
@@ -214,6 +357,7 @@ async function main() {
       VIDEORC_NATIVE_PREVIEW_SURFACE: config.noPreviewSurface ? '0' : '1',
       VIDEORC_DISABLE_AUTO_PREVIEW: '1',
       VIDEORC_SMOKE_COMMAND_SERVER: needsSmokeCommandServer ? '1' : '0',
+      VIDEORC_SMOKE_PACKAGED_APP: config.packagedExecutable ? '1' : '0',
       VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED: requiresPreviewHostCommandServer ? '1' : '0',
       ...(config.noPreviewSurface ? { VIDEORC_SMOKE_DISABLE_ELECTRON_GPU: '1' } : {}),
       ...(config.notesOverlay
@@ -477,8 +621,23 @@ async function main() {
     let snapshots
     try {
       const previewMeasurementPromise = measureNativePreviewDuringRecording()
+      const processEndurancePromise = config.performanceReportRequested
+        ? collectProcessEndurance({
+            ledgerPaths: performanceLedgerPaths,
+            pgid: launched.process.pid,
+            warmupMs: config.warmupMs,
+            measurementMs: Math.max(1, config.recordingMs - config.warmupMs),
+            intervalMs: config.sampleIntervalMs
+          }).catch((error) => {
+            processEnduranceError = error?.message ?? String(error)
+            return null
+          })
+        : Promise.resolve(null)
       snapshots = await sampleDuringRecording(ws, config.recordingMs)
-      previewMeasurement = await previewMeasurementPromise
+      ;[previewMeasurement, processEndurance] = await Promise.all([
+        previewMeasurementPromise,
+        processEndurancePromise
+      ])
     } finally {
       if (stopCaptionOverlayStimulus) await stopCaptionOverlayStimulus()
       if (motionStimulusFocusKeepalive) clearInterval(motionStimulusFocusKeepalive)
@@ -521,6 +680,15 @@ async function main() {
         previewMeasurement
       }
     )
+    performancePipeline = {
+      frames: diagnostics.previewDirectFrames,
+      framesPerSecond: diagnostics.previewDirectMeasuredFps,
+      presentFps: diagnostics.minPreviewPresentFps,
+      intervalP95Ms: diagnostics.previewIntervalP95Ms,
+      intervalP99Ms: diagnostics.previewDirectIntervalP99Ms,
+      transport: diagnostics.previewTransport,
+      backing: diagnostics.previewSurfaceBacking
+    }
     const analyzerPaths = writeReports(report)
     const startupReport = await analyzeStartupResolution(outputPath, {
       ffmpegPath: config.ffmpegPath,
@@ -1134,8 +1302,16 @@ function summarizeDiagnostics(events, snapshots, startedAt, stopRequestedAt, opt
   const previewDirectMeasuredFps = num(
     previewMeasurement?.measuredFps ?? previewMeasurementStatus?.presentFps
   )
+  const previewDirectFrames = num(
+    previewMeasurement?.frames ??
+      previewMeasurement?.framesRendered ??
+      previewMeasurementStatus?.framesRendered
+  )
   const previewDirectIntervalP95Ms = num(
     previewMeasurement?.intervalP95Ms ?? previewMeasurementStatus?.intervalP95Ms
+  )
+  const previewDirectIntervalP99Ms = num(
+    previewMeasurement?.intervalP99Ms ?? previewMeasurementStatus?.intervalP99Ms
   )
   const previewDirectInputToPresentP95Ms = num(
     previewMeasurement?.inputToPresentLatencyP95Ms ??
@@ -1235,8 +1411,32 @@ function summarizeDiagnostics(events, snapshots, startedAt, stopRequestedAt, opt
       ...measured.map((s) => s.previewSourcePixelsPresent),
       ...surfaceSamples.map((s) => s.sourcePixelsPresent)
     ]),
-    previewPendingHostCommandCount:
-      maxOf(surfaceSamples.map((s) => s.pendingHostCommandCount ?? 0)) ?? 0,
+    // "Pending" is a final-state contract. A transient placement update during
+    // the measured window is healthy as long as the last surface sample is
+    // drained before acceptance is evaluated.
+    previewPendingHostCommandCount: lastDefined(surfaceSamples, 'pendingHostCommandCount') ?? 0,
+    encoderBridgeOutputQueueOldestFrameAgeMs:
+      maxOf(collect('encoderBridgeOutputQueueOldestFrameAgeMs')) ?? null,
+    encoderBridgeOutputQueueCapacityPressureEvents:
+      maxOf(measured.map((s) => s.encoderBridgeOutputQueueCapacityPressureEvents ?? 0)) ?? 0,
+    encoderBridgeOutputQueueDroppedFrames:
+      maxOf(measured.map((s) => s.encoderBridgeOutputQueueDroppedFrames ?? 0)) ?? 0,
+    encoderBridgeRecordingQueueDepth:
+      maxOf(measured.map((s) => s.encoderBridgeRecordingQueueDepth ?? 0)) ?? 0,
+    encoderBridgeRecordingQueueOldestFrameAgeMs:
+      maxOf(collect('encoderBridgeRecordingQueueOldestFrameAgeMs')) ?? null,
+    encoderBridgeRecordingQueueCapacityPressureEvents:
+      maxOf(measured.map((s) => s.encoderBridgeRecordingQueueCapacityPressureEvents ?? 0)) ?? 0,
+    encoderBridgeRecordingQueueDroppedFrames:
+      maxOf(measured.map((s) => s.encoderBridgeRecordingQueueDroppedFrames ?? 0)) ?? 0,
+    encoderBridgeStreamQueueDepth:
+      maxOf(measured.map((s) => s.encoderBridgeStreamQueueDepth ?? 0)) ?? 0,
+    encoderBridgeStreamQueueOldestFrameAgeMs:
+      maxOf(collect('encoderBridgeStreamQueueOldestFrameAgeMs')) ?? null,
+    encoderBridgeStreamQueueCapacityPressureEvents:
+      maxOf(measured.map((s) => s.encoderBridgeStreamQueueCapacityPressureEvents ?? 0)) ?? 0,
+    encoderBridgeStreamQueueDroppedFrames:
+      maxOf(measured.map((s) => s.encoderBridgeStreamQueueDroppedFrames ?? 0)) ?? 0,
     encoderBridgeRepeatedFrames:
       maxOf(measured.map((s) => s.encoderBridgeRepeatedFrames ?? 0)) ?? 0,
     encoderBridgeRepeatedFrameBursts:
@@ -1342,7 +1542,9 @@ function summarizeDiagnostics(events, snapshots, startedAt, stopRequestedAt, opt
     previewInputToPresentLatencyP99Ms,
     previewIntervalP95Ms: previewDirectIntervalP95Ms ?? passivePreviewIntervalP95Ms,
     previewDirectMeasuredFps,
+    previewDirectFrames,
     previewDirectIntervalP95Ms,
+    previewDirectIntervalP99Ms,
     previewDirectInputToPresentP95Ms,
     previewDirectInputToPresentP99Ms,
     previewDirectCompositorFrameLag,
@@ -1884,6 +2086,9 @@ function writeBaselineReport(
       `deadline lag p95/max ${fmt(diagnostics.encoderBridgeDeadlineLagP95Ms)}/${fmt(diagnostics.encoderBridgeDeadlineLagMaxMs)}ms (${diagnostics.encoderBridgeLateDeadlineTicks} late tick(s))`
   )
   lines.push(
+    `- Recording bridge output queues: aggregate oldest ${fmt(diagnostics.encoderBridgeOutputQueueOldestFrameAgeMs)}ms, pressure ${diagnostics.encoderBridgeOutputQueueCapacityPressureEvents}, dropped ${diagnostics.encoderBridgeOutputQueueDroppedFrames} | recording depth/oldest ${diagnostics.encoderBridgeRecordingQueueDepth}/${fmt(diagnostics.encoderBridgeRecordingQueueOldestFrameAgeMs)}ms, pressure ${diagnostics.encoderBridgeRecordingQueueCapacityPressureEvents}, dropped ${diagnostics.encoderBridgeRecordingQueueDroppedFrames} | stream depth/oldest ${diagnostics.encoderBridgeStreamQueueDepth}/${fmt(diagnostics.encoderBridgeStreamQueueOldestFrameAgeMs)}ms, pressure ${diagnostics.encoderBridgeStreamQueueCapacityPressureEvents}, dropped ${diagnostics.encoderBridgeStreamQueueDroppedFrames}`
+  )
+  lines.push(
     `- Startup barrier: ${diagnostics.recordingStartupBarrierState ?? 'unknown'} | wait ${fmt(diagnostics.recordingStartupBarrierWaitMs, 0)}ms | ` +
       `first source ${fmt(diagnostics.firstSourceFrameMs, 0)}ms | full-res compositor ${fmt(diagnostics.firstFullResolutionCompositorFrameMs, 0)}ms | encoding ${fmt(diagnostics.firstEncodedFrameMs, 0)}ms`
   )
@@ -2344,6 +2549,21 @@ function gateDiagnosticsManifest(
       diagnostics.encoderBridgeStreamVideoToolboxOutputBytes,
     encoderBridgeSeparateOutputEncodersActive:
       diagnostics.encoderBridgeSeparateOutputEncodersActive,
+    encoderBridgeOutputQueueOldestFrameAgeMs: diagnostics.encoderBridgeOutputQueueOldestFrameAgeMs,
+    encoderBridgeOutputQueueCapacityPressureEvents:
+      diagnostics.encoderBridgeOutputQueueCapacityPressureEvents,
+    encoderBridgeOutputQueueDroppedFrames: diagnostics.encoderBridgeOutputQueueDroppedFrames,
+    encoderBridgeRecordingQueueDepth: diagnostics.encoderBridgeRecordingQueueDepth,
+    encoderBridgeRecordingQueueOldestFrameAgeMs:
+      diagnostics.encoderBridgeRecordingQueueOldestFrameAgeMs,
+    encoderBridgeRecordingQueueCapacityPressureEvents:
+      diagnostics.encoderBridgeRecordingQueueCapacityPressureEvents,
+    encoderBridgeRecordingQueueDroppedFrames: diagnostics.encoderBridgeRecordingQueueDroppedFrames,
+    encoderBridgeStreamQueueDepth: diagnostics.encoderBridgeStreamQueueDepth,
+    encoderBridgeStreamQueueOldestFrameAgeMs: diagnostics.encoderBridgeStreamQueueOldestFrameAgeMs,
+    encoderBridgeStreamQueueCapacityPressureEvents:
+      diagnostics.encoderBridgeStreamQueueCapacityPressureEvents,
+    encoderBridgeStreamQueueDroppedFrames: diagnostics.encoderBridgeStreamQueueDroppedFrames,
     encoderBridgeVideoToolboxProbeErrors: diagnostics.encoderBridgeVideoToolboxProbeErrors,
     encoderBridgeRepeatedFrames: diagnostics.encoderBridgeRepeatedFrames,
     encoderBridgeMaxRepeatedFrameRun: diagnostics.encoderBridgeMaxRepeatedFrameRun,
@@ -2788,9 +3008,13 @@ function previewSurfaceOutputFailureMessages(failures) {
 }
 
 function acceptanceGates() {
-  if (!config.avSyncStimulus) return DEFAULT_ACCEPTANCE_GATES
+  // While recording, the shared compositor intentionally runs at the output
+  // cadence. A healthy 30 fps recording preview must not be judged against
+  // the idle 60 fps native-preview sentinel.
+  const recordingCadenceGates = recordingPreviewAcceptanceGates(config.fps)
+  if (!config.avSyncStimulus) return recordingCadenceGates
   return {
-    ...DEFAULT_ACCEPTANCE_GATES,
+    ...recordingCadenceGates,
     minPreviewPresentFps: 0,
     maxPreviewIntervalP95Ms: Number.POSITIVE_INFINITY
   }
@@ -3319,9 +3543,9 @@ async function applyPendingNativePreviewHostCommands(ws) {
   return await smokeCommand(smoke, 'apply-native-preview-host-commands', { commands })
 }
 
-async function smokeCommand(smoke, command, params = {}) {
+async function smokeCommand(smoke, command, params = {}, timeoutMs = config.timeoutMs) {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
       method: 'POST',
@@ -3343,6 +3567,62 @@ async function smokeCommand(smoke, command, params = {}) {
   } finally {
     clearTimeout(timer)
   }
+}
+
+async function teardownPerformanceApp() {
+  const pgid = launched?.process?.pid
+  const result = {
+    clean: false,
+    gracefulQuitRequested: false,
+    gracefulQuitError: null,
+    stopResult: null,
+    stoppedCensus: null,
+    finalCensus: null,
+    recovery: null,
+    error: null
+  }
+
+  try {
+    const smoke = launched?.connections?.['preview-motion-ready']
+    if (smoke) {
+      try {
+        result.gracefulQuitRequested = true
+        await smokeCommand(smoke, 'app-quit', {}, 2_000)
+        await waitForNoLiveProcessState({
+          ledgerPaths: performanceLedgerPaths,
+          pgid,
+          timeoutMs: 10_000
+        }).catch(() => undefined)
+      } catch (error) {
+        result.gracefulQuitError = error?.message ?? String(error)
+      }
+    }
+
+    result.stopResult = await launched.stop()
+    result.stoppedCensus = await waitForNoLiveProcessState({
+      ledgerPaths: performanceLedgerPaths,
+      pgid,
+      timeoutMs: 10_000
+    })
+    result.finalCensus = await waitForCleanProcessState({
+      ledgerPaths: performanceLedgerPaths,
+      pgid,
+      timeoutMs: 2_000
+    })
+    result.clean =
+      result.finalCensus.records.length === 0 && result.finalCensus.processGroupRows.length === 0
+  } catch (error) {
+    result.error = error?.message ?? String(error)
+    result.finalCensus = await collectProcessCensus({
+      ledgerPaths: performanceLedgerPaths,
+      pgid
+    }).catch(() => null)
+    result.recovery = await pruneDeadOwnedProcessRecords({
+      ledgerPaths: performanceLedgerPaths
+    }).catch((cleanupError) => ({ error: cleanupError?.message ?? String(cleanupError) }))
+  }
+
+  return result
 }
 
 function siblingFfprobe(ffmpegPath) {

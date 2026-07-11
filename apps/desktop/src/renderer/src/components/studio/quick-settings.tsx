@@ -25,7 +25,7 @@ import {
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { useWorkspaceNav } from '@/components/workspace-nav'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import { recordingQuality } from '@/lib/studio-session-view'
 import type { LayoutPreset } from '@/lib/backend'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
@@ -91,7 +91,7 @@ export function QuickSettings(): ReactElement {
     startCaptions,
     stopCaptions,
     wsStatus
-  } = useStudio()
+  } = useStudioCore()
   // Q6 (plan 022): before the backend reports devices, selects say "Finding
   // devices…" instead of rendering blank.
   const discoveryPending = wsStatus !== 'connected'

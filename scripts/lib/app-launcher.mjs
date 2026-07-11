@@ -12,11 +12,22 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 export const repoRoot = resolve(import.meta.dirname, '..', '..')
 
 const MARKER_PREFIX = '[smoke] '
+
+/**
+ * Resolve the explicit packaged executable used by performance scenarios.
+ * The returned shape can be passed directly to `launchDevApp({ spawnSpec })`.
+ */
+export function performanceAppSpawnSpec(env = process.env) {
+  const executable = smokeEnvValue(env, 'VIDEORC_PERF_APP_EXECUTABLE')
+  if (!executable) return undefined
+  const command = resolve(executable)
+  return { command, args: [], cwd: dirname(command) }
+}
 
 export function resolveSmokeAppDirs({ env = {}, statePrefix = 'videorc-smoke' } = {}) {
   const stateDir =
@@ -80,27 +91,48 @@ export function launchDevApp({
   env = {},
   timeoutMs = 120000,
   requiredMarkers = ['backend-ready'],
-  onLine
+  onLine,
+  spawnSpec: requestedSpawnSpec
 } = {}) {
   return new Promise((resolveLaunch, rejectLaunch) => {
     const connections = {}
     let settled = false
     let stopping = false
+    let timer = null
     const recentOutput = []
     const childEnv = smokeAppEnv(env)
-    const spawnSpec = devAppSpawnSpec({ env: childEnv })
+    const spawnSpec = requestedSpawnSpec
+      ? appSpawnSpec({ ...requestedSpawnSpec, env: childEnv })
+      : devAppSpawnSpec({ env: childEnv })
 
     const child = spawn(spawnSpec.command, spawnSpec.args, spawnSpec.options)
 
     const stop = () => stopProcess(child, () => (stopping = true))
     const launchError = (message) => new Error(devAppFailureMessage(message, recentOutput))
-
-    const timer = setTimeout(() => {
+    const rejectAfterStop = async (message) => {
       if (settled) return
       settled = true
-      void stop()
+      if (timer) clearTimeout(timer)
+
+      let cleanupFailure = null
+      try {
+        await stop()
+      } catch (error) {
+        cleanupFailure = error?.message ?? String(error)
+      }
+
       rejectLaunch(
-        launchError(`Timed out waiting for [${requiredMarkers.join(', ')}] after ${timeoutMs}ms.`)
+        launchError(
+          cleanupFailure
+            ? `${message}\n\nFailed to stop launched process group: ${cleanupFailure}`
+            : message
+        )
+      )
+    }
+
+    timer = setTimeout(() => {
+      void rejectAfterStop(
+        `Timed out waiting for [${requiredMarkers.join(', ')}] after ${timeoutMs}ms.`
       )
     }, timeoutMs)
 
@@ -139,17 +171,11 @@ export function launchDevApp({
     child.stdout.on('data', handle)
     child.stderr.on('data', handle)
     child.on('error', (error) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      rejectLaunch(launchError(error.message))
+      void rejectAfterStop(error.message)
     })
     child.on('exit', (code, signal) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      rejectLaunch(
-        launchError(`Dev app exited before handshake completed: code=${code} signal=${signal}`)
+      void rejectAfterStop(
+        `Dev app exited before handshake completed: code=${code} signal=${signal}`
       )
     })
   })
@@ -160,6 +186,26 @@ export function devAppSpawnSpec({ env, platform = process.platform } = {}) {
     command: 'pnpm',
     args: ['--filter', '@videorc/desktop', 'dev'],
     options: devAppSpawnOptions({ env, platform })
+  }
+}
+
+export function appSpawnSpec({
+  command,
+  args = [],
+  cwd = repoRoot,
+  env,
+  platform = process.platform
+} = {}) {
+  if (typeof command !== 'string' || !command.trim()) {
+    throw new Error('Custom app launch requires a command.')
+  }
+  return {
+    command,
+    args,
+    options: {
+      ...devAppSpawnOptions({ env, platform }),
+      cwd
+    }
   }
 }
 

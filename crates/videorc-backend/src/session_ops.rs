@@ -89,7 +89,7 @@ fn import_destination(output_directory: &Path, source: &Path) -> PathBuf {
     first_free_duplicate_path(&base)
 }
 
-async fn probe_duration_ms(ffmpeg_path: &str, file: &Path) -> Option<i64> {
+pub(crate) async fn probe_duration_ms(ffmpeg_path: &str, file: &Path) -> Option<i64> {
     let ffprobe = crate::ffmpeg::ffprobe_path_for(ffmpeg_path);
     let mut command = tokio::process::Command::new(ffprobe);
     command

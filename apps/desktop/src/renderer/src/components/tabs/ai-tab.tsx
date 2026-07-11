@@ -26,7 +26,7 @@ import { Field, FieldContent, FieldLabel } from '@/components/ui/field'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { useVideorcAccount } from '@/hooks/use-account'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import { cloudAiReadiness } from '@/lib/ai-readiness'
 import {
   activeAiWorkflowStatus,
@@ -71,7 +71,7 @@ export function AiTab({
     aiQuota,
     aiReadinessError,
     aiReadinessLoading
-  } = useStudio()
+  } = useStudioCore()
   const cloudAi = cloudAiReadiness({
     account,
     capabilities: aiCapabilities,
@@ -940,7 +940,7 @@ function ClipsSection({
   session: SessionSummary
   highlightItems: Array<Record<string, unknown>>
 }): ReactElement {
-  const { suggestClips, exportClip } = useStudio()
+  const { suggestClips, exportClip } = useStudioCore()
   const [suggestion, setSuggestion] = useState<ClipSuggestResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [exportingKey, setExportingKey] = useState<string | null>(null)

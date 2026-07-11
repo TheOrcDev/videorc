@@ -4,7 +4,7 @@ import type { ReactElement } from 'react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { useDockSlotReporter } from '@/hooks/use-dock-slot'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import type {
   DockHiddenReason,
   PreviewLiveStatus,
@@ -38,7 +38,7 @@ export function PreviewStage({
     setPreviewWindowAlwaysOnTop,
     setPreviewWindowMode,
     captureConfig
-  } = useStudio()
+  } = useStudioCore()
 
   const docked =
     nativePreviewSurfaceEnabled && previewWindow.open && previewWindow.mode === 'docked'

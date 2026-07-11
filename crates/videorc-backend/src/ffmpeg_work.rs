@@ -31,6 +31,7 @@ struct FfmpegWorkState {
     capture_active: bool,
     finalizing_active: bool,
     maintenance_running: bool,
+    priority_maintenance_waiting: usize,
     maintenance_cancel_generation: u64,
     maintenance_cancel_requested: bool,
 }
@@ -100,15 +101,10 @@ impl FfmpegWorkCoordinator {
         if state.finalizing_active {
             return Err(MaintenanceDeferral::FinalizingActive);
         }
-        if state.maintenance_running {
+        if state.maintenance_running || state.priority_maintenance_waiting > 0 {
             return Err(MaintenanceDeferral::MaintenanceRunning);
         }
-        state.maintenance_running = true;
-        state.maintenance_cancel_requested = false;
-        Ok(MaintenancePermit {
-            coordinator: self.clone(),
-            generation: state.maintenance_cancel_generation,
-        })
+        Ok(self.begin_maintenance_locked(&mut state))
     }
 
     pub async fn begin_maintenance_when_idle(self: &Arc<Self>) -> MaintenancePermit {
@@ -117,6 +113,42 @@ impl FfmpegWorkCoordinator {
                 Ok(permit) => return permit,
                 Err(_) => self.notify.notified().await,
             }
+        }
+    }
+
+    /// Wait for the next idle maintenance slot ahead of background maintenance.
+    /// This is for short, user-visible work such as poster extraction. Capture
+    /// and finalization still take precedence.
+    pub async fn begin_priority_maintenance_when_idle(self: &Arc<Self>) -> MaintenancePermit {
+        let mut waiter = PriorityMaintenanceWaiter::new(self.clone());
+        loop {
+            let notified = {
+                let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+                if !state.capture_active
+                    && state.capture_waiting == 0
+                    && !state.finalizing_active
+                    && !state.maintenance_running
+                {
+                    state.priority_maintenance_waiting =
+                        state.priority_maintenance_waiting.saturating_sub(1);
+                    waiter.registered = false;
+                    return self.begin_maintenance_locked(&mut state);
+                }
+                self.notify.notified()
+            };
+            notified.await;
+        }
+    }
+
+    fn begin_maintenance_locked(
+        self: &Arc<Self>,
+        state: &mut FfmpegWorkState,
+    ) -> MaintenancePermit {
+        state.maintenance_running = true;
+        state.maintenance_cancel_requested = false;
+        MaintenancePermit {
+            coordinator: self.clone(),
+            generation: state.maintenance_cancel_generation,
         }
     }
 
@@ -164,6 +196,45 @@ impl FfmpegWorkCoordinator {
             state.maintenance_cancel_requested = false;
         }
         self.notify.notify_waiters();
+    }
+}
+
+struct PriorityMaintenanceWaiter {
+    coordinator: Arc<FfmpegWorkCoordinator>,
+    registered: bool,
+}
+
+impl PriorityMaintenanceWaiter {
+    fn new(coordinator: Arc<FfmpegWorkCoordinator>) -> Self {
+        {
+            let mut state = coordinator
+                .state
+                .lock()
+                .expect("ffmpeg work state poisoned");
+            state.priority_maintenance_waiting += 1;
+        }
+        Self {
+            coordinator,
+            registered: true,
+        }
+    }
+}
+
+impl Drop for PriorityMaintenanceWaiter {
+    fn drop(&mut self) {
+        if !self.registered {
+            return;
+        }
+        {
+            let mut state = self
+                .coordinator
+                .state
+                .lock()
+                .expect("ffmpeg work state poisoned");
+            state.priority_maintenance_waiting =
+                state.priority_maintenance_waiting.saturating_sub(1);
+        }
+        self.coordinator.notify.notify_waiters();
     }
 }
 
@@ -350,5 +421,28 @@ mod tests {
             MaintenanceDeferral::CaptureActive
         );
         drop(capture);
+    }
+
+    #[tokio::test]
+    async fn priority_maintenance_runs_before_waiting_background_maintenance() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let finalizing = coordinator.begin_finalizing();
+        let background = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.begin_maintenance_when_idle().await }
+        });
+        tokio::task::yield_now().await;
+        let priority = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.begin_priority_maintenance_when_idle().await }
+        });
+        tokio::task::yield_now().await;
+
+        drop(finalizing);
+        let priority_permit = priority.await.unwrap();
+        assert!(!background.is_finished());
+
+        drop(priority_permit);
+        drop(background.await.unwrap());
     }
 }

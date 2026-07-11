@@ -45,6 +45,7 @@ import { measureAvSync } from './lib/av-sync.mjs'
 import { evaluateMixedYoutube4kTwitch1080pEvidence } from './lib/mixed-youtube-4k-twitch-1080p-gate.mjs'
 import { probeMedia } from './lib/recording-analyzer.mjs'
 import { evaluateSplitOutput4kRecordEvidence } from './lib/split-output-4k-record-gate.mjs'
+import { splitOutputPreviewSurfaceDisabled } from './lib/split-output-performance-mode.mjs'
 import {
   DEFAULT_STREAM_AV_SYNC_GATES,
   evaluateStreamAvSync,
@@ -52,6 +53,20 @@ import {
   summarizeStreamAvSyncEvidence
 } from './lib/stream-av-sync.mjs'
 import { evaluateYoutube4kStreamEvidence } from './lib/youtube-4k-stream-gate.mjs'
+import {
+  evaluateOwnedTeardown,
+  evaluateProcessEnduranceEvidence,
+  performanceEnduranceMetrics
+} from './lib/process-endurance.mjs'
+import {
+  collectPerformanceMetadata,
+  createPerformanceReport,
+  failingChecks,
+  observationCheck,
+  passingCheck,
+  writePerformanceReport
+} from './lib/performance-contract.mjs'
+import { performanceSamplingInvariants } from './lib/performance-sampling-schedule.mjs'
 
 const argv = process.argv.slice(2).filter((arg) => arg !== '--')
 const config = {
@@ -61,6 +76,7 @@ const config = {
   requireYoutube4kStream: argv.includes('--require-youtube-4k-stream'),
   requireMixedYoutube4kTwitch1080p: argv.includes('--require-mixed-youtube-4k-twitch-1080p'),
   recordingMs: Number(process.env.VIDEORC_BASELINE_RECORDING_MS ?? 60000),
+  warmupMs: Number(process.env.VIDEORC_BASELINE_WARMUP_MS ?? 8000),
   streamPort: Number(process.env.VIDEORC_BASELINE_STREAM_PORT ?? 19501),
   companionStreamPort: Number(process.env.VIDEORC_BASELINE_COMPANION_STREAM_PORT ?? 19502),
   ffmpegPath: process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg',
@@ -81,14 +97,115 @@ const redactedCompanionStreamUrl = `${companionServerUrl}/••••`
 let sink = null
 let companionSink = null
 let exitCode = 0
+let performanceResult = null
+let runError = null
 try {
-  exitCode = await main()
+  performanceResult = await main()
+  exitCode = performanceResult.exitCode
 } catch (error) {
+  runError = error
   console.error(`stream av-sync baseline failed: ${error?.message ?? error}`)
   exitCode = 2
 } finally {
   if (sink && sink.exitCode === null) sink.kill('SIGKILL')
   if (companionSink && companionSink.exitCode === null) companionSink.kill('SIGKILL')
+}
+if (process.env.VIDEORC_PERF_REPORT_PATH) {
+  try {
+    const acceptanceFailures = [
+      ...(runError ? [runError?.message ?? String(runError)] : []),
+      ...(!runError && !performanceResult ? ['split-output acceptance result was missing'] : []),
+      ...(!runError && performanceResult && !performanceResult.pass
+        ? performanceResult.failures?.length
+          ? performanceResult.failures
+          : ['split-output acceptance failed']
+        : [])
+    ]
+    const nestedProcessEndurance = performanceResult?.recordStreamPerformance?.processEndurance
+    const nestedTeardown = performanceResult?.recordStreamPerformance?.teardown
+    const nestedVerdict = performanceResult?.recordStreamPerformanceReport?.verdict
+    const nestedVerdictAccepted =
+      nestedVerdict === 'pass' || (!config.gate && nestedVerdict === 'observation')
+    const {
+      recordStreamPerformanceReport: _nestedReport,
+      recordStreamPerformance: _nestedMetrics,
+      ...streamAcceptance
+    } = performanceResult ?? {}
+    const measurementMs = Math.max(0, config.recordingMs - config.warmupMs)
+    const sampleIntervalMs = Number(process.env.VIDEORC_BASELINE_SAMPLE_MS ?? 2_000)
+    const samplingInvariants = performanceSamplingInvariants(measurementMs, sampleIntervalMs)
+    const minimumSamples = Math.max(2, samplingInvariants.minSamples)
+    const processEnduranceFailures = [
+      ...(!performanceResult?.recordStreamPerformanceReport
+        ? ['split-output real-source child performance report was missing']
+        : []),
+      ...(performanceResult?.recordStreamPerformanceReport && !nestedVerdictAccepted
+        ? [`split-output real-source child performance verdict was ${nestedVerdict ?? 'missing'}`]
+        : []),
+      ...(performanceResult?.recordStreamPerformance?.processEnduranceError
+        ? [
+            `split-output process endurance collection failed: ${performanceResult.recordStreamPerformance.processEnduranceError}`
+          ]
+        : []),
+      ...evaluateProcessEnduranceEvidence(nestedProcessEndurance, {
+        minimumSamples,
+        minimumDurationMs: samplingInvariants.minDurationMs
+      }),
+      ...evaluateOwnedTeardown(nestedTeardown)
+    ]
+    const enforcedProcessEnduranceFailures = config.gate ? processEnduranceFailures : []
+    const report = createPerformanceReport({
+      scenario: 'record-4k-stream-1080p',
+      mode: config.gate ? 'gate' : 'report-only',
+      metadata: await collectPerformanceMetadata(),
+      timing: {
+        warmupMs: config.warmupMs,
+        measurementMs
+      },
+      metrics: {
+        ...performanceEnduranceMetrics({
+          evidence: nestedProcessEndurance,
+          teardown: nestedTeardown,
+          pipeline: performanceResult?.recordStreamPerformance?.pipeline
+        }),
+        outputRoot: config.outputRoot,
+        acceptance: streamAcceptance,
+        nestedRealSourceReport: performanceResult?.recordStreamPerformanceReport
+          ? {
+              schemaVersion: performanceResult.recordStreamPerformanceReport.schemaVersion,
+              scenario: performanceResult.recordStreamPerformanceReport.scenario,
+              mode: performanceResult.recordStreamPerformanceReport.mode,
+              generatedAt: performanceResult.recordStreamPerformanceReport.generatedAt,
+              verdict: performanceResult.recordStreamPerformanceReport.verdict,
+              metadata: performanceResult.recordStreamPerformanceReport.metadata,
+              timing: performanceResult.recordStreamPerformanceReport.timing,
+              checks: performanceResult.recordStreamPerformanceReport.checks
+            }
+          : null
+      },
+      checks: [
+        ...failingChecks(acceptanceFailures),
+        ...failingChecks(enforcedProcessEnduranceFailures),
+        ...(!config.gate
+          ? processEnduranceFailures.map((failure) =>
+              observationCheck(`report-only process endurance observation: ${failure}`)
+            )
+          : []),
+        ...(acceptanceFailures.length === 0 && processEnduranceFailures.length === 0
+          ? [
+              passingCheck(
+                'split-output recording, stream, native-preview cadence/transport, process endurance, resources, teardown, and A/V acceptance passed'
+              )
+            ]
+          : [])
+      ]
+    })
+    await writePerformanceReport(report)
+    if (config.gate && processEnduranceFailures.length > 0) exitCode = 1
+  } catch (error) {
+    console.error(`could not write split-output performance report: ${error?.message ?? error}`)
+    exitCode = 2
+  }
 }
 process.exit(exitCode)
 
@@ -127,6 +244,7 @@ async function main() {
     )
     await runBaselineSession({
       outputDir: recordOnlyDir,
+      collectPerformance: false,
       env: {
         VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT:
           process.env.VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT ?? 'videotoolbox-h264-mpegts'
@@ -178,8 +296,9 @@ async function main() {
     )
   }
 
-  await runBaselineSession({
+  const recordStreamRun = await runBaselineSession({
     outputDir: recordStreamDir,
+    collectPerformance: Boolean(process.env.VIDEORC_PERF_REPORT_PATH),
     env: {
       ...streamProfileEnv(),
       VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: null, // backend default selector decides
@@ -393,15 +512,41 @@ async function main() {
     mixedYoutube4kTwitch1080pVerdict,
     evidencePath
   })
-  return config.gate && !pass ? 1 : 0
+  const failures = [
+    ...(verdict?.failures ?? []),
+    ...(companionVerdict?.failures ?? []),
+    ...(splitOutput4kRecordVerdict?.failures ?? []),
+    ...(youtube4kStreamVerdict?.failures ?? []),
+    ...(mixedYoutube4kTwitch1080pVerdict?.failures ?? [])
+  ]
+  return {
+    exitCode: config.gate && !pass ? 1 : 0,
+    pass,
+    failures,
+    evidencePath,
+    recordStreamMkv: recordStreamRecording,
+    receivedFlv,
+    receivedCompanionFlv,
+    verdict,
+    companionVerdict,
+    splitOutput4kRecordVerdict,
+    youtube4kStreamVerdict,
+    mixedYoutube4kTwitch1080pVerdict,
+    recordStreamPerformanceReport: recordStreamRun.performanceReport,
+    recordStreamPerformance: recordStreamRun.performanceReport?.metrics ?? null
+  }
 }
 
 // --- Session runner ---------------------------------------------------------------
 
-function runBaselineSession({ outputDir, env }) {
+function runBaselineSession({ outputDir, env, collectPerformance = false }) {
   mkdirSync(outputDir, { recursive: true })
   const childEnv = { ...process.env }
   delete childEnv.VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT
+  delete childEnv.VIDEORC_PERF_REPORT_PATH
+  const performanceReportPath = collectPerformance
+    ? join(outputDir, 'real-source-performance.json')
+    : null
   for (const [key, value] of Object.entries(env)) {
     if (value === null) continue
     childEnv[key] = value
@@ -409,16 +554,28 @@ function runBaselineSession({ outputDir, env }) {
   childEnv.VIDEORC_SMOKE_OUTPUT_DIR = outputDir
   childEnv.VIDEORC_BASELINE_AV_SYNC_STIMULUS = '1'
   childEnv.VIDEORC_BASELINE_RECORDING_MS = String(config.recordingMs)
+  if (performanceReportPath) childEnv.VIDEORC_PERF_REPORT_PATH = performanceReportPath
 
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(process.execPath, [join('scripts', 'real-source-baseline-app.mjs')], {
-      env: childEnv,
-      stdio: 'inherit'
-    })
+    const child = spawn(
+      process.execPath,
+      [
+        join('scripts', 'real-source-baseline-app.mjs'),
+        ...(performanceReportPath && config.gate ? ['--gate'] : [])
+      ],
+      {
+        env: childEnv,
+        stdio: 'inherit'
+      }
+    )
     child.on('error', rejectRun)
     child.on('close', (code) => {
       if (code === 0) {
-        resolveRun()
+        const performanceReport =
+          performanceReportPath && existsSync(performanceReportPath)
+            ? JSON.parse(readFileSync(performanceReportPath, 'utf8'))
+            : null
+        resolveRun({ performanceReportPath, performanceReport })
       } else {
         rejectRun(new Error(`real-source baseline session exited with code ${code}`))
       }
@@ -466,7 +623,10 @@ function splitOutput4kRecordEnv() {
     VIDEORC_BASELINE_STREAM_BITRATE_KBPS: '6000',
     VIDEORC_BASELINE_LAYOUT_PRESET: process.env.VIDEORC_BASELINE_LAYOUT_PRESET ?? 'screen-only',
     VIDEORC_BASELINE_NO_CAMERA: process.env.VIDEORC_BASELINE_NO_CAMERA ?? '1',
-    VIDEORC_BASELINE_NO_PREVIEW_SURFACE: process.env.VIDEORC_BASELINE_NO_PREVIEW_SURFACE ?? '1'
+    // The performance scenario must exercise the production native preview
+    // while recording + streaming. Keep the historical A/V-isolation command
+    // preview-free unless an operator explicitly overrides it.
+    VIDEORC_BASELINE_NO_PREVIEW_SURFACE: splitOutputPreviewSurfaceDisabled()
   }
 }
 

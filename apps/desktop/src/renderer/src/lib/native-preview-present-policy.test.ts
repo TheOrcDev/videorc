@@ -7,7 +7,10 @@ import {
   decideNativePreviewCompositorPresent,
   nativePreviewDroppedFramesWithSuppressed,
   nativePreviewSceneProofPresentationOwner,
-  pendingCompositorStatusSupersedes
+  pendingCompositorStatusSupersedes,
+  rendererFallbackCompositorStatusIsFresh,
+  rendererFallbackSeedCompositorStatus,
+  rendererFallbackOwnsPresentation
 } from './native-preview-present-policy'
 
 const compositorStatus = (patch: Partial<CompositorStatus> = {}): CompositorStatus => ({
@@ -127,5 +130,63 @@ describe('native preview present policy', () => {
         rendererUpdaterAvailable: true
       })
     ).toBe('renderer-fallback')
+  })
+
+  it('waits for a fresh frame event when renderer fallback takes over from main', () => {
+    const cached = compositorStatus({ framesRendered: 100 })
+
+    expect(
+      rendererFallbackSeedCompositorStatus({
+        wasMainPumpActive: true,
+        nextMainPumpActive: false,
+        latestStatus: cached
+      })
+    ).toBeNull()
+    expect(
+      rendererFallbackSeedCompositorStatus({
+        wasMainPumpActive: false,
+        nextMainPumpActive: false,
+        latestStatus: cached
+      })
+    ).toBe(cached)
+  })
+
+  it('keeps renderer fallback available during an active recording', () => {
+    expect(
+      rendererFallbackOwnsPresentation({
+        mainPumpActive: false,
+        recordingState: 'recording'
+      })
+    ).toBe(true)
+    expect(
+      rendererFallbackOwnsPresentation({
+        mainPumpActive: true,
+        recordingState: 'recording'
+      })
+    ).toBe(false)
+  })
+
+  it('rejects a queued main-era status when renderer fallback takes over', () => {
+    expect(
+      rendererFallbackCompositorStatusIsFresh({
+        fallbackActivatedAtMs: Date.parse('2026-06-13T00:00:01.000Z'),
+        statusUpdatedAt: '2026-06-13T00:00:00.999Z'
+      })
+    ).toBe(false)
+    expect(
+      rendererFallbackCompositorStatusIsFresh({
+        fallbackActivatedAtMs: Date.parse('2026-06-13T00:00:01.000Z'),
+        statusUpdatedAt: '2026-06-13T00:00:01.001Z'
+      })
+    ).toBe(true)
+  })
+
+  it('allows status-only compatibility before main has ever owned presentation', () => {
+    expect(
+      rendererFallbackCompositorStatusIsFresh({
+        fallbackActivatedAtMs: 0,
+        statusUpdatedAt: compositorStatus().updatedAt
+      })
+    ).toBe(true)
   })
 })

@@ -50,7 +50,7 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { useWorkspaceNav } from '@/components/workspace-nav'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore, useStudioRecording, useStudioRecordingState } from '@/hooks/use-studio'
 import type { FileAssessment, GateStatus, SessionSummary } from '@/lib/backend'
 import { dayLabel, durationMsLabel, formatBytes, isActiveRecordingState } from '@/lib/format'
 import {
@@ -85,7 +85,7 @@ export function LibraryTab({
     importRecording,
     deleteSessions,
     renameSession
-  } = useStudio()
+  } = useStudioCore()
   const { setActive } = useWorkspaceNav()
   const [filter, setFilter] = useState<LibraryFilter>('all')
   const [sort, setSort] = useState<LibrarySort>('newest')
@@ -398,13 +398,12 @@ function LibraryRow({
   onRename: () => void
   onDelete: () => void
 }): ReactElement {
-  const { recording } = useStudio()
+  const { recording } = useStudioRecordingState()
   const filePath = session.mp4Path ?? session.outputPath ?? null
   const format = sessionFormatLabel(session)
   // A live row shows the capture's ticking elapsed time; the session row only
   // gets duration_ms at finalize.
   const live = isLiveSession(session, recording)
-  const durationMs = live ? recording.durationMs : session.durationMs
   return (
     <div
       className={cn(
@@ -435,9 +434,13 @@ function LibraryRow({
           </Badge>
         ) : null}
       </div>
-      <span className="text-xs text-muted-foreground tabular-nums">
-        {typeof durationMs === 'number' ? durationMsLabel(durationMs) : '—'}
-      </span>
+      {live ? (
+        <LiveSessionDuration />
+      ) : (
+        <span className="text-xs text-muted-foreground tabular-nums">
+          {typeof session.durationMs === 'number' ? durationMsLabel(session.durationMs) : '—'}
+        </span>
+      )}
       <span className="text-xs text-muted-foreground tabular-nums">
         {formatBytes(session.fileSizeBytes)}
       </span>
@@ -459,6 +462,15 @@ function LibraryRow({
   )
 }
 
+function LiveSessionDuration(): ReactElement {
+  const { recording } = useStudioRecording()
+  return (
+    <span className="text-xs text-muted-foreground tabular-nums">
+      {typeof recording.durationMs === 'number' ? durationMsLabel(recording.durationMs) : '—'}
+    </span>
+  )
+}
+
 /** Poster with one lazy backfill attempt: older sessions have no poster yet;
  * a 404 triggers a single sessions.poster round-trip (idle-aware backend).
  * Running sessions never request the poster — extraction waits for capture
@@ -468,7 +480,8 @@ export function SessionPoster({
 }: {
   session: Pick<SessionSummary, 'id' | 'durationMs' | 'status'>
 }): ReactElement {
-  const { connection, ensureSessionPoster, recording } = useStudio()
+  const { connection, ensureSessionPoster } = useStudioCore()
+  const { recording } = useStudioRecordingState()
   const [attempt, setAttempt] = useState(0)
   const [failed, setFailed] = useState(false)
   const running = session.status === 'running'
@@ -526,12 +539,12 @@ function RowActions({
     assessRecording,
     repairRecording,
     restoreRecording,
-    recording,
     wsStatus,
     remuxSession,
     openSessionCommentsWindow,
     duplicateSession
-  } = useStudio()
+  } = useStudioCore()
+  const { recording } = useStudioRecordingState()
   const [duplicating, setDuplicating] = useState(false)
 
   const runDuplicate = async (): Promise<void> => {

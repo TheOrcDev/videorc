@@ -20,7 +20,7 @@ import {
   shortcutDigitFor,
   useWorkspaceNav
 } from '@/components/workspace-nav'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 
 /** ⌘K command palette: jump anywhere + run the core session/theme actions. Open state is
  *  owned by the shell so the sidebar trigger and the global shortcut share it. */
@@ -32,14 +32,9 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void
 }): ReactElement {
   const { setActive, openStudioPanel } = useWorkspaceNav()
-  const {
-    recording,
-    runtimeInfo,
-    startSession,
-    stopSession,
-    commentsWindow,
-    toggleCommentsWindow
-  } = useStudio()
+  const { runtimeInfo, startSession, stopSession, commentsWindow, toggleCommentsWindow } =
+    useStudioCore()
+  const { recording } = useStudioRecordingState()
   const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
   const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
   const { setTheme } = useTheme()

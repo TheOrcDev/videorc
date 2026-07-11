@@ -16,7 +16,7 @@ import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { useStudio } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import type { StreamScreen } from '@/lib/backend'
 
 // Takeover-image manager (upload/rename/reorder/delete). Lives on the Assets
@@ -34,7 +34,7 @@ export function TakeoverScreensSection(): ReactElement {
     screenImportPending,
     screens,
     wsStatus
-  } = useStudio()
+  } = useStudioCore()
   const managementDisabled = isSessionActive || wsStatus !== 'connected'
   const uploadDisabled = managementDisabled || screenImportPending
 
