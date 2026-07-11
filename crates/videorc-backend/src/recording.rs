@@ -12558,8 +12558,21 @@ mod tests {
             crate::captions::CaptionBurnTarget::Off,
             "an ineligible mixed captions-off session does not reserve an impossible live leg"
         );
+        // Platform truth: record+stream split output is VideoToolbox-only, so
+        // the captions-off session validates on macOS and is correctly
+        // rejected (for the split-output reason, not a captions reason) on
+        // Windows.
+        #[cfg(target_os = "macos")]
         validate_outputs(&captions_off)
             .expect("captions-off preserves the existing mixed-profile capture behavior");
+        #[cfg(not(target_os = "macos"))]
+        {
+            let error = validate_outputs(&captions_off).unwrap_err().to_string();
+            assert!(
+                error.contains("VideoToolbox"),
+                "captions-off must fail for the split-output platform reason, not captions: {error}"
+            );
+        }
     }
 
     #[test]
