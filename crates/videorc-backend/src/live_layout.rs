@@ -45,7 +45,10 @@ use crate::protocol::{
     SceneSourceKind, SourceSelection,
 };
 use crate::scene::{scene_from_capture_config, validate_scene_background};
-use crate::screen_capture::{parse_screencapturekit_display_id, parse_screencapturekit_window_id};
+use crate::screen_capture::{
+    is_windows_gdigrab_desktop_screen_id, parse_screencapturekit_display_id,
+    parse_screencapturekit_window_id, parse_windows_dxgi_output_index,
+};
 use crate::state::AppState;
 
 const WARM_SOURCE_START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -234,18 +237,8 @@ pub fn preset_selection_blocker(params: &SceneConfigParams) -> Option<String> {
     );
     let camera_selected = params.sources.camera_id.is_some();
     let screen_selected = params.sources.test_pattern
-        || params
-            .sources
-            .screen_id
-            .as_deref()
-            .and_then(parse_screencapturekit_display_id)
-            .is_some()
-        || params
-            .sources
-            .window_id
-            .as_deref()
-            .and_then(parse_screencapturekit_window_id)
-            .is_some();
+        || screen_source_is_native(params.sources.screen_id.as_deref())
+        || window_source_is_native(params.sources.window_id.as_deref());
     if needs_camera && !camera_selected {
         return Some(format!(
             "Layout preset {preset:?} needs a camera, but no camera is selected. Pick a camera, then switch."
@@ -262,6 +255,26 @@ pub fn preset_selection_blocker(params: &SceneConfigParams) -> Option<String> {
         ));
     }
     None
+}
+
+fn screen_source_is_native(screen_id: Option<&str>) -> bool {
+    let Some(screen_id) = screen_id else {
+        return false;
+    };
+    if parse_screencapturekit_display_id(screen_id).is_some() {
+        return true;
+    }
+    if parse_windows_dxgi_output_index(screen_id).is_some() {
+        return true;
+    }
+    is_windows_gdigrab_desktop_screen_id(screen_id)
+}
+
+fn window_source_is_native(window_id: Option<&str>) -> bool {
+    let Some(window_id) = window_id else {
+        return false;
+    };
+    parse_screencapturekit_window_id(window_id).is_some()
 }
 
 async fn source_liveness(state: &AppState, target_sources: &SourceSelection) -> SourceLiveness {
@@ -1356,6 +1369,23 @@ mod tests {
             preset_selection_blocker(&legacy_screen)
                 .is_some_and(|message| message.contains("native screen"))
         );
+
+        let windows_screen = config(LayoutPreset::ScreenOnly, false, false);
+        assert_eq!(
+            preset_selection_blocker(&windows_screen),
+            Some(
+                "Layout preset ScreenOnly needs a screen or window, but none is selected. Pick one, then switch."
+                    .to_string()
+            )
+        );
+
+        let mut windows_dxgi = config(LayoutPreset::ScreenOnly, false, false);
+        windows_dxgi.sources.screen_id = Some("screen:dxgi:00000000000003f1:2".to_string());
+        assert_eq!(preset_selection_blocker(&windows_dxgi), None);
+
+        let mut windows_gdigrab = config(LayoutPreset::ScreenOnly, false, false);
+        windows_gdigrab.sources.screen_id = Some("screen:gdigrab:desktop".to_string());
+        assert_eq!(preset_selection_blocker(&windows_gdigrab), None);
     }
 
     #[test]

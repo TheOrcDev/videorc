@@ -31,6 +31,10 @@ struct WebAiJobContext<'a> {
     client_request_id: &'a str,
     diagnostic_summary: Option<&'a str>,
     health_events: &'a [HealthEvent],
+    /// Server-capability-gated extras (None when unsupported or not requested).
+    outputs: Option<Vec<String>>,
+    tone: Option<String>,
+    chat_context: Option<Value>,
 }
 
 pub async fn run_ai_workflow(
@@ -58,6 +62,60 @@ pub async fn run_ai_workflow(
             candidates.join(", ")
         );
     };
+
+    // Live captions already wrote a full timestamped transcript next to the
+    // recording (<recording>.srt). Reuse it: no audio extraction, no audio
+    // upload — cloud generation runs over the text the app already has, and
+    // the Transcript card is Ready even before any cloud consent.
+    let captions_transcript = captions_transcript_for(&input_path).await;
+
+    if let Some((srt_path, transcript_text)) = captions_transcript {
+        let artifacts = vec![state.database.save_ai_artifact(
+            &params.session_id,
+            AiArtifactKind::Transcript,
+            AiArtifactStatus::Ready,
+            json!({
+                "privacy": "Read from the live-captions file next to the recording. Uploaded as text only when cloud consent is on.",
+                "source": "live-captions",
+                "text": transcript_text,
+            }),
+            Some(srt_path.display().to_string()),
+        )?];
+
+        if !params.consent_to_upload_audio {
+            emit_health_event(
+                &state,
+                Some(&params.session_id),
+                HealthLevel::Info,
+                "ai-consent-required",
+                "Transcript is ready from live captions. Cloud generation did not run because consent was not granted.",
+            )?;
+            emit_ai_artifacts_changed(&state, &params.session_id)?;
+            return Ok(AiWorkflowResult {
+                session_id: params.session_id,
+                audio_path: String::new(),
+                artifacts,
+            });
+        }
+
+        let cloud_result = run_web_ai_job(
+            &state,
+            &params.session_id,
+            AiJobInput::Transcript(&transcript_text),
+            AiJobOptions {
+                outputs: params.outputs.clone(),
+                tone: params.tone.clone(),
+            },
+        )
+        .await;
+        return finish_workflow(
+            &state,
+            params.session_id,
+            String::new(),
+            artifacts,
+            cloud_result,
+        );
+    }
 
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path);
     let artifact_dir = default_artifacts_dir().join(&params.session_id);
@@ -103,8 +161,37 @@ pub async fn run_ai_workflow(
         });
     }
 
-    let cloud_artifacts = match run_web_ai_job(&state, &params.session_id, &audio_path).await {
-        Ok(artifacts) => artifacts,
+    let cloud_result = run_web_ai_job(
+        &state,
+        &params.session_id,
+        AiJobInput::Audio(&audio_path),
+        AiJobOptions {
+            outputs: params.outputs.clone(),
+            tone: params.tone.clone(),
+        },
+    )
+    .await;
+    finish_workflow(
+        &state,
+        params.session_id,
+        audio_path.display().to_string(),
+        artifacts,
+        cloud_result,
+    )
+}
+
+/// Shared tail of `run_ai_workflow`: append cloud artifacts or record the
+/// failure truthfully (a Failed TitleDescription stub carries the reason to
+/// the flagship card; a Ready transcript stays Ready).
+fn finish_workflow(
+    state: &AppState,
+    session_id: String,
+    audio_path: String,
+    mut artifacts: Vec<AiArtifact>,
+    cloud_result: Result<Vec<AiArtifact>>,
+) -> Result<AiWorkflowResult> {
+    match cloud_result {
+        Ok(cloud_artifacts) => artifacts.extend(cloud_artifacts),
         Err(error) => {
             let message = error.to_string();
             let code = if message.contains("Sign in") {
@@ -113,13 +200,22 @@ pub async fn run_ai_workflow(
                 "cloud-ai-job-failed"
             };
             let event_message = if code == "cloud-ai-sign-in-required" {
-                "Audio was extracted locally. Cloud AI did not run because the Videorc session is not signed in."
+                "Cloud AI did not run because the Videorc session is not signed in."
             } else {
-                "Cloud AI failed. The local recording and extracted audio are still available."
+                "Cloud AI failed. The local recording and any local transcript are still available."
+            };
+            let has_ready_transcript = artifacts.iter().any(|artifact| {
+                artifact.kind == AiArtifactKind::Transcript
+                    && artifact.status == AiArtifactStatus::Ready
+            });
+            let stub_kind = if has_ready_transcript {
+                AiArtifactKind::TitleDescription
+            } else {
+                AiArtifactKind::Transcript
             };
             artifacts.push(state.database.save_ai_artifact(
-                &params.session_id,
-                AiArtifactKind::Transcript,
+                &session_id,
+                stub_kind,
                 AiArtifactStatus::Failed,
                 json!({
                     "message": message,
@@ -128,45 +224,64 @@ pub async fn run_ai_workflow(
                 None,
             )?);
             emit_health_event(
-                &state,
-                Some(&params.session_id),
+                state,
+                Some(&session_id),
                 HealthLevel::Warn,
                 code,
                 event_message,
             )?;
-            emit_ai_artifacts_changed(&state, &params.session_id)?;
-            return Ok(AiWorkflowResult {
-                session_id: params.session_id,
-                audio_path: audio_path.display().to_string(),
-                artifacts,
-            });
         }
-    };
-    artifacts.extend(cloud_artifacts);
+    }
 
-    emit_ai_artifacts_changed(&state, &params.session_id)?;
-
+    emit_ai_artifacts_changed(state, &session_id)?;
     Ok(AiWorkflowResult {
-        session_id: params.session_id,
-        audio_path: audio_path.display().to_string(),
+        session_id,
+        audio_path,
         artifacts,
     })
+}
+
+/// What the cloud job runs over: extracted audio (uploaded for transcription)
+/// or transcript text the app already has (live captions — uploaded as text).
+enum AiJobInput<'a> {
+    Audio(&'a Path),
+    Transcript(&'a str),
+}
+
+/// Per-kind generation options; silently dropped when the server does not
+/// advertise the matching capability, so older servers keep working.
+#[derive(Default, Clone)]
+struct AiJobOptions {
+    outputs: Option<Vec<String>>,
+    tone: Option<String>,
 }
 
 async fn run_web_ai_job(
     state: &AppState,
     session_id: &str,
-    audio_path: &Path,
+    input: AiJobInput<'_>,
+    options: AiJobOptions,
 ) -> Result<Vec<AiArtifact>> {
     let token = account::stored_session_token().context("Sign in to use cloud AI.")?;
     let client = VideorcApiClient::new()?;
     let capabilities = client.get_ai_capabilities(&token).await?;
     validate_cloud_ai_capabilities(&capabilities)?;
-    let audio_size = fs::metadata(audio_path)
-        .await
-        .with_context(|| format!("Could not inspect {}", audio_path.display()))?
-        .len();
-    let client_request_id = ai_client_request_id(session_id, audio_path).await?;
+    let outputs = options
+        .outputs
+        .filter(|_| capabilities.workflow.supports_outputs_filter);
+    let tone = options.tone.filter(|_| capabilities.workflow.supports_tone);
+    let chat_context = if capabilities.workflow.supports_chat_context {
+        build_chat_context(state, session_id)
+    } else {
+        None
+    };
+    let client_request_id = match &input {
+        AiJobInput::Audio(audio_path) => ai_client_request_id(session_id, audio_path).await?,
+        AiJobInput::Transcript(transcript) => {
+            let hash = format!("{:x}", Sha256::digest(transcript.as_bytes()));
+            build_ai_client_request_id(session_id, &hash)
+        }
+    };
     let health_events = state.database.list_health_events(session_id)?;
     let health_events_json =
         serde_json::to_string(&health_events).context("Could not serialize AI health events.")?;
@@ -176,38 +291,66 @@ async fn run_web_ai_job(
         client_request_id: &client_request_id,
         diagnostic_summary: diagnostic_summary.as_deref(),
         health_events: &health_events,
+        outputs,
+        tone,
+        chat_context,
     };
-    let audio_intake_error = audio_intake_error(&capabilities, audio_size);
-    let initial_job = if capabilities.features.multipart_audio_jobs_enabled
-        && audio_intake_error.is_none()
-    {
-        client
-            .create_ai_job_from_audio(
-                &token,
-                AiAudioJobRequest {
-                    audio_path,
-                    client_request_id: &client_request_id,
-                    client_version: DESKTOP_CLIENT_VERSION,
-                    diagnostic_summary: job_context.diagnostic_summary,
-                    health_events_json: &health_events_json,
-                    session_client_id: session_id,
-                },
-            )
-            .await?
-            .job
-    } else if capabilities.features.object_backed_jobs_enabled && audio_intake_error.is_none() {
-        create_object_backed_ai_job(&client, &token, &job_context, audio_path, audio_size).await?
-    } else if capabilities.features.transcript_jobs_enabled {
-        let transcript = latest_local_transcript_text(state, session_id)?.with_context(|| {
-            audio_intake_error.clone().unwrap_or_else(|| {
-                "No ready local transcript is available for transcript-backed AI.".to_string()
-            })
-        })?;
-        create_transcript_backed_ai_job(&client, &token, &job_context, &transcript).await?
-    } else if let Some(error) = audio_intake_error {
-        bail!("{error}");
-    } else {
-        bail!("Videorc AI audio intake is not enabled for this account.");
+
+    let initial_job = match input {
+        AiJobInput::Transcript(transcript) => {
+            if !capabilities.features.transcript_jobs_enabled {
+                bail!("Transcript-backed Videorc AI is not enabled for this account.");
+            }
+            create_transcript_backed_ai_job(&client, &token, &job_context, transcript).await?
+        }
+        AiJobInput::Audio(audio_path) => {
+            let audio_size = fs::metadata(audio_path)
+                .await
+                .with_context(|| format!("Could not inspect {}", audio_path.display()))?
+                .len();
+            let audio_intake_error = audio_intake_error(&capabilities, audio_size);
+            if capabilities.features.multipart_audio_jobs_enabled && audio_intake_error.is_none() {
+                let chat_context_json = job_context
+                    .chat_context
+                    .as_ref()
+                    .and_then(|value| serde_json::to_string(value).ok());
+                client
+                    .create_ai_job_from_audio(
+                        &token,
+                        AiAudioJobRequest {
+                            audio_path,
+                            client_request_id: &client_request_id,
+                            client_version: DESKTOP_CLIENT_VERSION,
+                            diagnostic_summary: job_context.diagnostic_summary,
+                            health_events_json: &health_events_json,
+                            session_client_id: session_id,
+                            outputs: job_context.outputs.as_deref(),
+                            tone: job_context.tone.as_deref(),
+                            chat_context_json: chat_context_json.as_deref(),
+                        },
+                    )
+                    .await?
+                    .job
+            } else if capabilities.features.object_backed_jobs_enabled
+                && audio_intake_error.is_none()
+            {
+                create_object_backed_ai_job(&client, &token, &job_context, audio_path, audio_size)
+                    .await?
+            } else if capabilities.features.transcript_jobs_enabled {
+                let transcript =
+                    latest_local_transcript_text(state, session_id)?.with_context(|| {
+                        audio_intake_error.clone().unwrap_or_else(|| {
+                            "No ready local transcript is available for transcript-backed AI."
+                                .to_string()
+                        })
+                    })?;
+                create_transcript_backed_ai_job(&client, &token, &job_context, &transcript).await?
+            } else if let Some(error) = audio_intake_error {
+                bail!("{error}");
+            } else {
+                bail!("Videorc AI audio intake is not enabled for this account.");
+            }
+        }
     };
 
     let completed_job = wait_for_ai_job(
@@ -304,14 +447,21 @@ async fn create_object_backed_ai_job(
     client.upload_ai_object(&upload.ticket, audio_path).await?;
 
     let mut job_request = upload.job_request;
-    let input_json = json!({
+    let mut input_json = json!({
         "diagnosticSummary": job_context.diagnostic_summary,
         "healthEvents": job_context.health_events,
     });
+    if let (Some(object), Some(chat_context)) = (
+        input_json.as_object_mut(),
+        job_context.chat_context.as_ref(),
+    ) {
+        object.insert("chatContext".to_string(), chat_context.clone());
+    }
     let object = job_request
         .as_object_mut()
         .context("AI object upload response did not include a job request object.")?;
     object.insert("inputJson".to_string(), input_json);
+    apply_job_options(&mut job_request, job_context);
     Ok(client.create_ai_job(token, &job_request).await?.job)
 }
 
@@ -321,18 +471,39 @@ async fn create_transcript_backed_ai_job(
     job_context: &WebAiJobContext<'_>,
     transcript: &str,
 ) -> Result<AiJobSnapshot> {
-    let body = json!({
+    let mut input_json = json!({
+        "diagnosticSummary": job_context.diagnostic_summary,
+        "healthEvents": job_context.health_events,
+        "transcript": transcript,
+    });
+    if let (Some(object), Some(chat_context)) = (
+        input_json.as_object_mut(),
+        job_context.chat_context.as_ref(),
+    ) {
+        object.insert("chatContext".to_string(), chat_context.clone());
+    }
+    let mut body = json!({
         "clientRequestId": job_context.client_request_id,
         "clientVersion": DESKTOP_CLIENT_VERSION,
-        "inputJson": {
-            "diagnosticSummary": job_context.diagnostic_summary,
-            "healthEvents": job_context.health_events,
-            "transcript": transcript,
-        },
+        "inputJson": input_json,
         "sessionClientId": job_context.session_id,
         "workflowKind": AI_WORKFLOW_KIND_POST_RECORDING,
     });
+    apply_job_options(&mut body, job_context);
     Ok(client.create_ai_job(token, &body).await?.job)
+}
+
+/// Attach capability-gated per-kind options to a job create body.
+fn apply_job_options(body: &mut Value, job_context: &WebAiJobContext<'_>) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    if let Some(outputs) = &job_context.outputs {
+        object.insert("outputs".to_string(), json!(outputs));
+    }
+    if let Some(tone) = &job_context.tone {
+        object.insert("tone".to_string(), json!(tone));
+    }
 }
 
 async fn wait_for_ai_job(
@@ -419,44 +590,67 @@ fn save_completed_web_ai_artifacts(
         )?);
     }
 
+    // Per-kind jobs return only the requested generation blocks — an absent
+    // block must never overwrite a previously generated artifact with empties.
     let publish_pack = object_or_empty(&owner_artifacts.publish_pack);
-    saved.push(state.database.save_ai_artifact(
-        session_id,
-        AiArtifactKind::TitleDescription,
-        AiArtifactStatus::Ready,
-        json!({
-            "description": string_field(publish_pack, "description"),
-            "jobId": job.id,
-            "model": job.model,
-            "provider": job.provider,
-            "title": string_field(publish_pack, "title"),
-        }),
-        None,
-    )?);
-    saved.push(state.database.save_ai_artifact(
-        session_id,
-        AiArtifactKind::Summary,
-        AiArtifactStatus::Ready,
-        json!({
-            "jobId": job.id,
-            "model": job.model,
-            "provider": job.provider,
-            "text": string_field(publish_pack, "summary"),
-        }),
-        None,
-    )?);
-    saved.push(state.database.save_ai_artifact(
-        session_id,
-        AiArtifactKind::Chapters,
-        AiArtifactStatus::Ready,
-        json!({
-            "chapters": value_field(publish_pack, "chapters"),
-            "jobId": job.id,
-            "model": job.model,
-            "provider": job.provider,
-        }),
-        None,
-    )?);
+    if !publish_pack.is_empty() {
+        saved.push(state.database.save_ai_artifact(
+            session_id,
+            AiArtifactKind::TitleDescription,
+            AiArtifactStatus::Ready,
+            json!({
+                "description": string_field(publish_pack, "description"),
+                "jobId": job.id,
+                "model": job.model,
+                "provider": job.provider,
+                "title": string_field(publish_pack, "title"),
+                "titleVariants": value_field(publish_pack, "titleVariants"),
+            }),
+            None,
+        )?);
+        saved.push(state.database.save_ai_artifact(
+            session_id,
+            AiArtifactKind::Summary,
+            AiArtifactStatus::Ready,
+            json!({
+                "jobId": job.id,
+                "model": job.model,
+                "provider": job.provider,
+                "text": string_field(publish_pack, "summary"),
+            }),
+            None,
+        )?);
+        saved.push(state.database.save_ai_artifact(
+            session_id,
+            AiArtifactKind::Chapters,
+            AiArtifactStatus::Ready,
+            json!({
+                "chapters": value_field(publish_pack, "chapters"),
+                "jobId": job.id,
+                "model": job.model,
+                "provider": job.provider,
+            }),
+            None,
+        )?);
+    }
+
+    let social_posts = object_or_empty(&owner_artifacts.social_posts);
+    if !social_posts.is_empty() {
+        saved.push(state.database.save_ai_artifact(
+            session_id,
+            AiArtifactKind::SocialPosts,
+            AiArtifactStatus::Ready,
+            json!({
+                "jobId": job.id,
+                "model": job.model,
+                "provider": job.provider,
+                "twitchTitle": string_field(social_posts, "twitchTitle"),
+                "xPost": string_field(social_posts, "xPost"),
+                "xThread": value_field(social_posts, "xThread"),
+            }),
+            None,
+        )?);
+    }
 
     saved.extend(save_creator_intelligence_value_artifacts(
         state,
@@ -557,6 +751,60 @@ fn save_creator_intelligence_value_artifacts(
     ])
 }
 
+const CHAT_CONTEXT_MAX_ENTRIES: usize = 100;
+const CHAT_CONTEXT_MAX_TEXT_CHARS: usize = 500;
+
+/// Top chat moments for grounding titles/highlights in audience reaction.
+/// Evenly sampled when the session has more messages than the server cap.
+fn build_chat_context(state: &AppState, session_id: &str) -> Option<Value> {
+    let session_started_ms = state
+        .database
+        .list_sessions(500)
+        .ok()?
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| {
+            chrono::DateTime::parse_from_rfc3339(&session.started_at)
+                .ok()
+                .map(|started| started.timestamp_millis())
+        })?;
+    let messages = state.database.list_live_chat_messages(session_id).ok()?;
+    if messages.is_empty() {
+        return None;
+    }
+    let step = messages.len().div_ceil(CHAT_CONTEXT_MAX_ENTRIES).max(1);
+    let entries: Vec<Value> = messages
+        .iter()
+        .step_by(step)
+        .take(CHAT_CONTEXT_MAX_ENTRIES)
+        .filter_map(|message| {
+            let text: String = message
+                .message_text
+                .chars()
+                .take(CHAT_CONTEXT_MAX_TEXT_CHARS)
+                .collect();
+            if text.trim().is_empty() {
+                return None;
+            }
+            let at_ms = chrono::DateTime::parse_from_rfc3339(&message.received_at)
+                .ok()
+                .and_then(|received| {
+                    u64::try_from(received.timestamp_millis() - session_started_ms).ok()
+                });
+            Some(json!({
+                "atMs": at_ms,
+                "platform": message.platform,
+                "author": message.author_name,
+                "text": text,
+            }))
+        })
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    Some(Value::Array(entries))
+}
+
 fn diagnostic_summary_for_session(state: &AppState, session_id: &str) -> Option<String> {
     state
         .database
@@ -639,10 +887,60 @@ pub async fn export_publish_pack(
         .await
         .with_context(|| format!("Could not write {}", markdown_path.display()))?;
 
+    // The pack finale advertises paste-ready per-field files — write every one
+    // whose artifact is Ready (the checklist used to promise five files while
+    // only the combined markdown existed).
+    let mut files = vec![markdown_path.display().to_string()];
+    for (file_name, content) in publish_pack_files(&artifacts) {
+        let path = artifact_dir.join(file_name);
+        fs::write(&path, content)
+            .await
+            .with_context(|| format!("Could not write {}", path.display()))?;
+        files.push(path.display().to_string());
+    }
+
     Ok(ExportPublishPackResult {
         session_id: params.session_id,
         markdown_path: markdown_path.display().to_string(),
+        files,
     })
+}
+
+/// The per-field paste-ready files for a pack export, skipping artifacts that
+/// are missing or empty. Pure so the file list is unit-testable.
+fn publish_pack_files(artifacts: &[AiArtifact]) -> Vec<(&'static str, String)> {
+    let title_description = latest_ready_artifact(artifacts, AiArtifactKind::TitleDescription);
+    let mut files = Vec::new();
+    if let Some(title) = title_description.and_then(|artifact| content_string(artifact, "title"))
+        && !title.trim().is_empty()
+    {
+        files.push(("title.txt", title));
+    }
+    if let Some(description) =
+        title_description.and_then(|artifact| content_string(artifact, "description"))
+        && !description.trim().is_empty()
+    {
+        files.push(("description.txt", description));
+    }
+    if let Some(chapters) = latest_ready_artifact(artifacts, AiArtifactKind::Chapters) {
+        let lines = chapter_lines(chapters);
+        if !lines.is_empty() {
+            files.push(("chapters.txt", lines.join("\n")));
+        }
+    }
+    if let Some(summary) = latest_ready_artifact(artifacts, AiArtifactKind::Summary)
+        .and_then(|artifact| content_string(artifact, "text"))
+        && !summary.trim().is_empty()
+    {
+        files.push(("summary.md", summary));
+    }
+    if let Some(transcript) = latest_ready_artifact(artifacts, AiArtifactKind::Transcript)
+        .and_then(|artifact| content_string(artifact, "text"))
+        && !transcript.trim().is_empty()
+    {
+        files.push(("transcript.txt", transcript));
+    }
+    files
 }
 
 fn emit_ai_artifacts_changed(state: &AppState, session_id: &str) -> Result<()> {
@@ -699,6 +997,85 @@ async fn extract_audio(ffmpeg_path: &str, input_path: &Path, output_path: &Path)
     }
 
     Ok(())
+}
+
+/// One caption cue from a live-captions `.srt` (kept with timing for
+/// chapter/clip ranking, not just the joined text).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptionCue {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+/// Live captions write `<recording>.srt` next to the finished file
+/// (captions.rs). If it exists and parses to a non-empty transcript, the
+/// publish workflow can skip audio extraction and cloud transcription.
+async fn captions_transcript_for(input_path: &Path) -> Option<(PathBuf, String)> {
+    let srt_path = input_path.with_extension("srt");
+    let content = fs::read_to_string(&srt_path).await.ok()?;
+    let cues = parse_srt(&content);
+    let text = caption_cues_text(&cues);
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some((srt_path, text))
+}
+
+pub fn parse_srt(content: &str) -> Vec<CaptionCue> {
+    let mut cues = Vec::new();
+    for block in content.replace("\r\n", "\n").split("\n\n") {
+        let mut lines = block.lines().filter(|line| !line.trim().is_empty());
+        let Some(first) = lines.next() else { continue };
+        // The numeric cue index line is optional in practice; the timecode
+        // line is the anchor.
+        let timing_line = if first.contains("-->") {
+            first
+        } else {
+            match lines.next() {
+                Some(line) if line.contains("-->") => line,
+                _ => continue,
+            }
+        };
+        let mut parts = timing_line.splitn(2, "-->");
+        let (Some(start), Some(end)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Some(start_ms), Some(end_ms)) = (srt_timestamp_ms(start), srt_timestamp_ms(end))
+        else {
+            continue;
+        };
+        let text = lines.collect::<Vec<_>>().join(" ").trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        cues.push(CaptionCue {
+            start_ms,
+            end_ms,
+            text,
+        });
+    }
+    cues
+}
+
+fn srt_timestamp_ms(value: &str) -> Option<u64> {
+    // "HH:MM:SS,mmm" (SRT) or "HH:MM:SS.mmm".
+    let value = value.trim();
+    let mut clock_and_millis = value.split([',', '.']);
+    let clock = clock_and_millis.next()?;
+    let millis: u64 = clock_and_millis.next().unwrap_or("0").trim().parse().ok()?;
+    let mut parts = clock.split(':').rev();
+    let seconds: u64 = parts.next()?.trim().parse().ok()?;
+    let minutes: u64 = parts.next()?.trim().parse().ok()?;
+    let hours: u64 = parts.next().unwrap_or("0").trim().parse().ok()?;
+    Some(((hours * 60 + minutes) * 60 + seconds) * 1000 + millis)
+}
+
+pub fn caption_cues_text(cues: &[CaptionCue]) -> String {
+    cues.iter()
+        .map(|cue| cue.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn render_publish_pack(artifacts: &[AiArtifact]) -> String {
@@ -898,6 +1275,71 @@ fn push_markdown_list(markdown: &mut String, lines: Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_srt_with_and_without_cue_indices() {
+        let srt = "1\n00:00:01,000 --> 00:00:03,240\nWelcome back everyone\n\n00:00:03,500 --> 00:00:06.100\ntoday we build the thing\nfrom scratch\n\n2\n00:00:07,000 --> 00:00:08,000\n\n";
+        let cues = parse_srt(srt);
+
+        assert_eq!(
+            cues,
+            vec![
+                CaptionCue {
+                    start_ms: 1_000,
+                    end_ms: 3_240,
+                    text: "Welcome back everyone".to_string(),
+                },
+                CaptionCue {
+                    start_ms: 3_500,
+                    end_ms: 6_100,
+                    text: "today we build the thing from scratch".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            caption_cues_text(&cues),
+            "Welcome back everyone\ntoday we build the thing from scratch"
+        );
+    }
+
+    #[test]
+    fn srt_timestamps_cover_hours_and_dot_millis() {
+        assert_eq!(srt_timestamp_ms("01:02:03,456"), Some(3_723_456));
+        assert_eq!(srt_timestamp_ms(" 00:00:00.001 "), Some(1));
+        assert_eq!(srt_timestamp_ms("garbage"), None);
+    }
+
+    #[test]
+    fn publish_pack_files_write_only_ready_nonempty_fields() {
+        let artifacts = vec![
+            AiArtifact {
+                id: "1".to_string(),
+                session_id: "session".to_string(),
+                kind: AiArtifactKind::TitleDescription,
+                status: AiArtifactStatus::Ready,
+                content: json!({ "title": "How I Built X", "description": "" }),
+                file_path: None,
+                created_at: "2026-07-11T00:00:00Z".to_string(),
+            },
+            AiArtifact {
+                id: "2".to_string(),
+                session_id: "session".to_string(),
+                kind: AiArtifactKind::Transcript,
+                status: AiArtifactStatus::Ready,
+                content: json!({ "text": "hello world" }),
+                file_path: None,
+                created_at: "2026-07-11T00:00:00Z".to_string(),
+            },
+        ];
+
+        let files = publish_pack_files(&artifacts);
+        let names: Vec<&str> = files.iter().map(|(name, _)| *name).collect();
+
+        // Empty description and missing summary/chapters are skipped — the
+        // export writes exactly the paste-ready fields that exist.
+        assert_eq!(names, vec!["title.txt", "transcript.txt"]);
+        assert_eq!(files[0].1, "How I Built X");
+    }
 
     #[test]
     fn renders_publish_pack_markdown() {

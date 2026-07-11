@@ -77,7 +77,14 @@ pub async fn ensure_session_poster(
     {
         return false;
     }
-    let _maintenance = state.ffmpeg_work.begin_maintenance_when_idle().await;
+    let _maintenance = state
+        .ffmpeg_work
+        .begin_priority_maintenance_when_idle()
+        .await;
+    // Another request may have generated this poster while we waited.
+    if output.exists() {
+        return true;
+    }
     let mut command = tokio::process::Command::new(ffmpeg_path);
     command
         .args(poster_extract_args(

@@ -226,6 +226,11 @@ const SCREEN_OVERLAY_FIFO_WRITE_RETRY: std::time::Duration = std::time::Duration
 const POST_RECORDING_GATE_IDLE_DELAY: Duration = Duration::from_secs(30);
 const POST_RECORDING_FAST_ASSESSMENT_TIMEOUT: Duration = Duration::from_secs(60);
 const POST_RECORDING_REPAIR_TIMEOUT: Duration = Duration::from_secs(180);
+// Raw compositor frames arrive over a live FIFO alongside live device audio.
+// FFmpeg needs a dedicated demux thread for that input; without one, Windows
+// dshow polling can leave the named-pipe reader idle until its buffer fills,
+// blocking the bridge and starving both recording and preview.
+const ENCODER_BRIDGE_RAW_VIDEO_INPUT_QUEUE_FRAMES: u32 = 16;
 const ENCODER_BRIDGE_VIDEO_OUTPUT_ENV: &str = "VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT";
 
 #[derive(Debug)]
@@ -3020,6 +3025,19 @@ async fn monitor_session(
                     );
                 }
             }
+            // The Library describes the media file, not how long the record
+            // button was active. A stalled encoder can produce a much shorter
+            // timeline than wall time, so persist the probed finalized duration
+            // and retain elapsed time only as a fallback when probing fails.
+            let duration_ms = match mp4_path.as_ref().or(output_path.as_ref()) {
+                Some(final_path) => crate::session_ops::probe_duration_ms(
+                    &monitored_recording.ffmpeg_path,
+                    final_path,
+                )
+                .await
+                .or(duration_ms),
+                None => duration_ms,
+            };
             let _ = state.database.finish_session(
                 &session_id,
                 "completed",
@@ -5255,6 +5273,8 @@ fn append_bridge_recording_input_args(
             // timestamps and require the selected encoder to sustain the output
             // cadence instead.
             args.extend([
+                "-thread_queue_size".to_string(),
+                ENCODER_BRIDGE_RAW_VIDEO_INPUT_QUEUE_FRAMES.to_string(),
                 "-f".to_string(),
                 "rawvideo".to_string(),
                 "-pix_fmt".to_string(),
@@ -9491,6 +9511,15 @@ mod tests {
         assert_eq!(
             input_arg_value(&args, &fifo_path.display().to_string(), "-framerate"),
             Some("30")
+        );
+        assert_eq!(
+            input_arg_value(
+                &args,
+                &fifo_path.display().to_string(),
+                "-thread_queue_size"
+            ),
+            Some("16"),
+            "live raw video must have its own demux queue when device audio is also active"
         );
         assert_eq!(
             input_arg_value(

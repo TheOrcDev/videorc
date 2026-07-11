@@ -106,6 +106,8 @@ import type {
   CompositorFrameReady,
   CompositorStatus,
   DiagnosticStats,
+  ClipExportResult,
+  ClipSuggestResult,
   Device,
   DeviceList,
   EntitlementsSnapshot,
@@ -310,6 +312,7 @@ function sourceFallbackActiveSessionMessage(state: RecordingStatus['state']): st
 
 const NATIVE_PREVIEW_SURFACE_PRESENT_REPORT_INTERVAL_MS = 250
 const WORKSPACE_NAVIGATE_EVENT = 'videorc:navigate-workspace'
+const AI_CONSENT_STORAGE_KEY = 'videorc.aiConsent'
 
 function isRecordingQualityEvent(code: string): boolean {
   return code.startsWith('recording-quality-')
@@ -631,7 +634,8 @@ export type StudioContextValue = {
   mediaAccess: MediaAccessSnapshot | null
   // ai + jobs
   aiConsent: boolean
-  setAiConsent: Dispatch<SetStateAction<boolean>>
+  /** Persists across launches (durable preference, not a per-launch answer). */
+  setAiConsent: (consent: boolean) => void
   aiRunningSessionId: string | null
   exportRunningSessionId: string | null
   startRequestPending: boolean
@@ -730,8 +734,15 @@ export type StudioContextValue = {
   duplicateSession: (sessionId: string) => Promise<void>
   importRecording: () => Promise<void>
   sessionStorageTotals: SessionStorageTotals | null
-  runAiWorkflow: (sessionId: string) => Promise<void>
+  runAiWorkflow: (
+    sessionId: string,
+    options?: { outputs?: string[]; tone?: string }
+  ) => Promise<void>
   exportPublishPack: (sessionId: string) => Promise<void>
+  /** Rank clip-worthy moments locally (chat spikes + captions). */
+  suggestClips: (sessionId: string) => Promise<ClipSuggestResult | null>
+  /** Trim a clip out of the recording locally (ffmpeg, next to the file). */
+  exportClip: (sessionId: string, startMs: number, endMs: number) => Promise<void>
   assessRecording: (path: string) => Promise<FileAssessment>
   repairRecording: (path: string) => Promise<GateStatus>
   restoreRecording: (path: string) => Promise<boolean>
@@ -1956,7 +1967,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // On Windows this is what makes the permission chips truthful — the audio
   // meter has no capture backend there, so it can't report mic permission.
   const [mediaAccess, setMediaAccess] = useState<MediaAccessSnapshot | null>(null)
-  const [aiConsent, setAiConsent] = useState(false)
+  // Cloud-AI consent is a durable preference, not a per-launch answer: it
+  // silently resetting to off every launch was the top reason publish runs
+  // "did nothing but extract audio" (2026-07-11 report).
+  const [aiConsent, setAiConsentState] = useState(
+    () => localStorage.getItem(AI_CONSENT_STORAGE_KEY) === '1'
+  )
+  const setAiConsent = useCallback((consent: boolean) => {
+    setAiConsentState(consent)
+    localStorage.setItem(AI_CONSENT_STORAGE_KEY, consent ? '1' : '0')
+  }, [])
   const [aiRunningSessionId, setAiRunningSessionId] = useState<string | null>(null)
   const [exportRunningSessionId, setExportRunningSessionId] = useState<string | null>(null)
   const [startRequestPending, setStartRequestPending] = useState(false)
@@ -7688,7 +7708,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const runAiWorkflow = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string, options?: { outputs?: string[]; tone?: string }) => {
       if (!client) {
         // F-023: this used to be a silent no-op — the button appeared dead.
         toast.error('AI workflow', {
@@ -7709,13 +7729,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const result = await client.request<AiWorkflowResult>('ai.run_post_recording', {
           sessionId,
           consentToUploadAudio: aiConsent,
-          ffmpegPath: settings.ffmpegPath.trim() || undefined
+          ffmpegPath: settings.ffmpegPath.trim() || undefined,
+          outputs: options?.outputs,
+          tone: options?.tone
         })
         await refreshSessions(client)
         // FX3: the local-only run needs an explicit, named result — "nothing
         // visibly happened" was the by-eye finding. Name the produced file.
         if (aiConsent) {
-          toast.success('AI workflow finished.')
+          toast.success('Publish pack generated.')
+        } else if (
+          result.artifacts.some(
+            (artifact) => artifact.kind === 'transcript' && artifact.status === 'ready'
+          )
+        ) {
+          toast.success('Transcript ready from live captions.', {
+            description:
+              'Enable cloud consent to generate the title, description, and the rest of the pack — the transcript uploads as text only.'
+          })
         } else {
           toast.success('Local audio extracted.', {
             description: result.audioPath
@@ -7753,7 +7784,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const result = await client.request<ExportPublishPackResult>('ai.publish_pack.export', {
           sessionId
         })
-        toast.success(`Publish pack exported to ${result.markdownPath}`)
+        const fileCount = result.files?.length ?? 1
+        toast.success(
+          `Publish pack exported (${fileCount} ${fileCount === 1 ? 'file' : 'files'}).`,
+          {
+            description: result.markdownPath
+          }
+        )
       } catch (error) {
         reportError(error)
       } finally {
@@ -7761,6 +7798,51 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
     },
     [client, reportError]
+  )
+
+  const suggestClips = useCallback(
+    async (sessionId: string): Promise<ClipSuggestResult | null> => {
+      if (!client) {
+        toast.error('Clips', { description: 'Backend is not connected — try again in a moment.' })
+        return null
+      }
+      try {
+        return await client.request<ClipSuggestResult>('ai.clips.suggest', { sessionId })
+      } catch (error) {
+        reportError(error)
+        return null
+      }
+    },
+    [client, reportError]
+  )
+
+  const exportClip = useCallback(
+    async (sessionId: string, startMs: number, endMs: number): Promise<void> => {
+      if (!client) {
+        toast.error('Clips', { description: 'Backend is not connected — try again in a moment.' })
+        return
+      }
+      try {
+        const result = await client.request<ClipExportResult>('ai.clip.export', {
+          sessionId,
+          startMs,
+          endMs,
+          ffmpegPath: settings.ffmpegPath.trim() || undefined
+        })
+        toast.success('Clip exported next to the recording.', {
+          description: basename(result.path),
+          action: {
+            label: 'Reveal',
+            onClick: () => {
+              void window.videorc?.revealPath?.(result.path)
+            }
+          }
+        })
+      } catch (error) {
+        reportError(error)
+      }
+    },
+    [client, reportError, settings.ffmpegPath]
   )
 
   const assessRecording = useCallback(
@@ -8336,6 +8418,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionStorageTotals,
       runAiWorkflow,
       exportPublishPack,
+      suggestClips,
+      exportClip,
       assessRecording,
       repairRecording,
       restoreRecording,
@@ -8502,6 +8586,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessionStorageTotals,
       runAiWorkflow,
       exportPublishPack,
+      suggestClips,
+      exportClip,
       assessRecording,
       repairRecording,
       restoreRecording,

@@ -348,6 +348,7 @@ nativeTheme.themeSource = 'dark'
 type GlassVibrancyMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>[0]>
 const isMac = process.platform === 'darwin'
 const isWindows = process.platform === 'win32'
+const mainWindowSandboxEnabled = !isWindows
 const glassVibrancyEnabled = process.env.VIDEORC_GLASS_VIBRANCY !== '0'
 const glassVibrancyRaw = process.env.VIDEORC_GLASS_VIBRANCY
 const glassVibrancyMaterial: GlassVibrancyMaterial =
@@ -989,7 +990,7 @@ function createWindow(): void {
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: true,
+      sandbox: mainWindowSandboxEnabled,
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: false

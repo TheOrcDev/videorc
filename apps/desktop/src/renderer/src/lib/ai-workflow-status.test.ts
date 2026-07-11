@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   activeAiWorkflowStatus,
-  aiRunButtonLabel,
+  aiRunButtonAction,
   latestAiProblemArtifact
 } from './ai-workflow-status'
 import type { AiArtifact, HealthEvent, SessionSummary } from './backend'
@@ -48,34 +48,73 @@ function health(overrides: Partial<HealthEvent>): HealthEvent {
 }
 
 describe('ai workflow status', () => {
-  it('labels retryable sessions without hiding local extraction', () => {
+  it('the primary button is either the run or the exact fix, never a half-run', () => {
+    // Ready + consent: run/retry/regenerate.
     expect(
-      aiRunButtonLabel({
+      aiRunButtonAction({
         aiRunning: false,
-        cloudReady: true,
         consent: true,
         hasFailedArtifacts: true,
-        hasReviewableArtifacts: false
+        hasReviewableArtifacts: false,
+        readinessState: 'ready'
       })
-    ).toBe('Retry AI workflow')
+    ).toEqual({ kind: 'run', label: 'Retry generation' })
     expect(
-      aiRunButtonLabel({
+      aiRunButtonAction({
         aiRunning: false,
-        cloudReady: false,
-        consent: true,
-        hasFailedArtifacts: true,
-        hasReviewableArtifacts: false
-      })
-    ).toBe('Extract local audio')
-    expect(
-      aiRunButtonLabel({
-        aiRunning: true,
-        cloudReady: true,
         consent: true,
         hasFailedArtifacts: false,
-        hasReviewableArtifacts: false
+        hasReviewableArtifacts: false,
+        readinessState: 'ready'
       })
-    ).toBe('Running...')
+    ).toEqual({ kind: 'run', label: 'Generate publish pack' })
+    // Missing consent is the fix, regardless of readiness.
+    expect(
+      aiRunButtonAction({
+        aiRunning: false,
+        consent: false,
+        hasFailedArtifacts: false,
+        hasReviewableArtifacts: false,
+        readinessState: 'signed-out'
+      })
+    ).toEqual({ kind: 'enable-consent', label: 'Enable cloud consent' })
+    // Each blocked readiness state names its own fix.
+    expect(
+      aiRunButtonAction({
+        aiRunning: false,
+        consent: true,
+        hasFailedArtifacts: false,
+        hasReviewableArtifacts: false,
+        readinessState: 'signed-out'
+      }).kind
+    ).toBe('sign-in')
+    expect(
+      aiRunButtonAction({
+        aiRunning: false,
+        consent: true,
+        hasFailedArtifacts: false,
+        hasReviewableArtifacts: false,
+        readinessState: 'premium-required'
+      }).kind
+    ).toBe('view-premium')
+    expect(
+      aiRunButtonAction({
+        aiRunning: false,
+        consent: true,
+        hasFailedArtifacts: false,
+        hasReviewableArtifacts: false,
+        readinessState: 'server-unconfigured'
+      }).kind
+    ).toBe('blocked')
+    expect(
+      aiRunButtonAction({
+        aiRunning: true,
+        consent: true,
+        hasFailedArtifacts: false,
+        hasReviewableArtifacts: false,
+        readinessState: 'ready'
+      })
+    ).toEqual({ kind: 'run', label: 'Running…' })
   })
 
   it('surfaces delayed worker health while the workflow is active', () => {
@@ -90,7 +129,14 @@ describe('ai workflow status', () => {
   })
 
   it('falls back to extraction and processing states from local artifacts', () => {
-    expect(activeAiWorkflowStatus(session()).title).toBe('Extracting audio')
+    expect(activeAiWorkflowStatus(session()).title).toBe('Preparing recording')
+    expect(
+      activeAiWorkflowStatus(
+        session({
+          aiArtifacts: [artifact({ kind: 'transcript' })]
+        })
+      ).title
+    ).toBe('Processing cloud AI')
     expect(
       activeAiWorkflowStatus(
         session({
