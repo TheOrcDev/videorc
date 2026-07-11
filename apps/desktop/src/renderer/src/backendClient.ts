@@ -51,6 +51,10 @@ export class BackendClient {
     return this.pending.size
   }
 
+  get connected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN
+  }
+
   connect(): Promise<void> {
     if (this.ws?.readyState === WebSocket.OPEN) {
       return Promise.resolve()

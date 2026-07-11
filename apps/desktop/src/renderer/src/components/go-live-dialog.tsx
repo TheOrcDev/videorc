@@ -1,4 +1,4 @@
-import { Broadcast, CheckCircle, WarningCircle } from '@phosphor-icons/react'
+import { Broadcast, CheckCircle, ClosedCaptioning, WarningCircle } from '@phosphor-icons/react'
 import type { ReactElement } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -31,6 +31,7 @@ import type {
   StreamPrivacy
 } from '@/lib/backend'
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
+import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
 
 // The Go Live confirmation flow: review destinations + metadata, resolve any
 // error-severity blockers, then start the livestream. Extracted from StudioTab
@@ -43,10 +44,12 @@ export function GoLiveConfirmationDialog({
   preflight,
   entitlementGate,
   draft,
+  captionsReadiness,
   onPatchDraft,
   onCancel,
   onConfirm,
   onContinuePartial,
+  onContinueWithoutCaptions,
   onResolveBlocker
 }: {
   open: boolean
@@ -55,10 +58,12 @@ export function GoLiveConfirmationDialog({
   preflight: ReturnType<typeof useStudioCore>['goLivePreflight']
   entitlementGate: EntitlementUiGate
   draft: ReturnType<typeof useStudioCore>['streamMetadataDraft']
+  captionsReadiness: GoLiveCaptionsReadiness
   onPatchDraft: ReturnType<typeof useStudioCore>['patchStreamMetadataDraft']
   onCancel: () => void
   onConfirm: () => void
   onContinuePartial: () => void
+  onContinueWithoutCaptions: () => void
   onResolveBlocker: (targetId: string, resolution: 'disable' | 'manual-rtmp') => void
 }): ReactElement {
   const entitlementBlocker = entitlementGate.allowed ? null : entitlementGate
@@ -71,11 +76,15 @@ export function GoLiveConfirmationDialog({
     !preflight?.issues.some((issue) => issue.message === entitlementBlocker.reason)
       ? 1
       : 0
-  const issueCount = errorCount + entitlementIssueCount
+  const captionsIssueCount = captionsReadiness.blocksStart ? 1 : 0
+  const issueCount = errorCount + entitlementIssueCount + captionsIssueCount
   // "Resolve before going live" means exactly that: error-severity issues keep
   // the confirm button locked until resolved (disable the destination, switch
   // it to Manual RTMP, or fix it in the Streaming tab).
-  const blocked = Boolean(entitlementBlocker) || (preflight ? !preflight.valid : false)
+  const blocked =
+    Boolean(entitlementBlocker) ||
+    captionsReadiness.blocksStart ||
+    (preflight ? !preflight.valid : false)
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
@@ -110,6 +119,14 @@ export function GoLiveConfirmationDialog({
                 />
               </Field>
             </div>
+
+            {captionsReadiness.kind !== 'disabled' ? (
+              <GoLiveCaptionsStatus
+                pending={pending}
+                readiness={captionsReadiness}
+                onContinueWithoutCaptions={onContinueWithoutCaptions}
+              />
+            ) : null}
 
             <Field>
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -246,7 +263,10 @@ export function GoLiveConfirmationDialog({
             Cancel
           </Button>
           {partialSetup ? (
-            <Button disabled={pending || Boolean(entitlementBlocker)} onClick={onContinuePartial}>
+            <Button
+              disabled={pending || Boolean(entitlementBlocker) || captionsReadiness.blocksStart}
+              onClick={onContinuePartial}
+            >
               <Broadcast data-icon="inline-start" weight="fill" />
               {pending ? 'Starting…' : 'Continue With Ready'}
             </Button>
@@ -259,6 +279,51 @@ export function GoLiveConfirmationDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+export function GoLiveCaptionsStatus({
+  readiness,
+  pending,
+  onContinueWithoutCaptions
+}: {
+  readiness: GoLiveCaptionsReadiness
+  pending: boolean
+  onContinueWithoutCaptions: () => void
+}): ReactElement {
+  const blocked = readiness.kind === 'blocked'
+  const ready = readiness.kind === 'ready'
+  return (
+    <div
+      className={
+        blocked
+          ? 'flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3'
+          : 'flex flex-col gap-2 rounded-row border border-border bg-muted/25 p-3'
+      }
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-sm font-medium">
+          <ClosedCaptioning className="size-4 text-muted-foreground" weight="duotone" />
+          Captions
+        </div>
+        <Badge variant={ready ? 'success' : blocked ? 'warning' : 'secondary'}>
+          {ready ? <CheckCircle data-icon="inline-start" weight="fill" /> : null}
+          {readiness.title.replace(/^Captions\s*/i, '')}
+        </Badge>
+      </div>
+      <p className="text-sm text-muted-foreground">{readiness.description}</p>
+      {blocked ? (
+        <Button
+          className="w-fit"
+          disabled={pending}
+          size="sm"
+          variant="outline"
+          onClick={onContinueWithoutCaptions}
+        >
+          Continue without captions
+        </Button>
+      ) : null}
+    </div>
   )
 }
 

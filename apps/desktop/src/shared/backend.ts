@@ -1051,7 +1051,13 @@ export interface StartSessionParams {
 /** Burn-in intent for the session (shapes output legs; see burn-in plan A0/R1)
  *  plus the styling the post-recording captioned copy uses. */
 export interface CaptionsSessionParams {
+  enabled: boolean
+  /** Explicit per-session skip or an output shape that cannot be pre-armed. */
+  suppressedForSession: boolean
   burnTarget: 'off' | 'stream' | 'recording' | 'both'
+  styleId: CaptionStyleId
+  language: string
+  styleRevision: number
   position?: 'top' | 'bottom'
   textSize?: 's' | 'm' | 'l'
 }
@@ -1061,6 +1067,17 @@ export interface AudioSettings {
   microphoneMuted: boolean
   microphoneSyncOffsetMs: number
   microphoneSyncOffsetUserSet?: boolean
+}
+
+export interface AudioProcessingUpdateParams {
+  sessionId: string
+  microphoneGainDb: number
+  microphoneMuted: boolean
+}
+
+export interface AudioProcessingUpdateResult extends AudioProcessingUpdateParams {
+  applied: boolean
+  reasonCode?: 'no-active-session' | 'stale-session' | 'native-audio-unavailable'
 }
 
 export interface RemuxSessionParams {
@@ -2028,6 +2045,35 @@ export interface ExportPublishPackResult {
 }
 
 export interface AiCapabilities {
+  /** Optional during rolling web deployments. Missing must fail closed when captions are enabled. */
+  captions?: {
+    available: boolean
+    preferredTransport: CaptionTransport | null
+    reasonCode:
+      | 'ai-disabled'
+      | 'ai-user-disabled'
+      | 'captions-disabled'
+      | 'captions-invalid-config'
+      | 'captions-monthly-quota-exhausted'
+      | 'captions-not-configured'
+      | 'cloud-ai-premium-required'
+      | 'ready-chunked-realtime-disabled'
+      | 'ready-chunked-realtime-unconfigured'
+      | 'ready-realtime'
+    monthlySecondsLimit?: number | null
+    remainingSeconds?: number | null
+    realtime: {
+      available: boolean
+      configured: boolean
+      disabled: boolean
+      model: string
+    }
+    chunked: {
+      available: boolean
+      configured: boolean
+      model: string
+    }
+  }
   entitlement: {
     checkedAt: string
     cloudAi: boolean
@@ -2612,6 +2658,9 @@ export interface VideorcApi {
   getCaptionsWindowState: () => Promise<CaptionsWindowState>
   setCaptionsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<CaptionsWindowState>
   onCaptionsWindowState: (callback: (state: CaptionsWindowState) => void) => () => void
+  pushCaptionSnapshot: (snapshot: CaptionWindowSnapshot) => Promise<void>
+  getCaptionSnapshot: () => Promise<CaptionWindowSnapshot | null>
+  onCaptionSnapshot: (callback: (snapshot: CaptionWindowSnapshot) => void) => () => void
   pushCaptionLines: (lines: CaptionsUpdate[]) => Promise<void>
   getCaptionLines: () => Promise<CaptionsUpdate[] | null>
   onCaptionLines: (callback: (lines: CaptionsUpdate[]) => void) => () => void
@@ -2873,11 +2922,33 @@ export function createEmptyLiveChatSnapshot(updatedAt: string): LiveChatSnapshot
 }
 
 // Live captions (captions.* RPCs + events; premium cloud-AI feature).
-// 'degraded' = uploads failing + retrying with backoff; recovers on its own.
-export type CaptionsState = 'idle' | 'live' | 'degraded' | 'error'
+// `live` remains accepted during the rolling upgrade from the Alpha backend;
+// new coordinators publish the more truthful ready/listening state machine.
+export type CaptionsState =
+  | 'idle'
+  | 'ready'
+  | 'starting'
+  | 'listening'
+  | 'reconnecting'
+  | 'degraded'
+  | 'blocked'
+  | 'error'
+  | 'live'
+
+export type CaptionStyleId = 'classic' | 'glass' | 'lower-third' | 'high-contrast'
+export type CaptionTransport = 'realtime' | 'chunked'
+export type CaptionAudioSource = 'microphone'
 
 export interface CaptionsStatus {
   state: CaptionsState
+  desiredEnabled?: boolean
+  transport?: CaptionTransport
+  audioSource?: CaptionAudioSource
+  audioFramesSeen?: number
+  droppedAudioFrames?: number
+  droppedAudioSeconds?: number
+  providerReady?: boolean
+  reasonCode?: string
   message?: string
   remainingSeconds?: number
   sessionClientId?: string
@@ -2902,6 +2973,15 @@ export interface CaptionsWindowState {
   alwaysOnTop: boolean
   enabled: boolean
   message?: string
+}
+
+/** Complete detached-reader view so it follows style, status, and cue finality. */
+export interface CaptionWindowSnapshot {
+  lines: CaptionsUpdate[]
+  status: CaptionsStatus
+  styleId: CaptionStyleId
+  position: 'top' | 'bottom'
+  textSize: 's' | 'm' | 'l'
 }
 
 // --- OBS setup import (plan: vault 2026-07-07 OBS Import) ----------------

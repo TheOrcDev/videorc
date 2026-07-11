@@ -135,6 +135,89 @@ describe('buildStartSessionParams', () => {
     expect(params.streaming).toBe(config.streaming)
   })
 
+  it('snapshots caption consent, style, language, and revision for the session', () => {
+    const config = captureConfig({
+      captions: {
+        enabled: true,
+        burnTarget: 'both',
+        styleId: 'lower-third',
+        language: 'es',
+        styleRevision: 4,
+        position: 'top',
+        textSize: 'l'
+      }
+    })
+    const params = buildStartSessionParams({
+      captureConfig: config,
+      scene,
+      settings: { outputDirectory: '', ffmpegPath: '' }
+    })
+
+    expect(params.captions).toEqual({ ...config.captions, suppressedForSession: false })
+  })
+
+  it('can suppress captions for one session without mutating persisted consent', () => {
+    const config = captureConfig({
+      captions: { ...defaultCaptureConfig.captions, enabled: true }
+    })
+    const params = buildStartSessionParams({
+      captureConfig: config,
+      scene,
+      settings: { outputDirectory: '', ffmpegPath: '' },
+      suppressCaptionsForSession: true
+    })
+
+    expect(config.captions.enabled).toBe(true)
+    expect(params.captions?.enabled).toBe(false)
+    expect(params.captions?.suppressedForSession).toBe(true)
+  })
+
+  it('pre-arms an eligible saved live-caption leg for mid-session opt-in', () => {
+    const config = captureConfig({
+      streamEnabled: true,
+      video: videoPresets['stream-safe-1080p30'],
+      captions: {
+        ...defaultCaptureConfig.captions,
+        enabled: false,
+        burnTarget: 'both'
+      }
+    })
+    const params = buildStartSessionParams({
+      captureConfig: config,
+      scene,
+      settings: { outputDirectory: '', ffmpegPath: '' }
+    })
+
+    expect(params.captions).toMatchObject({
+      enabled: false,
+      suppressedForSession: false,
+      burnTarget: 'both'
+    })
+  })
+
+  it('suppresses mid-session opt-in when the saved live leg cannot be pre-armed', () => {
+    const config = captureConfig({
+      streamEnabled: true,
+      video: videoPresets['stream-safe-1080p60'],
+      captions: {
+        ...defaultCaptureConfig.captions,
+        enabled: false,
+        burnTarget: 'stream'
+      }
+    })
+    const params = buildStartSessionParams({
+      captureConfig: config,
+      scene,
+      settings: { outputDirectory: '', ffmpegPath: '' }
+    })
+
+    expect(params.captions).toMatchObject({
+      enabled: false,
+      suppressedForSession: true,
+      burnTarget: 'stream'
+    })
+  })
+
   it('passes 4K recording video and stream-safe output defaults for split output sessions', () => {
     const config = captureConfig({
       recordEnabled: true,

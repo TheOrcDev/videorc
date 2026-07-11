@@ -89,6 +89,7 @@ describe('BackendClient request lifetime', () => {
 
   it('rejects and clears every request owned by a closed socket', async () => {
     const { client, socket } = await connectedClient()
+    expect(client.connected).toBe(true)
     const first = client.request('scene.get')
     const second = client.request('diagnostics.stats')
     const firstRejection = expect(first).rejects.toThrow('Backend connection closed.')
@@ -98,6 +99,7 @@ describe('BackendClient request lifetime', () => {
 
     await Promise.all([firstRejection, secondRejection])
     expect(client.pendingRequestCount).toBe(0)
+    expect(client.connected).toBe(false)
   })
 
   it('clears timeout and cancellation hooks after a response', async () => {

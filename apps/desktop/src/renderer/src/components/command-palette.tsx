@@ -1,4 +1,12 @@
-import { ChatCircle, Desktop, Moon, Stop, Sun, VideoCamera } from '@phosphor-icons/react'
+import {
+  ChatCircle,
+  ClosedCaptioning,
+  Desktop,
+  Moon,
+  Stop,
+  Sun,
+  VideoCamera
+} from '@phosphor-icons/react'
 import { useTheme } from 'next-themes'
 import type { ReactElement } from 'react'
 
@@ -32,8 +40,15 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void
 }): ReactElement {
   const { setActive, openStudioPanel } = useWorkspaceNav()
-  const { runtimeInfo, startSession, stopSession, commentsWindow, toggleCommentsWindow } =
-    useStudioCore()
+  const {
+    runtimeInfo,
+    startSession,
+    stopSession,
+    commentsWindow,
+    toggleCommentsWindow,
+    captionsWindow,
+    toggleCaptionsWindow
+  } = useStudioCore()
   const { recording } = useStudioRecordingState()
   const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
   const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
@@ -136,6 +151,21 @@ export function CommandPalette({
                 <Kbd>
                   {modKey}
                   {shiftKey}J
+                </Kbd>
+              </CommandShortcut>
+            </CommandItem>
+          ) : null}
+          {captionsWindow.enabled || captionsWindow.open ? (
+            <CommandItem
+              value="Toggle captions reader"
+              onSelect={() => run(() => toggleCaptionsWindow())}
+            >
+              <ClosedCaptioning className="size-4" />
+              {captionsWindow.open ? 'Close captions reader' : 'Open captions reader'}
+              <CommandShortcut className="tracking-normal">
+                <Kbd>
+                  {modKey}
+                  {shiftKey}C
                 </Kbd>
               </CommandShortcut>
             </CommandItem>

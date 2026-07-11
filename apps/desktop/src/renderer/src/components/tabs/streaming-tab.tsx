@@ -4,7 +4,6 @@ import {
   Broadcast,
   CaretDown,
   CheckCircle,
-  ClosedCaptioning,
   FloppyDisk,
   Gauge,
   LinkSimple,
@@ -20,10 +19,10 @@ import {
   type Icon
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useState, type ReactElement } from 'react'
-import { toast } from 'sonner'
 
 import { ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
+import { CaptionsControls } from '@/components/captions/captions-controls'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -72,12 +71,7 @@ import {
   streamOutputVideoSettings,
   videoProfileCompatibility
 } from '@/lib/capture'
-import { captionStripLines } from '@/lib/captions-ui'
-import {
-  cloudAiUploadGate,
-  streamingDestinationEnableGate,
-  type EntitlementUiGate
-} from '@/lib/entitlement-ui'
+import { streamingDestinationEnableGate, type EntitlementUiGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { streamKeyPlatformMismatch, streamKeyTailHint } from '@/lib/stream-key-format'
 import { cn } from '@/lib/utils'
@@ -271,203 +265,9 @@ export function StreamingTab(): ReactElement {
           streamVideo={streamVideo}
           targets={streaming.targets}
         />
-        <LiveCaptionsSection />
+        <CaptionsControls />
       </div>
     </div>
-  )
-}
-
-/**
- * Live captions (premium cloud AI): real-time mic speech-to-text via the
- * Videorc AI gateway. The Rust backend uploads ~3s mic chunks while enabled —
- * the consent line below states that plainly (AI privacy tone).
- */
-function LiveCaptionsSection(): ReactElement {
-  const {
-    entitlements,
-    captionsStatus,
-    captionLines,
-    startCaptions,
-    stopCaptions,
-    captionsWindow,
-    toggleCaptionsWindow,
-    isSessionActive,
-    captureConfig,
-    setCaptureConfig
-  } = useStudioCore()
-  const [pending, setPending] = useState(false)
-  const gate = cloudAiUploadGate(entitlements)
-  const active = captionsStatus.state === 'live' || captionsStatus.state === 'degraded'
-  const locked = !active && !gate.allowed
-  const lines = captionStripLines(captionLines)
-  const captions = captureConfig.captions
-  const patchCaptions = (patch: Partial<typeof captions>): void =>
-    setCaptureConfig((current) => ({
-      ...current,
-      captions: { ...current.captions, ...patch }
-    }))
-
-  const toggleCaptions = async (next: boolean): Promise<void> => {
-    setPending(true)
-    try {
-      if (next) {
-        await startCaptions()
-      } else {
-        await stopCaptions()
-      }
-    } catch (error) {
-      toast.error('Live captions', {
-        description: error instanceof Error ? error.message : 'Could not update live captions.'
-      })
-    } finally {
-      setPending(false)
-    }
-  }
-
-  return (
-    <PanelSection
-      description="Real-time speech-to-text from your microphone while you record or stream."
-      icon={ClosedCaptioning}
-      title="Live captions"
-    >
-      <div className="flex flex-col gap-3">
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-sm text-muted-foreground">
-            {active ? 'Captions are live' : 'Captions are off'}
-          </span>
-          <Switch
-            aria-label="Enable live captions"
-            checked={active}
-            disabled={pending || locked}
-            onCheckedChange={(next) => void toggleCaptions(next)}
-          />
-        </div>
-        {locked ? (
-          <div className="flex flex-wrap items-center gap-2 border-l-2 border-warning/50 pl-3 text-xs text-warning-foreground dark:text-warning">
-            <WarningCircle className="size-3.5 shrink-0" weight="fill" />
-            <span className="min-w-0 flex-1">{gate.allowed ? null : gate.reason}</span>
-            {!gate.allowed && gate.upgradeUrl ? (
-              <Button
-                className="h-auto px-0 text-xs"
-                size="xs"
-                variant="link"
-                onClick={() => openExternalUrl(gate.upgradeUrl as string)}
-              >
-                View Premium
-              </Button>
-            ) : null}
-          </div>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            While enabled, your microphone audio is sent to xAI through the Videorc AI gateway for
-            transcription. Captions appear a few seconds behind speech.
-          </p>
-        )}
-        {(captionsStatus.state === 'error' || captionsStatus.state === 'degraded') &&
-        captionsStatus.message ? (
-          <div className="flex items-start gap-2 border-l-2 border-warning/50 pl-3 text-xs text-warning-foreground dark:text-warning">
-            <WarningCircle className="mt-0.5 size-3.5 shrink-0" weight="fill" />
-            <span>{captionsStatus.message}</span>
-          </div>
-        ) : null}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <span className="text-sm text-muted-foreground">Burn captions into</span>
-          <ToggleGroup
-            aria-label="Caption burn target"
-            size="sm"
-            type="single"
-            value={captions.burnTarget}
-            variant="outline"
-            disabled={locked}
-            onValueChange={(value) => {
-              if (
-                value === 'off' ||
-                value === 'stream' ||
-                value === 'recording' ||
-                value === 'both'
-              ) {
-                patchCaptions({ burnTarget: value })
-              }
-            }}
-          >
-            <ToggleGroupItem value="off">Off</ToggleGroupItem>
-            <ToggleGroupItem value="stream">Stream</ToggleGroupItem>
-            <ToggleGroupItem value="recording">Recording</ToggleGroupItem>
-            <ToggleGroupItem value="both">Both</ToggleGroupItem>
-          </ToggleGroup>
-        </div>
-        {captions.burnTarget !== 'off' ? (
-          <>
-            <p className="text-xs text-muted-foreground">
-              {captions.burnTarget === 'stream'
-                ? 'Viewers see a caption bar burned into the stream, a few seconds behind speech. Your recording stays clean and gets a perfectly-synced captioned copy after the session.'
-                : 'The live caption bar runs a few seconds behind speech, and that lag is burned in permanently. The recording also gets a perfectly-synced captioned copy after the session.'}
-            </p>
-            <div className="flex flex-wrap items-center gap-4">
-              <ToggleGroup
-                aria-label="Caption position"
-                size="sm"
-                type="single"
-                value={captions.position}
-                variant="outline"
-                onValueChange={(value) => {
-                  if (value === 'top' || value === 'bottom') {
-                    patchCaptions({ position: value })
-                  }
-                }}
-              >
-                <ToggleGroupItem value="bottom">Bottom</ToggleGroupItem>
-                <ToggleGroupItem value="top">Top</ToggleGroupItem>
-              </ToggleGroup>
-              <ToggleGroup
-                aria-label="Caption text size"
-                size="sm"
-                type="single"
-                value={captions.textSize}
-                variant="outline"
-                onValueChange={(value) => {
-                  if (value === 's' || value === 'm' || value === 'l') {
-                    patchCaptions({ textSize: value })
-                  }
-                }}
-              >
-                <ToggleGroupItem value="s">S</ToggleGroupItem>
-                <ToggleGroupItem value="m">M</ToggleGroupItem>
-                <ToggleGroupItem value="l">L</ToggleGroupItem>
-              </ToggleGroup>
-            </div>
-          </>
-        ) : null}
-        {active || lines.length > 0 ? (
-          <div aria-live="polite" className="flex min-h-16 flex-col justify-end gap-1.5">
-            {lines.length === 0 ? (
-              // No instructional copy while captions are on — the transcript
-              // area stays quiet until there is something to transcribe
-              // (post-0.9.4 fix batch F2).
-              isSessionActive ? (
-                <span className="text-sm text-muted-foreground">Listening…</span>
-              ) : null
-            ) : (
-              lines.map((line) => (
-                <p className="text-sm leading-6 text-foreground" key={line.seq}>
-                  {line.text}
-                </p>
-              ))
-            )}
-          </div>
-        ) : null}
-        {captionsWindow.enabled || captionsWindow.open ? (
-          <Button
-            className="w-fit"
-            size="sm"
-            variant="ghost"
-            onClick={() => void toggleCaptionsWindow()}
-          >
-            {captionsWindow.open ? 'Close captions window' : 'Open captions window'}
-          </Button>
-        ) : null}
-      </div>
-    </PanelSection>
   )
 }
 

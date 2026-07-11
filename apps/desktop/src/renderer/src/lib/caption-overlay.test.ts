@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  CAPTION_STYLE_DEFINITIONS,
+  CAPTION_STYLE_IDS,
   captionBarMetrics,
   layoutCaptionBar,
   MAX_CAPTION_BAR_LINES,
@@ -19,6 +21,50 @@ describe('captionBarMetrics', () => {
     expect(captionBarMetrics(1920, 's').fontPx).toBe(38)
     // Tiny canvases never go below the readable floor.
     expect(captionBarMetrics(320, 's').fontPx).toBe(24)
+  })
+})
+
+describe('caption style registry', () => {
+  it('ships the four named presets from the product contract', () => {
+    expect(CAPTION_STYLE_IDS).toEqual(['classic', 'glass', 'lower-third', 'high-contrast'])
+    expect(CAPTION_STYLE_DEFINITIONS.classic.plate).toBe('none')
+    expect(CAPTION_STYLE_DEFINITIONS.glass.plate).toBe('glass')
+    expect(CAPTION_STYLE_DEFINITIONS['lower-third'].align).toBe('left')
+    expect(CAPTION_STYLE_DEFINITIONS['high-contrast'].backgroundColor).toBe('#050506')
+  })
+
+  it('gives lower third a wide band while keeping other styles content-sized', () => {
+    const lowerThird = layoutCaptionBar({
+      text: 'Hello',
+      canvasWidth: 1920,
+      textSize: 'm',
+      styleId: 'lower-third',
+      measure
+    })
+    const classic = layoutCaptionBar({
+      text: 'Hello',
+      canvasWidth: 1920,
+      textSize: 'm',
+      styleId: 'classic',
+      measure
+    })
+    expect(lowerThird?.barWidthPx).toBe(Math.floor(1920 * 0.92))
+    expect(classic!.barWidthPx).toBeLessThan(lowerThird!.barWidthPx)
+  })
+
+  it.each(CAPTION_STYLE_IDS)('lays out %s at horizontal and vertical output widths', (styleId) => {
+    for (const canvasWidth of [1080, 1920, 3840]) {
+      const layout = layoutCaptionBar({
+        text: 'Captions remain readable across every output shape.',
+        canvasWidth,
+        textSize: 'm',
+        styleId,
+        measure
+      })
+      expect(layout).not.toBeNull()
+      expect(layout!.barWidthPx).toBeLessThanOrEqual(canvasWidth)
+      expect(layout!.lines.length).toBeLessThanOrEqual(MAX_CAPTION_BAR_LINES)
+    }
   })
 })
 

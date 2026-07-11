@@ -25,6 +25,13 @@ const METER_SAMPLE_DURATION: Duration = Duration::from_millis(700);
 const FIFO_OPEN_RETRY: Duration = Duration::from_millis(20);
 pub const NATIVE_AUDIO_FFMPEG_QUEUE_SIZE: u32 = 1024;
 
+/// Reserved CoreAudio id used only by the maintained debug caption smoke.
+/// A release build does not compile the synthetic source or its RPC handle.
+#[cfg(debug_assertions)]
+pub const CAPTION_CONTRACT_TEST_DEVICE_ID: u32 = u32::MAX;
+#[cfg(debug_assertions)]
+const CAPTION_CONTRACT_TEST_PACKET_MS: u64 = 20;
+
 /// Fraction of the expected audio sample-frames that were actually captured over the
 /// elapsed window: `captured / (elapsed × sample_rate)`. 1.0 means full real-time
 /// coverage; values meaningfully below 1.0 indicate the mic stalled (a capture gap).
@@ -83,6 +90,143 @@ impl Default for AudioProcessingSettings {
             muted: false,
         }
     }
+}
+
+/// Lock-free snapshot read by the realtime CoreAudio callback on every frame.
+/// Gain and mute share one atomic word so callbacks never observe a mixed pair
+/// from two renderer updates, and the callback never takes a mutex.
+#[derive(Debug, Clone)]
+pub struct AudioProcessingSettingsHandle {
+    packed: Arc<AtomicU64>,
+}
+
+impl AudioProcessingSettingsHandle {
+    pub fn new(settings: AudioProcessingSettings) -> Self {
+        Self {
+            packed: Arc::new(AtomicU64::new(pack_audio_processing_settings(settings))),
+        }
+    }
+
+    pub fn update(&self, settings: AudioProcessingSettings) {
+        self.packed
+            .store(pack_audio_processing_settings(settings), Ordering::Release);
+    }
+
+    fn load(&self) -> AudioProcessingSettings {
+        unpack_audio_processing_settings(self.packed.load(Ordering::Acquire))
+    }
+}
+
+fn normalized_audio_processing_settings(
+    settings: AudioProcessingSettings,
+) -> AudioProcessingSettings {
+    AudioProcessingSettings {
+        gain_db: if settings.gain_db.is_finite() {
+            settings.gain_db.clamp(-24.0, 24.0)
+        } else {
+            0.0
+        },
+        muted: settings.muted,
+    }
+}
+
+fn pack_audio_processing_settings(settings: AudioProcessingSettings) -> u64 {
+    let settings = normalized_audio_processing_settings(settings);
+    u64::from(settings.gain_db.to_bits()) | (u64::from(settings.muted) << 32)
+}
+
+fn unpack_audio_processing_settings(packed: u64) -> AudioProcessingSettings {
+    AudioProcessingSettings {
+        gain_db: f32::from_bits(packed as u32),
+        muted: ((packed >> 32) & 1) == 1,
+    }
+}
+
+/// Raw-tone controller for the permissionless maintained caption smoke.
+///
+/// The producer owns the real source cadence. This handle only selects a
+/// bounded number of raw packets to fill with a tone; the producer then runs
+/// them through `processed_capture_frame_with_handle` before the shared FIFO
+/// writer fans the resulting frame out to captions and FFmpeg.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone)]
+pub struct CaptionContractTestAudioInjector {
+    raw_peak_bits: Arc<AtomicU64>,
+    packets_remaining: Arc<AtomicU64>,
+    packets_generated: Arc<AtomicU64>,
+    injection_active: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy)]
+pub struct CaptionContractTestAudioInjection {
+    pub packets_generated: u64,
+    pub raw_peak: f32,
+}
+
+#[cfg(debug_assertions)]
+impl CaptionContractTestAudioInjector {
+    pub async fn inject(
+        &self,
+        duration_ms: u64,
+        raw_peak: f32,
+    ) -> Result<CaptionContractTestAudioInjection> {
+        if !caption_contract_test_audio_enabled() {
+            bail!("Caption contract test audio is disabled.");
+        }
+        if !raw_peak.is_finite() || !(0.001..=0.5).contains(&raw_peak) {
+            bail!("Caption contract test raw peak must be between 0.001 and 0.5.");
+        }
+        self.injection_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| anyhow::anyhow!("A caption contract PCM injection is already active."))?;
+
+        let duration_ms = duration_ms.clamp(CAPTION_CONTRACT_TEST_PACKET_MS, 5_000);
+        let packet_count = duration_ms.div_ceil(CAPTION_CONTRACT_TEST_PACKET_MS);
+        let before = self.packets_generated.load(Ordering::Acquire);
+        self.raw_peak_bits
+            .store(u64::from(raw_peak.to_bits()), Ordering::Release);
+        self.packets_remaining
+            .store(packet_count, Ordering::Release);
+
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(duration_ms)
+            + Duration::from_secs(2);
+        let outcome = loop {
+            let generated = self
+                .packets_generated
+                .load(Ordering::Acquire)
+                .saturating_sub(before);
+            if generated >= packet_count {
+                break Ok(CaptionContractTestAudioInjection {
+                    packets_generated: generated,
+                    raw_peak,
+                });
+            }
+            if self.stop.load(Ordering::Acquire) {
+                break Err(anyhow::anyhow!(
+                    "The active native audio session stopped during PCM injection."
+                ));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break Err(anyhow::anyhow!(
+                    "Timed out waiting for the synthetic native audio source."
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+
+        self.packets_remaining.store(0, Ordering::Release);
+        self.raw_peak_bits.store(0, Ordering::Release);
+        self.injection_active.store(false, Ordering::Release);
+        outcome
+    }
+}
+
+#[cfg(debug_assertions)]
+fn caption_contract_test_audio_enabled() -> bool {
+    std::env::var("VIDEORC_CAPTION_CONTRACT_TEST").as_deref() == Ok("1")
 }
 
 #[derive(Debug, Default)]
@@ -221,8 +365,13 @@ pub struct NativeAudioSource {
     pub device_name: String,
     receiver: Option<mpsc::Receiver<AudioFrame>>,
     stats: Arc<AudioCaptureStats>,
+    processing_settings: AudioProcessingSettingsHandle,
     stop: Arc<AtomicBool>,
     stop_on_drop: bool,
+    #[cfg(debug_assertions)]
+    caption_contract_test_injector: Option<CaptionContractTestAudioInjector>,
+    #[cfg(debug_assertions)]
+    caption_contract_test_producer: Option<thread::JoinHandle<()>>,
     #[cfg(target_os = "macos")]
     audio_unit: Option<coreaudio::audio_unit::AudioUnit>,
 }
@@ -254,6 +403,10 @@ impl Drop for NativeAudioSource {
             return;
         }
         self.stop.store(true, Ordering::Relaxed);
+        #[cfg(debug_assertions)]
+        if let Some(producer) = self.caption_contract_test_producer.take() {
+            let _ = producer.join();
+        }
         #[cfg(target_os = "macos")]
         if let Some(audio_unit) = self.audio_unit.as_mut() {
             let _ = audio_unit.stop();
@@ -266,8 +419,13 @@ pub struct NativeAudioCaptureSession {
     pub device_name: String,
     pub fifo_path: PathBuf,
     stats: Arc<AudioCaptureStats>,
+    processing_settings: AudioProcessingSettingsHandle,
     stop: Arc<AtomicBool>,
     writer: Option<thread::JoinHandle<()>>,
+    #[cfg(debug_assertions)]
+    caption_contract_test_injector: Option<CaptionContractTestAudioInjector>,
+    #[cfg(debug_assertions)]
+    caption_contract_test_producer: Option<thread::JoinHandle<()>>,
     #[cfg(target_os = "macos")]
     audio_unit: Option<coreaudio::audio_unit::AudioUnit>,
 }
@@ -309,11 +467,27 @@ impl NativeAudioCaptureSession {
     pub fn finish_recording_window(&self) {
         self.stats.finish_recording_window();
     }
+
+    pub fn update_processing_settings(&self, settings: AudioProcessingSettings) {
+        self.processing_settings.update(settings);
+    }
+
+    /// Clone the permissionless raw-PCM controller installed only for the
+    /// maintained debug caption smoke. Production CoreAudio sessions return
+    /// `None`, so the RPC cannot inject into an ordinary microphone session.
+    #[cfg(debug_assertions)]
+    pub fn caption_contract_test_injector(&self) -> Option<CaptionContractTestAudioInjector> {
+        self.caption_contract_test_injector.clone()
+    }
 }
 
 impl Drop for NativeAudioCaptureSession {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        #[cfg(debug_assertions)]
+        if let Some(producer) = self.caption_contract_test_producer.take() {
+            let _ = producer.join();
+        }
         if let Some(writer) = self.writer.take() {
             let _ = writer.join();
         }
@@ -359,6 +533,13 @@ pub fn start_native_audio_source(
     device_id: u32,
     settings: AudioProcessingSettings,
 ) -> Result<NativeAudioSource> {
+    #[cfg(debug_assertions)]
+    if device_id == CAPTION_CONTRACT_TEST_DEVICE_ID {
+        if !caption_contract_test_audio_enabled() {
+            bail!("The caption contract test microphone requires VIDEORC_CAPTION_CONTRACT_TEST=1.");
+        }
+        return start_caption_contract_test_audio_source(settings);
+    }
     start_platform_audio_source(device_id, settings)
 }
 
@@ -523,7 +704,12 @@ pub fn attach_fifo_writer(
         .take()
         .expect("native audio source receiver is available before attaching FIFO writer");
     let stats = source.stats.clone();
+    let processing_settings = source.processing_settings.clone();
     let stop = source.stop.clone();
+    #[cfg(debug_assertions)]
+    let caption_contract_test_injector = source.caption_contract_test_injector.clone();
+    #[cfg(debug_assertions)]
+    let caption_contract_test_producer = source.caption_contract_test_producer.take();
     #[cfg(target_os = "macos")]
     let audio_unit = source.audio_unit.take();
 
@@ -590,9 +776,9 @@ pub fn attach_fifo_writer(
         while !writer_stop.load(Ordering::Relaxed) {
             match receiver.recv_timeout(Duration::from_millis(50)) {
                 Ok(frame) => {
-                    // Live captions listen on the same mic frames; the offer is
-                    // a relaxed-atomic no-op unless a caption session is active
-                    // and never blocks this writer.
+                    // Live captions listen on this same post-gain/post-mute mic
+                    // bus; the offer is a relaxed-atomic no-op unless a caption
+                    // session is active and never blocks this writer.
                     crate::captions::offer_caption_frame(&frame);
                     let frame_peak = frame
                         .samples
@@ -618,8 +804,13 @@ pub fn attach_fifo_writer(
         device_name,
         fifo_path,
         stats,
+        processing_settings,
         stop,
         writer: Some(writer),
+        #[cfg(debug_assertions)]
+        caption_contract_test_injector,
+        #[cfg(debug_assertions)]
+        caption_contract_test_producer,
         #[cfg(target_os = "macos")]
         audio_unit,
     }
@@ -775,6 +966,131 @@ pub fn process_interleaved_f32(
     }
 
     output
+}
+
+#[cfg(any(test, target_os = "macos", debug_assertions))]
+fn processed_capture_frame(
+    input: &[f32],
+    source_channels: usize,
+    settings: AudioProcessingSettings,
+    timestamp_micros: u64,
+) -> AudioFrame {
+    AudioFrame {
+        timestamp_micros,
+        captured_at: Instant::now(),
+        sample_rate: NATIVE_AUDIO_SAMPLE_RATE,
+        channels: NATIVE_AUDIO_CHANNELS,
+        samples: process_interleaved_f32(input, source_channels, settings),
+    }
+}
+
+#[cfg(any(test, target_os = "macos", debug_assertions))]
+fn processed_capture_frame_with_handle(
+    input: &[f32],
+    source_channels: usize,
+    settings: &AudioProcessingSettingsHandle,
+    timestamp_micros: u64,
+) -> AudioFrame {
+    processed_capture_frame(input, source_channels, settings.load(), timestamp_micros)
+}
+
+#[cfg(debug_assertions)]
+fn start_caption_contract_test_audio_source(
+    settings: AudioProcessingSettings,
+) -> Result<NativeAudioSource> {
+    let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
+    let stats = Arc::new(AudioCaptureStats::default());
+    let processing_settings = AudioProcessingSettingsHandle::new(settings);
+    let stop = Arc::new(AtomicBool::new(false));
+    let injector = CaptionContractTestAudioInjector {
+        raw_peak_bits: Arc::new(AtomicU64::new(0)),
+        packets_remaining: Arc::new(AtomicU64::new(0)),
+        packets_generated: Arc::new(AtomicU64::new(0)),
+        injection_active: Arc::new(AtomicBool::new(false)),
+        stop: stop.clone(),
+    };
+
+    let producer_stats = stats.clone();
+    let producer_settings = processing_settings.clone();
+    let producer_stop = stop.clone();
+    let producer_injector = injector.clone();
+    let producer = thread::spawn(move || {
+        const SOURCE_CHANNELS: usize = 2;
+        let samples_per_channel = (u64::from(NATIVE_AUDIO_SAMPLE_RATE)
+            * CAPTION_CONTRACT_TEST_PACKET_MS
+            / 1_000) as usize;
+        let packet_duration = Duration::from_millis(CAPTION_CONTRACT_TEST_PACKET_MS);
+        let mut frame_cursor = 0_u64;
+        let mut next_tick = Instant::now();
+
+        while !producer_stop.load(Ordering::Acquire) {
+            let inject_tone = producer_injector
+                .packets_remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    (remaining > 0).then(|| remaining - 1)
+                })
+                .is_ok();
+            let raw_peak = if inject_tone {
+                f32::from_bits(producer_injector.raw_peak_bits.load(Ordering::Acquire) as u32)
+            } else {
+                0.0
+            };
+            let mut input = Vec::with_capacity(samples_per_channel * SOURCE_CHANNELS);
+            for sample_index in 0..samples_per_channel {
+                let absolute = frame_cursor as usize + sample_index;
+                let phase = absolute as f32 * 440.0 * std::f32::consts::TAU
+                    / NATIVE_AUDIO_SAMPLE_RATE as f32;
+                let sample = phase.sin() * raw_peak;
+                input.extend_from_slice(&[sample, sample]);
+            }
+            let frame = processed_capture_frame_with_handle(
+                &input,
+                SOURCE_CHANNELS,
+                &producer_settings,
+                timestamp_for_frame(frame_cursor),
+            );
+            let frame_count = frame.frame_count() as u64;
+            frame_cursor = frame_cursor.saturating_add(frame_count);
+            producer_stats.record_captured_frames(frame_count);
+
+            match sender.try_send(frame) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(frame)) => {
+                    producer_stats.record_dropped_frames(frame.frame_count() as u64);
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => break,
+            }
+            if inject_tone {
+                producer_injector
+                    .packets_generated
+                    .fetch_add(1, Ordering::Release);
+            }
+
+            next_tick = next_tick
+                .checked_add(packet_duration)
+                .unwrap_or_else(Instant::now);
+            let now = Instant::now();
+            if next_tick > now {
+                thread::sleep(next_tick.duration_since(now));
+            } else {
+                next_tick = now;
+            }
+        }
+    });
+
+    Ok(NativeAudioSource {
+        device_id: CAPTION_CONTRACT_TEST_DEVICE_ID,
+        device_name: "Caption contract test microphone".to_string(),
+        receiver: Some(receiver),
+        stats,
+        processing_settings,
+        stop,
+        stop_on_drop: true,
+        caption_contract_test_injector: Some(injector),
+        caption_contract_test_producer: Some(producer),
+        #[cfg(target_os = "macos")]
+        audio_unit: None,
+    })
 }
 
 fn centered_voice_sample(left: f32, right: f32) -> f32 {
@@ -939,6 +1255,8 @@ fn start_platform_audio_source(
     let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
     let stats = Arc::new(AudioCaptureStats::default());
     let callback_stats = stats.clone();
+    let processing_settings = AudioProcessingSettingsHandle::new(settings);
+    let callback_processing_settings = processing_settings.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let callback_stop = stop.clone();
     let mut frame_cursor = 0_u64;
@@ -950,15 +1268,17 @@ fn start_platform_audio_source(
                 return Ok(());
             }
 
-            let samples = process_interleaved_f32(args.data.buffer, args.data.channels, settings);
-            let frame_count = samples.len() / usize::from(NATIVE_AUDIO_CHANNELS);
-            let frame = AudioFrame {
-                timestamp_micros: timestamp_for_frame(frame_cursor),
-                captured_at: Instant::now(),
-                sample_rate: NATIVE_AUDIO_SAMPLE_RATE,
-                channels: NATIVE_AUDIO_CHANNELS,
-                samples,
-            };
+            // This processed frame is the single native microphone bus shared
+            // by FFmpeg and live captions. Gain/mute are already applied before
+            // either consumer can see it, so muted speech never reaches cloud
+            // transcription and caption levels match audible mic levels.
+            let frame = processed_capture_frame_with_handle(
+                args.data.buffer,
+                args.data.channels,
+                &callback_processing_settings,
+                timestamp_for_frame(frame_cursor),
+            );
+            let frame_count = frame.samples.len() / usize::from(NATIVE_AUDIO_CHANNELS);
             frame_cursor = frame_cursor.saturating_add(frame_count as u64);
             callback_stats.record_captured_frames(frame_count as u64);
 
@@ -985,8 +1305,13 @@ fn start_platform_audio_source(
         device_name,
         receiver: Some(receiver),
         stats,
+        processing_settings,
         stop,
         stop_on_drop: true,
+        #[cfg(debug_assertions)]
+        caption_contract_test_injector: None,
+        #[cfg(debug_assertions)]
+        caption_contract_test_producer: None,
         audio_unit: Some(audio_unit),
     })
 }
@@ -1317,8 +1642,15 @@ mod tests {
             device_name: "Built-in Microphone".to_string(),
             receiver: Some(receiver),
             stats: Arc::new(AudioCaptureStats::default()),
+            processing_settings: AudioProcessingSettingsHandle::new(
+                AudioProcessingSettings::default(),
+            ),
             stop: Arc::new(AtomicBool::new(false)),
             stop_on_drop: true,
+            #[cfg(debug_assertions)]
+            caption_contract_test_injector: None,
+            #[cfg(debug_assertions)]
+            caption_contract_test_producer: None,
             #[cfg(target_os = "macos")]
             audio_unit: None,
         };
@@ -1471,6 +1803,78 @@ mod tests {
             },
         );
         assert!(muted.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn shared_native_capture_frame_applies_controls_before_caption_fanout() {
+        let muted = processed_capture_frame(
+            &[0.8, 0.8, -0.5, -0.5],
+            2,
+            AudioProcessingSettings {
+                gain_db: 24.0,
+                muted: true,
+            },
+            42,
+        );
+        assert_eq!(muted.timestamp_micros, 42);
+        assert!(muted.samples.iter().all(|sample| *sample == 0.0));
+
+        let gained = processed_capture_frame(
+            &[0.1, 0.1],
+            2,
+            AudioProcessingSettings {
+                gain_db: 6.0,
+                muted: false,
+            },
+            43,
+        );
+        assert!(gained.samples[0] > 0.1);
+        assert_eq!(gained.samples[0], gained.samples[1]);
+    }
+
+    #[test]
+    fn caption_contract_test_source_delivers_permissionless_warmup_frames() {
+        let mut source = start_caption_contract_test_audio_source(AudioProcessingSettings {
+            gain_db: 6.0,
+            muted: true,
+        })
+        .expect("debug caption source should start without a device");
+        let stats = source.stats_handle();
+        let receiver = source
+            .receiver
+            .take()
+            .expect("debug caption source owns its receiver");
+        let frame = receiver
+            .recv_timeout(Duration::from_millis(500))
+            .expect("debug caption source should deliver a warmup frame");
+
+        assert_eq!(frame.frame_count(), 960);
+        assert!(frame.samples.iter().all(|sample| *sample == 0.0));
+        assert!(stats.captured_frames() >= 960);
+    }
+
+    #[test]
+    fn live_audio_processing_updates_reach_fifo_and_caption_bus_without_restarting_capture() {
+        let settings = AudioProcessingSettingsHandle::new(AudioProcessingSettings::default());
+        let input = [0.1, 0.1, -0.2, -0.2];
+
+        settings.update(AudioProcessingSettings {
+            gain_db: 6.0,
+            muted: false,
+        });
+        let gained = processed_capture_frame_with_handle(&input, 2, &settings, 100);
+        let caption_gained = crate::captions::round_trip_caption_audio_test_frame(&gained);
+        assert_eq!(caption_gained.samples, gained.samples);
+        assert!(gained.samples[0] > input[0]);
+
+        settings.update(AudioProcessingSettings {
+            gain_db: 24.0,
+            muted: true,
+        });
+        let muted = processed_capture_frame_with_handle(&input, 2, &settings, 101);
+        let caption_muted = crate::captions::round_trip_caption_audio_test_frame(&muted);
+        assert!(muted.samples.iter().all(|sample| *sample == 0.0));
+        assert!(caption_muted.samples.iter().all(|sample| *sample == 0.0));
     }
 
     #[test]

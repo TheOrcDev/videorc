@@ -34,6 +34,9 @@ const AiTab = lazy(async () => ({ default: (await import('@/components/tabs/ai-t
 const AssetsTab = lazy(async () => ({
   default: (await import('@/components/tabs/assets-tab')).AssetsTab
 }))
+const CaptionsTab = lazy(async () => ({
+  default: (await import('@/components/tabs/captions-tab')).CaptionsTab
+}))
 const DiagnosticsTab = lazy(async () => ({
   default: (await import('@/components/tabs/diagnostics-tab')).DiagnosticsTab
 }))
@@ -114,7 +117,8 @@ export function AppShell(): ReactElement {
     commentsWindowOpen,
     openCommentsWindow,
     closeCommentsWindow,
-    toggleCommentsWindow
+    toggleCommentsWindow,
+    toggleCaptionsWindow
   } = useStudioShell()
   const [active, setActive] = useState<WorkspaceTab>('studio')
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
@@ -207,6 +211,10 @@ export function AppShell(): ReactElement {
         event.preventDefault()
         void toggleCommentsWindow()
       }
+      if (event.key.toLowerCase() === 'c' && event.shiftKey && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault()
+        void toggleCaptionsWindow()
+      }
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
@@ -217,6 +225,7 @@ export function AppShell(): ReactElement {
     runtimeInfo?.commentsWindowEnabled,
     runtimeInfo?.notesWindowEnabled,
     toggleCommentsWindow,
+    toggleCaptionsWindow,
     togglePreviewWindow
   ])
 
@@ -314,6 +323,7 @@ export function AppShell(): ReactElement {
                 {active === 'layouts' ? <LayoutTab /> : null}
                 {active === 'assets' ? <AssetsTab /> : null}
                 {active === 'live' ? <StreamingTab /> : null}
+                {active === 'captions' ? <CaptionsTab /> : null}
                 {active === 'recording' ? <RecordingTab /> : null}
                 {active === 'library' ? <LibraryTab onOpenInAi={openInAi} /> : null}
                 {active === 'ai' ? (

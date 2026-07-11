@@ -51,11 +51,13 @@ export function StudioTab(): ReactElement {
     goLiveConfirmationPending,
     goLivePartialSetup,
     goLivePreflight,
+    goLiveCaptionsReadiness,
     streamMetadataDraft,
     patchStreamMetadataDraft,
     cancelGoLiveConfirmation,
     confirmGoLive,
     continueGoLiveWithReadyDestinations,
+    continueGoLiveWithoutCaptions,
     resolveGoLiveBlocker
   } = studio
 
@@ -127,6 +129,7 @@ export function StudioTab(): ReactElement {
       <div className="min-w-0 flex-1">
         <GoLiveConfirmationDialog
           draft={streamMetadataDraft}
+          captionsReadiness={goLiveCaptionsReadiness}
           entitlementGate={goLiveEntitlement}
           open={goLiveConfirmationOpen}
           pending={goLiveConfirmationPending || startRequestPending}
@@ -135,6 +138,7 @@ export function StudioTab(): ReactElement {
           onCancel={cancelGoLiveConfirmation}
           onConfirm={() => void confirmGoLive()}
           onContinuePartial={() => void continueGoLiveWithReadyDestinations()}
+          onContinueWithoutCaptions={continueGoLiveWithoutCaptions}
           onPatchDraft={patchStreamMetadataDraft}
           onResolveBlocker={(targetId, resolution) =>
             void resolveGoLiveBlocker(targetId, resolution)

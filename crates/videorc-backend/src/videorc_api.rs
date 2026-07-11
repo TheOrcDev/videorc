@@ -15,6 +15,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+pub(crate) const CAPTION_CHUNK_UPLOAD_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
 use crate::protocol::{
     AiCapabilities, AiJobCreateResponse, AiJobEnvelope, AiJobSnapshot, AiObjectUploadResponse,
     AiObjectUploadTicket, AiQuotaStatus,
@@ -341,6 +344,7 @@ impl VideorcApiClient {
             .file_name("videorc-caption-chunk.wav")
             .mime_str("audio/wav")
             .map_err(|error| CaptionChunkFailure::Transient {
+                code: None,
                 message: format!("Could not build the caption upload: {error}"),
             })?;
         let mut form = multipart::Form::new()
@@ -357,10 +361,11 @@ impl VideorcApiClient {
             .multipart(form)
             // A hung upload must become a retryable failure, not a stalled
             // caption loop (R0) — chunks are ~3s of audio, 10s is generous.
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(CAPTION_CHUNK_UPLOAD_TIMEOUT)
             .send()
             .await
             .map_err(|error| CaptionChunkFailure::Transient {
+                code: None,
                 message: format!("Could not reach the caption service: {error}"),
             })?;
 
@@ -370,6 +375,7 @@ impl VideorcApiClient {
                 .json()
                 .await
                 .map_err(|error| CaptionChunkFailure::Transient {
+                    code: None,
                     message: format!("Could not read the caption response: {error}"),
                 });
         }
@@ -396,6 +402,7 @@ impl VideorcApiClient {
             .send()
             .await
             .map_err(|error| CaptionChunkFailure::Transient {
+                code: None,
                 message: format!("Could not reach the caption service: {error}"),
             })?;
 
@@ -405,6 +412,7 @@ impl VideorcApiClient {
                 .json()
                 .await
                 .map_err(|error| CaptionChunkFailure::Transient {
+                    code: None,
                     message: format!("Could not read the streaming token: {error}"),
                 });
         }
@@ -512,7 +520,7 @@ pub struct CaptionRealtimeToken {
     pub expires_at: Option<u64>,
     pub model: String,
     #[serde(default)]
-    pub remaining_seconds: u64,
+    pub remaining_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -521,7 +529,10 @@ pub enum CaptionChunkFailure {
     /// quota exhausted, signed out, captions disabled).
     Terminal { code: String, message: String },
     /// Skip this chunk; the session keeps going (network blip, 5xx).
-    Transient { message: String },
+    Transient {
+        code: Option<String>,
+        message: String,
+    },
 }
 
 fn classify_caption_failure(status: u16, code: String, message: String) -> CaptionChunkFailure {
@@ -531,6 +542,8 @@ fn classify_caption_failure(status: u16, code: String, message: String) -> Capti
             | "captions-monthly-quota-exhausted"
             | "ai-user-disabled"
             | "ai-disabled"
+            | "ai-transcription-not-configured"
+            | "captions-config-missing"
             | "unauthorized"
     ) || status == 401
         || status == 403
@@ -539,6 +552,7 @@ fn classify_caption_failure(status: u16, code: String, message: String) -> Capti
         CaptionChunkFailure::Terminal { code, message }
     } else {
         CaptionChunkFailure::Transient {
+            code: Some(code),
             message: format!("caption chunk failed ({status}): {message}"),
         }
     }
@@ -682,6 +696,107 @@ mod tests {
         assert!(parsed.features.cloud_ai_enabled);
         assert_eq!(parsed.workflow.input_modes[1].kind, "multipart-audio");
         assert_eq!(parsed.limits.max_audio_megabytes, Some(12.5));
+        assert!(
+            parsed.captions.is_none(),
+            "older web deployments remain compatible during rollout"
+        );
+    }
+
+    #[test]
+    fn ai_capabilities_captions_readiness_survives_proxy_round_trip() {
+        let input = serde_json::json!({
+            "captions": {
+                "available": true,
+                "chunked": {
+                    "available": true,
+                    "configured": true,
+                    "model": "xai/grok-stt"
+                },
+                "monthlySecondsLimit": 180000,
+                "preferredTransport": "realtime",
+                "realtime": {
+                    "available": true,
+                    "configured": true,
+                    "disabled": false,
+                    "model": "xai/grok-voice-think-fast-1.0"
+                },
+                "remainingSeconds": 179940,
+                "reasonCode": "ready-realtime"
+            },
+            "entitlement": {
+                "checkedAt": "2026-07-11T12:00:00.000Z",
+                "cloudAi": true,
+                "expiresAt": "2026-07-11T12:05:00.000Z",
+                "isPremium": true,
+                "subscriptionStatus": "active",
+                "tier": "premium"
+            },
+            "features": {
+                "cloudAiEnabled": true,
+                "gatewayConfigured": true,
+                "modelTestingEnabled": true,
+                "multipartAudioJobsEnabled": true,
+                "objectBackedJobsEnabled": false,
+                "transcriptJobsEnabled": true,
+                "uploadTicketsEnabled": false
+            },
+            "generatedAt": "2026-07-11T12:00:00.000Z",
+            "limits": {
+                "dailyJobs": 25,
+                "maxAudioBytes": 13107200,
+                "maxAudioMegabytes": 12.5,
+                "maxOutputTokens": 1900,
+                "maxTranscriptCharacters": 90000,
+                "monthlyJobs": 600
+            },
+            "models": {
+                "allowedTextModelCount": 2,
+                "allowedTextModelsConfigured": true,
+                "defaultTextModel": "openai/gpt-5.5",
+                "fallbackTextModels": ["google/gemini"]
+            },
+            "objectStorage": {
+                "deleteConfigured": false,
+                "downloadConfigured": false,
+                "provider": null,
+                "providerError": null,
+                "proofConfigured": false,
+                "proofTtlMs": null,
+                "uploadConfigured": false
+            },
+            "readiness": {
+                "access": { "cloudAiEntitled": true, "globallyDisabled": false },
+                "gateway": { "configError": null, "configured": true },
+                "objectStorage": {
+                    "deleteConfigError": null,
+                    "downloadConfigError": null,
+                    "proofConfigError": null,
+                    "providerError": null,
+                    "uploadConfigError": null
+                },
+                "transcription": { "configError": null, "configured": true }
+            },
+            "transcription": {
+                "configured": true,
+                "configError": null,
+                "maxAudioBytes": 13107200,
+                "maxAudioMegabytes": 12.5,
+                "requestTimeoutMs": 65000
+            },
+            "workflow": {
+                "inputModes": [{ "enabled": true, "kind": "multipart-audio" }],
+                "kind": "post-recording-publish-pack",
+                "outputs": ["summary"]
+            }
+        });
+
+        let parsed: AiCapabilities = serde_json::from_value(input.clone()).unwrap();
+        let proxied = serde_json::to_value(parsed).unwrap();
+
+        assert_eq!(
+            proxied["captions"], input["captions"],
+            "the Rust proxy must preserve the complete readiness contract"
+        );
     }
 
     #[test]
@@ -700,5 +815,48 @@ mod tests {
             Some("ai-daily-quota-exhausted")
         );
         assert_eq!(parsed.today.remaining, 0);
+    }
+
+    #[test]
+    fn missing_chunk_transcription_config_is_terminal_not_an_infinite_retry() {
+        let failure = classify_caption_failure(
+            503,
+            "ai-transcription-not-configured".to_string(),
+            "Live captions are not configured.".to_string(),
+        );
+        assert!(matches!(
+            failure,
+            CaptionChunkFailure::Terminal { code, .. }
+                if code == "ai-transcription-not-configured"
+        ));
+    }
+
+    #[test]
+    fn realtime_unavailable_remains_eligible_for_chunk_fallback() {
+        let failure = classify_caption_failure(
+            503,
+            "captions-realtime-unavailable".to_string(),
+            "Streaming captions are unavailable.".to_string(),
+        );
+        assert!(matches!(
+            failure,
+            CaptionChunkFailure::Transient { code: Some(code), .. }
+                if code == "captions-realtime-unavailable"
+        ));
+    }
+
+    #[test]
+    fn realtime_kill_switch_remains_eligible_for_chunk_fallback() {
+        let failure = classify_caption_failure(
+            503,
+            "captions-realtime-disabled".to_string(),
+            "Streaming captions are temporarily disabled; chunked captions remain available."
+                .to_string(),
+        );
+        assert!(matches!(
+            failure,
+            CaptionChunkFailure::Transient { code: Some(code), .. }
+                if code == "captions-realtime-disabled"
+        ));
     }
 }

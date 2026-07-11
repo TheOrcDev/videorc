@@ -18,10 +18,11 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
   { id: 'nav-layouts', keys: ['⌘', '3'], label: 'Scene', group: 'Navigation' },
   { id: 'nav-assets', keys: ['⌘', '4'], label: 'Assets', group: 'Navigation' },
   { id: 'nav-live', keys: ['⌘', '5'], label: 'Livestream', group: 'Navigation' },
-  { id: 'nav-recording', keys: ['⌘', '6'], label: 'Output', group: 'Navigation' },
-  { id: 'nav-library', keys: ['⌘', '7'], label: 'Library', group: 'Navigation' },
-  { id: 'nav-ai', keys: ['⌘', '8'], label: 'Publish', group: 'Navigation' },
-  { id: 'nav-settings', keys: ['⌘', '9'], label: 'Settings', group: 'Navigation' },
+  { id: 'nav-captions', keys: ['⌘', '6'], label: 'Captions', group: 'Navigation' },
+  { id: 'nav-recording', keys: ['⌘', '7'], label: 'Output', group: 'Navigation' },
+  { id: 'nav-library', keys: ['⌘', '8'], label: 'Library', group: 'Navigation' },
+  { id: 'nav-ai', keys: ['⌘', '9'], label: 'Publish', group: 'Navigation' },
+  { id: 'nav-settings', keys: ['⌘', ','], label: 'Settings', group: 'Navigation' },
   { id: 'search', keys: ['⌘', 'K'], label: 'Search & commands', group: 'Navigation' },
 
   { id: 'record-toggle', keys: ['␣'], label: 'Start / stop the session', group: 'Session' },
@@ -29,6 +30,7 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
   { id: 'preview-window', keys: ['⌘', 'P'], label: 'Open preview window', group: 'Windows' },
   { id: 'notes-window', keys: ['⌘', '⇧', 'N'], label: 'Open notes window', group: 'Windows' },
   { id: 'comments-window', keys: ['⌘', '⇧', 'J'], label: 'Open comments window', group: 'Windows' },
+  { id: 'captions-window', keys: ['⌘', '⇧', 'C'], label: 'Open captions reader', group: 'Windows' },
 
   { id: 'theme-toggle', keys: ['D'], label: 'Toggle light / dark theme', group: 'Appearance' }
 ] as const
@@ -43,9 +45,9 @@ export function shortcutsByGroup(): Map<ShortcutEntry['group'], ShortcutEntry[]>
   return groups
 }
 
-/** Navigation digit for a workspace tab id ("nav-<tab>" convention). */
+/** Navigation key for a workspace tab id ("nav-<tab>" convention). */
 export function navShortcutDigit(tab: string): string | undefined {
   const entry = SHORTCUTS.find((candidate) => candidate.id === `nav-${tab}`)
   const digit = entry?.keys.at(-1)
-  return digit && /^[1-9]$/.test(digit) ? digit : undefined
+  return digit && (/^[1-9]$/.test(digit) || digit === ',') ? digit : undefined
 }

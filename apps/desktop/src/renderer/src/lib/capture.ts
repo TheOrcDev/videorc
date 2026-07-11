@@ -1,5 +1,6 @@
 import type {
   AudioSettings,
+  CaptionStyleId,
   AutomaticSourceFallbackEvent,
   AutomaticSourceFallbackSourceKind,
   CameraTransform,
@@ -26,8 +27,13 @@ export type SettingsState = {
 export type CaptionBurnTarget = 'off' | 'stream' | 'recording' | 'both'
 
 export type CaptionsCaptureSettings = {
+  /** Explicit, persisted consent. Audio is uploaded only during capture sessions. */
+  enabled: boolean
   /** Which output legs the LIVE caption bar burns into (R1). */
   burnTarget: CaptionBurnTarget
+  styleId: CaptionStyleId
+  language: string
+  styleRevision: number
   position: 'top' | 'bottom'
   textSize: 's' | 'm' | 'l'
 }
@@ -417,6 +423,31 @@ export function streamOutputVideosForTargets(
   }))
 }
 
+function sameVideoOutputProfile(left: VideoSettings, right: VideoSettings): boolean {
+  return (
+    left.width === right.width &&
+    left.height === right.height &&
+    left.fps === right.fps &&
+    left.bitrateKbps === right.bitrateKbps
+  )
+}
+
+/**
+ * Mirrors the backend's record+stream auxiliary compositor profile choice.
+ * The auxiliary uses the distinct enabled-target output; when every enabled
+ * target shares the recording profile, caption routing forces a same-profile
+ * auxiliary and therefore falls back to the recording canvas.
+ */
+export function auxiliaryStreamOutputVideoSettings(
+  recording: VideoSettings,
+  streaming: StreamingSettings | undefined
+): VideoSettings {
+  const companion = streamOutputVideosForTargets(recording, streaming).find(
+    ({ video }) => !sameVideoOutputProfile(video, recording)
+  )
+  return companion?.video ?? recording
+}
+
 export const defaultCaptureConfig: CaptureConfig = {
   sources: {},
   layout: {
@@ -457,10 +488,19 @@ export const defaultCaptureConfig: CaptureConfig = {
 }
 
 export function defaultCaptionsCaptureSettings(): CaptionsCaptureSettings {
-  return { burnTarget: 'off', position: 'bottom', textSize: 'm' }
+  return {
+    enabled: false,
+    burnTarget: 'stream',
+    styleId: 'classic',
+    language: 'auto',
+    styleRevision: 0,
+    position: 'bottom',
+    textSize: 'm'
+  }
 }
 
 const CAPTION_BURN_TARGETS: CaptionBurnTarget[] = ['off', 'stream', 'recording', 'both']
+const CAPTION_STYLE_IDS: CaptionStyleId[] = ['classic', 'glass', 'lower-third', 'high-contrast']
 
 export function normalizeCaptionsCaptureSettings(
   loaded: (Partial<CaptionsCaptureSettings> & { burnInEnabled?: boolean }) | undefined
@@ -468,11 +508,34 @@ export function normalizeCaptionsCaptureSettings(
   const defaults = defaultCaptionsCaptureSettings()
   // Pre-R1 configs carried a boolean; true meant the stream leg.
   const migrated: CaptionBurnTarget | undefined =
-    loaded?.burnTarget === undefined && loaded?.burnInEnabled === true ? 'stream' : undefined
+    loaded?.burnTarget === undefined && typeof loaded?.burnInEnabled === 'boolean'
+      ? loaded.burnInEnabled
+        ? 'stream'
+        : 'off'
+      : undefined
   return {
+    // Missing consent is always false. Never infer permission from legacy burn-in.
+    enabled: loaded?.enabled === true,
     burnTarget: CAPTION_BURN_TARGETS.includes(loaded?.burnTarget as CaptionBurnTarget)
       ? (loaded?.burnTarget as CaptionBurnTarget)
-      : (migrated ?? defaults.burnTarget),
+      : (migrated ?? (loaded ? 'off' : defaults.burnTarget)),
+    // A real legacy captions object had the single Glass renderer. Preserve it;
+    // brand-new profiles come from defaultCaptionsCaptureSettings (Classic).
+    styleId: CAPTION_STYLE_IDS.includes(loaded?.styleId as CaptionStyleId)
+      ? (loaded?.styleId as CaptionStyleId)
+      : loaded
+        ? 'glass'
+        : defaults.styleId,
+    language:
+      typeof loaded?.language === 'string' && loaded.language.trim()
+        ? loaded.language.trim()
+        : defaults.language,
+    styleRevision:
+      typeof loaded?.styleRevision === 'number' &&
+      Number.isSafeInteger(loaded.styleRevision) &&
+      loaded.styleRevision >= 0
+        ? loaded.styleRevision
+        : defaults.styleRevision,
     position: loaded?.position === 'top' ? 'top' : defaults.position,
     textSize:
       loaded?.textSize === 's' || loaded?.textSize === 'l' ? loaded.textSize : defaults.textSize

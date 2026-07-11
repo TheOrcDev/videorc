@@ -9,8 +9,7 @@ import {
   SpeakerSlash,
   type Icon
 } from '@phosphor-icons/react'
-import { useState, type ReactElement, type ReactNode } from 'react'
-import { toast } from 'sonner'
+import type { ReactElement, ReactNode } from 'react'
 
 import { SourceSelect } from '@/components/source-select'
 import { Button } from '@/components/ui/button'
@@ -27,7 +26,7 @@ import { Switch } from '@/components/ui/switch'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
 import { recordingQuality } from '@/lib/studio-session-view'
-import type { LayoutPreset } from '@/lib/backend'
+import type { CaptionsStatus, LayoutPreset } from '@/lib/backend'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import {
   buildCameraSources,
@@ -63,6 +62,33 @@ function resolutionKey(width: number, height: number): string {
   return `${width}x${height}`
 }
 
+function compactCaptionsStatus(
+  status: CaptionsStatus,
+  enabled: boolean,
+  sessionActive: boolean,
+  premiumAllowed: boolean
+): string {
+  switch (status.state) {
+    case 'starting':
+      return 'Starting…'
+    case 'listening':
+    case 'live':
+      return sessionActive ? 'Live' : 'Waiting for session'
+    case 'reconnecting':
+      return 'Reconnecting…'
+    case 'degraded':
+      return 'Higher delay'
+    case 'blocked':
+      return 'Blocked'
+    case 'error':
+      return 'Error'
+    case 'ready':
+      return 'Ready'
+    default:
+      return enabled ? 'Armed' : premiumAllowed ? 'Off' : 'Premium'
+  }
+}
+
 const TRIGGER_CLASS =
   'flex w-full items-center gap-2 rounded-row border bg-background px-2.5 py-1.5 text-sm transition-colors hover:bg-accent data-[state=open]:bg-accent'
 
@@ -88,33 +114,15 @@ export function QuickSettings(): ReactElement {
     isSessionActive,
     entitlements,
     captionsStatus,
-    startCaptions,
-    stopCaptions,
+    captionsCommandPending,
     wsStatus
   } = useStudioCore()
   // Q6 (plan 022): before the backend reports devices, selects say "Finding
   // devices…" instead of rendering blank.
   const discoveryPending = wsStatus !== 'connected'
   const { openStudioPanel } = useWorkspaceNav()
-  const [captionsPending, setCaptionsPending] = useState(false)
   const captionsGate = cloudAiUploadGate(entitlements)
-  const captionsLive = captionsStatus.state === 'live' || captionsStatus.state === 'degraded'
-  const toggleCaptions = async (next: boolean): Promise<void> => {
-    setCaptionsPending(true)
-    try {
-      if (next) {
-        await startCaptions()
-      } else {
-        await stopCaptions()
-      }
-    } catch (error) {
-      toast.error('Live captions', {
-        description: error instanceof Error ? error.message : 'Could not update live captions.'
-      })
-    } finally {
-      setCaptionsPending(false)
-    }
-  }
+  const captionsEnabled = captureConfig.captions.enabled
 
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
@@ -302,23 +310,26 @@ export function QuickSettings(): ReactElement {
       <QuickCard icon={ClosedCaptioning} label="Captions">
         <div className="flex items-center justify-between gap-2 rounded-row border bg-background px-2.5 py-1.5">
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
-            {captionsStatus.state === 'degraded'
-              ? 'Reconnecting…'
-              : captionsLive
-                ? isSessionActive
-                  ? 'Live'
-                  : 'Waiting for session'
-                : captionsGate.allowed
-                  ? 'Off'
-                  : 'Premium'}
+            {compactCaptionsStatus(
+              captionsStatus,
+              captionsEnabled,
+              isSessionActive,
+              captionsGate.allowed
+            )}
           </span>
           <Switch
             aria-label="Enable live captions"
-            checked={captionsLive}
-            disabled={captionsPending || (!captionsLive && !captionsGate.allowed)}
-            onCheckedChange={(next) => void toggleCaptions(next)}
+            checked={captionsEnabled}
+            disabled={captionsCommandPending || (!captionsEnabled && !captionsGate.allowed)}
+            onCheckedChange={(enabled) =>
+              setCaptureConfig((current) => ({
+                ...current,
+                captions: { ...current.captions, enabled }
+              }))
+            }
           />
         </div>
+        <ManageLink onClick={() => openStudioPanel('captions')}>Manage captions</ManageLink>
       </QuickCard>
     </div>
   )

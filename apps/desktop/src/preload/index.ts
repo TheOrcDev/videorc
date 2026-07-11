@@ -9,6 +9,7 @@ import type {
   CommentsClearCommand,
   CommentsSendCommand,
   CommentsViewSnapshot,
+  CaptionWindowSnapshot,
   CaptionsUpdate,
   CaptionsWindowState,
   CommentsSnapshotDelta,
@@ -157,6 +158,14 @@ const api: VideorcApi = {
       callback(state)
     ipcRenderer.on('captions-window:state', listener)
     return () => ipcRenderer.removeListener('captions-window:state', listener)
+  },
+  pushCaptionSnapshot: (snapshot) => ipcRenderer.invoke('captions-window:push-snapshot', snapshot),
+  getCaptionSnapshot: () => ipcRenderer.invoke('captions-window:get-snapshot'),
+  onCaptionSnapshot: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, snapshot: CaptionWindowSnapshot): void =>
+      callback(snapshot)
+    ipcRenderer.on('captions-window:snapshot', listener)
+    return () => ipcRenderer.removeListener('captions-window:snapshot', listener)
   },
   pushCaptionLines: (lines) => ipcRenderer.invoke('captions-window:push-lines', lines),
   getCaptionLines: () => ipcRenderer.invoke('captions-window:get-lines'),

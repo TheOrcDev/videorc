@@ -390,9 +390,10 @@ pub struct AppState {
     /// None falls back to the dev env mock; persistent token storage replaces it.
     pub account_session: Arc<tokio::sync::Mutex<Option<VideorcAccountSnapshot>>>,
     pub captions: crate::captions::CaptionsSlot,
-    /// Burn-in caption bar for the stream leg (std mutex: read from the
-    /// synchronous compositor render thread).
-    pub caption_overlay: crate::captions::CaptionOverlaySlot,
+    /// Per-output burn-in caption bars (std mutex: read from the synchronous
+    /// compositor render thread). Primary and auxiliary may use different
+    /// raster dimensions for split 4K-record/1080p-stream sessions.
+    pub caption_overlay: crate::captions::CaptionOverlaySlots,
     /// Comment-highlight overlay (Comments upgrade S2): independent from the
     /// captions bar — highlight top, captions bottom, coexisting.
     pub highlight_overlay: crate::captions::CaptionOverlaySlot,
@@ -441,7 +442,7 @@ impl AppState {
                 crate::account::restore_persisted_account(),
             )),
             captions: crate::captions::new_captions_slot(),
-            caption_overlay: crate::captions::new_caption_overlay_slot(),
+            caption_overlay: crate::captions::new_caption_overlay_slots(),
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
             comment_highlight: crate::comment_highlight::new_comment_highlight_slot(),
         }

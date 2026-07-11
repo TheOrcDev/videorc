@@ -793,13 +793,23 @@ pub struct StartSessionParams {
     pub captions: Option<CaptionsSessionParams>,
 }
 
-/// Live-caption burn-in intent for this session (the bar itself arrives via
-/// captions.overlay.set; this shapes output legs — see burn-in plan A0 — and
-/// styles the post-recording captioned copy).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+/// Live-caption output intent for this session. Stream selection shapes the
+/// live compositor legs; Recording selection gates a non-destructive aligned
+/// `(captioned)` copy after finalization. The source recording remains clean.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptionsSessionParams {
-    /// Which legs the LIVE bar burns into (R1). Replaces `burnInEnabled`.
+    /// Persisted explicit consent. Audio is only attached while this capture
+    /// session is active; enabling while idle leaves captions Ready.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Explicit one-capture suppression selected by "Continue without
+    /// captions". Unlike `enabled: false`, this prevents pre-arming a saved
+    /// Stream/Both compositor leg for mid-session activation.
+    #[serde(default)]
+    pub suppressed_for_session: bool,
+    /// Which outputs receive captions: live Stream burn-in, an aligned
+    /// Recording copy, or both. Replaces `burnInEnabled`.
     #[serde(default)]
     pub burn_target: crate::captions::CaptionBurnTarget,
     /// Legacy pre-R1 flag; `true` maps to Stream when burn_target is absent.
@@ -809,6 +819,36 @@ pub struct CaptionsSessionParams {
     pub position: crate::captions::CaptionOverlayPosition,
     #[serde(default)]
     pub text_size: crate::captions::CaptionTextSize,
+    #[serde(default = "legacy_caption_style_id")]
+    pub style_id: crate::captions::CaptionStyleId,
+    #[serde(default = "default_caption_language")]
+    pub language: String,
+    #[serde(default)]
+    pub style_revision: u64,
+}
+
+impl Default for CaptionsSessionParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            suppressed_for_session: false,
+            burn_target: crate::captions::CaptionBurnTarget::Off,
+            burn_in_enabled: false,
+            position: crate::captions::CaptionOverlayPosition::Bottom,
+            text_size: crate::captions::CaptionTextSize::M,
+            style_id: crate::captions::CaptionStyleId::Classic,
+            language: default_caption_language(),
+            style_revision: 0,
+        }
+    }
+}
+
+fn default_caption_language() -> String {
+    "auto".to_string()
+}
+
+fn legacy_caption_style_id() -> crate::captions::CaptionStyleId {
+    crate::captions::CaptionStyleId::Glass
 }
 
 impl CaptionsSessionParams {
@@ -839,6 +879,25 @@ impl Default for AudioSettings {
             microphone_sync_offset_ms: default_microphone_sync_offset_ms(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioProcessingUpdateParams {
+    pub session_id: String,
+    pub microphone_gain_db: f32,
+    pub microphone_muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioProcessingUpdateResult {
+    pub applied: bool,
+    pub session_id: String,
+    pub microphone_gain_db: f32,
+    pub microphone_muted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
 }
 
 fn default_microphone_sync_offset_ms() -> i32 {
@@ -2415,6 +2474,11 @@ pub struct AiJobGetParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiCapabilities {
+    /// Live-caption transport readiness from videorc-web. Optional so desktop
+    /// remains compatible while older web deployments roll forward; callers
+    /// that opted into captions intentionally fail closed when it is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captions: Option<AiCapabilitiesCaptions>,
     pub entitlement: AiCapabilitiesEntitlement,
     /// Ed25519-signed entitlement proof (`v1.<payload>.<sig>`) minted by
     /// videorc.com. Optional: older web deploys (or an unconfigured signing
@@ -2429,6 +2493,59 @@ pub struct AiCapabilities {
     pub readiness: AiCapabilitiesReadiness,
     pub transcription: AiCapabilitiesTranscription,
     pub workflow: AiCapabilitiesWorkflow,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCaptions {
+    pub available: bool,
+    pub chunked: AiCapabilitiesCaptionsChunked,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_seconds_limit: Option<u64>,
+    pub preferred_transport: Option<AiCapabilitiesCaptionsTransport>,
+    pub realtime: AiCapabilitiesCaptionsRealtime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_seconds: Option<u64>,
+    pub reason_code: AiCapabilitiesCaptionsReasonCode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCaptionsChunked {
+    pub available: bool,
+    pub configured: bool,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCaptionsRealtime {
+    pub available: bool,
+    pub configured: bool,
+    pub disabled: bool,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiCapabilitiesCaptionsTransport {
+    Chunked,
+    Realtime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiCapabilitiesCaptionsReasonCode {
+    AiDisabled,
+    AiUserDisabled,
+    CaptionsDisabled,
+    CaptionsInvalidConfig,
+    CaptionsMonthlyQuotaExhausted,
+    CaptionsNotConfigured,
+    CloudAiPremiumRequired,
+    ReadyChunkedRealtimeDisabled,
+    ReadyChunkedRealtimeUnconfigured,
+    ReadyRealtime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3025,5 +3142,38 @@ mod tests {
             serde_json::to_value(SideBySideCameraSide::Right).unwrap(),
             serde_json::json!("right")
         );
+    }
+
+    #[test]
+    fn legacy_caption_session_settings_migrate_privacy_safe_defaults() {
+        let settings: CaptionsSessionParams = serde_json::from_value(serde_json::json!({
+            "burnTarget": "stream",
+            "position": "bottom",
+            "textSize": "m"
+        }))
+        .unwrap();
+        assert!(!settings.enabled);
+        assert!(!settings.suppressed_for_session);
+        assert_eq!(settings.style_id, crate::captions::CaptionStyleId::Glass);
+        assert_eq!(settings.language, "auto");
+        assert_eq!(settings.style_revision, 0);
+    }
+
+    #[test]
+    fn caption_session_style_fields_use_stable_wire_names() {
+        let settings = CaptionsSessionParams {
+            enabled: true,
+            suppressed_for_session: true,
+            style_id: crate::captions::CaptionStyleId::HighContrast,
+            language: "es".to_string(),
+            style_revision: 12,
+            ..Default::default()
+        };
+        let value = serde_json::to_value(settings).unwrap();
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["suppressedForSession"], true);
+        assert_eq!(value["styleId"], "high-contrast");
+        assert_eq!(value["language"], "es");
+        assert_eq!(value["styleRevision"], 12);
     }
 }

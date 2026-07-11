@@ -11,6 +11,8 @@ export function buildRecordingStudioGateSteps({
         '@videorc/desktop',
         'test',
         'capture.test.ts',
+        'caption-overlay.test.ts',
+        'captions-ui.test.ts',
         'background-assets.test.ts',
         'session-params.test.ts',
         'studio-health.test.ts',
@@ -48,6 +50,16 @@ export function buildRecordingStudioGateSteps({
 
   if (includeAppSmoke) {
     steps.push(
+      {
+        label: 'live captions transport contract smoke',
+        command: 'pnpm',
+        args: ['smoke:captions-contract']
+      },
+      {
+        label: 'live captions mute/gain and record+stream artifact smoke',
+        command: 'pnpm',
+        args: ['smoke:captions-live']
+      },
       {
         label: 'dev app all-layout recording artifact smoke',
         command: 'pnpm',

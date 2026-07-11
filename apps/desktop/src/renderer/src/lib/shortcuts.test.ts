@@ -16,9 +16,11 @@ describe('SHORTCUTS registry', () => {
         ? true
         : entry.id.startsWith('nav-')
     )
-    expect(navEntries.filter((entry) => /^[1-9]$/.test(entry.keys.at(-1) ?? '')).length).toBe(
-      WORKSPACE_SHORTCUTS.length
-    )
+    expect(
+      navEntries.filter(
+        (entry) => /^[1-9]$/.test(entry.keys.at(-1) ?? '') || entry.keys.at(-1) === ','
+      ).length
+    ).toBe(WORKSPACE_SHORTCUTS.length)
   })
 
   it('has unique ids and non-empty key lists', () => {

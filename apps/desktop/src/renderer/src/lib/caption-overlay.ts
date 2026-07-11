@@ -4,6 +4,7 @@
 // the canvas painter is a thin shell over it.
 
 import { commentHighlightPlatformBadge, layoutCommentHighlight } from '@/lib/comment-highlight'
+import type { CaptionStyleId } from '@/lib/backend'
 
 export type CaptionTextSize = 's' | 'm' | 'l'
 export type CaptionPosition = 'top' | 'bottom'
@@ -17,7 +18,102 @@ export interface CaptionBarMetrics {
   maxTextWidthPx: number
 }
 
+export interface CaptionStyleDefinition {
+  id: CaptionStyleId
+  label: string
+  description: string
+  plate: 'none' | 'glass' | 'band' | 'solid'
+  align: 'left' | 'center'
+  fontWeight: 600 | 700
+  maxWidthFraction: number
+  wide: boolean
+  lineHeightFactor: number
+  paddingXFactor: number
+  paddingYFactor: number
+  radiusFactor: number
+  backgroundColor: string
+  textColor: string
+  strokeColor?: string
+  strokeWidthFactor?: number
+}
+
+export const CAPTION_STYLE_DEFINITIONS: Record<CaptionStyleId, CaptionStyleDefinition> = {
+  classic: {
+    id: 'classic',
+    label: 'Classic',
+    description: 'Clean outlined subtitles that stay legible over any video.',
+    plate: 'none',
+    align: 'center',
+    fontWeight: 600,
+    maxWidthFraction: 0.88,
+    wide: false,
+    lineHeightFactor: 1.28,
+    paddingXFactor: 0.3,
+    paddingYFactor: 0.24,
+    radiusFactor: 0,
+    backgroundColor: 'transparent',
+    textColor: '#FFFFFF',
+    strokeColor: 'rgba(0, 0, 0, 0.96)',
+    strokeWidthFactor: 0.105
+  },
+  glass: {
+    id: 'glass',
+    label: 'Glass',
+    description: 'Videorc black glass with a polished edge and soft elevation.',
+    plate: 'glass',
+    align: 'center',
+    fontWeight: 600,
+    maxWidthFraction: 0.92,
+    wide: false,
+    lineHeightFactor: 1.32,
+    paddingXFactor: 0.72,
+    paddingYFactor: 0.4,
+    radiusFactor: 0.26,
+    backgroundColor: 'rgba(16, 16, 18, 0.78)',
+    textColor: '#F5F5F7'
+  },
+  'lower-third': {
+    id: 'lower-third',
+    label: 'Lower third',
+    description: 'A wide, left-aligned broadcast band for conversations.',
+    plate: 'band',
+    align: 'left',
+    fontWeight: 600,
+    maxWidthFraction: 0.92,
+    wide: true,
+    lineHeightFactor: 1.3,
+    paddingXFactor: 0.7,
+    paddingYFactor: 0.34,
+    radiusFactor: 0.12,
+    backgroundColor: 'rgba(13, 13, 15, 0.9)',
+    textColor: '#F5F5F7'
+  },
+  'high-contrast': {
+    id: 'high-contrast',
+    label: 'High contrast',
+    description: 'Opaque black and bold white for maximum readability.',
+    plate: 'solid',
+    align: 'center',
+    fontWeight: 700,
+    maxWidthFraction: 0.88,
+    wide: false,
+    lineHeightFactor: 1.4,
+    paddingXFactor: 0.62,
+    paddingYFactor: 0.42,
+    radiusFactor: 0.08,
+    backgroundColor: '#050506',
+    textColor: '#FFFFFF'
+  }
+}
+
+export const CAPTION_STYLE_IDS = Object.keys(CAPTION_STYLE_DEFINITIONS) as CaptionStyleId[]
+
+export function captionStyleDefinition(styleId: CaptionStyleId): CaptionStyleDefinition {
+  return CAPTION_STYLE_DEFINITIONS[styleId]
+}
+
 export interface CaptionBarLayout {
+  style: CaptionStyleDefinition
   metrics: CaptionBarMetrics
   lines: string[]
   barWidthPx: number
@@ -27,25 +123,23 @@ export interface CaptionBarLayout {
 export type TextMeasurer = (text: string, fontPx: number) => number
 
 const SIZE_FACTOR: Record<CaptionTextSize, number> = { s: 0.8, m: 1.0, l: 1.25 }
-/** The bar never exceeds this fraction of the video width. */
-const MAX_BAR_WIDTH_FRACTION = 0.92
 export const MAX_CAPTION_BAR_LINES = 2
 
 export function captionBarMetrics(
   canvasWidth: number,
-  textSize: CaptionTextSize
+  textSize: CaptionTextSize,
+  styleId: CaptionStyleId = 'glass'
 ): CaptionBarMetrics {
+  const style = captionStyleDefinition(styleId)
   const fontPx = Math.max(24, Math.round((canvasWidth / 40) * SIZE_FACTOR[textSize]))
-  const paddingXPx = Math.round(fontPx * 0.72)
+  const paddingXPx = Math.round(fontPx * style.paddingXFactor)
   return {
     fontPx,
-    lineHeightPx: Math.round(fontPx * 1.32),
+    lineHeightPx: Math.round(fontPx * style.lineHeightFactor),
     paddingXPx,
-    paddingYPx: Math.round(fontPx * 0.4),
-    // Panel-tier corners (videorc-design): ~13px at 1080p — a caption panel,
-    // never a pill button.
-    radiusPx: Math.round(fontPx * 0.26),
-    maxTextWidthPx: Math.floor(canvasWidth * MAX_BAR_WIDTH_FRACTION) - paddingXPx * 2
+    paddingYPx: Math.round(fontPx * style.paddingYFactor),
+    radiusPx: Math.round(fontPx * style.radiusFactor),
+    maxTextWidthPx: Math.floor(canvasWidth * style.maxWidthFraction) - paddingXPx * 2
   }
 }
 
@@ -89,20 +183,22 @@ export function layoutCaptionBar(params: {
   text: string
   canvasWidth: number
   textSize: CaptionTextSize
+  styleId?: CaptionStyleId
   measure: TextMeasurer
 }): CaptionBarLayout | null {
-  const metrics = captionBarMetrics(params.canvasWidth, params.textSize)
+  const style = captionStyleDefinition(params.styleId ?? 'glass')
+  const metrics = captionBarMetrics(params.canvasWidth, params.textSize, style.id)
   const lines = wrapCaptionText(params.text, metrics, params.measure)
   if (lines.length === 0) {
     return null
   }
   const widest = Math.max(...lines.map((line) => params.measure(line, metrics.fontPx)))
-  const barWidthPx = Math.min(
-    Math.ceil(widest) + metrics.paddingXPx * 2,
-    Math.floor(params.canvasWidth * MAX_BAR_WIDTH_FRACTION)
-  )
+  const maxBarWidth = Math.floor(params.canvasWidth * style.maxWidthFraction)
+  const barWidthPx = style.wide
+    ? maxBarWidth
+    : Math.min(Math.ceil(widest) + metrics.paddingXPx * 2, maxBarWidth)
   const barHeightPx = metrics.paddingYPx * 2 + metrics.lineHeightPx * lines.length
-  return { metrics, lines, barWidthPx, barHeightPx }
+  return { style, metrics, lines, barWidthPx, barHeightPx }
 }
 
 /** Vertical safe margin the compositor uses — mirrored for burned frames. */
@@ -139,70 +235,77 @@ export function captionBarFramePosition(params: {
 function paintCaptionBar(
   context: OffscreenCanvasRenderingContext2D,
   layout: CaptionBarLayout,
-  fontFor: (fontPx: number) => string,
+  fontFor: (fontPx: number, weight?: 600 | 700) => string,
   originX: number,
   originY: number
 ): void {
   const { metrics } = layout
-  // Glass panel over video (videorc-design solid fallback): translucent
-  // charcoal that FLOATS — soft elevation shadow, inner-top sheen, hairline
-  // ring — instead of a flat pill.
-  context.save()
-  context.shadowColor = 'rgba(0, 0, 0, 0.4)'
-  context.shadowBlur = metrics.fontPx * 0.45
-  context.shadowOffsetY = metrics.fontPx * 0.1
-  context.beginPath()
-  context.roundRect(originX, originY, layout.barWidthPx, layout.barHeightPx, metrics.radiusPx)
-  context.fillStyle = 'rgba(16, 16, 18, 0.78)'
-  context.fill()
-  context.restore()
+  const { style } = layout
+  if (style.plate !== 'none') {
+    context.save()
+    if (style.plate === 'glass') {
+      context.shadowColor = 'rgba(0, 0, 0, 0.4)'
+      context.shadowBlur = metrics.fontPx * 0.45
+      context.shadowOffsetY = metrics.fontPx * 0.1
+    }
+    context.beginPath()
+    context.roundRect(originX, originY, layout.barWidthPx, layout.barHeightPx, metrics.radiusPx)
+    context.fillStyle = style.backgroundColor
+    context.fill()
+    context.restore()
 
-  const sheen = context.createLinearGradient(0, originY, 0, originY + layout.barHeightPx)
-  sheen.addColorStop(0, 'rgba(255, 255, 255, 0.07)')
-  sheen.addColorStop(0.35, 'rgba(255, 255, 255, 0.015)')
-  sheen.addColorStop(1, 'rgba(255, 255, 255, 0)')
-  context.beginPath()
-  context.roundRect(originX, originY, layout.barWidthPx, layout.barHeightPx, metrics.radiusPx)
-  context.fillStyle = sheen
-  context.fill()
-
-  context.beginPath()
-  context.roundRect(
-    originX + 0.5,
-    originY + 0.5,
-    layout.barWidthPx - 1,
-    layout.barHeightPx - 1,
-    metrics.radiusPx
-  )
-  context.strokeStyle = 'rgba(255, 255, 255, 0.1)'
-  context.lineWidth = 1
-  context.stroke()
+    if (style.plate === 'glass') {
+      const sheen = context.createLinearGradient(0, originY, 0, originY + layout.barHeightPx)
+      sheen.addColorStop(0, 'rgba(255, 255, 255, 0.07)')
+      sheen.addColorStop(0.35, 'rgba(255, 255, 255, 0.015)')
+      sheen.addColorStop(1, 'rgba(255, 255, 255, 0)')
+      context.beginPath()
+      context.roundRect(originX, originY, layout.barWidthPx, layout.barHeightPx, metrics.radiusPx)
+      context.fillStyle = sheen
+      context.fill()
+      context.beginPath()
+      context.roundRect(
+        originX + 0.5,
+        originY + 0.5,
+        layout.barWidthPx - 1,
+        layout.barHeightPx - 1,
+        metrics.radiusPx
+      )
+      context.strokeStyle = 'rgba(255, 255, 255, 0.1)'
+      context.lineWidth = 1
+      context.stroke()
+    }
+  }
 
   // Crisp text with a whisper of shadow so it survives bright video.
   context.save()
-  context.shadowColor = 'rgba(0, 0, 0, 0.45)'
-  context.shadowBlur = metrics.fontPx * 0.08
+  context.shadowColor = 'rgba(0, 0, 0, 0.58)'
+  context.shadowBlur = metrics.fontPx * (style.plate === 'none' ? 0.12 : 0.08)
   context.shadowOffsetY = Math.max(1, Math.round(metrics.fontPx * 0.03))
-  context.font = fontFor(metrics.fontPx)
-  context.fillStyle = '#F5F5F7'
-  context.textAlign = 'center'
+  context.font = fontFor(metrics.fontPx, style.fontWeight)
+  context.fillStyle = style.textColor
+  context.textAlign = style.align
   context.textBaseline = 'middle'
+  const textX =
+    style.align === 'left' ? originX + metrics.paddingXPx : originX + layout.barWidthPx / 2
   layout.lines.forEach((line, index) => {
-    context.fillText(
-      line,
-      originX + layout.barWidthPx / 2,
-      originY + metrics.paddingYPx + metrics.lineHeightPx * (index + 0.5),
-      layout.barWidthPx - metrics.paddingXPx
-    )
+    const textY = originY + metrics.paddingYPx + metrics.lineHeightPx * (index + 0.5)
+    if (style.strokeColor && style.strokeWidthFactor) {
+      context.strokeStyle = style.strokeColor
+      context.lineWidth = Math.max(2, metrics.fontPx * style.strokeWidthFactor)
+      context.lineJoin = 'round'
+      context.strokeText(line, textX, textY, layout.barWidthPx - metrics.paddingXPx * 2)
+    }
+    context.fillText(line, textX, textY, layout.barWidthPx - metrics.paddingXPx * 2)
   })
   context.restore()
 }
 
-function canvasFont(fontPx: number): string {
-  return `600 ${fontPx}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`
+function canvasFont(fontPx: number, weight: 600 | 700 = 600): string {
+  return `${weight} ${fontPx}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`
 }
 
-function canvasMeasurer(): { measure: TextMeasurer } | null {
+function canvasMeasurer(styleId: CaptionStyleId = 'glass'): { measure: TextMeasurer } | null {
   const probe = new OffscreenCanvas(1, 1)
   const probeContext = probe.getContext('2d')
   if (!probeContext) {
@@ -210,7 +313,7 @@ function canvasMeasurer(): { measure: TextMeasurer } | null {
   }
   return {
     measure: (text, fontPx) => {
-      probeContext.font = canvasFont(fontPx)
+      probeContext.font = canvasFont(fontPx, captionStyleDefinition(styleId).fontWeight)
       return probeContext.measureText(text).width
     }
   }
@@ -236,12 +339,14 @@ export async function renderCaptionOverlayPng(params: {
   text: string
   canvasWidth: number
   textSize: CaptionTextSize
+  styleId?: CaptionStyleId
 }): Promise<string | null> {
-  const measurer = canvasMeasurer()
+  const styleId = params.styleId ?? 'glass'
+  const measurer = canvasMeasurer(styleId)
   if (!measurer) {
     return null
   }
-  const layout = layoutCaptionBar({ ...params, measure: measurer.measure })
+  const layout = layoutCaptionBar({ ...params, styleId, measure: measurer.measure })
   if (!layout) {
     return null
   }
@@ -266,6 +371,7 @@ export async function renderCaptionCueFramePng(params: {
   canvasHeight: number
   position: CaptionPosition
   textSize: CaptionTextSize
+  styleId?: CaptionStyleId
 }): Promise<string | null> {
   const canvas = new OffscreenCanvas(
     Math.max(2, params.canvasWidth),
@@ -276,7 +382,8 @@ export async function renderCaptionCueFramePng(params: {
     return null
   }
   if (params.text.trim().length > 0) {
-    const measurer = canvasMeasurer()
+    const styleId = params.styleId ?? 'glass'
+    const measurer = canvasMeasurer(styleId)
     if (!measurer) {
       return null
     }
@@ -284,6 +391,7 @@ export async function renderCaptionCueFramePng(params: {
       text: params.text,
       canvasWidth: params.canvasWidth,
       textSize: params.textSize,
+      styleId,
       measure: measurer.measure
     })
     if (layout) {

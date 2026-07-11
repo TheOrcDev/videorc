@@ -6,6 +6,7 @@ import {
   applyAudioSyncRecommendation,
   audioSyncCalibrationState,
   applyStoredManualStreamKeyResult,
+  auxiliaryStreamOutputVideoSettings,
   buildCameraSources,
   buildCaptureSources,
   buildMicrophoneSources,
@@ -1023,6 +1024,51 @@ describe('videoProfileCompatibility', () => {
     })
   })
 
+  it('uses the enabled Twitch 1080p override for a 4K-default auxiliary canvas', () => {
+    const config = captureConfigFixture()
+    config.video = videoPresets['record-4k30']
+    config.streaming = {
+      ...config.streaming,
+      enabled: true,
+      defaultOutputPreset: 'stream-youtube-4k30',
+      defaultBitrateKbps: 30000,
+      targets: config.streaming.targets.map((target) =>
+        target.platform === 'twitch'
+          ? {
+              ...target,
+              enabled: true,
+              outputPreset: 'stream-safe-1080p30',
+              outputBitrateKbps: 6000
+            }
+          : { ...target, enabled: target.platform === 'youtube' }
+      )
+    }
+
+    expect(streamOutputVideoSettings(config.video, config.streaming)).toEqual(
+      videoPresets['stream-youtube-4k30']
+    )
+    expect(auxiliaryStreamOutputVideoSettings(config.video, config.streaming)).toEqual(
+      videoPresets['stream-safe-1080p30']
+    )
+  })
+
+  it('falls back to the recording canvas when enabled targets share its profile', () => {
+    const config = captureConfigFixture()
+    config.video = videoPresets['record-4k30']
+    config.streaming = {
+      ...config.streaming,
+      enabled: true,
+      defaultOutputPreset: 'stream-youtube-4k30',
+      defaultBitrateKbps: 30000,
+      targets: config.streaming.targets.map((target) => ({
+        ...target,
+        enabled: target.platform === 'youtube'
+      }))
+    }
+
+    expect(auxiliaryStreamOutputVideoSettings(config.video, config.streaming)).toEqual(config.video)
+  })
+
   it('warns (never blocks) on 4K local recording while streaming — the reproduced freeze profile', () => {
     // docs/live-video-freeze-incident-plan.md: split-output 4K record + stream
     // drops recorded video to ~8fps. Warning only, until LVF2–LVF4 land.
@@ -1065,6 +1111,22 @@ describe('videoProfileCompatibility', () => {
     })
     expect(warned.blockingReason).toBeNull()
     expect(warned.warning).not.toBeNull()
+  })
+})
+
+describe('persistable capture settings', () => {
+  it('keeps live microphone gain and mute as next-session defaults', () => {
+    const config = captureConfigFixture()
+    config.audio = {
+      ...config.audio,
+      microphoneGainDb: 6,
+      microphoneMuted: true
+    }
+
+    expect(persistableCaptureConfig(config).audio).toMatchObject({
+      microphoneGainDb: 6,
+      microphoneMuted: true
+    })
   })
 })
 
@@ -1219,18 +1281,30 @@ describe('normalizeCaptionsCaptureSettings', () => {
   it('defaults, validates, and migrates the pre-R1 boolean', async () => {
     const { normalizeCaptionsCaptureSettings } = await import('./capture')
     expect(normalizeCaptionsCaptureSettings(undefined)).toEqual({
-      burnTarget: 'off',
+      enabled: false,
+      burnTarget: 'stream',
+      styleId: 'classic',
+      language: 'auto',
+      styleRevision: 0,
       position: 'bottom',
       textSize: 'm'
     })
     // Pre-R1 config: burnInEnabled true meant the stream leg.
     expect(normalizeCaptionsCaptureSettings({ burnInEnabled: true })).toEqual({
+      enabled: false,
       burnTarget: 'stream',
+      styleId: 'glass',
+      language: 'auto',
+      styleRevision: 0,
       position: 'bottom',
       textSize: 'm'
     })
     expect(normalizeCaptionsCaptureSettings({ burnInEnabled: false })).toEqual({
+      enabled: false,
       burnTarget: 'off',
+      styleId: 'glass',
+      language: 'auto',
+      styleRevision: 0,
       position: 'bottom',
       textSize: 'm'
     })
@@ -1242,11 +1316,46 @@ describe('normalizeCaptionsCaptureSettings', () => {
         position: 'top',
         textSize: 'l'
       })
-    ).toEqual({ burnTarget: 'recording', position: 'top', textSize: 'l' })
+    ).toEqual({
+      enabled: false,
+      burnTarget: 'recording',
+      styleId: 'glass',
+      language: 'auto',
+      styleRevision: 0,
+      position: 'top',
+      textSize: 'l'
+    })
     expect(normalizeCaptionsCaptureSettings({ burnTarget: 'sideways' as never })).toEqual({
+      enabled: false,
       burnTarget: 'off',
+      styleId: 'glass',
+      language: 'auto',
+      styleRevision: 0,
       position: 'bottom',
       textSize: 'm'
+    })
+  })
+
+  it('keeps valid consent, language, style, and monotonic revision values', async () => {
+    const { normalizeCaptionsCaptureSettings } = await import('./capture')
+    expect(
+      normalizeCaptionsCaptureSettings({
+        enabled: true,
+        burnTarget: 'both',
+        styleId: 'high-contrast',
+        language: ' es ',
+        styleRevision: 7,
+        position: 'top',
+        textSize: 's'
+      })
+    ).toEqual({
+      enabled: true,
+      burnTarget: 'both',
+      styleId: 'high-contrast',
+      language: 'es',
+      styleRevision: 7,
+      position: 'top',
+      textSize: 's'
     })
   })
 })

@@ -1,7 +1,35 @@
-import type { CaptionsUpdate } from '@/lib/backend'
+import type { CaptionStyleId, CaptionsStatus, CaptionsUpdate } from '@/lib/backend'
+import type { CaptionBurnTarget } from '@/lib/capture'
 
 /** Lines kept for the captions strip / detached window. */
 export const MAX_CAPTION_LINES = 50
+
+/**
+ * Generation guard for renderer-owned caption cue raster work. Privacy
+ * boundaries and client teardown invalidate older async renders before they
+ * can retain or submit more transcript pixels.
+ */
+export class CaptionCueRenderGuard {
+  private generation = 0
+
+  begin(): number {
+    this.generation += 1
+    return this.generation
+  }
+
+  cancel(): void {
+    this.generation += 1
+  }
+
+  isCurrent(generation: number): boolean {
+    return generation === this.generation
+  }
+}
+
+/** Final-copy work survives ordinary capture boundaries; sign-out purges it. */
+export function shouldCancelCaptionCueRender(reason: string | undefined): boolean {
+  return reason === 'signed-out'
+}
 
 /**
  * Append a caption update: streaming PARTIALS (and the final that settles
@@ -34,6 +62,184 @@ export function appendCaptionLine(
 /** The strip shows the tail of the transcript, most recent lines only. */
 export function captionStripLines(lines: CaptionsUpdate[], count = 3): CaptionsUpdate[] {
   return lines.slice(-count)
+}
+
+/** Screen readers announce settled cues only; evolving partials remain visual. */
+export function latestFinalCaptionText(lines: CaptionsUpdate[]): string | undefined {
+  return [...lines].reverse().find((line) => line.kind !== 'partial')?.text
+}
+
+export function captionsStatusIsActive(status: CaptionsStatus): boolean {
+  return ['starting', 'listening', 'reconnecting', 'degraded', 'live'].includes(status.state)
+}
+
+/**
+ * Reconciles persisted caption consent with backend-owned desired intent.
+ * Attempts are tracked by StudioProvider per toggle/capture/client scope so a
+ * blocked provider cannot spin, while an explicit retry edge can try once.
+ */
+export function decideCaptionsRuntimeIntent(input: {
+  persistedEnabled: boolean
+  suppressForSession: boolean
+  captureActive: boolean
+  status: CaptionsStatus
+  startAttempted: boolean
+  stopAttempted: boolean
+}): 'start' | 'stop' | 'none' {
+  const shouldEnable = input.persistedEnabled && !input.suppressForSession
+  const backendHasIntent = input.status.state !== 'idle' || input.status.desiredEnabled === true
+
+  if (!shouldEnable) {
+    return backendHasIntent && !input.stopAttempted ? 'stop' : 'none'
+  }
+  if (captionsStatusIsActive(input.status)) {
+    return 'none'
+  }
+  if (
+    input.status.state === 'ready' &&
+    input.status.desiredEnabled !== false &&
+    !input.captureActive
+  ) {
+    return 'none'
+  }
+  return input.startAttempted ? 'none' : 'start'
+}
+
+export function captionLineIdentity(line: CaptionsUpdate): string {
+  return `${line.sessionClientId}:${line.seq}`
+}
+
+export interface CaptionOverlaySignature {
+  styleId: CaptionStyleId
+  styleRevision: number
+  position: 'top' | 'bottom'
+  textSize: 's' | 'm' | 'l'
+  canvasWidth: number
+  canvasHeight: number
+  outputLeg: 'shared' | 'stream' | 'recording' | 'primary' | 'auxiliary'
+}
+
+export interface CaptionOverlayTargetPlan {
+  target: 'primary' | 'auxiliary'
+  outputLeg: 'recording' | 'stream'
+  canvasWidth: number
+  canvasHeight: number
+}
+
+/** Map user-facing outputs to the backend's session-stable compositor roles. */
+export function captionOverlayTargetPlan(input: {
+  burnTarget: CaptionBurnTarget
+  recordEnabled: boolean
+  streamEnabled: boolean
+  recordingVideo: { width: number; height: number }
+  streamVideo: { width: number; height: number }
+}): CaptionOverlayTargetPlan[] {
+  const streamRequested =
+    input.streamEnabled && (input.burnTarget === 'stream' || input.burnTarget === 'both')
+
+  if (input.recordEnabled && input.streamEnabled) {
+    // Recording captions are rendered later into a non-destructive copy. The
+    // source recording remains clean, so the only live raster is the split
+    // viewer-facing stream leg.
+    return streamRequested
+      ? [
+          {
+            target: 'auxiliary' as const,
+            outputLeg: 'stream' as const,
+            canvasWidth: input.streamVideo.width,
+            canvasHeight: input.streamVideo.height
+          }
+        ]
+      : []
+  }
+  if (streamRequested) {
+    return [
+      {
+        target: 'primary',
+        outputLeg: 'stream',
+        // Stream-only sessions do not allocate the auxiliary stream canvas:
+        // the primary compositor stays at the capture canvas and FFmpeg scales
+        // that complete frame to the destination profile. Rasterize at the
+        // actual compositor size so text scales with the video instead of
+        // becoming a small 1080p island on a 4K primary.
+        canvasWidth: input.recordingVideo.width,
+        canvasHeight: input.recordingVideo.height
+      }
+    ]
+  }
+  return []
+}
+
+/** Everything that can change pixels belongs in the key. */
+export function captionOverlayKey(
+  line: CaptionsUpdate,
+  signature: CaptionOverlaySignature
+): string {
+  return [
+    captionLineIdentity(line),
+    line.text,
+    signature.styleId,
+    signature.styleRevision,
+    signature.position,
+    signature.textSize,
+    `${signature.canvasWidth}x${signature.canvasHeight}`,
+    signature.outputLeg
+  ].join(':')
+}
+
+/** Readable dwell for a settled line: two seconds minimum, six maximum. */
+export function captionDwellMs(text: string): number {
+  return Math.min(6000, Math.max(2000, 1800 + text.trim().length * 45))
+}
+
+/**
+ * Serial, bounded latest-wins work queue. At most one request is rendering and
+ * one newest request is pending; intermediate partials are deliberately
+ * coalesced, while a final/style update can never be stranded behind a busy ref.
+ */
+export class LatestWinsScheduler<T> {
+  private running = false
+  private pending: T | null = null
+  private idleResolvers: Array<() => void> = []
+
+  constructor(private readonly worker: (value: T) => Promise<void>) {}
+
+  enqueue(value: T): void {
+    this.pending = value
+    if (!this.running) {
+      void this.drain()
+    }
+  }
+
+  clearPending(): void {
+    this.pending = null
+  }
+
+  whenIdle(): Promise<void> {
+    if (!this.running && this.pending === null) {
+      return Promise.resolve()
+    }
+    return new Promise((resolve) => this.idleResolvers.push(resolve))
+  }
+
+  private async drain(): Promise<void> {
+    this.running = true
+    try {
+      while (this.pending !== null) {
+        const next = this.pending
+        this.pending = null
+        try {
+          await this.worker(next)
+        } catch {
+          // One failed render/push must not strand the newest queued request.
+        }
+      }
+    } finally {
+      this.running = false
+      const resolvers = this.idleResolvers.splice(0)
+      resolvers.forEach((resolve) => resolve())
+    }
+  }
 }
 
 /**
@@ -81,17 +287,25 @@ export function decideOverlayPush(input: {
   latest: CaptionsUpdate | undefined
   floor: CaptionSessionFloor | null
   pushedKey: string | null
-  busy: boolean
+  candidateKey?: string
+  expiredLineId?: string | null
+  /** Legacy caller compatibility; the latest-wins scheduler replaces this gate. */
+  busy?: boolean
 }): { action: 'push' | 'clear' | 'none'; key: string | null } {
   if (!input.burnIn || !input.captionsRunning || !input.sessionActive) {
     return { action: input.pushedKey !== null ? 'clear' : 'none', key: null }
   }
-  if (!input.latest || input.busy || !captionLineAboveFloor(input.latest, input.floor)) {
+  if (
+    !input.latest ||
+    input.busy ||
+    !captionLineAboveFloor(input.latest, input.floor) ||
+    input.expiredLineId === captionLineIdentity(input.latest)
+  ) {
     return { action: 'none', key: input.pushedKey }
   }
   // Streaming partials share a seq while the text evolves — key on both so
   // the live bar refreshes with every refinement.
-  const key = `${input.latest.seq}:${input.latest.text}`
+  const key = input.candidateKey ?? `${input.latest.seq}:${input.latest.text}`
   if (input.pushedKey === key) {
     return { action: 'none', key }
   }

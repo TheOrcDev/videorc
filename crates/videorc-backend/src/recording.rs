@@ -61,11 +61,12 @@ use crate::preview_camera::{
 use crate::preview_screen::preview_screen_latest_frame_info;
 use crate::process_job::{spawn_owned_tokio, status_owned_tokio};
 use crate::protocol::{
-    AudioSettings, AudioTrack, AudioTrackSource, BackgroundFit, CameraAspect, CameraCorner,
-    CameraFit, CameraShape, CameraSize, CameraTransformMode, CompositorBackend,
-    CompositorSceneUpdateParams, CompositorState, DiagnosticStats, EffectiveSceneBackground,
-    EncodeBackend, EntitlementsSnapshot, FeatureId, HealthLevel, LayoutPreset, LayoutSettings,
-    PreviewCameraState, PreviewLiveParams, PreviewLiveSource, PreviewLiveState, PreviewLiveStatus,
+    AudioProcessingUpdateParams, AudioProcessingUpdateResult, AudioSettings, AudioTrack,
+    AudioTrackSource, BackgroundFit, CameraAspect, CameraCorner, CameraFit, CameraShape,
+    CameraSize, CameraTransformMode, CompositorBackend, CompositorSceneUpdateParams,
+    CompositorState, DiagnosticStats, EffectiveSceneBackground, EncodeBackend,
+    EntitlementsSnapshot, FeatureId, HealthLevel, LayoutPreset, LayoutSettings, PreviewCameraState,
+    PreviewLiveParams, PreviewLiveSource, PreviewLiveState, PreviewLiveStatus,
     PreviewScreenSourceKind, PreviewScreenState, PreviewSnapshot, PreviewSnapshotParams,
     PreviewSurfaceBacking, PreviewTransport, RecordingPipelineStage, RecordingState,
     RecordingStatus, RemuxSessionParams, RtmpPreset, RtmpSettings, Scene, SceneConfigParams,
@@ -100,6 +101,17 @@ const NATIVE_AUDIO_SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
 /// silent zeros from CoreAudio — frames advance, the track holds nothing).
 const MIC_SILENT_CHECK_AFTER: Duration = Duration::from_secs(10);
 const MIC_SILENT_PEAK_EPSILON: f32 = 0.001;
+const CAPTIONS_NATIVE_AUDIO_REQUIRED_MESSAGE: &str = "Live captions require the supported native microphone audio path after gain and mute controls. This session was not started because the selected microphone path cannot supply caption audio. Continue without captions for this session or select a supported microphone.";
+/// Once split-input probing completes, the recording demux thread may absorb a
+/// bounded scheduling cushion without applying pipe backpressure; the live
+/// auxiliary input keeps the small latency-first queue.
+const SPLIT_RECORDING_INPUT_THREAD_QUEUE_PACKETS: usize = 64;
+const SPLIT_STREAM_INPUT_THREAD_QUEUE_PACKETS: usize = 8;
+/// FFmpeg starts per-input demux threads only after `avformat_find_stream_info`.
+/// A 65,536-byte probe on a low-complexity H.264 test pattern can therefore
+/// leave the sibling FIFO unread for seconds, before either thread queue can
+/// help. MPEG-TS PAT/PMT plus the first SPS/IDR fit in this split-only bound.
+const SPLIT_ENCODED_INPUT_PROBE_BYTES: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SilentMicKind {
@@ -118,6 +130,61 @@ fn silent_mic_verdict(captured_frames: u64, session_peak: f32) -> Option<SilentM
         return Some(SilentMicKind::AllSilence);
     }
     None
+}
+
+/// Capability token for the publication edge of a capture session.
+///
+/// Both the user-visible Starting event and the FFmpeg/RTMP process require
+/// this token, so a captions-enabled session cannot publish before its
+/// post-controls native microphone bus has actually opened and warmed up.
+#[derive(Debug)]
+struct SessionStartPublicationPermit;
+
+fn live_captions_requested(params: &StartSessionParams) -> bool {
+    params
+        .captions
+        .as_ref()
+        .is_some_and(|captions| captions.enabled && !captions.suppressed_for_session)
+}
+
+async fn authorize_session_start_publication(
+    state: &AppState,
+    session_id: &str,
+    params: &StartSessionParams,
+    has_native_audio: bool,
+) -> Result<SessionStartPublicationPermit> {
+    if live_captions_requested(params) && !has_native_audio {
+        crate::captions::block_captions_for_audio_path(
+            state,
+            CAPTIONS_NATIVE_AUDIO_REQUIRED_MESSAGE,
+        )
+        .await;
+        let _ = emit_health_event(
+            state,
+            Some(session_id),
+            HealthLevel::Error,
+            "captions-audio-path-unsupported",
+            CAPTIONS_NATIVE_AUDIO_REQUIRED_MESSAGE,
+        );
+        bail!(CAPTIONS_NATIVE_AUDIO_REQUIRED_MESSAGE);
+    }
+
+    Ok(SessionStartPublicationPermit)
+}
+
+fn publish_authorized_session_start(
+    state: &AppState,
+    status: RecordingStatus,
+    _permit: &SessionStartPublicationPermit,
+) {
+    state.emit_event("recording.status", status);
+}
+
+fn spawn_authorized_capture_process(
+    command: &mut Command,
+    _permit: SessionStartPublicationPermit,
+) -> io::Result<tokio::process::Child> {
+    spawn_owned_tokio(command)
 }
 const RECORDING_PREVIEW_WIDTH: u32 = 640;
 const RECORDING_PREVIEW_HEIGHT: u32 = 360;
@@ -170,6 +237,11 @@ pub struct ActiveRecording {
     pub stream_url: Option<String>,
     pub ffmpeg_path: String,
     pub started_at: String,
+    /// First authoritative video-content instant for encoder-bridge sessions.
+    /// Captions use it to align cues when the user opts in after capture began.
+    capture_epoch: Arc<std::sync::OnceLock<Instant>>,
+    /// Monotonic fallback for legacy paths that do not publish a video epoch.
+    capture_started_fallback: Instant,
     pub mode: String,
     pub audio_tracks: Vec<AudioTrack>,
     pub pipeline: RecordingPipeline,
@@ -177,6 +249,10 @@ pub struct ActiveRecording {
     pub screen_overlay: Option<ScreenOverlaySession>,
     pub encoder_bridge: Option<EncoderBridgeRecordingSession>,
     pub encoder_bridge_stream: Option<EncoderBridgeRecordingSession>,
+    /// Frozen at session start from the Recording/Both caption selection.
+    /// Finalization may render a non-destructive `(captioned)` copy only when
+    /// this is true; the source recording itself always stays clean.
+    captioned_copy_requested: bool,
     /// True only when this session has a viewer-facing stream leg rendered by
     /// the compositor bridge. Legacy FFmpeg and record-only paths must reject
     /// comment highlights before touching the overlay slot.
@@ -287,6 +363,65 @@ impl ActiveRecording {
         }
         Ok(())
     }
+}
+
+/// Capture-relative media time used to seed a caption session that starts
+/// after recording/streaming is already underway.
+pub async fn active_capture_elapsed_seconds(state: &AppState) -> Option<f64> {
+    let recording = state.recording.lock().await;
+    let active = recording.as_ref()?;
+    let origin = active
+        .capture_epoch
+        .get()
+        .copied()
+        .unwrap_or(active.capture_started_fallback);
+    Some(
+        Instant::now()
+            .saturating_duration_since(origin)
+            .as_secs_f64(),
+    )
+}
+
+/// Applies renderer mic controls to the currently active native capture
+/// session. The session id makes delayed websocket commands harmless across a
+/// stop/start boundary; the CoreAudio callback consumes the update atomically.
+pub async fn update_active_audio_processing(
+    state: &AppState,
+    params: AudioProcessingUpdateParams,
+) -> AudioProcessingUpdateResult {
+    let settings = AudioProcessingSettings {
+        gain_db: if params.microphone_gain_db.is_finite() {
+            params.microphone_gain_db.clamp(-24.0, 24.0)
+        } else {
+            0.0
+        },
+        muted: params.microphone_muted,
+    };
+    let mut result = AudioProcessingUpdateResult {
+        applied: false,
+        session_id: params.session_id.clone(),
+        microphone_gain_db: settings.gain_db,
+        microphone_muted: settings.muted,
+        reason_code: None,
+    };
+
+    let recording = state.recording.lock().await;
+    let Some(active) = recording.as_ref() else {
+        result.reason_code = Some("no-active-session".to_string());
+        return result;
+    };
+    if active.session_id != params.session_id {
+        result.reason_code = Some("stale-session".to_string());
+        return result;
+    }
+    let Some(native_audio) = active.native_audio.as_ref() else {
+        result.reason_code = Some("native-audio-unavailable".to_string());
+        return result;
+    };
+
+    native_audio.update_processing_settings(settings);
+    result.applied = true;
+    result
 }
 
 pub fn initial_live_preview_state() -> LivePreviewState {
@@ -579,7 +714,20 @@ pub async fn start_session(
         && let Some(prepared) = native_audio_source.take()
     {
         let device_name = prepared.source.device_name.clone();
-        if let Some(index) =
+        if live_captions_requested(&params) {
+            let message = format!(
+                "Native microphone {device_name} did not deliver warmup frames. Live captions require this post-controls native microphone bus, so the session will not be published."
+            );
+            state.emit_log("error", &message);
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Error,
+                "microphone-native-warmup-timeout",
+                &message,
+            );
+            capture.microphone = None;
+        } else if let Some(index) =
             find_avfoundation_microphone_index_for_native_name(&ffmpeg_path, &device_name).await
         {
             let message = format!(
@@ -610,6 +758,9 @@ pub async fn start_session(
         }
         let _ = crate::fifo::cleanup(&prepared.fifo_path);
     }
+    let has_native_audio = native_audio_source.is_some();
+    let session_start_publication_permit =
+        authorize_session_start_publication(&state, &session_id, &params, has_native_audio).await?;
     let audio_tracks = capture_audio_tracks(&capture);
     if matches!(capture.video, VideoInput::TestPattern) {
         let (code, message) = if matches!(params.layout.layout_preset, LayoutPreset::CameraOnly) {
@@ -681,24 +832,15 @@ pub async fn start_session(
     } else {
         None
     };
-    // Remember this session's caption styling for the post-recording burned
-    // copy (defaults when captions params are absent).
-    {
-        let captions_params = params.captions.clone().unwrap_or_default();
-        crate::captions::set_caption_session_style(
-            &state,
-            captions_params.position,
-            captions_params.text_size,
-            params.output.video.width,
-            params.output.video.height,
-        )
-        .await;
-    }
+    let session_caption_plan = caption_leg_plan(&params);
     // A new session must never inherit a composited caption bar. The overlay
     // slot is app-global and the renderer's stop-time clear is best-effort
     // (fire-and-forget, and a closed renderer never sends it) — clearing here
     // is the authoritative boundary (caption carry-over fix, 2026-07-04).
-    let _ = crate::captions::clear_caption_overlay(&state.caption_overlay);
+    let _ = crate::captions::clear_caption_overlays(
+        &state.caption_overlay,
+        crate::captions::ClearCaptionOverlayParams::default(),
+    );
     // Same boundary rule for comment highlights, including backend state and
     // any old expiry task — a new session never inherits the prior card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_start(&state).await;
@@ -706,9 +848,8 @@ pub async fn start_session(
     // split-leg plan, an auxiliary render. Outside those shapes the captions
     // stay UI-only — say so instead of silently skipping pixels.
     {
-        let leg_plan = caption_leg_plan(&params);
-        let burn_requested = leg_plan.primary || leg_plan.aux;
-        let split_needed_but_missing = leg_plan.force_same_profile_split
+        let burn_requested = session_caption_plan.primary || session_caption_plan.aux;
+        let split_needed_but_missing = session_caption_plan.force_same_profile_split
             && params.output.record_enabled
             && params.output.stream_enabled
             && encoder_bridge_stream_output.is_none();
@@ -806,10 +947,11 @@ pub async fn start_session(
                     CompositorFrameConsumer::VideoToolboxEncoder
                 },
                 stream_output: encoder_bridge_stream_output,
-                // Per-leg overlay plan (R1): primary = recording (or the
-                // stream when stream-only), aux = the split stream leg.
-                caption_overlay_on_primary: caption_leg_plan(&params).primary,
-                caption_overlay_on_aux: caption_leg_plan(&params).aux,
+                // Per-leg overlay plan (R1): primary is the clean source
+                // recording (or the stream when stream-only); aux is the
+                // captioned stream leg for combined sessions.
+                caption_overlay_on_primary: session_caption_plan.primary,
+                caption_overlay_on_aux: session_caption_plan.aux,
                 highlight_overlay_on_primary: crate::captions::highlight_overlay_leg_plan(
                     params.output.record_enabled,
                     params.output.stream_enabled,
@@ -963,8 +1105,8 @@ pub async fn start_session(
         )?
     };
 
-    state.emit_event(
-        "recording.status",
+    publish_authorized_session_start(
+        &state,
         RecordingStatus {
             state: RecordingState::Starting,
             session_id: Some(session_id.clone()),
@@ -976,6 +1118,7 @@ pub async fn start_session(
             duration_ms: None,
             message: Some(format!("Starting {mode} session.")),
         },
+        &session_start_publication_permit,
     );
 
     let mut command = ffmpeg_command(&ffmpeg_path);
@@ -988,8 +1131,9 @@ pub async fn start_session(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = spawn_owned_tokio(&mut command)
-        .with_context(|| format!("Could not start {ffmpeg_path}"))?;
+    let mut child =
+        spawn_authorized_capture_process(&mut command, session_start_publication_permit)
+            .with_context(|| format!("Could not start {ffmpeg_path}"))?;
 
     let stderr = child.stderr.take();
     let stdout = child.stdout.take();
@@ -1070,7 +1214,6 @@ pub async fn start_session(
         .await;
     }
     pipeline.mark_running();
-    let has_native_audio = native_audio_source.is_some();
     // Post-recording quality gate inputs (slice 8): what this session is expected to
     // contain, captured before `audio_tracks` is moved into the active recording.
     let gate_expect_audio = !audio_tracks.is_empty();
@@ -1083,6 +1226,8 @@ pub async fn start_session(
         stream_url,
         ffmpeg_path: ffmpeg_path.clone(),
         started_at: started_at.to_rfc3339(),
+        capture_epoch: video_epoch.clone(),
+        capture_started_fallback: Instant::now(),
         mode: mode.to_string(),
         audio_tracks,
         pipeline,
@@ -1104,10 +1249,28 @@ pub async fn start_session(
         },
         encoder_bridge,
         encoder_bridge_stream,
+        captioned_copy_requested: session_caption_plan.captioned_copy,
         comment_highlight_available: comment_highlight_available(&params, use_encoder_bridge),
         _capture_permit: Some(capture_permit),
         stop_requested: false,
     };
+    // The fully-constructed pipeline is now committed to becoming an active
+    // capture. Advance the caption epoch only here, after every fallible startup
+    // step, so an early start failure cannot create an orphan caption session.
+    // This boundary also purges any cues left by a previously failed capture.
+    {
+        let captions_params = params.captions.clone().unwrap_or_default();
+        crate::captions::set_caption_session_style(
+            &state,
+            captions_params.position,
+            captions_params.text_size,
+            captions_params.style_id,
+            captions_params.style_revision,
+            params.output.video.width,
+            params.output.video.height,
+        )
+        .await;
+    }
     let running_state = if params.output.stream_enabled && !params.output.record_enabled {
         RecordingState::Streaming
     } else {
@@ -1122,6 +1285,30 @@ pub async fn start_session(
     drop(recording_startup_scene.take());
     state.emit_event("recording.status", running_status.clone());
     publish_recording_live_preview_status(&state, use_encoder_bridge, None).await;
+    if let Some(captions) = params
+        .captions
+        .as_ref()
+        .filter(|captions| captions.enabled && !captions.suppressed_for_session)
+    {
+        debug_assert!(
+            has_native_audio,
+            "captions-enabled sessions must hold native audio before publication"
+        );
+        let language = (!captions.language.trim().is_empty()
+            && !captions.language.eq_ignore_ascii_case("auto"))
+        .then(|| captions.language.clone());
+        if let Err(error) = crate::captions::start_captions(&state, language).await {
+            let message = format!("Live captions could not start: {error}");
+            crate::captions::block_captions(&state, "captions-start-failed", message.clone()).await;
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Warn,
+                "captions-start-failed",
+                &message,
+            );
+        }
+    }
     if has_native_audio {
         tokio::spawn(sample_native_audio_during_recording(
             state.clone(),
@@ -2644,6 +2831,7 @@ async fn monitor_session(
                 ffmpeg_path: active.ffmpeg_path.clone(),
                 started_at: active.started_at.clone(),
                 pipeline: active.pipeline.clone(),
+                captioned_copy_requested: active.captioned_copy_requested,
                 native_audio_stats,
             }
         });
@@ -2655,6 +2843,17 @@ async fn monitor_session(
     let Some(mut monitored_recording) = monitored_recording else {
         return;
     };
+
+    // Dropping ActiveRecording stops the native post-controls audio producer.
+    // Close the caption bus now, drain the provider's final utterance within a
+    // bounded grace period, and only then generate SRT/captioned artifacts.
+    crate::captions::finish_captions_for_capture(&state).await;
+    let finalized_caption_artifact =
+        crate::captions::take_finalized_caption_artifact_for_capture(&state).await;
+    let _ = crate::captions::clear_caption_overlays(
+        &state.caption_overlay,
+        crate::captions::ClearCaptionOverlayParams::default(),
+    );
 
     // Also cover provider/process exits that bypass an explicit stop RPC. The
     // session guard prevents this late monitor task from clearing a newer
@@ -2783,6 +2982,44 @@ async fn monitor_session(
             } else {
                 None
             };
+            let final_path = mp4_path.clone().or(output_path.clone());
+
+            // Establish ownership of every finalized caption artifact before
+            // publishing Idle. The renderer may start another capture as soon
+            // as it sees Idle; by then this request must already survive as an
+            // independent queued render rather than borrowing the next epoch.
+            if let Some(final_path) = final_path.as_ref() {
+                let caption_artifact = crate::captions::write_caption_artifacts(
+                    &state,
+                    &gate_session_id,
+                    final_path,
+                    finalized_caption_artifact,
+                )
+                .await;
+                if should_begin_captioned_copy_render(
+                    monitored_recording.captioned_copy_requested,
+                    caption_artifact.chunks.len(),
+                ) {
+                    crate::captions::begin_caption_cue_render(
+                        &state,
+                        &gate_session_id,
+                        &monitored_recording.ffmpeg_path,
+                        final_path,
+                        &caption_artifact,
+                    )
+                    .await;
+                }
+            } else {
+                let dropped = finalized_caption_artifact.chunks.len();
+                if dropped > 0 {
+                    state.emit_log(
+                        "info",
+                        format!(
+                            "Discarded {dropped} ephemeral live-caption cue(s) after the stream-only session ended."
+                        ),
+                    );
+                }
+            }
             let _ = state.database.finish_session(
                 &session_id,
                 "completed",
@@ -2820,23 +3057,7 @@ async fn monitor_session(
             // Slice 8: check (and, if needed, repair in place) the finalized file off
             // the hot path. The recording is already marked complete; the gate only ever
             // replaces the visible file with a validated better version, keeping a backup.
-            if let Some(final_path) = mp4_path.clone().or(output_path.clone()) {
-                // Aligned captions (burn-in plan B2/B3): drain this session's
-                // live caption chunks into an .srt sidecar, then queue the
-                // idle-time captioned copy from the same chunks.
-                let caption_chunks =
-                    crate::captions::write_caption_artifacts(&state, &gate_session_id, &final_path)
-                        .await;
-                if !caption_chunks.is_empty() {
-                    crate::captions::begin_caption_cue_render(
-                        &state,
-                        &gate_session_id,
-                        &monitored_recording.ffmpeg_path,
-                        &final_path,
-                        &caption_chunks,
-                    )
-                    .await;
-                }
+            if let Some(final_path) = final_path {
                 // Library poster (L2): one thumbnail frame per recording,
                 // extracted off the hot path under the idle ffmpeg permit.
                 {
@@ -2901,6 +3122,13 @@ async fn monitor_session(
                     message: Some(message),
                 },
             );
+            let discarded = crate::captions::discard_failed_caption_capture(&state).await;
+            if discarded > 0 {
+                state.emit_log(
+                    "info",
+                    format!("Discarded {discarded} caption cue(s) owned by the failed capture."),
+                );
+            }
         }
         Err(error) => {
             let message = format!("Could not wait for FFmpeg: {error}");
@@ -2939,6 +3167,13 @@ async fn monitor_session(
                     message: Some(message),
                 },
             );
+            let discarded = crate::captions::discard_failed_caption_capture(&state).await;
+            if discarded > 0 {
+                state.emit_log(
+                    "info",
+                    format!("Discarded {discarded} caption cue(s) owned by the failed capture."),
+                );
+            }
         }
     }
     drop(finalizing_permit);
@@ -3530,7 +3765,12 @@ struct MonitoredRecording {
     ffmpeg_path: String,
     started_at: String,
     pipeline: RecordingPipeline,
+    captioned_copy_requested: bool,
     native_audio_stats: Option<NativeAudioStats>,
+}
+
+fn should_begin_captioned_copy_render(requested: bool, caption_chunk_count: usize) -> bool {
+    requested && caption_chunk_count > 0
 }
 
 fn recording_duration_ms(started_at: &str, ended_at: &str) -> Option<i64> {
@@ -4343,8 +4583,13 @@ async fn prepare_native_audio_source(
 
     let path = native_audio_fifo_path(session_id);
     if let Err(error) = create_native_audio_fifo(&path) {
+        let consequence = if live_captions_requested(params) {
+            "the captions-enabled session cannot start"
+        } else {
+            "continuing video-only"
+        };
         let message = format!(
-            "Native CoreAudio microphone is unavailable; continuing video-only. Could not create audio FIFO: {error}"
+            "Native CoreAudio microphone is unavailable; {consequence}. Could not create audio FIFO: {error}"
         );
         state.emit_log("warn", &message);
         let _ = emit_health_event(
@@ -4377,9 +4622,13 @@ async fn prepare_native_audio_source(
         }
         Err(error) => {
             let _ = crate::fifo::cleanup(&path);
-            let message = format!(
-                "Native CoreAudio microphone is unavailable; continuing video-only. {error}"
-            );
+            let consequence = if live_captions_requested(params) {
+                "the captions-enabled session cannot start"
+            } else {
+                "continuing video-only"
+            };
+            let message =
+                format!("Native CoreAudio microphone is unavailable; {consequence}. {error}");
             state.emit_log("warn", &message);
             let _ = emit_health_event(
                 state,
@@ -4854,6 +5103,7 @@ fn bridge_compositor_split_output_ffmpeg_args(
         recording_fifo_path,
         recording_video_output,
         params.output.video.fps,
+        SPLIT_RECORDING_INPUT_THREAD_QUEUE_PACKETS,
     )?;
     let stream_video_input_index = append_bridge_encoded_video_input_args(
         &mut args,
@@ -4861,6 +5111,7 @@ fn bridge_compositor_split_output_ffmpeg_args(
         stream_fifo_path,
         recording_video_output,
         stream_video.fps,
+        SPLIT_STREAM_INPUT_THREAD_QUEUE_PACKETS,
     )?;
     let input_layout = InputLayout {
         video_input_index: recording_video_input_index,
@@ -4897,12 +5148,15 @@ fn bridge_compositor_split_output_ffmpeg_args(
     let mut uses_companion_stream_input = false;
     for target in stream_targets {
         let target_video = target.output_video.as_ref().unwrap_or(&stream_video);
-        let video_input_index = if same_video_profile(target_video, &params.output.video) {
-            uses_recording_stream_input = true;
-            recording_video_input_index
-        } else if same_video_profile(target_video, &stream_video) {
+        // Prefer the auxiliary stream input on a profile tie. A tie only exists
+        // for the forced same-profile caption split; routing primary first would
+        // silently send the clean recording pixels to RTMP.
+        let video_input_index = if same_video_profile(target_video, &stream_video) {
             uses_companion_stream_input = true;
             stream_video_input_index
+        } else if same_video_profile(target_video, &params.output.video) {
+            uses_recording_stream_input = true;
+            recording_video_input_index
         } else {
             bail!(
                 "Target {} resolves to unsupported mixed stream profile {}x{}@{} {}kbps",
@@ -5071,12 +5325,15 @@ fn append_bridge_encoded_video_input_args(
     fifo_path: &Path,
     video_output: EncoderBridgeVideoOutput,
     fps: u32,
+    thread_queue_packets: usize,
 ) -> Result<usize> {
     ensure_encoded_bridge_video_output(video_output)?;
     let input_index = *next_input_index;
     match video_output {
         EncoderBridgeVideoOutput::VideoToolboxH264AnnexB => {
             args.extend([
+                "-thread_queue_size".to_string(),
+                thread_queue_packets.max(1).to_string(),
                 "-use_wallclock_as_timestamps".to_string(),
                 "1".to_string(),
                 "-f".to_string(),
@@ -5089,13 +5346,15 @@ fn append_bridge_encoded_video_input_args(
         }
         EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => {
             args.extend([
+                "-thread_queue_size".to_string(),
+                thread_queue_packets.max(1).to_string(),
                 // Same probe discipline as append_bridge_recording_input_args:
                 // the writer is our own bridge; default mpegts probing starves
                 // a multi-FIFO graph (LVF2 "no bytes", plan 023 L1). `nobuffer`
                 // is deliberately absent because it discards the first GOP on
                 // these non-seekable FIFOs and creates a deterministic A/V gap.
                 "-probesize".to_string(),
-                "65536".to_string(),
+                SPLIT_ENCODED_INPUT_PROBE_BYTES.to_string(),
                 "-analyzeduration".to_string(),
                 "0".to_string(),
                 "-f".to_string(),
@@ -6471,7 +6730,52 @@ fn validate_outputs(params: &StartSessionParams) -> Result<()> {
     }
 
     validate_video_settings(&params.output.video)?;
+    validate_caption_output_policy(params)?;
     validate_video_profile_policy(params)?;
+
+    Ok(())
+}
+
+fn validate_caption_output_policy(params: &StartSessionParams) -> Result<()> {
+    let Some(captions) = params
+        .captions
+        .as_ref()
+        .filter(|captions| captions.enabled && !captions.suppressed_for_session)
+    else {
+        // Captions-off sessions may still pre-arm an eligible saved target,
+        // but preflight must not block capture. The renderer's output-readiness
+        // guard prevents enabling an ineligible 60fps/mixed session mid-run.
+        return Ok(());
+    };
+    if !captions.effective_burn_target().burns_stream() || !params.output.stream_enabled {
+        return Ok(());
+    }
+    let plan = caption_leg_plan(params);
+    let live_caption_profiles = resolved_enabled_stream_output_videos(params)?;
+
+    if plan.aux {
+        let mut distinct_profiles = Vec::<VideoSettings>::new();
+        for profile in live_caption_profiles.iter().cloned() {
+            if !distinct_profiles
+                .iter()
+                .any(|existing| same_video_profile(existing, &profile))
+            {
+                distinct_profiles.push(profile);
+            }
+        }
+        if distinct_profiles.len() > 1 {
+            bail!(
+                "A clean recording plus live captions supports one captioned stream profile per session. Make every enabled streaming target use the same output profile."
+            );
+        }
+    }
+
+    if params.output.video.fps > 30 || live_caption_profiles.iter().any(|profile| profile.fps > 30)
+    {
+        bail!(
+            "Live caption burn-in supports stream profiles up to 30fps. Select Off or Recording captions for higher-frame-rate streaming."
+        );
+    }
 
     Ok(())
 }
@@ -6585,11 +6889,46 @@ fn resolve_split_output_profiles(params: &StartSessionParams) -> Result<SplitOut
 }
 
 fn caption_burn_target(params: &StartSessionParams) -> crate::captions::CaptionBurnTarget {
-    params
+    let Some(captions) = params
         .captions
         .as_ref()
-        .map(|captions| captions.effective_burn_target())
-        .unwrap_or_default()
+        .filter(|captions| !captions.suppressed_for_session)
+    else {
+        return crate::captions::CaptionBurnTarget::Off;
+    };
+    let target = captions.effective_burn_target();
+    let needs_live_stream_leg = target.burns_stream() && params.output.stream_enabled;
+    if !captions.enabled && needs_live_stream_leg && !caption_live_burn_output_eligible(params) {
+        return crate::captions::CaptionBurnTarget::Off;
+    }
+    target
+}
+
+fn caption_live_burn_output_eligible(params: &StartSessionParams) -> bool {
+    if params.output.video.fps > 30 {
+        return false;
+    }
+    let Ok(profiles) = resolved_enabled_stream_output_videos(params) else {
+        return false;
+    };
+    if profiles.iter().any(|profile| profile.fps > 30) {
+        return false;
+    }
+    if params.output.record_enabled && params.output.stream_enabled {
+        let mut distinct_profiles = Vec::<VideoSettings>::new();
+        for profile in profiles {
+            if !distinct_profiles
+                .iter()
+                .any(|existing| same_video_profile(existing, &profile))
+            {
+                distinct_profiles.push(profile);
+            }
+        }
+        if distinct_profiles.len() > 1 {
+            return false;
+        }
+    }
+    true
 }
 
 fn caption_leg_plan(params: &StartSessionParams) -> crate::captions::CaptionOverlayLegPlan {
@@ -7634,6 +7973,101 @@ mod tests {
         // Real audio, however quiet, is not a silent track.
         assert_eq!(silent_mic_verdict(48_000, 0.002), None);
         assert_eq!(silent_mic_verdict(48_000, 0.9), None);
+    }
+
+    fn starting_test_status() -> RecordingStatus {
+        RecordingStatus {
+            state: RecordingState::Starting,
+            session_id: Some("caption-preflight-test".to_string()),
+            output_path: None,
+            stream_url: Some("rtmp://example.invalid/live/redacted".to_string()),
+            started_at: Some("2026-07-11T00:00:00Z".to_string()),
+            audio_tracks: Vec::new(),
+            pipeline: None,
+            duration_ms: None,
+            message: Some("Starting stream session.".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn captions_enabled_without_native_audio_cannot_receive_start_publication_permit() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let mut params = base_params(false, true);
+        params.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: true,
+            ..Default::default()
+        });
+
+        let result = authorize_session_start_publication(&state, "session", &params, false).await;
+
+        assert!(result.is_err(), "the publication permit must be withheld");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("session was not started")
+        );
+        assert!(state.recording.lock().await.is_none());
+        let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            emitted
+                .iter()
+                .all(|event| event.event != "recording.status"),
+            "no Starting/Recording/Streaming status may be published without the permit"
+        );
+        let caption_status = crate::captions::captions_status(&state).await;
+        assert_eq!(
+            caption_status.state,
+            crate::captions::CaptionsState::Blocked
+        );
+        assert_eq!(
+            caption_status.reason_code.as_deref(),
+            Some("audio-path-unsupported")
+        );
+    }
+
+    #[tokio::test]
+    async fn one_session_caption_suppression_allows_normal_start_publication() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let mut params = base_params(false, true);
+        // The renderer preserves persisted consent and sends enabled=false only
+        // in this session snapshot after "Continue without captions".
+        params.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: false,
+            suppressed_for_session: true,
+            ..Default::default()
+        });
+
+        let permit = authorize_session_start_publication(&state, "session", &params, false)
+            .await
+            .expect("suppressed captions do not require the native caption bus");
+        publish_authorized_session_start(&state, starting_test_status(), &permit);
+
+        let event = events.try_recv().expect("Starting status is published");
+        assert_eq!(event.event, "recording.status");
+        assert_eq!(event.payload["state"], "starting");
+    }
+
+    #[tokio::test]
+    async fn captions_enabled_with_native_audio_allows_start_publication() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let mut params = base_params(false, true);
+        params.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: true,
+            ..Default::default()
+        });
+
+        let permit = authorize_session_start_publication(&state, "session", &params, true)
+            .await
+            .expect("opened native caption bus authorizes publication");
+        publish_authorized_session_start(&state, starting_test_status(), &permit);
+
+        let event = events.try_recv().expect("Starting status is published");
+        assert_eq!(event.event, "recording.status");
+        assert_eq!(event.payload["state"], "starting");
     }
 
     #[test]
@@ -9610,6 +10044,24 @@ mod tests {
             input_arg_value(&args, &stream_fifo_path.display().to_string(), "-f"),
             Some("mpegts")
         );
+        assert_eq!(
+            input_arg_value(
+                &args,
+                &recording_fifo_path.display().to_string(),
+                "-thread_queue_size"
+            ),
+            Some("64"),
+            "the first split FIFO needs enough demux-thread cushion while FFmpeg opens the auxiliary input"
+        );
+        assert_eq!(
+            input_arg_value(
+                &args,
+                &stream_fifo_path.display().to_string(),
+                "-thread_queue_size"
+            ),
+            Some("8"),
+            "the live input stays latency-bounded"
+        );
         // MpegTs carries real encoder PTS — no -framerate synthesis and no
         // wallclock stamping on either FIFO (plan 023: the wallclock path
         // wrote duplicate-PTS slideshow recordings).
@@ -9622,8 +10074,17 @@ mod tests {
             None
         );
         assert_eq!(
+            input_arg_value(
+                &args,
+                &recording_fifo_path.display().to_string(),
+                "-probesize"
+            ),
+            Some("4096")
+        );
+        assert_eq!(
             input_arg_value(&args, &stream_fifo_path.display().to_string(), "-probesize"),
-            Some("65536")
+            Some("4096"),
+            "split FIFO probing must complete before the sibling encoder reaches its 250ms integrity ceiling"
         );
         assert!(args.windows(2).any(|pair| pair == ["-map", "1:v"]));
         assert!(args.windows(2).any(|pair| pair == ["-map", "2:v"]));
@@ -9645,14 +10106,6 @@ mod tests {
         assert_eq!(
             input_arg_value(&args, &recording_fifo_path.display().to_string(), "-f"),
             Some("mpegts")
-        );
-        assert_eq!(
-            input_arg_value(
-                &args,
-                &recording_fifo_path.display().to_string(),
-                "-probesize"
-            ),
-            Some("65536")
         );
         assert_eq!(
             input_arg_value(&args, &recording_fifo_path.display().to_string(), "-fflags"),
@@ -11796,9 +12249,9 @@ mod tests {
     }
 
     #[test]
-    fn caption_burn_in_forces_a_same_profile_stream_leg() {
+    fn captioned_stream_forces_a_same_profile_stream_leg_without_touching_recording() {
         // Same-profile record+stream normally shares frames (no aux leg);
-        // burn-in must force a separate stream leg so the recording stays clean.
+        // stream burn-in must force a separate stream leg so the recording stays clean.
         // No StreamingSettings → the stream output IS the recording profile.
         let mut params = base_params(true, true);
         params.streaming = None;
@@ -11811,22 +12264,310 @@ mod tests {
         assert_eq!(without_burn_in, None);
 
         params.captions = Some(crate::protocol::CaptionsSessionParams {
-            burn_in_enabled: true,
+            enabled: true,
+            burn_target: crate::captions::CaptionBurnTarget::Stream,
             ..Default::default()
         });
-        let with_burn_in = recording_compositor_stream_output(
+        let stream_only = recording_compositor_stream_output(
             &params,
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
         )
         .unwrap();
         assert_eq!(
-            with_burn_in,
+            stream_only,
             Some(CompositorAuxiliaryOutput {
                 width: params.output.video.width,
                 height: params.output.video.height,
                 frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
             })
         );
+        let stream_plan = caption_leg_plan(&params);
+        assert_eq!((stream_plan.primary, stream_plan.aux), (false, true));
+        assert!(!stream_plan.captioned_copy);
+
+        params.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: true,
+            burn_target: crate::captions::CaptionBurnTarget::Recording,
+            ..Default::default()
+        });
+        assert_eq!(
+            recording_compositor_stream_output(
+                &params,
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            )
+            .unwrap(),
+            None,
+            "Recording selection creates a later copy and needs no live split"
+        );
+        let recording_plan = caption_leg_plan(&params);
+        assert_eq!((recording_plan.primary, recording_plan.aux), (false, false));
+        assert!(recording_plan.captioned_copy);
+
+        params.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: true,
+            burn_target: crate::captions::CaptionBurnTarget::Both,
+            ..Default::default()
+        });
+        assert!(
+            recording_compositor_stream_output(
+                &params,
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            )
+            .unwrap()
+            .is_some(),
+            "Both still splits because the live stream is captioned"
+        );
+        let both_plan = caption_leg_plan(&params);
+        assert_eq!(
+            (both_plan.primary, both_plan.aux),
+            (false, true),
+            "one auxiliary overlay avoids both a dirty source and double overlay"
+        );
+        assert!(both_plan.captioned_copy);
+    }
+
+    #[test]
+    fn session_suppression_keeps_the_saved_target_but_plans_as_off() {
+        let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p60);
+        params.streaming = None;
+        params.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: false,
+            suppressed_for_session: true,
+            burn_target: crate::captions::CaptionBurnTarget::Both,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            params.captions.as_ref().unwrap().burn_target,
+            crate::captions::CaptionBurnTarget::Both,
+            "Continue without captions must not erase the user's saved selection"
+        );
+        assert_eq!(
+            caption_burn_target(&params),
+            crate::captions::CaptionBurnTarget::Off
+        );
+        assert_eq!(
+            recording_compositor_stream_output(
+                &params,
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            )
+            .unwrap(),
+            None,
+            "session suppression must not force a same-profile auxiliary leg"
+        );
+        validate_outputs(&params)
+            .expect("session suppression must not trigger the live-burn 30fps preflight");
+    }
+
+    #[test]
+    fn captions_off_prearms_only_an_eligible_saved_live_target() {
+        let mut eligible = base_params(true, true);
+        eligible.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        eligible.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: false,
+            suppressed_for_session: false,
+            burn_target: crate::captions::CaptionBurnTarget::Stream,
+            ..Default::default()
+        });
+        let eligible_plan = caption_leg_plan(&eligible);
+        assert_eq!((eligible_plan.primary, eligible_plan.aux), (false, true));
+        assert!(eligible_plan.force_same_profile_split);
+        validate_outputs(&eligible).expect("captions-off prearming does not block capture");
+
+        let mut ineligible = eligible.clone();
+        ineligible.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p60);
+        assert_eq!(
+            caption_burn_target(&ineligible),
+            crate::captions::CaptionBurnTarget::Off
+        );
+        assert_eq!(
+            recording_compositor_stream_output(
+                &ineligible,
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            )
+            .unwrap(),
+            None
+        );
+        validate_outputs(&ineligible)
+            .expect("ineligible captions-off output may start with mid-session enable blocked");
+    }
+
+    #[test]
+    fn forced_same_profile_caption_split_routes_rtmp_from_the_auxiliary_input() {
+        let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        params.streaming = None;
+        params.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: true,
+            burn_target: crate::captions::CaptionBurnTarget::Both,
+            ..Default::default()
+        });
+        let stream_output = recording_compositor_stream_output(
+            &params,
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+        )
+        .unwrap()
+        .expect("captioned stream forces an auxiliary leg");
+        let target = StreamTarget {
+            url: "rtmp://example.test/live/key".to_string(),
+            redacted_url: "rtmp://example.test/live/••••".to_string(),
+            target_id: "target:test".to_string(),
+            platform: StreamPlatform::Custom,
+            label: "Test".to_string(),
+            output_video: None,
+        };
+        let args = bridge_compositor_split_output_ffmpeg_args(
+            &CaptureInputs {
+                video: VideoInput::TestPattern,
+                camera_index: None,
+                microphone: None,
+            },
+            &params,
+            Some(Path::new("/tmp/videorc-caption-route.mkv")),
+            &[target],
+            Path::new("/tmp/videorc-caption-route-recording.ts"),
+            Path::new("/tmp/videorc-caption-route-stream.ts"),
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            stream_output,
+        )
+        .unwrap();
+
+        assert_eq!(
+            args.windows(2)
+                .filter(|pair| pair == &["-map", "1:v"])
+                .count(),
+            1,
+            "clean primary is mapped only to the local recording"
+        );
+        assert_eq!(
+            args.windows(2)
+                .filter(|pair| pair == &["-map", "2:v"])
+                .count(),
+            1,
+            "RTMP must map the captioned auxiliary leg when both profiles tie"
+        );
+    }
+
+    #[test]
+    fn live_caption_burn_preflight_rejects_over_30fps_but_copy_only_is_allowed() {
+        for burn_target in [
+            crate::captions::CaptionBurnTarget::Stream,
+            crate::captions::CaptionBurnTarget::Both,
+        ] {
+            let mut params = base_params(true, true);
+            params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p60);
+            params.captions = Some(crate::protocol::CaptionsSessionParams {
+                enabled: true,
+                burn_target,
+                ..Default::default()
+            });
+            let error = validate_outputs(&params).unwrap_err().to_string();
+            assert!(error.contains("30fps"), "{error}");
+            assert!(error.contains("caption"), "{error}");
+        }
+
+        for burn_target in [
+            crate::captions::CaptionBurnTarget::Off,
+            crate::captions::CaptionBurnTarget::Recording,
+        ] {
+            let mut params = base_params(true, true);
+            params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p60);
+            params.captions = Some(crate::protocol::CaptionsSessionParams {
+                enabled: true,
+                burn_target,
+                ..Default::default()
+            });
+            validate_outputs(&params).expect("non-live caption modes remain valid above 30fps");
+        }
+
+        let mut split = base_params(true, true);
+        split.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p60);
+        split.streaming = Some(streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "yt",
+        )]));
+        split.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: true,
+            burn_target: crate::captions::CaptionBurnTarget::Stream,
+            ..Default::default()
+        });
+        let error = validate_outputs(&split).unwrap_err().to_string();
+        assert!(error.contains("30fps"), "{error}");
+        assert!(
+            error.contains("caption"),
+            "primary 60fps remains ineligible even when the separate stream profile is 30fps: {error}"
+        );
+    }
+
+    #[test]
+    fn captioned_record_and_stream_rejects_multiple_target_profiles() {
+        let mut params = base_params(true, true);
+        params.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: true,
+            burn_target: crate::captions::CaptionBurnTarget::Stream,
+            ..Default::default()
+        });
+        let mut streaming = streaming_for(&[
+            (
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "yt",
+            ),
+            (StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "tw"),
+        ]);
+        let twitch = streaming
+            .targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Twitch)
+            .unwrap();
+        twitch.output_preset = Some(VideoPreset::StreamSafe1080p60);
+        twitch.output_bitrate_kbps = Some(6000);
+        params.streaming = Some(streaming);
+
+        let error = validate_outputs(&params).unwrap_err().to_string();
+        assert!(error.contains("one captioned stream profile"), "{error}");
+
+        let mut captions_off = base_params(true, true);
+        captions_off.output.video = VideoSettings {
+            preset: VideoPreset::Record4k30,
+            width: 3840,
+            height: 2160,
+            fps: 30,
+            bitrate_kbps: 30_000,
+        };
+        let mut mixed = streaming_for(&[
+            (
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "yt",
+            ),
+            (StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "tw"),
+        ]);
+        mixed.default_output_preset = VideoPreset::StreamYoutube4k30;
+        mixed.default_bitrate_kbps = 30_000;
+        captions_off.streaming = Some(mixed);
+        captions_off.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: false,
+            burn_target: crate::captions::CaptionBurnTarget::Stream,
+            ..Default::default()
+        });
+        assert_eq!(
+            caption_burn_target(&captions_off),
+            crate::captions::CaptionBurnTarget::Off,
+            "an ineligible mixed captions-off session does not reserve an impossible live leg"
+        );
+        validate_outputs(&captions_off)
+            .expect("captions-off preserves the existing mixed-profile capture behavior");
+    }
+
+    #[test]
+    fn captioned_copy_finalization_requires_explicit_selection_and_cues() {
+        assert!(!should_begin_captioned_copy_render(false, 0));
+        assert!(!should_begin_captioned_copy_render(false, 3));
+        assert!(!should_begin_captioned_copy_render(true, 0));
+        assert!(should_begin_captioned_copy_render(true, 3));
     }
 
     #[test]

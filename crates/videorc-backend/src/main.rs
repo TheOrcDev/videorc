@@ -96,7 +96,8 @@ use protocol::{
 use recording::{
     create_preview_snapshot, idle_status, live_preview_status, preview_file_path, remux_session,
     resume_pending_repair_jobs, shutdown_capture_processes, start_live_preview, start_session,
-    stop_live_preview, stop_recording, subscribe_live_preview_frames, update_preview_frame_age,
+    stop_live_preview, stop_recording, subscribe_live_preview_frames,
+    update_active_audio_processing, update_preview_frame_age,
 };
 use scene::{
     nudge_source, reorder_sources, reset_source_transform, scene_from_capture_config,
@@ -306,9 +307,11 @@ async fn shutdown_signal(state: AppState) {
 
     state.emit_log(
         "info",
-        "Backend shutdown requested; stopping capture processes.",
+        "Backend shutdown requested; stopping caption, capture, and artifact processes.",
     );
-    shutdown_capture_processes(state).await;
+    captions::shutdown_caption_runtime(&state).await;
+    shutdown_capture_processes(state.clone()).await;
+    captions::shutdown_caption_artifacts(&state).await;
 }
 
 /// A dedicated OS thread that kills this process when its parent dies. This MUST be
@@ -3206,7 +3209,10 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             ServerResponse::ok(command.id, account::current_account(session.as_ref()))
         }
         "account.sign_out" => {
-            account::clear_persisted_account();
+            clear_account_credentials_after_caption_shutdown(state, || {
+                account::clear_persisted_account();
+            })
+            .await;
             // The account no longer vouches for premium — drop hydrated
             // entitlements with it (multistream gate closes immediately).
             if entitlements::clear_account_entitlements() {
@@ -3254,23 +3260,63 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
         "captions.status.get" => {
             ServerResponse::ok(command.id, captions::captions_status(state).await)
         }
-        "captions.overlay.set" => {
-            let png_base64 = command
-                .params
-                .get("pngBase64")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            let position = command
-                .params
-                .get("position")
-                .and_then(|value| {
-                    serde_json::from_value::<captions::CaptionOverlayPosition>(value.clone()).ok()
-                })
-                .unwrap_or(captions::CaptionOverlayPosition::Bottom);
-            match captions::install_caption_overlay(&state.caption_overlay, png_base64, position) {
-                Ok(info) => ServerResponse::ok(command.id, info),
+        "captions.style.set" => {
+            match serde_json::from_value::<captions::SetCaptionStyleParams>(command.params) {
+                Ok(params) => match captions::update_caption_style(state, params).await {
+                    Ok(style) => ServerResponse::ok(command.id, style),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        captions::caption_style_error_code(&error),
+                        error.to_string(),
+                    ),
+                },
                 Err(error) => {
-                    ServerResponse::error(command.id, "captions-overlay-invalid", error.to_string())
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        "captions.test.inject-audio" => {
+            let duration_ms = command
+                .params
+                .get("durationMs")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(600);
+            match captions::inject_caption_contract_test_audio(duration_ms).await {
+                Ok(frames_accepted) => ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({ "framesAccepted": frames_accepted }),
+                ),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "caption-contract-test-disabled",
+                    error.to_string(),
+                ),
+            }
+        }
+        #[cfg(debug_assertions)]
+        "captions.test.snapshot" => match captions::caption_contract_test_snapshot(state).await {
+            Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+            Err(error) => ServerResponse::error(
+                command.id,
+                "caption-contract-test-disabled",
+                error.to_string(),
+            ),
+        },
+        "captions.overlay.set" => {
+            match serde_json::from_value::<captions::SetCaptionOverlayParams>(command.params) {
+                Ok(params) => {
+                    match captions::install_caption_overlays(&state.caption_overlay, params) {
+                        Ok(info) => ServerResponse::ok(command.id, info),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            captions::caption_overlay_error_code(&error),
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
         }
@@ -3297,10 +3343,23 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             command.id,
             comment_highlight::clear_comment_highlight(state).await,
         ),
-        "captions.overlay.clear" => ServerResponse::ok(
-            command.id,
-            captions::clear_caption_overlay(&state.caption_overlay),
-        ),
+        "captions.overlay.clear" => {
+            match serde_json::from_value::<captions::ClearCaptionOverlayParams>(command.params) {
+                Ok(params) => {
+                    match captions::clear_caption_overlays(&state.caption_overlay, params) {
+                        Ok(info) => ServerResponse::ok(command.id, info),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            captions::caption_overlay_error_code(&error),
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "captions.cues.submit" => {
             let request_id = command
                 .params
@@ -3544,6 +3603,65 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
+            }
+        }
+        "audio.processing.update" => {
+            match serde_json::from_value::<protocol::AudioProcessingUpdateParams>(command.params) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    update_active_audio_processing(state, params).await,
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        "audio.test.inject-pcm" => {
+            let session_id = command
+                .params
+                .get("sessionId")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let duration_ms = command
+                .params
+                .get("durationMs")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(600);
+            let raw_peak = command
+                .params
+                .get("rawPeak")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.12) as f32;
+            let injector = {
+                let recording = state.recording.lock().await;
+                recording
+                    .as_ref()
+                    .filter(|active| active.session_id == session_id)
+                    .and_then(|active| active.native_audio.as_ref())
+                    .and_then(|native_audio| native_audio.caption_contract_test_injector())
+            };
+            match injector {
+                Some(injector) => match injector.inject(duration_ms, raw_peak).await {
+                    Ok(injection) => ServerResponse::ok(
+                        command.id,
+                        serde_json::json!({
+                            "packetsGenerated": injection.packets_generated,
+                            "rawPeak": injection.raw_peak,
+                        }),
+                    ),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "caption-contract-test-disabled",
+                        error.to_string(),
+                    ),
+                },
+                None => ServerResponse::error(
+                    command.id,
+                    "caption-contract-test-disabled",
+                    "The matching caption contract test microphone session is not active.",
+                ),
             }
         }
         "scene.get" => {
@@ -4791,6 +4909,13 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
     }
 }
 
+async fn clear_account_credentials_after_caption_shutdown(
+    state: &AppState,
+    clear_credentials: impl FnOnce(),
+) {
+    captions::stop_captions_for_sign_out(state, clear_credentials).await;
+}
+
 fn stored_ai_session_token() -> Result<String> {
     account::stored_session_token().context("Sign in to use cloud AI.")
 }
@@ -4980,6 +5105,8 @@ mod tests {
     use serde_json::json;
     use std::time::Instant;
     use tokio::sync::broadcast;
+
+    static CAPTION_LIFECYCLE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn receive_tracked_json(
         receiver: &mut mpsc::Receiver<Message>,
@@ -5641,6 +5768,298 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[tokio::test]
+    async fn live_audio_processing_update_requires_an_active_matching_session() {
+        let state = test_state();
+        let response = handle_text_message(
+            &state,
+            r#"{"id":"audio-live","method":"audio.processing.update","params":{"sessionId":"ended-session","microphoneGainDb":6,"microphoneMuted":true}}"#,
+        )
+        .await;
+
+        assert!(response.ok);
+        let payload = response.payload.expect("audio processing payload");
+        assert_eq!(payload["applied"], false);
+        assert_eq!(payload["sessionId"], "ended-session");
+        assert_eq!(payload["microphoneGainDb"], 6.0);
+        assert_eq!(payload["microphoneMuted"], true);
+        assert_eq!(payload["reasonCode"], "no-active-session");
+    }
+
+    #[tokio::test]
+    async fn account_sign_out_stops_active_captions_before_credentials_are_cleared() {
+        let _caption_test_guard = CAPTION_LIFECYCLE_TEST_LOCK.lock().await;
+        let state = test_state();
+        let probe = captions::install_caption_sign_out_test_session(&state).await;
+        let mut events = state.events.subscribe();
+        let frame = audio::AudioFrame {
+            timestamp_micros: 0,
+            captured_at: std::time::Instant::now(),
+            sample_rate: 48_000,
+            channels: 1,
+            samples: vec![0.1; 960],
+        };
+
+        captions::offer_caption_frame(&frame);
+        timeout(Duration::from_secs(1), async {
+            while probe.frames_received() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active caption task should consume the microphone tap");
+        let received_before_sign_out = probe.frames_received();
+
+        let credentials_cleared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let clear_signal = credentials_cleared.clone();
+        clear_account_credentials_after_caption_shutdown(&state, || {
+            assert!(
+                probe.task_finished(),
+                "caption task must be joined before credential removal"
+            );
+            clear_signal.store(true, std::sync::atomic::Ordering::Release);
+        })
+        .await;
+        assert!(credentials_cleared.load(std::sync::atomic::Ordering::Acquire));
+
+        captions::offer_caption_frame(&audio::AudioFrame {
+            timestamp_micros: 20_000,
+            ..frame
+        });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(
+            probe.frames_received(),
+            received_before_sign_out,
+            "signed-out captions must not continue consuming microphone audio"
+        );
+
+        assert_eq!(
+            captions::caption_sign_out_test_snapshot(&state).await,
+            captions::CaptionSignOutTestSnapshot {
+                task_present: false,
+                stop_present: false,
+                desired_enabled: false,
+                language_present: false,
+                chunk_count: 0,
+                finalized_style_present: false,
+                tap_active: false,
+                primary_overlay_active: false,
+                auxiliary_overlay_active: false,
+            }
+        );
+        assert_eq!(
+            captions::captions_status(&state).await.state,
+            captions::CaptionsState::Idle
+        );
+
+        let mut saw_idle = false;
+        let mut saw_cleared = false;
+        while let Ok(event) = events.try_recv() {
+            saw_idle |= event.event == "captions.status" && event.payload["state"] == "idle";
+            saw_cleared |= event.event == "captions.cleared";
+        }
+        assert!(saw_idle, "renderer must receive the signed-out idle state");
+        assert!(
+            saw_cleared,
+            "renderer must receive a transcript reset event"
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_shutdown_joins_active_captions_and_removes_the_audio_tap() {
+        let _caption_test_guard = CAPTION_LIFECYCLE_TEST_LOCK.lock().await;
+        let state = test_state();
+        let probe = captions::install_caption_sign_out_test_session(&state).await;
+        let frame = audio::AudioFrame {
+            timestamp_micros: 0,
+            captured_at: std::time::Instant::now(),
+            sample_rate: 48_000,
+            channels: 1,
+            samples: vec![0.1; 960],
+        };
+
+        captions::offer_caption_frame(&frame);
+        timeout(Duration::from_secs(1), async {
+            while probe.frames_received() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active caption task should consume the microphone tap");
+        let received_before_shutdown = probe.frames_received();
+
+        captions::shutdown_caption_runtime(&state).await;
+        assert!(
+            probe.task_finished(),
+            "backend shutdown must join the provider task before capture teardown"
+        );
+        captions::offer_caption_frame(&audio::AudioFrame {
+            timestamp_micros: 20_000,
+            ..frame
+        });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(
+            probe.frames_received(),
+            received_before_shutdown,
+            "backend shutdown must disconnect the microphone tap"
+        );
+
+        assert_eq!(
+            captions::caption_sign_out_test_snapshot(&state).await,
+            captions::CaptionSignOutTestSnapshot {
+                task_present: false,
+                stop_present: false,
+                desired_enabled: true,
+                language_present: true,
+                chunk_count: 1,
+                finalized_style_present: true,
+                tap_active: false,
+                primary_overlay_active: false,
+                auxiliary_overlay_active: false,
+            },
+            "runtime shutdown preserves preferences and artifact cues until the artifact teardown"
+        );
+
+        captions::shutdown_caption_artifacts(&state).await;
+        let cleaned = captions::caption_sign_out_test_snapshot(&state).await;
+        assert_eq!(cleaned.chunk_count, 0);
+        assert!(!cleaned.finalized_style_present);
+    }
+
+    #[tokio::test]
+    async fn caption_stop_and_block_clear_backend_overlays_and_reset_renderer() {
+        let _caption_test_guard = CAPTION_LIFECYCLE_TEST_LOCK.lock().await;
+        let state = test_state();
+
+        let _stop_probe = captions::install_caption_sign_out_test_session(&state).await;
+        let mut stop_events = state.events.subscribe();
+        let stopped = captions::stop_captions(&state).await;
+        assert_eq!(stopped.state, captions::CaptionsState::Idle);
+        let stopped_snapshot = captions::caption_sign_out_test_snapshot(&state).await;
+        assert!(!stopped_snapshot.primary_overlay_active);
+        assert!(!stopped_snapshot.auxiliary_overlay_active);
+        assert_eq!(
+            stopped_snapshot.chunk_count, 1,
+            "ordinary stop preserves already-spoken cues for the recording artifact"
+        );
+        assert!(event_stream_contains_caption_reset(
+            &mut stop_events,
+            "stopped"
+        ));
+
+        let _block_probe = captions::install_caption_sign_out_test_session(&state).await;
+        let mut block_events = state.events.subscribe();
+        captions::block_captions(&state, "audio-path-unsupported", "No supported mic path").await;
+        let blocked = captions::captions_status(&state).await;
+        assert_eq!(blocked.state, captions::CaptionsState::Blocked);
+        assert_eq!(
+            blocked.reason_code.as_deref(),
+            Some("audio-path-unsupported")
+        );
+        let blocked_snapshot = captions::caption_sign_out_test_snapshot(&state).await;
+        assert!(!blocked_snapshot.primary_overlay_active);
+        assert!(!blocked_snapshot.auxiliary_overlay_active);
+        assert!(event_stream_contains_caption_reset(
+            &mut block_events,
+            "blocked"
+        ));
+    }
+
+    #[tokio::test]
+    async fn explicit_caption_opt_out_discards_audio_already_queued_for_transcription() {
+        let _caption_test_guard = CAPTION_LIFECYCLE_TEST_LOCK.lock().await;
+        let state = test_state();
+        let probe = captions::install_caption_queued_audio_test_session(&state).await;
+        timeout(Duration::from_secs(1), async {
+            while !probe.task_started() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("caption test consumer should start");
+
+        for timestamp_micros in [0, 20_000, 40_000] {
+            captions::offer_caption_frame(&audio::AudioFrame {
+                timestamp_micros,
+                captured_at: std::time::Instant::now(),
+                sample_rate: 48_000,
+                channels: 1,
+                samples: vec![0.1; 960],
+            });
+        }
+
+        let stop_state = state.clone();
+        let stopped = tokio::spawn(async move { captions::stop_captions(&stop_state).await });
+        timeout(Duration::from_secs(1), async {
+            while !captions::caption_task_detached_for_test(&state).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stop should take ownership of the caption task");
+        probe.release();
+
+        assert_eq!(
+            stopped.await.expect("stop task joins").state,
+            captions::CaptionsState::Idle
+        );
+        assert_eq!(
+            probe.frames_received(),
+            0,
+            "privacy opt-out must discard queued PCM instead of transcribing it"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_caption_failure_clears_backend_overlays_and_resets_renderer() {
+        let _caption_test_guard = CAPTION_LIFECYCLE_TEST_LOCK.lock().await;
+        let state = test_state();
+        let _probe = captions::install_caption_sign_out_test_session(&state).await;
+        let mut events = state.events.subscribe();
+
+        captions::publish_terminal_caption_failure_for_test(&state).await;
+
+        let snapshot = captions::caption_sign_out_test_snapshot(&state).await;
+        assert!(!snapshot.primary_overlay_active);
+        assert!(!snapshot.auxiliary_overlay_active);
+        assert!(event_stream_contains_caption_reset(&mut events, "blocked"));
+    }
+
+    #[tokio::test]
+    async fn capture_end_resets_live_caption_presentation_but_retains_artifact_cues() {
+        let _caption_test_guard = CAPTION_LIFECYCLE_TEST_LOCK.lock().await;
+        let state = test_state();
+        let _probe = captions::install_caption_sign_out_test_session(&state).await;
+        let mut events = state.events.subscribe();
+
+        let status = captions::finish_captions_for_capture(&state).await;
+
+        assert_eq!(status.state, captions::CaptionsState::Ready);
+        let snapshot = captions::caption_sign_out_test_snapshot(&state).await;
+        assert_eq!(
+            snapshot.chunk_count, 1,
+            "capture finalization must retain canonical cues for SRT/captioned-copy generation"
+        );
+        assert!(!snapshot.primary_overlay_active);
+        assert!(!snapshot.auxiliary_overlay_active);
+        assert!(event_stream_contains_caption_reset(
+            &mut events,
+            "capture-ended"
+        ));
+    }
+
+    fn event_stream_contains_caption_reset(
+        events: &mut broadcast::Receiver<protocol::ServerEvent>,
+        reason: &str,
+    ) -> bool {
+        while let Ok(event) = events.try_recv() {
+            if event.event == "captions.cleared" && event.payload["reason"] == reason {
+                return true;
+            }
+        }
+        false
     }
 
     #[derive(Clone)]

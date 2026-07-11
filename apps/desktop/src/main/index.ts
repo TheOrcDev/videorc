@@ -169,6 +169,7 @@ import type {
   BackendConnection,
   BackendLogEvent,
   CameraShape,
+  CaptionWindowSnapshot,
   CaptionsUpdate,
   CaptionsWindowState,
   CommentHighlightCommand,
@@ -249,6 +250,13 @@ let captionsWindowLastFrame: Electron.Rectangle | null = null
 let captionsWindowAlwaysOnTop = false
 let captionsWindowClosing = false
 let latestCaptionLines: CaptionsUpdate[] = []
+let latestCaptionSnapshot: CaptionWindowSnapshot = {
+  lines: [],
+  status: { state: 'idle' },
+  styleId: 'classic',
+  position: 'bottom',
+  textSize: 'm'
+}
 let nativePreviewSurfaceCompositorUpdateInFlight: Promise<PreviewSurfaceStatus> | null = null
 let nativePreviewSurfaceCompositorRequestSerial = 0
 const nativePreviewSurfaceMutationQueue = new NativePreviewMutationQueue()
@@ -1647,8 +1655,8 @@ function notesWindowHtml(document: NotesDocument): string {
 
 // FX6: app shortcuts died while an aux window (Notes/Comments) held key focus
 // — the forwarding above only listens on the main window. Aux windows forward
-// the exact same chords: ⌘1–9/⌘, focus main and navigate; ⌘⇧N/⌘⇧J toggle the
-// aux windows. Nothing else is intercepted (typing in Notes stays untouched).
+// the exact same chords: ⌘1–9/⌘, focus main and navigate; ⌘⇧N/⌘⇧J/⌘⇧C toggle
+// the aux windows. Nothing else is intercepted (typing in Notes stays untouched).
 function attachAuxWindowShortcuts(window: BrowserWindow): void {
   window.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown' || input.alt || !(input.meta || input.control)) {
@@ -1669,6 +1677,13 @@ function attachAuxWindowShortcuts(window: BrowserWindow): void {
           closeCommentsWindow()
         } else {
           void openCommentsWindow()
+        }
+      } else if (key === 'c') {
+        event.preventDefault()
+        if (captionsWindowIsOpen()) {
+          closeCaptionsWindow()
+        } else {
+          void openCaptionsWindow()
         }
       }
       return
@@ -9465,10 +9480,20 @@ app.whenReady().then(async () => {
   )
   // Same relay shape as comments: the main renderer owns the backend WS and
   // pushes its caption-line buffer; main caches it for the window's first paint.
+  ipcMain.handle('captions-window:push-snapshot', (_event, snapshot: CaptionWindowSnapshot) => {
+    latestCaptionSnapshot = snapshot
+    latestCaptionLines = Array.isArray(snapshot.lines) ? snapshot.lines : []
+    if (captionsWindow && !captionsWindow.webContents.isDestroyed()) {
+      captionsWindow.webContents.send('captions-window:snapshot', latestCaptionSnapshot)
+    }
+  })
+  ipcMain.handle('captions-window:get-snapshot', () => latestCaptionSnapshot)
   ipcMain.handle('captions-window:push-lines', (_event, lines: CaptionsUpdate[]) => {
     latestCaptionLines = Array.isArray(lines) ? lines : []
+    latestCaptionSnapshot = { ...latestCaptionSnapshot, lines: latestCaptionLines }
     if (captionsWindow && !captionsWindow.webContents.isDestroyed()) {
       captionsWindow.webContents.send('captions-window:lines', latestCaptionLines)
+      captionsWindow.webContents.send('captions-window:snapshot', latestCaptionSnapshot)
     }
   })
   ipcMain.handle('captions-window:get-lines', () => latestCaptionLines)

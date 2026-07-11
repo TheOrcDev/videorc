@@ -19,6 +19,8 @@ describe('buildRecordingStudioGateSteps', () => {
       'backend scene layout tests',
       'backend recording pipeline tests',
       'backend audio pipeline tests',
+      'live captions transport contract smoke',
+      'live captions mute/gain and record+stream artifact smoke',
       'dev app all-layout recording artifact smoke',
       'imported screen image recording smoke',
       'real-user launch first-frame contract smoke',
@@ -40,6 +42,8 @@ describe('buildRecordingStudioGateSteps', () => {
       '@videorc/desktop',
       'test',
       'capture.test.ts',
+      'caption-overlay.test.ts',
+      'captions-ui.test.ts',
       'background-assets.test.ts',
       'session-params.test.ts',
       'studio-health.test.ts',
@@ -48,6 +52,8 @@ describe('buildRecordingStudioGateSteps', () => {
       'backend-isolation.test.ts'
     ])
     assert.deepEqual(steps[1].args, ['test:scripts'])
+    assert.deepEqual(steps.at(-17).args, ['smoke:captions-contract'])
+    assert.deepEqual(steps.at(-16).args, ['smoke:captions-live'])
     assert.deepEqual(steps.at(-15).args, ['smoke:dev'])
     assert.deepEqual(steps.at(-14).args, ['smoke:screens'])
     assert.deepEqual(steps.at(-13).args, ['smoke:preview-real-launch'])
@@ -101,6 +107,8 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(report, /capture\.test\.ts/)
     assert.match(report, /test:scripts/)
     assert.match(report, /live_layout::tests::/)
+    assert.match(report, /smoke:captions-contract/)
+    assert.match(report, /smoke:captions-live/)
     assert.match(report, /smoke:dev/)
     assert.match(report, /smoke:screens/)
     assert.match(report, /smoke:layout-source-loop/)
