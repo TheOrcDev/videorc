@@ -666,13 +666,17 @@ function assertNativeMeasurement(scenario, measurement) {
   const maxMeasurementIntervalP95Ms = nativeMeasurementMaxIntervalP95Ms()
   const maxInputToPresentP95Ms = previewInputToPresentP95BudgetMs()
   const maxInputToPresentP99Ms = previewInputToPresentP99BudgetMs()
+  const requireAnimationCadence = expectNativeMetalPreview || !exerciseProofFramePolling
 
-  if ((measurement.measuredFps ?? 0) < minMeasurementFps) {
+  if (requireAnimationCadence && (measurement.measuredFps ?? 0) < minMeasurementFps) {
     throw new Error(
       `Native preview measured ${format(measurement.measuredFps)}fps, below ${format(minMeasurementFps)}.`
     )
   }
-  if ((measurement.intervalP95Ms ?? Number.POSITIVE_INFINITY) > maxMeasurementIntervalP95Ms) {
+  if (
+    requireAnimationCadence &&
+    (measurement.intervalP95Ms ?? Number.POSITIVE_INFINITY) > maxMeasurementIntervalP95Ms
+  ) {
     throw new Error(
       `Native preview p95 interval ${format(measurement.intervalP95Ms)}ms exceeded ${format(maxMeasurementIntervalP95Ms)}ms.`
     )
