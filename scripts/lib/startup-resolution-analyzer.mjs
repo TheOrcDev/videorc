@@ -7,7 +7,7 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import {
   maxConsecutiveRun,
@@ -24,6 +24,10 @@ export const DEFAULT_STARTUP_GATES = Object.freeze({
   blackFramePercent: 98,
   blackFrameThreshold: 32,
 })
+
+export function startupReportBaseName(file) {
+  return basename(file.replaceAll('\\', '/')).replace(/\.[^.]+$/, '')
+}
 
 // ---------------------------------------------------------------------------
 // Pure parsers / evaluators
@@ -583,7 +587,7 @@ export function renderStartupMarkdownReport(report) {
 export async function writeStartupReports(report, { outDir, ffmpegPath = 'ffmpeg', thumbnails = true } = {}) {
   const dir = outDir ?? dirname(report.file)
   mkdirSync(dir, { recursive: true })
-  const base = report.file.split('/').pop().replace(/\.[^.]+$/, '')
+  const base = startupReportBaseName(report.file)
   const jsonPath = join(dir, `${base}.startup.json`)
   const mdPath = join(dir, `${base}.startup.md`)
   writeFileSync(jsonPath, JSON.stringify(report, null, 2))
