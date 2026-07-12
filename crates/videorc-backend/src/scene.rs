@@ -71,6 +71,25 @@ pub fn validate_scene_background(scene: &Scene) -> Result<(), String> {
     Ok(())
 }
 
+/// Fit the preview output inside the preview budget box (1280x720) while
+/// PRESERVING the canvas aspect. The old independent `min()` clamps distorted
+/// any non-16:9 canvas — a portrait 1080x1920 became a 1080x720 (3:2) preview
+/// surface inside a correctly 9:16 CSS slot (vertical scene plan S2).
+/// Dimensions are rounded down to even values for the YUV conversion paths.
+fn preview_output_dimensions(output_width: u32, output_height: u32) -> (u32, u32) {
+    const MAX_WIDTH: u32 = 1280;
+    const MAX_HEIGHT: u32 = 720;
+    let even = |value: u32| (value.max(2) / 2) * 2;
+    if output_width <= MAX_WIDTH && output_height <= MAX_HEIGHT {
+        return (even(output_width), even(output_height));
+    }
+    let scale = (f64::from(MAX_WIDTH) / f64::from(output_width.max(1)))
+        .min(f64::from(MAX_HEIGHT) / f64::from(output_height.max(1)));
+    let width = (f64::from(output_width) * scale).round() as u32;
+    let height = (f64::from(output_height) * scale).round() as u32;
+    (even(width), even(height))
+}
+
 pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
     let (output_width, output_height, fps) = params
         .video
@@ -82,12 +101,16 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
         name: "Default Scene".to_string(),
         sources: Vec::new(),
         outputs: vec![
-            SceneOutput {
-                id: "output:preview".to_string(),
-                kind: SceneOutputKind::Preview,
-                width: output_width.min(1280),
-                height: output_height.min(720),
-                fps: fps.min(30),
+            {
+                let (preview_width, preview_height) =
+                    preview_output_dimensions(output_width, output_height);
+                SceneOutput {
+                    id: "output:preview".to_string(),
+                    kind: SceneOutputKind::Preview,
+                    width: preview_width,
+                    height: preview_height,
+                    fps: fps.min(30),
+                }
             },
             SceneOutput {
                 id: "output:recording".to_string(),
@@ -144,12 +167,31 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
                 scene.sources.push(camera);
             }
         }
-        // Explicit arms (no wildcard): a new preset must state its composition
+        LayoutPreset::Vertical => {
+            // Stacked portrait arrangement (9:16 short-form): camera band on
+            // top, screen below. Fractions are canvas-normalized so the
+            // arrangement stays sane even if applied to a landscape canvas.
+            // Like side-by-side regions, the camera band keeps no bubble mask
+            // and the screen band CONTAINS (nothing on the user's screen may
+            // be cropped away); the camera honors the user's Fit/Fill.
+            let mut base = base_source(&params.sources);
+            base.transform =
+                vertical_band_transform(VERTICAL_CAMERA_BAND, 1.0 - VERTICAL_CAMERA_BAND);
+            base.default_transform = base.transform.clone();
+            scene.sources.push(base);
+
+            if let Some(camera_id) = params.sources.camera_id.clone() {
+                let mut camera =
+                    camera_source(camera_id, &params.layout, output_width, output_height);
+                camera.transform = vertical_band_transform(0.0, VERTICAL_CAMERA_BAND);
+                camera.default_transform = camera.transform.clone();
+                scene.sources.push(camera);
+            }
+        }
+        // Explicit arm (no wildcard): a new preset must state its composition
         // here or fail to compile — the old `_ =>` silently composited unknown
         // presets as screen-camera.
-        LayoutPreset::ScreenCamera | LayoutPreset::Vertical => {
-            // Vertical's stacked portrait arrangement lands with the vertical
-            // layout slice; until then it composites like screen-camera.
+        LayoutPreset::ScreenCamera => {
             scene.sources.push(base_source(&params.sources));
             if let Some(camera_id) = params.sources.camera_id.clone() {
                 scene.sources.push(camera_source(
@@ -334,6 +376,23 @@ fn region_transform(x: f64, width: f64) -> SceneTransform {
     }
 }
 
+/// Camera band height for the Vertical (9:16) preset: face on top, content
+/// below — the short-form idiom. Owner taste review may tune this (0.35-0.45).
+const VERTICAL_CAMERA_BAND: f64 = 0.4;
+
+fn vertical_band_transform(y: f64, height: f64) -> SceneTransform {
+    SceneTransform {
+        x: 0.0,
+        y,
+        width: 1.0,
+        height,
+        crop_left: 0.0,
+        crop_top: 0.0,
+        crop_right: 0.0,
+        crop_bottom: 0.0,
+    }
+}
+
 fn apply_transform_patch(
     mut transform: SceneTransform,
     patch: SceneTransformPatch,
@@ -440,6 +499,58 @@ mod tests {
         CameraTransform, CameraTransformMode, EffectiveSceneBackground, LayoutPreset,
         LayoutSettings, SideBySideSplit, SourceSelection,
     };
+
+    #[test]
+    fn vertical_preset_stacks_camera_band_over_contained_screen() {
+        let mut params = base_params();
+        params.layout.layout_preset = LayoutPreset::Vertical;
+        let scene = scene_from_capture_config(params);
+
+        assert_eq!(scene.sources.len(), 2);
+        let screen = &scene.sources[0];
+        let camera = &scene.sources[1];
+
+        // Screen fills the lower band edge-to-edge.
+        assert_eq!(screen.transform.x, 0.0);
+        assert_eq!(screen.transform.y, VERTICAL_CAMERA_BAND);
+        assert_eq!(screen.transform.width, 1.0);
+        assert_eq!(screen.transform.height, 1.0 - VERTICAL_CAMERA_BAND);
+
+        // Camera band sits on top, full width.
+        assert_eq!(camera.transform.x, 0.0);
+        assert_eq!(camera.transform.y, 0.0);
+        assert_eq!(camera.transform.width, 1.0);
+        assert_eq!(camera.transform.height, VERTICAL_CAMERA_BAND);
+        assert_eq!(camera.default_transform, camera.transform);
+    }
+
+    #[test]
+    fn vertical_preset_without_camera_keeps_the_screen_band() {
+        // Transient state only — the selection blocker refuses vertical
+        // without a camera; the band stays consistent with side-by-side.
+        let mut params = base_params();
+        params.layout.layout_preset = LayoutPreset::Vertical;
+        params.sources.camera_id = None;
+        let scene = scene_from_capture_config(params);
+
+        assert_eq!(scene.sources.len(), 1);
+        assert_eq!(scene.sources[0].transform.y, VERTICAL_CAMERA_BAND);
+    }
+
+    #[test]
+    fn preview_output_preserves_canvas_aspect_inside_the_budget_box() {
+        // Standard landscape canvases keep their historical preview sizes.
+        assert_eq!(preview_output_dimensions(1920, 1080), (1280, 720));
+        assert_eq!(preview_output_dimensions(3840, 2160), (1280, 720));
+        assert_eq!(preview_output_dimensions(1280, 720), (1280, 720));
+        // Portrait no longer distorts: 1080x1920 fits height-bound at 9:16.
+        assert_eq!(preview_output_dimensions(1080, 1920), (404, 720));
+        // Non-16:9 landscape scales by the binding axis instead of squashing.
+        assert_eq!(preview_output_dimensions(1500, 1000), (1080, 720));
+        // Small canvases pass through (evened), never upscaled.
+        assert_eq!(preview_output_dimensions(640, 360), (640, 360));
+        assert_eq!(preview_output_dimensions(3, 3), (2, 2));
+    }
 
     // Camera shape/aspect feature (2026-07-06): the box aspect is decided HERE
     // once; every render path center-crops into it via Fill. Portrait = 3:4,

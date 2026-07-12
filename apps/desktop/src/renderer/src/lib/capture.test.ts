@@ -22,6 +22,7 @@ import {
   isScreenCaptureKitCaptureDevice,
   isSelectableCaptureDevice,
   layoutPresetNeedsCamera,
+  verticalOrientationVideoPatch,
   layoutPresetNeedsScreen,
   loadCaptureConfig,
   normalizeLayoutSettings,
@@ -1417,5 +1418,44 @@ describe('camera shape and aspect (2026-07-06)', () => {
 
     expect(layout.cameraShape).toBe('rectangle')
     expect(layout.cameraAspect).toBe('source')
+  })
+})
+
+describe('vertical orientation video coupling', () => {
+  const landscape = videoPresets['record-4k30']
+  const vertical = videoPresets['vertical-1080x1920']
+
+  it('entering vertical applies the portrait profile and remembers the landscape canvas', () => {
+    const patch = verticalOrientationVideoPatch('screen-camera', 'vertical', landscape, null)
+    expect(patch).toEqual({ video: vertical, verticalRestoreVideo: landscape })
+  })
+
+  it('entering vertical keeps a canvas the user already made portrait', () => {
+    const customPortrait = { ...landscape, preset: 'custom' as const, width: 1440, height: 2560 }
+    expect(
+      verticalOrientationVideoPatch('screen-only', 'vertical', customPortrait, null)
+    ).toBeNull()
+  })
+
+  it('leaving vertical restores exactly the remembered landscape canvas once', () => {
+    const patch = verticalOrientationVideoPatch('vertical', 'screen-camera', vertical, landscape)
+    expect(patch).toEqual({ video: landscape, verticalRestoreVideo: null })
+  })
+
+  it('leaving vertical falls back to the default landscape profile with nothing remembered', () => {
+    const patch = verticalOrientationVideoPatch('vertical', 'side-by-side', vertical, null)
+    expect(patch).toEqual({ video: defaultCaptureConfig.video, verticalRestoreVideo: null })
+  })
+
+  it('leaving vertical never clobbers a canvas the user already made landscape', () => {
+    const patch = verticalOrientationVideoPatch('vertical', 'screen-camera', landscape, vertical)
+    expect(patch).toEqual({ video: landscape, verticalRestoreVideo: null })
+  })
+
+  it('is inert for same-orientation transitions', () => {
+    expect(
+      verticalOrientationVideoPatch('screen-camera', 'side-by-side', landscape, null)
+    ).toBeNull()
+    expect(verticalOrientationVideoPatch('vertical', 'vertical', vertical, landscape)).toBeNull()
   })
 })

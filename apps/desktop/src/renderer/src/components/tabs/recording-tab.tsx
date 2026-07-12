@@ -22,7 +22,8 @@ const RESOLUTION_PRESETS = [
   { label: '4K', detail: '3840 × 2160', width: 3840, height: 2160 },
   { label: '2K', detail: '2560 × 1440', width: 2560, height: 1440 },
   { label: '1080p', detail: '1920 × 1080', width: 1920, height: 1080 },
-  { label: '720p', detail: '1280 × 720', width: 1280, height: 720 }
+  { label: '720p', detail: '1280 × 720', width: 1280, height: 720 },
+  { label: 'Vertical', detail: '1080 × 1920', width: 1080, height: 1920 }
 ] as const
 
 export function RecordingTab(): ReactElement {

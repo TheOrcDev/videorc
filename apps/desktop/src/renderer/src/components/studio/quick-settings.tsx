@@ -49,7 +49,8 @@ const QUICK_PRESETS: { id: LayoutPreset; label: string }[] = [
   { id: 'screen-camera', label: 'Screen + Cam' },
   { id: 'screen-only', label: 'Screen' },
   { id: 'camera-only', label: 'Camera' },
-  { id: 'side-by-side', label: 'Side by side' }
+  { id: 'side-by-side', label: 'Side by side' },
+  { id: 'vertical', label: 'Vertical (9:16)' }
 ]
 
 function presetLabel(preset: LayoutPreset): string {
@@ -62,7 +63,8 @@ const RESOLUTIONS = [
   { label: '4K', detail: '3840 × 2160', width: 3840, height: 2160 },
   { label: '2K', detail: '2560 × 1440', width: 2560, height: 1440 },
   { label: '1080p', detail: '1920 × 1080', width: 1920, height: 1080 },
-  { label: '720p', detail: '1280 × 720', width: 1280, height: 720 }
+  { label: '720p', detail: '1280 × 720', width: 1280, height: 720 },
+  { label: 'Vertical', detail: '1080 × 1920', width: 1080, height: 1920 }
 ]
 
 function resolutionKey(width: number, height: number): string {

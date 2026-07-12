@@ -7588,6 +7588,10 @@ fn video_filter(
         return side_by_side_video_filter(camera_input_index, params, preview);
     }
 
+    if matches!(params.layout.layout_preset, LayoutPreset::Vertical) {
+        return vertical_video_filter(camera_input_index, params, preview);
+    }
+
     let base_scale = if preview {
         "scale=w=960:h=-2".to_string()
     } else {
@@ -7663,6 +7667,52 @@ fn side_by_side_video_filter(
     };
     let final_scale = if preview { ",scale=w=960:h=-2" } else { "" };
     format!("{screen};{camera};[{left}][{right}]hstack=inputs=2{final_scale}[v]")
+}
+
+/// Camera band height for the Vertical preset's legacy FFmpeg path — mirrors
+/// scene.rs VERTICAL_CAMERA_BAND (0.4) and the compositor arrangement: camera
+/// band on top (covers), screen below (contains, never cropped). Heights are
+/// evened for yuv420p.
+fn vertical_band_heights(canvas_height: u32) -> (u32, u32) {
+    let camera = ((f64::from(canvas_height) * 0.4).round() as u32 / 2) * 2;
+    let camera = camera.clamp(2, canvas_height.saturating_sub(2));
+    (camera, canvas_height - camera)
+}
+
+fn vertical_video_filter(
+    camera_input_index: Option<usize>,
+    params: &StartSessionParams,
+    preview: bool,
+) -> String {
+    let video = &params.output.video;
+    let width = video.width;
+    let (camera_height, screen_height) = vertical_band_heights(video.height);
+    let fps = video.fps;
+
+    // Screen CONTAINS in its band (nothing on the user's screen may be cropped
+    // away) and pads with black; the camera band fills via the shared camera
+    // frame filter (fit/fill/zoom preserved).
+    let screen = format!(
+        "[0:v]setpts=PTS-STARTPTS,scale={width}:{screen_height}:force_original_aspect_ratio=decrease,pad={width}:{screen_height}:(ow-iw)/2:(oh-ih)/2:color=black,fps={fps},format=yuv420p[vt_screen]"
+    );
+    let camera = match camera_input_index {
+        Some(index) => {
+            let mirror = if params.layout.camera_mirror {
+                "hflip,"
+            } else {
+                ""
+            };
+            let frame = camera_frame_filter(width, camera_height, &params.layout);
+            format!(
+                "[{index}:v]setpts=PTS-STARTPTS,{mirror}{frame},fps={fps},format=yuv420p[vt_camera]"
+            )
+        }
+        None => {
+            format!("color=c=black:s={width}x{camera_height}:r={fps},format=yuv420p[vt_camera]")
+        }
+    };
+    let final_scale = if preview { ",scale=w=960:h=-2" } else { "" };
+    format!("{screen};{camera};[vt_camera][vt_screen]vstack=inputs=2{final_scale}[v]")
 }
 
 fn output_scale_filter(video: &VideoSettings) -> String {
@@ -11285,6 +11335,46 @@ mod tests {
         params.layout.side_by_side_camera_side = SideBySideCameraSide::Left;
         let left = video_filter(Some(1), &params, false);
         assert!(left.contains("[sbs_camera][sbs_screen]hstack=inputs=2"));
+    }
+
+    #[test]
+    fn vertical_band_heights_are_even_and_tile_the_canvas() {
+        let (camera, screen) = vertical_band_heights(1920);
+        assert_eq!(camera, 768);
+        assert_eq!(screen, 1152);
+        for height in [720, 1080, 1919, 1921] {
+            let (camera, screen) = vertical_band_heights(height);
+            assert_eq!(camera % 2, 0);
+            assert_eq!(camera + screen, height);
+            assert!(camera >= 2);
+        }
+    }
+
+    #[test]
+    fn vertical_filter_stacks_camera_band_over_padded_screen() {
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::Vertical;
+        params.output.video.width = 1080;
+        params.output.video.height = 1920;
+
+        let filter = video_filter(Some(1), &params, false);
+        // Camera band on top, screen below; screen pads (contains), never crops.
+        assert!(
+            filter.contains("[vt_camera][vt_screen]vstack=inputs=2"),
+            "stacked filter: {filter}"
+        );
+        assert!(
+            filter.contains("pad=1080:1152"),
+            "screen contains: {filter}"
+        );
+        assert!(!filter.contains("overlay"));
+
+        // Without a camera input the band renders black instead of collapsing.
+        let no_camera = video_filter(None, &params, false);
+        assert!(
+            no_camera.contains("color=c=black:s=1080x768"),
+            "{no_camera}"
+        );
     }
 
     fn ffmpeg_inputs(args: &[String]) -> Vec<&str> {

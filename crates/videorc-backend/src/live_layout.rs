@@ -386,6 +386,27 @@ async fn apply_scene_transaction(
     let intent_id = begin_layout_intent(state, requested_intent_id, needs).await?;
     let session_active = state.recording.lock().await.is_some();
 
+    // Vertical implies a portrait canvas and the encoder canvas is fixed at
+    // session start — switching INTO vertical mid-session is refused honestly
+    // (the renderer disables the card too; this is defense in depth). Being
+    // live in vertical stays fully mutable: source switches, backgrounds, and
+    // scene commits within the running vertical session all pass.
+    if session_active && matches!(params.layout.layout_preset, LayoutPreset::Vertical) {
+        let already_vertical = {
+            let compositor = state.compositor.lock().await;
+            compositor
+                .status
+                .scene_layout
+                .as_ref()
+                .is_some_and(|layout| matches!(layout.layout_preset, LayoutPreset::Vertical))
+        };
+        if !already_vertical {
+            bail!(
+                "Vertical changes the canvas orientation — stop the session before switching to it."
+            );
+        }
+    }
+
     let live = source_liveness(state, target_sources).await;
     match plan_live_swap(mutation_kind, needs, live) {
         ApplyMode::Hot => {

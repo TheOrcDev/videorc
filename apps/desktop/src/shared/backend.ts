@@ -533,6 +533,7 @@ export type VideoPreset =
   | 'stream-safe-1080p60'
   | 'stream-youtube-4k30'
   | 'stream-1080p60'
+  | 'vertical-1080x1920'
   | 'custom'
 
 export interface VideoSettings {

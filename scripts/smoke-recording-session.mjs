@@ -21,7 +21,16 @@ export const LAYOUT_PRESET_SCENARIOS = [
   { preset: 'screen-camera', label: 'Screen + camera' },
   { preset: 'screen-only', label: 'Screen only' },
   { preset: 'camera-only', label: 'Camera only' },
-  { preset: 'side-by-side', label: 'Side-by-side' }
+  { preset: 'side-by-side', label: 'Side-by-side' },
+  // Vertical records a true PORTRAIT canvas and the artifact's probed
+  // dimensions are asserted below — a vertical scene that silently produced
+  // landscape pixels must fail here. 720x1280 is the smallest exact 9:16
+  // canvas inside the backend's resolution bounds (width >= 640).
+  {
+    preset: 'vertical',
+    label: 'Vertical 9:16',
+    video: { width: 720, height: 1280 }
+  }
 ]
 
 export async function runBackendRecordingSmoke({
@@ -205,7 +214,8 @@ async function recordScenario({
     sessionParams({
       outputDirectoryCapability,
       preset: scenario.preset,
-      background: scenario.background
+      background: scenario.background,
+      video: scenario.video
     })
   )
   if (!['recording', 'streaming'].includes(started.state)) {
@@ -249,6 +259,17 @@ async function recordScenario({
         `(report: ${reportPaths.mdPath})`
     )
   }
+  if (scenario.video) {
+    const probedWidth = quality.metrics.width
+    const probedHeight = quality.metrics.height
+    if (probedWidth !== scenario.video.width || probedHeight !== scenario.video.height) {
+      throw new Error(
+        `[${scenario.label}] Artifact dimensions ${probedWidth}x${probedHeight} do not match the ` +
+          `requested canvas ${scenario.video.width}x${scenario.video.height}.`
+      )
+    }
+  }
+
   const durationFailures = evaluateRecordingWallDuration({
     expectedDurationMs: recordingMs,
     actualDurationSeconds: quality.metrics.durationSeconds
@@ -422,7 +443,7 @@ export function request(ws, timeoutMs, method, params) {
   })
 }
 
-function sessionParams({ outputDirectoryCapability, preset = 'screen-camera', background }) {
+function sessionParams({ outputDirectoryCapability, preset = 'screen-camera', background, video }) {
   return {
     sources: {
       testPattern: true
@@ -449,8 +470,8 @@ function sessionParams({ outputDirectoryCapability, preset = 'screen-camera', ba
       ...(outputDirectoryCapability ? { outputDirectoryCapability } : {}),
       video: {
         preset: 'custom',
-        width: SMOKE_VIDEO_WIDTH,
-        height: SMOKE_VIDEO_HEIGHT,
+        width: video?.width ?? SMOKE_VIDEO_WIDTH,
+        height: video?.height ?? SMOKE_VIDEO_HEIGHT,
         fps: SMOKE_VIDEO_FPS,
         bitrateKbps: SMOKE_VIDEO_BITRATE_KBPS
       },

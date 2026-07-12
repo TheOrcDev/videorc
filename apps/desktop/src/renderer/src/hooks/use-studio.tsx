@@ -54,6 +54,7 @@ import {
   STORAGE_KEYS,
   streamOutputVideosForTargets,
   streamOutputVideoSettings,
+  verticalOrientationVideoPatch,
   videoProfileCompatibility,
   videoPresets,
   type CaptureConfig,
@@ -4725,7 +4726,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client])
 
   const requestLayoutTransaction = useCallback(
-    (layout: LayoutSettings, options?: { pendingIndicator?: boolean }) => {
+    (
+      layout: LayoutSettings,
+      options?: { pendingIndicator?: boolean; videoOverride?: VideoSettings }
+    ) => {
       const sessionActive = isActiveRecordingState(recordingRef.current.state)
       if (!client || wsStatus !== 'connected') {
         toast.error('Backend socket is not connected — layout unchanged.')
@@ -4762,7 +4766,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             intentId,
             sources: requestedSources,
             layout,
-            video: requestedConfig.video,
+            // The vertical orientation coupling patches React state and the
+            // transaction in the same tick; the ref may not have caught up,
+            // so the caller passes the canvas it just applied.
+            video: options?.videoOverride ?? requestedConfig.video,
             background: activeSceneBackground,
             protectedOverlayWindowIds
           })
@@ -4909,14 +4916,42 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const applyCameraPreset = useCallback(
     (patch: Partial<LayoutSettings>) => {
-      requestLayoutTransaction({
-        ...captureConfigRef.current.layout,
-        ...patch,
-        cameraTransformMode: 'preset',
-        cameraTransform: null
-      })
+      const current = captureConfigRef.current
+      const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
+
+      // Vertical scene ⇄ canvas orientation coupling, OFF-AIR ONLY: entering
+      // vertical flips the canvas to 1080×1920 and remembers the landscape
+      // profile; leaving restores it. Mid-session the canvas is fixed (the
+      // vertical card is disabled and the backend refuses the switch).
+      let videoOverride: VideoSettings | undefined
+      if (!isActiveRecordingState(recordingRef.current.state)) {
+        const coupling = verticalOrientationVideoPatch(
+          current.layout.layoutPreset,
+          nextPreset,
+          current.video,
+          current.verticalRestoreVideo
+        )
+        if (coupling) {
+          videoOverride = coupling.video
+          setCaptureConfig((config) => ({
+            ...config,
+            video: coupling.video,
+            verticalRestoreVideo: coupling.verticalRestoreVideo
+          }))
+        }
+      }
+
+      requestLayoutTransaction(
+        {
+          ...current.layout,
+          ...patch,
+          cameraTransformMode: 'preset',
+          cameraTransform: null
+        },
+        videoOverride ? { videoOverride } : undefined
+      )
     },
-    [requestLayoutTransaction]
+    [requestLayoutTransaction, setCaptureConfig]
   )
 
   const switchSourceDeviceLive = useCallback(

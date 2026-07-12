@@ -22,6 +22,10 @@ const LAYOUTS = [
   {
     preset: 'screen-camera',
     expectedKinds: ['camera', 'test-pattern']
+  },
+  {
+    preset: 'vertical',
+    expectedKinds: ['camera', 'test-pattern']
   }
 ]
 

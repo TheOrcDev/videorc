@@ -91,9 +91,20 @@ export function PreviewStage({
 }
 
 /** All three preview states occupy the same output-aspect rect so the Studio
- * layout never jumps when the preview opens, docks, or closes. */
+ * layout never jumps when the preview opens, docks, or closes. Portrait
+ * canvases (the vertical 9:16 profile) keep the LANDSCAPE footprint: a raw
+ * 9:16 slot would tower ~2.4× over the Studio column, so the strip stays 16:9
+ * and the native surface pillarboxes the portrait video inside it (the
+ * surface contain-fits within the slot; the detached window is truly
+ * portrait). */
 function previewAspectRatio(aspect: { width: number; height: number }): string {
-  return aspect.width > 0 && aspect.height > 0 ? `${aspect.width} / ${aspect.height}` : '16 / 9'
+  if (aspect.width <= 0 || aspect.height <= 0) {
+    return '16 / 9'
+  }
+  if (aspect.height > aspect.width) {
+    return '16 / 9'
+  }
+  return `${aspect.width} / ${aspect.height}`
 }
 
 // Docked ("stick") mode: the native preview surface floats glued over the slot

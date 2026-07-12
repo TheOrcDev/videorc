@@ -39,7 +39,8 @@ const LAYOUT_PRESETS = [
   { id: 'screen-camera', label: 'Screen + camera', enabled: true },
   { id: 'screen-only', label: 'Screen only', enabled: true },
   { id: 'camera-only', label: 'Camera only', enabled: true },
-  { id: 'side-by-side', label: 'Side-by-side', enabled: true }
+  { id: 'side-by-side', label: 'Side-by-side', enabled: true },
+  { id: 'vertical', label: 'Vertical (9:16)', enabled: true }
 ] as const
 
 export function LayoutTab(): ReactElement {
@@ -77,6 +78,7 @@ export function LayoutTab(): ReactElement {
   const hasScreen = hasSelectedScreenSource(captureConfig.sources)
   const isCameraOnly = layout.layoutPreset === 'camera-only'
   const isSideBySide = layout.layoutPreset === 'side-by-side'
+  const isVertical = layout.layoutPreset === 'vertical'
   const showOverlayControls = layout.layoutPreset === 'screen-camera'
 
   return (
@@ -140,6 +142,7 @@ export function LayoutTab(): ReactElement {
             cameraShape={layout.cameraShape}
             dragEnabled={showOverlayControls && !isSessionActive}
             hasBackground={Boolean(scene?.background)}
+            outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}
             previewOpen={previewWindow.open}
             scene={scene}
             selectedSourceId={selectedSceneSourceId}
@@ -213,6 +216,13 @@ export function LayoutTab(): ReactElement {
                 <p className="text-sm text-muted-foreground">
                   Camera only fills the frame as a rectangle. Corner, size, and shape do not apply —
                   use fit, mirror, zoom, and pan.
+                </p>
+              ) : null}
+
+              {isVertical ? (
+                <p className="text-sm text-muted-foreground">
+                  Vertical stacks the camera band on top of the screen for 9:16 short-form output.
+                  Corner, size, and shape do not apply — use fit, mirror, zoom, and pan.
                 </p>
               ) : null}
 

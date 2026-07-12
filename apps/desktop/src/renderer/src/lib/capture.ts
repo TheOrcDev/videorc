@@ -44,6 +44,12 @@ export type CaptureConfig = {
   layout: LayoutSettings
   audio: AudioSettings
   video: VideoSettings
+  /**
+   * Landscape canvas remembered while the Vertical scene holds the output in
+   * portrait — restored when the user switches back to a landscape scene
+   * (verticalOrientationVideoPatch). Null outside the vertical scene.
+   */
+  verticalRestoreVideo: VideoSettings | null
   recordEnabled: boolean
   streamEnabled: boolean
   rtmpPreset: RtmpPreset
@@ -78,6 +84,47 @@ export function layoutPresetNeedsScreen(preset: LayoutPreset): boolean {
 
 export function hasSelectedCameraSource(sources: SourceSelection): boolean {
   return Boolean(sources.cameraId)
+}
+
+export type VerticalOrientationVideoPatch = {
+  video: VideoSettings
+  verticalRestoreVideo: VideoSettings | null
+}
+
+/**
+ * Off-air orientation coupling for the Vertical scene: entering `vertical`
+ * flips the canvas to the vertical profile and remembers the landscape
+ * settings; leaving restores exactly what was there. Returns null when no
+ * video change is needed — same orientation class, a canvas the user already
+ * made portrait (entering), or a canvas the user already made landscape while
+ * in the vertical scene (leaving — their explicit choice wins). Callers MUST
+ * NOT apply this mid-session: the encoder canvas is fixed at session start
+ * (the backend refuses live switches into vertical as defense in depth).
+ */
+export function verticalOrientationVideoPatch(
+  fromPreset: LayoutPreset,
+  toPreset: LayoutPreset,
+  video: VideoSettings,
+  verticalRestoreVideo: VideoSettings | null
+): VerticalOrientationVideoPatch | null {
+  const fromVertical = fromPreset === 'vertical'
+  const toVertical = toPreset === 'vertical'
+  if (fromVertical === toVertical) {
+    return null
+  }
+  if (toVertical) {
+    if (video.height > video.width) {
+      return null
+    }
+    return { video: videoPresets['vertical-1080x1920'], verticalRestoreVideo: video }
+  }
+  if (video.height <= video.width) {
+    return { video, verticalRestoreVideo: null }
+  }
+  return {
+    video: verticalRestoreVideo ?? defaultCaptureConfig.video,
+    verticalRestoreVideo: null
+  }
 }
 
 export function hasSelectedScreenSource(sources: SourceSelection): boolean {
@@ -265,6 +312,15 @@ export const videoPresets: Record<VideoPreset, VideoSettings> = {
     fps: 60,
     bitrateKbps: 9000
   },
+  // True portrait canvas for short-form output (Shorts/Reels/TikTok): the
+  // Vertical scene applies this preset off-air (vertical scene plan S2/S4).
+  'vertical-1080x1920': {
+    preset: 'vertical-1080x1920',
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    bitrateKbps: 9000
+  },
   custom: {
     preset: 'custom',
     width: 1920,
@@ -284,7 +340,8 @@ export const recordingVideoPresetOptions: VideoPresetOption[] = [
   { value: 'record-4k30', label: 'Record 4K30' },
   { value: 'record-4k60-experimental', label: 'Record 4K60 experimental', tone: 'warning' },
   { value: 'tutorial-1440p30', label: 'Tutorial 1440p30' },
-  { value: 'tutorial-1080p30', label: 'Tutorial 1080p30' }
+  { value: 'tutorial-1080p30', label: 'Tutorial 1080p30' },
+  { value: 'vertical-1080x1920', label: 'Vertical 1080×1920 (9:16)' }
 ]
 
 export const streamingVideoPresetOptions: VideoPresetOption[] = [
@@ -461,6 +518,7 @@ export function auxiliaryStreamOutputVideoSettings(
 
 export const defaultCaptureConfig: CaptureConfig = {
   sources: {},
+  verticalRestoreVideo: null,
   layout: {
     layoutPreset: 'screen-camera',
     cameraTransformMode: 'preset',
@@ -580,6 +638,10 @@ export function loadCaptureConfig(): CaptureConfig {
     layout: normalizeLayoutSettings(loaded.layout),
     audio: normalizeAudioSettings(loaded.audio),
     video: normalizeVideoSettings(loaded.video),
+    verticalRestoreVideo:
+      loaded.verticalRestoreVideo != null
+        ? normalizeVideoSettings(loaded.verticalRestoreVideo)
+        : null,
     recordEnabled:
       typeof loaded.recordEnabled === 'boolean'
         ? loaded.recordEnabled

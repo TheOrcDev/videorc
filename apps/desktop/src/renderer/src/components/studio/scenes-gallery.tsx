@@ -17,11 +17,12 @@ const SCENE_PRESETS: { id: LayoutPreset; label: string }[] = [
   { id: 'screen-camera', label: 'Screen + Cam' },
   { id: 'screen-only', label: 'Screen' },
   { id: 'camera-only', label: 'Camera' },
-  { id: 'side-by-side', label: 'Side by side' }
+  { id: 'side-by-side', label: 'Side by side' },
+  { id: 'vertical', label: 'Vertical' }
 ]
 
 export function ScenesGallery(): ReactElement {
-  const { captureConfig, applyCameraPreset, layoutSwitchPending } = useStudioCore()
+  const { captureConfig, applyCameraPreset, layoutSwitchPending, isSessionActive } = useStudioCore()
   const { openStudioPanel } = useWorkspaceNav()
   const hasCamera = Boolean(captureConfig.sources.cameraId)
   const hasScreen = Boolean(captureConfig.sources.screenId ?? captureConfig.sources.windowId)
@@ -39,9 +40,15 @@ export function ScenesGallery(): ReactElement {
     >
       <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
         {SCENE_PRESETS.map((preset) => {
+          // Vertical changes the canvas orientation and the encoder canvas is
+          // fixed at session start — switching INTO it mid-session is refused
+          // (backend enforces this too). Every other scene stays live-safe.
+          const verticalBlockedLive =
+            preset.id === 'vertical' && isSessionActive && activePreset !== 'vertical'
           const disabled =
             (layoutPresetNeedsCamera(preset.id) && !hasCamera) ||
-            (layoutPresetNeedsScreen(preset.id) && !hasScreen)
+            (layoutPresetNeedsScreen(preset.id) && !hasScreen) ||
+            verticalBlockedLive
           const active = activePreset === preset.id
           return (
             <button
@@ -53,6 +60,11 @@ export function ScenesGallery(): ReactElement {
                 disabled && 'cursor-not-allowed opacity-50'
               )}
               disabled={disabled}
+              title={
+                verticalBlockedLive
+                  ? 'Vertical changes the canvas orientation — stop the session to switch.'
+                  : undefined
+              }
               type="button"
               onClick={() => applyCameraPreset({ layoutPreset: preset.id })}
             >
@@ -90,6 +102,14 @@ function LayoutThumb({ preset }: { preset: LayoutPreset }): ReactElement {
           <div className="absolute inset-y-1.5 left-1.5 w-[44%] rounded-[3px] bg-foreground/10" />
           <div className="absolute inset-y-1.5 right-1.5 w-[44%] rounded-[3px] bg-foreground/25" />
         </>
+      ) : null}
+      {preset === 'vertical' ? (
+        // 9:16 mini-canvas centered in the 16:9 thumb: camera band on top,
+        // screen below — the short-form arrangement, honest about pillarbox.
+        <div className="absolute inset-y-1 left-1/2 aspect-[9/16] -translate-x-1/2 overflow-hidden rounded-[3px] border border-background/60 bg-background/40">
+          <div className="absolute inset-x-0.5 top-0.5 h-[38%] rounded-[2px] bg-foreground/30" />
+          <div className="absolute inset-x-0.5 bottom-0.5 h-[56%] rounded-[2px] bg-foreground/10" />
+        </div>
       ) : null}
     </div>
   )
