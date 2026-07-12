@@ -30,5 +30,8 @@ export function previewProofLayerShape(
   if (source.kind !== 'camera') {
     return undefined
   }
-  return layout.layoutPreset === 'screen-camera' ? layout.cameraShape : 'rectangle'
+  // Only the inset scenes shape the camera bubble — mirrors Rust camera_mask.
+  return layout.layoutPreset === 'screen-camera' || layout.layoutPreset === 'vertical-screen-camera'
+    ? layout.cameraShape
+    : 'rectangle'
 }

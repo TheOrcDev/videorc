@@ -18,6 +18,11 @@ import type {
   VideoPreset,
   VideoSettings
 } from '../../../shared/backend'
+import {
+  HORIZONTAL_LAYOUT_PRESETS,
+  LAYOUT_PRESET_VALUES,
+  VERTICAL_LAYOUT_PRESETS
+} from '../../../shared/backend'
 
 export type SettingsState = {
   /** Human-readable picker label only; never a filesystem path. */
@@ -71,22 +76,10 @@ export type LegacyStreamKeyMigrationCandidate = {
   streamKey: string
 }
 
-/** The Studio's horizontal scene set, in gallery order. */
-export const HORIZONTAL_LAYOUT_PRESETS: readonly LayoutPreset[] = [
-  'screen-camera',
-  'screen-only',
-  'camera-only',
-  'side-by-side'
-]
-
-/** The Studio's vertical (9:16 short-form) scene set, in gallery order. */
-export const VERTICAL_LAYOUT_PRESETS: readonly LayoutPreset[] = [
-  'vertical-camera-top',
-  'vertical-camera-bottom',
-  'vertical-split',
-  'vertical-screen-camera',
-  'vertical-screen-only'
-]
+// The canonical per-mode scene lists live in shared/backend.ts next to the
+// LayoutPreset type — the wire contracts validate against the same values, so
+// renderer galleries and main-process event validation cannot drift apart.
+export { HORIZONTAL_LAYOUT_PRESETS, VERTICAL_LAYOUT_PRESETS }
 
 export type LayoutOrientation = 'horizontal' | 'vertical'
 
@@ -938,11 +931,6 @@ function stringList(value: unknown): string[] {
     ? value.filter((item): item is string => typeof item === 'string')
     : []
 }
-
-const LAYOUT_PRESET_VALUES: readonly LayoutPreset[] = [
-  ...HORIZONTAL_LAYOUT_PRESETS,
-  ...VERTICAL_LAYOUT_PRESETS
-]
 
 function isLayoutPreset(value: unknown): value is LayoutPreset {
   return typeof value === 'string' && (LAYOUT_PRESET_VALUES as readonly string[]).includes(value)

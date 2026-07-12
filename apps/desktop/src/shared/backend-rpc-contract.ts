@@ -28,6 +28,7 @@ import type {
   StartSessionParams,
   VideorcAccountSnapshot
 } from './backend'
+import { LAYOUT_PRESET_VALUES } from './backend'
 import {
   arraySchema,
   boundedJsonValueSchema,
@@ -279,7 +280,7 @@ const sourceSelectionSchema = objectSchema(
 
 const layoutSchema = objectSchema(
   {
-    layoutPreset: enumSchema(['screen-camera', 'screen-only', 'camera-only', 'side-by-side']),
+    layoutPreset: enumSchema(LAYOUT_PRESET_VALUES),
     cameraTransformMode: enumSchema(['preset', 'custom']),
     cameraTransform: nullableSchema(boundedBackendParamValueSchema),
     cameraCorner: enumSchema(['top-left', 'top-right', 'bottom-left', 'bottom-right']),

@@ -296,6 +296,32 @@ export type LayoutPreset =
   | 'vertical-split'
   | 'vertical-screen-camera'
   | 'vertical-screen-only'
+
+/**
+ * The Studio scene vocabularies by orientation mode, in gallery order. The
+ * wire contracts (backend-rpc / electron-ipc) accept exactly their union —
+ * a preset missing here is silently dropped by the main process's event
+ * validation (the present pump retires), so these lists are load-bearing.
+ */
+export const HORIZONTAL_LAYOUT_PRESETS = [
+  'screen-camera',
+  'screen-only',
+  'camera-only',
+  'side-by-side'
+] as const satisfies readonly LayoutPreset[]
+
+export const VERTICAL_LAYOUT_PRESETS = [
+  'vertical-camera-top',
+  'vertical-camera-bottom',
+  'vertical-split',
+  'vertical-screen-camera',
+  'vertical-screen-only'
+] as const satisfies readonly LayoutPreset[]
+
+export const LAYOUT_PRESET_VALUES = [
+  ...HORIZONTAL_LAYOUT_PRESETS,
+  ...VERTICAL_LAYOUT_PRESETS
+] as const satisfies readonly LayoutPreset[]
 export type CameraTransformMode = 'preset' | 'custom'
 export type SideBySideSplit = '50-50' | '60-40' | '70-30'
 export type SideBySideCameraSide = 'left' | 'right'

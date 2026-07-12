@@ -22,6 +22,7 @@ import type {
   VideorcApi,
   ViewerSample
 } from './backend'
+import { LAYOUT_PRESET_VALUES } from './backend'
 import {
   arraySchema,
   booleanSchema,
@@ -529,7 +530,7 @@ const cameraTransformSchema = objectSchema(
 
 const layoutSettingsSchema = objectSchema(
   {
-    layoutPreset: enumSchema(['screen-camera', 'screen-only', 'camera-only', 'side-by-side']),
+    layoutPreset: enumSchema(LAYOUT_PRESET_VALUES),
     cameraTransformMode: enumSchema(['preset', 'custom']),
     cameraTransform: nullableSchema(cameraTransformSchema),
     cameraCorner: enumSchema(['top-left', 'top-right', 'bottom-left', 'bottom-right']),

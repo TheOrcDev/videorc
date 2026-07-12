@@ -22,13 +22,21 @@ export const LAYOUT_PRESET_SCENARIOS = [
   { preset: 'screen-only', label: 'Screen only' },
   { preset: 'camera-only', label: 'Camera only' },
   { preset: 'side-by-side', label: 'Side-by-side' },
-  // Vertical records a true PORTRAIT canvas and the artifact's probed
-  // dimensions are asserted below — a vertical scene that silently produced
-  // landscape pixels must fail here. 720x1280 is the smallest exact 9:16
-  // canvas inside the backend's resolution bounds (width >= 640).
+  // The vertical scenes record a true PORTRAIT canvas and the artifact's
+  // probed dimensions are asserted below — a vertical scene that silently
+  // produced landscape pixels must fail here. 720x1280 is the smallest exact
+  // 9:16 canvas inside the backend's resolution bounds (width >= 640). One
+  // stacked and one inset scenario record real artifacts; the remaining
+  // vertical arrangements (camera-bottom, split, screen-only) are covered at
+  // scene-fixture and FFmpeg-filter level plus the layout-source-loop smoke.
   {
     preset: 'vertical-camera-top',
-    label: 'Vertical 9:16',
+    label: 'Vertical camera top 9:16',
+    video: { width: 720, height: 1280 }
+  },
+  {
+    preset: 'vertical-screen-camera',
+    label: 'Vertical screen + camera 9:16',
     video: { width: 720, height: 1280 }
   }
 ]

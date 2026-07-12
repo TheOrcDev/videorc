@@ -189,7 +189,12 @@ pub fn scene_source_fit(kind: &SceneSourceKind, layout: &LayoutSettings) -> Scen
 /// Camera masks are overlay policy, not renderer policy: only screen+camera
 /// applies the selected bubble shape. Camera-only and side-by-side stay plain.
 pub fn camera_mask(layout: &LayoutSettings) -> SceneMask {
-    if !matches!(layout.layout_preset, LayoutPreset::ScreenCamera) {
+    // Only the inset scenes draw the camera as a shaped bubble; band and
+    // region presets keep the camera rectangular (maskless).
+    if !matches!(
+        layout.layout_preset,
+        LayoutPreset::ScreenCamera | LayoutPreset::VerticalScreenCamera
+    ) {
         return SceneMask::None;
     }
     match layout.camera_shape {
@@ -440,6 +445,33 @@ mod tests {
             (LayoutPreset::ScreenOnly, SceneFit::Contain, SceneMask::None),
             (LayoutPreset::CameraOnly, SceneFit::Contain, SceneMask::None),
             (LayoutPreset::SideBySide, SceneFit::Cover, SceneMask::None),
+            // Vertical family: the inset twin masks exactly like ScreenCamera;
+            // the banded scenes keep a rectangular camera and CONTAIN screens.
+            (
+                LayoutPreset::VerticalScreenCamera,
+                SceneFit::Contain,
+                SceneMask::Rounded { radius_pct: 12 },
+            ),
+            (
+                LayoutPreset::VerticalCameraTop,
+                SceneFit::Contain,
+                SceneMask::None,
+            ),
+            (
+                LayoutPreset::VerticalCameraBottom,
+                SceneFit::Contain,
+                SceneMask::None,
+            ),
+            (
+                LayoutPreset::VerticalSplit,
+                SceneFit::Contain,
+                SceneMask::None,
+            ),
+            (
+                LayoutPreset::VerticalScreenOnly,
+                SceneFit::Contain,
+                SceneMask::None,
+            ),
         ];
         for (preset, expected_screen_fit, expected_mask) in cases {
             let mut layout = layout();

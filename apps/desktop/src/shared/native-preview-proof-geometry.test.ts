@@ -50,12 +50,22 @@ describe('Windows proof-surface geometry', () => {
   it('covers only side-by-side screen regions', () => {
     expect(previewProofLayerFit(screen, layout({ layoutPreset: 'screen-only' }))).toBe('contain')
     expect(previewProofLayerFit(screen, layout({ layoutPreset: 'side-by-side' }))).toBe('cover')
+    // Vertical screen bands CONTAIN — nothing on the user's screen is cropped.
+    expect(previewProofLayerFit(screen, layout({ layoutPreset: 'vertical-camera-top' }))).toBe(
+      'contain'
+    )
   })
 
-  it('preserves rounded and circle masks only for the screen-camera overlay', () => {
+  it('preserves rounded and circle masks only for the inset scene overlays', () => {
     expect(previewProofLayerShape(camera, layout({ cameraShape: 'rounded' }))).toBe('rounded')
     expect(previewProofLayerShape(camera, layout({ cameraShape: 'circle' }))).toBe('circle')
+    expect(previewProofLayerShape(camera, layout({ layoutPreset: 'vertical-screen-camera' }))).toBe(
+      'rounded'
+    )
     expect(previewProofLayerShape(camera, layout({ layoutPreset: 'camera-only' }))).toBe(
+      'rectangle'
+    )
+    expect(previewProofLayerShape(camera, layout({ layoutPreset: 'vertical-camera-top' }))).toBe(
       'rectangle'
     )
     expect(previewProofLayerShape(screen, layout())).toBeUndefined()
