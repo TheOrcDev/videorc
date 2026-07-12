@@ -1931,25 +1931,33 @@ async fn export_mp4_from_mkv(ffmpeg_path: &str, input: &Path, output: &Path) -> 
     }
 
     let output = output.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        let file = std::fs::File::open(&output)
-            .with_context(|| format!("Could not open staged MP4 {}", output.display()))?;
-        let metadata = file
-            .metadata()
-            .with_context(|| format!("Could not inspect staged MP4 {}", output.display()))?;
-        if !metadata.is_file() || metadata.len() == 0 {
-            bail!(
-                "FFmpeg did not create a non-empty staged MP4 at {}",
-                output.display()
-            );
-        }
-        file.sync_all()
-            .with_context(|| format!("Could not sync staged MP4 {}", output.display()))?;
-        Ok(())
-    })
-    .await
-    .context("Could not join staged MP4 sync task")??;
+    tokio::task::spawn_blocking(move || sync_nonempty_staged_mp4(&output))
+        .await
+        .context("Could not join staged MP4 sync task")??;
 
+    Ok(())
+}
+
+fn sync_nonempty_staged_mp4(output: &Path) -> Result<()> {
+    // Windows requires a handle with write access for FlushFileBuffers, which
+    // backs File::sync_all. File::open creates a read-only handle and made a
+    // successful FFmpeg export fall back to the MKV recovery file there.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(output)
+        .with_context(|| format!("Could not open staged MP4 {}", output.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("Could not inspect staged MP4 {}", output.display()))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        bail!(
+            "FFmpeg did not create a non-empty staged MP4 at {}",
+            output.display()
+        );
+    }
+    file.sync_all()
+        .with_context(|| format!("Could not sync staged MP4 {}", output.display()))?;
     Ok(())
 }
 
@@ -13551,6 +13559,29 @@ mod tests {
         cleanup_prepared_mp4_export_staging(&staging).unwrap();
         assert!(!staging.directory_path.exists());
         assert!(!staging.cleanup_directory_path.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn staged_mp4_sync_flushes_a_nonempty_file_and_rejects_an_empty_one() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-staged-mp4-sync-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let nonempty = directory.join("recording.mp4");
+        std::fs::write(&nonempty, b"staged mp4 bytes").unwrap();
+        sync_nonempty_staged_mp4(&nonempty).unwrap();
+
+        let empty = directory.join("empty.mp4");
+        std::fs::write(&empty, []).unwrap();
+        let error = sync_nonempty_staged_mp4(&empty).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("FFmpeg did not create a non-empty staged MP4"),
+            "unexpected error: {error:#}"
+        );
+
         std::fs::remove_dir_all(directory).unwrap();
     }
 
