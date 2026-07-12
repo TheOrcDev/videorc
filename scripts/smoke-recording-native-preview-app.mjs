@@ -11,6 +11,7 @@ import { assertSmokeCommandConnection } from './lib/smoke-command-client.mjs'
 import { assertSourceCompleteCompositorHealthy } from './lib/native-preview-source-gates.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import {
+  minimumProofSourceFrameDelta,
   resolveNativePreviewLatencyBudgets,
   summarizeNativePreviewRecordingDiagnostics
 } from './lib/native-preview-diagnostics.mjs'
@@ -82,12 +83,17 @@ const expectedSurfaceBacking = expectNativeMetalPreview
 const exerciseProofFramePolling = process.env.VIDEORC_NATIVE_PREVIEW_EXERCISE_PROOF_POLLING === '1'
 const usePackagedWindowsScreen =
   Boolean(packagedSpawnSpec) && process.platform === 'win32' && exerciseProofFramePolling
+const recordingProofPollingIntervalMs = 125
+const recordingProofPollingMaxWidth = 960
 const previewLatencyBudgets = resolveNativePreviewLatencyBudgets({
   configuredP95Ms: maxPreviewInputToPresentLatencyP95Ms,
   configuredP99Ms: maxPreviewInputToPresentLatencyP99Ms,
   sourceCompleteScene,
   expectNativeMetalPreview,
-  exerciseProofFramePolling
+  exerciseProofFramePolling,
+  proofPollingIntervalMs: usePackagedWindowsScreen
+    ? recordingProofPollingIntervalMs
+    : undefined
 })
 
 const visibleScenarios = [
@@ -270,56 +276,103 @@ async function runNativePreviewRecordingScenario(
     )
   }
   const recordingStartedAt = Date.now()
-  if (packagedSpawnSpec) {
-    await waitForPackagedActiveSceneDiagnostics(ws, packagedWindowsScreen?.id)
-  } else {
-    const activeSceneRevision = Date.now()
-    const compositorStatus = await smokeCommand(smoke, 'backend-debug-rpc', {
-      method: 'compositor.scene.update',
-      params: compositorSceneUpdateParams(activeSceneRevision, 0.58),
-      timeoutMs
-    })
-    if (compositorStatus.sceneRevision !== activeSceneRevision) {
-      throw new Error(
-        `[${scenario.label}] Compositor scene update returned revision ${compositorStatus.sceneRevision}, expected ${activeSceneRevision}.`
-      )
-    }
-    await waitForActiveSceneDiagnostics(ws, activeSceneRevision, 'record')
-  }
-  await assertSameRunningSession(ws, started.sessionId)
-  if (expectsPreview && expectNativeMetalPreview) {
-    const pumpReconnect = await smokeCommand(smoke, 'exercise-main-present-pump-reconnect')
-    assertMainPumpReconnectDuringRecording(scenario, pumpReconnect)
-  }
-
-  const measurementPromise = expectsPreview
-    ? smokeCommand(smoke, 'measure-native-preview-surface', {
-        durationMs: previewMeasurementMs
+  let measurement = null
+  let measurementFailure = null
+  let surfaceDuring = null
+  let scenarioFailure = null
+  try {
+    if (packagedSpawnSpec) {
+      await waitForPackagedActiveSceneDiagnostics(ws, packagedWindowsScreen?.id)
+    } else {
+      const activeSceneRevision = Date.now()
+      const compositorStatus = await smokeCommand(smoke, 'backend-debug-rpc', {
+        method: 'compositor.scene.update',
+        params: compositorSceneUpdateParams(activeSceneRevision, 0.58),
+        timeoutMs
       })
-    : Promise.resolve(null)
-  const stressPromise = stressLayoutDuringRecording(
-    ws,
-    smoke,
-    started.sessionId,
-    layoutStressUpdates
-  )
-  await sleep(recordingMs)
-  await stressPromise
-  const measurement = await measurementPromise
-  if (expectsPreview) {
-    try {
-      assertNativeMeasurement(scenario, measurement)
-    } catch (error) {
-      failOrWarn(error.message)
+      if (compositorStatus.sceneRevision !== activeSceneRevision) {
+        throw new Error(
+          `[${scenario.label}] Compositor scene update returned revision ${compositorStatus.sceneRevision}, expected ${activeSceneRevision}.`
+        )
+      }
+      await waitForActiveSceneDiagnostics(ws, activeSceneRevision, 'record')
     }
+    await assertSameRunningSession(ws, started.sessionId)
+    if (expectsPreview && expectNativeMetalPreview) {
+      const pumpReconnect = await smokeCommand(smoke, 'exercise-main-present-pump-reconnect')
+      assertMainPumpReconnectDuringRecording(scenario, pumpReconnect)
+    }
+
+    const measurementResultPromise = (expectsPreview
+      ? smokeCommand(smoke, 'measure-native-preview-surface', {
+          durationMs: previewMeasurementMs,
+          warmupMs
+        })
+      : Promise.resolve(null)
+    ).then(
+      (value) => ({ ok: true, value }),
+      (error) => ({ ok: false, error })
+    )
+    const stressResultPromise = stressLayoutDuringRecording(
+      ws,
+      smoke,
+      started.sessionId,
+      layoutStressUpdates
+    ).then(
+      () => ({ ok: true }),
+      (error) => ({ ok: false, error })
+    )
+    await sleep(recordingMs)
+    const [measurementResult, stressResult] = await Promise.all([
+      measurementResultPromise,
+      stressResultPromise
+    ])
+    if (!stressResult.ok) {
+      throw stressResult.error
+    }
+    if (measurementResult.ok) {
+      measurement = measurementResult.value
+    } else {
+      measurementFailure = `Native preview measurement command failed: ${errorMessage(measurementResult.error)}`
+    }
+    if (expectsPreview && !measurementFailure) {
+      console.log(
+        `[${scenario.label}] Native preview steady measurement: ${JSON.stringify(measurement)}`
+      )
+      try {
+        assertNativeMeasurement(scenario, measurement)
+      } catch (error) {
+        measurementFailure = errorMessage(error)
+      }
+    }
+
+    surfaceDuring = expectsPreview
+      ? await waitForNativeSurface(ws, previousSurface.framesRendered)
+      : await waitForHiddenNativeSurface(ws)
+  } catch (error) {
+    scenarioFailure = error
   }
 
-  const surfaceDuring = expectsPreview
-    ? await waitForNativeSurface(ws, previousSurface.framesRendered)
-    : await waitForHiddenNativeSurface(ws)
   const stopRequestedAt = Date.now()
   const expectedDurationMs = stopRequestedAt - recordingStartedAt
-  const stopped = await request(ws, timeoutMs, 'session.stop')
+  let stopped
+  try {
+    stopped = await request(ws, timeoutMs, 'session.stop')
+  } catch (stopError) {
+    if (scenarioFailure) {
+      throw new AggregateError(
+        [scenarioFailure, stopError],
+        `[${scenario.label}] Recording scenario failed and could not be stopped cleanly.`
+      )
+    }
+    throw stopError
+  }
+  if (scenarioFailure) {
+    throw scenarioFailure
+  }
+  if (!surfaceDuring) {
+    throw new Error(`[${scenario.label}] Preview surface evidence was unavailable after recording.`)
+  }
   const outputPath = stopped.outputPath ?? started.outputPath
   if (!outputPath || !existsSync(outputPath)) {
     throw new Error(
@@ -352,11 +405,14 @@ async function runNativePreviewRecordingScenario(
     writeStartupReports(startupReport, { ffmpegPath }),
     Promise.resolve(writeReports(recordingReport))
   ])
+  const measurementStartedAtMs = Number.isFinite(measurement?.measurementStartedAtMs)
+    ? measurement.measurementStartedAtMs
+    : null
   const stats = summarizeNativePreviewRecordingDiagnostics(samples, {
     targetFps: scenario.fps,
-    startedAt: scenarioStartedAt,
+    startedAt: measurementStartedAtMs ?? scenarioStartedAt,
     stopRequestedAt,
-    warmupMs,
+    warmupMs: measurementStartedAtMs === null ? warmupMs : 0,
     expectedSurfaceTransport,
     expectedSurfaceBacking,
     previewSurfaceSamples
@@ -371,6 +427,11 @@ async function runNativePreviewRecordingScenario(
     reportPath: recordingReportPaths.mdPath
   })
   assertRecordingDurationHealthy(scenario, recordingReport, expectedDurationMs)
+  if (measurementFailure) {
+    failOrWarn(
+      `[${scenario.label}] ${measurementFailure} Measurement: ${JSON.stringify(measurement)}. Diagnostics: ${bridgeSummary}`
+    )
+  }
 
   assertStatsHealthy(
     scenario,
@@ -863,14 +924,21 @@ function assertNativeMeasurement(scenario, measurement) {
     throw new Error(`Native preview reported ${measurement.blankFrames} blank frame(s).`)
   }
   if (!expectNativeMetalPreview && exerciseProofFramePolling) {
-    if ((measurement.sourceFrameDelta ?? 0) < 2) {
+    const minimumSourceFrameDelta = minimumProofSourceFrameDelta({
+      measurementMs: previewMeasurementMs,
+      pollingIntervalMs: recordingProofPollingIntervalMs
+    })
+    if ((measurement.sourceFrameDelta ?? 0) < minimumSourceFrameDelta) {
       throw new Error(
-        `Windows proof preview source frames did not advance during recording: delta ${measurement.sourceFrameDelta ?? 0}.`
+        `Windows proof preview source frames advanced ${measurement.sourceFrameDelta ?? 0} time(s) during recording, below ${minimumSourceFrameDelta}.`
       )
     }
-    if (measurement.framePollingIntervalMs !== 125 || measurement.framePollingMaxWidth !== 960) {
+    if (
+      measurement.framePollingIntervalMs !== recordingProofPollingIntervalMs ||
+      measurement.framePollingMaxWidth !== recordingProofPollingMaxWidth
+    ) {
       throw new Error(
-        `Windows recording preview did not apply the contained 125ms/960px polling profile: ${JSON.stringify({ intervalMs: measurement.framePollingIntervalMs, maxWidth: measurement.framePollingMaxWidth })}`
+        `Windows recording preview did not apply the contained ${recordingProofPollingIntervalMs}ms/${recordingProofPollingMaxWidth}px polling profile: ${JSON.stringify({ intervalMs: measurement.framePollingIntervalMs, maxWidth: measurement.framePollingMaxWidth })}`
       )
     }
     if (
@@ -1038,6 +1106,10 @@ function failOrWarn(message) {
     return
   }
   throw new Error(message)
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function assertVisiblePreviewStats(scenario, stats) {

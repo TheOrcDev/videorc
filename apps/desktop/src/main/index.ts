@@ -179,6 +179,7 @@ import {
   type PresentingWatchState
 } from './native-preview-first-frame'
 import { NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT } from './native-preview-proof-poller-runtime'
+import { NATIVE_PREVIEW_PROOF_MEASUREMENT_RUNTIME_SCRIPT } from './native-preview-proof-measurement-runtime'
 import {
   nativePreviewProofFrameUrl,
   nativePreviewProofPollingProfile,
@@ -3833,7 +3834,6 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
       (() => {
         const root = document.getElementById('scene-root');
         const readout = document.getElementById('readout');
-        const frameTimes = [];
         const layers = new Map();
         const pollers = new Map();
         const sourceFrames = new Map();
@@ -3848,13 +3848,15 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         let compositorFrames = 0;
         let presentedCompositorFrame = 0;
         let skippedCompositorFrames = 0;
-        let inputToPresentLatencyMs = null;
-        const inputToPresentLatencies = [];
         let scene = ${initialSceneJson};
         let frames = 0;
         let blankFrames = 0;
         let liveLayerCount = 0;
-        let startedAt = performance.now();
+        let proofMeasurementEpoch = createNativePreviewProofMeasurementEpoch(
+          performance.now(),
+          blankFrames,
+          skippedCompositorFrames
+        );
 
         function percent(value) {
           const next = Number.isFinite(value) ? value : 0;
@@ -3944,6 +3946,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         }
 
         ${NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT}
+        ${NATIVE_PREVIEW_PROOF_MEASUREMENT_RUNTIME_SCRIPT}
 
         function markLive(kind, sourceId) {
           sourceFrames.set(sourceId, (sourceFrames.get(sourceId) ?? 0) + 1);
@@ -4229,9 +4232,14 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             }
             presentedCompositorFrame = Math.max(presentedCompositorFrame, frame);
             const frameAgeMs = Number(nextStatus.frameAgeMs ?? 0);
-            inputToPresentLatencyMs = Math.max(0, Math.round(frameAgeMs + Math.max(0, now - receivedAt)));
-            inputToPresentLatencies.push(inputToPresentLatencyMs);
-            if (inputToPresentLatencies.length > 900) inputToPresentLatencies.shift();
+            const inputToPresentLatencyMs = Math.max(
+              0,
+              Math.round(frameAgeMs + Math.max(0, now - receivedAt))
+            );
+            recordNativePreviewProofMeasurementLatency(
+              proofMeasurementEpoch,
+              inputToPresentLatencyMs
+            );
             const width = Math.max(1, Number(nextStatus.width ?? window.innerWidth));
             const x = (frame * 7) % (width + 140);
             document.body.style.setProperty('--dot-x', String((x / Math.max(1, width)) * 100) + '%');
@@ -4274,13 +4282,23 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             return;
           }
           frames = 0;
-          frameTimes.length = 0;
-          startedAt = performance.now();
+          proofMeasurementEpoch = createNativePreviewProofMeasurementEpoch(
+            performance.now(),
+            blankFrames,
+            skippedCompositorFrames
+          );
           applyScene(scene);
           scheduleTick();
         }
 
         window.__videorcSetProofSurfaceSuspended = setProofSurfaceSuspended;
+        window.__videorcResetNativePreviewMeasurement = () => {
+          proofMeasurementEpoch = createNativePreviewProofMeasurementEpoch(
+            performance.now(),
+            blankFrames,
+            skippedCompositorFrames
+          );
+        };
 
         function tick(now) {
           animationFrameId = null;
@@ -4288,8 +4306,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             return;
           }
           frames += 1;
-          frameTimes.push(now);
-          if (frameTimes.length > 900) frameTimes.shift();
+          recordNativePreviewProofMeasurementFrame(proofMeasurementEpoch, now);
           presentLatestCompositorStatus(now);
           if (!compositorStatus) {
             const x = (now * 0.045) % Math.max(1, window.innerWidth + 140);
@@ -4298,15 +4315,13 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             document.body.style.setProperty('--stripe-offset', String((now * 0.18) % 120) + 'px');
           }
           window.__videorcNativePreviewMetrics = () => {
-            const intervals = frameTimes.slice(1).map((time, index) => time - frameTimes[index]);
-            const percentile = (values, p) => {
-              const sorted = [...values].sort((a, b) => a - b);
-              if (!sorted.length) return null;
-              const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
-              return sorted[index];
-            };
-            const elapsed = Math.max(1, performance.now() - startedAt);
             const measuredAt = performance.now();
+            const measurement = nativePreviewProofMeasurementSnapshot(
+              proofMeasurementEpoch,
+              measuredAt,
+              blankFrames,
+              skippedCompositorFrames
+            );
             const sourceFrameAges = [...pollers.values()].map((poller) =>
               proofPollerFrameAgeMs(poller, measuredAt)
             );
@@ -4328,7 +4343,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             ).length;
             return {
               frames,
-              measuredFps: frames / elapsed * 1000,
+              measuredFps: measurement.measuredFps,
               sceneRevision: scene?.revision ?? null,
               compositorSceneRevision: compositorStatus?.sceneRevision ?? null,
               sceneMatchesCompositor: compositorStatus?.sceneRevision == null
@@ -4338,11 +4353,11 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               compositorFrames,
               presentedCompositorFrame,
               compositorFrameLag: Math.max(0, compositorFrames - presentedCompositorFrame),
-              skippedCompositorFrames,
-              inputToPresentLatencyMs,
-              inputToPresentLatencyP50Ms: percentile(inputToPresentLatencies, 50),
-              inputToPresentLatencyP95Ms: percentile(inputToPresentLatencies, 95),
-              inputToPresentLatencyP99Ms: percentile(inputToPresentLatencies, 99),
+              skippedCompositorFrames: measurement.skippedCompositorFrames,
+              inputToPresentLatencyMs: measurement.inputToPresentLatencyMs,
+              inputToPresentLatencyP50Ms: measurement.inputToPresentLatencyP50Ms,
+              inputToPresentLatencyP95Ms: measurement.inputToPresentLatencyP95Ms,
+              inputToPresentLatencyP99Ms: measurement.inputToPresentLatencyP99Ms,
               compositorSources: compositorStatus?.sources ?? [],
               layerCount: layers.size,
               sourcePollerCount: pollers.size,
@@ -4352,15 +4367,15 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               sourceFrameAgeMs,
               sourceTransportAgeMs,
               healthySourceTransportCount,
-              intervalP50Ms: percentile(intervals, 50),
-              intervalP95Ms: percentile(intervals, 95),
-              intervalP99Ms: percentile(intervals, 99),
+              intervalP50Ms: measurement.intervalP50Ms,
+              intervalP95Ms: measurement.intervalP95Ms,
+              intervalP99Ms: measurement.intervalP99Ms,
               framePollingSuppressed,
               framePollingIntervalMs,
               framePollingMaxWidth,
               proofSurfaceSuspended,
               sourcePixelsPresent: liveLayerCount > 0,
-              blankFrames,
+              blankFrames: measurement.blankFrames,
               width: window.innerWidth,
               height: window.innerHeight
             };
@@ -7761,6 +7776,13 @@ async function runSmokePreviewMotionCommand(
       throw new Error('Native preview surface is not ready for measurement.')
     }
     const durationMs = typeof params.durationMs === 'number' ? params.durationMs : 2500
+    const warmupMs =
+      typeof params.warmupMs === 'number' && Number.isFinite(params.warmupMs)
+        ? Math.max(0, params.warmupMs)
+        : 0
+    if (warmupMs > 0) {
+      await new Promise((resolveWarmup) => setTimeout(resolveWarmup, warmupMs))
+    }
     resetNativePreviewMainHandoffMetrics()
     nativePreviewRealSurfaceDriver?.resetMetrics?.()
     const measuringProofSurface = !nativePreviewSurfaceStatusIsRealSurface(
@@ -7768,13 +7790,17 @@ async function runSmokePreviewMotionCommand(
     )
     const initialProofMetrics = measuringProofSurface
       ? await nativePreviewSurfaceWindow.webContents.executeJavaScript(
-          'window.__videorcNativePreviewMetrics?.() ?? null',
+          'window.__videorcResetNativePreviewMeasurement?.(); window.__videorcNativePreviewMetrics?.() ?? null',
           true
         )
       : null
+    const measurementStartedAtMs = Date.now()
     await new Promise((resolveMeasure) => setTimeout(resolveMeasure, durationMs))
     if (nativePreviewSurfaceStatusIsRealSurface(nativePreviewSurfaceStatus)) {
-      return nativePreviewSurfaceStatusMetrics(nativePreviewSurfaceStatus)
+      return {
+        ...nativePreviewSurfaceStatusMetrics(nativePreviewSurfaceStatus),
+        measurementStartedAtMs
+      }
     }
     const metrics = await nativePreviewSurfaceWindow.webContents.executeJavaScript(
       'window.__videorcNativePreviewMetrics?.() ?? null',
@@ -7814,6 +7840,7 @@ async function runSmokePreviewMotionCommand(
     return {
       ...metrics,
       sourceFrameDelta,
+      measurementStartedAtMs,
       status: nativePreviewSurfaceStatus
     }
   }
