@@ -90,14 +90,14 @@ export function PreviewStage({
   )
 }
 
-/** All three preview states occupy the same output-aspect rect so the Studio
+/** All three preview states occupy the same FOOTPRINT rect so the Studio
  * layout never jumps when the preview opens, docks, or closes. Portrait
- * canvases (the vertical 9:16 profile) keep the LANDSCAPE footprint: a raw
- * 9:16 slot would tower ~2.4× over the Studio column, so the strip stays 16:9
- * and the native surface pillarboxes the portrait video inside it (the
- * surface contain-fits within the slot; the detached window is truly
- * portrait). */
-function previewAspectRatio(aspect: { width: number; height: number }): string {
+ * canvases (the vertical 9:16 profile) keep the LANDSCAPE footprint — a raw
+ * full-width 9:16 strip would tower ~2.4× over the Studio column. The docked
+ * frame centers a TRUE-portrait slot inside that footprint (see
+ * DockedPreviewFrame); this function only shapes the outer strip and the
+ * detached placeholder card. */
+function previewFootprintRatio(aspect: { width: number; height: number }): string {
   if (aspect.width <= 0 || aspect.height <= 0) {
     return '16 / 9'
   }
@@ -105,6 +105,14 @@ function previewAspectRatio(aspect: { width: number; height: number }): string {
     return '16 / 9'
   }
   return `${aspect.width} / ${aspect.height}`
+}
+
+/** The slot itself always carries the REAL canvas aspect: the native surface
+ * is glued to the slot rect, so a portrait canvas must get a portrait slot —
+ * gluing a 9:16 surface over a 16:9 slot renders a squashed preview (the
+ * 0.9.32 vertical-mode report). */
+function previewSlotRatio(aspect: { width: number; height: number }): string {
+  return aspect.width > 0 && aspect.height > 0 ? `${aspect.width} / ${aspect.height}` : '16 / 9'
 }
 
 // Docked ("stick") mode: the native preview surface floats glued over the slot
@@ -138,7 +146,8 @@ function DockedPreviewFrame({
     detail: previewSupervisorDisplay(true, supervisor, previewSurfaceStatus).detail
   }
   const showPermissionAction = supervisor.lifecycleState === 'permission-required'
-  const aspectRatio = previewAspectRatio(aspect)
+  const footprintRatio = previewFootprintRatio(aspect)
+  const slotRatio = previewSlotRatio(aspect)
 
   return (
     // No border and no panel rounding here: the native surface is a separate
@@ -149,19 +158,28 @@ function DockedPreviewFrame({
       data-videorc-preview-card
       data-videorc-preview-docked
     >
-      {/* The slot the native surface covers. Solid charcoal (it frames video,
-          matching the preview window's own base) and output-aspect-locked so
-          the surface can never be squeezed. */}
+      {/* The charcoal strip keeps the landscape footprint so the Studio
+          column never grows; the SLOT the native surface glues to carries the
+          REAL canvas aspect and centers inside it. Landscape: slot == strip.
+          Portrait (vertical mode): a true 9:16 slot on the black strip — the
+          surface aspect always matches the slot, so it can never be
+          squeezed or stretched. */}
       <div
-        ref={slotRef}
-        className="relative w-full bg-[#0D0D0F]"
-        data-videorc-dock-slot
-        style={{ aspectRatio }}
+        className="flex w-full items-center justify-center bg-[#0D0D0F]"
+        data-videorc-dock-strip
+        style={{ aspectRatio: footprintRatio }}
       >
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
-          <VideoCamera className="size-8 text-muted-foreground" weight="duotone" />
-          <span className="text-sm font-medium text-[#F4F4F5]">{status.title}</span>
-          <span className="text-xs text-[#A1A1AA]">{status.detail}</span>
+        <div
+          ref={slotRef}
+          className="relative h-full"
+          data-videorc-dock-slot
+          style={{ aspectRatio: slotRatio }}
+        >
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
+            <VideoCamera className="size-8 text-muted-foreground" weight="duotone" />
+            <span className="text-sm font-medium text-[#F4F4F5]">{status.title}</span>
+            <span className="text-xs text-[#A1A1AA]">{status.detail}</span>
+          </div>
         </div>
       </div>
       {/* Slim control row under the bare strip (the docked preview has no
@@ -282,7 +300,7 @@ function DetachedPreviewCard({
         className
       )}
       data-videorc-preview-card
-      style={{ aspectRatio: previewAspectRatio(aspect) }}
+      style={{ aspectRatio: previewFootprintRatio(aspect) }}
     >
       {nativePreviewSurfaceEnabled && supervisorStatus.tone !== 'warn' ? (
         <VideoCamera className="size-8 text-muted-foreground" weight="duotone" />
