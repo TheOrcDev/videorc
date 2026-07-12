@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { summarizeNativePreviewRecordingDiagnostics } from './native-preview-diagnostics.mjs'
+import {
+  minimumProofSourceFrameDelta,
+  resolveNativePreviewLatencyBudgets,
+  summarizeNativePreviewRecordingDiagnostics
+} from './native-preview-diagnostics.mjs'
 
 const baseOptions = {
   targetFps: 30,
@@ -11,6 +15,104 @@ const baseOptions = {
   expectedSurfaceTransport: 'electron-proof-surface',
   expectedSurfaceBacking: 'electron-browser-window'
 }
+
+test('native preview latency budgets distinguish native Metal from contained proof polling', () => {
+  const configured = {
+    configuredP95Ms: 50,
+    configuredP99Ms: 100
+  }
+
+  assert.deepEqual(
+    resolveNativePreviewLatencyBudgets({
+      ...configured,
+      expectNativeMetalPreview: true,
+      exerciseProofFramePolling: true
+    }),
+    { p95Ms: 50, p99Ms: 100 }
+  )
+  assert.deepEqual(
+    resolveNativePreviewLatencyBudgets({
+      ...configured,
+      expectNativeMetalPreview: false,
+      exerciseProofFramePolling: false
+    }),
+    { p95Ms: 50, p99Ms: 100 }
+  )
+  assert.deepEqual(
+    resolveNativePreviewLatencyBudgets({
+      ...configured,
+      expectNativeMetalPreview: false,
+      exerciseProofFramePolling: true,
+      proofPollingIntervalMs: 125
+    }),
+    { p95Ms: 250, p99Ms: 250 }
+  )
+  assert.deepEqual(
+    resolveNativePreviewLatencyBudgets({
+      ...configured,
+      sourceCompleteScene: true
+    }),
+    { p95Ms: 100, p99Ms: 150 }
+  )
+  assert.deepEqual(
+    resolveNativePreviewLatencyBudgets({
+      configuredP95Ms: 125,
+      configuredP99Ms: 200,
+      expectNativeMetalPreview: false,
+      exerciseProofFramePolling: true,
+      proofPollingIntervalMs: 125
+    }),
+    { p95Ms: 250, p99Ms: 250 }
+  )
+})
+
+test('proof-source advancement floor scales with the measurement and polling profile', () => {
+  assert.equal(
+    minimumProofSourceFrameDelta({ measurementMs: 4_000, pollingIntervalMs: 125 }),
+    8
+  )
+  assert.equal(
+    minimumProofSourceFrameDelta({ measurementMs: 500, pollingIntervalMs: 125 }),
+    2
+  )
+  assert.equal(
+    minimumProofSourceFrameDelta({ measurementMs: 4_000, pollingIntervalMs: 0 }),
+    2
+  )
+})
+
+test('native preview diagnostics exclude samples before the absolute measurement epoch', () => {
+  const summary = summarizeNativePreviewRecordingDiagnostics(
+    [
+      {
+        activeOutputMode: 'record',
+        receivedAt: 2_500,
+        previewTransport: 'electron-proof-surface',
+        previewSurfaceBacking: 'electron-browser-window',
+        previewInputToPresentLatencyP95Ms: 600,
+        previewInputToPresentLatencyP99Ms: 700
+      },
+      {
+        activeOutputMode: 'record',
+        receivedAt: 4_500,
+        previewTransport: 'electron-proof-surface',
+        previewSurfaceBacking: 'electron-browser-window',
+        previewInputToPresentLatencyP95Ms: 80,
+        previewInputToPresentLatencyP99Ms: 120
+      }
+    ],
+    {
+      ...baseOptions,
+      startedAt: 4_000,
+      warmupMs: 0,
+      stopRequestedAt: 6_000
+    }
+  )
+
+  assert.equal(summary.maxPreviewInputToPresentLatencyP95Ms, 80)
+  assert.equal(summary.maxPreviewInputToPresentLatencyP99Ms, 120)
+  assert.equal(summary.measuredSamples, 1)
+})
 
 test('native preview diagnostics summarize only steady active recording samples when available', () => {
   const summary = summarizeNativePreviewRecordingDiagnostics(

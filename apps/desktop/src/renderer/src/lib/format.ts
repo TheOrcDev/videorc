@@ -7,6 +7,7 @@ import type {
   SessionSummary,
   StreamHealth
 } from '../../../shared/backend'
+import { isActiveRecordingState as isSharedActiveRecordingState } from '../../../shared/capture-state'
 import type { CaptureConfig, SetupStep, SetupTone, WsStatus } from './capture'
 
 export function compactTime(timestamp: string): string {
@@ -100,7 +101,7 @@ export function mergeStreamHealth(
 }
 
 export function isActiveRecordingState(state: RecordingStatus['state']): boolean {
-  return ['recording', 'streaming', 'starting', 'stopping'].includes(state)
+  return isSharedActiveRecordingState(state)
 }
 
 export function isEditableTarget(target: EventTarget | null): boolean {

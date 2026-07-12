@@ -22,6 +22,26 @@ const LAYOUTS = [
   {
     preset: 'screen-camera',
     expectedKinds: ['camera', 'test-pattern']
+  },
+  {
+    preset: 'vertical-camera-top',
+    expectedKinds: ['camera', 'test-pattern']
+  },
+  {
+    preset: 'vertical-camera-bottom',
+    expectedKinds: ['camera', 'test-pattern']
+  },
+  {
+    preset: 'vertical-split',
+    expectedKinds: ['camera', 'test-pattern']
+  },
+  {
+    preset: 'vertical-screen-camera',
+    expectedKinds: ['camera', 'test-pattern']
+  },
+  {
+    preset: 'vertical-screen-only',
+    expectedKinds: ['test-pattern']
   }
 ]
 
@@ -139,7 +159,8 @@ function sendSmokeCommand(smoke, command, params = {}) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body)
+          'Content-Length': Buffer.byteLength(body),
+          Authorization: `Bearer ${smoke.capability}`
         }
       },
       (res) => {

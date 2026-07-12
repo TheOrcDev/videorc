@@ -17,6 +17,26 @@ describe('mediaAccessPermissionForPane', () => {
 })
 
 describe('createMediaPermissionGrantWatcher', () => {
+  it('does not restart when Settings opens for an already-granted permission', async () => {
+    vi.useFakeTimers()
+    try {
+      const restartBackend = vi.fn<() => Promise<void>>(() => Promise.resolve())
+      const watcher = createMediaPermissionGrantWatcher({
+        getStatus: () => 'granted',
+        intervalMs: 100,
+        maxChecks: 2,
+        restartBackend
+      })
+
+      watcher.watch('camera', 'restart after camera grant')
+      await vi.advanceTimersByTimeAsync(300)
+
+      expect(restartBackend).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('restarts the backend when a permission changes to granted after Settings opens', async () => {
     vi.useFakeTimers()
     try {

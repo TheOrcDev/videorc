@@ -16,6 +16,21 @@ pub struct ClientCommand {
     pub params: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCompleteSignInParams {
+    pub code: String,
+    pub state: String,
+    pub verifier: String,
+    pub intent_generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountAuthIntent {
+    pub intent_generation: u64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerResponse {
@@ -446,6 +461,30 @@ pub enum LayoutPreset {
     ScreenOnly,
     CameraOnly,
     SideBySide,
+    /// The alias covers dev-era configs and session rows written while the
+    /// preset was plain "vertical" (never shipped in a release).
+    #[serde(alias = "vertical")]
+    VerticalCameraTop,
+    VerticalCameraBottom,
+    VerticalSplit,
+    VerticalScreenCamera,
+    VerticalScreenOnly,
+}
+
+impl LayoutPreset {
+    /// Orientation class: vertical presets exist only in the Studio's
+    /// vertical mode and imply a portrait canvas. The classes may not be
+    /// crossed while a session runs — the encoder canvas is fixed at start.
+    pub fn is_vertical(&self) -> bool {
+        matches!(
+            self,
+            LayoutPreset::VerticalCameraTop
+                | LayoutPreset::VerticalCameraBottom
+                | LayoutPreset::VerticalSplit
+                | LayoutPreset::VerticalScreenCamera
+                | LayoutPreset::VerticalScreenOnly
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -756,6 +795,8 @@ pub enum VideoPreset {
     StreamYoutube4k30,
     #[serde(rename = "stream-1080p60")]
     Stream1080p60,
+    #[serde(rename = "vertical-1080x1920")]
+    Vertical1080x1920,
     Custom,
 }
 
@@ -934,6 +975,20 @@ pub struct RepairRestoreParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairSessionParams {
+    pub session_id: String,
+    pub expect_audio: Option<bool>,
+    pub intended_fps: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairRestoreSessionParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewSnapshotParams {
     pub sources: SourceSelection,
@@ -1102,6 +1157,8 @@ pub enum EncodeBackend {
     HardwareVideotoolbox,
     /// h264_mf (MediaFoundation hardware/software hybrid), used by Windows builds.
     HardwareMediaFoundation,
+    /// h264_mf's software MFT fallback after the exact hardware profile probe failed.
+    SoftwareMediaFoundation,
 }
 
 /// Which compositor rendered the active shared-compositor frame.
@@ -1128,6 +1185,15 @@ pub enum CompositorBackend {
 pub struct PreviewImagePollCounts {
     pub camera_png: u64,
     pub screen_png: u64,
+    /// Requests to the PNG routes without the explicit debug opt-in. These are
+    /// rejected before encoding; any nonzero value is a production transport bug.
+    #[serde(default)]
+    pub production_png: u64,
+    /// Uncompressed latest-frame requests used by the Windows proof surface.
+    #[serde(default)]
+    pub camera_bmp: u64,
+    #[serde(default)]
+    pub screen_bmp: u64,
     pub live_jpeg: u64,
     pub live_mjpeg: u64,
 }
@@ -2013,17 +2079,23 @@ pub struct CompositorStatus {
     pub scene_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scene_layout: Option<LayoutSettings>,
+    /// Persisted `StreamScreen` takeover image layered above the live scene.
+    /// Native screen/window capture authority lives in `scene_sources` and
+    /// `sources`; this field is not the selected capture device id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_screen_id: Option<String>,
     #[serde(default)]
     pub scene_sources: Vec<CompositorSceneSourceStatus>,
     #[serde(default)]
     pub sources: Vec<CompositorSourceStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub render_fps: Option<f64>,
     pub frames_rendered: u64,
     pub repeated_frames: u64,
     pub dropped_frames: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub frame_age_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub frame_time_p95_ms: Option<f64>,
     /// IOSurface id for the latest retained Metal compositor target. This is a native
     /// preview handoff handle, not an OBS-native claim by itself.
@@ -2189,6 +2261,7 @@ pub struct PreviewCameraStatus {
     pub selected_format_max_fps: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub frame_age_ms: Option<u64>,
     pub frames_captured: u64,
     pub dropped_frames: u64,
@@ -2258,6 +2331,7 @@ pub struct PreviewScreenStatus {
     pub iosurface_available: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub frame_age_ms: Option<u64>,
     pub frames_captured: u64,
     pub dropped_frames: u64,
@@ -2357,6 +2431,41 @@ pub struct SessionStorageTotals {
 #[serde(rename_all = "camelCase")]
 pub struct SessionCommentsListParams {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default = "default_session_comments_page_limit")]
+    pub limit: usize,
+}
+
+pub const DEFAULT_SESSION_COMMENTS_PAGE_LIMIT: usize = 200;
+
+fn default_session_comments_page_limit() -> usize {
+    DEFAULT_SESSION_COMMENTS_PAGE_LIMIT
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDeleteParams {
+    pub session_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDeleteCompleteParams {
+    pub operation_id: String,
+    pub failed_paths: Vec<String>,
+}
+
+/// Renderer-safe handle for a durable Library deletion. Paths remain behind
+/// the admin channel and are resolved by Electron main immediately before it
+/// invokes the system Trash API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDeletionHandle {
+    pub operation_id: String,
+    pub session_id: String,
+    pub path_count: usize,
+    pub blocked_path_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3085,6 +3194,63 @@ mod tests {
             serde_json::to_value(LayoutPreset::SideBySide).unwrap(),
             serde_json::json!("side-by-side")
         );
+        assert_eq!(
+            serde_json::to_value(LayoutPreset::VerticalCameraTop).unwrap(),
+            serde_json::json!("vertical-camera-top")
+        );
+        assert_eq!(
+            serde_json::to_value(LayoutPreset::VerticalCameraBottom).unwrap(),
+            serde_json::json!("vertical-camera-bottom")
+        );
+        assert_eq!(
+            serde_json::to_value(LayoutPreset::VerticalSplit).unwrap(),
+            serde_json::json!("vertical-split")
+        );
+        assert_eq!(
+            serde_json::to_value(LayoutPreset::VerticalScreenCamera).unwrap(),
+            serde_json::json!("vertical-screen-camera")
+        );
+        assert_eq!(
+            serde_json::to_value(LayoutPreset::VerticalScreenOnly).unwrap(),
+            serde_json::json!("vertical-screen-only")
+        );
+    }
+
+    #[test]
+    fn layout_preset_orientation_classes_are_exhaustive() {
+        // The class gates live scene switches (the canvas is fixed while a
+        // session runs) — a misclassified preset silently breaks that gate.
+        assert!(!LayoutPreset::ScreenCamera.is_vertical());
+        assert!(!LayoutPreset::ScreenOnly.is_vertical());
+        assert!(!LayoutPreset::CameraOnly.is_vertical());
+        assert!(!LayoutPreset::SideBySide.is_vertical());
+        assert!(LayoutPreset::VerticalCameraTop.is_vertical());
+        assert!(LayoutPreset::VerticalCameraBottom.is_vertical());
+        assert!(LayoutPreset::VerticalSplit.is_vertical());
+        assert!(LayoutPreset::VerticalScreenCamera.is_vertical());
+        assert!(LayoutPreset::VerticalScreenOnly.is_vertical());
+    }
+
+    #[test]
+    fn layout_preset_accepts_the_dev_era_vertical_alias() {
+        // "vertical" was the preset's wire name before the orientation-mode
+        // split; it never shipped, but dev configs and session rows carry it.
+        assert_eq!(
+            serde_json::from_value::<LayoutPreset>(serde_json::json!("vertical")).unwrap(),
+            LayoutPreset::VerticalCameraTop
+        );
+    }
+
+    #[test]
+    fn media_foundation_backends_match_the_desktop_wire_contract() {
+        assert_eq!(
+            serde_json::to_value(EncodeBackend::HardwareMediaFoundation).unwrap(),
+            serde_json::json!("hardware-media-foundation")
+        );
+        assert_eq!(
+            serde_json::to_value(EncodeBackend::SoftwareMediaFoundation).unwrap(),
+            serde_json::json!("software-media-foundation")
+        );
     }
 
     #[test]
@@ -3171,6 +3337,17 @@ mod tests {
             serde_json::to_value(VideoPreset::StreamYoutube4k30).unwrap(),
             serde_json::json!("stream-youtube-4k30")
         );
+        // The 0.9.31 wire bug: the renderer's 'vertical-1080x1920' had no Rust
+        // variant, so entering vertical mode failed to deserialize. Pin BOTH
+        // directions so a renderer-only preset can never ship again.
+        assert_eq!(
+            serde_json::to_value(VideoPreset::Vertical1080x1920).unwrap(),
+            serde_json::json!("vertical-1080x1920")
+        );
+        assert_eq!(
+            serde_json::from_value::<VideoPreset>(serde_json::json!("vertical-1080x1920")).unwrap(),
+            VideoPreset::Vertical1080x1920
+        );
     }
 
     #[test]
@@ -3247,5 +3424,121 @@ mod tests {
         assert_eq!(value["styleId"], "high-contrast");
         assert_eq!(value["language"], "es");
         assert_eq!(value["styleRevision"], 12);
+    }
+
+    fn shared_high_risk_contract_fixture_value(pointer: &str) -> serde_json::Value {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/high-risk-contracts.json"
+        ))
+        .expect("shared high-risk protocol fixture must be valid JSON");
+        fixture
+            .pointer(pointer)
+            .unwrap_or_else(|| panic!("shared protocol fixture is missing {pointer}"))
+            .clone()
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_preserves_preview_bounds_and_stacking() {
+        let wire = shared_high_risk_contract_fixture_value("/previewSurfaceBounds/wire");
+        let expected = shared_high_risk_contract_fixture_value("/previewSurfaceBounds/normalized");
+        let bounds: PreviewSurfaceBounds = serde_json::from_value(wire).unwrap();
+        assert_eq!(bounds.order_above_window_id, Some(4242));
+        assert_eq!(bounds.elevated, Some(false));
+        assert_eq!(serde_json::to_value(bounds).unwrap(), expected);
+
+        let legacy_wire =
+            shared_high_risk_contract_fixture_value("/previewSurfaceBounds/legacyWire");
+        let legacy_expected =
+            shared_high_risk_contract_fixture_value("/previewSurfaceBounds/legacyNormalized");
+        let legacy: PreviewSurfaceBounds = serde_json::from_value(legacy_wire).unwrap();
+        assert_eq!(serde_json::to_value(legacy).unwrap(), legacy_expected);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_layout_and_scene_defaults() {
+        let legacy_layout = shared_high_risk_contract_fixture_value("/layout/legacyWire");
+        let expected_layout = shared_high_risk_contract_fixture_value("/layout/normalized");
+        let layout: LayoutSettings = serde_json::from_value(legacy_layout).unwrap();
+        assert_eq!(serde_json::to_value(layout).unwrap(), expected_layout);
+
+        let scene_wire = shared_high_risk_contract_fixture_value("/scene/wire");
+        let scene: Scene = serde_json::from_value(scene_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(scene).unwrap(), scene_wire);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_recording_status_defaults() {
+        let wire = shared_high_risk_contract_fixture_value("/recordingStatus/wire");
+        let status: RecordingStatus = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(status).unwrap(), wire);
+
+        let minimal = shared_high_risk_contract_fixture_value("/recordingStatus/minimalWire");
+        let expected =
+            shared_high_risk_contract_fixture_value("/recordingStatus/minimalNormalized");
+        let status: RecordingStatus = serde_json::from_value(minimal).unwrap();
+        assert_eq!(serde_json::to_value(status).unwrap(), expected);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_stopped_compositor_nullability() {
+        let wire = shared_high_risk_contract_fixture_value("/compositorStatus/stoppedWire");
+        let status: CompositorStatus = serde_json::from_value(wire.clone()).unwrap();
+        assert!(status.render_fps.is_none());
+        assert!(status.frame_age_ms.is_none());
+        assert!(status.frame_time_p95_ms.is_none());
+        assert_eq!(serde_json::to_value(status).unwrap(), wire);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_account_sign_in_params() {
+        let wire = shared_high_risk_contract_fixture_value("/account/completeSignInParams");
+        let params: AccountCompleteSignInParams = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(params).unwrap(), wire);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_comment_pagination_and_deletion_dtos() {
+        let list_wire = shared_high_risk_contract_fixture_value("/comments/listParamsWire");
+        let list_expected =
+            shared_high_risk_contract_fixture_value("/comments/listParamsNormalized");
+        let list: SessionCommentsListParams = serde_json::from_value(list_wire).unwrap();
+        assert_eq!(list.limit, DEFAULT_SESSION_COMMENTS_PAGE_LIMIT);
+        assert_eq!(serde_json::to_value(list).unwrap(), list_expected);
+
+        let page_expected = shared_high_risk_contract_fixture_value("/comments/page");
+        let page = crate::storage::LiveChatMessagesPage {
+            messages: Vec::new(),
+            next_cursor: page_expected["nextCursor"].as_str().map(str::to_string),
+        };
+        assert_eq!(serde_json::to_value(page).unwrap(), page_expected);
+        assert!(
+            page_expected["nextCursor"]
+                .as_str()
+                .is_some_and(|cursor| cursor.contains('\n'))
+        );
+
+        let terminal_page_expected =
+            shared_high_risk_contract_fixture_value("/comments/terminalPage");
+        let terminal_page = crate::storage::LiveChatMessagesPage {
+            messages: Vec::new(),
+            next_cursor: None,
+        };
+        assert_eq!(
+            serde_json::to_value(terminal_page).unwrap(),
+            terminal_page_expected
+        );
+
+        let delete_params_wire = shared_high_risk_contract_fixture_value("/comments/deleteParams");
+        let delete_params: SessionDeleteParams =
+            serde_json::from_value(delete_params_wire.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(delete_params).unwrap(),
+            delete_params_wire
+        );
+
+        let operation_wire = shared_high_risk_contract_fixture_value("/comments/deletionOperation");
+        let operation: SessionDeletionHandle =
+            serde_json::from_value(operation_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(operation).unwrap(), operation_wire);
     }
 }

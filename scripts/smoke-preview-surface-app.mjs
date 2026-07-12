@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { appSpawnSpec, devAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { assertSmokeCommandConnection } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
 
@@ -50,6 +52,7 @@ const packagedNativePreviewHelper = resolve(
   'Resources',
   'native_preview_host_helper'
 )
+const packagedSmokeCapability = usePackagedApp ? randomBytes(32).toString('base64url') : null
 
 if (usePackagedApp) {
   if (process.platform !== 'darwin') {
@@ -76,6 +79,7 @@ try {
 }
 
 async function runPreviewSurfaceSmoke(connection, smoke) {
+  assertSmokeCommandConnection(smoke)
   const ws = await connectBackend(connection, timeoutMs)
   try {
     await smokeCommand(smoke, 'open-tab', {
@@ -667,7 +671,8 @@ async function sendSmokeCommand(smoke, command, params = {}) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body)
+          'Content-Length': Buffer.byteLength(body),
+          Authorization: `Bearer ${smoke.capability}`
         }
       },
       (response) => {
@@ -709,20 +714,27 @@ function launchAndReadConnections() {
     }, timeoutMs)
     const connections = { backend: null, smoke: null }
 
-    const command = usePackagedApp ? packagedAppExecutable : 'pnpm'
-    const args = usePackagedApp ? [] : ['dev']
-    appProcess = spawn(command, args, {
-      cwd: usePackagedApp ? dirname(packagedAppExecutable) : repoRoot,
-      detached: true,
-      env: smokeAppEnv({
-        VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
-        VIDEORC_USER_DATA_DIR: join(outputDirectory, 'user-data'),
-        VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
-        VIDEORC_SMOKE_PREVIEW_MOTION: '1',
-        VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
-      }),
-      stdio: ['ignore', 'pipe', 'pipe']
+    const env = smokeAppEnv({
+      VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
+      VIDEORC_USER_DATA_DIR: join(outputDirectory, 'user-data'),
+      VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
+      VIDEORC_SMOKE_PREVIEW_MOTION: '1',
+      ...(packagedSmokeCapability
+        ? {
+            VIDEORC_PACKAGED_SMOKE_TEST: '1',
+            VIDEORC_SMOKE_COMMAND_CAPABILITY: packagedSmokeCapability
+          }
+        : {}),
+      VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
     })
+    const spawnSpec = usePackagedApp
+      ? appSpawnSpec({
+          command: packagedAppExecutable,
+          cwd: dirname(packagedAppExecutable),
+          env
+        })
+      : devAppSpawnSpec({ env })
+    appProcess = spawn(spawnSpec.command, spawnSpec.args, spawnSpec.options)
 
     const maybeResolve = () => {
       if (connections.backend && connections.smoke) {
@@ -730,7 +742,8 @@ function launchAndReadConnections() {
         resolveConnections(connections)
       }
     }
-    const handleOutput = (text) => handleAppOutput(text, connections, maybeResolve)
+    const handleOutput = (text) =>
+      handleAppOutput(text, connections, maybeResolve, packagedSmokeCapability)
 
     appProcess.stdout.setEncoding('utf8')
     appProcess.stderr.setEncoding('utf8')
@@ -773,7 +786,7 @@ async function launchAndReadConnectionsWithRetry() {
   throw lastError ?? new Error('Preview surface smoke failed before launch.')
 }
 
-function handleAppOutput(text, connections, maybeResolve) {
+function handleAppOutput(text, connections, maybeResolve, expectedPackagedCapability = null) {
   for (const line of text.split(/\r?\n/)) {
     outputGuard.inspectLine(line)
     if (line.trim() && !stopping) {
@@ -792,6 +805,9 @@ function handleAppOutput(text, connections, maybeResolve) {
     const smokeIndex = line.indexOf(smokeMarker)
     if (smokeIndex !== -1) {
       connections.smoke = JSON.parse(line.slice(smokeIndex + smokeMarker.length))
+      if (expectedPackagedCapability) {
+        connections.smoke.capability = expectedPackagedCapability
+      }
       maybeResolve()
     }
   }

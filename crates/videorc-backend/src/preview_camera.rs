@@ -21,6 +21,7 @@ use crate::diagnostics::{
 };
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats};
+use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
 use crate::protocol::{
     CameraAspect, CameraCapabilityFormat, CameraShape, CameraSize, CameraTransformMode,
     LayoutPreset, LayoutSettings, PreviewCameraStartParams, PreviewCameraState,
@@ -791,6 +792,55 @@ pub async fn latest_preview_camera_png(
         (guard.frame_store.latest()?, layout)
     };
 
+    let max_width = preview_camera_png_max_width(requested_max_width);
+    tokio::task::spawn_blocking(move || encode_preview_camera_png(frame, layout, max_width))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Latest-wins BGRA/BMP transport used by the production Windows proof
+/// surface. Unlike the debug PNG route this performs no compression and
+/// preserves the capture frame sequence for duplicate suppression.
+pub async fn latest_preview_camera_bmp(
+    state: &AppState,
+    requested_max_width: Option<u32>,
+    cursor: Option<PreviewBmpCursor>,
+) -> Option<LatestPreviewBmpPoll> {
+    let (generation, frame) = {
+        let slot = state.preview_camera.lock().await;
+        let active = slot.active.as_ref()?;
+        let generation = slot.run_id.clone()?;
+        let shared = Arc::clone(&active.shared);
+        drop(slot);
+        let guard = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (generation, guard.frame_store.latest()?)
+    };
+
+    let max_width = preview_camera_png_max_width(requested_max_width);
+    tokio::task::spawn_blocking(move || {
+        encode_latest_bgra_bmp(
+            cursor.as_ref(),
+            generation,
+            frame.sequence,
+            frame.width,
+            frame.height,
+            &frame.bytes,
+            max_width,
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn encode_preview_camera_png(
+    frame: FrameHandle<PreviewCameraPixelFormat>,
+    layout: LayoutSettings,
+    max_width: u32,
+) -> Option<Vec<u8>> {
     let expected_len = frame.width as usize * frame.height as usize * 4;
     if frame.bytes.len() < expected_len {
         return None;
@@ -802,12 +852,8 @@ pub async fn latest_preview_camera_png(
     if layout.camera_mirror {
         mirror_rgba_in_place(&mut rgba, frame.width as usize, frame.height as usize);
     }
-    let (rgba, width, height) = downscale_rgba_for_preview(
-        rgba,
-        frame.width,
-        frame.height,
-        preview_camera_png_max_width(requested_max_width),
-    );
+    let (rgba, width, height) =
+        downscale_rgba_for_preview(rgba, frame.width, frame.height, max_width);
 
     let mut png = Vec::new();
     let encoder = PngEncoder::new(&mut png);
@@ -1372,7 +1418,13 @@ fn windows_camera_preview_ffmpeg_args_opts(
 }
 
 fn camera_capture_target_dimensions(layout: &LayoutSettings, video: &VideoSettings) -> (u32, u32) {
-    if layout.layout_preset != LayoutPreset::ScreenCamera {
+    // Only the inset scenes (ScreenCamera + its vertical twin) render the
+    // camera as a small overlay box; everywhere else the camera can span the
+    // canvas, so capture at full output size.
+    if !matches!(
+        layout.layout_preset,
+        LayoutPreset::ScreenCamera | LayoutPreset::VerticalScreenCamera
+    ) {
         return (video.width, video.height);
     }
 

@@ -1,10 +1,13 @@
 import { DownloadSimple, X } from '@phosphor-icons/react'
-import { useEffect, useState, type ReactElement } from 'react'
+import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
-import { ObsImportDialog } from '@/components/obs-import-dialog'
 import { Button } from '@/components/ui/button'
 import { useStudioCore } from '@/hooks/use-studio'
 import { OBS_NUDGE_DISMISSED_KEY, shouldShowObsNudge } from '@/lib/obs-import-nudge'
+
+const ObsImportDialog = lazy(async () => ({
+  default: (await import('@/components/obs-import-dialog')).ObsImportDialog
+}))
 
 /** Fresh-profile hint (O5): one quiet dismissible row in the Studio — never
  *  shown once any capture source is picked or after a dismissal. */
@@ -52,7 +55,11 @@ export function ObsImportNudge(): ReactElement | null {
       <Button aria-label="Dismiss OBS import hint" size="xs" variant="ghost" onClick={dismiss}>
         <X className="size-3.5" />
       </Button>
-      <ObsImportDialog open={importOpen} onOpenChange={setImportOpen} />
+      {importOpen ? (
+        <Suspense fallback={null}>
+          <ObsImportDialog open onOpenChange={setImportOpen} />
+        </Suspense>
+      ) : null}
     </div>
   )
 }

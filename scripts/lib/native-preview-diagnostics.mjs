@@ -1,3 +1,56 @@
+export function resolveNativePreviewLatencyBudgets({
+  configuredP95Ms,
+  configuredP99Ms,
+  sourceCompleteScene = false,
+  expectNativeMetalPreview = true,
+  exerciseProofFramePolling = false,
+  proofPollingIntervalMs
+}) {
+  const usesContainedProofSurface =
+    !expectNativeMetalPreview && exerciseProofFramePolling
+  const usesExpandedBudget = sourceCompleteScene || usesContainedProofSurface
+  const proofPollingBudgetMs =
+    usesContainedProofSurface &&
+    Number.isFinite(proofPollingIntervalMs) &&
+    proofPollingIntervalMs > 0
+      ? proofPollingIntervalMs * 2
+      : null
+
+  // The Electron proof surface shares renderer/main-loop scheduling and is not
+  // governed by the CAMetal presenter contract. A live proof source can only
+  // advance at its configured poll cadence, so allow at most two polls while
+  // the smoke separately proves advancing, fresh source pixels and no blanks.
+  return {
+    p95Ms: usesExpandedBudget
+      ? Math.max(configuredP95Ms, proofPollingBudgetMs ?? 100)
+      : configuredP95Ms,
+    p99Ms: usesExpandedBudget
+      ? Math.max(configuredP99Ms, proofPollingBudgetMs ?? 150)
+      : configuredP99Ms
+  }
+}
+
+export function minimumProofSourceFrameDelta({
+  measurementMs,
+  pollingIntervalMs,
+  toleratedPollsPerAdvance = 4
+}) {
+  if (
+    !Number.isFinite(measurementMs) ||
+    measurementMs <= 0 ||
+    !Number.isFinite(pollingIntervalMs) ||
+    pollingIntervalMs <= 0 ||
+    !Number.isFinite(toleratedPollsPerAdvance) ||
+    toleratedPollsPerAdvance < 1
+  ) {
+    return 2
+  }
+  return Math.max(
+    2,
+    Math.floor(measurementMs / (pollingIntervalMs * toleratedPollsPerAdvance))
+  )
+}
+
 export function summarizeNativePreviewRecordingDiagnostics(
   samples,
   {

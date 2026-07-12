@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, readdirSync } from 'fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { isAbsolute, join, relative, resolve } from 'path'
 
 import type {
   ObsDiscovery,
@@ -241,10 +241,19 @@ export function parseService(json: string): (ObsStreamService & { key?: string }
 
 // --- Filesystem discovery -------------------------------------------------
 
-function readWithBakFallback(path: string): string | null {
+function pathInsideRoot(candidate: string, root: string): boolean {
+  const rel = relative(resolve(root), resolve(candidate))
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+function readWithBakFallback(path: string, allowedRoot: string): string | null {
   for (const candidate of [path, `${path}.bak`]) {
     try {
-      if (existsSync(candidate)) {
+      if (
+        existsSync(candidate) &&
+        !lstatSync(candidate).isSymbolicLink() &&
+        pathInsideRoot(realpathSync(candidate), realpathSync(allowedRoot))
+      ) {
         return readFileSync(candidate, 'utf8')
       }
     } catch {
@@ -260,16 +269,23 @@ export function discoverObs(root = obsRootPath()): ObsDiscovery {
   if (!existsSync(scenesDir)) {
     return { available: false, collections: [], profiles: [] }
   }
-  const collections = readdirSync(scenesDir)
-    .filter((file) => file.endsWith('.json'))
-    .map((file) => file.replace(/\.json$/, ''))
+  const collections = [
+    ...new Set(
+      readdirSync(scenesDir, { withFileTypes: true })
+        .filter(
+          (entry) =>
+            entry.isFile() && (entry.name.endsWith('.json') || entry.name.endsWith('.json.bak'))
+        )
+        .map((entry) => entry.name.replace(/\.json(?:\.bak)?$/, ''))
+    )
+  ]
   const profiles = existsSync(profilesDir)
     ? readdirSync(profilesDir, { withFileTypes: true })
         .filter((entry) => entry.isDirectory())
         .map((entry) => entry.name)
     : []
-  const globalIni = parseIni(readWithBakFallback(join(root, 'global.ini')) ?? '')
-  const userIni = parseIni(readWithBakFallback(join(root, 'user.ini')) ?? '')
+  const globalIni = parseIni(readWithBakFallback(join(root, 'global.ini'), root) ?? '')
+  const userIni = parseIni(readWithBakFallback(join(root, 'user.ini'), root) ?? '')
   const basic = { ...globalIni.Basic, ...userIni.Basic }
   return {
     available: collections.length > 0,
@@ -288,17 +304,22 @@ export function readObsSetup(
   profile: string,
   root = obsRootPath()
 ): ObsSetup | null {
-  const collectionJson = readWithBakFallback(join(root, 'basic', 'scenes', `${collection}.json`))
+  const discovery = discoverObs(root)
+  if (!discovery.collections.includes(collection) || !discovery.profiles.includes(profile)) {
+    return null
+  }
+  const scenesRoot = join(root, 'basic', 'scenes')
+  const profilesRoot = join(root, 'basic', 'profiles')
+  const profileRoot = join(profilesRoot, profile)
+  const collectionJson = readWithBakFallback(join(scenesRoot, `${collection}.json`), scenesRoot)
   if (!collectionJson) {
     return null
   }
   const parsed = parseSceneCollection(collectionJson)
-  const ini = parseIni(
-    readWithBakFallback(join(root, 'basic', 'profiles', profile, 'basic.ini')) ?? ''
-  )
+  const ini = parseIni(readWithBakFallback(join(profileRoot, 'basic.ini'), profileRoot) ?? '')
   const video = ini.Video ?? {}
   const service = parseService(
-    readWithBakFallback(join(root, 'basic', 'profiles', profile, 'service.json')) ?? 'null'
+    readWithBakFallback(join(profileRoot, 'service.json'), profileRoot) ?? 'null'
   )
   const recordingPath =
     ini.SimpleOutput?.FilePath ?? ini.AdvOut?.RecFilePath ?? ini.Output?.RecFilePath
@@ -327,8 +348,13 @@ export function readObsSetup(
 }
 
 export function readObsStreamKey(profile: string, root = obsRootPath()): string | null {
+  const discovery = discoverObs(root)
+  if (!discovery.profiles.includes(profile)) {
+    return null
+  }
+  const profileRoot = join(root, 'basic', 'profiles', profile)
   const service = parseService(
-    readWithBakFallback(join(root, 'basic', 'profiles', profile, 'service.json')) ?? 'null'
+    readWithBakFallback(join(profileRoot, 'service.json'), profileRoot) ?? 'null'
   )
   return service?.key ?? null
 }

@@ -10,9 +10,11 @@ import { join } from 'node:path'
 // debug backend binary against an isolated database (secrets/posters derive
 // from its parent), so the owner's real library is never touched.
 //
-// The Trash contract is asserted the hard way: after sessions.delete, the
-// files must STILL exist on disk — the backend never unlinks recordings;
-// moving them to the Trash is the renderer's job.
+// The two-phase Trash contract is asserted the hard way: sessions.delete
+// durably hides rows and atomically moves identity-matched media to private
+// quarantine names. The renderer receives only opaque operation handles;
+// Electron main resolves each handle over its private admin connection before
+// an explicit completion removes the rows after simulated Trash moves.
 
 const backendBinary = join(process.cwd(), 'target', 'debug', 'videorc-backend')
 assert.ok(
@@ -43,7 +45,11 @@ try {
     stdio: ['ignore', 'pipe', 'pipe']
   })
   const ready = await waitForReady(backend)
-  socket = await connect(`ws://127.0.0.1:${ready.port}/ws?token=${ready.token}`)
+  assert.ok(
+    typeof ready.adminToken === 'string' && ready.adminToken.length >= 32,
+    'debug backend READY must include its private smoke admin credential'
+  )
+  socket = await connect(`ws://127.0.0.1:${ready.port}/ws?token=${ready.adminToken}`)
   const rpc = makeRpc(socket)
 
   // Import: a managed copy into the output directory + a completed row.
@@ -91,16 +97,60 @@ try {
   assert.equal(totals.count, 2)
   assert.equal(totals.totalBytes, 2 * statSync(importedFile).size)
 
-  // Delete: rows go, files STAY — the backend never unlinks a recording.
-  const deleted = await rpc('sessions.delete', { sessionIds: [importedId, duplicateId] })
-  assert.equal(deleted.deleted, 2)
+  // Delete prepare: rows hide, identity-matched files move to operation-owned
+  // quarantine names, and the public result contains no path authority.
+  const operations = await rpc('sessions.delete', { sessionIds: [importedId, duplicateId] })
+  assert.equal(operations.length, 2)
+  assert.ok(
+    operations.every(
+      (operation) =>
+        typeof operation.operationId === 'string' &&
+        operation.pathCount === 1 &&
+        !Object.hasOwn(operation, 'paths') &&
+        !Object.hasOwn(operation, 'blockedPaths')
+    ),
+    'delete prepare should return only renderer-safe operation handles'
+  )
   sessions = await rpc('sessions.list', { limit: 200 })
-  assert.equal(sessions.length, 0, 'deleted sessions should leave the list')
-  assert.ok(existsSync(importedFile), 'delete must never unlink the recording file')
-  assert.ok(existsSync(copyFile), 'delete must never unlink the duplicated file')
+  assert.equal(sessions.length, 0, 'prepared sessions should be hidden immediately')
+  assert.ok(!existsSync(importedFile), 'prepare should quarantine the recording file')
+  assert.ok(!existsSync(copyFile), 'prepare should quarantine the duplicated file')
+  const resolvedOperations = await Promise.all(
+    operations.map((operation) =>
+      rpc('sessions.delete.resolve', { operationId: operation.operationId })
+    )
+  )
+  const quarantinePaths = resolvedOperations.flatMap((operation) => operation.paths)
+  assert.equal(quarantinePaths.length, 2)
+  assert.ok(
+    quarantinePaths.every(
+      (path) => path.startsWith(outputDir) && path.includes('.videorc-trash-') && existsSync(path)
+    ),
+    'prepare should return two existing operation-owned quarantine paths'
+  )
+  assert.ok(
+    resolvedOperations.every((operation) => (operation.blockedPaths ?? []).length === 0),
+    'identity-matched files should not be blocked from Trash'
+  )
+  assert.ok(
+    quarantinePaths.every((path) => statSync(path).size === 4096),
+    'quarantine must preserve both recording payloads'
+  )
+
+  for (const path of quarantinePaths) {
+    await rm(path)
+  }
+  for (const operation of operations) {
+    const completed = await rpc('sessions.delete.complete', {
+      operationId: operation.operationId,
+      failedPaths: []
+    })
+    assert.equal(completed.deleted, true)
+  }
+  assert.deepEqual(await rpc('sessions.delete.pending'), [])
 
   console.log(
-    'Session ops smoke OK — import/rename/duplicate/storage/delete round-trip over the real WS; files untouched by delete.'
+    'Session ops smoke OK — import/rename/duplicate/storage/two-phase-delete round-trip over the real WS.'
   )
 } finally {
   if (socket) {

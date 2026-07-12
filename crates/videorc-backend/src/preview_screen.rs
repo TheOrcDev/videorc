@@ -16,6 +16,7 @@ use crate::diagnostics::{
 };
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats};
+use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
 use crate::protocol::{
     PreviewScreenSourceKind, PreviewScreenStartParams, PreviewScreenState, PreviewScreenStatus,
     VideoSettings,
@@ -831,6 +832,54 @@ pub async fn latest_preview_screen_png(
         guard.frame_store.latest()?
     };
 
+    let max_width = preview_screen_png_max_width(requested_max_width);
+    tokio::task::spawn_blocking(move || encode_preview_screen_png(frame, max_width))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Latest-wins, uncompressed proof-surface transport for Windows. The BMP
+/// wrapper carries the capture store's newest BGRA frame without PNG encode
+/// work and exposes its sequence so clients can skip duplicate frames.
+pub async fn latest_preview_screen_bmp(
+    state: &AppState,
+    requested_max_width: Option<u32>,
+    cursor: Option<PreviewBmpCursor>,
+) -> Option<LatestPreviewBmpPoll> {
+    let (generation, frame) = {
+        let slot = state.preview_screen.lock().await;
+        let active = slot.active.as_ref()?;
+        let generation = slot.run_id.clone()?;
+        let shared = Arc::clone(&active.shared);
+        drop(slot);
+        let guard = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (generation, guard.frame_store.latest()?)
+    };
+
+    let max_width = preview_screen_png_max_width(requested_max_width);
+    tokio::task::spawn_blocking(move || {
+        encode_latest_bgra_bmp(
+            cursor.as_ref(),
+            generation,
+            frame.sequence,
+            frame.width,
+            frame.height,
+            &frame.bytes,
+            max_width,
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn encode_preview_screen_png(
+    frame: FrameHandle<PreviewScreenPixelFormat>,
+    max_width: u32,
+) -> Option<Vec<u8>> {
     let expected_len = frame.width as usize * frame.height as usize * 4;
     if frame.bytes.len() < expected_len {
         return None;
@@ -839,12 +888,8 @@ pub async fn latest_preview_screen_png(
     for pixel in frame.bytes.chunks_exact(4) {
         rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
     }
-    let (rgba, width, height) = downscale_rgba_for_preview(
-        rgba,
-        frame.width,
-        frame.height,
-        preview_screen_png_max_width(requested_max_width),
-    );
+    let (rgba, width, height) =
+        downscale_rgba_for_preview(rgba, frame.width, frame.height, max_width);
 
     let mut png = Vec::new();
     let encoder = PngEncoder::new(&mut png);

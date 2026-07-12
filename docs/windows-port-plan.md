@@ -4,10 +4,25 @@ Goal: ship a Windows version of Videorc that hits the project's real bar — a
 smooth preview and a correct recording (docs/, memory: OBS parity is dropped).
 Dark-glass UI carries over; macOS-only niceties degrade gracefully.
 
-## Current status (reconciled 2026-07-08)
+## Current status (reconciled 2026-07-12)
 
-This plan is still a follow-through track, not a claim that Windows is ready.
-The completed work is packaging and platform-seam preparation:
+Windows has crossed the tracer-bullet milestone: the tester build compiles,
+launches, discovers working audio, and records real media. The 0.9.30 timing
+fix keeps finished files at wall-clock duration with aligned A/V while the
+proof preview stays live during recording (PR #79). This deep-reliability
+follow-up removes production PNG compression from the Windows proof surface in
+favor of a latest-wins uncompressed BMP transport; PNG source routes are now
+explicit debug endpoints and diagnostics count any production request as a
+transport bug.
+
+What remains is release acceptance, not first implementation: rerun the full
+packaged Windows 11 device matrix, retain analyzer/support-bundle evidence, and
+make the signing/distribution decision. The older phase notes below are
+implementation history; where they conflict with this section or `AGENTS.md`'s
+recording-studio gates, those current sources are authoritative.
+
+This plan is still a follow-through track, not a claim that public Windows
+release acceptance is complete:
 
 - **First on-box run happened (2026-07-08, Windows 10 x64 dev box).** `pnpm dev`
   boots, the backend compiles and runs, DXGI display + MediaFoundation
@@ -53,20 +68,24 @@ The completed work is packaging and platform-seam preparation:
   Windows-native display/camera/microphone rows instead of the old unsupported
   platform placeholder. The renderer source picker now treats DXGI and gdigrab
   screen IDs as selectable native screen sources. These paths are compile-checked
-  by `pnpm check:windows`; they still need an on-box Windows run to verify actual
-  device rows, dimensions, and dshow symbolic-link behavior.
-- **Windows capture is not done.** Renderer-driven selection from real
-  enumerated Windows devices and dated on-box recording artifacts are still
-  pending for display, camera, microphone, streaming, and packaged cleanup.
+  by `pnpm check:windows`; Windows CI also selects a real DXGI display (with a
+  gdigrab fallback), proves the authenticated latest-frame BMP transport, and
+  records that source in ScreenOnly. Camera/microphone symbolic-link behavior and
+  subjective quality still need the dated on-box matrix.
+- **Windows capture works; the complete acceptance matrix is not done.**
+  Renderer-driven selection and real recording now work on the tester box.
+  Dated packaged artifacts are still pending for the full display, camera,
+  microphone, streaming, reconnect, and forced-cleanup matrix.
   Preview source selection now recognizes Windows DXGI, gdigrab, and dshow IDs
   instead of reporting them as missing macOS-native sources, preview start
   commands carry the configured FFmpeg path, and the Windows preview runners now
   spawn FFmpeg to publish raw BGRA frames into the existing frame stores.
-  First-frame, smoothness, dimensions, and device-format behavior still need the
-  on-box Windows slice. Phase 2 remains the product proof. The Windows local gate
-  now routes its
-  packaged test-pattern
-  smoke output to the ignored acceptance artifact directory so on-box runs can
+  CI now rejects missing/constant BMP pixels, a stalled frame sequence during
+  recording, the wrong native source in recording diagnostics, bad final duration,
+  and blank ScreenOnly artifacts. Smoothness and device-format quality still need
+  the on-box Windows slice. Phase 2 remains the product proof. The Windows local
+  gate now routes its packaged smoke output to the ignored acceptance artifact
+  directory so on-box runs can
   be copied into the dated acceptance note instead of disappearing into a temp
   folder. Its manifest also prints the strict support-bundle verifier command:
   `pnpm support-bundle:verify -- <support-bundle.json> --windows-acceptance`.
@@ -74,8 +93,10 @@ The completed work is packaging and platform-seam preparation:
   named-pipe arm (`\\.\pipe\` namespace) behind the same
   create/open_writer/cleanup contract, so the encoder-bridge FIFO, per-leg
   stream FIFOs, and the screen-overlay FIFO no longer bail `Unsupported` at
-  session start on Windows. Windows writes are always blocking after the
-  reader attaches (PIPE_NOWAIT reports full buffers as zero-byte successes).
+  session start on Windows. Cancellation-aware media writers retain PIPE_NOWAIT;
+  the Screen overlay writer now treats zero/partial writes as bounded backpressure,
+  retries while progress is possible, and fails after a hard frame deadline rather
+  than killing 4K overlays when one frame exceeds the 16 MiB pipe buffer.
   Compile-checked by `pnpm check:windows`; end-to-end write→ffmpeg-read proof
   needs the Windows box. The same slice made the dshow microphone honour
   gain/mute through a `volume=` filter leg (the in-process CoreAudio path is
@@ -164,9 +185,12 @@ Decisions to make before any code; each unblocks a later phase.
   this checks schema v2, Windows 11 host/runtime info, GPU adapter metadata,
   packaged runtime context, Windows device backend proof, encoder diagnostics,
   and redaction. Authenticode signing still needs a separate manual check.
-- **CI reality.** GitHub Actions budget is exhausted (memory) — plan around
-  local gates on the Windows box, mirroring `smoke:local-gates`. Optional
-  later: self-hosted runner on that box.
+- **CI reality.** The Windows workflow builds the packaged app, validates a bundled
+  background through the production managed-asset path, selects a real DXGI/gdigrab
+  screen, polls and decodes the backend BMP route while recording, records ScreenOnly,
+  and drives the Electron proof surface from that real source. Real device quality
+  still requires the Windows box; CI complements rather than replaces the dated
+  on-box acceptance run.
 - **ffmpeg sourcing.** Start with a pinned prebuilt **LGPL win64** build
   (e.g. BtbN `win64-lgpl` release) checked into `vendor/ffmpeg/` layout;
   write `scripts/fetch-ffmpeg-windows.ps1` later if we want reproducible
@@ -367,8 +391,9 @@ app in exile.
   merge gate (no Actions budget). **Script DONE 2026-06-13:** the gate runs
   desktop unit tests, capture-input/FIFO backend seam tests, release backend
   build, pinned Windows FFmpeg fetch, package preflight, Windows dir package,
-  owned-process lifecycle cleanup, and packaged boot plus test-pattern
-  recording smoke. The packaged smoke now understands both macOS app bundles
+  owned-process lifecycle cleanup, packaged recording plus bundled-background
+  decode, native DXGI/gdigrab ScreenOnly + BMP transport, and the recording-time
+  Electron proof surface. The packaged smoke understands both macOS app bundles
   and Windows `win-unpacked` layouts.
   **Manifest slice DONE 2026-07-08:** the gate writes
   `windows-local-gates.manifest.json` into the ignored Windows acceptance

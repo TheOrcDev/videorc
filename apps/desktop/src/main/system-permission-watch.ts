@@ -61,6 +61,21 @@ export function createMediaPermissionGrantWatcher({
       stop()
       const currentWatchId = watchId
       let remainingChecks = Math.max(1, maxChecks)
+      let previousStatus: MediaAccessStatus
+      try {
+        previousStatus = getStatus(permission)
+      } catch (error) {
+        log?.(
+          'warn',
+          `Could not read ${pane} permission before Settings opened: ${error instanceof Error ? error.message : String(error)}`
+        )
+        return
+      }
+      // Opening Settings is navigation, not a permission transition. In
+      // particular, an already-granted pane must never restart the backend.
+      if (previousStatus === 'granted') {
+        return
+      }
 
       const poll = async (): Promise<void> => {
         if (currentWatchId !== watchId) {
@@ -79,10 +94,10 @@ export function createMediaPermissionGrantWatcher({
           return
         }
 
-        if (status === 'granted') {
+        if (status === 'granted' && previousStatus !== 'granted') {
           timer = null
           watchId += 1
-          log?.('info', `${pane} permission is now granted; restarting capture backend.`)
+          log?.('info', `${pane} permission is now granted; requesting a capture backend restart.`)
           try {
             await restartBackend(reason)
           } catch (error) {
@@ -93,6 +108,7 @@ export function createMediaPermissionGrantWatcher({
           }
           return
         }
+        previousStatus = status
 
         remainingChecks -= 1
         if (remainingChecks <= 0) {

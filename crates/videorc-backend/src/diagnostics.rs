@@ -80,6 +80,9 @@ impl CompositorSourceImportStats {
 pub struct PreviewTransportCounters {
     camera_png: AtomicU64,
     screen_png: AtomicU64,
+    production_png: AtomicU64,
+    camera_bmp: AtomicU64,
+    screen_bmp: AtomicU64,
     live_jpeg: AtomicU64,
     live_mjpeg: AtomicU64,
 }
@@ -89,6 +92,9 @@ impl PreviewTransportCounters {
         Self {
             camera_png: AtomicU64::new(0),
             screen_png: AtomicU64::new(0),
+            production_png: AtomicU64::new(0),
+            camera_bmp: AtomicU64::new(0),
+            screen_bmp: AtomicU64::new(0),
             live_jpeg: AtomicU64::new(0),
             live_mjpeg: AtomicU64::new(0),
         }
@@ -100,6 +106,18 @@ impl PreviewTransportCounters {
 
     pub fn record_screen_png(&self) {
         self.screen_png.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_production_png(&self) {
+        self.production_png.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_camera_bmp(&self) {
+        self.camera_bmp.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_screen_bmp(&self) {
+        self.screen_bmp.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_live_jpeg(&self) {
@@ -114,6 +132,9 @@ impl PreviewTransportCounters {
         PreviewImagePollCounts {
             camera_png: self.camera_png.load(Ordering::Relaxed),
             screen_png: self.screen_png.load(Ordering::Relaxed),
+            production_png: self.production_png.load(Ordering::Relaxed),
+            camera_bmp: self.camera_bmp.load(Ordering::Relaxed),
+            screen_bmp: self.screen_bmp.load(Ordering::Relaxed),
             live_jpeg: self.live_jpeg.load(Ordering::Relaxed),
             live_mjpeg: self.live_mjpeg.load(Ordering::Relaxed),
         }
@@ -492,6 +513,24 @@ pub fn classify_recording_risk(stats: &DiagnosticStats) -> (bool, Vec<String>) {
     );
     if stats.dropped_frames > 0 {
         reasons.push(format!("encoder dropped {} frame(s)", stats.dropped_frames));
+    }
+    let recording_queue_dropped_frames = if stats.encoder_bridge_recording_queue_dropped_frames > 0
+    {
+        stats.encoder_bridge_recording_queue_dropped_frames
+    } else if !stats.encoder_bridge_separate_output_encoders_active
+        && stats
+            .active_output_mode
+            .as_deref()
+            .is_some_and(|mode| mode.contains("record"))
+    {
+        stats.encoder_bridge_output_queue_dropped_frames
+    } else {
+        0
+    };
+    if recording_queue_dropped_frames > 0 {
+        reasons.push(format!(
+            "recording output queue dropped {recording_queue_dropped_frames} frame(s) before delivery"
+        ));
     }
     if stats.encoder_bridge_repeated_frames > 0 {
         let burst_detail = if stats.encoder_bridge_repeated_frame_bursts > 0
@@ -1507,6 +1546,9 @@ mod tests {
         counters.record_camera_png();
         counters.record_camera_png();
         counters.record_screen_png();
+        counters.record_production_png();
+        counters.record_camera_bmp();
+        counters.record_screen_bmp();
         counters.record_live_jpeg();
         counters.record_live_mjpeg();
         counters.record_live_mjpeg();
@@ -1514,6 +1556,9 @@ mod tests {
         let snapshot = counters.snapshot();
         assert_eq!(snapshot.camera_png, 2);
         assert_eq!(snapshot.screen_png, 1);
+        assert_eq!(snapshot.production_png, 1);
+        assert_eq!(snapshot.camera_bmp, 1);
+        assert_eq!(snapshot.screen_bmp, 1);
         assert_eq!(snapshot.live_jpeg, 1);
         assert_eq!(snapshot.live_mjpeg, 3);
     }
@@ -1616,6 +1661,16 @@ mod tests {
         let (risk, reasons) = classify_recording_risk(&compromised);
         assert!(risk);
         assert!(reasons.iter().any(|reason| reason.contains("duplicate")));
+
+        let mut queue_drops = starting_diagnostics("s", 30, "record");
+        queue_drops.encoder_bridge_recording_queue_dropped_frames = 3;
+        let (risk, reasons) = classify_recording_risk(&queue_drops);
+        assert!(risk);
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("recording output queue dropped 3"))
+        );
 
         // Microphone capture gap → at risk.
         let mut gappy = starting_diagnostics("s", 30, "record");

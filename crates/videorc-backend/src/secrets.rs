@@ -15,7 +15,8 @@
 
 use anyhow::{Context, Result, anyhow};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const JSON_FILE_SECRET_STORE_KIND: &str = "json-file";
@@ -241,33 +242,74 @@ fn load_cache<'a>(
     Ok(cache.as_mut().expect("secret cache was just loaded"))
 }
 
-fn write_json_file(path: &PathBuf, secrets: &BTreeMap<String, String>) -> Result<()> {
+fn write_json_file(path: &Path, secrets: &BTreeMap<String, String>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Could not create secret store dir {}", parent.display()))?;
     }
     let tmp = path.with_extension("json.tmp");
     let payload = serde_json::to_string_pretty(secrets).context("Could not encode secrets")?;
-    std::fs::write(&tmp, payload)
-        .with_context(|| format!("Could not write secret store {}", tmp.display()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&tmp)
+        .with_context(|| format!("Could not open secret store {}", tmp.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("Could not set permissions on {}", tmp.display()))?;
     }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("Could not commit secret store {}", path.display()))
+    file.write_all(payload.as_bytes())
+        .with_context(|| format!("Could not write secret store {}", tmp.display()))?;
+    file.sync_all()
+        .with_context(|| format!("Could not sync secret store {}", tmp.display()))?;
+    drop(file);
+    if let Err(error) = crate::atomic_file::replace_file(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error)
+            .with_context(|| format!("Could not commit secret store {}", path.display()));
+    }
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("Could not sync secret store dir {}", parent.display()))?;
+    }
+    Ok(())
 }
 
 pub fn put_secret(secret_ref: &str, value: &str) -> Result<()> {
+    put_secrets(&[(secret_ref, value)])
+}
+
+/// Commit related secret values in one read-modify-write cycle. Account sign-in
+/// uses this so its bearer token, cached identity, and replay binding cannot be
+/// torn across separate file replacements.
+pub fn put_secrets(entries: &[(&str, &str)]) -> Result<()> {
+    update_secrets(entries, &[])
+}
+
+/// Atomically apply related secret writes and removals in one file replacement.
+/// Product-account sign-out uses this to advance its durable intent generation
+/// in the same commit that removes the bearer token and cached identity.
+pub fn update_secrets(entries: &[(&str, &str)], removals: &[&str]) -> Result<()> {
     let mut guard = STORE_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let backend = selected_secret_store()?;
     let store = load_cache(&mut guard, &backend)?;
     let mut secrets = store.secrets.clone();
-    secrets.insert(secret_ref.to_string(), value.to_string());
+    for secret_ref in removals {
+        secrets.remove(*secret_ref);
+    }
+    for (secret_ref, value) in entries {
+        secrets.insert((*secret_ref).to_string(), (*value).to_string());
+    }
+    if secrets == store.secrets {
+        return Ok(());
+    }
     backend.write_all(&secrets)?;
     store.secrets = secrets;
     Ok(())
@@ -298,17 +340,11 @@ pub fn try_get_secret(secret_ref: &str) -> Result<Option<String>> {
 }
 
 pub fn delete_secret(secret_ref: &str) -> Result<()> {
-    let mut guard = STORE_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let backend = selected_secret_store()?;
-    let store = load_cache(&mut guard, &backend)?;
-    let mut secrets = store.secrets.clone();
-    if secrets.remove(secret_ref).is_some() {
-        backend.write_all(&secrets)?;
-        store.secrets = secrets;
-    }
-    Ok(())
+    delete_secrets(&[secret_ref])
+}
+
+pub fn delete_secrets(secret_refs: &[&str]) -> Result<()> {
+    update_secrets(&[], secret_refs)
 }
 
 #[cfg(test)]
@@ -354,12 +390,15 @@ mod tests {
             None
         );
 
-        put_secret("stream-target:twitch:manual-stream-key", "live_abc").unwrap();
+        put_secrets(&[
+            ("stream-target:twitch:manual-stream-key", "live_abc"),
+            ("platform:x:oauth:refresh", "tok"),
+        ])
+        .unwrap();
         assert_eq!(
             try_get_secret("stream-target:twitch:manual-stream-key").unwrap(),
             Some("live_abc".to_string())
         );
-        put_secret("platform:x:oauth:refresh", "tok").unwrap();
         assert_eq!(
             get_secret("stream-target:twitch:manual-stream-key").unwrap(),
             "live_abc"
@@ -380,6 +419,24 @@ mod tests {
             "live_def"
         );
 
+        update_secrets(
+            &[("account:videorc:sign-in-intent-generation", "7")],
+            &["platform:x:oauth:refresh"],
+        )
+        .unwrap();
+        assert_eq!(
+            get_secret("account:videorc:sign-in-intent-generation").unwrap(),
+            "7"
+        );
+        assert!(get_secret("platform:x:oauth:refresh").is_err());
+        reset_secret_store_for_tests();
+        assert_eq!(
+            get_secret("account:videorc:sign-in-intent-generation").unwrap(),
+            "7",
+            "intent tombstone must survive a backend restart"
+        );
+        assert!(get_secret("platform:x:oauth:refresh").is_err());
+
         // Owner-only permissions: the file is the protection boundary.
         #[cfg(unix)]
         {
@@ -392,10 +449,32 @@ mod tests {
         delete_secret("stream-target:twitch:manual-stream-key").unwrap();
         delete_secret("stream-target:twitch:manual-stream-key").unwrap();
         assert!(get_secret("stream-target:twitch:manual-stream-key").is_err());
-        assert_eq!(get_secret("platform:x:oauth:refresh").unwrap(), "tok");
+        assert_eq!(
+            get_secret("account:videorc:sign-in-intent-generation").unwrap(),
+            "7"
+        );
 
         clear_secret_store_env_for_tests();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn json_file_commit_replaces_an_existing_destination_repeatedly() {
+        let dir = std::env::temp_dir().join(format!(
+            "videorc-secrets-replace-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("videorc-secrets.json");
+        let first = BTreeMap::from([("token".to_string(), "first".to_string())]);
+        let second = BTreeMap::from([("token".to_string(), "second".to_string())]);
+
+        write_json_file(&path, &first).unwrap();
+        write_json_file(&path, &second).unwrap();
+
+        assert_eq!(read_json_file(&path).unwrap(), second);
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -34,14 +34,19 @@ use crate::protocol::{
     CompositorFrameReady, CompositorImageCacheStatus, CompositorSceneSourceFit,
     CompositorSceneSourceKind, CompositorSceneSourceStatus, CompositorSceneUpdateParams,
     CompositorSourceKind, CompositorSourceStatus, CompositorState, CompositorStatus,
-    DiagnosticStats, EffectiveSceneBackground, LayoutPreset, LayoutSettings, PreviewCameraState,
+    DiagnosticStats, EffectiveSceneBackground, LayoutSettings, PreviewCameraState,
     PreviewScreenSourceKind, PreviewScreenState, PreviewSurfaceState, PreviewSurfaceStatus,
     PreviewTransport, Scene, SceneSourceKind, SceneTransform, StreamScreen,
+};
+use crate::scene_geometry::{
+    PixelRect, SceneCrop, SceneFit, SceneMask, background_stage_margin, background_zoom_crop,
+    camera_mask, scene_crop_from_transform, scene_mask_allows, scene_source_fit,
+    scene_source_rect_pixels, scene_source_render_transform,
 };
 use crate::state::AppState;
 
 #[cfg(test)]
-use crate::protocol::SceneSource;
+use crate::protocol::{LayoutPreset, SceneSource};
 
 const COMPOSITOR_DIAGNOSTIC_WINDOW: Duration = Duration::from_secs(2);
 const COMPOSITOR_LIVE_SOURCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
@@ -66,15 +71,6 @@ const COMPOSITOR_MAX_OUTPUT_HEIGHT: u32 = 2160;
 const COMPOSITOR_IMAGE_CACHE_MAX_SOURCE_PIXELS: u64 =
     (COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES / COMPOSITOR_IMAGE_CACHE_MAX_PINNED_ENTRIES / 4) as u64;
 const COMPOSITOR_WORKER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
-// Stage margin per side for a scene background: `visibility_percent / 200`, so
-// the default visibility of 20 yields the classic 0.10 margin (80% stage) and
-// 0 keeps the recording full-canvas (the asset only fills letterbox gaps).
-pub(crate) fn background_stage_margin(background: Option<&EffectiveSceneBackground>) -> f64 {
-    background
-        .map(|background| (background.visibility_percent / 200.0).clamp(0.0, 0.20))
-        .unwrap_or(0.0)
-}
-
 pub type CompositorSlot = std::sync::Arc<tokio::sync::Mutex<CompositorRuntime>>;
 pub type CompositorFrameStore =
     Arc<StdMutex<FrameStore<CompositorPixelFormat, CompositorFrameExportHandle>>>;
@@ -1219,21 +1215,32 @@ pub async fn update_compositor_scene(
     state: &AppState,
     params: CompositorSceneUpdateParams,
 ) -> CompositorStatus {
+    let CompositorSceneUpdateParams {
+        revision,
+        scene,
+        layout,
+        active_screen,
+    } = params;
+    let active_screen = active_screen.map(|screen| {
+        state
+            .database
+            .revalidate_stream_screen_for_compositor(screen)
+    });
     let status = {
         let mut compositor = state.compositor.lock().await;
         if compositor
             .scene
             .as_ref()
-            .is_some_and(|current| params.revision < current.revision)
+            .is_some_and(|current| revision < current.revision)
         {
             return compositor.status.clone();
         }
 
         let snapshot = CompositorSceneSnapshot {
-            revision: params.revision,
-            scene: params.scene,
-            layout: params.layout,
-            active_screen: params.active_screen,
+            revision,
+            scene,
+            layout,
+            active_screen,
         };
         compositor
             .image_sources
@@ -2098,7 +2105,18 @@ struct PreparedGpuSource<'a> {
     dest: [f32; 4],
     crop: [f32; 4],
     mirror: bool,
-    mask: SourceMask,
+    mask: SceneMask,
+}
+
+#[cfg(target_os = "macos")]
+fn scene_mask_into_metal(mask: SceneMask) -> crate::metal_compositor::SourceMask {
+    match mask {
+        SceneMask::None => crate::metal_compositor::SourceMask::None,
+        SceneMask::Circle => crate::metal_compositor::SourceMask::Circle,
+        SceneMask::Rounded { radius_pct } => {
+            crate::metal_compositor::SourceMask::Rounded { radius_pct }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2115,7 +2133,7 @@ impl<'a> PreparedGpuSource<'a> {
             dest: self.dest,
             crop: self.crop,
             mirror: self.mirror,
-            mask: self.mask.into_metal(),
+            mask: scene_mask_into_metal(self.mask),
         }
     }
 }
@@ -2233,7 +2251,7 @@ fn push_caption_overlay_gpu_source<'a>(
             height: draw_height as u32,
         },
         false,
-        SourceCrop::none(),
+        SceneCrop::none(),
         canvas_width,
         canvas_height,
     ) else {
@@ -2256,7 +2274,7 @@ fn push_caption_overlay_gpu_source<'a>(
         dest,
         crop,
         mirror: false,
-        mask: SourceMask::None,
+        mask: SceneMask::None,
     });
 }
 
@@ -2324,7 +2342,7 @@ fn try_gpu_compose(
                     dest,
                     crop,
                     mirror: false,
-                    mask: SourceMask::None,
+                    mask: SceneMask::None,
                 });
                 true
             } else {
@@ -2361,7 +2379,7 @@ fn try_gpu_compose(
                 compositor_scene_source_fit(&SceneSourceKind::Screen, layout),
                 CompositorSceneSourceFit::Contain
             ),
-            SourceCrop::none(),
+            SceneCrop::none(),
             inputs.width,
             inputs.height,
         )
@@ -2381,7 +2399,7 @@ fn try_gpu_compose(
             dest,
             crop,
             mirror: false,
-            mask: SourceMask::None,
+            mask: SceneMask::None,
         });
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
@@ -2434,7 +2452,7 @@ fn try_gpu_compose(
                 compositor_scene_source_fit(&SceneSourceKind::Screen, layout),
                 CompositorSceneSourceFit::Contain
             ),
-            SourceCrop::none(),
+            SceneCrop::none(),
             inputs.width,
             inputs.height,
         )
@@ -2450,7 +2468,7 @@ fn try_gpu_compose(
             dest,
             crop,
             mirror: false,
-            mask: SourceMask::None,
+            mask: SceneMask::None,
         });
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
@@ -2499,7 +2517,7 @@ fn try_gpu_compose(
             scene_source_render_transform(&source.transform, &source.kind, stage_margin);
         let rect = scene_source_rect_pixels(&transform, inputs.width, inputs.height)
             .ok_or("source rectangle is outside compositor bounds")?;
-        let source_crop = source_crop_from_transform(&transform);
+        let source_crop = scene_crop_from_transform(&transform);
         match source.kind {
             SceneSourceKind::Camera => {
                 if let Some(frame) = inputs
@@ -2527,7 +2545,7 @@ fn try_gpu_compose(
                         dest,
                         crop,
                         mirror: layout.camera_mirror,
-                        mask: camera_source_mask(layout),
+                        mask: camera_mask(layout),
                     });
                 } else {
                     let placeholder =
@@ -2553,7 +2571,7 @@ fn try_gpu_compose(
                         dest,
                         crop,
                         mirror: layout.camera_mirror,
-                        mask: camera_source_mask(layout),
+                        mask: camera_mask(layout),
                     });
                 }
             }
@@ -2600,7 +2618,7 @@ fn try_gpu_compose(
                         dest,
                         crop,
                         mirror: false,
-                        mask: SourceMask::None,
+                        mask: SceneMask::None,
                     });
                 } else {
                     let placeholder =
@@ -2626,7 +2644,7 @@ fn try_gpu_compose(
                         dest,
                         crop,
                         mirror: false,
-                        mask: SourceMask::None,
+                        mask: SceneMask::None,
                     });
                 }
             }
@@ -2637,7 +2655,7 @@ fn try_gpu_compose(
                     pattern.height as u32,
                     rect,
                     false,
-                    SourceCrop::none(),
+                    SceneCrop::none(),
                     inputs.width,
                     inputs.height,
                 )
@@ -2653,7 +2671,7 @@ fn try_gpu_compose(
                     dest,
                     crop,
                     mirror: false,
-                    mask: SourceMask::None,
+                    mask: SceneMask::None,
                 });
             }
         }
@@ -2948,7 +2966,7 @@ fn gpu_source_placement(
     source_height: u32,
     rect: PixelRect,
     contain: bool,
-    crop: SourceCrop,
+    crop: SceneCrop,
     output_width: u32,
     output_height: u32,
 ) -> Option<([f32; 4], [f32; 4])> {
@@ -3391,14 +3409,14 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
             height,
             scene_content_rect_pixels(stage_margin, width, height),
             SourceRenderOptions {
-                crop: SourceCrop::none(),
+                crop: SceneCrop::none(),
                 // Screen-image stand-ins are screen-like: contain, never crop.
                 contain: matches!(
                     compositor_scene_source_fit(&SceneSourceKind::Screen, &snapshot.layout),
                     CompositorSceneSourceFit::Contain
                 ),
                 mirror_x: false,
-                mask: SourceMask::None,
+                mask: SceneMask::None,
             },
         )
     {
@@ -3439,10 +3457,10 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                         height,
                         rect,
                         SourceRenderOptions {
-                            crop: source_crop_from_transform(&transform),
+                            crop: scene_crop_from_transform(&transform),
                             contain: screen_contain,
                             mirror_x: false,
-                            mask: SourceMask::None,
+                            mask: SceneMask::None,
                         },
                     )
                 } else if let Some(frame) = screen_frame {
@@ -3458,10 +3476,10 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                         height,
                         rect,
                         SourceRenderOptions {
-                            crop: source_crop_from_transform(&transform),
+                            crop: scene_crop_from_transform(&transform),
                             contain: screen_contain,
                             mirror_x: false,
-                            mask: SourceMask::None,
+                            mask: SceneMask::None,
                         },
                     )
                 } else {
@@ -3481,11 +3499,11 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                     height,
                     rect,
                     SourceRenderOptions {
-                        crop: source_crop_from_transform(&transform),
+                        crop: scene_crop_from_transform(&transform),
                         contain: matches!(snapshot.layout.camera_fit, CameraFit::Fit)
                             && snapshot.layout.camera_zoom <= 100,
                         mirror_x: snapshot.layout.camera_mirror,
-                        mask: camera_source_mask(&snapshot.layout),
+                        mask: camera_mask(&snapshot.layout),
                     },
                 )
             }),
@@ -3684,14 +3702,6 @@ fn raw_yuv420p_len(width: u32, height: u32) -> usize {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PixelRect {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
 enum SourcePixelFormat {
     Bgra,
     Rgba,
@@ -3699,66 +3709,10 @@ enum SourcePixelFormat {
 
 #[derive(Debug, Clone, Copy)]
 struct SourceRenderOptions {
-    crop: SourceCrop,
+    crop: SceneCrop,
     contain: bool,
     mirror_x: bool,
-    mask: SourceMask,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SourceMask {
-    None,
-    Circle,
-    Rounded { radius_pct: u32 },
-}
-
-impl SourceMask {
-    #[cfg(target_os = "macos")]
-    fn into_metal(self) -> crate::metal_compositor::SourceMask {
-        match self {
-            Self::None => crate::metal_compositor::SourceMask::None,
-            Self::Circle => crate::metal_compositor::SourceMask::Circle,
-            Self::Rounded { radius_pct } => {
-                crate::metal_compositor::SourceMask::Rounded { radius_pct }
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct SourceCrop {
-    left: f64,
-    top: f64,
-    right: f64,
-    bottom: f64,
-}
-
-impl SourceCrop {
-    fn none() -> Self {
-        Self {
-            left: 0.0,
-            top: 0.0,
-            right: 0.0,
-            bottom: 0.0,
-        }
-    }
-
-    fn kept_width(self) -> f64 {
-        (1.0 - self.left - self.right).max(0.001)
-    }
-
-    fn kept_height(self) -> f64 {
-        (1.0 - self.top - self.bottom).max(0.001)
-    }
-}
-
-fn source_crop_from_transform(transform: &SceneTransform) -> SourceCrop {
-    SourceCrop {
-        left: transform.crop_left.clamp(0.0, 0.95),
-        top: transform.crop_top.clamp(0.0, 0.95),
-        right: transform.crop_right.clamp(0.0, 0.95),
-        bottom: transform.crop_bottom.clamp(0.0, 0.95),
-    }
+    mask: SceneMask,
 }
 
 struct RgbaSource<'a> {
@@ -3816,28 +3770,9 @@ fn render_scene_background(
             crop: background_zoom_crop(Some(background)),
             contain: matches!(background.fit, BackgroundFit::Fit),
             mirror_x: false,
-            mask: SourceMask::None,
+            mask: SceneMask::None,
         },
     )
-}
-
-fn background_zoom_crop(background: Option<&EffectiveSceneBackground>) -> SourceCrop {
-    let Some(background) = background else {
-        return SourceCrop::none();
-    };
-    let scale = background.scale.clamp(100.0, 200.0);
-    if scale <= 100.0 {
-        return SourceCrop::none();
-    }
-    let total_crop = 1.0 - (100.0 / scale);
-    let crop_x = (background.offset_x.clamp(-100.0, 100.0) / 200.0) * total_crop;
-    let crop_y = (background.offset_y.clamp(-100.0, 100.0) / 200.0) * total_crop;
-    SourceCrop {
-        left: ((total_crop / 2.0) + crop_x).clamp(0.0, 0.95),
-        right: ((total_crop / 2.0) - crop_x).clamp(0.0, 0.95),
-        top: ((total_crop / 2.0) + crop_y).clamp(0.0, 0.95),
-        bottom: ((total_crop / 2.0) - crop_y).clamp(0.0, 0.95),
-    }
 }
 
 fn scene_content_rect_pixels(stage_margin: f64, width: u32, height: u32) -> PixelRect {
@@ -3869,64 +3804,6 @@ fn scene_content_rect_pixels(stage_margin: f64, width: u32, height: u32) -> Pixe
         width,
         height,
     })
-}
-
-fn scene_source_render_transform(
-    transform: &SceneTransform,
-    source_kind: &SceneSourceKind,
-    stage_margin: f64,
-) -> SceneTransform {
-    if stage_margin <= 0.0 || !scene_source_uses_background_stage(source_kind) {
-        return transform.clone();
-    }
-    let stage_scale = 1.0 - (stage_margin * 2.0);
-    SceneTransform {
-        x: stage_margin + (transform.x * stage_scale),
-        y: stage_margin + (transform.y * stage_scale),
-        width: transform.width * stage_scale,
-        height: transform.height * stage_scale,
-        crop_left: transform.crop_left,
-        crop_top: transform.crop_top,
-        crop_right: transform.crop_right,
-        crop_bottom: transform.crop_bottom,
-    }
-}
-
-fn scene_source_uses_background_stage(source_kind: &SceneSourceKind) -> bool {
-    matches!(
-        source_kind,
-        SceneSourceKind::Screen | SceneSourceKind::Window | SceneSourceKind::TestPattern
-    )
-}
-
-fn scene_source_rect_pixels(
-    transform: &SceneTransform,
-    canvas_width: u32,
-    canvas_height: u32,
-) -> Option<PixelRect> {
-    if transform.width <= 0.0 || transform.height <= 0.0 {
-        return None;
-    }
-    let x = normalized_to_pixel(transform.x, canvas_width).min(canvas_width.saturating_sub(1));
-    let y = normalized_to_pixel(transform.y, canvas_height).min(canvas_height.saturating_sub(1));
-    let max_width = canvas_width.saturating_sub(x).max(1);
-    let max_height = canvas_height.saturating_sub(y).max(1);
-    let width = normalized_to_span(transform.width, canvas_width).min(max_width);
-    let height = normalized_to_span(transform.height, canvas_height).min(max_height);
-    Some(PixelRect {
-        x,
-        y,
-        width,
-        height,
-    })
-}
-
-fn normalized_to_pixel(value: f64, span: u32) -> u32 {
-    (value.clamp(0.0, 1.0) * f64::from(span)).round() as u32
-}
-
-fn normalized_to_span(value: f64, span: u32) -> u32 {
-    (value.clamp(0.0, 1.0) * f64::from(span)).round().max(1.0) as u32
 }
 
 fn fill_yuv420p(bytes: &mut [u8], width: u32, height: u32, y_value: u8, u_value: u8, v_value: u8) {
@@ -4000,10 +3877,10 @@ fn render_synthetic_source_rect(
         canvas_height,
         rect,
         SourceRenderOptions {
-            crop: SourceCrop::none(),
+            crop: SceneCrop::none(),
             contain: false,
             mirror_x: false,
-            mask: SourceMask::None,
+            mask: SceneMask::None,
         },
     );
 }
@@ -4264,7 +4141,7 @@ fn source_fit(
     source_height: u32,
     rect: PixelRect,
     contain: bool,
-    crop: SourceCrop,
+    crop: SceneCrop,
 ) -> Option<SourceFit> {
     if rect.width == 0 || rect.height == 0 || source_width == 0 || source_height == 0 {
         return None;
@@ -4358,47 +4235,18 @@ fn map_source_pixel(
     Some((source_x, source_y))
 }
 
-/// Whether `(dest_x, dest_y)` falls inside the largest circle inscribed in `fit`'s box
-/// — diameter `min(width, height)`, centered. A circle bubble must stay round even when
-/// the box is not perfectly square (the preview drawable's aspect drifts from the output's,
-/// so the "square" camera box renders slightly non-square). Using separate x/y radii here
-/// drew an ellipse; this matches the recording path's `circle_alpha_mask_filter` so the
-/// preview and the encoded file agree.
-fn source_mask_allows(mask: SourceMask, dest_x: usize, dest_y: usize, fit: &SourceFit) -> bool {
-    match mask {
-        SourceMask::None => true,
-        SourceMask::Circle => inside_circle(dest_x, dest_y, fit),
-        SourceMask::Rounded { radius_pct } => inside_rounded_rect(dest_x, dest_y, fit, radius_pct),
-    }
-}
-
-/// Whether `(dest_x, dest_y)` falls inside `fit`'s box with its corners clipped at
-/// `radius_pct`% of the shorter side — the same SDF the Metal shader and the FFmpeg
-/// rounded_alpha_mask_filter use, so preview and recording agree.
-fn inside_rounded_rect(dest_x: usize, dest_y: usize, fit: &SourceFit, radius_pct: u32) -> bool {
-    let radius = f64::from(fit.width.min(fit.height)) * f64::from(radius_pct.min(50)) / 100.0;
-    if radius <= 0.0 {
-        return true;
-    }
-    let center_x = f64::from(fit.x) + f64::from(fit.width) / 2.0;
-    let center_y = f64::from(fit.y) + f64::from(fit.height) / 2.0;
-    let inner_half_w = (f64::from(fit.width) / 2.0 - radius).max(0.0);
-    let inner_half_h = (f64::from(fit.height) / 2.0 - radius).max(0.0);
-    let qx = ((dest_x as f64 + 0.5 - center_x).abs() - inner_half_w).max(0.0);
-    let qy = ((dest_y as f64 + 0.5 - center_y).abs() - inner_half_h).max(0.0);
-    qx * qx + qy * qy <= radius * radius
-}
-
-fn inside_circle(dest_x: usize, dest_y: usize, fit: &SourceFit) -> bool {
-    let center_x = f64::from(fit.x) + f64::from(fit.width) / 2.0;
-    let center_y = f64::from(fit.y) + f64::from(fit.height) / 2.0;
-    let radius = f64::from(fit.width.min(fit.height)) / 2.0;
-    if radius <= 0.0 {
-        return false;
-    }
-    let dx = dest_x as f64 + 0.5 - center_x;
-    let dy = dest_y as f64 + 0.5 - center_y;
-    dx * dx + dy * dy <= radius * radius
+fn source_mask_allows(mask: SceneMask, dest_x: usize, dest_y: usize, fit: &SourceFit) -> bool {
+    scene_mask_allows(
+        mask,
+        PixelRect {
+            x: fit.x,
+            y: fit.y,
+            width: fit.width,
+            height: fit.height,
+        },
+        dest_x,
+        dest_y,
+    )
 }
 
 fn source_pixel_len(source: &RgbaSource<'_>) -> usize {
@@ -4516,10 +4364,8 @@ fn compositor_scene_sources(
                     shape: if matches!(source.kind, SceneSourceKind::Camera) {
                         Some(if camera_circle_mask_applies(&snapshot.layout) {
                             CameraShape::Circle
-                        } else if matches!(
-                            camera_source_mask(&snapshot.layout),
-                            SourceMask::Rounded { .. }
-                        ) {
+                        } else if matches!(camera_mask(&snapshot.layout), SceneMask::Rounded { .. })
+                        {
                             CameraShape::Rounded
                         } else {
                             CameraShape::Rectangle
@@ -4631,43 +4477,14 @@ fn compositor_scene_source_fit(
     kind: &SceneSourceKind,
     layout: &LayoutSettings,
 ) -> CompositorSceneSourceFit {
-    if matches!(kind, SceneSourceKind::Camera) {
-        return match layout.camera_fit {
-            CameraFit::Fit => CompositorSceneSourceFit::Contain,
-            CameraFit::Fill => CompositorSceneSourceFit::Cover,
-        };
+    match scene_source_fit(kind, layout) {
+        SceneFit::Contain => CompositorSceneSourceFit::Contain,
+        SceneFit::Cover => CompositorSceneSourceFit::Cover,
     }
-    // Screen-like content CONTAINS in full-frame presets: nothing on the
-    // user's screen may be cropped away by the layout (2026-07-02 report:
-    // cover hid the Dock in screen+camera). Side-by-side is the exception —
-    // its tall, narrow region is meant to be FILLED, so the screen covers
-    // (full region height, sides center-cropped; owner 2026-07-03, restoring
-    // the pre-7/2 side-by-side behavior).
-    if matches!(layout.layout_preset, LayoutPreset::SideBySide) {
-        return CompositorSceneSourceFit::Cover;
-    }
-    CompositorSceneSourceFit::Contain
 }
 
 fn camera_circle_mask_applies(layout: &LayoutSettings) -> bool {
-    matches!(layout.layout_preset, LayoutPreset::ScreenCamera)
-        && matches!(layout.camera_shape, CameraShape::Circle)
-}
-
-/// The camera bubble's mask for BOTH software compositors — one derivation,
-/// mirrored by the FFmpeg filter graph (rounded_alpha_mask_filter): circle
-/// inscribes min(w,h); rounded clips corners at radius_pct% of the shorter side.
-fn camera_source_mask(layout: &LayoutSettings) -> SourceMask {
-    if !matches!(layout.layout_preset, LayoutPreset::ScreenCamera) {
-        return SourceMask::None;
-    }
-    match layout.camera_shape {
-        CameraShape::Circle => SourceMask::Circle,
-        CameraShape::Rounded => SourceMask::Rounded {
-            radius_pct: layout.camera_corner_radius_pct.min(50),
-        },
-        CameraShape::Rectangle => SourceMask::None,
-    }
+    matches!(camera_mask(layout), SceneMask::Circle)
 }
 
 fn full_frame_transform() -> SceneTransform {
@@ -5104,7 +4921,7 @@ mod tests {
                 height: 2,
             },
             SourceRenderOptions {
-                crop: SourceCrop {
+                crop: SceneCrop {
                     left: 0.5,
                     top: 0.0,
                     right: 0.0,
@@ -5112,7 +4929,7 @@ mod tests {
                 },
                 contain: false,
                 mirror_x: false,
-                mask: SourceMask::None,
+                mask: SceneMask::None,
             },
         ));
 
@@ -5133,7 +4950,7 @@ mod tests {
                 height: 2,
             },
             false,
-            SourceCrop {
+            SceneCrop {
                 left: 0.5,
                 top: 0.0,
                 right: 0.0,
@@ -5161,7 +4978,7 @@ mod tests {
                 height: 4,
             },
             true,
-            SourceCrop::none(),
+            SceneCrop::none(),
             4,
             4,
         )
@@ -7891,19 +7708,25 @@ mod tests {
             source_height: 40.0,
         };
         // radius = min(100, 40) / 2 = 20, centered at (50, 20).
-        assert!(inside_circle(50, 20, &fit), "center is inside");
         assert!(
-            inside_circle(65, 20, &fit),
+            source_mask_allows(SceneMask::Circle, 50, 20, &fit),
+            "center is inside"
+        );
+        assert!(
+            source_mask_allows(SceneMask::Circle, 65, 20, &fit),
             "15px from center is within the 20px radius"
         );
         // The old ellipse (radius_x = 50) kept this horizontal extreme; a true circle rejects it.
         assert!(
-            !inside_circle(80, 20, &fit),
+            !source_mask_allows(SceneMask::Circle, 80, 20, &fit),
             "30px from center is outside the circle — an ellipse would have kept it"
         );
         // A true circle is symmetric: the same 30px offset is outside vertically too
         // (here bounded by the box, so assert the corner is dropped).
-        assert!(!inside_circle(0, 0, &fit), "corner is masked out");
+        assert!(
+            !source_mask_allows(SceneMask::Circle, 0, 0, &fit),
+            "corner is masked out"
+        );
     }
 
     // Rounded camera bubble (2026-07-06): the corner arcs must match the Metal
@@ -7924,30 +7747,34 @@ mod tests {
         // radius = 20% of min(100, 60) = 12px.
         let pct = 20;
 
-        assert!(inside_rounded_rect(50, 30, &fit, pct), "center is inside");
+        let rounded = SceneMask::Rounded { radius_pct: pct };
         assert!(
-            inside_rounded_rect(50, 0, &fit, pct),
+            source_mask_allows(rounded, 50, 30, &fit),
+            "center is inside"
+        );
+        assert!(
+            source_mask_allows(rounded, 50, 0, &fit),
             "top edge midpoint survives"
         );
         assert!(
-            inside_rounded_rect(0, 30, &fit, pct),
+            source_mask_allows(rounded, 0, 30, &fit),
             "left edge midpoint survives"
         );
         assert!(
-            !inside_rounded_rect(0, 0, &fit, pct),
+            !source_mask_allows(rounded, 0, 0, &fit),
             "corner tip is clipped"
         );
         assert!(
-            !inside_rounded_rect(99, 59, &fit, pct),
+            !source_mask_allows(rounded, 99, 59, &fit),
             "opposite corner tip is clipped"
         );
         assert!(
-            inside_rounded_rect(12, 12, &fit, pct),
+            source_mask_allows(rounded, 12, 12, &fit),
             "just inside the corner arc survives"
         );
         // pct 0 = plain rectangle: nothing clipped.
         assert!(
-            inside_rounded_rect(0, 0, &fit, 0),
+            source_mask_allows(SceneMask::Rounded { radius_pct: 0 }, 0, 0, &fit),
             "0% radius keeps corners"
         );
     }
@@ -7958,28 +7785,22 @@ mod tests {
         layout.layout_preset = LayoutPreset::ScreenCamera;
 
         layout.camera_shape = CameraShape::Rectangle;
-        assert_eq!(camera_source_mask(&layout), SourceMask::None);
+        assert_eq!(camera_mask(&layout), SceneMask::None);
 
         layout.camera_shape = CameraShape::Circle;
-        assert_eq!(camera_source_mask(&layout), SourceMask::Circle);
+        assert_eq!(camera_mask(&layout), SceneMask::Circle);
 
         layout.camera_shape = CameraShape::Rounded;
         layout.camera_corner_radius_pct = 18;
-        assert_eq!(
-            camera_source_mask(&layout),
-            SourceMask::Rounded { radius_pct: 18 }
-        );
+        assert_eq!(camera_mask(&layout), SceneMask::Rounded { radius_pct: 18 });
 
         // The radius clamps to 50 (a pill) — beyond that is meaningless.
         layout.camera_corner_radius_pct = 400;
-        assert_eq!(
-            camera_source_mask(&layout),
-            SourceMask::Rounded { radius_pct: 50 }
-        );
+        assert_eq!(camera_mask(&layout), SceneMask::Rounded { radius_pct: 50 });
 
         // Only the screen+camera overlay masks; other presets render plain.
         layout.layout_preset = LayoutPreset::SideBySide;
-        assert_eq!(camera_source_mask(&layout), SourceMask::None);
+        assert_eq!(camera_mask(&layout), SceneMask::None);
     }
 
     #[tokio::test]

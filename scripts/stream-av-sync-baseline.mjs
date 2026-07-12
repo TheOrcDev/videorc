@@ -42,6 +42,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { measureAvSync } from './lib/av-sync.mjs'
+import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { evaluateMixedYoutube4kTwitch1080pEvidence } from './lib/mixed-youtube-4k-twitch-1080p-gate.mjs'
 import { probeMedia } from './lib/recording-analyzer.mjs'
 import { evaluateSplitOutput4kRecordEvidence } from './lib/split-output-4k-record-gate.mjs'
@@ -767,7 +768,7 @@ async function probeOrNull(filePath) {
   if (!filePath) return null
   try {
     return await probeMedia(filePath, {
-      ffprobePath: config.ffprobePath ?? resolveSiblingFfprobe(config.ffmpegPath)
+      ffprobePath: config.ffprobePath ?? siblingFfprobePath(config.ffmpegPath) ?? 'ffprobe'
     })
   } catch (error) {
     console.error(`probeMedia failed for ${filePath}: ${error?.message ?? error}`)
@@ -950,13 +951,6 @@ function printDrift(label, drift) {
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
-}
-
-function resolveSiblingFfprobe(ffmpegPath) {
-  if (typeof ffmpegPath !== 'string' || !ffmpegPath.endsWith('ffmpeg')) {
-    return 'ffprobe'
-  }
-  return `${ffmpegPath.slice(0, -'ffmpeg'.length)}ffprobe`
 }
 
 function formatOutputProfile(profile) {

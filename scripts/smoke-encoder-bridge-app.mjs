@@ -1,19 +1,20 @@
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp } from './lib/app-launcher.mjs'
+import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
-const repoRoot = resolve(import.meta.dirname, '..')
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
     join(tmpdir(), `videorc-encoder-bridge-smoke-${Date.now()}`)
 )
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath =
-  process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? resolveSiblingFfprobe(ffmpegPath) ?? 'ffprobe'
+  process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? siblingFfprobePath(ffmpegPath) ?? 'ffprobe'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 const scenario = {
   width: Number(process.env.VIDEORC_ENCODER_BRIDGE_WIDTH ?? 640),
@@ -23,19 +24,28 @@ const scenario = {
   bitrateKbps: Number(process.env.VIDEORC_ENCODER_BRIDGE_BITRATE_KBPS ?? 2000)
 }
 
-let appProcess
-let stopping = false
+let launched
 
 mkdirSync(outputDirectory, { recursive: true })
 
 try {
-  const connection = await launchAndReadConnection()
-  await runEncoderBridgeSmoke(connection)
+  launched = await launchDevApp({
+    requiredMarkers: ['backend-ready', 'preview-motion-ready'],
+    timeoutMs,
+    env: {
+      VIDEORC_SMOKE_COMMAND_SERVER: '1',
+      VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory
+    }
+  })
+  await runEncoderBridgeSmoke(
+    launched.connections['backend-ready'],
+    launched.connections['preview-motion-ready']
+  )
 } finally {
-  await stopApp()
+  await launched?.stop()
 }
 
-async function runEncoderBridgeSmoke(connection) {
+async function runEncoderBridgeSmoke(connection, smoke) {
   const outputPath = join(outputDirectory, 'encoder-bridge-synthetic.mp4')
   const ws = await connectBackend(connection, timeoutMs)
   const diagnosticSamples = []
@@ -59,15 +69,24 @@ async function runEncoderBridgeSmoke(connection) {
     console.log(`Encoder bridge smoke using FFmpeg: ${ffmpegPath}`)
     console.log(`Encoder bridge smoke using FFprobe: ${ffprobePath}`)
 
-    const result = await request(ws, timeoutMs, 'encoder_bridge.synthetic_record', {
-      ffmpegPath,
-      outputPath,
-      width: scenario.width,
-      height: scenario.height,
-      fps: scenario.fps,
-      durationMs: scenario.durationMs,
-      bitrateKbps: scenario.bitrateKbps
-    })
+    const result = await requestSmokeCommand(
+      smoke,
+      'backend-debug-rpc',
+      {
+        method: 'encoder_bridge.synthetic_record',
+        params: {
+          ffmpegPath,
+          outputPath,
+          width: scenario.width,
+          height: scenario.height,
+          fps: scenario.fps,
+          durationMs: scenario.durationMs,
+          bitrateKbps: scenario.bitrateKbps
+        },
+        timeoutMs
+      },
+      { timeoutMs }
+    )
     verifyBridgeResult(result, outputPath)
     const probe = probeVideo(outputPath)
     verifyProbe(probe)
@@ -191,69 +210,6 @@ function assertFfprobeAvailable() {
       `FFprobe is unavailable for encoder bridge smoke: ${result.stderr || result.stdout}`
     )
   }
-}
-
-function resolveSiblingFfprobe(path) {
-  return path.endsWith('ffmpeg') ? `${path.slice(0, -'ffmpeg'.length)}ffprobe` : null
-}
-
-function launchAndReadConnection() {
-  return new Promise((resolveConnection, rejectConnection) => {
-    const timer = setTimeout(() => {
-      rejectConnection(new Error(`Timed out waiting for dev backend READY after ${timeoutMs}ms.`))
-    }, timeoutMs)
-
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
-      detached: true,
-      env: smokeAppEnv({
-        VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
-      }),
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-
-    appProcess.stdout.setEncoding('utf8')
-    appProcess.stderr.setEncoding('utf8')
-    appProcess.stdout.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.stderr.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.on('error', (error) => {
-      clearTimeout(timer)
-      rejectConnection(error)
-    })
-    appProcess.on('exit', (code, signal) => {
-      clearTimeout(timer)
-      rejectConnection(
-        new Error(
-          `Dev app exited before Encoder bridge smoke completed: code=${code} signal=${signal}`
-        )
-      )
-    })
-  })
-}
-
-function handleAppOutput(text, resolveConnection, timer) {
-  for (const line of text.split(/\r?\n/)) {
-    if (line.trim() && !stopping) {
-      console.log(line)
-    }
-
-    const marker = '[smoke] backend-ready '
-    const index = line.indexOf(marker)
-    if (index === -1) {
-      continue
-    }
-
-    clearTimeout(timer)
-    resolveConnection(JSON.parse(line.slice(index + marker.length)))
-  }
-}
-
-async function stopApp() {
-  if (!appProcess?.pid || appProcess.killed) {
-    return
-  }
-  stopping = true
-  await stopProcess(appProcess)
 }
 
 function format(value) {

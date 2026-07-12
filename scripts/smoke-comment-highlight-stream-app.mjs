@@ -67,13 +67,16 @@ console.log(
 )
 
 async function runScenarioGroup({ label, scenarios, indexOffset, env = {} }) {
+  const groupStateDirectory = join(outputDirectory, `${label}-app-state`)
   const launched = await launchDevApp({
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     timeoutMs,
     env: {
       VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
-      VIDEORC_SMOKE_STATE_DIR: join(outputDirectory, `${label}-app-state`),
+      VIDEORC_SMOKE_STATE_DIR: outputDirectory,
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
+      VIDEORC_APP_DATA_DIR: join(groupStateDirectory, 'app-data'),
+      VIDEORC_USER_DATA_DIR: join(groupStateDirectory, 'user-data'),
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_COMMENTS_WINDOW: '1',
       VIDEORC_DISABLE_AUTO_PREVIEW: '1',
@@ -136,11 +139,19 @@ async function runScenario(ws, smoke, scenario, index) {
       )
     }
 
+    const outputAuthorization = await smokeCommand(smoke, 'authorize-smoke-resource', {
+      kind: 'output-directory',
+      path: scenarioDirectory
+    })
     const started = await request(
       ws,
       timeoutMs,
       'session.start',
-      sessionParams({ scenario, scenarioDirectory, target })
+      sessionParams({
+        scenario,
+        outputDirectoryCapability: outputAuthorization.capabilityId,
+        target
+      })
     )
     if (!['recording', 'streaming'].includes(started.state) || !started.sessionId) {
       throw new Error(
@@ -399,7 +410,7 @@ async function selectAndWaitForHighlight(ws, smoke, params) {
   )
 }
 
-function sessionParams({ scenario, scenarioDirectory, target }) {
+function sessionParams({ scenario, outputDirectoryCapability, target }) {
   const timestamp = '2026-01-01T00:00:00.000Z'
   return {
     sources: { testPattern: true },
@@ -424,8 +435,7 @@ function sessionParams({ scenario, scenarioDirectory, target }) {
     output: {
       recordEnabled: scenario.recordEnabled,
       streamEnabled: true,
-      outputDirectory: scenarioDirectory,
-      ffmpegPath,
+      outputDirectoryCapability,
       video: {
         preset: 'custom',
         width: 640,
@@ -544,7 +554,10 @@ async function requestSafe(ws, method, params) {
 async function smokeCommand(smoke, command, params = {}) {
   const response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${smoke.capability}`
+    },
     body: JSON.stringify({ command, params }),
     signal: AbortSignal.timeout(timeoutMs)
   })

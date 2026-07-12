@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, OwnedMutexGuard, oneshot};
 use tokio::time::{Duration, sleep, timeout};
 use uuid::Uuid;
 
@@ -33,9 +33,8 @@ use crate::capture_input::{
 use crate::compositor::{
     CompositorAuxiliaryOutput, CompositorFrameConsumer, CompositorStartParams,
     CompositorStartupBarrierParams, CompositorStartupBarrierResult,
-    CompositorStartupSourceRequirements, background_stage_margin, compositor_frame_store,
-    compositor_stream_frame_store, start_synthetic_compositor, update_compositor_scene,
-    wait_for_compositor_startup_frames,
+    CompositorStartupSourceRequirements, compositor_frame_store, compositor_stream_frame_store,
+    start_synthetic_compositor, update_compositor_scene, wait_for_compositor_startup_frames,
 };
 use crate::devices::{
     find_avfoundation_camera_index, find_avfoundation_microphone_index_for_native_name,
@@ -65,16 +64,15 @@ use crate::process_job::{
 };
 use crate::protocol::{
     AudioProcessingUpdateParams, AudioProcessingUpdateResult, AudioSettings, AudioTrack,
-    AudioTrackSource, BackgroundFit, CameraAspect, CameraCorner, CameraFit, CameraShape,
-    CameraSize, CameraTransformMode, CompositorBackend, CompositorSceneUpdateParams,
-    CompositorState, DiagnosticStats, EffectiveSceneBackground, EncodeBackend,
-    EntitlementsSnapshot, FeatureId, HealthLevel, LayoutPreset, LayoutSettings, PreviewCameraState,
-    PreviewLiveParams, PreviewLiveSource, PreviewLiveState, PreviewLiveStatus,
-    PreviewScreenSourceKind, PreviewScreenState, PreviewSnapshot, PreviewSnapshotParams,
-    PreviewSurfaceBacking, PreviewTransport, RecordingPipelineStage, RecordingState,
-    RecordingStatus, RemuxSessionParams, RtmpPreset, RtmpSettings, Scene, SceneConfigParams,
-    SceneSourceKind, SceneTransform, SideBySideCameraSide, SideBySideSplit, StartSessionParams,
-    StreamHealth, StreamScreen, VideoPreset, VideoSettings,
+    AudioTrackSource, BackgroundFit, CameraCorner, CameraFit, CameraShape, CameraTransformMode,
+    CompositorBackend, CompositorSceneUpdateParams, CompositorState, DiagnosticStats,
+    EffectiveSceneBackground, EncodeBackend, EntitlementsSnapshot, FeatureId, HealthLevel,
+    LayoutPreset, LayoutSettings, PreviewCameraState, PreviewLiveParams, PreviewLiveSource,
+    PreviewLiveState, PreviewLiveStatus, PreviewScreenSourceKind, PreviewScreenState,
+    PreviewSnapshot, PreviewSnapshotParams, PreviewSurfaceBacking, PreviewTransport,
+    RecordingPipelineStage, RecordingState, RecordingStatus, RemuxSessionParams, RtmpPreset,
+    RtmpSettings, Scene, SceneConfigParams, SceneSourceKind, SideBySideCameraSide,
+    StartSessionParams, StreamHealth, StreamScreen, VideoPreset, VideoSettings,
 };
 use crate::repair::{
     GateStatus, MAINTENANCE_CANCELLED, QualityExpectations, QualityThresholds, QualityVerdict,
@@ -82,13 +80,26 @@ use crate::repair::{
     issue_reasons,
 };
 use crate::scene::{scene_from_capture_config, validate_scene_background};
+use crate::scene_geometry::{
+    PixelRect, SceneFit, SceneMask, background_stage_margin, camera_mask, circle_geometry,
+    resolved_camera_transform, rounded_rect_geometry, scaled_camera_box_size, scaled_camera_margin,
+    scene_crop_from_transform, scene_source_fit, scene_source_rect_pixels,
+    scene_source_render_transform, side_by_side_widths,
+};
 use crate::screen_capture::{
     is_windows_gdigrab_desktop_screen_id, parse_screencapturekit_display_id,
     parse_screencapturekit_window_id, parse_windows_dxgi_output_index,
 };
 use crate::secrets;
 use crate::state::{AppState, PreviewFrame};
-use crate::storage::{Database, NewSession, PlatformAccountCredentials, default_preview_dir};
+#[cfg(test)]
+use crate::storage::cleanup_session_mp4_staging_directory;
+use crate::storage::{
+    Database, NewSession, PlatformAccountCredentials, SessionFileBoundIdentity,
+    SessionFileIdentity, SessionFileObjectIdentity, SessionFinalization,
+    capture_session_directory_object_identity, capture_session_file_bound_identity,
+    capture_session_file_identity, capture_session_file_object_identity, default_preview_dir,
+};
 use crate::streaming::{
     StreamAuthMode, StreamPlatform, StreamTargetRuntime, StreamTargetSettings, StreamTargetState,
     StreamTargetsSnapshot, StreamUrlMode, StreamingSettings, stream_platform_from_preset,
@@ -197,8 +208,6 @@ const IDLE_PREVIEW_WIDTH: u32 = 1280;
 const IDLE_PREVIEW_HEIGHT: u32 = 720;
 const IDLE_PREVIEW_FPS: u32 = 10;
 const IDLE_PREVIEW_JPEG_QUALITY: u32 = 4;
-const CAMERA_REFERENCE_WIDTH: u32 = 1280;
-const CAMERA_REFERENCE_HEIGHT: u32 = 720;
 const STOP_FINALIZE_TIMEOUT: Duration = Duration::from_secs(20);
 const FINAL_DURATION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TERM_DELAY: Duration = Duration::from_secs(3);
@@ -227,6 +236,11 @@ const MAX_PENDING_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
 const SCREEN_OVERLAY_FPS: u32 = 4;
 const SCREEN_OVERLAY_FIFO_OPEN_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
 const SCREEN_OVERLAY_FIFO_WRITE_RETRY: std::time::Duration = std::time::Duration::from_millis(5);
+// PIPE_NOWAIT reports a temporarily full Windows byte pipe as a zero-byte
+// write. Allow the FFmpeg reader to drain, but keep both frame delivery and
+// ScreenOverlaySession::drop bounded if that reader has stopped permanently.
+const SCREEN_OVERLAY_FIFO_WRITE_PROGRESS_TIMEOUT: Duration = Duration::from_secs(2);
+const SCREEN_OVERLAY_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
 const POST_RECORDING_GATE_IDLE_DELAY: Duration = Duration::from_secs(30);
 const POST_RECORDING_FAST_ASSESSMENT_TIMEOUT: Duration = Duration::from_secs(60);
 const POST_RECORDING_REPAIR_TIMEOUT: Duration = Duration::from_secs(180);
@@ -267,6 +281,12 @@ pub struct ActiveRecording {
     /// comment highlights before touching the overlay slot.
     pub comment_highlight_available: bool,
     pub _capture_permit: Option<CapturePermit>,
+    /// Signals the process monitor at the exact user-stop edge. The monitor
+    /// orders this against FFmpeg exit readiness before it touches the shared
+    /// recording slot, so a late Stop cannot legitimize an earlier clean exit.
+    stop_intent_sender: Option<oneshot::Sender<()>>,
+    /// Renderer/status hint only. Successful finalization uses the ordered
+    /// monitor result above rather than sampling this flag after process exit.
     pub stop_requested: bool,
 }
 
@@ -528,6 +548,21 @@ where
     )
 }
 
+fn recording_output_path(
+    output_directory: &Path,
+    started_at: &DateTime<Utc>,
+    session_id: &str,
+) -> PathBuf {
+    let safe_session_id = session_id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .collect::<String>();
+    output_directory.join(format!(
+        "videorc-session-{}-{safe_session_id}.mkv",
+        started_at.format("%Y%m%d-%H%M%S")
+    ))
+}
+
 fn default_video_settings() -> VideoSettings {
     VideoSettings {
         preset: VideoPreset::Tutorial1440p30,
@@ -596,6 +631,14 @@ pub async fn start_session(
     state: AppState,
     mut params: StartSessionParams,
 ) -> Result<RecordingStatus> {
+    // This backend-owned edge closes the gap between Electron's last sampled
+    // status and the first Starting event. A permission restart or updater
+    // install that already owns the interruption lease rejects this start; a
+    // start that wins first makes interruption admission fail immediately.
+    let session_start_admission = state
+        .capture_interruption
+        .try_begin_session_start()
+        .map_err(|blocker| anyhow::anyhow!(blocker.to_string()))?;
     if state.recording.lock().await.is_some() {
         bail!("A capture session is already running");
     }
@@ -612,6 +655,7 @@ pub async fn start_session(
     }
 
     let ffmpeg_path = resolve_ffmpeg_path(params.output.ffmpeg_path.clone());
+    select_windows_media_foundation_encoder(&state, &ffmpeg_path, &params.output.video).await;
     let output_dir = resolve_output_directory(params.output.output_directory.as_deref())?;
 
     if params.output.record_enabled {
@@ -625,12 +669,10 @@ pub async fn start_session(
     // FX8: the display title reads in the user's wall clock — it sat next to
     // Library's locally-rendered date column showing a different time. The
     // stored `started_at` (RFC3339 UTC) and the output filename stay UTC.
-    let output_path = params.output.record_enabled.then(|| {
-        output_dir.join(format!(
-            "videorc-session-{}.mkv",
-            started_at.format("%Y%m%d-%H%M%S")
-        ))
-    });
+    let output_path = params
+        .output
+        .record_enabled
+        .then(|| recording_output_path(&output_dir, &started_at, &session_id));
     let stream_resolution = if params.output.stream_enabled {
         match params
             .streaming
@@ -801,13 +843,19 @@ pub async fn start_session(
     let use_encoder_bridge =
         should_use_compositor_encoder_bridge(&state, &params, active_screen.as_ref()).await?;
     emit_foundation_health_events(&state, &session_id, &params, use_encoder_bridge)?;
-    // The legacy FFmpeg screen+camera overlay and side-by-side paths both rely on the
-    // camera device index. The protected compositor bridge uses native source frames, so
-    // an unavailable FFmpeg camera index is not itself a recording-path failure there.
+    // The legacy FFmpeg screen+camera overlay, side-by-side, and vertical stack
+    // paths all rely on the camera device index. The protected compositor bridge
+    // uses native source frames, so an unavailable FFmpeg camera index is not
+    // itself a recording-path failure there.
     if !use_encoder_bridge
         && matches!(
             params.layout.layout_preset,
-            LayoutPreset::ScreenCamera | LayoutPreset::SideBySide
+            LayoutPreset::ScreenCamera
+                | LayoutPreset::SideBySide
+                | LayoutPreset::VerticalCameraTop
+                | LayoutPreset::VerticalCameraBottom
+                | LayoutPreset::VerticalSplit
+                | LayoutPreset::VerticalScreenCamera
         )
         && params.sources.camera_id.is_some()
         && capture.camera_index.is_none()
@@ -1163,6 +1211,18 @@ pub async fn start_session(
         child.stdin.take()
     };
     let pid = child.id().unwrap_or_default();
+    // FFmpeg opens every declared input before it starts draining raw video.
+    // Attach the native-audio FIFO now, before waiting for the raw-video prime,
+    // or FFmpeg can block opening audio while the bridge waits for video bytes
+    // to be consumed. The writer already waits on `video_epoch`, so pre-roll is
+    // still trimmed at the completed priming frame.
+    let attached_native_audio = native_audio_source.take().map(|prepared| {
+        attach_fifo_writer(
+            prepared.source,
+            prepared.fifo_path,
+            use_encoder_bridge.then(|| video_epoch.clone()),
+        )
+    });
     let (encoder_bridge, encoder_bridge_stream) = if use_encoder_bridge {
         let bridge_fifo_path = encoder_bridge_fifo
             .clone()
@@ -1178,7 +1238,7 @@ pub async fn start_session(
             encoder_bridge_video_output,
             encoder_bridge_stream_profile.is_some(),
         );
-        let recording_bridge = start_synthetic_recording_bridge(
+        let mut recording_bridge = start_synthetic_recording_bridge(
             state.clone(),
             session_id.clone(),
             params.output.video.fps,
@@ -1191,7 +1251,7 @@ pub async fn start_session(
             recording_diagnostics_context,
             video_epoch.clone(),
         )?;
-        let stream_bridge = match (
+        let mut stream_bridge = match (
             encoder_bridge_stream_fifo.clone(),
             encoder_bridge_stream_profile.as_ref(),
             encoder_bridge_stream_frame_store.clone(),
@@ -1220,6 +1280,10 @@ pub async fn start_session(
             }
             _ => None,
         };
+        recording_bridge.wait_until_ready().await?;
+        if let Some(stream_bridge) = stream_bridge.as_mut() {
+            stream_bridge.wait_until_ready().await?;
+        }
         (Some(recording_bridge), stream_bridge)
     } else {
         (None, None)
@@ -1238,6 +1302,7 @@ pub async fn start_session(
     // contain, captured before `audio_tracks` is moved into the active recording.
     let gate_expect_audio = !audio_tracks.is_empty();
     let gate_intended_fps = (params.output.video.fps > 0).then_some(params.output.video.fps as f64);
+    let (stop_intent_sender, stop_intent_receiver) = oneshot::channel();
     let active = ActiveRecording {
         session_id: session_id.clone(),
         pid,
@@ -1251,13 +1316,7 @@ pub async fn start_session(
         mode: mode.to_string(),
         audio_tracks,
         pipeline,
-        native_audio: native_audio_source.map(|prepared| {
-            attach_fifo_writer(
-                prepared.source,
-                prepared.fifo_path,
-                use_encoder_bridge.then(|| video_epoch.clone()),
-            )
-        }),
+        native_audio: attached_native_audio,
         screen_overlay: match screen_overlay_fifo {
             Some(screen_overlay_fifo) => Some(ScreenOverlaySession::start(
                 screen_overlay_fifo,
@@ -1272,6 +1331,7 @@ pub async fn start_session(
         captioned_copy_requested: session_caption_plan.captioned_copy,
         comment_highlight_available: comment_highlight_available(&params, use_encoder_bridge),
         _capture_permit: Some(capture_permit),
+        stop_intent_sender: Some(stop_intent_sender),
         stop_requested: false,
     };
     // The fully-constructed pipeline is now committed to becoming an active
@@ -1299,6 +1359,7 @@ pub async fn start_session(
     let running_status = active.status(running_state, Some(format!("Running {mode} session.")));
 
     *state.recording.lock().await = Some(active);
+    session_start_admission.commit();
     // A delayed idle capture-config reload that was queued before session start
     // may resume only after `recording` is authoritative; the idle-only commit
     // path will then reject it instead of silently replacing the startup scene.
@@ -1498,6 +1559,7 @@ pub async fn start_session(
     tokio::spawn(monitor_session(
         state.clone(),
         child,
+        stop_intent_receiver,
         session_id,
         output_path,
         PostRecordingGate {
@@ -1641,7 +1703,15 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     let session_id = active.session_id.clone();
     let wait_session_id = session_id.clone();
     let mut force_stop_now = false;
-    active.stop_requested = true;
+    if !active.stop_requested {
+        // Send before touching FFmpeg stdin. The monitor gives an already-ready
+        // process exit priority over this signal, closing the old wait -> lock
+        // window where a late Stop changed an unsolicited exit into success.
+        if let Some(stop_intent_sender) = active.stop_intent_sender.take() {
+            let _ = stop_intent_sender.send(());
+        }
+        active.stop_requested = true;
+    }
     if let Some(native_audio) = active.native_audio.as_ref() {
         native_audio.finish_recording_window();
     }
@@ -1709,7 +1779,79 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mp4FinalizationFault {
+    None,
+    #[cfg(test)]
+    AfterWorkspaceCreate,
+    #[cfg(test)]
+    AfterFfmpeg,
+    #[cfg(test)]
+    AfterPublication,
+    #[cfg(test)]
+    AfterDatabaseCommit,
+}
+
+impl Mp4FinalizationFault {
+    fn after_workspace_create(self) -> bool {
+        #[cfg(test)]
+        {
+            return matches!(self, Self::AfterWorkspaceCreate);
+        }
+        #[cfg(not(test))]
+        false
+    }
+
+    fn after_ffmpeg(self) -> bool {
+        #[cfg(test)]
+        {
+            return matches!(self, Self::AfterFfmpeg);
+        }
+        #[cfg(not(test))]
+        false
+    }
+
+    fn after_publication(self) -> bool {
+        #[cfg(test)]
+        {
+            return matches!(self, Self::AfterPublication);
+        }
+        #[cfg(not(test))]
+        false
+    }
+
+    fn after_database_commit(self) -> bool {
+        #[cfg(test)]
+        {
+            return matches!(self, Self::AfterDatabaseCommit);
+        }
+        #[cfg(not(test))]
+        false
+    }
+}
+
 pub async fn remux_session(state: AppState, params: RemuxSessionParams) -> Result<String> {
+    remux_session_with_exporter(
+        state,
+        params,
+        Mp4FinalizationFault::None,
+        |ffmpeg_path, input, output| async move {
+            export_mp4_from_mkv(&ffmpeg_path, &input, &output).await
+        },
+    )
+    .await
+}
+
+async fn remux_session_with_exporter<F, Fut>(
+    state: AppState,
+    params: RemuxSessionParams,
+    fault: Mp4FinalizationFault,
+    exporter: F,
+) -> Result<String>
+where
+    F: FnOnce(String, PathBuf, PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let input = state
         .database
         .session_recording_path(&params.session_id)?
@@ -1720,22 +1862,70 @@ pub async fn remux_session(state: AppState, params: RemuxSessionParams) -> Resul
         bail!("Only MKV session outputs can be remuxed to MP4");
     }
 
-    let output = input.with_extension("mp4");
+    let preferred_output = input.with_extension("mp4");
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path);
-    export_mp4_from_mkv(&ffmpeg_path, &input, &output).await?;
+    let mut base_finalization = state
+        .database
+        .session_finalization_snapshot(&params.session_id)?;
+    base_finalization.status = "completed".to_string();
+    base_finalization.mp4_path = Some(preferred_output.display().to_string());
+    let output_ownership = capture_session_file_bound_identity(&input)?;
+    let mut recovery_path = None;
+    let published = export_recording_to_mp4_with_exporter(
+        &state,
+        Mp4ExportRequest {
+            session_id: &params.session_id,
+            input: &input,
+            base_finalization: base_finalization.clone(),
+            output_ownership: output_ownership.clone(),
+            remove_output_after_commit: false,
+            fault,
+        },
+        &mut recovery_path,
+        move |input, output| exporter(ffmpeg_path, input, output),
+    )
+    .await?
+    .context("Manual remux did not produce an MP4")?;
+    let mut finalization = base_finalization
+        .with_media_ownership(
+            Some(input.display().to_string()),
+            output_ownership
+                .as_ref()
+                .map(|ownership| ownership.content_identity.clone()),
+            Some(published.staging_path.display().to_string()),
+            Some(published.identity.clone()),
+            false,
+        )
+        .with_mp4_staging_file_object_identity(published.object_identity.clone())
+        .with_mp4_staging_directory_ownership(
+            published.staging_directory_path.display().to_string(),
+            published.staging_directory_object_identity.clone(),
+            published
+                .staging_directory_cleanup_path
+                .display()
+                .to_string(),
+        );
+    if let Some(ownership) = output_ownership {
+        finalization = finalization.with_output_file_object_identity(ownership.object_identity);
+    }
+    finalization.mp4_path = Some(published.path.display().to_string());
+    persist_finalization_or_recovery_with_fault(&state, &finalization, &mut recovery_path, fault)
+        .map_err(anyhow::Error::msg)?;
 
-    state.database.finish_session(
-        &params.session_id,
-        "completed",
-        None,
-        Some(output.display().to_string()),
-        None,
-    )?;
     state.emit_log("info", "Created MP4 copy for session.");
-    Ok(output.display().to_string())
+    Ok(published.path.display().to_string())
 }
 
 async fn export_mp4_from_mkv(ffmpeg_path: &str, input: &Path, output: &Path) -> Result<()> {
+    if output
+        .try_exists()
+        .with_context(|| format!("Could not inspect MP4 output {}", output.display()))?
+    {
+        bail!(
+            "Refusing to start FFmpeg because MP4 output {} already exists",
+            output.display()
+        );
+    }
     let mut command = Command::new(ffmpeg_path);
     command.args(mp4_export_args(input, output));
     let status = status_owned_tokio(&mut command)
@@ -1749,9 +1939,214 @@ async fn export_mp4_from_mkv(ffmpeg_path: &str, input: &Path, output: &Path) -> 
     Ok(())
 }
 
+async fn sync_nonempty_staged_mp4_for_publication(output: PathBuf) -> Result<()> {
+    tokio::task::spawn_blocking(move || sync_nonempty_staged_mp4(&output))
+        .await
+        .context("Could not join staged MP4 sync task")??;
+    Ok(())
+}
+
+fn sync_nonempty_staged_mp4(output: &Path) -> Result<()> {
+    // Windows requires a handle with write access for FlushFileBuffers, which
+    // backs File::sync_all. File::open creates a read-only handle and made a
+    // successful FFmpeg export fall back to the MKV recovery file there.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(output)
+        .with_context(|| format!("Could not open staged MP4 {}", output.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("Could not inspect staged MP4 {}", output.display()))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        bail!(
+            "FFmpeg did not create a non-empty staged MP4 at {}",
+            output.display()
+        );
+    }
+    file.sync_all()
+        .with_context(|| format!("Could not sync staged MP4 {}", output.display()))?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct Mp4ExportStaging {
+    directory_path: PathBuf,
+    output_path: PathBuf,
+    cleanup_directory_path: PathBuf,
+    directory_object_identity: SessionFileObjectIdentity,
+}
+
+#[derive(Debug, Clone)]
+struct Mp4ExportStagingPlan {
+    directory_path: PathBuf,
+    output_path: PathBuf,
+    cleanup_directory_path: PathBuf,
+}
+
+fn plan_mp4_export_staging(preferred_output: &Path) -> Result<Mp4ExportStagingPlan> {
+    let parent = preferred_output.parent().with_context(|| {
+        format!(
+            "MP4 output {} does not have a parent directory",
+            preferred_output.display()
+        )
+    })?;
+    let id = Uuid::new_v4();
+    let directory_path = parent.join(format!(".videorc-export-{id}.partial"));
+    let cleanup_directory_path = parent.join(format!(".videorc-export-cleanup-{id}"));
+    let output_path = directory_path.join("export.mp4");
+
+    Ok(Mp4ExportStagingPlan {
+        directory_path,
+        output_path,
+        cleanup_directory_path,
+    })
+}
+
+fn create_planned_mp4_export_staging(plan: &Mp4ExportStagingPlan) -> Result<Mp4ExportStaging> {
+    let Mp4ExportStagingPlan {
+        directory_path,
+        output_path,
+        cleanup_directory_path,
+    } = plan;
+
+    #[cfg(unix)]
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(directory_path).with_context(|| {
+        format!(
+            "Could not create private MP4 staging directory {}",
+            directory_path.display()
+        )
+    })?;
+    crate::session_ops::sync_session_file_parent(directory_path)?;
+    // Sync the newly-created directory itself while the child output remains
+    // absent. FFmpeg's `-n` can now create the child without any preexisting
+    // file to reject or truncate.
+    crate::session_ops::sync_session_file_parent(output_path)?;
+    let directory_object_identity = capture_session_directory_object_identity(directory_path)?
+        .with_context(|| {
+            format!(
+                "MP4 staging directory {} disappeared after creation",
+                directory_path.display()
+            )
+        })?;
+    if output_path.exists() {
+        bail!(
+            "Private MP4 output {} unexpectedly exists before FFmpeg starts",
+            output_path.display()
+        );
+    }
+
+    Ok(Mp4ExportStaging {
+        directory_path: directory_path.clone(),
+        output_path: output_path.clone(),
+        cleanup_directory_path: cleanup_directory_path.clone(),
+        directory_object_identity,
+    })
+}
+
+#[cfg(test)]
+fn prepare_mp4_export_staging(preferred_output: &Path) -> Result<Mp4ExportStaging> {
+    let plan = plan_mp4_export_staging(preferred_output)?;
+    create_planned_mp4_export_staging(&plan)
+}
+
+#[cfg(test)]
+fn cleanup_prepared_mp4_export_staging(staging: &Mp4ExportStaging) -> Result<()> {
+    cleanup_session_mp4_staging_directory(
+        &staging.directory_path,
+        &staging.cleanup_directory_path,
+        &staging.directory_object_identity,
+    )
+}
+
+fn verify_prepared_mp4_export_staging(staging: &Mp4ExportStaging) -> Result<()> {
+    if staging.output_path.parent() != Some(staging.directory_path.as_path()) {
+        bail!(
+            "MP4 output {} escaped private staging directory {}",
+            staging.output_path.display(),
+            staging.directory_path.display()
+        );
+    }
+    if capture_session_directory_object_identity(&staging.directory_path)?.as_ref()
+        != Some(&staging.directory_object_identity)
+    {
+        bail!(
+            "Private MP4 staging directory {} was replaced",
+            staging.directory_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn media_collision_candidate(preferred: &Path, attempt: u32) -> PathBuf {
+    if attempt == 0 {
+        return preferred.to_path_buf();
+    }
+    let stem = preferred
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("recording");
+    let extension = preferred
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    preferred.with_file_name(format!("{stem} ({}){extension}", attempt + 1))
+}
+
+fn is_destination_collision(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::AlreadyExists
+        || matches!(error.raw_os_error(), Some(17 | 80 | 183))
+}
+
+#[cfg(test)]
+async fn publish_staged_media_uniquely(staging: PathBuf, preferred: PathBuf) -> Result<PathBuf> {
+    tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+        let expected_identity = capture_session_file_identity(&staging)?.with_context(|| {
+            format!("Staged recording {} disappeared", staging.display())
+        })?;
+        for attempt in 0..10_000 {
+            let candidate = media_collision_candidate(&preferred, attempt);
+            match crate::session_ops::rename_session_file_no_replace(&staging, &candidate) {
+                Ok(()) => {
+                    crate::session_ops::sync_session_file_parent(&candidate)?;
+                    if capture_session_file_identity(&candidate)?.as_ref()
+                        == Some(&expected_identity)
+                    {
+                        return Ok(candidate);
+                    }
+                    let _ = crate::session_ops::rename_session_file_no_replace(
+                        &candidate, &staging,
+                    );
+                    bail!(
+                        "Staged recording changed during publication; the raced file was not adopted."
+                    );
+                }
+                Err(error) if is_destination_collision(&error) => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("Could not publish staged recording {}", candidate.display())
+                    });
+                }
+            }
+        }
+        bail!("Could not reserve a free recording filename after 10,000 attempts.")
+    })
+    .await
+    .context("Could not join staged recording publish task")?
+}
+
 fn mp4_export_args(input: &Path, output: &Path) -> Vec<String> {
     vec![
-        "-y".to_string(),
+        "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
@@ -2813,14 +3208,189 @@ async fn final_session_diagnostics_snapshot(state: &AppState, session_id: &str) 
     snapshot
 }
 
+fn persist_terminal_session_or_recovery(
+    state: &AppState,
+    session_id: &str,
+    status: &str,
+    ended_at: &str,
+    mp4_path: Option<String>,
+    duration_ms: Option<i64>,
+    diagnostics: &DiagnosticStats,
+) -> std::result::Result<(), String> {
+    let finalization = SessionFinalization::new(
+        session_id,
+        status,
+        Some(ended_at.to_string()),
+        mp4_path,
+        duration_ms,
+        diagnostics,
+    )
+    .map_err(|error| format!("Could not serialize final session metadata: {error:#}"))?;
+    persist_finalization_or_recovery(state, &finalization, &mut None)
+}
+
+fn persist_finalization_or_recovery(
+    state: &AppState,
+    finalization: &SessionFinalization,
+    recovery_path: &mut Option<PathBuf>,
+) -> std::result::Result<(), String> {
+    persist_finalization_or_recovery_with_fault(
+        state,
+        finalization,
+        recovery_path,
+        Mp4FinalizationFault::None,
+    )
+}
+
+fn persist_finalization_or_recovery_with_fault(
+    state: &AppState,
+    finalization: &SessionFinalization,
+    recovery_path: &mut Option<PathBuf>,
+    fault: Mp4FinalizationFault,
+) -> std::result::Result<(), String> {
+    // A pre-existing record may still own a partial or published MP4 while the
+    // live terminal path falls back to the MKV. In that case it remains the
+    // single authority: replacing or clearing it with a staging-less fallback
+    // would strand media that startup can still recover safely.
+    let pending_media_recovery = recovery_path.is_some() && finalization.mp4_staging_path.is_none();
+    let recovery_error = if pending_media_recovery {
+        None
+    } else if let Some(path) = recovery_path.as_ref() {
+        state
+            .database
+            .replace_session_finalization_recovery(path, finalization)
+            .err()
+    } else {
+        match state
+            .database
+            .persist_session_finalization_recovery(finalization)
+        {
+            Ok(path) => {
+                *recovery_path = Some(path);
+                None
+            }
+            Err(error) => Some(error),
+        }
+    };
+
+    if let Err(database_error) = state
+        .database
+        .finalize_session_with_diagnostics(finalization)
+    {
+        let path = recovery_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let recovery_detail = recovery_error
+            .as_ref()
+            .map(|error| format!(" The latest recovery write also failed: {error:#}."))
+            .unwrap_or_default();
+        let message = if recovery_path.is_none() {
+            format!(
+                "Recording media finished, but neither its recovery record nor Library metadata could be committed: recovery: {}; database: {database_error:#}.",
+                recovery_error
+                    .map(|error| format!("{error:#}"))
+                    .unwrap_or_else(|| "unavailable".to_string())
+            )
+        } else {
+            format!(
+                "Recording media finished, but its Library metadata could not be committed: {database_error:#}. Recovery metadata was saved at {path}. Videorc will retry it on the next launch.{recovery_detail}"
+            )
+        };
+        state.emit_log("error", &message);
+        return Err(message);
+    }
+
+    if fault.after_database_commit() {
+        return Err("injected crash after session database commit".to_string());
+    }
+
+    if let Err(error) = state
+        .database
+        .cleanup_session_finalization_source(finalization)
+    {
+        // SQLite already owns the MP4. Retain the recovery records so startup
+        // retries only the identity-checked MKV cleanup.
+        state.emit_log(
+            "warn",
+            format!(
+                "Session metadata committed, but finalized MKV cleanup will retry next launch: {error:#}"
+            ),
+        );
+        return Ok(());
+    }
+
+    if let Err(error) = state
+        .database
+        .cleanup_session_finalization_mp4_staging(finalization)
+    {
+        // SQLite already owns the terminal media decision. Keep recovery so
+        // startup can retry removing only the identity-bound private export
+        // workspace; never clear the journal while owned staging may remain.
+        state.emit_log(
+            "warn",
+            format!(
+                "Session metadata committed, but MP4 staging cleanup will retry next launch: {error:#}"
+            ),
+        );
+        return Ok(());
+    }
+
+    if pending_media_recovery {
+        return Ok(());
+    }
+
+    if let Some(path) = recovery_path.as_ref() {
+        if let Err(error) = state.database.clear_session_finalization_recovery(path) {
+            // SQLite is already truthful. A stale idempotent recovery record is
+            // safer than reporting a completed recording as failed.
+            state.emit_log(
+                "warn",
+                format!(
+                    "Session metadata committed, but recovery cleanup will retry next launch: {error:#}"
+                ),
+            );
+        } else {
+            *recovery_path = None;
+        }
+    }
+    Ok(())
+}
+
+async fn wait_for_process_exit_ordered<F>(
+    process_exit: F,
+    stop_intent: oneshot::Receiver<()>,
+) -> (F::Output, bool)
+where
+    F: std::future::Future,
+{
+    tokio::pin!(process_exit);
+    tokio::pin!(stop_intent);
+
+    tokio::select! {
+        // Fail closed when both are ready in the same scheduler turn. This also
+        // covers a monitor that was descheduled after FFmpeg exited and resumed
+        // only after the user clicked Stop.
+        biased;
+        status = &mut process_exit => (status, false),
+        intent = &mut stop_intent => {
+            let stop_intent_preceded_exit = intent.is_ok();
+            let status = process_exit.await;
+            (status, stop_intent_preceded_exit)
+        }
+    }
+}
+
 async fn monitor_session(
     state: AppState,
     mut child: tokio::process::Child,
+    stop_intent: oneshot::Receiver<()>,
     session_id: String,
     output_path: Option<PathBuf>,
     gate: PostRecordingGate,
 ) {
-    let status = child.wait().await;
+    let (status, stop_intent_preceded_exit) =
+        wait_for_process_exit_ordered(child.wait(), stop_intent).await;
     let finalizing_permit = state.ffmpeg_work.begin_finalizing();
     let mut guard = state.recording.lock().await;
     let monitored_recording = guard
@@ -2837,7 +3407,7 @@ async fn monitor_session(
                 }
             });
             MonitoredRecording {
-                stop_requested: active.stop_requested,
+                stop_intent_preceded_exit,
                 encoder_bridge_terminal_failure: active.encoder_bridge_terminal_failure(),
                 ffmpeg_path: active.ffmpeg_path.clone(),
                 started_at: active.started_at.clone(),
@@ -2947,11 +3517,11 @@ async fn monitor_session(
     let final_diagnostics = final_session_diagnostics_snapshot(&state, &session_id).await;
     let encoder_bridge_terminal_failure =
         monitored_recording.encoder_bridge_terminal_failure.clone();
-    match status {
+    let terminal_status = match status {
         Ok(exit_status)
             if should_finalize_recording_session(
                 exit_status.success(),
-                monitored_recording.stop_requested,
+                monitored_recording.stop_intent_preceded_exit,
                 encoder_bridge_terminal_failure.as_deref(),
             ) =>
         {
@@ -2972,12 +3542,35 @@ async fn monitor_session(
                 },
                 &message,
             );
-            let mp4_path = if let Some(output_path) = output_path.as_ref() {
+            let output_ownership = output_path.as_ref().and_then(|path| {
+                match capture_session_file_bound_identity(path) {
+                    Ok(ownership) => ownership,
+                    Err(error) => {
+                        state.emit_log(
+                            "warn",
+                            format!(
+                                "Could not bind finalized MKV {} to its file identity; it will be retained after MP4 export: {error:#}",
+                                path.display()
+                            ),
+                        );
+                        None
+                    }
+                }
+            });
+            let mut finalization_recovery_path = None;
+            let published_mp4 = if let Some(output_path) = output_path.as_ref() {
                 match export_completed_recording_to_mp4(
                     &state,
                     &session_id,
                     &monitored_recording.ffmpeg_path,
                     output_path,
+                    Mp4ExportFinalizationContext {
+                        ended_at: &ended_at,
+                        duration_ms,
+                        diagnostics: &final_diagnostics,
+                        output_ownership: output_ownership.clone(),
+                    },
+                    &mut finalization_recovery_path,
                 )
                 .await
                 {
@@ -3001,6 +3594,9 @@ async fn monitor_session(
             } else {
                 None
             };
+            let mp4_path = published_mp4
+                .as_ref()
+                .map(|published| published.path.clone());
             let final_path = mp4_path.clone().or(output_path.clone());
 
             // Establish ownership of every finalized caption artifact before
@@ -3068,40 +3664,93 @@ async fn monitor_session(
                 },
                 None => duration_ms,
             };
-            let _ = state.database.finish_session(
+            let persistence_error = SessionFinalization::new(
                 &session_id,
                 "completed",
-                Some(ended_at),
+                Some(ended_at.clone()),
                 mp4_path.as_ref().map(|path| path.display().to_string()),
                 duration_ms,
-            );
-            let _ = state
-                .database
-                .save_session_diagnostics(&session_id, &final_diagnostics);
-            let _ = emit_health_event(
-                &state,
-                Some(&session_id),
-                HealthLevel::Info,
-                "recording-finalized",
-                "Recording pipeline finalized and output metadata was saved.",
-            );
-            state.emit_event(
-                "recording.status",
-                RecordingStatus {
-                    state: RecordingState::Idle,
-                    session_id: Some(session_id),
-                    output_path: mp4_path
+                &final_diagnostics,
+            )
+            .map_err(|error| format!("Could not serialize final session metadata: {error:#}"))
+            .map(|finalization| {
+                let mut finalization = finalization.with_media_ownership(
+                    output_path.as_ref().map(|path| path.display().to_string()),
+                    output_ownership
                         .as_ref()
-                        .or(output_path.as_ref())
-                        .map(|path| path.display().to_string()),
-                    stream_url: None,
-                    started_at: None,
-                    audio_tracks: Vec::new(),
-                    pipeline: Some(monitored_recording.pipeline.status()),
-                    duration_ms,
-                    message: Some("Capture session finalized.".to_string()),
+                        .map(|ownership| ownership.content_identity.clone()),
+                    published_mp4
+                        .as_ref()
+                        .map(|published| published.staging_path.display().to_string()),
+                    published_mp4
+                        .as_ref()
+                        .map(|published| published.identity.clone()),
+                    published_mp4.is_some(),
+                );
+                if let Some(ownership) = output_ownership.as_ref() {
+                    finalization = finalization
+                        .with_output_file_object_identity(ownership.object_identity.clone());
+                }
+                if let Some(published) = published_mp4.as_ref() {
+                    finalization
+                        .with_mp4_staging_file_object_identity(published.object_identity.clone())
+                        .with_mp4_staging_directory_ownership(
+                            published.staging_directory_path.display().to_string(),
+                            published.staging_directory_object_identity.clone(),
+                            published
+                                .staging_directory_cleanup_path
+                                .display()
+                                .to_string(),
+                        )
+                } else {
+                    finalization
+                }
+            })
+            .and_then(|finalization| {
+                persist_finalization_or_recovery(
+                    &state,
+                    &finalization,
+                    &mut finalization_recovery_path,
+                )
+            })
+            .err();
+            if let Some(message) = persistence_error.as_deref() {
+                let _ = emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Error,
+                    "recording-metadata-recovery-required",
+                    message,
+                );
+            } else {
+                let _ = emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Info,
+                    "recording-finalized",
+                    "Recording pipeline finalized and output metadata was saved.",
+                );
+            }
+            let terminal_status = RecordingStatus {
+                state: if persistence_error.is_some() {
+                    RecordingState::Failed
+                } else {
+                    RecordingState::Idle
                 },
-            );
+                session_id: Some(session_id.clone()),
+                output_path: mp4_path
+                    .as_ref()
+                    .or(output_path.as_ref())
+                    .map(|path| path.display().to_string()),
+                stream_url: None,
+                started_at: None,
+                audio_tracks: Vec::new(),
+                pipeline: Some(monitored_recording.pipeline.status()),
+                duration_ms,
+                message: Some(
+                    persistence_error.unwrap_or_else(|| "Capture session finalized.".to_string()),
+                ),
+            };
             // Slice 8: check (and, if needed, repair in place) the finalized file off
             // the hot path. The recording is already marked complete; the gate only ever
             // replaces the visible file with a validated better version, keeping a backup.
@@ -3132,9 +3781,10 @@ async fn monitor_session(
                     gate,
                 );
             }
+            terminal_status
         }
         Ok(exit_status) => {
-            let (failed_stage, health_code, message) = if let Some(error) =
+            let (failed_stage, health_code, mut message) = if let Some(error) =
                 encoder_bridge_terminal_failure.as_deref()
             {
                 (
@@ -3155,16 +3805,17 @@ async fn monitor_session(
                 .pipeline
                 .mark_failed(failed_stage, &message);
             state.emit_log("error", &message);
-            let _ = state.database.finish_session(
+            if let Err(persistence_error) = persist_terminal_session_or_recovery(
+                &state,
                 &session_id,
                 "failed",
-                Some(ended_at),
+                &ended_at,
                 None,
                 duration_ms,
-            );
-            let _ = state
-                .database
-                .save_session_diagnostics(&session_id, &final_diagnostics);
+                &final_diagnostics,
+            ) {
+                message = format!("{message}. {persistence_error}");
+            }
             let _ = emit_health_event(
                 &state,
                 Some(&session_id),
@@ -3172,20 +3823,17 @@ async fn monitor_session(
                 health_code,
                 &message,
             );
-            state.emit_event(
-                "recording.status",
-                RecordingStatus {
-                    state: RecordingState::Failed,
-                    session_id: Some(session_id),
-                    output_path: output_path.as_ref().map(|path| path.display().to_string()),
-                    stream_url: None,
-                    started_at: None,
-                    audio_tracks: Vec::new(),
-                    pipeline: Some(monitored_recording.pipeline.status()),
-                    duration_ms,
-                    message: Some(message),
-                },
-            );
+            let terminal_status = RecordingStatus {
+                state: RecordingState::Failed,
+                session_id: Some(session_id),
+                output_path: output_path.as_ref().map(|path| path.display().to_string()),
+                stream_url: None,
+                started_at: None,
+                audio_tracks: Vec::new(),
+                pipeline: Some(monitored_recording.pipeline.status()),
+                duration_ms,
+                message: Some(message),
+            };
             let discarded = crate::captions::discard_failed_caption_capture(&state).await;
             if discarded > 0 {
                 state.emit_log(
@@ -3193,23 +3841,25 @@ async fn monitor_session(
                     format!("Discarded {discarded} caption cue(s) owned by the failed capture."),
                 );
             }
+            terminal_status
         }
         Err(error) => {
-            let message = format!("Could not wait for FFmpeg: {error}");
+            let mut message = format!("Could not wait for FFmpeg: {error}");
             monitored_recording
                 .pipeline
                 .mark_failed(RecordingPipelineStage::Muxer, &message);
             state.emit_log("error", &message);
-            let _ = state.database.finish_session(
+            if let Err(persistence_error) = persist_terminal_session_or_recovery(
+                &state,
                 &session_id,
                 "failed",
-                Some(ended_at),
+                &ended_at,
                 None,
                 duration_ms,
-            );
-            let _ = state
-                .database
-                .save_session_diagnostics(&session_id, &final_diagnostics);
+                &final_diagnostics,
+            ) {
+                message = format!("{message}. {persistence_error}");
+            }
             let _ = emit_health_event(
                 &state,
                 Some(&session_id),
@@ -3217,20 +3867,17 @@ async fn monitor_session(
                 "ffmpeg-wait-failed",
                 &message,
             );
-            state.emit_event(
-                "recording.status",
-                RecordingStatus {
-                    state: RecordingState::Failed,
-                    session_id: Some(session_id),
-                    output_path: output_path.as_ref().map(|path| path.display().to_string()),
-                    stream_url: None,
-                    started_at: None,
-                    audio_tracks: Vec::new(),
-                    pipeline: Some(monitored_recording.pipeline.status()),
-                    duration_ms,
-                    message: Some(message),
-                },
-            );
+            let terminal_status = RecordingStatus {
+                state: RecordingState::Failed,
+                session_id: Some(session_id),
+                output_path: output_path.as_ref().map(|path| path.display().to_string()),
+                stream_url: None,
+                started_at: None,
+                audio_tracks: Vec::new(),
+                pipeline: Some(monitored_recording.pipeline.status()),
+                duration_ms,
+                message: Some(message),
+            };
             let discarded = crate::captions::discard_failed_caption_capture(&state).await;
             if discarded > 0 {
                 state.emit_log(
@@ -3238,9 +3885,16 @@ async fn monitor_session(
                     format!("Discarded {discarded} caption cue(s) owned by the failed capture."),
                 );
             }
+            terminal_status
         }
-    }
+    };
     drop(finalizing_permit);
+    // The terminal event is the desktop updater/restart gate. Publish it only
+    // after MP4 export, caption ownership, duration probing, metadata commit,
+    // and post-recording maintenance scheduling are complete and the backend's
+    // authoritative finalizing lease has been released.
+    state.capture_interruption.capture_finished();
+    state.emit_event("recording.status", terminal_status);
 
     restart_idle_live_preview_if_desired(state).await;
 }
@@ -3774,34 +4428,255 @@ async fn export_completed_recording_to_mp4(
     session_id: &str,
     ffmpeg_path: &str,
     input: &Path,
-) -> Result<Option<PathBuf>> {
+    context: Mp4ExportFinalizationContext<'_>,
+    recovery_path: &mut Option<PathBuf>,
+) -> Result<Option<PublishedRecordingMp4>> {
+    let Mp4ExportFinalizationContext {
+        ended_at,
+        duration_ms,
+        diagnostics,
+        output_ownership,
+    } = context;
+    let base_finalization = SessionFinalization::new(
+        session_id,
+        "completed",
+        Some(ended_at.to_string()),
+        None,
+        duration_ms,
+        diagnostics,
+    )?;
+    let ffmpeg_path = ffmpeg_path.to_string();
+    export_recording_to_mp4_with_exporter(
+        state,
+        Mp4ExportRequest {
+            session_id,
+            input,
+            base_finalization,
+            remove_output_after_commit: output_ownership.is_some(),
+            output_ownership,
+            fault: Mp4FinalizationFault::None,
+        },
+        recovery_path,
+        move |input, output| async move {
+            export_mp4_from_mkv(&ffmpeg_path, &input, &output).await
+        },
+    )
+    .await
+}
+
+struct Mp4ExportRequest<'a> {
+    session_id: &'a str,
+    input: &'a Path,
+    base_finalization: SessionFinalization,
+    output_ownership: Option<SessionFileBoundIdentity>,
+    remove_output_after_commit: bool,
+    fault: Mp4FinalizationFault,
+}
+
+async fn export_recording_to_mp4_with_exporter<F, Fut>(
+    state: &AppState,
+    request: Mp4ExportRequest<'_>,
+    recovery_path: &mut Option<PathBuf>,
+    exporter: F,
+) -> Result<Option<PublishedRecordingMp4>>
+where
+    F: FnOnce(PathBuf, PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let Mp4ExportRequest {
+        session_id,
+        input,
+        base_finalization,
+        output_ownership,
+        remove_output_after_commit,
+        fault,
+    } = request;
+    let output_identity = output_ownership
+        .as_ref()
+        .map(|ownership| ownership.content_identity.clone());
     if input.extension().and_then(|value| value.to_str()) != Some("mkv") {
         return Ok(None);
     }
 
-    let output = input.with_extension("mp4");
+    let preferred_output = input.with_extension("mp4");
+    let staging_plan = plan_mp4_export_staging(&preferred_output)?;
+    let mut initial_intent = base_finalization.clone();
+    initial_intent.mp4_path = Some(preferred_output.display().to_string());
+    let mut planned_intent = initial_intent.with_media_ownership(
+        Some(input.display().to_string()),
+        output_identity.clone(),
+        Some(staging_plan.output_path.display().to_string()),
+        None,
+        false,
+    );
+    if let Some(ownership) = output_ownership.as_ref() {
+        planned_intent =
+            planned_intent.with_output_file_object_identity(ownership.object_identity.clone());
+    }
+    planned_intent.mp4_staging_directory_path =
+        Some(staging_plan.directory_path.display().to_string());
+    planned_intent.mp4_staging_directory_cleanup_path =
+        Some(staging_plan.cleanup_directory_path.display().to_string());
+    let initial_recovery = match state
+        .database
+        .persist_session_finalization_recovery(&planned_intent)
+    {
+        Ok(path) => path,
+        Err(error) => return Err(error).context("Could not persist MP4 export plan"),
+    };
+    *recovery_path = Some(initial_recovery.clone());
+    let staging = create_planned_mp4_export_staging(&staging_plan)?;
+    if fault.after_workspace_create() {
+        bail!("injected crash after private MP4 workspace creation");
+    }
+    let initial_intent = planned_intent.with_mp4_staging_directory_ownership(
+        staging.directory_path.display().to_string(),
+        staging.directory_object_identity.clone(),
+        staging.cleanup_directory_path.display().to_string(),
+    );
+    state
+        .database
+        .replace_session_finalization_recovery(&initial_recovery, &initial_intent)
+        .context("Could not bind MP4 export plan to its private workspace")?;
+
     state.emit_log(
         "info",
-        format!("Exporting MP4 recording to {}.", output.display()),
+        format!(
+            "Exporting MP4 recording through private staging {}.",
+            staging.output_path.display()
+        ),
     );
-    export_mp4_from_mkv(ffmpeg_path, input, &output).await?;
+    let export_result = match verify_prepared_mp4_export_staging(&staging) {
+        Ok(()) => match exporter(input.to_path_buf(), staging.output_path.clone()).await {
+            Ok(()) => {
+                // Finalization owns this durability boundary instead of
+                // trusting each exporter callback to open a Windows-flushable
+                // handle. That keeps production FFmpeg and crash-injection
+                // exporters under the same validation and identity contract.
+                sync_nonempty_staged_mp4_for_publication(staging.output_path.clone()).await
+            }
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(error),
+    }
+    .and_then(|()| verify_prepared_mp4_export_staging(&staging));
+    if let Err(error) = export_result {
+        let cleanup_result = state
+            .database
+            .cleanup_session_finalization_mp4_staging(&initial_intent);
+        match cleanup_result {
+            Ok(()) => {
+                if let Err(clear_error) = state
+                    .database
+                    .clear_session_finalization_recovery(&initial_recovery)
+                {
+                    return Err(error).context(format!(
+                        "MP4 staging was cleaned, but its recovery record could not be cleared: {clear_error:#}"
+                    ));
+                }
+                *recovery_path = None;
+                return Err(error);
+            }
+            Err(cleanup_error) => {
+                return Err(error).context(format!(
+                    "Interrupted MP4 staging remains bound to recovery {} because safe cleanup failed: {cleanup_error:#}",
+                    initial_recovery.display()
+                ));
+            }
+        }
+    }
+    if fault.after_ffmpeg() {
+        bail!("injected crash after FFmpeg completed private MP4 staging");
+    }
+    let identity = capture_session_file_identity(&staging.output_path)?.with_context(|| {
+        format!(
+            "Staged MP4 {} disappeared before publication",
+            staging.output_path.display()
+        )
+    })?;
+    let object_identity = capture_session_file_object_identity(&staging.output_path)?
+        .with_context(|| {
+            format!(
+                "Staged MP4 {} disappeared before object binding",
+                staging.output_path.display()
+            )
+        })?;
 
-    match fs::remove_file(input).await {
-        Ok(()) => {
-            state.emit_log(
-                "info",
-                format!("Removed temporary MKV capture file {}.", input.display()),
-            );
+    let output = {
+        let mut published = None;
+        for attempt in 0..10_000 {
+            let candidate = media_collision_candidate(&preferred_output, attempt);
+            // Bind candidate + exact bytes durably before the atomic rename.
+            // A crash after publication can therefore adopt only this file.
+            let mut publication_intent = base_finalization.clone();
+            publication_intent.mp4_path = Some(candidate.display().to_string());
+            let mut publication_intent = publication_intent
+                .with_media_ownership(
+                    Some(input.display().to_string()),
+                    output_identity.clone(),
+                    Some(staging.output_path.display().to_string()),
+                    Some(identity.clone()),
+                    remove_output_after_commit,
+                )
+                .with_mp4_staging_file_object_identity(object_identity.clone())
+                .with_mp4_staging_directory_ownership(
+                    staging.directory_path.display().to_string(),
+                    staging.directory_object_identity.clone(),
+                    staging.cleanup_directory_path.display().to_string(),
+                );
+            if let Some(ownership) = output_ownership.as_ref() {
+                publication_intent = publication_intent
+                    .with_output_file_object_identity(ownership.object_identity.clone());
+            }
+            state
+                .database
+                .replace_session_finalization_recovery(&initial_recovery, &publication_intent)
+                .with_context(|| {
+                    format!(
+                        "Could not advance MP4 publication intent for {}",
+                        candidate.display()
+                    )
+                })?;
+            match crate::session_ops::rename_session_file_no_replace(
+                &staging.output_path,
+                &candidate,
+            ) {
+                Ok(()) => {
+                    crate::session_ops::sync_session_file_parent(&candidate)?;
+                    if capture_session_file_bound_identity(&candidate)?.is_some_and(|actual| {
+                        crate::storage::session_file_bound_identity_matches(
+                            &actual,
+                            &identity,
+                            Some(&object_identity),
+                        )
+                    }) {
+                        published = Some(candidate);
+                        break;
+                    }
+                    if crate::session_ops::rename_session_file_no_replace(
+                        &candidate,
+                        &staging.output_path,
+                    )
+                    .is_ok()
+                    {
+                        let _ = crate::session_ops::sync_session_file_parent(&staging.output_path);
+                    }
+                    bail!("Staged MP4 changed during publication; the raced file was not adopted.");
+                }
+                Err(error) if is_destination_collision(&error) => {
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("Could not publish MP4 {}", candidate.display()));
+                }
+            }
         }
-        Err(error) => {
-            state.emit_log(
-                "warn",
-                format!(
-                    "Created MP4 export but could not remove temporary MKV {}: {error}",
-                    input.display()
-                ),
-            );
-        }
+        published.context("Could not reserve a free MP4 filename after 10,000 attempts")?
+    };
+
+    if fault.after_publication() {
+        bail!("injected crash after MP4 publication");
     }
 
     emit_health_event(
@@ -3812,7 +4687,33 @@ async fn export_completed_recording_to_mp4(
         &format!("MP4 recording exported to {}.", output.display()),
     )?;
 
-    Ok(Some(output))
+    Ok(Some(PublishedRecordingMp4 {
+        path: output,
+        staging_path: staging.output_path,
+        identity,
+        object_identity,
+        staging_directory_path: staging.directory_path,
+        staging_directory_object_identity: staging.directory_object_identity,
+        staging_directory_cleanup_path: staging.cleanup_directory_path,
+    }))
+}
+
+struct Mp4ExportFinalizationContext<'a> {
+    ended_at: &'a str,
+    duration_ms: Option<i64>,
+    diagnostics: &'a DiagnosticStats,
+    output_ownership: Option<SessionFileBoundIdentity>,
+}
+
+#[derive(Debug)]
+struct PublishedRecordingMp4 {
+    path: PathBuf,
+    staging_path: PathBuf,
+    identity: SessionFileIdentity,
+    object_identity: SessionFileObjectIdentity,
+    staging_directory_path: PathBuf,
+    staging_directory_object_identity: SessionFileObjectIdentity,
+    staging_directory_cleanup_path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -3825,7 +4726,7 @@ struct NativeAudioStats {
 
 #[derive(Debug)]
 struct MonitoredRecording {
-    stop_requested: bool,
+    stop_intent_preceded_exit: bool,
     encoder_bridge_terminal_failure: Option<String>,
     ffmpeg_path: String,
     started_at: String,
@@ -3836,10 +4737,19 @@ struct MonitoredRecording {
 
 fn should_finalize_recording_session(
     ffmpeg_exit_success: bool,
-    stop_requested: bool,
+    stop_intent_preceded_exit: bool,
     encoder_bridge_terminal_failure: Option<&str>,
 ) -> bool {
-    encoder_bridge_terminal_failure.is_none() && (ffmpeg_exit_success || stop_requested)
+    // Production capture is intentionally unbounded. A clean FFmpeg exit
+    // before the user asks to stop is still an early termination (for example,
+    // a source/pipe that silently ended) and must never publish a shortened
+    // artifact as successful.
+    // Stop intent must win the monitor's exit-ready race, but that alone is not
+    // proof that muxer flush completed. A forced
+    // TERM/KILL or any non-zero FFmpeg exit keeps the artifact as recovery
+    // media and marks the session failed unless a future explicit verifier can
+    // prove the container is complete.
+    encoder_bridge_terminal_failure.is_none() && stop_intent_preceded_exit && ffmpeg_exit_success
 }
 
 fn should_begin_captioned_copy_render(requested: bool, caption_chunk_count: usize) -> bool {
@@ -3918,9 +4828,12 @@ async fn resolve_capture_inputs(ffmpeg_path: &str, params: &StartSessionParams) 
     } else {
         resolve_primary_screen_video_input(ffmpeg_path, params.sources.screen_id.as_deref()).await
     };
-    // Screen-only intentionally skips the camera overlay so no camera permission
-    // is requested.
-    let camera_index = if matches!(params.layout.layout_preset, LayoutPreset::ScreenOnly) {
+    // The screen-only scenes intentionally skip the camera overlay so no
+    // camera permission is requested.
+    let camera_index = if matches!(
+        params.layout.layout_preset,
+        LayoutPreset::ScreenOnly | LayoutPreset::VerticalScreenOnly
+    ) {
         None
     } else {
         resolve_camera_input(ffmpeg_path, params.sources.camera_id.as_deref()).await
@@ -4418,8 +5331,41 @@ fn bool_label(value: bool) -> &'static str {
 #[allow(dead_code)]
 enum FfmpegH264Platform {
     Macos,
-    Windows,
+    WindowsHardware,
+    WindowsSoftware,
     Other,
+}
+
+#[cfg(target_os = "windows")]
+static WINDOWS_MEDIA_FOUNDATION_HARDWARE_SELECTED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "windows")]
+static WINDOWS_MEDIA_FOUNDATION_PROBE_CACHE: std::sync::OnceLock<
+    StdMutex<std::collections::HashMap<WindowsMediaFoundationProbeKey, bool>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WindowsMediaFoundationProbeKey {
+    ffmpeg_path: PathBuf,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_media_foundation_probe_key(
+    ffmpeg_path: &str,
+    video: &VideoSettings,
+) -> WindowsMediaFoundationProbeKey {
+    let path = PathBuf::from(ffmpeg_path);
+    WindowsMediaFoundationProbeKey {
+        ffmpeg_path: std::fs::canonicalize(&path).unwrap_or(path),
+        width: video.width,
+        height: video.height,
+        fps: video.fps,
+        bitrate_kbps: video.bitrate_kbps,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4436,7 +5382,11 @@ fn current_ffmpeg_h264_platform() -> FfmpegH264Platform {
     }
     #[cfg(target_os = "windows")]
     {
-        FfmpegH264Platform::Windows
+        if WINDOWS_MEDIA_FOUNDATION_HARDWARE_SELECTED.load(Ordering::Relaxed) {
+            FfmpegH264Platform::WindowsHardware
+        } else {
+            FfmpegH264Platform::WindowsSoftware
+        }
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
@@ -4451,12 +5401,17 @@ fn ffmpeg_h264_encoder(platform: FfmpegH264Platform) -> FfmpegH264Encoder {
             pix_fmt: "yuv420p",
             backend: EncodeBackend::HardwareVideotoolbox,
         },
-        FfmpegH264Platform::Windows => FfmpegH264Encoder {
+        FfmpegH264Platform::WindowsHardware => FfmpegH264Encoder {
             codec: "h264_mf",
             // FFmpeg's MediaFoundation wrapper accepts yuv420p on some encoders,
             // but nv12 is the safer input shape for hardware-backed devices.
             pix_fmt: "nv12",
             backend: EncodeBackend::HardwareMediaFoundation,
+        },
+        FfmpegH264Platform::WindowsSoftware => FfmpegH264Encoder {
+            codec: "h264_mf",
+            pix_fmt: "nv12",
+            backend: EncodeBackend::SoftwareMediaFoundation,
         },
         FfmpegH264Platform::Other => FfmpegH264Encoder {
             codec: "libx264",
@@ -4464,6 +5419,125 @@ fn ffmpeg_h264_encoder(platform: FfmpegH264Platform) -> FfmpegH264Encoder {
             backend: EncodeBackend::SoftwareX264,
         },
     }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_media_foundation_hardware_probe_args(video: &VideoSettings) -> Vec<String> {
+    vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-f".to_string(),
+        "lavfi".to_string(),
+        "-i".to_string(),
+        format!(
+            "color=c=black:s={}x{}:r={}",
+            video.width.max(1),
+            video.height.max(1),
+            video.fps.max(1)
+        ),
+        "-frames:v".to_string(),
+        "3".to_string(),
+        "-an".to_string(),
+        "-pix_fmt".to_string(),
+        "nv12".to_string(),
+        "-c:v".to_string(),
+        "h264_mf".to_string(),
+        "-hw_encoding".to_string(),
+        "1".to_string(),
+        "-rate_control".to_string(),
+        "ld_vbr".to_string(),
+        "-scenario".to_string(),
+        "live_streaming".to_string(),
+        "-b:v".to_string(),
+        format!("{}k", video.bitrate_kbps.max(1)),
+        "-f".to_string(),
+        "null".to_string(),
+        "-".to_string(),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+async fn select_windows_media_foundation_encoder(
+    state: &AppState,
+    ffmpeg_path: &str,
+    video: &VideoSettings,
+) {
+    let probe_key = windows_media_foundation_probe_key(ffmpeg_path, video);
+    let probe_cache = WINDOWS_MEDIA_FOUNDATION_PROBE_CACHE
+        .get_or_init(|| StdMutex::new(std::collections::HashMap::new()));
+    if let Some(hardware_selected) = probe_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&probe_key)
+        .copied()
+    {
+        WINDOWS_MEDIA_FOUNDATION_HARDWARE_SELECTED.store(hardware_selected, Ordering::Relaxed);
+        state.emit_log(
+            "info",
+            if hardware_selected {
+                "Using the cached Media Foundation hardware H.264 probe result."
+            } else {
+                "Using the cached Media Foundation software H.264 fallback result."
+            },
+        );
+        return;
+    }
+    let mut command = Command::new(ffmpeg_path);
+    command
+        .args(windows_media_foundation_hardware_probe_args(video))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let probe = timeout(Duration::from_secs(8), command.output()).await;
+    let (hardware_selected, detail) = match probe {
+        Ok(Ok(output)) if output.status.success() => (
+            true,
+            format!(
+                "Media Foundation hardware H.264 passed the {}x{}@{} startup probe.",
+                video.width, video.height, video.fps
+            ),
+        ),
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            (
+                false,
+                format!(
+                    "Media Foundation hardware H.264 was unavailable for {}x{}@{} ({}); using the software MFT fallback.",
+                    video.width,
+                    video.height,
+                    video.fps,
+                    stderr.trim().chars().take(240).collect::<String>()
+                ),
+            )
+        }
+        Ok(Err(error)) => (
+            false,
+            format!(
+                "Media Foundation hardware H.264 probe could not start ({error}); using the software MFT fallback."
+            ),
+        ),
+        Err(_) => (
+            false,
+            "Media Foundation hardware H.264 probe timed out; using the software MFT fallback."
+                .to_string(),
+        ),
+    };
+    probe_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(probe_key, hardware_selected);
+    WINDOWS_MEDIA_FOUNDATION_HARDWARE_SELECTED.store(hardware_selected, Ordering::Relaxed);
+    state.emit_log(if hardware_selected { "info" } else { "warn" }, &detail);
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn select_windows_media_foundation_encoder(
+    _state: &AppState,
+    _ffmpeg_path: &str,
+    _video: &VideoSettings,
+) {
 }
 
 fn default_h264_encode_backend() -> EncodeBackend {
@@ -4474,15 +5548,38 @@ fn append_h264_encoding_args(args: &mut Vec<String>, video: &VideoSettings) {
     append_h264_encoding_args_for_platform(args, video, current_ffmpeg_h264_platform());
 }
 
+fn append_h264_encoding_args_preserving_input_timestamps(
+    args: &mut Vec<String>,
+    video: &VideoSettings,
+) {
+    append_h264_encoding_args_for_platform_with_timing(
+        args,
+        video,
+        current_ffmpeg_h264_platform(),
+        false,
+    );
+    args.extend(["-fps_mode".to_string(), "vfr".to_string()]);
+}
+
 fn append_h264_encoding_args_for_platform(
     args: &mut Vec<String>,
     video: &VideoSettings,
     platform: FfmpegH264Platform,
 ) {
+    append_h264_encoding_args_for_platform_with_timing(args, video, platform, true);
+}
+
+fn append_h264_encoding_args_for_platform_with_timing(
+    args: &mut Vec<String>,
+    video: &VideoSettings,
+    platform: FfmpegH264Platform,
+    force_output_fps: bool,
+) {
     let encoder = ffmpeg_h264_encoder(platform);
+    if force_output_fps {
+        args.extend(["-r".to_string(), video.fps.to_string()]);
+    }
     args.extend([
-        "-r".to_string(),
-        video.fps.to_string(),
         "-pix_fmt".to_string(),
         encoder.pix_fmt.to_string(),
         "-c:v".to_string(),
@@ -4499,11 +5596,19 @@ fn append_h264_encoding_args_for_platform(
                 "1".to_string(),
             ]);
         }
-        FfmpegH264Platform::Windows => {
+        FfmpegH264Platform::WindowsHardware => {
+            args.extend(["-hw_encoding".to_string(), "1".to_string()]);
+            args.extend([
+                "-rate_control".to_string(),
+                "ld_vbr".to_string(),
+                "-scenario".to_string(),
+                "live_streaming".to_string(),
+            ]);
+        }
+        FfmpegH264Platform::WindowsSoftware => {
             // Keep the low-delay Media Foundation profile, but let the encoder
-            // select an available implementation. Forcing hardware encoding
-            // makes h264_mf fail outright on systems without a compatible
-            // hardware MFT.
+            // select its software implementation only after the exact hardware
+            // probe failed for this output profile.
             args.extend([
                 "-rate_control".to_string(),
                 "ld_vbr".to_string(),
@@ -4550,7 +5655,8 @@ fn compositor_backend_label(backend: Option<CompositorBackend>) -> &'static str 
 fn encode_backend_label(backend: Option<EncodeBackend>) -> &'static str {
     match backend {
         Some(EncodeBackend::HardwareVideotoolbox) => "hardware-videotoolbox",
-        Some(EncodeBackend::HardwareMediaFoundation) => "hardware-mediafoundation",
+        Some(EncodeBackend::HardwareMediaFoundation) => "hardware-media-foundation",
+        Some(EncodeBackend::SoftwareMediaFoundation) => "software-media-foundation",
         Some(EncodeBackend::SoftwareX264) => "software-x264",
         None => "unknown",
     }
@@ -5014,8 +6120,9 @@ fn bridge_compositor_ffmpeg_args(
     fifo_path: &Path,
     video_output: EncoderBridgeVideoOutput,
 ) -> Result<Vec<String>> {
+    validate_stream_targets_for_ffmpeg(stream_targets)?;
     let mut args = vec![
-        "-y".to_string(),
+        "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
@@ -5061,7 +6168,10 @@ fn bridge_compositor_ffmpeg_args(
         append_audio_output_args(&mut args, &input_layout);
         match video_output {
             EncoderBridgeVideoOutput::RawYuv420p => {
-                append_h264_encoding_args(&mut args, &params.output.video);
+                append_h264_encoding_args_preserving_input_timestamps(
+                    &mut args,
+                    &params.output.video,
+                );
             }
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => {
@@ -5149,6 +6259,7 @@ fn bridge_compositor_split_output_ffmpeg_args(
     recording_video_output: EncoderBridgeVideoOutput,
     stream_output: CompositorAuxiliaryOutput,
 ) -> Result<Vec<String>> {
+    validate_stream_targets_for_ffmpeg(stream_targets)?;
     let output_path =
         output_path.context("Split output encoder bridge requires a local recording path")?;
     if stream_targets.is_empty() {
@@ -5277,7 +6388,7 @@ fn bridge_compositor_split_output_ffmpeg_args(
 
 fn bridge_ffmpeg_base_args() -> Vec<String> {
     vec![
-        "-y".to_string(),
+        "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
@@ -5565,8 +6676,9 @@ fn ffmpeg_args(
     stream_targets: &[StreamTarget],
     screen_overlay: Option<&ScreenOverlayInput>,
 ) -> Result<Vec<String>> {
+    validate_stream_targets_for_ffmpeg(stream_targets)?;
     let mut args = vec![
-        "-y".to_string(),
+        "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
@@ -5964,33 +7076,73 @@ fn write_screen_overlay_frames(
     }
 }
 
-fn write_screen_overlay_frame(
-    file: &mut File,
+fn write_screen_overlay_frame<W: Write>(
+    file: &mut W,
     frame: &[u8],
     stop: &AtomicBool,
 ) -> io::Result<bool> {
+    write_screen_overlay_frame_until(
+        file,
+        frame,
+        stop,
+        SCREEN_OVERLAY_FIFO_WRITE_PROGRESS_TIMEOUT,
+        SCREEN_OVERLAY_FIFO_FRAME_WRITE_HARD_TIMEOUT,
+    )
+}
+
+fn write_screen_overlay_frame_until<W: Write>(
+    file: &mut W,
+    frame: &[u8],
+    stop: &AtomicBool,
+    progress_timeout: Duration,
+    hard_timeout: Duration,
+) -> io::Result<bool> {
+    let started_at = Instant::now();
+    let hard_deadline = started_at.checked_add(hard_timeout).unwrap_or(started_at);
+    let mut progress_deadline = started_at
+        .checked_add(progress_timeout)
+        .unwrap_or(started_at)
+        .min(hard_deadline);
     let mut written = 0;
     while written < frame.len() {
         if stop.load(Ordering::Relaxed) {
             return Ok(false);
         }
+        if Instant::now() >= progress_deadline || Instant::now() >= hard_deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Screen overlay FIFO write exceeded the complete-frame delivery budget",
+            ));
+        }
 
         match file.write(&frame[written..]) {
             Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "Screen overlay FIFO write returned zero bytes",
-                ));
+                wait_for_screen_overlay_fifo_write_progress(progress_deadline.min(hard_deadline));
             }
-            Ok(bytes) => written += bytes,
+            Ok(bytes) => {
+                written += bytes;
+                if written < frame.len() {
+                    progress_deadline = Instant::now()
+                        .checked_add(progress_timeout)
+                        .unwrap_or_else(Instant::now)
+                        .min(hard_deadline);
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(SCREEN_OVERLAY_FIFO_WRITE_RETRY);
+                wait_for_screen_overlay_fifo_write_progress(progress_deadline.min(hard_deadline));
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }
     }
     Ok(true)
+}
+
+fn wait_for_screen_overlay_fifo_write_progress(deadline: Instant) {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if !remaining.is_zero() {
+        thread::sleep(remaining.min(SCREEN_OVERLAY_FIFO_WRITE_RETRY));
+    }
 }
 
 fn transparent_overlay_frame(width: u32, height: u32) -> Vec<u8> {
@@ -6210,11 +7362,15 @@ fn scene_video_filter(
         };
         let transform =
             scene_source_render_transform(&source.transform, &source.kind, stage_margin);
-        let Some((x, y, layer_width, layer_height)) =
-            scene_source_rect_pixels(&transform, width, height)
-        else {
+        let Some(rect) = scene_source_rect_pixels(&transform, width, height) else {
             continue;
         };
+        let PixelRect {
+            x,
+            y,
+            width: layer_width,
+            height: layer_height,
+        } = rect;
 
         let layer_label = format!("scene_layer{layer_index}");
         graph.push(scene_source_layer_filter(
@@ -6267,34 +7423,6 @@ fn scene_background_fit_filter(fit: &BackgroundFit, width: u32, height: u32) -> 
     }
 }
 
-fn scene_source_render_transform(
-    transform: &SceneTransform,
-    source_kind: &SceneSourceKind,
-    stage_margin: f64,
-) -> SceneTransform {
-    if stage_margin <= 0.0 || !scene_source_uses_background_stage(source_kind) {
-        return transform.clone();
-    }
-    let stage_scale = 1.0 - (stage_margin * 2.0);
-    SceneTransform {
-        x: stage_margin + (transform.x * stage_scale),
-        y: stage_margin + (transform.y * stage_scale),
-        width: transform.width * stage_scale,
-        height: transform.height * stage_scale,
-        crop_left: transform.crop_left,
-        crop_top: transform.crop_top,
-        crop_right: transform.crop_right,
-        crop_bottom: transform.crop_bottom,
-    }
-}
-
-fn scene_source_uses_background_stage(source_kind: &SceneSourceKind) -> bool {
-    matches!(
-        source_kind,
-        SceneSourceKind::Screen | SceneSourceKind::Window | SceneSourceKind::TestPattern
-    )
-}
-
 fn escape_filter_path(path: &str) -> String {
     path.replace('\\', "\\\\")
         .replace('\'', "\\'")
@@ -6329,34 +7457,8 @@ fn scene_source_input_index(
     }
 }
 
-fn scene_source_rect_pixels(
-    transform: &crate::protocol::SceneTransform,
-    canvas_width: u32,
-    canvas_height: u32,
-) -> Option<(u32, u32, u32, u32)> {
-    if transform.width <= 0.0 || transform.height <= 0.0 {
-        return None;
-    }
-    let x = normalized_to_pixel(transform.x, canvas_width).min(canvas_width.saturating_sub(1));
-    let y = normalized_to_pixel(transform.y, canvas_height).min(canvas_height.saturating_sub(1));
-    let max_width = canvas_width.saturating_sub(x).max(1);
-    let max_height = canvas_height.saturating_sub(y).max(1);
-    let width = normalized_to_span(transform.width, canvas_width).min(max_width);
-    let height = normalized_to_span(transform.height, canvas_height).min(max_height);
-    Some((x, y, width, height))
-}
-
-fn normalized_to_pixel(value: f64, span: u32) -> u32 {
-    (value.clamp(0.0, 1.0) * f64::from(span)).round() as u32
-}
-
-fn normalized_to_span(value: f64, span: u32) -> u32 {
-    (value.clamp(0.0, 1.0) * f64::from(span)).round().max(1.0) as u32
-}
-
 fn camera_circle_mask_applies(layout: &LayoutSettings) -> bool {
-    matches!(layout.layout_preset, LayoutPreset::ScreenCamera)
-        && matches!(layout.camera_shape, CameraShape::Circle)
+    matches!(camera_mask(layout), SceneMask::Circle)
 }
 
 fn scene_source_layer_filter(
@@ -6390,13 +7492,13 @@ fn scene_source_layer_filter(
 }
 
 fn normalized_crop_filter(transform: &crate::protocol::SceneTransform) -> String {
-    let left = transform.crop_left.clamp(0.0, 0.95);
-    let right = transform.crop_right.clamp(0.0, 0.95);
-    let top = transform.crop_top.clamp(0.0, 0.95);
-    let bottom = transform.crop_bottom.clamp(0.0, 0.95);
-    let kept_x = (1.0 - left - right).max(0.001);
-    let kept_y = (1.0 - top - bottom).max(0.001);
-    format!("crop=w='iw*{kept_x:.6}':h='ih*{kept_y:.6}':x='iw*{left:.6}':y='ih*{top:.6}',")
+    let crop = scene_crop_from_transform(transform);
+    let kept_x = crop.kept_width();
+    let kept_y = crop.kept_height();
+    format!(
+        "crop=w='iw*{kept_x:.6}':h='ih*{kept_y:.6}':x='iw*{:.6}':y='ih*{:.6}',",
+        crop.left, crop.top
+    )
 }
 
 fn scene_source_fit_filter(
@@ -6405,18 +7507,7 @@ fn scene_source_fit_filter(
     height: u32,
     params: &StartSessionParams,
 ) -> String {
-    let contain = match kind {
-        SceneSourceKind::Camera => {
-            matches!(params.layout.camera_fit, CameraFit::Fit) && params.layout.camera_zoom <= 100
-        }
-        // Screen-like content always CONTAINS — nothing on the user's screen may
-        // be cropped away by the layout box (cover hid the Dock on 16:10 screens
-        // in 16:9 boxes; matches compositor_scene_source_fit). Transparent bars
-        // so the canvas/background stage shows through the letterbox.
-        SceneSourceKind::Screen | SceneSourceKind::Window => true,
-        SceneSourceKind::TestPattern => false,
-    };
-    if contain {
+    if matches!(scene_source_fit(kind, &params.layout), SceneFit::Contain) {
         return format!(
             "scale={width}:{height}:force_original_aspect_ratio=decrease,format=rgba,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0"
         );
@@ -6427,9 +7518,15 @@ fn scene_source_fit_filter(
 }
 
 fn circle_alpha_mask_filter(width: u32, height: u32) -> String {
-    let center_x = f64::from(width) / 2.0;
-    let center_y = f64::from(height) / 2.0;
-    let radius = f64::from(width.min(height)) / 2.0;
+    let geometry = circle_geometry(PixelRect {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    });
+    let center_x = geometry.center_x;
+    let center_y = geometry.center_y;
+    let radius = geometry.radius;
     format!(
         ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte((X-{center_x:.3})*(X-{center_x:.3})+(Y-{center_y:.3})*(Y-{center_y:.3}),{radius:.3}*{radius:.3}),255,0)'"
     )
@@ -6441,11 +7538,20 @@ fn circle_alpha_mask_filter(width: u32, height: u32) -> String {
 /// SDF form: a pixel is inside when its distance beyond the radius-shrunk box
 /// (qx, qy) satisfies qx²+qy² ≤ r².
 fn rounded_alpha_mask_filter(width: u32, height: u32, radius_pct: u32) -> String {
-    let center_x = f64::from(width) / 2.0;
-    let center_y = f64::from(height) / 2.0;
-    let radius = f64::from(width.min(height)) * f64::from(radius_pct.min(50)) / 100.0;
-    let inner_half_w = (f64::from(width) / 2.0 - radius).max(0.0);
-    let inner_half_h = (f64::from(height) / 2.0 - radius).max(0.0);
+    let geometry = rounded_rect_geometry(
+        PixelRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+        radius_pct,
+    );
+    let center_x = geometry.center_x;
+    let center_y = geometry.center_y;
+    let radius = geometry.radius;
+    let inner_half_w = geometry.inner_half_width;
+    let inner_half_h = geometry.inner_half_height;
     let radius_sq = radius * radius;
     format!(
         ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(st(0,max(abs(X-{center_x:.3})-{inner_half_w:.3},0))*ld(0)+st(1,max(abs(Y-{center_y:.3})-{inner_half_h:.3},0))*ld(1),{radius_sq:.3}),255,0)'"
@@ -6453,9 +7559,10 @@ fn rounded_alpha_mask_filter(width: u32, height: u32, radius_pct: u32) -> String
 }
 
 fn camera_rounded_mask_pct(layout: &LayoutSettings) -> Option<u32> {
-    (matches!(layout.layout_preset, LayoutPreset::ScreenCamera)
-        && matches!(layout.camera_shape, CameraShape::Rounded))
-    .then(|| layout.camera_corner_radius_pct.min(50))
+    match camera_mask(layout) {
+        SceneMask::Rounded { radius_pct } => Some(radius_pct),
+        SceneMask::None | SceneMask::Circle => None,
+    }
 }
 
 fn live_preview_filter(camera_input_index: Option<usize>, params: &StartSessionParams) -> String {
@@ -6489,6 +7596,10 @@ fn video_filter(
 
     if matches!(params.layout.layout_preset, LayoutPreset::SideBySide) {
         return side_by_side_video_filter(camera_input_index, params, preview);
+    }
+
+    if let Some(bands) = vertical_stack_filter_bands(&params.layout.layout_preset) {
+        return vertical_video_filter(camera_input_index, params, preview, &bands);
     }
 
     let base_scale = if preview {
@@ -6526,20 +7637,6 @@ fn camera_only_video_filter(params: &StartSessionParams, preview: bool) -> Strin
     let frame = camera_frame_filter(video.width, video.height, &params.layout);
     let final_scale = if preview { ",scale=w=960:h=-2" } else { "" };
     format!("{prefix}{frame},fps={}{final_scale}[v]", video.fps)
-}
-
-/// Splits the canvas width into the screen and camera regions. The screen always
-/// gets the larger (or equal) share, and the two widths sum to the canvas width.
-fn side_by_side_widths(split: SideBySideSplit, total_width: u32) -> (u32, u32) {
-    let screen_fraction = match split {
-        SideBySideSplit::Even => 0.5,
-        SideBySideSplit::SixtyForty => 0.6,
-        SideBySideSplit::SeventyThirty => 0.7,
-    };
-    let mut screen_width = (f64::from(total_width) * screen_fraction).round() as u32;
-    screen_width -= screen_width % 2;
-    screen_width = screen_width.clamp(2, total_width.saturating_sub(2));
-    (screen_width, total_width - screen_width)
 }
 
 fn side_by_side_video_filter(
@@ -6582,6 +7679,90 @@ fn side_by_side_video_filter(
     format!("{screen};{camera};[{left}][{right}]hstack=inputs=2{final_scale}[v]")
 }
 
+/// Band geometry for a stacked vertical preset on the legacy FFmpeg path —
+/// mirrors the scene.rs arrangements: camera band covers, screen band
+/// contains (nothing on the user's screen may be cropped away).
+struct VerticalStackFilterBands {
+    camera_fraction: f64,
+    camera_on_top: bool,
+}
+
+/// Exhaustive on purpose: a new preset must state its legacy-path
+/// composition here (stacked, or None for the overlay/base paths) or fail to
+/// compile — no preset may silently ride the screen-camera overlay.
+fn vertical_stack_filter_bands(preset: &LayoutPreset) -> Option<VerticalStackFilterBands> {
+    match preset {
+        LayoutPreset::VerticalCameraTop => Some(VerticalStackFilterBands {
+            camera_fraction: crate::scene::VERTICAL_CAMERA_BAND,
+            camera_on_top: true,
+        }),
+        LayoutPreset::VerticalCameraBottom => Some(VerticalStackFilterBands {
+            camera_fraction: crate::scene::VERTICAL_CAMERA_BAND,
+            camera_on_top: false,
+        }),
+        LayoutPreset::VerticalSplit => Some(VerticalStackFilterBands {
+            camera_fraction: 0.5,
+            camera_on_top: false,
+        }),
+        LayoutPreset::ScreenCamera
+        | LayoutPreset::ScreenOnly
+        | LayoutPreset::CameraOnly
+        | LayoutPreset::SideBySide
+        | LayoutPreset::VerticalScreenCamera
+        | LayoutPreset::VerticalScreenOnly => None,
+    }
+}
+
+/// Camera band height for a stacked vertical preset's legacy FFmpeg path.
+/// Heights are evened for yuv420p.
+fn vertical_band_heights(canvas_height: u32, camera_fraction: f64) -> (u32, u32) {
+    let camera = ((f64::from(canvas_height) * camera_fraction).round() as u32 / 2) * 2;
+    let camera = camera.clamp(2, canvas_height.saturating_sub(2));
+    (camera, canvas_height - camera)
+}
+
+fn vertical_video_filter(
+    camera_input_index: Option<usize>,
+    params: &StartSessionParams,
+    preview: bool,
+    bands: &VerticalStackFilterBands,
+) -> String {
+    let video = &params.output.video;
+    let width = video.width;
+    let (camera_height, screen_height) = vertical_band_heights(video.height, bands.camera_fraction);
+    let fps = video.fps;
+
+    // Screen CONTAINS in its band (nothing on the user's screen may be cropped
+    // away) and pads with black; the camera band fills via the shared camera
+    // frame filter (fit/fill/zoom preserved).
+    let screen = format!(
+        "[0:v]setpts=PTS-STARTPTS,scale={width}:{screen_height}:force_original_aspect_ratio=decrease,pad={width}:{screen_height}:(ow-iw)/2:(oh-ih)/2:color=black,fps={fps},format=yuv420p[vt_screen]"
+    );
+    let camera = match camera_input_index {
+        Some(index) => {
+            let mirror = if params.layout.camera_mirror {
+                "hflip,"
+            } else {
+                ""
+            };
+            let frame = camera_frame_filter(width, camera_height, &params.layout);
+            format!(
+                "[{index}:v]setpts=PTS-STARTPTS,{mirror}{frame},fps={fps},format=yuv420p[vt_camera]"
+            )
+        }
+        None => {
+            format!("color=c=black:s={width}x{camera_height}:r={fps},format=yuv420p[vt_camera]")
+        }
+    };
+    let final_scale = if preview { ",scale=w=960:h=-2" } else { "" };
+    let stack_order = if bands.camera_on_top {
+        "[vt_camera][vt_screen]"
+    } else {
+        "[vt_screen][vt_camera]"
+    };
+    format!("{screen};{camera};{stack_order}vstack=inputs=2{final_scale}[v]")
+}
+
 fn output_scale_filter(video: &VideoSettings) -> String {
     format!(
         "scale=w={}:h={}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2",
@@ -6621,7 +7802,8 @@ fn camera_chain_filter(camera_input_index: usize, params: &StartSessionParams) -
         &params.layout.camera_size,
         &overlay_shape,
         &params.layout.camera_aspect,
-        &params.output.video,
+        params.output.video.width,
+        params.output.video.height,
     );
     let prefix = if params.layout.camera_mirror {
         format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,hflip,")
@@ -6646,44 +7828,6 @@ fn camera_chain_filter(camera_input_index: usize, params: &StartSessionParams) -
     }
 }
 
-fn camera_box_size(size: &CameraSize, shape: &CameraShape, aspect: &CameraAspect) -> (u32, u32) {
-    let width = match size {
-        CameraSize::Small => 260,
-        CameraSize::Medium => 360,
-        CameraSize::Large => 480,
-    };
-    // Must mirror scene::camera_box_size and preview_camera's copy.
-    let height = match shape {
-        CameraShape::Circle => width,
-        CameraShape::Rectangle | CameraShape::Rounded => match aspect {
-            CameraAspect::Source => (width * 9 + 8) / 16,
-            CameraAspect::Square => width,
-            CameraAspect::Portrait => (width * 4u32).div_ceil(3),
-        },
-    };
-
-    (width, height)
-}
-
-fn scaled_camera_box_size(
-    size: &CameraSize,
-    shape: &CameraShape,
-    aspect: &CameraAspect,
-    video: &VideoSettings,
-) -> (u32, u32) {
-    let scale = camera_output_scale(video);
-    let (width, height) = camera_box_size(size, shape, aspect);
-
-    (
-        scale_camera_dimension(width, scale),
-        scale_camera_dimension(height, scale),
-    )
-}
-
-fn scaled_camera_margin(layout: &crate::protocol::LayoutSettings, video: &VideoSettings) -> u32 {
-    scale_camera_dimension(layout.camera_margin.min(160), camera_output_scale(video))
-}
-
 /// Builds the FFmpeg `overlay` x/y expressions for the camera box. In `custom`
 /// mode the normalized dragged position drives `W*x`/`H*y` (clamped so the box
 /// stays on-canvas); otherwise the camera sits in its corner/size preset.
@@ -6691,38 +7835,22 @@ fn camera_overlay_position(
     layout: &crate::protocol::LayoutSettings,
     video: &VideoSettings,
 ) -> (String, String) {
-    if let (CameraTransformMode::Custom, Some(transform)) =
-        (layout.camera_transform_mode, layout.camera_transform)
+    if matches!(layout.camera_transform_mode, CameraTransformMode::Custom)
+        && layout.camera_transform.is_some()
     {
-        let (cam_width, cam_height) = scaled_camera_box_size(
-            &layout.camera_size,
-            &layout.camera_shape,
-            &layout.camera_aspect,
-            video,
-        );
-        let max_x = 1.0 - f64::from(cam_width) / f64::from(video.width.max(1));
-        let max_y = 1.0 - f64::from(cam_height) / f64::from(video.height.max(1));
-        let x = transform.x.clamp(0.0, max_x.max(0.0));
-        let y = transform.y.clamp(0.0, max_y.max(0.0));
+        let transform = resolved_camera_transform(layout, video.width, video.height);
+        let x = transform.x;
+        let y = transform.y;
         return (format!("W*{x:.5}"), format!("H*{y:.5}"));
     }
 
-    let margin = scaled_camera_margin(layout, video);
+    let margin = scaled_camera_margin(layout, video.width, video.height);
     match layout.camera_corner {
         CameraCorner::TopLeft => (format!("{margin}"), format!("{margin}")),
         CameraCorner::TopRight => (format!("W-w-{margin}"), format!("{margin}")),
         CameraCorner::BottomLeft => (format!("{margin}"), format!("H-h-{margin}")),
         CameraCorner::BottomRight => (format!("W-w-{margin}"), format!("H-h-{margin}")),
     }
-}
-
-fn camera_output_scale(video: &VideoSettings) -> f64 {
-    (f64::from(video.width) / f64::from(CAMERA_REFERENCE_WIDTH))
-        .min(f64::from(video.height) / f64::from(CAMERA_REFERENCE_HEIGHT))
-}
-
-fn scale_camera_dimension(value: u32, scale: f64) -> u32 {
-    (f64::from(value) * scale).round().max(1.0) as u32
 }
 
 fn crop_offset_expr(offset: i32, input_size: &str, output_size: &str) -> String {
@@ -7337,6 +8465,15 @@ fn video_preset_defaults(preset: VideoPreset) -> VideoSettings {
             fps: 60,
             bitrate_kbps: 9000,
         },
+        // Mirrors videoPresets['vertical-1080x1920'] in capture.ts — the
+        // portrait canvas the vertical Studio mode applies.
+        VideoPreset::Vertical1080x1920 => VideoSettings {
+            preset,
+            width: 1080,
+            height: 1920,
+            fps: 30,
+            bitrate_kbps: 9000,
+        },
         VideoPreset::Custom => VideoSettings {
             preset,
             width: 1920,
@@ -7399,10 +8536,11 @@ fn build_stream_url(settings: &RtmpSettings) -> Result<StreamTarget> {
     }
 
     let url = format!("{server_url}/{stream_key}");
+    validate_stream_publish_url(&url)?;
     let platform = stream_platform_from_preset(&settings.preset);
     Ok(StreamTarget {
+        redacted_url: redact_stream_url(&url),
         url,
-        redacted_url: format!("{server_url}/••••"),
         target_id: stream_platform_id(platform).to_string(),
         platform,
         label: stream_platform_label(platform).to_string(),
@@ -7411,7 +8549,11 @@ fn build_stream_url(settings: &RtmpSettings) -> Result<StreamTarget> {
 }
 
 fn redact_stream_url(url: &str) -> String {
-    match url.rsplit_once('/') {
+    let without_fragment = url.split_once('#').map_or(url, |(prefix, _)| prefix);
+    let without_query = without_fragment
+        .split_once('?')
+        .map_or(without_fragment, |(prefix, _)| prefix);
+    match without_query.rsplit_once('/') {
         Some((prefix, _)) => format!("{prefix}/••••"),
         None => "••••".to_string(),
     }
@@ -7437,6 +8579,8 @@ fn resolve_stream_target(
     }
     let output_video = Some(stream_target_output_video(streaming, target));
     if matches!(target.url_mode, Some(StreamUrlMode::FullUrl)) {
+        validate_stream_publish_url(server)
+            .with_context(|| format!("{} stream URL is unsafe", target.label))?;
         return Ok(StreamTarget {
             url: server.to_string(),
             redacted_url: redact_stream_url(server),
@@ -7450,14 +8594,89 @@ fn resolve_stream_target(
     if stream_key.is_empty() {
         bail!("{} stream key is missing", target.label);
     }
+    let url = format!("{server}/{stream_key}");
+    validate_stream_publish_url(&url)
+        .with_context(|| format!("{} stream URL is unsafe", target.label))?;
     Ok(StreamTarget {
-        url: format!("{server}/{stream_key}"),
-        redacted_url: format!("{server}/••••"),
+        redacted_url: redact_stream_url(&url),
+        url,
         target_id: target.id.clone(),
         platform: target.platform,
         label: target.label.clone(),
         output_video,
     })
+}
+
+/// FFmpeg accepts far more output protocols than Videorc needs, including
+/// local files, HTTP servers, arbitrary TCP sockets, and RTMP listener mode.
+/// Treat stream URLs as network publish destinations, not generic FFmpeg URLs.
+/// This validator is used both while resolving saved settings and again at
+/// every FFmpeg argument-construction boundary.
+fn validate_stream_publish_url(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.chars().any(|character| character.is_control())
+        || contains_percent_encoded_control(value)
+    {
+        bail!("Stream URL is empty or contains control characters.");
+    }
+    let parsed = reqwest::Url::parse(value).context("Stream URL is not a valid absolute URL.")?;
+    if !matches!(parsed.scheme(), "rtmp" | "rtmps") {
+        bail!("Stream URL must use rtmp:// or rtmps://.");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("Stream URL credentials are not accepted; use the stream-key field.");
+    }
+    let host = parsed
+        .host_str()
+        .context("Stream URL must name a network host.")?;
+    if host == "0.0.0.0" || host.trim_matches(['[', ']']) == "::" {
+        bail!("Stream URL may not use an unspecified listener address.");
+    }
+    if parsed.port() == Some(0) {
+        bail!("Stream URL port must be a network service port.");
+    }
+    if parsed.fragment().is_some() {
+        bail!("Stream URL fragments are not publish destinations.");
+    }
+    for (name, _) in parsed.query_pairs() {
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "listen" | "listen_timeout" | "rtmp_listen" | "rtmp_listen_timeout"
+        ) {
+            bail!("RTMP listener options are not accepted in a publish URL.");
+        }
+    }
+    Ok(())
+}
+
+fn contains_percent_encoded_control(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.windows(3).any(|window| {
+        if window[0] != b'%' {
+            return false;
+        }
+        let (Some(high), Some(low)) = (hex_nibble(window[1]), hex_nibble(window[2])) else {
+            return false;
+        };
+        matches!((high << 4) | low, 0..=31 | 127)
+    })
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn validate_stream_targets_for_ffmpeg(stream_targets: &[StreamTarget]) -> Result<()> {
+    for target in stream_targets {
+        validate_stream_publish_url(&target.url)
+            .with_context(|| format!("{} stream URL was rejected", target.label))?;
+    }
+    Ok(())
 }
 
 fn stream_target_output_video(
@@ -7987,7 +9206,7 @@ mod tests {
         CameraCorner, CameraFit, CameraShape, CameraSize, CameraTransform, LayoutPreset,
         LayoutSettings, OutputSettings, PreviewLiveParams, PreviewSurfaceBacking, RtmpSettings,
         Scene, SceneOutput, SceneOutputKind, SceneSource, SceneSourceKind, SceneTransform,
-        SourceSelection,
+        SideBySideSplit, SourceSelection,
     };
     use crate::storage::Database;
     use crate::streaming::{
@@ -8198,6 +9417,90 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[derive(Debug)]
+    struct PipeQuotaPressureWriter {
+        bytes: Vec<u8>,
+        quota: usize,
+        pressure_reported: bool,
+    }
+
+    impl Write for PipeQuotaPressureWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.bytes.len() == self.quota && !self.pressure_reported {
+                self.pressure_reported = true;
+                return Ok(0);
+            }
+
+            let before_quota = self.quota.saturating_sub(self.bytes.len());
+            let written = if before_quota == 0 {
+                bytes.len()
+            } else {
+                bytes.len().min(before_quota)
+            };
+            self.bytes.extend_from_slice(&bytes[..written]);
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn screen_overlay_writer_completes_a_first_frame_larger_than_the_windows_pipe() {
+        let pipe_capacity = crate::fifo::PIPE_OUT_BUFFER_BYTES as usize;
+        let frame = vec![7; pipe_capacity + 4096];
+        let mut writer = PipeQuotaPressureWriter {
+            bytes: Vec::with_capacity(frame.len()),
+            quota: pipe_capacity,
+            pressure_reported: false,
+        };
+        let stop = AtomicBool::new(false);
+
+        let wrote_frame = write_screen_overlay_frame_until(
+            &mut writer,
+            &frame,
+            &stop,
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+        )
+        .expect("temporary full-pipe pressure must not terminate the overlay writer");
+
+        assert!(wrote_frame);
+        assert!(writer.pressure_reported);
+        assert_eq!(writer.bytes, frame);
+    }
+
+    #[derive(Debug, Default)]
+    struct PermanentlyPressuredWriter;
+
+    impl Write for PermanentlyPressuredWriter {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn screen_overlay_writer_bounds_sustained_pipe_pressure() {
+        let mut writer = PermanentlyPressuredWriter;
+        let stop = AtomicBool::new(false);
+
+        let error = write_screen_overlay_frame_until(
+            &mut writer,
+            &[1, 2, 3, 4],
+            &stop,
+            Duration::from_millis(10),
+            Duration::from_millis(25),
+        )
+        .expect_err("a permanently full pipe must not retain the overlay writer forever");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
     #[test]
     fn preflight_failure_report_includes_owner_and_context() {
         let report = format_preflight_failure_report(&PreflightFailureReport {
@@ -8265,7 +9568,11 @@ mod tests {
         );
         assert_eq!(
             encode_backend_label(Some(EncodeBackend::HardwareMediaFoundation)),
-            "hardware-mediafoundation"
+            "hardware-media-foundation"
+        );
+        assert_eq!(
+            encode_backend_label(Some(EncodeBackend::SoftwareMediaFoundation)),
+            "software-media-foundation"
         );
         assert_eq!(
             encode_backend_label(Some(EncodeBackend::SoftwareX264)),
@@ -8296,13 +9603,23 @@ mod tests {
         append_h264_encoding_args_for_platform(
             &mut windows_args,
             &video,
-            FfmpegH264Platform::Windows,
+            FfmpegH264Platform::WindowsHardware,
         );
         assert_eq!(arg_value(&windows_args, "-c:v"), Some("h264_mf"));
         assert_eq!(arg_value(&windows_args, "-pix_fmt"), Some("nv12"));
+        assert_eq!(arg_value(&windows_args, "-hw_encoding"), Some("1"));
         assert_eq!(arg_value(&windows_args, "-allow_sw"), None);
         assert_eq!(arg_value(&windows_args, "-realtime"), None);
         assert_eq!(arg_value(&windows_args, "-prio_speed"), None);
+
+        let mut windows_software_args = Vec::new();
+        append_h264_encoding_args_for_platform(
+            &mut windows_software_args,
+            &video,
+            FfmpegH264Platform::WindowsSoftware,
+        );
+        assert_eq!(arg_value(&windows_software_args, "-c:v"), Some("h264_mf"));
+        assert_eq!(arg_value(&windows_software_args, "-hw_encoding"), None);
 
         let mut fallback_args = Vec::new();
         append_h264_encoding_args_for_platform(
@@ -8315,7 +9632,12 @@ mod tests {
         assert_eq!(arg_value(&fallback_args, "-preset"), Some("ultrafast"));
         assert_eq!(arg_value(&fallback_args, "-tune"), Some("zerolatency"));
 
-        for args in [&macos_args, &windows_args, &fallback_args] {
+        for args in [
+            &macos_args,
+            &windows_args,
+            &windows_software_args,
+            &fallback_args,
+        ] {
             assert_eq!(arg_value(args, "-b:v"), Some("6000k"));
             assert_eq!(arg_value(args, "-maxrate"), Some("6000k"));
             assert_eq!(arg_value(args, "-bufsize"), Some("12000k"));
@@ -8335,12 +9657,51 @@ mod tests {
             EncodeBackend::HardwareVideotoolbox
         );
         assert_eq!(
-            ffmpeg_h264_encoder(FfmpegH264Platform::Windows).backend,
+            ffmpeg_h264_encoder(FfmpegH264Platform::WindowsHardware).backend,
             EncodeBackend::HardwareMediaFoundation
+        );
+        assert_eq!(
+            ffmpeg_h264_encoder(FfmpegH264Platform::WindowsSoftware).backend,
+            EncodeBackend::SoftwareMediaFoundation
         );
         assert_eq!(
             ffmpeg_h264_encoder(FfmpegH264Platform::Other).backend,
             EncodeBackend::SoftwareX264
+        );
+    }
+
+    #[test]
+    fn windows_hardware_encoder_probe_uses_the_exact_output_profile() {
+        let video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+        };
+        let args = windows_media_foundation_hardware_probe_args(&video);
+
+        assert_eq!(arg_value(&args, "-c:v"), Some("h264_mf"));
+        assert_eq!(arg_value(&args, "-hw_encoding"), Some("1"));
+        assert_eq!(arg_value(&args, "-b:v"), Some("6000k"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "color=c=black:s=1920x1080:r=30")
+        );
+        assert_eq!(arg_value(&args, "-frames:v"), Some("3"));
+
+        let key = windows_media_foundation_probe_key("ffmpeg", &video);
+        let mut higher_fps = video.clone();
+        higher_fps.fps = 60;
+        assert_ne!(
+            key,
+            windows_media_foundation_probe_key("ffmpeg", &higher_fps),
+            "hardware results must not leak across output profiles"
+        );
+        assert_ne!(
+            key,
+            windows_media_foundation_probe_key("alternate-ffmpeg", &video),
+            "hardware results must not leak across FFmpeg binaries"
         );
     }
 
@@ -8501,6 +9862,478 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    fn test_state_with_file_database(directory: &Path) -> AppState {
+        let (events, _) = broadcast::channel(16);
+        AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_file_for_tests(&directory.join("videorc.sqlite3")),
+        )
+    }
+
+    fn create_test_recording_row(state: &AppState, session_id: &str, output_path: &Path) {
+        let params = base_params(true, false);
+        state
+            .database
+            .create_session(&NewSession {
+                id: session_id.to_string(),
+                title: "Recovery test".to_string(),
+                started_at: "2026-07-12T11:59:00Z".to_string(),
+                mode: "record".to_string(),
+                output_path: Some(output_path.display().to_string()),
+                container: Some("mkv".to_string()),
+                stream_preset: None,
+                sources: params.sources,
+                layout: params.layout,
+                output: params.output,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn fallback_finalization_keeps_the_authoritative_mp4_recovery_record() {
+        let session_id = format!("session-authoritative-recovery-{}", Uuid::new_v4());
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-authoritative-recovery-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = test_state_with_file_database(&directory);
+        state
+            .database
+            .ensure_fake_live_chat_session(&session_id)
+            .unwrap();
+        let diagnostics = starting_diagnostics(&session_id, 30, "record");
+        let mkv = directory.join("recording.mkv");
+        let candidate = directory.join("recording.mp4");
+        std::fs::write(&mkv, b"authoritative mkv").unwrap();
+        let staging = prepare_mp4_export_staging(&candidate).unwrap();
+        std::fs::write(&staging.output_path, b"completed staged mp4").unwrap();
+        let staged_identity = capture_session_file_identity(&staging.output_path).unwrap();
+        let staged_object_identity = capture_session_file_object_identity(&staging.output_path)
+            .unwrap()
+            .unwrap();
+        let intent = SessionFinalization::new(
+            &session_id,
+            "completed",
+            Some("2026-07-12T12:00:00Z".to_string()),
+            Some(candidate.display().to_string()),
+            Some(1_000),
+            &diagnostics,
+        )
+        .unwrap()
+        .with_media_ownership(
+            Some(mkv.display().to_string()),
+            capture_session_file_identity(&mkv).unwrap(),
+            Some(staging.output_path.display().to_string()),
+            staged_identity,
+            true,
+        )
+        .with_mp4_staging_file_object_identity(staged_object_identity)
+        .with_mp4_staging_directory_ownership(
+            staging.directory_path.display().to_string(),
+            staging.directory_object_identity.clone(),
+            staging.cleanup_directory_path.display().to_string(),
+        );
+        let recovery = state
+            .database
+            .persist_session_finalization_recovery(&intent)
+            .unwrap();
+        let mut recovery_path = Some(recovery.clone());
+        let fallback = SessionFinalization::new(
+            &session_id,
+            "completed",
+            Some("2026-07-12T12:00:00Z".to_string()),
+            None,
+            Some(1_000),
+            &diagnostics,
+        )
+        .unwrap()
+        .with_media_ownership(
+            Some(mkv.display().to_string()),
+            capture_session_file_identity(&mkv).unwrap(),
+            None,
+            None,
+            false,
+        );
+
+        persist_finalization_or_recovery(&state, &fallback, &mut recovery_path).unwrap();
+
+        assert!(
+            recovery.exists(),
+            "the pending MP4 intent remains authoritative after MKV fallback"
+        );
+        assert_eq!(recovery_path, Some(recovery.clone()));
+        assert!(staging.output_path.exists());
+        state
+            .database
+            .clear_session_finalization_recovery(&recovery)
+            .unwrap();
+        cleanup_prepared_mp4_export_staging(&staging).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn post_publication_health_error_cannot_retire_the_mp4_recovery_record() {
+        let session_id = format!("session-health-error-recovery-{}", Uuid::new_v4());
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-health-error-recovery-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = test_state_with_file_database(&directory);
+        let mkv = directory.join("recording.mkv");
+        std::fs::write(&mkv, b"authoritative mkv").unwrap();
+        let diagnostics = starting_diagnostics(&session_id, 30, "record");
+        let base_finalization = SessionFinalization::new(
+            &session_id,
+            "completed",
+            Some("2026-07-12T12:00:00Z".to_string()),
+            None,
+            Some(1_000),
+            &diagnostics,
+        )
+        .unwrap();
+        let output_ownership = capture_session_file_bound_identity(&mkv).unwrap();
+        let mut recovery_path = None;
+
+        // No session row exists yet, so the post-publication health insert is
+        // deterministically rejected by the health_events foreign key.
+        let result = export_recording_to_mp4_with_exporter(
+            &state,
+            Mp4ExportRequest {
+                session_id: &session_id,
+                input: &mkv,
+                base_finalization: base_finalization.clone(),
+                output_ownership: output_ownership.clone(),
+                remove_output_after_commit: true,
+                fault: Mp4FinalizationFault::None,
+            },
+            &mut recovery_path,
+            |_input, output| async move {
+                std::fs::write(output, b"completed published mp4")?;
+                Ok(())
+            },
+        )
+        .await;
+
+        let error = result.expect_err("health persistence failure must surface");
+        let recovery = recovery_path
+            .clone()
+            .expect("publication remains journaled");
+        assert!(
+            recovery.exists(),
+            "publication failed before it could remain journaled: {error:#}"
+        );
+        let published = directory.join("recording.mp4");
+        assert_eq!(
+            std::fs::read(&published).unwrap(),
+            b"completed published mp4"
+        );
+
+        create_test_recording_row(&state, &session_id, &mkv);
+        let fallback = base_finalization
+            .with_media_ownership(
+                Some(mkv.display().to_string()),
+                output_ownership
+                    .as_ref()
+                    .map(|ownership| ownership.content_identity.clone()),
+                None,
+                None,
+                false,
+            )
+            .with_output_file_object_identity(output_ownership.unwrap().object_identity);
+        persist_finalization_or_recovery(&state, &fallback, &mut recovery_path).unwrap();
+        assert_eq!(recovery_path, Some(recovery.clone()));
+        assert!(recovery.exists());
+
+        let summary = state
+            .database
+            .reconcile_session_finalization_recoveries()
+            .unwrap();
+
+        assert_eq!(summary.pending, 0);
+        assert!(summary.recovered >= 1);
+        assert!(!recovery.exists());
+        assert_eq!(
+            state.database.list_sessions(200).unwrap()[0]
+                .mp4_path
+                .as_deref(),
+            published.to_str()
+        );
+        assert!(
+            !mkv.exists(),
+            "auto-finalization removes MKV only after recovery commit"
+        );
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_remux_recovers_publication_after_a_crash_before_database_commit() {
+        let session_id = format!("session-remux-publication-crash-{}", Uuid::new_v4());
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-remux-publication-crash-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = test_state_with_file_database(&directory);
+        let mkv = directory.join("recording.mkv");
+        std::fs::write(&mkv, b"authoritative manual-remux mkv").unwrap();
+        create_test_recording_row(&state, &session_id, &mkv);
+
+        let result = remux_session_with_exporter(
+            state.clone(),
+            RemuxSessionParams {
+                session_id: session_id.clone(),
+                ffmpeg_path: None,
+            },
+            Mp4FinalizationFault::AfterPublication,
+            |_ffmpeg_path, _input, output| async move {
+                std::fs::write(output, b"completed manual-remux mp4")?;
+                Ok(())
+            },
+        )
+        .await;
+
+        let error = result.expect_err("the injected crash must interrupt remux");
+        assert!(
+            error
+                .to_string()
+                .contains("injected crash after MP4 publication"),
+            "remux failed before the expected publication crash: {error:#}"
+        );
+        let published = directory.join("recording.mp4");
+        assert_eq!(
+            std::fs::read(&published).unwrap(),
+            b"completed manual-remux mp4"
+        );
+        assert_eq!(
+            state.database.list_sessions(200).unwrap()[0].mp4_path,
+            None,
+            "the crash happened before the live DB commit"
+        );
+
+        let summary = state
+            .database
+            .reconcile_session_finalization_recoveries()
+            .unwrap();
+
+        assert_eq!(summary.pending, 0);
+        assert!(summary.recovered >= 1);
+        assert_eq!(
+            state.database.list_sessions(200).unwrap()[0]
+                .mp4_path
+                .as_deref(),
+            published.to_str()
+        );
+        assert_eq!(
+            std::fs::read(&mkv).unwrap(),
+            b"authoritative manual-remux mkv",
+            "manual remux keeps the source MKV"
+        );
+        assert!(directory.read_dir().unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".videorc-export-")
+        }));
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_remux_discards_private_output_after_a_crash_before_publication() {
+        let session_id = format!("session-remux-private-crash-{}", Uuid::new_v4());
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-remux-private-crash-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = test_state_with_file_database(&directory);
+        let mkv = directory.join("recording.mkv");
+        std::fs::write(&mkv, b"authoritative manual-remux mkv").unwrap();
+        create_test_recording_row(&state, &session_id, &mkv);
+
+        let result = remux_session_with_exporter(
+            state.clone(),
+            RemuxSessionParams {
+                session_id: session_id.clone(),
+                ffmpeg_path: None,
+            },
+            Mp4FinalizationFault::AfterFfmpeg,
+            |_ffmpeg_path, _input, output| async move {
+                std::fs::write(output, b"completed but unpublished manual-remux mp4")?;
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_err(), "the injected crash must interrupt remux");
+        assert!(!directory.join("recording.mp4").exists());
+        assert!(directory.read_dir().unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".videorc-export-")
+        }));
+
+        let summary = state
+            .database
+            .reconcile_session_finalization_recoveries()
+            .unwrap();
+
+        assert_eq!(summary.pending, 0);
+        assert!(summary.recovered >= 1);
+        assert_eq!(state.database.list_sessions(200).unwrap()[0].mp4_path, None);
+        assert_eq!(
+            std::fs::read(&mkv).unwrap(),
+            b"authoritative manual-remux mkv"
+        );
+        assert!(directory.read_dir().unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".videorc-export-")
+        }));
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_remux_cleans_empty_workspace_after_create_before_identity_bind_crash() {
+        let session_id = format!("session-remux-workspace-crash-{}", Uuid::new_v4());
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-remux-workspace-crash-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = test_state_with_file_database(&directory);
+        let mkv = directory.join("recording.mkv");
+        std::fs::write(&mkv, b"authoritative manual-remux mkv").unwrap();
+        create_test_recording_row(&state, &session_id, &mkv);
+
+        let result = remux_session_with_exporter(
+            state.clone(),
+            RemuxSessionParams {
+                session_id: session_id.clone(),
+                ffmpeg_path: None,
+            },
+            Mp4FinalizationFault::AfterWorkspaceCreate,
+            |_ffmpeg_path, _input, _output| async move {
+                panic!("FFmpeg must not start before workspace ownership is durable")
+            },
+        )
+        .await;
+
+        assert!(result.is_err(), "the injected crash must interrupt remux");
+        let workspace = directory
+            .read_dir()
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".videorc-export-"))
+            })
+            .expect("the empty workspace was created before the crash");
+        assert!(workspace.read_dir().unwrap().next().is_none());
+
+        let summary = state
+            .database
+            .reconcile_session_finalization_recoveries()
+            .unwrap();
+
+        assert_eq!(summary.pending, 0);
+        assert!(summary.recovered >= 1);
+        assert!(!workspace.exists());
+        assert_eq!(state.database.list_sessions(200).unwrap()[0].mp4_path, None);
+        assert_eq!(
+            std::fs::read(&mkv).unwrap(),
+            b"authoritative manual-remux mkv"
+        );
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_remux_replays_cleanup_after_a_crash_following_database_commit() {
+        let session_id = format!("session-remux-db-crash-{}", Uuid::new_v4());
+        let directory =
+            std::env::temp_dir().join(format!("videorc-remux-db-crash-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = test_state_with_file_database(&directory);
+        let mkv = directory.join("recording.mkv");
+        std::fs::write(&mkv, b"authoritative manual-remux mkv").unwrap();
+        create_test_recording_row(&state, &session_id, &mkv);
+
+        let result = remux_session_with_exporter(
+            state.clone(),
+            RemuxSessionParams {
+                session_id: session_id.clone(),
+                ffmpeg_path: None,
+            },
+            Mp4FinalizationFault::AfterDatabaseCommit,
+            |_ffmpeg_path, _input, output| async move {
+                std::fs::write(output, b"completed manual-remux mp4")?;
+                Ok(())
+            },
+        )
+        .await;
+
+        let error = result.expect_err("the injected crash must interrupt cleanup");
+        assert!(
+            error
+                .to_string()
+                .contains("injected crash after session database commit"),
+            "remux failed before the expected database-commit crash: {error:#}"
+        );
+        let published = directory.join("recording.mp4");
+        assert_eq!(
+            state.database.list_sessions(200).unwrap()[0]
+                .mp4_path
+                .as_deref(),
+            published.to_str(),
+            "the DB commit precedes the injected crash"
+        );
+        assert!(directory.read_dir().unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".videorc-export-")
+        }));
+
+        let summary = state
+            .database
+            .reconcile_session_finalization_recoveries()
+            .unwrap();
+
+        assert_eq!(summary.pending, 0);
+        assert!(summary.recovered >= 1);
+        assert_eq!(
+            std::fs::read(&published).unwrap(),
+            b"completed manual-remux mp4"
+        );
+        assert_eq!(
+            std::fs::read(&mkv).unwrap(),
+            b"authoritative manual-remux mkv"
+        );
+        assert!(directory.read_dir().unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".videorc-export-")
+        }));
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -8674,6 +10507,98 @@ mod tests {
     }
 
     #[test]
+    fn legacy_rtmp_rejects_non_publish_and_listener_urls() {
+        for unsafe_server in [
+            "file:///tmp/videorc-output.flv",
+            "http://example.test/live",
+            "tcp://example.test:1935",
+            "rtmp://user:password@example.test/live",
+            "rtmp://example.test/li\nve",
+            "rtmp://example.test/live%0d%0aescape",
+            "rtmp://0.0.0.0/live",
+            "rtmp://[::]/live",
+            "rtmp://example.test/live?listen=1",
+            "rtmps://example.test/live?rtmp_listen=1",
+            "rtmp:///live",
+        ] {
+            let settings = RtmpSettings {
+                preset: RtmpPreset::Custom,
+                server_url: unsafe_server.to_string(),
+                stream_key: "key".to_string(),
+            };
+            assert!(
+                build_stream_url(&settings).is_err(),
+                "legacy RTMP accepted unsafe server {unsafe_server:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn modern_split_and_full_url_targets_share_the_publish_url_policy() {
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Custom,
+            "rtmps://publish.example.test:443/live",
+            "key",
+        )]);
+        let custom_index = streaming
+            .targets
+            .iter()
+            .position(|target| target.platform == StreamPlatform::Custom)
+            .unwrap();
+        assert!(resolve_stream_target(&streaming, &streaming.targets[custom_index]).is_ok());
+
+        streaming.targets[custom_index].server_url = "http://example.test/upload".to_string();
+        assert!(resolve_stream_target(&streaming, &streaming.targets[custom_index]).is_err());
+
+        streaming.targets[custom_index].url_mode = Some(StreamUrlMode::FullUrl);
+        streaming.targets[custom_index].server_url =
+            "rtmps://publish.example.test/live/secret?token=opaque".to_string();
+        streaming.targets[custom_index].stream_key.clear();
+        let resolved = resolve_stream_target(&streaming, &streaming.targets[custom_index]).unwrap();
+        assert!(!resolved.redacted_url.contains("token"));
+        assert!(!resolved.redacted_url.contains("opaque"));
+
+        for unsafe_url in [
+            "file:///tmp/output.flv",
+            "tcp://example.test:1935",
+            "rtmp://user@example.test/live/key",
+            "rtmp://example.test/live/key?listen=1",
+        ] {
+            streaming.targets[custom_index].server_url = unsafe_url.to_string();
+            assert!(
+                resolve_stream_target(&streaming, &streaming.targets[custom_index]).is_err(),
+                "full-url target accepted {unsafe_url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ffmpeg_argument_boundary_rejects_a_forged_non_rtmp_target() {
+        let params = base_params(false, true);
+        let target = StreamTarget {
+            url: "file:///tmp/forged.flv".to_string(),
+            redacted_url: "file:///tmp/forged.flv".to_string(),
+            target_id: "custom".to_string(),
+            platform: StreamPlatform::Custom,
+            label: "Forged".to_string(),
+            output_video: None,
+        };
+        let error = ffmpeg_args(
+            &CaptureInputs {
+                video: VideoInput::TestPattern,
+                camera_index: None,
+                microphone: None,
+            },
+            &params,
+            None,
+            &[target],
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Forged stream URL was rejected"));
+    }
+
+    #[test]
     fn resolves_three_ready_stream_targets() {
         let streaming = streaming_for(&[
             (
@@ -8824,6 +10749,7 @@ mod tests {
             token_secret_ref: Some("platform:youtube:oauth:access".to_string()),
             refresh_token_secret_ref: None,
             stream_key_secret_ref: Some("platform:youtube:UC123:stream-key".to_string()),
+            write_generation: 0,
         }];
 
         hydrate_stream_key_secret_refs_from_credentials(
@@ -9468,6 +11394,128 @@ mod tests {
         assert!(left.contains("[sbs_camera][sbs_screen]hstack=inputs=2"));
     }
 
+    #[test]
+    fn vertical_band_heights_are_even_and_tile_the_canvas() {
+        let (camera, screen) = vertical_band_heights(1920, crate::scene::VERTICAL_CAMERA_BAND);
+        assert_eq!(camera, 768);
+        assert_eq!(screen, 1152);
+        let (camera, screen) = vertical_band_heights(1920, 0.5);
+        assert_eq!(camera, 960);
+        assert_eq!(screen, 960);
+        for height in [720, 1080, 1919, 1921] {
+            for fraction in [crate::scene::VERTICAL_CAMERA_BAND, 0.5] {
+                let (camera, screen) = vertical_band_heights(height, fraction);
+                assert_eq!(camera % 2, 0);
+                assert_eq!(camera + screen, height);
+                assert!(camera >= 2);
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_filter_stacks_camera_band_over_padded_screen() {
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalCameraTop;
+        params.output.video.width = 1080;
+        params.output.video.height = 1920;
+
+        let filter = video_filter(Some(1), &params, false);
+        // Camera band on top, screen below; screen pads (contains), never crops.
+        assert!(
+            filter.contains("[vt_camera][vt_screen]vstack=inputs=2"),
+            "stacked filter: {filter}"
+        );
+        assert!(
+            filter.contains("pad=1080:1152"),
+            "screen contains: {filter}"
+        );
+        assert!(!filter.contains("overlay"));
+
+        // Without a camera input the band renders black instead of collapsing.
+        let no_camera = video_filter(None, &params, false);
+        assert!(
+            no_camera.contains("color=c=black:s=1080x768"),
+            "{no_camera}"
+        );
+    }
+
+    #[test]
+    fn vertical_camera_bottom_filter_mirrors_the_stack_order() {
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalCameraBottom;
+        params.output.video.width = 1080;
+        params.output.video.height = 1920;
+
+        let filter = video_filter(Some(1), &params, false);
+        // Screen band on top, camera below — the mirrored stack.
+        assert!(
+            filter.contains("[vt_screen][vt_camera]vstack=inputs=2"),
+            "stacked filter: {filter}"
+        );
+        assert!(
+            filter.contains("pad=1080:1152"),
+            "screen contains: {filter}"
+        );
+        assert!(!filter.contains("overlay"));
+    }
+
+    #[test]
+    fn vertical_split_filter_shares_the_canvas_evenly() {
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalSplit;
+        params.output.video.width = 1080;
+        params.output.video.height = 1920;
+
+        let filter = video_filter(Some(1), &params, false);
+        // 50/50: screen contains in the top 960, camera fills the bottom 960.
+        assert!(
+            filter.contains("[vt_screen][vt_camera]vstack=inputs=2"),
+            "stacked filter: {filter}"
+        );
+        assert!(filter.contains("pad=1080:960"), "screen contains: {filter}");
+        let no_camera = video_filter(None, &params, false);
+        assert!(
+            no_camera.contains("color=c=black:s=1080x960"),
+            "{no_camera}"
+        );
+    }
+
+    #[test]
+    fn vertical_screen_camera_filter_rides_the_overlay_path() {
+        // The inset scene composes exactly like screen-camera: full-canvas
+        // screen (contained) with the camera overlaid at the user's corner.
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalScreenCamera;
+        params.output.video.width = 1080;
+        params.output.video.height = 1920;
+
+        let filter = video_filter(Some(1), &params, false);
+        assert!(filter.contains("overlay=x="), "overlay path: {filter}");
+        assert!(!filter.contains("vstack"), "no stacking: {filter}");
+        assert!(
+            filter.contains("scale=w=1080:h=1920:force_original_aspect_ratio=decrease"),
+            "portrait contain: {filter}"
+        );
+    }
+
+    #[test]
+    fn vertical_screen_only_filter_skips_the_camera_entirely() {
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalScreenOnly;
+        params.output.video.width = 1080;
+        params.output.video.height = 1920;
+
+        // The capture layer never resolves a camera for screen-only scenes;
+        // the base path then renders the screen alone.
+        let filter = video_filter(None, &params, false);
+        assert!(!filter.contains("overlay"), "no overlay: {filter}");
+        assert!(!filter.contains("vstack"), "no stacking: {filter}");
+        assert!(
+            filter.contains("scale=w=1080:h=1920:force_original_aspect_ratio=decrease"),
+            "portrait contain: {filter}"
+        );
+    }
+
     fn ffmpeg_inputs(args: &[String]) -> Vec<&str> {
         args.windows(2)
             .filter_map(|pair| (pair[0] == "-i").then_some(pair[1].as_str()))
@@ -9518,11 +11566,19 @@ mod tests {
                 assert_eq!(arg_value(args, "-realtime"), Some("1"));
                 assert_eq!(arg_value(args, "-prio_speed"), Some("1"));
             }
-            FfmpegH264Platform::Windows => {
+            FfmpegH264Platform::WindowsHardware => {
                 assert_eq!(arg_value(args, "-allow_sw"), None);
                 assert_eq!(arg_value(args, "-realtime"), None);
                 assert_eq!(arg_value(args, "-prio_speed"), None);
+                assert_eq!(arg_value(args, "-hw_encoding"), Some("1"));
                 assert_eq!(encoder.backend, EncodeBackend::HardwareMediaFoundation);
+            }
+            FfmpegH264Platform::WindowsSoftware => {
+                assert_eq!(arg_value(args, "-allow_sw"), None);
+                assert_eq!(arg_value(args, "-realtime"), None);
+                assert_eq!(arg_value(args, "-prio_speed"), None);
+                assert_eq!(arg_value(args, "-hw_encoding"), None);
+                assert_eq!(encoder.backend, EncodeBackend::SoftwareMediaFoundation);
             }
             FfmpegH264Platform::Other => {
                 assert_eq!(arg_value(args, "-allow_sw"), None);
@@ -9605,6 +11661,8 @@ mod tests {
 
         let filter = arg_value(&args, "-filter_complex").unwrap();
         assert_eq!(filter, "[0:v]setpts=PTS-STARTPTS,fps=30[v_main]");
+        assert_eq!(arg_value(&args, "-fps_mode"), Some("vfr"));
+        assert_eq!(arg_value(&args, "-r"), None);
         assert!(!args.iter().any(|arg| arg == "pipe:1"));
         assert!(!args.iter().any(|arg| arg == "pipe:0"));
     }
@@ -10911,10 +12969,61 @@ mod tests {
         assert_eq!(status.output_path.as_deref(), Some("/tmp/videorc-test.mkv"));
     }
 
+    #[tokio::test]
+    async fn ready_process_exit_wins_a_tie_with_late_stop_intent() {
+        let (stop_intent_sender, stop_intent) = oneshot::channel();
+        stop_intent_sender.send(()).unwrap();
+
+        let (status, stop_intent_preceded_exit) =
+            wait_for_process_exit_ordered(std::future::ready("clean exit"), stop_intent).await;
+
+        assert_eq!(status, "clean exit");
+        assert!(
+            !stop_intent_preceded_exit,
+            "an already-ready process exit must not be reclassified by a late Stop"
+        );
+        assert!(!should_finalize_recording_session(
+            true,
+            stop_intent_preceded_exit,
+            None
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_intent_observed_before_process_exit_allows_clean_finalization() {
+        let (stop_intent_sender, stop_intent) = oneshot::channel();
+        stop_intent_sender.send(()).unwrap();
+        let mut first_exit_poll = true;
+        let process_exit = std::future::poll_fn(move |context| {
+            if first_exit_poll {
+                first_exit_poll = false;
+                context.waker().wake_by_ref();
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready("clean exit")
+            }
+        });
+
+        let (status, stop_intent_preceded_exit) =
+            wait_for_process_exit_ordered(process_exit, stop_intent).await;
+
+        assert_eq!(status, "clean exit");
+        assert!(stop_intent_preceded_exit);
+        assert!(should_finalize_recording_session(
+            true,
+            stop_intent_preceded_exit,
+            None
+        ));
+    }
+
     #[test]
-    fn bridge_terminal_failure_prevents_successful_ffmpeg_exit_from_finalizing() {
-        assert!(should_finalize_recording_session(true, false, None));
-        assert!(should_finalize_recording_session(false, true, None));
+    fn only_an_explicit_graceful_stop_can_finalize_an_unbounded_capture() {
+        assert!(!should_finalize_recording_session(true, false, None));
+        assert!(
+            !should_finalize_recording_session(false, true, None),
+            "a non-zero/forced FFmpeg exit after stop must remain failed"
+        );
+        assert!(should_finalize_recording_session(true, true, None));
 
         assert!(!should_finalize_recording_session(
             true,
@@ -11671,10 +13780,167 @@ mod tests {
         assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert_eq!(arg_value(&args, "-b:a"), Some("160k"));
         assert_eq!(arg_value(&args, "-movflags"), Some("+faststart"));
+        assert!(args.iter().any(|arg| arg == "-n"));
+        assert!(!args.iter().any(|arg| arg == "-y"));
         assert_eq!(
             args.last().map(String::as_str),
             Some("/tmp/videorc-test.mp4")
         );
+    }
+
+    #[test]
+    fn mp4_export_uses_no_overwrite_with_an_absent_child_in_an_owned_directory() {
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-mp4-private-staging-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let preferred = directory.join("recording.mp4");
+
+        let staging = prepare_mp4_export_staging(&preferred).unwrap();
+        let args = mp4_export_args(&directory.join("recording.mkv"), &staging.output_path);
+
+        assert!(staging.directory_path.is_dir());
+        assert!(!staging.output_path.exists());
+        assert_eq!(
+            staging.output_path.parent(),
+            Some(staging.directory_path.as_path())
+        );
+        assert_eq!(
+            capture_session_directory_object_identity(&staging.directory_path).unwrap(),
+            Some(staging.directory_object_identity.clone())
+        );
+        assert!(args.iter().any(|arg| arg == "-n"));
+        assert!(!args.iter().any(|arg| arg == "-y"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            staging.output_path.to_str()
+        );
+
+        cleanup_prepared_mp4_export_staging(&staging).unwrap();
+        assert!(!staging.directory_path.exists());
+        assert!(!staging.cleanup_directory_path.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn staged_mp4_sync_flushes_a_nonempty_file_and_rejects_an_empty_one() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-staged-mp4-sync-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let nonempty = directory.join("recording.mp4");
+        std::fs::write(&nonempty, b"staged mp4 bytes").unwrap();
+        sync_nonempty_staged_mp4(&nonempty).unwrap();
+
+        let empty = directory.join("empty.mp4");
+        std::fs::write(&empty, []).unwrap();
+        let error = sync_nonempty_staged_mp4(&empty).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("FFmpeg did not create a non-empty staged MP4"),
+            "unexpected error: {error:#}"
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Exercises FFmpeg's actual `-n` behavior against the production argument
+    /// builder. Ignored in default CI because the Rust test job deliberately
+    /// has no FFmpeg dependency; run explicitly on recording-studio hosts.
+    #[tokio::test]
+    #[ignore = "spawns ffmpeg and writes media; run with --ignored"]
+    async fn real_ffmpeg_export_creates_absent_child_and_rejects_preexisting_output() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-real-mp4-export-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let input = directory.join("recording.mkv");
+        let fixture = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=64x64:rate=10:color=black",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+                "-t",
+                "0.2",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "pcm_s16le",
+            ])
+            .arg(&input)
+            .status()
+            .expect("ffmpeg should be on PATH for this ignored test");
+        assert!(fixture.success(), "fixture FFmpeg failed");
+
+        let staging = prepare_mp4_export_staging(&directory.join("recording.mp4")).unwrap();
+        assert!(!staging.output_path.exists());
+        export_mp4_from_mkv("ffmpeg", &input, &staging.output_path)
+            .await
+            .unwrap();
+        assert!(std::fs::metadata(&staging.output_path).unwrap().len() > 0);
+
+        let preexisting = directory.join("preexisting.mp4");
+        std::fs::write(&preexisting, b"must survive").unwrap();
+        assert!(
+            export_mp4_from_mkv("ffmpeg", &input, &preexisting)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&preexisting).unwrap(), b"must survive");
+
+        cleanup_prepared_mp4_export_staging(&staging).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recording_paths_are_unique_even_when_sessions_start_in_the_same_second() {
+        let started_at = DateTime::parse_from_rfc3339("2026-07-12T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let directory = Path::new("/tmp/recordings");
+        let first = recording_output_path(directory, &started_at, "session-a");
+        let second = recording_output_path(directory, &started_at, "session-b");
+
+        assert_ne!(first, second);
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("videorc-session-20260712-123456-session-a.mkv")
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_mp4_publication_never_replaces_an_existing_candidate() {
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-staged-publication-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let preferred = directory.join("recording.mp4");
+        let staging = directory.join(".recording.partial.mp4");
+        std::fs::write(&preferred, b"existing").unwrap();
+        std::fs::write(&staging, b"new recording").unwrap();
+
+        let published = publish_staged_media_uniquely(staging, preferred.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&preferred).unwrap(), b"existing");
+        assert_eq!(
+            published.file_name().and_then(|name| name.to_str()),
+            Some("recording (2).mp4")
+        );
+        assert_eq!(std::fs::read(&published).unwrap(), b"new recording");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

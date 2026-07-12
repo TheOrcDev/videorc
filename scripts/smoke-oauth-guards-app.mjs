@@ -353,11 +353,10 @@ function launchAndReadConnection() {
       detached: true,
       env: smokeAppEnv({
         VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
-        VIDEORC_USER_DATA_DIR: process.env.VIDEORC_USER_DATA_DIR ?? join(stateRoot, 'user-data'),
-        VIDEORC_DATABASE_PATH:
-          process.env.VIDEORC_DATABASE_PATH ?? join(stateRoot, 'videorc.sqlite'),
-        VIDEORC_SECRETS_PATH:
-          process.env.VIDEORC_SECRETS_PATH ?? join(stateRoot, 'videorc-secrets.json'),
+        VIDEORC_SMOKE_STATE_DIR: stateRoot,
+        VIDEORC_USER_DATA_DIR: join(stateRoot, 'user-data'),
+        VIDEORC_DATABASE_PATH: join(stateRoot, 'videorc.sqlite'),
+        VIDEORC_SECRETS_PATH: join(stateRoot, 'videorc-secrets.json'),
         VIDEORC_TWITCH_CLIENT_ID: 'smoke-twitch-client-id',
         VIDEORC_X_CLIENT_ID: 'smoke-x-client-id',
         VIDEORC_TWITCH_CLIENT_SECRET: ''

@@ -17,6 +17,7 @@ use serde::de::DeserializeOwned;
 
 pub(crate) const CAPTION_CHUNK_UPLOAD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10);
+const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 use crate::protocol::{
     AiCapabilities, AiJobCreateResponse, AiJobEnvelope, AiJobSnapshot, AiObjectUploadResponse,
@@ -53,8 +54,8 @@ fn resolve_api_base_url(dev_build: bool, env_override: Option<&str>) -> String {
     }
 }
 
-/// The account identity + durable session token obtained by exchanging a
-/// one-time token at `/api/auth/one-time-token/verify`.
+/// The account identity + durable session token obtained by exchanging an
+/// encrypted, PKCE-bound desktop authorization code.
 pub struct VerifiedSession {
     pub session_token: String,
     pub name: Option<String>,
@@ -188,19 +189,32 @@ impl VideorcApiClient {
             .with_context(|| format!("Could not read Videorc API response for {path}."))
     }
 
-    /// Exchange a single-use one-time token (delivered via the `videorc://`
-    /// deep-link) for a durable Better Auth session token + the account identity.
-    pub async fn verify_one_time_token(&self, one_time_token: &str) -> Result<VerifiedSession> {
+    /// Exchange an encrypted, state + PKCE-bound desktop authorization code for
+    /// a durable Better Auth session token and account identity.
+    pub async fn verify_desktop_authorization(
+        &self,
+        code: &str,
+        state: &str,
+        verifier: &str,
+    ) -> Result<VerifiedSession> {
         let response = self
             .http
-            .post(self.endpoint("/api/auth/one-time-token/verify"))
-            .json(&serde_json::json!({ "token": one_time_token }))
+            .post(self.endpoint("/api/desktop/session/verify"))
+            .timeout(DESKTOP_AUTH_EXCHANGE_TIMEOUT)
+            .json(&serde_json::json!({
+                "code": code,
+                "state": state,
+                "verifier": verifier,
+            }))
             .send()
             .await
             .context("Could not reach the Videorc sign-in service.")?;
 
         if !response.status().is_success() {
-            bail!("Sign-in token exchange failed ({}).", response.status());
+            bail!(
+                "Desktop authorization exchange failed ({}).",
+                response.status()
+            );
         }
 
         let body: VerifyResponse = response

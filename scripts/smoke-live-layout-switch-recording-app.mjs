@@ -5,11 +5,11 @@ import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const outputDirectory = resolve(
-  process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
-    join(tmpdir(), `videorc-live-layout-switch-${Date.now()}`)
+  process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-live-layout-switch-${Date.now()}`)
 )
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const recordingMs = Number(process.env.VIDEORC_LIVE_LAYOUT_RECORDING_MS ?? 3500)
@@ -35,12 +35,16 @@ const video = {
 mkdirSync(outputDirectory, { recursive: true })
 
 const launched = await launchDevApp({
-  requiredMarkers: ['backend-ready'],
+  requiredMarkers: ['backend-ready', 'preview-motion-ready'],
   timeoutMs,
   env: {
-    VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
+    VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
+    VIDEORC_SMOKE_STATE_DIR: outputDirectory,
+    VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
+    VIDEORC_SMOKE_COMMAND_SERVER: '1'
   }
 })
+const smoke = launched.connections['preview-motion-ready']
 
 let ws
 let listener = null
@@ -55,7 +59,7 @@ try {
   }
 
   const sources = realScreenMode ? await prepareRealScreenSource(ws) : { testPattern: true }
-  await runSwitchScenario(ws, {
+  await runSwitchScenario(ws, smoke, {
     label: realScreenMode ? 'real-screen-recording' : 'synthetic-recording',
     sources,
     streamTarget: null,
@@ -72,7 +76,7 @@ try {
     }
     listener = spawnListener(streamTarget)
     await sleep(1500)
-    await runSwitchScenario(ws, {
+    await runSwitchScenario(ws, smoke, {
       label: realScreenMode ? 'real-screen-record-stream' : 'synthetic-record-stream',
       sources,
       streamTarget,
@@ -155,12 +159,22 @@ async function waitForScreenFrame(ws, sourceId) {
   )
 }
 
-async function runSwitchScenario(ws, { label, sources, streamTarget, durationMs }) {
+async function runSwitchScenario(ws, smoke, { label, sources, streamTarget, durationMs }) {
+  const recordingDirectory = await requestSmokeCommand(
+    smoke,
+    'authorize-smoke-resource',
+    { path: outputDirectory, kind: 'output-directory' },
+    { timeoutMs }
+  )
   const started = await request(
     ws,
     timeoutMs,
     'session.start',
-    sessionParams({ sources, streamTarget })
+    sessionParams({
+      sources,
+      streamTarget,
+      outputDirectoryCapability: recordingDirectory.capabilityId
+    })
   )
   if (!['recording', 'streaming'].includes(started.state)) {
     throw new Error(`[${label}] Expected active session after start, got ${started.state}.`)
@@ -193,7 +207,7 @@ async function runSwitchScenario(ws, { label, sources, streamTarget, durationMs 
   })
 }
 
-function sessionParams({ sources, streamTarget }) {
+function sessionParams({ sources, streamTarget, outputDirectoryCapability }) {
   const timestamp = '2026-01-01T00:00:00.000Z'
   const streamEnabled = Boolean(streamTarget)
   return {
@@ -202,8 +216,7 @@ function sessionParams({ sources, streamTarget }) {
     output: {
       recordEnabled: true,
       streamEnabled,
-      outputDirectory,
-      ffmpegPath,
+      outputDirectoryCapability,
       video,
       rtmp: {
         preset: 'custom',

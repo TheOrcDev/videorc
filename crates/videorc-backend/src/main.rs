@@ -1,9 +1,12 @@
 mod account;
 mod ai;
+mod atomic_file;
 mod audio;
+mod backend_authority;
 mod camera_capture;
 mod captions;
 mod capture_input;
+mod capture_interruption;
 mod color;
 mod comment_highlight;
 mod compositor;
@@ -17,6 +20,7 @@ mod ffmpeg_work;
 mod fifo;
 mod frame_store;
 mod live_chat;
+mod live_chat_persistence;
 mod live_layout;
 mod live_pipeline;
 mod live_render;
@@ -28,6 +32,7 @@ mod oauth;
 mod pipeline;
 mod posters;
 mod preflight;
+mod preview_bmp;
 mod preview_camera;
 mod preview_screen;
 mod preview_surface;
@@ -37,7 +42,9 @@ mod publish_clips;
 mod recording;
 mod repair;
 mod repair_service;
+mod resource_authority;
 mod scene;
+mod scene_geometry;
 mod screen_capture;
 mod secrets;
 mod session_ops;
@@ -73,17 +80,20 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::Html;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use compositor::{compositor_status, update_compositor_active_screen, update_compositor_scene};
+#[cfg(debug_assertions)]
 use encoder_bridge::run_synthetic_encoder_bridge;
 use futures_util::stream;
 use futures_util::{SinkExt, StreamExt};
 use preview_camera::{
-    latest_preview_camera_png, preview_camera_status, start_preview_camera, stop_preview_camera,
+    latest_preview_camera_bmp, latest_preview_camera_png, preview_camera_status,
+    start_preview_camera, stop_preview_camera,
 };
 use preview_screen::{
-    latest_preview_screen_png, preview_screen_status, start_preview_screen, stop_preview_screen,
+    latest_preview_screen_bmp, latest_preview_screen_png, preview_screen_status,
+    start_preview_screen, stop_preview_screen,
 };
 use preview_surface::{
     create_preview_surface, destroy_preview_surface, preview_surface_status,
@@ -112,6 +122,10 @@ use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+use crate::backend_authority::{
+    BackendBootstrap, BackendRole, authenticate_backend_token, authorize_backend_method,
+    resolve_trusted_ffmpeg_path, scrub_untrusted_ffmpeg_paths,
+};
 use crate::ffmpeg::{default_ffmpeg_path, resolve_ffmpeg_path_ref};
 use crate::oauth::{OAuthCompleteParams, OAuthStartParams, OAuthStartProviderParams};
 use crate::preflight::GoLivePreflightParams;
@@ -183,6 +197,39 @@ async fn main() -> Result<()> {
     let token = Uuid::new_v4().to_string();
     let (events, _) = broadcast::channel(256);
     let database = Database::open_default()?;
+    match database.reconcile_session_finalization_recoveries() {
+        Ok(summary) if summary.recovered > 0 || summary.pending > 0 => tracing::warn!(
+            "Replayed {} recording finalization recovery record(s); {} remain pending: {:?}",
+            summary.recovered,
+            summary.pending,
+            summary.errors
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!("Could not reconcile recording finalizations: {error:#}"),
+    }
+    match database.reconcile_session_deletions() {
+        Ok(summary) if summary.completed > 0 || summary.pending > 0 => tracing::warn!(
+            "Completed {} interrupted Library deletion(s); {} still require Trash retry: {:?}",
+            summary.completed,
+            summary.pending,
+            summary.errors
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!("Could not reconcile Library deletions: {error:#}"),
+    }
+    match database.reconcile_session_file_operations() {
+        Ok(summary) if summary.published > 0 || summary.discarded > 0 || summary.pending > 0 => {
+            tracing::warn!(
+                "Reconciled Library file operations: {} published, {} discarded, {} pending: {:?}",
+                summary.published,
+                summary.discarded,
+                summary.pending,
+                summary.errors
+            )
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!("Could not reconcile Library file operations: {error:#}"),
+    }
     match database.reconcile_orphaned_sessions() {
         Ok(0) => {}
         Ok(reconciled) => tracing::warn!(
@@ -205,14 +252,32 @@ async fn main() -> Result<()> {
         .route("/preview/live.jpg", get(live_preview_frame_handler))
         .route("/preview/camera/live.png", get(live_camera_frame_handler))
         .route("/preview/screen/live.png", get(live_screen_frame_handler))
+        .route("/preview/camera/latest.bmp", get(live_camera_bmp_handler))
+        .route("/preview/screen/latest.bmp", get(live_screen_bmp_handler))
         .route("/preview/{id}", get(preview_handler))
         .route("/sessions/{id}/poster", get(session_poster_handler))
         .route("/compositor/status", get(compositor_status_handler))
+        .route(
+            "/interruption/lease",
+            post(acquire_interruption_lease_handler),
+        )
+        .route(
+            "/interruption/lease/{lease_id}",
+            delete(release_interruption_lease_handler).put(renew_interruption_lease_handler),
+        )
+        .route(
+            "/interruption/lease/{lease_id}/consume",
+            post(consume_interruption_lease_handler),
+        )
         .route("/oauth/callback", get(oauth_callback_handler))
         .route("/ws", get(ws_handler))
         .with_state(state.clone());
 
-    let ready = backend_connection(port, token);
+    // READY is a private bootstrap message consumed by Electron main. Main
+    // must strip `adminToken` before any log, smoke marker, preload response,
+    // or renderer event. Ordinary backend.ready events use BackendConnection
+    // below and therefore contain only the renderer-scoped credential.
+    let ready = backend_bootstrap(&state);
     println!("READY {}", serde_json::to_string(&ready)?);
     std::io::stdout().flush()?;
 
@@ -260,6 +325,7 @@ async fn main() -> Result<()> {
             );
         }
     }
+    tokio::spawn(resume_pending_oauth_completions(state.clone()));
     // Resume interrupted repair jobs through the idle-only maintenance queue.
     tokio::spawn(resume_pending_repair_jobs(state.clone()));
     axum::serve(listener, app)
@@ -416,6 +482,17 @@ fn backend_connection(port: u16, token: String) -> BackendConnection {
     }
 }
 
+fn backend_bootstrap(state: &AppState) -> BackendBootstrap {
+    BackendBootstrap {
+        host: "127.0.0.1".to_string(),
+        port: state.port,
+        token: state.token.clone(),
+        admin_token: state.admin_token.clone(),
+        pid: std::process::id(),
+        parent_pid: current_parent_pid(),
+    }
+}
+
 #[cfg(unix)]
 fn current_parent_pid() -> Option<u32> {
     Some(std::os::unix::process::parent_id())
@@ -456,6 +533,46 @@ struct WsQuery {
     token: String,
     #[serde(default)]
     max_width: Option<u32>,
+    #[serde(default)]
+    after_sequence: Option<u64>,
+    #[serde(default)]
+    after_generation: Option<String>,
+    /// PNG endpoints are retained only as an explicit developer/debug fallback.
+    #[serde(default)]
+    debug: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InterruptionLeaseQuery {
+    token: String,
+    owner_id: String,
+    action: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InterruptionLeaseResponse {
+    lease_id: String,
+    expires_in_ms: u64,
+    consumed: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct InterruptionLeaseErrorResponse {
+    code: &'static str,
+    message: String,
+}
+
+impl WsQuery {
+    fn preview_bmp_cursor(&self) -> Option<preview_bmp::PreviewBmpCursor> {
+        Some(preview_bmp::PreviewBmpCursor {
+            generation: self.after_generation.clone()?,
+            sequence: self.after_sequence?,
+        })
+    }
 }
 
 // No rename_all here: these are the providers' own wire names. OAuth
@@ -475,20 +592,156 @@ struct OAuthCallbackQuery {
     denied: Option<String>,
 }
 
-async fn health_handler(State(state): State<AppState>) -> Json<BackendHealth> {
+fn http_backend_role(state: &AppState, token: &str) -> Option<BackendRole> {
+    authenticate_backend_token(token, &state.token, &state.admin_token)
+}
+
+async fn health_handler(State(state): State<AppState>, Query(query): Query<WsQuery>) -> Response {
+    let role = http_backend_role(&state, &query.token);
+    if role.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let ffmpeg_path = default_ffmpeg_path();
-    Json(backend_health(&state, &ffmpeg_path).await)
+    let mut health = backend_health(&state, &ffmpeg_path).await;
+    if role == Some(BackendRole::Renderer) {
+        health.database_path = "managed-app-data".to_string();
+        health.ffmpeg.path = "trusted-bundled-ffmpeg".to_string();
+    }
+    Json(health).into_response()
 }
 
 async fn compositor_status_handler(
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
 ) -> impl IntoResponse {
-    if query.token != state.token {
+    let Some(role) = http_backend_role(&state, &query.token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    let status = compositor_status(&state).await;
+    if role == BackendRole::Renderer {
+        let mut value = serde_json::to_value(status).unwrap_or(serde_json::Value::Null);
+        resource_authority::redact_managed_screen_paths(&mut value);
+        Json(value).into_response()
+    } else {
+        Json(serde_json::to_value(status).unwrap_or(serde_json::Value::Null)).into_response()
+    }
+}
+
+async fn acquire_interruption_lease_handler(
+    State(state): State<AppState>,
+    Query(query): Query<InterruptionLeaseQuery>,
+) -> Response {
+    if http_backend_role(&state, &query.token) != Some(BackendRole::Admin) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    if query
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.len() > 256)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(InterruptionLeaseErrorResponse {
+                code: "invalid-reason",
+                message: "Interruption reason must be at most 256 bytes.".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    if !valid_interruption_identifier(&query.owner_id, 128)
+        || !valid_interruption_identifier(&query.action, 64)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(InterruptionLeaseErrorResponse {
+                code: "invalid-owner-or-action",
+                message: "Interruption owner and action must be bounded ASCII identifiers."
+                    .to_string(),
+            }),
+        )
+            .into_response();
+    }
 
-    Json(compositor_status(&state).await).into_response()
+    match state
+        .capture_interruption
+        .try_acquire_interruption(&query.owner_id, &query.action)
+    {
+        Ok(grant) => (
+            StatusCode::CREATED,
+            Json(interruption_lease_response(grant)),
+        )
+            .into_response(),
+        Err(blocker) => (
+            StatusCode::CONFLICT,
+            Json(InterruptionLeaseErrorResponse {
+                code: "capture-not-idle",
+                message: blocker.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+fn valid_interruption_identifier(value: &str, max_length: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_length
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':' | '.')
+        })
+}
+
+fn interruption_lease_response(
+    grant: capture_interruption::InterruptionLeaseGrant,
+) -> InterruptionLeaseResponse {
+    InterruptionLeaseResponse {
+        lease_id: grant.lease_id,
+        expires_in_ms: grant.expires_in_ms,
+        consumed: grant.consumed,
+    }
+}
+
+async fn consume_interruption_lease_handler(
+    State(state): State<AppState>,
+    Query(query): Query<WsQuery>,
+    AxumPath(lease_id): AxumPath<String>,
+) -> Response {
+    if http_backend_role(&state, &query.token) != Some(BackendRole::Admin) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.capture_interruption.consume_interruption(&lease_id) {
+        Some(grant) => Json(interruption_lease_response(grant)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn renew_interruption_lease_handler(
+    State(state): State<AppState>,
+    Query(query): Query<WsQuery>,
+    AxumPath(lease_id): AxumPath<String>,
+) -> Response {
+    if http_backend_role(&state, &query.token) != Some(BackendRole::Admin) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.capture_interruption.renew_interruption(&lease_id) {
+        Some(grant) => Json(interruption_lease_response(grant)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn release_interruption_lease_handler(
+    State(state): State<AppState>,
+    Query(query): Query<WsQuery>,
+    AxumPath(lease_id): AxumPath<String>,
+) -> Response {
+    if http_backend_role(&state, &query.token) != Some(BackendRole::Admin) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if state.capture_interruption.release_interruption(&lease_id) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 async fn preview_handler(
@@ -496,7 +749,7 @@ async fn preview_handler(
     Query(query): Query<WsQuery>,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
-    if query.token != state.token {
+    if http_backend_role(&state, &query.token).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -524,7 +777,7 @@ async fn live_preview_handler(
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
 ) -> Response {
-    if query.token != state.token {
+    if http_backend_role(&state, &query.token).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -556,8 +809,17 @@ async fn live_camera_frame_handler(
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
 ) -> Response {
-    if query.token != state.token {
+    let role = http_backend_role(&state, &query.token);
+    if role.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    if !query.debug {
+        diagnostics::PREVIEW_POLL_COUNTS.record_production_png();
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if role != Some(BackendRole::Admin) || !state.smoke_rpc_enabled {
+        return StatusCode::FORBIDDEN.into_response();
     }
 
     diagnostics::PREVIEW_POLL_COUNTS.record_camera_png();
@@ -578,8 +840,17 @@ async fn live_screen_frame_handler(
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
 ) -> Response {
-    if query.token != state.token {
+    let role = http_backend_role(&state, &query.token);
+    if role.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    if !query.debug {
+        diagnostics::PREVIEW_POLL_COUNTS.record_production_png();
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if role != Some(BackendRole::Admin) || !state.smoke_rpc_enabled {
+        return StatusCode::FORBIDDEN.into_response();
     }
 
     diagnostics::PREVIEW_POLL_COUNTS.record_screen_png();
@@ -596,6 +867,83 @@ async fn live_screen_frame_handler(
     }
 }
 
+async fn live_camera_bmp_handler(
+    State(state): State<AppState>,
+    Query(query): Query<WsQuery>,
+) -> Response {
+    if http_backend_role(&state, &query.token).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    diagnostics::PREVIEW_POLL_COUNTS.record_camera_bmp();
+    let cursor = query.preview_bmp_cursor();
+    match latest_preview_camera_bmp(&state, query.max_width, cursor).await {
+        Some(poll) => latest_preview_bmp_response(poll),
+        None => preview_bmp_not_found_response(),
+    }
+}
+
+async fn live_screen_bmp_handler(
+    State(state): State<AppState>,
+    Query(query): Query<WsQuery>,
+) -> Response {
+    if http_backend_role(&state, &query.token).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    diagnostics::PREVIEW_POLL_COUNTS.record_screen_bmp();
+    let cursor = query.preview_bmp_cursor();
+    match latest_preview_screen_bmp(&state, query.max_width, cursor).await {
+        Some(poll) => latest_preview_bmp_response(poll),
+        None => preview_bmp_not_found_response(),
+    }
+}
+
+const PREVIEW_BMP_EXPOSED_HEADERS: &str = "x-videorc-frame-transport, x-videorc-frame-generation, x-videorc-frame-sequence, x-videorc-frame-width, x-videorc-frame-height, x-videorc-frame-stride, x-videorc-pixel-format";
+
+fn latest_preview_bmp_response(poll: preview_bmp::LatestPreviewBmpPoll) -> Response {
+    match poll {
+        preview_bmp::LatestPreviewBmpPoll::Unchanged {
+            generation,
+            sequence,
+        } => Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header(header::CACHE_CONTROL, "no-store")
+            .header("access-control-allow-origin", "*")
+            .header("access-control-expose-headers", PREVIEW_BMP_EXPOSED_HEADERS)
+            .header("x-videorc-frame-transport", "latest-bgra-bmp")
+            .header("x-videorc-frame-generation", generation)
+            .header("x-videorc-frame-sequence", sequence.to_string())
+            .body(Body::empty())
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        preview_bmp::LatestPreviewBmpPoll::Frame(frame) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/bmp")
+            .header(header::CACHE_CONTROL, "no-store")
+            .header("access-control-allow-origin", "*")
+            .header("access-control-expose-headers", PREVIEW_BMP_EXPOSED_HEADERS)
+            .header("x-videorc-frame-transport", "latest-bgra-bmp")
+            .header("x-videorc-frame-generation", frame.generation)
+            .header("x-videorc-frame-sequence", frame.sequence.to_string())
+            .header("x-videorc-frame-width", frame.width.to_string())
+            .header("x-videorc-frame-height", frame.height.to_string())
+            .header("x-videorc-frame-stride", frame.stride.to_string())
+            .header("x-videorc-pixel-format", frame.pixel_format)
+            .body(Body::from(frame.bytes))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    }
+}
+
+fn preview_bmp_not_found_response() -> Response {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("access-control-allow-origin", "*")
+        .header("access-control-expose-headers", PREVIEW_BMP_EXPOSED_HEADERS)
+        .body(Body::empty())
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
 /// Serve a session's poster thumbnail (Library rewrite L2). Token-gated like
 /// every other media route; 404 until the poster exists.
 async fn session_poster_handler(
@@ -603,7 +951,7 @@ async fn session_poster_handler(
     axum::extract::Path(session_id): axum::extract::Path<String>,
     Query(query): Query<WsQuery>,
 ) -> Response {
-    if query.token != state.token {
+    if http_backend_role(&state, &query.token).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     match tokio::fs::read(posters::poster_path(&session_id)).await {
@@ -623,7 +971,7 @@ async fn live_preview_frame_handler(
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
 ) -> Response {
-    if query.token != state.token {
+    if http_backend_role(&state, &query.token).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -655,27 +1003,35 @@ async fn oauth_callback_handler(
     State(state): State<AppState>,
     Query(query): Query<OAuthCallbackQuery>,
 ) -> impl IntoResponse {
-    let result = if let Some(state_param) = query.state {
-        complete_oauth_callback(
-            &state,
-            OAuthCompleteParams {
-                state: state_param,
-                code: query.code,
-                error: query.error,
-                error_description: query.error_description,
-            },
+    let (result, event_already_emitted) = if let Some(state_param) = query.state {
+        (
+            drive_loopback_oauth_callback(
+                state.clone(),
+                OAuthCompleteParams {
+                    state: state_param,
+                    code: query.code,
+                    error: query.error,
+                    error_description: query.error_description,
+                },
+            )
+            .await,
+            true,
         )
-        .await
     } else {
-        complete_x_oauth1_callback(
-            &state,
-            query.oauth_token,
-            query.oauth_verifier,
-            query.denied,
+        (
+            complete_x_oauth1_callback(
+                &state,
+                query.oauth_token,
+                query.oauth_verifier,
+                query.denied,
+            )
+            .await,
+            false,
         )
-        .await
     };
-    state.emit_event("platformAccounts.oauth.callback", result.clone());
+    if !event_already_emitted {
+        state.emit_event("platformAccounts.oauth.callback", result.clone());
+    }
 
     let title = match result.status {
         oauth::OAuthCallbackStatus::Success => "Videorc OAuth received",
@@ -689,46 +1045,549 @@ async fn oauth_callback_handler(
     ))
 }
 
+const LOOPBACK_OAUTH_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+const LOOPBACK_OAUTH_COOLDOWN_RETRY_DELAY: Duration = Duration::from_secs(20);
+
+fn oauth_retry_delay(
+    fast_retry_delays: &[Duration],
+    cooldown_retry_delay: Duration,
+    retries_scheduled: usize,
+    now: tokio::time::Instant,
+    retry_deadline: tokio::time::Instant,
+) -> Option<Duration> {
+    (now < retry_deadline).then(|| {
+        fast_retry_delays
+            .get(retries_scheduled)
+            .copied()
+            .unwrap_or(cooldown_retry_delay)
+            .min(retry_deadline.saturating_duration_since(now))
+    })
+}
+
+async fn run_bounded_oauth_retry_loop<A, AFut, R, RFut, E>(
+    initial_params: OAuthCompleteParams,
+    fast_retry_delays: &[Duration],
+    cooldown_retry_delay: Duration,
+    retry_deadline: tokio::time::Instant,
+    mut attempt: A,
+    mut can_resume_without_code: R,
+    mut emit: E,
+) -> oauth::OAuthCallbackResult
+where
+    A: FnMut(OAuthCompleteParams) -> AFut,
+    AFut: std::future::Future<Output = oauth::OAuthCallbackResult>,
+    R: FnMut() -> RFut,
+    RFut: std::future::Future<Output = bool>,
+    E: FnMut(&oauth::OAuthCallbackResult),
+{
+    let callback_state = initial_params.state.clone();
+    let mut params = initial_params;
+    let mut retries_scheduled = 0usize;
+    let mut deadline_retry_attempted = false;
+    loop {
+        let result = attempt(params).await;
+        emit(&result);
+        if !result.retryable {
+            return result;
+        }
+        // Retrying ProviderExchange would repost a single-use code. Only a
+        // durably advanced checkpoint/account stage may continue code-less.
+        if !can_resume_without_code().await {
+            return result;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= retry_deadline {
+            if deadline_retry_attempted {
+                return result;
+            }
+            deadline_retry_attempted = true;
+            params = OAuthCompleteParams {
+                state: callback_state.clone(),
+                code: None,
+                error: None,
+                error_description: None,
+            };
+            continue;
+        }
+        let Some(delay) = oauth_retry_delay(
+            fast_retry_delays,
+            cooldown_retry_delay,
+            retries_scheduled,
+            now,
+            retry_deadline,
+        ) else {
+            return result;
+        };
+        retries_scheduled += 1;
+        // Drop the authorization code before any await. Every retry is driven
+        // exclusively by a durable code-less checkpoint.
+        params = OAuthCompleteParams {
+            state: callback_state.clone(),
+            code: None,
+            error: None,
+            error_description: None,
+        };
+        tokio::time::sleep(delay).await;
+    }
+}
+
+async fn drive_loopback_oauth_callback(
+    state: AppState,
+    params: OAuthCompleteParams,
+) -> oauth::OAuthCallbackResult {
+    let callback_state = params.state.clone();
+    let attempt_state = state.clone();
+    let resume_oauth = state.oauth.clone();
+    let resume_state = callback_state.clone();
+    let event_state = state.clone();
+    let retry_window = state
+        .oauth
+        .pending_retry_window(&callback_state)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let retry_deadline = tokio::time::Instant::now() + retry_window;
+    run_bounded_oauth_retry_loop(
+        params,
+        &LOOPBACK_OAUTH_RETRY_DELAYS,
+        LOOPBACK_OAUTH_COOLDOWN_RETRY_DELAY,
+        retry_deadline,
+        move |params| {
+            let state = attempt_state.clone();
+            async move { complete_oauth_callback(&state, params).await }
+        },
+        move || {
+            let oauth = resume_oauth.clone();
+            let callback_state = resume_state.clone();
+            async move {
+                oauth
+                    .can_resume_without_code(&callback_state)
+                    .await
+                    .unwrap_or(false)
+            }
+        },
+        move |result| {
+            event_state.emit_event("platformAccounts.oauth.callback", result.clone());
+        },
+    )
+    .await
+}
+
+async fn resume_pending_oauth_completions(state: AppState) {
+    const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
+    loop {
+        let states = match state
+            .oauth
+            .maintain_pending(chrono::Utc::now(), secrets::delete_secret)
+            .await
+        {
+            Ok(states) => states,
+            Err(error) => {
+                state.emit_log(
+                    "error",
+                    format!("Could not maintain durable OAuth recovery work: {error}"),
+                );
+                tokio::time::sleep(MAINTENANCE_INTERVAL).await;
+                continue;
+            }
+        };
+        for callback_state in states {
+            let recovery_state = state.clone();
+            tokio::spawn(async move {
+                let result = drive_loopback_oauth_callback(
+                    recovery_state.clone(),
+                    OAuthCompleteParams {
+                        state: callback_state.clone(),
+                        code: None,
+                        error: None,
+                        error_description: None,
+                    },
+                )
+                .await;
+                recovery_state
+                    .oauth
+                    .release_recovery_driver(&callback_state)
+                    .await;
+                if result.retryable {
+                    recovery_state.emit_log(
+                        "warn",
+                        "Durable OAuth recovery remains pending and will be retried by live maintenance.",
+                    );
+                }
+            });
+        }
+        tokio::time::sleep(MAINTENANCE_INTERVAL).await;
+    }
+}
+
+fn prepare_oauth_account_transition(
+    mut account: crate::streaming::UpsertPlatformAccount,
+    existing: Option<&crate::storage::PlatformAccountCredentials>,
+) -> (crate::streaming::UpsertPlatformAccount, Vec<String>) {
+    if let Some(existing) = existing
+        && existing.account.account_id == account.account_id
+        && account.refresh_token_secret_ref.is_none()
+    {
+        account.refresh_token_secret_ref = existing.refresh_token_secret_ref.clone();
+    }
+    let committed = [
+        account.token_secret_ref.as_deref(),
+        account.refresh_token_secret_ref.as_deref(),
+    ];
+    let mut superseded = existing
+        .into_iter()
+        .flat_map(|existing| {
+            [
+                existing.token_secret_ref.as_ref(),
+                existing.refresh_token_secret_ref.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+        })
+        .filter(|secret_ref| {
+            !committed
+                .iter()
+                .flatten()
+                .any(|committed| *committed == secret_ref.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    superseded.sort();
+    superseded.dedup();
+    (account, superseded)
+}
+
 async fn complete_oauth_callback(
     state: &AppState,
     params: OAuthCompleteParams,
 ) -> oauth::OAuthCallbackResult {
     let outcome = state.oauth.complete_with_pending(params).await;
     let mut result = outcome.result;
-    let Some(exchange) = outcome.exchange else {
+    let callback_state = result.state.clone();
+    if result.status != oauth::OAuthCallbackStatus::Success {
+        // A concurrent delivery can observe the durable state while its owner
+        // is still exchanging/storing credentials. It is explicitly retryable:
+        // retiring it here would consume the single-use code out from under the
+        // in-flight owner and make crash recovery impossible.
+        if result.retryable {
+            return result;
+        }
+        if result.status != oauth::OAuthCallbackStatus::UnknownState
+            && let Err(error) = state
+                .oauth
+                .finish_with_secret_cleanup(&callback_state, secrets::delete_secret)
+                .await
+        {
+            result.retryable = true;
+            result.message = Some(format!(
+                "OAuth callback could not be retired durably and will be retried: {error}"
+            ));
+        }
         return result;
-    };
-    let Some(code) = outcome.authorization_code else {
-        return result;
+    }
+
+    let account_write = if let Some(account) = outcome.account_to_store {
+        let commit =
+            outcome
+                .account_storage_commit
+                .unwrap_or(oauth::PendingOAuthAccountStorageCommit {
+                    expected_account_state: None,
+                    write_generation: 0,
+                });
+        let guard = state
+            .oauth
+            .lock_platform_finalization(account.platform)
+            .await;
+        Some((account, commit, guard))
+    } else {
+        let provider_client = oauth::provider_http_client();
+        let token_and_checkpoint = if let Some(checkpoint) = outcome.token_checkpoint {
+            match secrets::try_get_secret(checkpoint.secret_ref()) {
+                Ok(Some(payload)) => {
+                    match oauth::recover_exchanged_token(&checkpoint, |_| Ok(Some(payload.clone())))
+                    {
+                        Ok(token) => Some((checkpoint, token)),
+                        Err(error) => {
+                            result.status = oauth::OAuthCallbackStatus::Failed;
+                            result.message = Some(format!(
+                                "Protected OAuth token checkpoint was invalid. Start the connection again: {error}"
+                            ));
+                            if let Err(cleanup_error) = state
+                                .oauth
+                                .finish_with_secret_cleanup(&callback_state, secrets::delete_secret)
+                                .await
+                            {
+                                result.retryable = true;
+                                result.message = Some(format!(
+                                    "OAuth checkpoint cleanup failed and will be retried: {cleanup_error}"
+                                ));
+                            }
+                            return result;
+                        }
+                    }
+                }
+                Ok(None) => {
+                    result.status = oauth::OAuthCallbackStatus::Failed;
+                    result.message = Some(
+                        "OAuth code exchange was interrupted before its protected token checkpoint completed. Start the connection again."
+                            .to_string(),
+                    );
+                    if let Err(error) = state
+                        .oauth
+                        .finish_with_secret_cleanup(&callback_state, secrets::delete_secret)
+                        .await
+                    {
+                        result.retryable = true;
+                        result.message = Some(format!(
+                            "OAuth checkpoint cleanup failed and will be retried: {error}"
+                        ));
+                    }
+                    return result;
+                }
+                Err(error) => {
+                    result.status = oauth::OAuthCallbackStatus::Failed;
+                    result.retryable = true;
+                    result.message = Some(format!(
+                        "Protected OAuth token checkpoint is temporarily unavailable: {error}"
+                    ));
+                    let _ = state.oauth.retry(&callback_state).await;
+                    return result;
+                }
+            }
+        } else if let (Some(exchange), Some(code)) = (outcome.exchange, outcome.authorization_code)
+        {
+            let code_verifier = match oauth::recover_pkce_verifier(
+                &exchange,
+                secrets::try_get_secret,
+            ) {
+                Ok(code_verifier) => code_verifier,
+                Err(error) => {
+                    result.status = oauth::OAuthCallbackStatus::Failed;
+                    result.message = Some(format!(
+                        "Protected OAuth PKCE recovery failed. Start the connection again: {error}"
+                    ));
+                    if let Err(cleanup_error) = state
+                        .oauth
+                        .finish_with_secret_cleanup(&callback_state, secrets::delete_secret)
+                        .await
+                    {
+                        result.retryable = true;
+                        result.message = Some(format!(
+                            "OAuth PKCE cleanup failed and will be retried: {cleanup_error}"
+                        ));
+                    }
+                    return result;
+                }
+            };
+            let checkpoint = match state.oauth.stage_exchange_started(&callback_state).await {
+                Ok(checkpoint) => checkpoint,
+                Err(error) => {
+                    result.status = oauth::OAuthCallbackStatus::Failed;
+                    result.retryable = true;
+                    result.message = Some(format!(
+                        "OAuth token exchange could not be admitted durably: {error}"
+                    ));
+                    let _ = state.oauth.retry(&callback_state).await;
+                    return result;
+                }
+            };
+            let token = match oauth::exchange_authorization_code(
+                &exchange,
+                &code,
+                code_verifier.as_deref(),
+                &provider_client,
+            )
+            .await
+            {
+                Ok(token) => token,
+                Err(error) => {
+                    result.status = oauth::OAuthCallbackStatus::Failed;
+                    result.message = Some(format!(
+                        "OAuth token exchange did not complete. Start the connection again: {error}"
+                    ));
+                    if let Err(cleanup_error) = state
+                        .oauth
+                        .finish_with_secret_cleanup(&callback_state, secrets::delete_secret)
+                        .await
+                    {
+                        result.retryable = true;
+                        result.message = Some(format!(
+                            "OAuth exchange cleanup failed and will be retried: {cleanup_error}"
+                        ));
+                    }
+                    return result;
+                }
+            };
+            if let Err(error) = state
+                .oauth
+                .stage_exchanged_token(&callback_state, token.clone(), secrets::put_secret)
+                .await
+            {
+                result.status = oauth::OAuthCallbackStatus::Failed;
+                result.retryable = true;
+                result.message = Some(format!(
+                    "OAuth token checkpoint could not be committed and will be recovered or retired: {error}"
+                ));
+                let _ = state.oauth.retry(&callback_state).await;
+                return result;
+            }
+            Some((checkpoint, token))
+        } else {
+            None
+        };
+
+        match token_and_checkpoint {
+            Some((checkpoint, token)) => match oauth::account_from_exchanged_token(
+                &checkpoint,
+                &token,
+                &provider_client,
+                secrets::put_secrets,
+            )
+            .await
+            {
+                Ok(account) => {
+                    let guard = state
+                        .oauth
+                        .lock_platform_finalization(account.platform)
+                        .await;
+                    let existing = match state.database.list_platform_account_credentials() {
+                        Ok(credentials) => credentials
+                            .into_iter()
+                            .find(|credential| credential.account.platform == account.platform),
+                        Err(error) => {
+                            result.status = oauth::OAuthCallbackStatus::Failed;
+                            result.retryable = true;
+                            result.message = Some(format!(
+                                "OAuth account transition could not inspect existing credentials: {error}"
+                            ));
+                            let _ = state.oauth.retry(&callback_state).await;
+                            return result;
+                        }
+                    };
+                    let expected_account_state = match state
+                        .database
+                        .platform_account_write_expectation(account.platform)
+                    {
+                        Ok(expected) => expected,
+                        Err(error) => {
+                            result.status = oauth::OAuthCallbackStatus::Failed;
+                            result.retryable = true;
+                            result.message = Some(format!(
+                                "OAuth account transition could not snapshot its write generation: {error}"
+                            ));
+                            let _ = state.oauth.retry(&callback_state).await;
+                            return result;
+                        }
+                    };
+                    let (account, superseded_secret_refs) =
+                        prepare_oauth_account_transition(account, existing.as_ref());
+                    let commit = match state
+                        .oauth
+                        .stage_account_storage_with_checkpoint(
+                            &callback_state,
+                            account.clone(),
+                            Some(&checkpoint),
+                            superseded_secret_refs,
+                            expected_account_state,
+                        )
+                        .await
+                    {
+                        Ok(commit) => commit,
+                        Err(error) => {
+                            result.status = oauth::OAuthCallbackStatus::Failed;
+                            result.retryable = true;
+                            result.message = Some(format!(
+                                "OAuth completion could not be staged durably: {error}"
+                            ));
+                            let _ = state.oauth.retry(&callback_state).await;
+                            return result;
+                        }
+                    };
+                    Some((account, commit, guard))
+                }
+                Err(error) => {
+                    result.status = oauth::OAuthCallbackStatus::Failed;
+                    result.retryable = true;
+                    result.message = Some(format!(
+                        "OAuth account preparation failed and will be retried from its protected token checkpoint: {error}"
+                    ));
+                    let _ = state.oauth.retry(&callback_state).await;
+                    return result;
+                }
+            },
+            None => None,
+        }
     };
 
-    match oauth::exchange_and_store_token(
-        &exchange,
-        &code,
-        &reqwest::Client::new(),
-        secrets::put_secret,
-    )
-    .await
-    {
-        Ok(account) => match state.database.upsert_platform_account(account) {
-            Ok(_) => {
+    let mut stale_account_state = None;
+    let mut platform_finalization_guard = None;
+    if let Some((account, commit, guard)) = account_write {
+        platform_finalization_guard = Some(guard);
+        match state.database.compare_and_upsert_platform_account(
+            account,
+            commit.expected_account_state.as_ref(),
+            commit.write_generation,
+            true,
+            true,
+            || Ok(()),
+        ) {
+            Ok(
+                storage::PlatformAccountCasOutcome::Applied(_)
+                | storage::PlatformAccountCasOutcome::AlreadyApplied(_),
+            ) => {
                 result.token_stored = true;
                 result.account_connected = true;
                 if let Ok(accounts) = state.database.list_platform_accounts() {
                     state.emit_event("platformAccounts.changed", accounts);
                 }
             }
+            Ok(storage::PlatformAccountCasOutcome::Stale(current)) => {
+                result.token_stored = current.token_secret_ref.is_some();
+                result.account_connected = current.exists;
+                result.message = Some(
+                    "A newer account connection already won; the older OAuth transaction was retired."
+                        .to_string(),
+                );
+                stale_account_state = Some(current);
+            }
             Err(error) => {
                 result.status = oauth::OAuthCallbackStatus::Failed;
+                result.retryable = true;
                 result.message = Some(format!("OAuth account storage failed: {error}"));
+                let _ = state.oauth.retry(&callback_state).await;
+                return result;
             }
-        },
-        Err(error) => {
-            result.status = oauth::OAuthCallbackStatus::Failed;
-            result.message = Some(format!("OAuth token exchange failed: {error}"));
         }
     }
 
+    let cleanup = if let Some(current) = stale_account_state.as_ref() {
+        state
+            .oauth
+            .finish_superseded_account_storage_with_secret_cleanup(
+                &callback_state,
+                current,
+                secrets::delete_secret,
+            )
+            .await
+    } else {
+        state
+            .oauth
+            .finish_with_secret_cleanup(&callback_state, secrets::delete_secret)
+            .await
+    };
+    if let Err(error) = cleanup {
+        result.status = oauth::OAuthCallbackStatus::Failed;
+        result.retryable = true;
+        result.message = Some(format!("OAuth completion acknowledgement failed: {error}"));
+    }
+    drop(platform_finalization_guard);
     result
 }
 
@@ -752,6 +1611,7 @@ async fn complete_x_oauth1_callback(
         message: None,
         token_stored: false,
         account_connected: false,
+        retryable: false,
         received_at,
     };
 
@@ -822,6 +1682,7 @@ async fn complete_x_oauth1_callback(
     result
 }
 
+#[derive(Debug)]
 struct FreshPlatformAccessToken {
     access_token: String,
     account: streaming::PlatformAccount,
@@ -874,18 +1735,62 @@ fn persist_refreshed_platform_access_token(
     refresh_ref: &str,
     token: oauth::RefreshedOAuthToken,
 ) -> Result<FreshPlatformAccessToken> {
-    secrets::put_secret(access_ref, &token.access_token)
-        .context("Could not store refreshed OAuth access token.")?;
-    if let Some(next_refresh_token) = token.refresh_token.as_deref() {
-        secrets::put_secret(refresh_ref, next_refresh_token)
-            .context("Could not store refreshed OAuth refresh token.")?;
-    }
+    persist_refreshed_platform_access_token_with_secret_writer(
+        state,
+        credential,
+        access_ref,
+        refresh_ref,
+        token,
+        secrets::put_secrets,
+    )
+}
 
+fn persist_refreshed_platform_access_token_with_secret_writer<F>(
+    state: &AppState,
+    credential: &storage::PlatformAccountCredentials,
+    access_ref: &str,
+    refresh_ref: &str,
+    token: oauth::RefreshedOAuthToken,
+    mut put_secrets: F,
+) -> Result<FreshPlatformAccessToken>
+where
+    F: FnMut(&[(&str, &str)]) -> Result<()>,
+{
     let mut account = credential.account.clone();
-    account.scopes = token.scopes;
-    account.expires_at = token.expires_at;
+    account.scopes = token.scopes.clone();
+    account.expires_at = token.expires_at.clone();
     account.status = PlatformAccountStatus::Connected;
-    upsert_validated_account(state, credential, account.clone())?;
+    let expected = storage::PlatformAccountWriteExpectation::from_credentials(credential);
+    let upsert = UpsertPlatformAccount {
+        platform: account.platform,
+        account_id: account.account_id.clone(),
+        account_label: account.account_label.clone(),
+        account_handle: account.account_handle.clone(),
+        avatar_url: account.avatar_url.clone(),
+        scopes: account.scopes.clone(),
+        token_secret_ref: credential.token_secret_ref.clone(),
+        refresh_token_secret_ref: credential.refresh_token_secret_ref.clone(),
+        stream_key_secret_ref: credential.stream_key_secret_ref.clone(),
+        expires_at: account.expires_at.clone(),
+        status: account.status,
+    };
+    let outcome = state.database.compare_and_upsert_platform_account(
+        upsert,
+        Some(&expected),
+        expected.generation.saturating_add(1),
+        false,
+        false,
+        || {
+            let mut entries = vec![(access_ref, token.access_token.as_str())];
+            if let Some(next_refresh_token) = token.refresh_token.as_deref() {
+                entries.push((refresh_ref, next_refresh_token));
+            }
+            put_secrets(&entries).context("Could not atomically store refreshed OAuth credentials")
+        },
+    )?;
+    if !matches!(outcome, storage::PlatformAccountCasOutcome::Applied(_)) {
+        anyhow::bail!("Platform account changed while its OAuth token was refreshing.");
+    }
     if let Ok(accounts) = state.database.list_platform_accounts() {
         state.emit_event("platformAccounts.changed", accounts);
     }
@@ -1013,7 +1918,8 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
         let mut account = credential.account.clone();
         let Some(access_ref) = credential.token_secret_ref.as_deref() else {
             account.status = PlatformAccountStatus::NeedsReconnect;
-            changed |= upsert_validated_account(state, &credential, account.clone()).is_ok();
+            changed |=
+                upsert_validated_account(state, &credential, account.clone()).unwrap_or(false);
             validations.push(platform_validation(
                 &account,
                 PlatformAccountValidationState::NeedsReconnect,
@@ -1026,7 +1932,8 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
             Ok(fresh) => fresh,
             Err(error) => {
                 let validation = platform_validation_after_token_error(&mut account, &error);
-                changed |= upsert_validated_account(state, &credential, account.clone()).is_ok();
+                changed |=
+                    upsert_validated_account(state, &credential, account.clone()).unwrap_or(false);
                 validations.push(validation);
                 continue;
             }
@@ -1052,8 +1959,8 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
                 }
                 Err(refresh_error) => {
                     account.status = PlatformAccountStatus::NeedsReconnect;
-                    changed |=
-                        upsert_validated_account(state, &credential, account.clone()).is_ok();
+                    changed |= upsert_validated_account(state, &credential, account.clone())
+                        .unwrap_or(false);
                     validations.push(platform_validation(
                         &account,
                         PlatformAccountValidationState::NeedsReconnect,
@@ -1069,7 +1976,8 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
         match validation {
             Ok(()) => {
                 account.status = PlatformAccountStatus::Connected;
-                changed |= upsert_validated_account(state, &credential, account.clone()).is_ok();
+                changed |=
+                    upsert_validated_account(state, &credential, account.clone()).unwrap_or(false);
                 validations.push(platform_validation(
                     &account,
                     if fresh.refreshed {
@@ -1087,8 +1995,8 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
             Err(error) => {
                 if should_keep_account_connected_after_validation_error(account.platform, &error) {
                     account.status = PlatformAccountStatus::Connected;
-                    changed |=
-                        upsert_validated_account(state, &credential, account.clone()).is_ok();
+                    changed |= upsert_validated_account(state, &credential, account.clone())
+                        .unwrap_or(false);
                     validations.push(platform_validation(
                         &account,
                         if fresh.refreshed {
@@ -1104,7 +2012,8 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
                 }
 
                 account.status = PlatformAccountStatus::NeedsReconnect;
-                changed |= upsert_validated_account(state, &credential, account.clone()).is_ok();
+                changed |=
+                    upsert_validated_account(state, &credential, account.clone()).unwrap_or(false);
                 validations.push(platform_validation(
                     &account,
                     PlatformAccountValidationState::NeedsReconnect,
@@ -2264,10 +3173,10 @@ fn upsert_validated_account(
     state: &AppState,
     credential: &storage::PlatformAccountCredentials,
     account: streaming::PlatformAccount,
-) -> anyhow::Result<streaming::PlatformAccount> {
-    state
-        .database
-        .upsert_platform_account(UpsertPlatformAccount {
+) -> anyhow::Result<bool> {
+    let expected = storage::PlatformAccountWriteExpectation::from_credentials(credential);
+    let outcome = state.database.compare_and_upsert_platform_account(
+        UpsertPlatformAccount {
             platform: account.platform,
             account_id: account.account_id,
             account_label: account.account_label,
@@ -2279,7 +3188,17 @@ fn upsert_validated_account(
             stream_key_secret_ref: credential.stream_key_secret_ref.clone(),
             expires_at: account.expires_at,
             status: account.status,
-        })
+        },
+        Some(&expected),
+        expected.generation.saturating_add(1),
+        false,
+        false,
+        || Ok(()),
+    )?;
+    Ok(matches!(
+        outcome,
+        storage::PlatformAccountCasOutcome::Applied(_)
+    ))
 }
 
 fn platform_validation(
@@ -2862,9 +3781,9 @@ type WebSocketCommandFuture =
 type WebSocketCommandHandler =
     std::sync::Arc<dyn Fn(AppState, String) -> WebSocketCommandFuture + Send + Sync>;
 
-fn production_websocket_command_handler() -> WebSocketCommandHandler {
-    std::sync::Arc::new(|state, text| {
-        Box::pin(async move { handle_text_message(&state, text.as_str()).await })
+fn production_websocket_command_handler(role: BackendRole) -> WebSocketCommandHandler {
+    std::sync::Arc::new(move |state, text| {
+        Box::pin(async move { handle_text_message_with_role(&state, text.as_str(), role).await })
     })
 }
 
@@ -2945,11 +3864,12 @@ async fn ws_handler(
     Query(query): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    if query.token != state.token {
+    let Some(role) = authenticate_backend_token(&query.token, &state.token, &state.admin_token)
+    else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
 
-    ws.on_upgrade(move |socket| websocket_session(socket, state))
+    ws.on_upgrade(move |socket| websocket_session(socket, state, role))
         .into_response()
 }
 
@@ -2967,9 +3887,10 @@ async fn relay_websocket_events(
     slow_pressure: WebSocketSlowPressureSignal,
     telemetry: CoalescingEventBuffer,
     event_filter: std::sync::Arc<std::sync::Mutex<ConnectionEventFilter>>,
+    redact_renderer_paths: bool,
 ) {
     loop {
-        let (event, is_recovery) = match events.recv().await {
+        let (mut event, is_recovery) = match events.recv().await {
             Ok(event) => (event, false),
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 // Backpressure is deliberate: a slow socket can retain at most the
@@ -2989,6 +3910,10 @@ async fn relay_websocket_events(
             }
             Err(broadcast::error::RecvError::Closed) => break,
         };
+        if redact_renderer_paths {
+            resource_authority::redact_managed_background_paths(&mut event.payload);
+            resource_authority::redact_managed_screen_paths(&mut event.payload);
+        }
 
         // A recovery frame is mandatory connection control, not an ordinary event a
         // renderer can exclude. Keep the pre-bounded-queue protocol behavior intact.
@@ -3023,14 +3948,30 @@ async fn relay_websocket_events(
     }
 }
 
-async fn websocket_session(socket: WebSocket, state: AppState) {
-    websocket_session_with_handler(socket, state, production_websocket_command_handler()).await;
+async fn websocket_session(socket: WebSocket, state: AppState, role: BackendRole) {
+    websocket_session_with_handler_and_redaction(
+        socket,
+        state,
+        production_websocket_command_handler(role),
+        role == BackendRole::Renderer,
+    )
+    .await;
 }
 
+#[cfg(test)]
 async fn websocket_session_with_handler(
     socket: WebSocket,
     state: AppState,
     command_handler: WebSocketCommandHandler,
+) {
+    websocket_session_with_handler_and_redaction(socket, state, command_handler, false).await;
+}
+
+async fn websocket_session_with_handler_and_redaction(
+    socket: WebSocket,
+    state: AppState,
+    command_handler: WebSocketCommandHandler,
+    redact_renderer_paths: bool,
 ) {
     let (sender, mut receiver) = socket.split();
     let events = state.events.subscribe();
@@ -3093,6 +4034,7 @@ async fn websocket_session_with_handler(
         slow_pressure.clone(),
         telemetry_tx,
         event_filter_for_events,
+        redact_renderer_paths,
     ));
 
     let (command_tx, command_rx) = mpsc::channel::<String>(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
@@ -3183,8 +4125,208 @@ async fn websocket_session_with_handler(
     );
 }
 
+#[cfg(test)]
 async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
-    let command = match serde_json::from_str::<ClientCommand>(text) {
+    handle_text_message_with_role(state, text, BackendRole::Admin).await
+}
+
+fn consume_resource_field(
+    state: &AppState,
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    role: BackendRole,
+    capability_field: &str,
+    path_field: &str,
+    kind: resource_authority::ResourceCapabilityKind,
+    required: bool,
+) -> Result<()> {
+    let raw_path_present = object
+        .get(path_field)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|path| !path.trim().is_empty());
+    let capability_id = object
+        .remove(capability_field)
+        .and_then(|value| value.as_str().map(str::to_string));
+
+    if role == BackendRole::Admin && capability_id.is_none() {
+        return Ok(());
+    }
+    let Some(capability_id) = capability_id else {
+        object.remove(path_field);
+        if required || raw_path_present {
+            anyhow::bail!("{capability_field} is required; raw {path_field} is not accepted.");
+        }
+        return Ok(());
+    };
+    let path = state.resource_authority.consume(&capability_id, kind)?;
+    object.insert(
+        path_field.to_string(),
+        serde_json::Value::String(path.display().to_string()),
+    );
+    Ok(())
+}
+
+fn resolve_start_session_resources(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    let output = params
+        .get_mut("output")
+        .and_then(serde_json::Value::as_object_mut)
+        .context("output is required")?;
+    consume_resource_field(
+        state,
+        output,
+        role,
+        "outputDirectoryCapability",
+        "outputDirectory",
+        resource_authority::ResourceCapabilityKind::OutputDirectory,
+        false,
+    )
+}
+
+fn resolve_import_resources(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    let object = params.as_object_mut().context("params must be an object")?;
+    consume_resource_field(
+        state,
+        object,
+        role,
+        "sourceCapability",
+        "sourcePath",
+        resource_authority::ResourceCapabilityKind::InputFile,
+        true,
+    )?;
+    consume_resource_field(
+        state,
+        object,
+        role,
+        "outputDirectoryCapability",
+        "outputDirectory",
+        resource_authority::ResourceCapabilityKind::OutputDirectory,
+        false,
+    )
+}
+
+fn resolve_screen_import_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    let object = params.as_object_mut().context("params must be an object")?;
+    consume_resource_field(
+        state,
+        object,
+        role,
+        "sourceCapability",
+        "path",
+        resource_authority::ResourceCapabilityKind::InputFile,
+        true,
+    )
+}
+
+fn session_deletion_handle(
+    operation: &storage::PendingSessionDeletion,
+) -> protocol::SessionDeletionHandle {
+    protocol::SessionDeletionHandle {
+        operation_id: operation.operation_id.clone(),
+        session_id: operation.session_id.clone(),
+        path_count: operation.paths.len(),
+        blocked_path_count: operation.blocked_paths.len(),
+    }
+}
+
+fn session_recording_path(state: &AppState, session_id: &str) -> Result<String> {
+    if session_id.is_empty() {
+        anyhow::bail!("sessionId is required.");
+    }
+    state
+        .database
+        .session_file_facts(session_id)?
+        .map(|(path, _)| path)
+        .filter(|path| !path.trim().is_empty())
+        .with_context(|| format!("Session {session_id} has no managed recording file."))
+}
+
+fn resolve_repair_file_params(
+    state: &AppState,
+    value: serde_json::Value,
+    role: BackendRole,
+) -> Result<protocol::RepairFileParams> {
+    if role == BackendRole::Admin && value.get("path").is_some() {
+        return serde_json::from_value(value).map_err(Into::into);
+    }
+    let params = serde_json::from_value::<protocol::RepairSessionParams>(value)?;
+    Ok(protocol::RepairFileParams {
+        path: session_recording_path(state, &params.session_id)?,
+        ffmpeg_path: None,
+        expect_audio: params.expect_audio,
+        intended_fps: params.intended_fps,
+    })
+}
+
+fn resolve_repair_restore_params(
+    state: &AppState,
+    value: serde_json::Value,
+    role: BackendRole,
+) -> Result<protocol::RepairRestoreParams> {
+    if role == BackendRole::Admin && value.get("path").is_some() {
+        return serde_json::from_value(value).map_err(Into::into);
+    }
+    let params = serde_json::from_value::<protocol::RepairRestoreSessionParams>(value)?;
+    Ok(protocol::RepairRestoreParams {
+        path: session_recording_path(state, &params.session_id)?,
+    })
+}
+
+fn resolve_renderer_managed_backgrounds(
+    state: &AppState,
+    value: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    if role == BackendRole::Admin {
+        return Ok(());
+    }
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(background) = object.get_mut("background")
+                && let Some(background) = background.as_object_mut()
+            {
+                let asset_id = background
+                    .get("assetId")
+                    .and_then(serde_json::Value::as_str)
+                    .context("Scene background assetId is required.")?;
+                let path = state
+                    .resource_authority
+                    .resolve_managed_background(asset_id)?;
+                background.insert(
+                    "managedAssetPath".to_string(),
+                    serde_json::Value::String(path.display().to_string()),
+                );
+            }
+            for child in object.values_mut() {
+                resolve_renderer_managed_backgrounds(state, child, role)?;
+            }
+        }
+        serde_json::Value::Array(array) => {
+            for child in array {
+                resolve_renderer_managed_backgrounds(state, child, role)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn handle_text_message_with_role(
+    state: &AppState,
+    text: &str,
+    role: BackendRole,
+) -> ServerResponse {
+    let mut command = match serde_json::from_str::<ClientCommand>(text) {
         Ok(command) => command,
         Err(error) => {
             return ServerResponse::error(
@@ -3195,25 +4337,183 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
         }
     };
 
-    match command.method.as_str() {
+    if let Err(error) = authorize_backend_method(role, &command.method, state.smoke_rpc_enabled) {
+        return ServerResponse::error(command.id, error.code(), error.message());
+    }
+    // Do this centrally, before individual parameter deserializers can turn a
+    // renderer string into process authority. Release builds ignore caller
+    // FFmpeg paths even on the admin channel.
+    scrub_untrusted_ffmpeg_paths(&mut command.params, role, state.smoke_rpc_enabled);
+    if let Err(error) = resolve_renderer_managed_backgrounds(state, &mut command.params, role) {
+        return ServerResponse::error(command.id, "managed-background-rejected", error.to_string());
+    }
+
+    let mut response = match command.method.as_str() {
+        "resource.capability.issue" => {
+            match serde_json::from_value::<resource_authority::IssueResourceCapabilityParams>(
+                command.params,
+            ) {
+                Ok(params) => match state.resource_authority.issue(params) {
+                    Ok(capability) => ServerResponse::ok(command.id, capability),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "resource-capability-rejected",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "resource.capability.revoke" => {
+            let capability_id = command
+                .params
+                .get("capabilityId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            ServerResponse::ok(
+                command.id,
+                serde_json::json!({
+                    "revoked": state.resource_authority.revoke(capability_id)
+                }),
+            )
+        }
+        "resource.capability.register_background" => {
+            let asset_id = command
+                .params
+                .get("assetId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let path = command
+                .params
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            match state
+                .resource_authority
+                .register_managed_background(asset_id, path)
+            {
+                Ok(()) => ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({ "registered": true, "assetId": asset_id }),
+                ),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "managed-background-rejected",
+                    error.to_string(),
+                ),
+            }
+        }
+        "resource.admin.resolve_session_path" => {
+            let session_id = command
+                .params
+                .get("sessionId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            match session_recording_path(state, session_id) {
+                Ok(path) => ServerResponse::ok(command.id, serde_json::json!({ "path": path })),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "managed-session-path-missing",
+                    error.to_string(),
+                ),
+            }
+        }
+        "resource.admin.resolve_screen_path" => {
+            let screen_id = command
+                .params
+                .get("screenId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            match state.database.stream_screen_by_id(screen_id) {
+                Ok(screen)
+                    if screen.status == protocol::StreamScreenStatus::Ready
+                        && !screen.image_path.is_empty() =>
+                {
+                    ServerResponse::ok(command.id, serde_json::json!({ "path": screen.image_path }))
+                }
+                Ok(_) => ServerResponse::error(
+                    command.id,
+                    "managed-screen-path-missing",
+                    "Managed Screen image is missing or no longer trusted.",
+                ),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "managed-screen-path-missing",
+                    error.to_string(),
+                ),
+            }
+        }
+        "resource.admin.resolve_background_path" => {
+            let asset_id = command
+                .params
+                .get("assetId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            match state
+                .resource_authority
+                .resolve_managed_background(asset_id)
+            {
+                Ok(path) => ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({ "path": path.display().to_string() }),
+                ),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "managed-background-path-missing",
+                    error.to_string(),
+                ),
+            }
+        }
         "health.ping" => {
-            let ffmpeg_path = resolve_ffmpeg_path_ref(
+            let ffmpeg_path = resolve_trusted_ffmpeg_path(
                 command
                     .params
                     .get("ffmpegPath")
                     .and_then(|value| value.as_str()),
+                role,
+                state.smoke_rpc_enabled,
             );
-            ServerResponse::ok(command.id, backend_health(state, &ffmpeg_path).await)
+            let mut health = backend_health(state, &ffmpeg_path).await;
+            if role == BackendRole::Renderer {
+                health.database_path = "managed-app-data".to_string();
+                health.ffmpeg.path = "trusted-bundled-ffmpeg".to_string();
+            }
+            ServerResponse::ok(command.id, health)
         }
         "account.get" => {
             let session = state.account_session.lock().await;
             ServerResponse::ok(command.id, account::current_account(session.as_ref()))
         }
+        "account.auth.begin_intent" => {
+            let _account_transition = state.account_auth_transition.lock().await;
+            match account::advance_sign_in_intent_generation() {
+                Ok(intent_generation) => ServerResponse::ok(
+                    command.id,
+                    protocol::AccountAuthIntent { intent_generation },
+                ),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "account-intent-persist-failed",
+                    error.to_string(),
+                ),
+            }
+        }
         "account.sign_out" => {
+            let account_transition = state.account_auth_transition.lock().await;
+            let mut clear_result = None;
             clear_account_credentials_after_caption_shutdown(state, || {
-                account::clear_persisted_account();
+                clear_result = Some(account::clear_persisted_account_and_advance_intent());
             })
             .await;
+            if let Some(Err(error)) = clear_result {
+                return ServerResponse::error(
+                    command.id,
+                    "account-sign-out-persist-failed",
+                    error.to_string(),
+                );
+            }
             // The account no longer vouches for premium — drop hydrated
             // entitlements with it (multistream gate closes immediately).
             if entitlements::clear_account_entitlements() {
@@ -3221,23 +4521,51 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             }
             let signed_out = account::signed_out_account();
             *state.account_session.lock().await = Some(signed_out.clone());
+            drop(account_transition);
             ServerResponse::ok(command.id, signed_out)
         }
         "account.complete_sign_in" => {
-            let token = command
-                .params
-                .get("token")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            let resolved = account::complete_sign_in(token, cfg!(debug_assertions)).await;
-            *state.account_session.lock().await = Some(resolved.clone());
-            let entitlement_state = state.clone();
-            tokio::spawn(async move { refresh_account_entitlements(&entitlement_state).await });
-            ServerResponse::ok(command.id, resolved)
+            match serde_json::from_value::<protocol::AccountCompleteSignInParams>(command.params) {
+                Ok(params) => {
+                    let account_transition = state.account_auth_transition.lock().await;
+                    match account::complete_sign_in(
+                        &params.code,
+                        &params.state,
+                        &params.verifier,
+                        params.intent_generation,
+                        cfg!(debug_assertions),
+                    )
+                    .await
+                    {
+                        Ok(resolved) => {
+                            *state.account_session.lock().await = Some(resolved.clone());
+                            drop(account_transition);
+                            let entitlement_state = state.clone();
+                            tokio::spawn(async move {
+                                refresh_account_entitlements(&entitlement_state).await
+                            });
+                            ServerResponse::ok(command.id, resolved)
+                        }
+                        Err(error) => {
+                            let code = if account::is_sign_in_superseded(&error) {
+                                "account-sign-in-superseded"
+                            } else {
+                                "account-sign-in-failed"
+                            };
+                            ServerResponse::error(command.id, code, error.to_string())
+                        }
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
         }
         "account.refresh" => {
+            let account_transition = state.account_auth_transition.lock().await;
             let resolved = account::refresh_account().await;
             *state.account_session.lock().await = Some(resolved.clone());
+            drop(account_transition);
             let entitlement_state = state.clone();
             tokio::spawn(async move { refresh_account_entitlements(&entitlement_state).await });
             ServerResponse::ok(command.id, resolved)
@@ -3407,22 +4735,40 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
         "devices.list" => {
-            let ffmpeg_path = resolve_ffmpeg_path_ref(
+            let ffmpeg_path = resolve_trusted_ffmpeg_path(
                 command
                     .params
                     .get("ffmpegPath")
                     .and_then(|value| value.as_str()),
+                role,
+                state.smoke_rpc_enabled,
             );
             let devices = devices::list_devices(&ffmpeg_path).await;
             state.emit_event("devices.changed", &devices);
             ServerResponse::ok(command.id, devices)
         }
         "diagnostics.supportBundle.export" => {
+            if role == BackendRole::Renderer
+                && command
+                    .params
+                    .as_object()
+                    .is_some_and(|params| params.contains_key("outputDirectory"))
+            {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    "Renderer support bundles use the managed diagnostics directory; raw outputDirectory is not accepted.",
+                );
+            }
             match serde_json::from_value::<support_bundle::SupportBundleExportParams>(
                 command.params,
             ) {
                 Ok(params) => {
-                    let ffmpeg_path = resolve_ffmpeg_path_ref(params.ffmpeg_path.as_deref());
+                    let ffmpeg_path = resolve_trusted_ffmpeg_path(
+                        params.ffmpeg_path.as_deref(),
+                        role,
+                        state.smoke_rpc_enabled,
+                    );
                     match export_support_bundle_for_state(state, params, &ffmpeg_path).await {
                         Ok(result) => ServerResponse::ok(command.id, result),
                         Err(error) => ServerResponse::error(
@@ -3461,6 +4807,7 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             let stats = state.diagnostics.lock().await.clone();
             ServerResponse::ok(command.id, stats)
         }
+        #[cfg(debug_assertions)]
         "encoder_bridge.synthetic_record" => {
             match serde_json::from_value::<protocol::EncoderBridgeSyntheticParams>(command.params) {
                 Ok(params) => match run_synthetic_encoder_bridge(state.clone(), params).await {
@@ -3890,6 +5237,7 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
                 }
             }
         }
+        #[cfg(debug_assertions)]
         "recording.start_test" => {
             match serde_json::from_value::<protocol::StartSessionParams>(command.params) {
                 Ok(params) => match validate_start_session_oauth_availability(&params) {
@@ -3913,7 +5261,15 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             }
         }
         "session.start" => {
-            match serde_json::from_value::<protocol::StartSessionParams>(command.params) {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_start_session_resources(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value::<protocol::StartSessionParams>(params_value) {
                 Ok(params) => {
                     let streaming = params.streaming.clone();
                     match validate_start_session_oauth_availability(&params) {
@@ -4036,35 +5392,109 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             }
         }
         "sessions.delete" => {
-            let session_ids: Vec<String> = command
-                .params
-                .get("sessionIds")
-                .and_then(|value| value.as_array())
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|value| value.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if session_ids.is_empty() {
-                ServerResponse::error(command.id, "session-delete-invalid", "No sessions given.")
-            } else {
-                match state.database.delete_sessions(&session_ids) {
-                    Ok(deleted) => {
-                        for id in &session_ids {
-                            posters::remove_session_poster(id).await;
-                        }
-                        ServerResponse::ok(command.id, serde_json::json!({ "deleted": deleted }))
-                    }
+            match serde_json::from_value::<protocol::SessionDeleteParams>(command.params) {
+                Ok(params) if params.session_ids.is_empty() => ServerResponse::error(
+                    command.id,
+                    "session-delete-invalid",
+                    "No sessions given.",
+                ),
+                Ok(params) => match state
+                    .database
+                    .prepare_session_deletions(&params.session_ids)
+                {
+                    Ok(operations) => ServerResponse::ok(
+                        command.id,
+                        operations
+                            .iter()
+                            .map(session_deletion_handle)
+                            .collect::<Vec<_>>(),
+                    ),
                     Err(error) => ServerResponse::error(
                         command.id,
                         "session-delete-failed",
                         error.to_string(),
                     ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
         }
+        "sessions.delete.complete" => {
+            match serde_json::from_value::<protocol::SessionDeleteCompleteParams>(command.params) {
+                Ok(params) if params.operation_id.is_empty() => ServerResponse::error(
+                    command.id,
+                    "session-delete-complete-invalid",
+                    "A delete operation id is required.",
+                ),
+                Ok(params) => match state
+                    .database
+                    .complete_session_deletion(&params.operation_id, &params.failed_paths)
+                {
+                    Ok(completion) => {
+                        if completion.deleted {
+                            posters::remove_session_poster(&completion.session_id).await;
+                        }
+                        ServerResponse::ok(command.id, completion)
+                    }
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "session-delete-complete-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sessions.delete.resolve" => {
+            let operation_id = command
+                .params
+                .get("operationId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if operation_id.is_empty() {
+                ServerResponse::error(
+                    command.id,
+                    "session-delete-resolve-invalid",
+                    "A delete operation id is required.",
+                )
+            } else {
+                match state.database.pending_session_deletions() {
+                    Ok(operations) => match operations
+                        .into_iter()
+                        .find(|operation| operation.operation_id == operation_id)
+                    {
+                        Some(operation) => ServerResponse::ok(command.id, operation),
+                        None => ServerResponse::error(
+                            command.id,
+                            "session-delete-resolve-missing",
+                            "Delete operation was not found.",
+                        ),
+                    },
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "session-delete-resolve-failed",
+                        error.to_string(),
+                    ),
+                }
+            }
+        }
+        "sessions.delete.pending" => match state.database.pending_session_deletions() {
+            Ok(operations) => ServerResponse::ok(
+                command.id,
+                operations
+                    .iter()
+                    .map(session_deletion_handle)
+                    .collect::<Vec<_>>(),
+            ),
+            Err(error) => ServerResponse::error(
+                command.id,
+                "session-delete-pending-failed",
+                error.to_string(),
+            ),
+        },
         "sessions.duplicate" => {
             let session_id = command
                 .params
@@ -4081,19 +5511,24 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             }
         }
         "sessions.import" => {
-            let source_path = command
-                .params
-                .get("sourcePath")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            let output_directory = command
-                .params
+            let mut params_value = command.params;
+            if let Err(error) = resolve_import_resources(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            let output_directory = params_value
                 .get("outputDirectory")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
+            let source_path = params_value
+                .get("sourcePath")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
             let ffmpeg_path = ffmpeg::resolve_ffmpeg_path(
-                command
-                    .params
+                params_value
                     .get("ffmpegPath")
                     .and_then(|value| value.as_str())
                     .map(str::to_string),
@@ -4115,8 +5550,12 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
         },
         "sessions.comments.list" => {
             match serde_json::from_value::<protocol::SessionCommentsListParams>(command.params) {
-                Ok(params) => match state.database.list_live_chat_messages(&params.session_id) {
-                    Ok(messages) => ServerResponse::ok(command.id, messages),
+                Ok(params) => match state.database.list_live_chat_messages_page(
+                    &params.session_id,
+                    params.cursor.as_deref(),
+                    params.limit,
+                ) {
+                    Ok(page) => ServerResponse::ok(command.id, page),
                     Err(error) => ServerResponse::error(
                         command.id,
                         "session-comments-list-failed",
@@ -4236,7 +5675,12 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             match serde_json::from_value::<OAuthStartProviderParams>(command.params) {
                 Ok(params) => match state
                     .oauth
-                    .start_provider(params, state.oauth_redirect_port())
+                    .start_provider_with_secret_store(
+                        params,
+                        state.oauth_redirect_port(),
+                        secrets::put_secret,
+                        secrets::delete_secret,
+                    )
                     .await
                 {
                     Ok(result) => ServerResponse::ok(command.id, result),
@@ -4266,38 +5710,51 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
         "platformAccounts.disconnect" => {
             match serde_json::from_value::<streaming::PlatformAccountPlatformParams>(command.params)
             {
-                Ok(params) => match state.database.disconnect_platform_account(params.platform) {
-                    Ok(account) => {
-                        if params.platform == StreamPlatform::X {
-                            // Disconnecting X revokes the local live authorization
-                            // too — the OAuth 1.0a token pair must not outlive the
-                            // account it belongs to.
-                            for secret_ref in [
-                                x_live::X_OAUTH1_ACCESS_TOKEN_SECRET_REF,
-                                x_live::X_OAUTH1_TOKEN_SECRET_SECRET_REF,
-                                x_live::X_OAUTH1_HANDLE_SECRET_REF,
-                            ] {
-                                if let Err(error) = secrets::delete_secret(secret_ref) {
-                                    state.emit_log(
+                Ok(params) => {
+                    let _platform_finalization = state
+                        .oauth
+                        .lock_platform_finalization(params.platform)
+                        .await;
+                    let pending_generation = state
+                        .oauth
+                        .highest_pending_account_write_generation(params.platform)
+                        .await;
+                    match state.database.disconnect_platform_account_after_generation(
+                        params.platform,
+                        pending_generation,
+                    ) {
+                        Ok(account) => {
+                            if params.platform == StreamPlatform::X {
+                                // Disconnecting X revokes the local live authorization
+                                // too — the OAuth 1.0a token pair must not outlive the
+                                // account it belongs to.
+                                for secret_ref in [
+                                    x_live::X_OAUTH1_ACCESS_TOKEN_SECRET_REF,
+                                    x_live::X_OAUTH1_TOKEN_SECRET_SECRET_REF,
+                                    x_live::X_OAUTH1_HANDLE_SECRET_REF,
+                                ] {
+                                    if let Err(error) = secrets::delete_secret(secret_ref) {
+                                        state.emit_log(
                                         "warn",
                                         format!(
                                             "Could not delete X live secret {secret_ref}: {error}"
                                         ),
                                     );
+                                    }
                                 }
                             }
+                            if let Ok(accounts) = state.database.list_platform_accounts() {
+                                state.emit_event("platformAccounts.changed", accounts);
+                            }
+                            ServerResponse::ok(command.id, account)
                         }
-                        if let Ok(accounts) = state.database.list_platform_accounts() {
-                            state.emit_event("platformAccounts.changed", accounts);
-                        }
-                        ServerResponse::ok(command.id, account)
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "platform-account-disconnect-failed",
+                            error.to_string(),
+                        ),
                     }
-                    Err(error) => ServerResponse::error(
-                        command.id,
-                        "platform-account-disconnect-failed",
-                        error.to_string(),
-                    ),
-                },
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -4602,7 +6059,15 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             }
         },
         "screens.importImage" => {
-            match serde_json::from_value::<protocol::ImportScreenImageParams>(command.params) {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_screen_import_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value::<protocol::ImportScreenImageParams>(params_value) {
                 Ok(params) => {
                     let ffmpeg_path = resolve_ffmpeg_path_ref(params.ffmpeg_path.as_deref());
                     match state
@@ -4775,41 +6240,29 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
                 }
             }
         }
-        "repair.assess_file" => {
-            match serde_json::from_value::<protocol::RepairFileParams>(command.params) {
-                Ok(params) => match repair_service::assess_file(state.clone(), params).await {
-                    Ok(result) => ServerResponse::ok(command.id, result),
-                    Err(error) => ServerResponse::error(command.id, "repair-assess-failed", error),
-                },
-                Err(error) => {
-                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+        "repair.assess_file" => match resolve_repair_file_params(state, command.params, role) {
+            Ok(params) => match repair_service::assess_file(state.clone(), params).await {
+                Ok(result) => ServerResponse::ok(command.id, result),
+                Err(error) => ServerResponse::error(command.id, "repair-assess-failed", error),
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "repair.repair_file" => match resolve_repair_file_params(state, command.params, role) {
+            Ok(params) => match repair_service::repair_file(state.clone(), params).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(command.id, "repair-failed", error),
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "repair.restore_file" => match resolve_repair_restore_params(state, command.params, role) {
+            Ok(params) => match repair_service::restore_file(params).await {
+                Ok(restored) => {
+                    ServerResponse::ok(command.id, serde_json::json!({ "restored": restored }))
                 }
-            }
-        }
-        "repair.repair_file" => {
-            match serde_json::from_value::<protocol::RepairFileParams>(command.params) {
-                Ok(params) => match repair_service::repair_file(state.clone(), params).await {
-                    Ok(status) => ServerResponse::ok(command.id, status),
-                    Err(error) => ServerResponse::error(command.id, "repair-failed", error),
-                },
-                Err(error) => {
-                    ServerResponse::error(command.id, "invalid-params", error.to_string())
-                }
-            }
-        }
-        "repair.restore_file" => {
-            match serde_json::from_value::<protocol::RepairRestoreParams>(command.params) {
-                Ok(params) => match repair_service::restore_file(params).await {
-                    Ok(restored) => {
-                        ServerResponse::ok(command.id, serde_json::json!({ "restored": restored }))
-                    }
-                    Err(error) => ServerResponse::error(command.id, "repair-restore-failed", error),
-                },
-                Err(error) => {
-                    ServerResponse::error(command.id, "invalid-params", error.to_string())
-                }
-            }
-        }
+                Err(error) => ServerResponse::error(command.id, "repair-restore-failed", error),
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
         "ai.run_post_recording" => {
             match serde_json::from_value::<protocol::RunAiWorkflowParams>(command.params) {
                 Ok(params) => match ai::run_ai_workflow(state.clone(), params).await {
@@ -4933,7 +6386,14 @@ async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
             "unknown-method",
             format!("Unknown backend method: {method}"),
         ),
+    };
+    if role == BackendRole::Renderer
+        && let Some(payload) = response.payload.as_mut()
+    {
+        resource_authority::redact_managed_background_paths(payload);
+        resource_authority::redact_managed_screen_paths(payload);
     }
+    response
 }
 
 async fn clear_account_credentials_after_caption_shutdown(
@@ -5048,20 +6508,33 @@ async fn current_diagnostics_stats(state: &AppState) -> protocol::DiagnosticStat
 }
 
 async fn current_recording_status(state: &AppState) -> protocol::RecordingStatus {
-    state
-        .recording
-        .lock()
-        .await
-        .as_ref()
-        .map(|active| {
-            let state = if active.mode == "stream" {
-                RecordingState::Streaming
-            } else {
-                RecordingState::Recording
-            };
-            active.status(state, None)
-        })
-        .unwrap_or_else(idle_status)
+    let active_status = state.recording.lock().await.as_ref().map(|active| {
+        let state = if active.stop_requested {
+            RecordingState::Stopping
+        } else if active.mode == "stream" {
+            RecordingState::Streaming
+        } else {
+            RecordingState::Recording
+        };
+        active.status(state, None)
+    });
+    if let Some(status) = active_status {
+        return status;
+    }
+    if state.ffmpeg_work.snapshot().finalizing_active {
+        return protocol::RecordingStatus {
+            state: RecordingState::Stopping,
+            session_id: None,
+            output_path: None,
+            stream_url: None,
+            started_at: None,
+            audio_tracks: Vec::new(),
+            pipeline: None,
+            duration_ms: None,
+            message: Some("Finalizing recording output.".to_string()),
+        };
+    }
+    idle_status()
 }
 
 async fn export_support_bundle_for_state(
@@ -5172,6 +6645,447 @@ mod tests {
         assert_eq!(query.error_description.as_deref(), Some("denied by user"));
         assert_eq!(query.state, None);
         assert_eq!(query.code, None);
+    }
+
+    #[tokio::test]
+    async fn loopback_oauth_retries_advanced_work_code_less_until_success() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_codes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempt_counter = attempts.clone();
+        let attempt_codes = seen_codes.clone();
+        let emitted_counter = emitted.clone();
+
+        let result = run_bounded_oauth_retry_loop(
+            OAuthCompleteParams {
+                state: "provider-state".to_string(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            },
+            &[Duration::ZERO, Duration::ZERO, Duration::ZERO],
+            Duration::ZERO,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            move |params| {
+                let attempt_counter = attempt_counter.clone();
+                let attempt_codes = attempt_codes.clone();
+                async move {
+                    attempt_codes.lock().unwrap().push(params.code.clone());
+                    let attempt = attempt_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    oauth::OAuthCallbackResult {
+                        platform: Some(StreamPlatform::X),
+                        state: params.state,
+                        status: if attempt < 2 {
+                            oauth::OAuthCallbackStatus::Failed
+                        } else {
+                            oauth::OAuthCallbackStatus::Success
+                        },
+                        code_present: params.code.is_some(),
+                        error: None,
+                        message: None,
+                        token_stored: attempt >= 2,
+                        account_connected: attempt >= 2,
+                        retryable: attempt < 2,
+                        received_at: chrono::Utc::now().to_rfc3339(),
+                    }
+                }
+            },
+            || async { true },
+            move |_| {
+                emitted_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await;
+
+        assert_eq!(result.status, oauth::OAuthCallbackStatus::Success);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(emitted.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(
+            *seen_codes.lock().unwrap(),
+            vec![Some("single-use-code".to_string()), None, None]
+        );
+    }
+
+    #[test]
+    fn loopback_oauth_cooldown_is_capped_by_the_transaction_expiry() {
+        let now = tokio::time::Instant::now();
+        let deadline = now + Duration::from_secs(600);
+
+        assert_eq!(
+            oauth_retry_delay(
+                &LOOPBACK_OAUTH_RETRY_DELAYS,
+                LOOPBACK_OAUTH_COOLDOWN_RETRY_DELAY,
+                LOOPBACK_OAUTH_RETRY_DELAYS.len(),
+                now + Duration::from_secs(595),
+                deadline,
+            ),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            oauth_retry_delay(
+                &LOOPBACK_OAUTH_RETRY_DELAYS,
+                LOOPBACK_OAUTH_COOLDOWN_RETRY_DELAY,
+                LOOPBACK_OAUTH_RETRY_DELAYS.len(),
+                deadline,
+                deadline,
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_oauth_runs_one_code_less_terminal_attempt_at_expiry() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_codes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let attempt_counter = attempts.clone();
+        let attempt_codes = seen_codes.clone();
+
+        let result = run_bounded_oauth_retry_loop(
+            OAuthCompleteParams {
+                state: "provider-state".to_string(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            },
+            &LOOPBACK_OAUTH_RETRY_DELAYS,
+            LOOPBACK_OAUTH_COOLDOWN_RETRY_DELAY,
+            tokio::time::Instant::now(),
+            move |params| {
+                let attempt_counter = attempt_counter.clone();
+                let attempt_codes = attempt_codes.clone();
+                async move {
+                    attempt_codes.lock().unwrap().push(params.code.clone());
+                    let attempt = attempt_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    oauth::OAuthCallbackResult {
+                        platform: Some(StreamPlatform::X),
+                        state: params.state,
+                        status: if attempt == 0 {
+                            oauth::OAuthCallbackStatus::Failed
+                        } else {
+                            oauth::OAuthCallbackStatus::Expired
+                        },
+                        code_present: params.code.is_some(),
+                        error: None,
+                        message: None,
+                        token_stored: false,
+                        account_connected: false,
+                        retryable: attempt == 0,
+                        received_at: chrono::Utc::now().to_rfc3339(),
+                    }
+                }
+            },
+            || async { true },
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(result.status, oauth::OAuthCallbackStatus::Expired);
+        assert_eq!(
+            *seen_codes.lock().unwrap(),
+            vec![Some("single-use-code".to_string()), None]
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_oauth_never_reposts_provider_exchange_code() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempt_counter = attempts.clone();
+        let result = run_bounded_oauth_retry_loop(
+            OAuthCompleteParams {
+                state: "provider-state".to_string(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            },
+            &[Duration::ZERO],
+            Duration::ZERO,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            move |params| {
+                attempt_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    oauth::OAuthCallbackResult {
+                        platform: Some(StreamPlatform::X),
+                        state: params.state,
+                        status: oauth::OAuthCallbackStatus::Failed,
+                        code_present: params.code.is_some(),
+                        error: None,
+                        message: None,
+                        token_stored: false,
+                        account_connected: false,
+                        retryable: true,
+                        received_at: chrono::Utc::now().to_rfc3339(),
+                    }
+                }
+            },
+            || async { false },
+            |_| {},
+        )
+        .await;
+
+        assert!(result.retryable);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn loopback_oauth_cooldown_recovers_after_the_fast_retry_window_without_reposting_code() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_codes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let attempt_counter = attempts.clone();
+        let attempt_codes = seen_codes.clone();
+
+        let result = run_bounded_oauth_retry_loop(
+            OAuthCompleteParams {
+                state: "provider-state".to_string(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            },
+            &[Duration::ZERO],
+            Duration::ZERO,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            move |params| {
+                let attempt_counter = attempt_counter.clone();
+                let attempt_codes = attempt_codes.clone();
+                async move {
+                    attempt_codes.lock().unwrap().push(params.code.clone());
+                    let attempt = attempt_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    oauth::OAuthCallbackResult {
+                        platform: Some(StreamPlatform::X),
+                        state: params.state,
+                        status: if attempt < 8 {
+                            oauth::OAuthCallbackStatus::Failed
+                        } else {
+                            oauth::OAuthCallbackStatus::Success
+                        },
+                        code_present: params.code.is_some(),
+                        error: None,
+                        message: None,
+                        token_stored: attempt >= 8,
+                        account_connected: attempt >= 8,
+                        retryable: attempt < 8,
+                        received_at: chrono::Utc::now().to_rfc3339(),
+                    }
+                }
+            },
+            || async { true },
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(result.status, oauth::OAuthCallbackStatus::Success);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 9);
+        let codes = seen_codes.lock().unwrap();
+        assert_eq!(codes.first(), Some(&Some("single-use-code".to_string())));
+        assert!(codes.iter().skip(1).all(Option::is_none));
+    }
+
+    #[tokio::test]
+    async fn concurrent_oauth_completion_never_retires_the_in_flight_transaction() {
+        let state = test_state();
+        let started = state
+            .oauth
+            .start_provider(
+                OAuthStartProviderParams {
+                    platform: StreamPlatform::X,
+                    redirect_uri: Some("videorc://oauth/callback".to_string()),
+                },
+                state.port,
+            )
+            .await
+            .unwrap();
+        let params = OAuthCompleteParams {
+            state: started.state.clone(),
+            code: Some("single-use-code".to_string()),
+            error: None,
+            error_description: None,
+        };
+
+        let first = state.oauth.complete_with_pending(params.clone()).await;
+        assert!(first.exchange.is_some(), "first caller owns the exchange");
+
+        let concurrent = complete_oauth_callback(&state, params.clone()).await;
+        assert!(concurrent.retryable);
+        assert!(
+            concurrent
+                .message
+                .as_deref()
+                .is_some_and(|message| { message.contains("already in progress") })
+        );
+
+        state.oauth.retry(&started.state).await.unwrap();
+        let recovered = state.oauth.complete_with_pending(params).await;
+        assert_eq!(recovered.result.status, oauth::OAuthCallbackStatus::Success);
+        assert!(
+            recovered.exchange.is_some(),
+            "the retryable concurrent caller must not delete pending exchange state"
+        );
+        state.oauth.finish(&started.state).await.unwrap();
+    }
+
+    #[test]
+    fn oauth_account_transition_preserves_same_identity_refresh_and_supersedes_old_access() {
+        let existing = crate::storage::PlatformAccountCredentials {
+            account: crate::streaming::PlatformAccount {
+                id: "stored-account".to_string(),
+                platform: StreamPlatform::X,
+                account_id: "x-user-1".to_string(),
+                account_label: "X User".to_string(),
+                account_handle: Some("@x-user".to_string()),
+                avatar_url: None,
+                scopes: vec!["users.read".to_string()],
+                access_token_present: true,
+                refresh_token_present: true,
+                stream_key_present: false,
+                expires_at: None,
+                connected_at: "2026-07-12T00:00:00Z".to_string(),
+                updated_at: "2026-07-12T00:00:00Z".to_string(),
+                status: crate::streaming::PlatformAccountStatus::Connected,
+            },
+            token_secret_ref: Some("platform:x:oauth:access".to_string()),
+            refresh_token_secret_ref: Some("platform:x:oauth:refresh".to_string()),
+            stream_key_secret_ref: None,
+            write_generation: 0,
+        };
+        let candidate = crate::streaming::UpsertPlatformAccount {
+            platform: StreamPlatform::X,
+            account_id: "x-user-1".to_string(),
+            account_label: "X User".to_string(),
+            account_handle: Some("@x-user".to_string()),
+            avatar_url: None,
+            scopes: vec!["users.read".to_string()],
+            token_secret_ref: Some("platform:x:oauth:candidate:abc:access".to_string()),
+            refresh_token_secret_ref: None,
+            stream_key_secret_ref: None,
+            expires_at: None,
+            status: crate::streaming::PlatformAccountStatus::Connected,
+        };
+
+        let (prepared, superseded) =
+            prepare_oauth_account_transition(candidate.clone(), Some(&existing));
+        assert_eq!(
+            prepared.refresh_token_secret_ref.as_deref(),
+            Some("platform:x:oauth:refresh")
+        );
+        assert_eq!(superseded, vec!["platform:x:oauth:access".to_string()]);
+
+        let mut different_identity = candidate;
+        different_identity.account_id = "x-user-2".to_string();
+        let (prepared, superseded) =
+            prepare_oauth_account_transition(different_identity, Some(&existing));
+        assert!(prepared.refresh_token_secret_ref.is_none());
+        assert_eq!(
+            superseded,
+            vec![
+                "platform:x:oauth:access".to_string(),
+                "platform:x:oauth:refresh".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn refresh_finishing_after_reconnect_cannot_restore_stale_secret_refs() {
+        let state = test_state();
+        let account = |account_id: &str, token_ref: &str| UpsertPlatformAccount {
+            platform: StreamPlatform::X,
+            account_id: account_id.to_string(),
+            account_label: account_id.to_string(),
+            account_handle: Some(format!("@{account_id}")),
+            avatar_url: None,
+            scopes: vec!["users.read".to_string()],
+            token_secret_ref: Some(token_ref.to_string()),
+            refresh_token_secret_ref: Some(format!("{token_ref}:refresh")),
+            stream_key_secret_ref: None,
+            expires_at: None,
+            status: PlatformAccountStatus::Connected,
+        };
+        state
+            .database
+            .upsert_platform_account(account("account-a", "platform:x:oauth:a"))
+            .unwrap();
+        let stale = state
+            .database
+            .list_platform_account_credentials()
+            .unwrap()
+            .remove(0);
+        state
+            .database
+            .upsert_platform_account(account("account-b", "platform:x:oauth:b"))
+            .unwrap();
+        let secret_writer_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called = secret_writer_called.clone();
+
+        let error = persist_refreshed_platform_access_token_with_secret_writer(
+            &state,
+            &stale,
+            stale.token_secret_ref.as_deref().unwrap(),
+            stale.refresh_token_secret_ref.as_deref().unwrap(),
+            oauth::RefreshedOAuthToken {
+                access_token: "late-refreshed-access".to_string(),
+                refresh_token: Some("late-refreshed-refresh".to_string()),
+                scopes: vec!["users.read".to_string()],
+                expires_at: None,
+            },
+            move |_| {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("changed while"));
+        assert!(!secret_writer_called.load(std::sync::atomic::Ordering::SeqCst));
+        let current = state.database.list_platform_account_credentials().unwrap();
+        assert_eq!(current[0].account.account_id, "account-b");
+        assert_eq!(
+            current[0].token_secret_ref.as_deref(),
+            Some("platform:x:oauth:b")
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_bmp_query_parses_generation_aware_camel_case_cursor() {
+        use axum::extract::FromRequestParts;
+
+        let request = axum::http::Request::builder()
+            .uri(
+                "/preview/screen/latest.bmp?token=test-token&maxWidth=960&afterGeneration=screen-run-b&afterSequence=42",
+            )
+            .body(())
+            .unwrap();
+        let (mut parts, _) = request.into_parts();
+        let Query(query) = Query::<WsQuery>::from_request_parts(&mut parts, &())
+            .await
+            .unwrap();
+
+        assert_eq!(query.max_width, Some(960));
+        assert_eq!(
+            query.preview_bmp_cursor(),
+            Some(preview_bmp::PreviewBmpCursor {
+                generation: "screen-run-b".to_string(),
+                sequence: 42,
+            })
+        );
+    }
+
+    #[test]
+    fn unchanged_preview_bmp_response_exposes_generation_cursor_to_file_origin_fetch() {
+        let response = latest_preview_bmp_response(preview_bmp::LatestPreviewBmpPoll::Unchanged {
+            generation: "camera-run-a".to_string(),
+            sequence: 9,
+        });
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response.headers()["x-videorc-frame-generation"],
+            "camera-run-a"
+        );
+        assert_eq!(response.headers()["x-videorc-frame-sequence"], "9");
+        assert!(
+            response.headers()["access-control-expose-headers"]
+                .to_str()
+                .unwrap()
+                .contains("x-videorc-frame-generation")
+        );
     }
 
     #[test]
@@ -5548,6 +7462,7 @@ mod tests {
             slow_pressure,
             telemetry,
             event_filter,
+            false,
         ));
 
         events_tx
@@ -5795,6 +7710,50 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[tokio::test]
+    async fn renderer_support_bundle_export_rejects_a_raw_output_directory() {
+        let state = test_state();
+        let response = handle_text_message_with_role(
+            &state,
+            &serde_json::json!({
+                "id": "support-bundle-raw-path",
+                "method": "diagnostics.supportBundle.export",
+                "params": { "outputDirectory": "/tmp/renderer-chosen-output" }
+            })
+            .to_string(),
+            BackendRole::Renderer,
+        )
+        .await;
+
+        assert!(!response.ok);
+        let error = response.error.expect("renderer raw path rejection");
+        assert_eq!(error.code, "resource-capability-rejected");
+        assert!(
+            error
+                .message
+                .contains("raw outputDirectory is not accepted")
+        );
+    }
+
+    #[tokio::test]
+    async fn recording_status_stays_stopping_for_the_authoritative_finalization_lease() {
+        let state = test_state();
+        let finalizing = state.ffmpeg_work.begin_finalizing();
+
+        let status = current_recording_status(&state).await;
+        assert!(matches!(status.state, RecordingState::Stopping));
+        assert_eq!(
+            status.message.as_deref(),
+            Some("Finalizing recording output.")
+        );
+
+        drop(finalizing);
+        assert!(matches!(
+            current_recording_status(&state).await.state,
+            RecordingState::Idle
+        ));
     }
 
     #[tokio::test]

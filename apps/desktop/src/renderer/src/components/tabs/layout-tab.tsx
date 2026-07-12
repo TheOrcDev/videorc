@@ -32,14 +32,25 @@ import {
   hasSelectedCameraSource,
   hasSelectedScreenSource,
   layoutPresetNeedsCamera,
-  layoutPresetNeedsScreen
+  layoutPresetNeedsScreen,
+  layoutPresetOrientation
 } from '@/lib/capture'
 
-const LAYOUT_PRESETS = [
+// Mode-scoped like the Scenes gallery: the tab edits the current
+// orientation's scenes; the gallery's header toggle switches modes.
+const HORIZONTAL_LAYOUT_TAB_PRESETS = [
   { id: 'screen-camera', label: 'Screen + camera', enabled: true },
   { id: 'screen-only', label: 'Screen only', enabled: true },
   { id: 'camera-only', label: 'Camera only', enabled: true },
   { id: 'side-by-side', label: 'Side-by-side', enabled: true }
+] as const
+
+const VERTICAL_LAYOUT_TAB_PRESETS = [
+  { id: 'vertical-camera-top', label: 'Camera top', enabled: true },
+  { id: 'vertical-camera-bottom', label: 'Camera bottom', enabled: true },
+  { id: 'vertical-split', label: 'Split', enabled: true },
+  { id: 'vertical-screen-camera', label: 'Screen + camera', enabled: true },
+  { id: 'vertical-screen-only', label: 'Screen only', enabled: true }
 ] as const
 
 export function LayoutTab(): ReactElement {
@@ -77,7 +88,19 @@ export function LayoutTab(): ReactElement {
   const hasScreen = hasSelectedScreenSource(captureConfig.sources)
   const isCameraOnly = layout.layoutPreset === 'camera-only'
   const isSideBySide = layout.layoutPreset === 'side-by-side'
-  const showOverlayControls = layout.layoutPreset === 'screen-camera'
+  // The stacked vertical scenes have fixed bands — no corner/size/shape; the
+  // vertical Screen + camera is a true inset scene and keeps every overlay
+  // control, exactly like its landscape twin.
+  const isVerticalStack =
+    layout.layoutPreset === 'vertical-camera-top' ||
+    layout.layoutPreset === 'vertical-camera-bottom' ||
+    layout.layoutPreset === 'vertical-split'
+  const showOverlayControls =
+    layout.layoutPreset === 'screen-camera' || layout.layoutPreset === 'vertical-screen-camera'
+  const layoutTabPresets =
+    layoutPresetOrientation(layout.layoutPreset) === 'vertical'
+      ? VERTICAL_LAYOUT_TAB_PRESETS
+      : HORIZONTAL_LAYOUT_TAB_PRESETS
 
   return (
     <div className="flex flex-col gap-5">
@@ -89,7 +112,7 @@ export function LayoutTab(): ReactElement {
             title="Layout preset"
           >
             <div className="flex flex-wrap gap-2">
-              {LAYOUT_PRESETS.map((preset) => {
+              {layoutTabPresets.map((preset) => {
                 const needsCamera = layoutPresetNeedsCamera(preset.id)
                 const needsScreen = layoutPresetNeedsScreen(preset.id)
                 const switching = layoutSwitchPending === preset.id
@@ -127,7 +150,9 @@ export function LayoutTab(): ReactElement {
               </p>
             ) : !hasCamera ? (
               <p className="text-xs text-muted-foreground">
-                Select a camera in Studio to enable Camera only and Side-by-side.
+                {layoutPresetOrientation(layout.layoutPreset) === 'vertical'
+                  ? 'Select a camera in Studio to enable the camera scenes.'
+                  : 'Select a camera in Studio to enable Camera only and Side-by-side.'}
               </p>
             ) : null}
           </PanelSection>
@@ -140,6 +165,7 @@ export function LayoutTab(): ReactElement {
             cameraShape={layout.cameraShape}
             dragEnabled={showOverlayControls && !isSessionActive}
             hasBackground={Boolean(scene?.background)}
+            outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}
             previewOpen={previewWindow.open}
             scene={scene}
             selectedSourceId={selectedSceneSourceId}
@@ -213,6 +239,13 @@ export function LayoutTab(): ReactElement {
                 <p className="text-sm text-muted-foreground">
                   Camera only fills the frame as a rectangle. Corner, size, and shape do not apply —
                   use fit, mirror, zoom, and pan.
+                </p>
+              ) : null}
+
+              {isVerticalStack ? (
+                <p className="text-sm text-muted-foreground">
+                  The stacked vertical scenes give the camera and the screen fixed bands of the 9:16
+                  canvas. Corner, size, and shape do not apply — use fit, mirror, zoom, and pan.
                 </p>
               ) : null}
 

@@ -27,9 +27,9 @@ Cut from [ui-glass-redesign-plan.md](./ui-glass-redesign-plan.md). Design author
 - **Gates before commit:** from `apps/desktop/`: `pnpm typecheck && pnpm exec vitest run` (78+ tests stay green). From repo root: `pnpm exec eslint <touched files>` and `pnpm format:check` (run prettier --write on touched files first). Capture exit codes directly — do not pipe gates through `tail`/`grep`.
 - **Screenshot recipe** (visual check): launch an isolated instance alongside any running dev app:
   `VIDEORC_USER_DATA_DIR=$(mktemp -d) VIDEORC_DATABASE_PATH=$(mktemp -d)/videorc.sqlite3 VIDEORC_SMOKE_PREVIEW_MOTION=1 VIDEORC_SMOKE_OUTPUT_DIR=/tmp pnpm dev`
-  wait for the `[smoke] preview-motion-ready {host,port}` line, then per surface:
-  `curl -s -X POST http://HOST:PORT/command -H 'Content-Type: application/json' -d '{"command":"open-tab","params":{"tab":"<tab>"}}'` followed by
-  `curl -s -X POST ... -d '{"command":"capture-page","params":{"name":"<tab>"}}'` → PNG path returned; open and compare against the skill's tokens/patterns.
+  wait for the `[smoke] preview-motion-ready {host,port,capability}` line, then per surface:
+  `curl -s -X POST http://HOST:PORT/command -H "Authorization: Bearer $CAPABILITY" -H 'Content-Type: application/json' -d '{"command":"open-tab","params":{"tab":"<tab>"}}'` followed by
+  `curl -s -X POST ... -H "Authorization: Bearer $CAPABILITY" -d '{"command":"capture-page","params":{"name":"<tab>"}}'` → PNG path returned; open and compare against the skill's tokens/patterns.
 - **Commit + push to `main` after each slice**, message naming the slice.
 
 ---

@@ -3,31 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file: videorc-asset: http://127.0.0.1:* http://localhost:*; font-src 'self' data:; media-src 'self' data: blob: file: videorc-asset:; connect-src 'self' videorc-asset: https://www.videorc.com http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
     <link rel="icon" type="image/png" href="./src/assets/videorc-logo.png" />
     <title>Videorc</title>
   </head>
   <body>
     <div id="root"></div>
-    <script>
-      // Theme pre-hydration: next-themes applies the `.dark` class only after
-      // React mounts, but :root CSS defaults to the LIGHT palette — without
-      // this the first frame can flash light before recoloring. Resolve the
-      // stored theme (same key/default as the ThemeProvider in App.tsx)
-      // before the bundle loads so frame one is already the right theme.
-      ;(() => {
-        try {
-          const stored = window.localStorage.getItem('videorc.theme')
-          const dark =
-            stored === 'system'
-              ? window.matchMedia('(prefers-color-scheme: dark)').matches
-              : stored !== 'light'
-          document.documentElement.classList.add(dark ? 'dark' : 'light')
-          document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
-        } catch {
-          document.documentElement.classList.add('dark')
-        }
-      })()
-    </script>
+    <script type="module" src="/theme-bootstrap.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

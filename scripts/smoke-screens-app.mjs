@@ -1,9 +1,10 @@
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp } from './lib/app-launcher.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
@@ -18,8 +19,7 @@ const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 
 mkdirSync(outputDirectory, { recursive: true })
 
-let appProcess
-let stopping = false
+let stopApp = async () => {}
 
 try {
   const redPath = join(outputDirectory, 'screen-red.png')
@@ -27,7 +27,19 @@ try {
   createSolidPng('red', redPath)
   createSolidPng('lime', greenPath)
 
-  const connection = await launchAndReadConnection()
+  const launch = await launchDevApp({
+    env: {
+      VIDEORC_SMOKE_COMMAND_SERVER: '1',
+      VIDEORC_SMOKE_STATE_DIR: outputDirectory,
+      VIDEORC_USER_DATA_DIR: userDataDir
+    },
+    timeoutMs,
+    requiredMarkers: ['backend-ready', 'preview-motion-ready'],
+    onLine: (line) => console.log(line)
+  })
+  stopApp = launch.stop
+  const connection = launch.connections['backend-ready']
+  const smoke = launch.connections['preview-motion-ready']
   const ws = await connectBackend(connection, timeoutMs)
   const statuses = []
   ws.addEventListener('message', (event) => {
@@ -50,15 +62,29 @@ try {
     }
     console.log(`Screens smoke using FFmpeg: ${ffmpegPath}`)
 
+    const redSource = await authorizeSmokeResource(smoke, redPath, 'input-file')
+    const greenSource = await authorizeSmokeResource(smoke, greenPath, 'input-file')
+    const recordingDirectory = await authorizeSmokeResource(
+      smoke,
+      outputDirectory,
+      'output-directory'
+    )
+
     await request(ws, timeoutMs, 'screens.clear')
-    redScreen = await request(ws, timeoutMs, 'screens.importImage', { path: redPath, ffmpegPath })
+    redScreen = await request(ws, timeoutMs, 'screens.importImage', {
+      sourceCapability: redSource.capabilityId
+    })
     greenScreen = await request(ws, timeoutMs, 'screens.importImage', {
-      path: greenPath,
-      ffmpegPath
+      sourceCapability: greenSource.capabilityId
     })
 
     await request(ws, timeoutMs, 'screens.activate', { screenId: redScreen.id })
-    const started = await request(ws, timeoutMs, 'session.start', sessionParams())
+    const started = await request(
+      ws,
+      timeoutMs,
+      'session.start',
+      sessionParams(recordingDirectory.capabilityId)
+    )
     if (!['recording', 'streaming'].includes(started.state)) {
       throw new Error(`Expected recording state after start, got ${started.state}.`)
     }
@@ -209,7 +235,7 @@ async function assertSameRunningSession(ws, sessionId) {
   }
 }
 
-function sessionParams() {
+function sessionParams(outputDirectoryCapability) {
   return {
     sources: { testPattern: true },
     layout: {
@@ -231,70 +257,15 @@ function sessionParams() {
     output: {
       recordEnabled: true,
       streamEnabled: false,
-      outputDirectory,
-      ffmpegPath,
+      outputDirectoryCapability,
       video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 },
       rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
     }
   }
 }
 
-function launchAndReadConnection() {
-  return new Promise((resolveConnection, rejectConnection) => {
-    const timer = setTimeout(() => {
-      rejectConnection(new Error(`Timed out waiting for dev backend READY after ${timeoutMs}ms.`))
-    }, timeoutMs)
-
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
-      detached: true,
-      env: smokeAppEnv({
-        VIDEORC_USER_DATA_DIR: userDataDir,
-        VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
-      }),
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-
-    appProcess.stdout.setEncoding('utf8')
-    appProcess.stderr.setEncoding('utf8')
-    appProcess.stdout.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.stderr.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.on('error', (error) => {
-      clearTimeout(timer)
-      rejectConnection(error)
-    })
-    appProcess.on('exit', (code, signal) => {
-      clearTimeout(timer)
-      rejectConnection(
-        new Error(`Dev app exited before Screens smoke completed: code=${code} signal=${signal}`)
-      )
-    })
-  })
-}
-
-function handleAppOutput(text, resolveConnection, timer) {
-  for (const line of text.split(/\r?\n/)) {
-    if (line.trim() && !stopping) {
-      console.log(line)
-    }
-
-    const marker = '[smoke] backend-ready '
-    const index = line.indexOf(marker)
-    if (index === -1) {
-      continue
-    }
-
-    clearTimeout(timer)
-    resolveConnection(JSON.parse(line.slice(index + marker.length)))
-  }
-}
-
-async function stopApp() {
-  if (!appProcess?.pid || appProcess.killed) {
-    return
-  }
-  stopping = true
-  await stopProcess(appProcess)
+function authorizeSmokeResource(smoke, path, kind) {
+  return requestSmokeCommand(smoke, 'authorize-smoke-resource', { path, kind }, { timeoutMs })
 }
 
 function sleep(ms) {

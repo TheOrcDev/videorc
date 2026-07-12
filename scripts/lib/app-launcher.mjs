@@ -12,7 +12,9 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+
+import { assertSmokeCommandConnection } from './smoke-command-client.mjs'
 
 export const repoRoot = resolve(import.meta.dirname, '..', '..')
 
@@ -31,14 +33,15 @@ export function performanceAppSpawnSpec(env = process.env) {
 
 export function resolveSmokeAppDirs({ env = {}, statePrefix = 'videorc-smoke' } = {}) {
   const stateDir =
-    smokeEnvValue(env, 'VIDEORC_SMOKE_STATE_DIR') ?? smokeEnvValue(env, 'VIDEORC_SMOKE_OUTPUT_DIR')
+    explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_STATE_DIR') ??
+    explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_OUTPUT_DIR')
   const appDataDir =
-    smokeEnvValue(env, 'VIDEORC_APP_DATA_DIR') ??
+    explicitSmokeEnvValue(env, 'VIDEORC_APP_DATA_DIR') ??
     (stateDir
       ? join(resolve(stateDir), 'app-data')
       : mkdtempSync(join(tmpdir(), `${statePrefix}-app-data-`)))
   const userDataDir =
-    smokeEnvValue(env, 'VIDEORC_USER_DATA_DIR') ??
+    explicitSmokeEnvValue(env, 'VIDEORC_USER_DATA_DIR') ??
     (stateDir
       ? join(resolve(stateDir), 'user-data')
       : mkdtempSync(join(tmpdir(), `${statePrefix}-user-data-`)))
@@ -50,7 +53,16 @@ export function smokeAppEnv(env = {}, options = {}) {
     env,
     statePrefix: options.statePrefix
   })
-  return {
+  const explicitStateDir = explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_STATE_DIR')
+  const explicitOutputDir = explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_OUTPUT_DIR')
+  const isolationRoots = Array.from(
+    new Set(
+      [explicitStateDir, explicitOutputDir, appDataDir, userDataDir]
+        .filter(Boolean)
+        .map((path) => resolve(path))
+    )
+  )
+  const result = {
     ...process.env,
     ...env,
     VIDEORC_SMOKE_PRINT_BACKEND_READY:
@@ -64,11 +76,58 @@ export function smokeAppEnv(env = {}, options = {}) {
     // and writes the REAL user profile — 2026-07-01 this filled the user's DB
     // with smoke test-pattern sessions and their preview showed the smoke's
     // bars. Full isolation or none.
-    VIDEORC_DATABASE_PATH:
-      smokeEnvValue(env, 'VIDEORC_DATABASE_PATH') ?? join(appDataDir, 'videorc.sqlite3'),
-    VIDEORC_SECRETS_PATH:
-      smokeEnvValue(env, 'VIDEORC_SECRETS_PATH') ?? join(appDataDir, 'videorc-secrets.json')
+    VIDEORC_DATABASE_PATH: isolatedSmokePath(
+      env,
+      'VIDEORC_DATABASE_PATH',
+      join(appDataDir, 'videorc.sqlite3'),
+      isolationRoots
+    ),
+    VIDEORC_SECRETS_PATH: isolatedSmokePath(
+      env,
+      'VIDEORC_SECRETS_PATH',
+      join(appDataDir, 'videorc-secrets.json'),
+      isolationRoots
+    ),
+    VIDEORC_RECORDINGS_DIR: isolatedSmokePath(
+      env,
+      'VIDEORC_RECORDINGS_DIR',
+      join(appDataDir, 'recordings'),
+      isolationRoots
+    )
   }
+  // Ambient smoke roots are just as unsafe as ambient state-file overrides:
+  // a parent shell must not silently redirect a new harness into an older run.
+  if (!explicitStateDir) delete result.VIDEORC_SMOKE_STATE_DIR
+  if (!explicitOutputDir) delete result.VIDEORC_SMOKE_OUTPUT_DIR
+  return result
+}
+
+function isolatedSmokePath(env, name, fallback, roots) {
+  const explicitPath = explicitSmokeEnvValue(env, name)
+  if (!explicitPath) return resolve(fallback)
+  const candidate = resolve(explicitPath)
+  if (!isPathInsideAnyRoot(candidate, roots)) {
+    throw new Error(`${name} must be inside this smoke run's isolated state directories.`)
+  }
+  return candidate
+}
+
+function isPathInsideAnyRoot(candidate, roots) {
+  if (!isAbsolute(candidate)) return false
+  return roots.some((root) => {
+    const relativePath = relative(resolve(root), candidate)
+    return (
+      relativePath.length > 0 &&
+      relativePath !== '..' &&
+      !relativePath.startsWith(`..${sep}`) &&
+      !isAbsolute(relativePath)
+    )
+  })
+}
+
+function explicitSmokeEnvValue(env, name) {
+  const value = Object.prototype.hasOwnProperty.call(env, name) ? env[name] : undefined
+  return typeof value === 'string' && value.trim() ? value : undefined
 }
 
 function smokeEnvValue(env, name) {
@@ -157,12 +216,25 @@ export function launchDevApp({
         if (spaceIdx === -1) continue
         const marker = rest.slice(0, spaceIdx)
         if (!requiredMarkers.includes(marker)) continue
+        let connection
         try {
-          connections[marker] = JSON.parse(rest.slice(spaceIdx + 1))
-          settleIfReady()
+          connection = JSON.parse(rest.slice(spaceIdx + 1))
         } catch {
           // A non-JSON tail for a known marker: ignore and keep waiting.
+          continue
         }
+        if (marker === 'preview-motion-ready') {
+          try {
+            assertSmokeCommandConnection(connection)
+          } catch (error) {
+            void rejectAfterStop(
+              `Invalid [smoke] preview-motion-ready marker: ${error?.message ?? error}`
+            )
+            return
+          }
+        }
+        connections[marker] = connection
+        settleIfReady()
       }
     }
 

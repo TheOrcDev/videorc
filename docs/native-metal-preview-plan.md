@@ -1,5 +1,13 @@
 # Native Metal Preview + GPU Compositor — Integration Plan (Phases 2 & 3)
 
+> Historical implementation plan, reconciled 2026-07-12. Production macOS
+> preview is now the detached native CAMetalLayer path described by
+> `AGENTS.md`; JPEG/MJPEG/PNG routes are debug or fallback paths only. Windows
+> does not claim CAMetalLayer: its contained proof surface uses an uncompressed,
+> latest-wins BMP frame transport, with production PNG requests rejected and
+> counted diagnostically. The phase narrative below records how the macOS path
+> was built and is not the current runtime ownership contract.
+
 This is the remaining native integration for the OBS Quality Root Fix. The GPU
 compositor **core** is implemented and tested on-device (`metal_compositor.rs`:
 device → render pipeline → textured-quad composite → readback, verified on Apple M4).

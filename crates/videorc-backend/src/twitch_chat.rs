@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::live_chat::{
     LiveChatEventType, LiveChatMessage, LiveChatMessageFragment, LiveChatProviderConnectionState,
-    ProviderSendReceipt, deliver_message, live_chat_message_id, set_provider_and_emit,
+    ProviderSendReceipt, live_chat_message_id, set_provider_and_emit, try_deliver_message,
 };
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
@@ -594,7 +594,7 @@ fn next_backoff_ms(current: u64) -> u64 {
 
 enum SessionOutcome {
     Reconnect(Option<String>),
-    Fatal(&'static str),
+    Fatal(String),
 }
 
 async fn create_subscriptions(
@@ -659,7 +659,8 @@ async fn run_eventsub_session(
                         .is_err()
                     {
                         return SessionOutcome::Fatal(
-                            "Could not subscribe to Twitch live chat. Reconnect Twitch to enable live comments.",
+                            "Could not subscribe to Twitch live chat. Reconnect Twitch to enable live comments."
+                                .to_string(),
                         );
                     }
                     set_provider_and_emit(
@@ -686,7 +687,7 @@ async fn run_eventsub_session(
                         session_id,
                         config.target_id.as_deref(),
                         &now,
-                    ) && seen.insert(message.provider_message_id.clone())
+                    ) && !seen.contains(&message.provider_message_id)
                     {
                         // EventSub carries no avatar; backfill once per chatter
                         // (Comments window upgrade S1).
@@ -696,7 +697,50 @@ async fn run_eventsub_session(
                             message.author_avatar_url =
                                 avatars.lookup(client, config, &author_id).await;
                         }
-                        deliver_message(state, message).await;
+                        let provider_message_id = message.provider_message_id.clone();
+                        let mut persistence_backoff_ms = MIN_BACKOFF_MS;
+                        let mut waited_for_storage = false;
+                        loop {
+                            match try_deliver_message(state, message.clone()).await {
+                                Ok(()) => break,
+                                Err(error) if error.is_terminal() => {
+                                    return SessionOutcome::Fatal(format!(
+                                        "Twitch live chat stopped because comments storage failed: {error}"
+                                    ));
+                                }
+                                Err(error) => {
+                                    // EventSub WebSockets do not guarantee notification
+                                    // replay. Retain this exact normalized message locally,
+                                    // release global delivery ordering between attempts, and
+                                    // retry it before reading a later Twitch frame.
+                                    waited_for_storage = true;
+                                    set_provider_and_emit(
+                                        state,
+                                        StreamPlatform::Twitch,
+                                        config.target_id.as_deref(),
+                                        LiveChatProviderConnectionState::Waiting,
+                                        &format!(
+                                            "Waiting for comments storage before accepting more Twitch messages: {error}"
+                                        ),
+                                    )
+                                    .await;
+                                    sleep(Duration::from_millis(persistence_backoff_ms)).await;
+                                    persistence_backoff_ms =
+                                        next_backoff_ms(persistence_backoff_ms);
+                                }
+                            }
+                        }
+                        if waited_for_storage {
+                            set_provider_and_emit(
+                                state,
+                                StreamPlatform::Twitch,
+                                config.target_id.as_deref(),
+                                LiveChatProviderConnectionState::Connected,
+                                "Twitch live chat connected; comments storage recovered.",
+                            )
+                            .await;
+                        }
+                        seen.insert(provider_message_id);
                     }
                 }
                 EventSubFrame::Reconnect { reconnect_url } => {
@@ -704,7 +748,8 @@ async fn run_eventsub_session(
                 }
                 EventSubFrame::Revocation => {
                     return SessionOutcome::Fatal(
-                        "Twitch revoked live chat access. Reconnect Twitch to enable live comments.",
+                        "Twitch revoked live chat access. Reconnect Twitch to enable live comments."
+                            .to_string(),
                     );
                 }
                 EventSubFrame::Keepalive | EventSubFrame::Unknown => {}
@@ -780,7 +825,7 @@ pub async fn run_twitch_chat_connector(
                     StreamPlatform::Twitch,
                     config.target_id.as_deref(),
                     LiveChatProviderConnectionState::Failed,
-                    message,
+                    &message,
                 )
                 .await;
                 return;
@@ -793,6 +838,7 @@ pub async fn run_twitch_chat_connector(
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::extract::State;
     use axum::extract::ws::{Message as AxumMessage, WebSocketUpgrade};
@@ -805,6 +851,7 @@ mod tests {
     use crate::live_chat::{
         LiveChatProviderConnectionState, LiveChatProviderState, current_status,
     };
+    use crate::live_chat_persistence::{BatchWriter, LiveChatPersistence};
     use crate::storage::Database;
 
     #[derive(Clone)]
@@ -895,10 +942,17 @@ mod tests {
     #[derive(Clone)]
     struct MockTwitchServerState {
         subscriptions: Arc<Mutex<Vec<Value>>>,
+        socket_connections: Arc<AtomicUsize>,
+        notifications_sent: Arc<AtomicUsize>,
+        replay_notifications: bool,
     }
 
-    async fn mock_eventsub_ws(ws: WebSocketUpgrade) -> impl IntoResponse {
-        ws.on_upgrade(|mut socket| async move {
+    async fn mock_eventsub_ws(
+        State(state): State<MockTwitchServerState>,
+        ws: WebSocketUpgrade,
+    ) -> impl IntoResponse {
+        state.socket_connections.fetch_add(1, Ordering::SeqCst);
+        ws.on_upgrade(move |mut socket| async move {
             let welcome = json!({
                 "metadata": { "message_type": "session_welcome" },
                 "payload": { "session": { "id": "socket-session-1" } }
@@ -906,9 +960,20 @@ mod tests {
             .to_string();
             let _ = socket.send(AxumMessage::Text(welcome.into())).await;
             sleep(Duration::from_millis(100)).await;
-            let _ = socket
-                .send(AxumMessage::Text(chat_message_frame().into()))
-                .await;
+            let should_send = if state.replay_notifications {
+                state.notifications_sent.fetch_add(1, Ordering::SeqCst);
+                true
+            } else {
+                state
+                    .notifications_sent
+                    .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            };
+            if should_send {
+                let _ = socket
+                    .send(AxumMessage::Text(chat_message_frame().into()))
+                    .await;
+            }
             sleep(Duration::from_millis(100)).await;
         })
     }
@@ -929,11 +994,46 @@ mod tests {
         }))
     }
 
-    async fn spawn_mock_twitch_server()
-    -> (String, String, Arc<Mutex<Vec<Value>>>, oneshot::Sender<()>) {
+    async fn spawn_mock_twitch_server() -> (
+        String,
+        String,
+        Arc<Mutex<Vec<Value>>>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        oneshot::Sender<()>,
+    ) {
+        spawn_mock_twitch_server_with_notification_replay(true).await
+    }
+
+    async fn spawn_mock_twitch_server_sending_notification_once() -> (
+        String,
+        String,
+        Arc<Mutex<Vec<Value>>>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        oneshot::Sender<()>,
+    ) {
+        spawn_mock_twitch_server_with_notification_replay(false).await
+    }
+
+    async fn spawn_mock_twitch_server_with_notification_replay(
+        replay_notifications: bool,
+    ) -> (
+        String,
+        String,
+        Arc<Mutex<Vec<Value>>>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        oneshot::Sender<()>,
+    ) {
         let subscriptions = Arc::new(Mutex::new(Vec::new()));
+        let socket_connections = Arc::new(AtomicUsize::new(0));
+        let notifications_sent = Arc::new(AtomicUsize::new(0));
         let state = MockTwitchServerState {
             subscriptions: subscriptions.clone(),
+            socket_connections: socket_connections.clone(),
+            notifications_sent: notifications_sent.clone(),
+            replay_notifications,
         };
         let app = Router::new()
             .route("/eventsub", get(mock_eventsub_ws))
@@ -956,6 +1056,8 @@ mod tests {
             format!("http://{addr}"),
             format!("ws://{addr}/eventsub"),
             subscriptions,
+            socket_connections,
+            notifications_sent,
             shutdown_tx,
         )
     }
@@ -1001,6 +1103,62 @@ mod tests {
             if std::time::Instant::now() > deadline {
                 panic!("timed out waiting for mocked Twitch chat message: {snapshot:?}");
             }
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn wait_for_persistence_rejection(state: &AppState) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if state.recent_logs(16).iter().any(|entry| {
+                entry
+                    .message
+                    .contains("exact-message retry remains eligible")
+            }) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for forced Twitch persistence rejection"
+            );
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn wait_for_persisted_message(state: &AppState, provider_message_id: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if state
+                .database
+                .list_live_chat_messages_recent("session-1", 10)
+                .unwrap()
+                .iter()
+                .any(|message| message.provider_message_id == provider_message_id)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for durable Twitch message {provider_message_id}"
+            );
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn wait_for_terminal_storage_failure(state: &AppState) -> LiveChatProviderState {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = current_status(state).await;
+            if let Some(provider) = snapshot.providers.into_iter().find(|provider| {
+                provider.platform == StreamPlatform::Twitch
+                    && provider.state == LiveChatProviderConnectionState::Failed
+            }) {
+                return provider;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for terminal Twitch comments-storage failure"
+            );
             sleep(Duration::from_millis(25)).await;
         }
     }
@@ -1081,9 +1239,19 @@ mod tests {
 
     #[tokio::test]
     async fn eventsub_session_subscribes_and_delivers_chat_message() {
-        let (api_base_url, eventsub_ws_url, subscriptions, shutdown) =
-            spawn_mock_twitch_server().await;
+        let (
+            api_base_url,
+            eventsub_ws_url,
+            subscriptions,
+            _socket_connections,
+            _notifications_sent,
+            shutdown,
+        ) = spawn_mock_twitch_server().await;
         let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
         {
             let mut coordinator = state.live_chat.lock().await;
             coordinator.start_session("session-1".to_string(), vec![twitch_provider_row()]);
@@ -1136,6 +1304,114 @@ mod tests {
                 "missing mocked subscription type {subscription_type}: {subscription_types:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn persistence_rejection_retries_retained_twitch_message_without_server_replay() {
+        let (
+            api_base_url,
+            eventsub_ws_url,
+            _subscriptions,
+            socket_connections,
+            notifications_sent,
+            shutdown,
+        ) = spawn_mock_twitch_server_sending_notification_once().await;
+        let state = test_state();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-1".to_string(), vec![twitch_provider_row()]);
+
+        let connector = tokio::spawn(run_twitch_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            TwitchChatConfig {
+                access_token: "token-1".to_string(),
+                client_id: "client-1".to_string(),
+                broadcaster_user_id: "broadcaster-1".to_string(),
+                user_id: "user-1".to_string(),
+                target_id: Some("twitch".to_string()),
+                eventsub_ws_url: Some(eventsub_ws_url),
+                api_base_url: Some(api_base_url),
+            },
+        ));
+
+        wait_for_persistence_rejection(&state).await;
+        assert!(current_status(&state).await.messages.is_empty());
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
+        let snapshot = wait_for_twitch_message(&state).await;
+        wait_for_persisted_message(&state, "chat-1").await;
+        connector.abort();
+        let _ = shutdown.send(());
+
+        assert_eq!(snapshot.messages.len(), 1);
+        assert_eq!(snapshot.messages[0].provider_message_id, "chat-1");
+        assert_eq!(notifications_sent.load(Ordering::SeqCst), 1);
+        assert_eq!(socket_connections.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state
+                .database
+                .list_live_chat_messages_recent("session-1", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_storage_failure_marks_twitch_failed_instead_of_reconnecting_forever() {
+        let (
+            api_base_url,
+            eventsub_ws_url,
+            _subscriptions,
+            _socket_connections,
+            _notifications_sent,
+            shutdown,
+        ) = spawn_mock_twitch_server().await;
+        let mut state = test_state();
+        let writer: BatchWriter = Arc::new(|_| {
+            Err(anyhow::Error::new(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ErrorCode::DatabaseCorrupt,
+                    extended_code: 11,
+                },
+                Some("injected corrupt comments database".to_string()),
+            )))
+        });
+        state.live_chat_persistence = LiveChatPersistence::with_writer(writer);
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-1".to_string(), vec![twitch_provider_row()]);
+
+        let connector = tokio::spawn(run_twitch_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            TwitchChatConfig {
+                access_token: "token-1".to_string(),
+                client_id: "client-1".to_string(),
+                broadcaster_user_id: "broadcaster-1".to_string(),
+                user_id: "user-1".to_string(),
+                target_id: Some("twitch".to_string()),
+                eventsub_ws_url: Some(eventsub_ws_url),
+                api_base_url: Some(api_base_url),
+            },
+        ));
+
+        let provider = wait_for_terminal_storage_failure(&state).await;
+        tokio::time::timeout(Duration::from_secs(5), connector)
+            .await
+            .expect("terminal Twitch connector stopped")
+            .expect("terminal Twitch connector joined");
+        let _ = shutdown.send(());
+
+        assert!(provider.message.contains("comments storage failed"));
+        assert!(current_status(&state).await.messages.is_empty());
     }
 
     #[test]

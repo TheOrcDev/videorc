@@ -9,7 +9,7 @@ import {
   SpeakerSlash,
   type Icon
 } from '@phosphor-icons/react'
-import type { ReactElement, ReactNode } from 'react'
+import { Suspense, lazy, type ReactElement, type ReactNode } from 'react'
 
 import { SourceSelect } from '@/components/source-select'
 import { Button } from '@/components/ui/button'
@@ -35,18 +35,40 @@ import {
   capturePickerDevices,
   microphonePickerDevices,
   layoutPresetNeedsCamera,
-  layoutPresetNeedsScreen
+  layoutPresetNeedsScreen,
+  layoutPresetOrientation
 } from '@/lib/capture'
 
-const QUICK_PRESETS: { id: LayoutPreset; label: string }[] = [
+// Lazy like the tab chunks (app-shell): the preview (and the live-waveform it
+// pulls in) loads on first popover open, keeping it out of the eager renderer
+// bundle (check:renderer-assets budget).
+const MicPickerPreview = lazy(async () => ({
+  default: (await import('@/components/studio/mic-picker-preview')).MicPickerPreview
+}))
+
+// Mode-scoped like the Scenes gallery: the picker offers only the current
+// orientation's scenes (the gallery's header toggle is the one home for
+// switching modes — one-home-per-control).
+const HORIZONTAL_QUICK_PRESETS: { id: LayoutPreset; label: string }[] = [
   { id: 'screen-camera', label: 'Screen + Cam' },
   { id: 'screen-only', label: 'Screen' },
   { id: 'camera-only', label: 'Camera' },
   { id: 'side-by-side', label: 'Side by side' }
 ]
 
+const VERTICAL_QUICK_PRESETS: { id: LayoutPreset; label: string }[] = [
+  { id: 'vertical-camera-top', label: 'Camera top' },
+  { id: 'vertical-camera-bottom', label: 'Camera bottom' },
+  { id: 'vertical-split', label: 'Split' },
+  { id: 'vertical-screen-camera', label: 'Screen + Cam' },
+  { id: 'vertical-screen-only', label: 'Screen' }
+]
+
 function presetLabel(preset: LayoutPreset): string {
-  return QUICK_PRESETS.find((entry) => entry.id === preset)?.label ?? preset
+  return (
+    [...HORIZONTAL_QUICK_PRESETS, ...VERTICAL_QUICK_PRESETS].find((entry) => entry.id === preset)
+      ?.label ?? preset
+  )
 }
 
 // Resolution options mirroring the Output tab (recording-tab.tsx); picking one
@@ -55,7 +77,8 @@ const RESOLUTIONS = [
   { label: '4K', detail: '3840 × 2160', width: 3840, height: 2160 },
   { label: '2K', detail: '2560 × 1440', width: 2560, height: 1440 },
   { label: '1080p', detail: '1920 × 1080', width: 1920, height: 1080 },
-  { label: '720p', detail: '1280 × 720', width: 1280, height: 720 }
+  { label: '720p', detail: '1280 × 720', width: 1280, height: 720 },
+  { label: 'Vertical', detail: '1080 × 1920', width: 1080, height: 1920 }
 ]
 
 function resolutionKey(width: number, height: number): string {
@@ -218,6 +241,12 @@ export function QuickSettings(): ReactElement {
                 }))
               }
             />
+            {/* See-before-you-pick: live waveform of the selected mic while the
+                popover is open. Mounted only with the popover, so the preview
+                stream releases the device on close. */}
+            <Suspense fallback={<div className="h-[38px] rounded-row border bg-muted/20" />}>
+              <MicPickerPreview deviceName={selectedMicrophone?.name} />
+            </Suspense>
             {selectedMicrophone ? (
               <Button
                 aria-pressed={muted}
@@ -250,7 +279,10 @@ export function QuickSettings(): ReactElement {
           </PopoverTrigger>
           <PopoverContent align="start" className="w-64 p-2">
             <div className="grid grid-cols-2 gap-1.5">
-              {QUICK_PRESETS.map((preset) => (
+              {(layoutPresetOrientation(captureConfig.layout.layoutPreset) === 'vertical'
+                ? VERTICAL_QUICK_PRESETS
+                : HORIZONTAL_QUICK_PRESETS
+              ).map((preset) => (
                 <Button
                   key={preset.id}
                   disabled={

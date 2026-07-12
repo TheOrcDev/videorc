@@ -5,10 +5,13 @@ How to develop and verify Videorc on a Windows box. First proven on-box
 
 ## One-time setup
 
-Prerequisites: Node 22+, pnpm 11 (`packageManager` pin), Rust stable with the
-MSVC toolchain (Visual Studio Build Tools), git.
+Prerequisites: Node 24.x (the `.node-version` and `engines` line used by CI),
+Rust stable with the MSVC toolchain (Visual Studio Build Tools), and git.
+Corepack installs the repository's pinned pnpm 11 version.
 
 ```powershell
+corepack enable
+corepack install
 pnpm install
 pnpm ffmpeg:fetch:windows   # pinned LGPL FFmpeg -> vendor/ffmpeg/windows-x64
 ```
@@ -81,6 +84,19 @@ $env:VIDEORC_ALLOW_UNSUPPORTED_WINDOWS = '1'
 pnpm smoke:dev
 ```
 
+Packaged native-screen acceptance (requires `VIDEORC_PERF_APP_EXECUTABLE` plus
+the bundled FFmpeg/FFprobe paths, as configured in `.github/workflows/windows.yml`):
+
+```powershell
+pnpm smoke:windows-native-screen
+pnpm smoke:recording-native-preview
+```
+
+The first command selects DXGI (gdigrab fallback), validates decoded BMP pixels
+and frame advancement during a real ScreenOnly recording, then inspects the final
+artifact. The second keeps the detached Electron proof surface mounted and fed by
+that real source throughout recording.
+
 Full Windows merge gate (release build + package + packaged smoke; slow):
 
 ```powershell
@@ -106,9 +122,11 @@ Learned on-box 2026-07-08; encoded in `scripts/lib/app-launcher.mjs`:
   `basename()` instead of `split('/')` for path math (`recording-analyzer.mjs`).
 - Do **not** write package scripts as `VAR=1 node script.mjs` — pnpm on Windows
   runs those through `cmd.exe`, which treats `VAR=1` as a command name
-  (`'VAR' is not recognized…`). Prefer CLI flags (e.g.
-  `node scripts/smoke-packaged-app.mjs --require-bundled-ffmpeg`) or set env in
-  the parent Node `spawn({ env })`.
+  (`'VAR' is not recognized…`). Package aliases use the dependency-free
+  `scripts/run-with-env.mjs` launcher instead. Its `--platform=darwin` guard
+  makes macOS-only capture and VideoToolbox aliases fail with a clear message
+  before they spawn anything. Prefer ordinary CLI flags when the script already
+  exposes them, or set env in the parent Node `spawn({ env })`.
 
 ## electron-builder winCodeSign / symlink privilege
 

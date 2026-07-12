@@ -3,7 +3,28 @@ import { once } from 'node:events'
 import { createServer } from 'node:http'
 import test from 'node:test'
 
-import { requestSmokeCommand, requestSmokeCommandWithRetry } from './smoke-command-client.mjs'
+import {
+  assertSmokeCommandConnection,
+  requestSmokeCommand,
+  requestSmokeCommandWithRetry
+} from './smoke-command-client.mjs'
+
+const capability = 'a'.repeat(43)
+
+test('assertSmokeCommandConnection requires a loopback endpoint and per-run capability', () => {
+  assert.deepEqual(
+    assertSmokeCommandConnection({ host: '127.0.0.1', port: 41_234, capability }),
+    { host: '127.0.0.1', port: 41_234, capability }
+  )
+  assert.throws(
+    () => assertSmokeCommandConnection({ host: '127.0.0.1', port: 41_234 }),
+    /per-run capability/
+  )
+  assert.throws(
+    () => assertSmokeCommandConnection({ host: '0.0.0.0', port: 41_234, capability }),
+    /loopback/
+  )
+})
 
 test('requestSmokeCommand uses a one-shot connection and returns the command result', async (t) => {
   const requests = []
@@ -15,6 +36,7 @@ test('requestSmokeCommand uses a one-shot connection and returns the command res
     })
     request.on('end', () => {
       requests.push({
+        authorization: request.headers.authorization,
         connection: request.headers.connection,
         body: JSON.parse(body)
       })
@@ -31,7 +53,7 @@ test('requestSmokeCommand uses a one-shot connection and returns the command res
   assert.equal(typeof address, 'object')
 
   const result = await requestSmokeCommand(
-    { host: '127.0.0.1', port: address.port },
+    { host: '127.0.0.1', port: address.port, capability },
     'preview-window-state',
     { generation: 7 }
   )
@@ -39,6 +61,7 @@ test('requestSmokeCommand uses a one-shot connection and returns the command res
   assert.deepEqual(result, { open: true })
   assert.deepEqual(requests, [
     {
+      authorization: `Bearer ${capability}`,
       connection: 'close',
       body: {
         command: 'preview-window-state',
@@ -64,7 +87,11 @@ test('requestSmokeCommand surfaces a command-server error without replaying it',
   assert.equal(typeof address, 'object')
 
   await assert.rejects(
-    requestSmokeCommand({ host: '127.0.0.1', port: address.port }, 'preview-window-toggle', {}),
+    requestSmokeCommand(
+      { host: '127.0.0.1', port: address.port, capability },
+      'preview-window-toggle',
+      {}
+    ),
     /preview generation is stale/
   )
   assert.equal(requestCount, 1)
@@ -95,7 +122,7 @@ test('requestSmokeCommandWithRetry recovers a target-state command after ECONNRE
   assert.equal(typeof address, 'object')
 
   const result = await requestSmokeCommandWithRetry(
-    { host: '127.0.0.1', port: address.port },
+    { host: '127.0.0.1', port: address.port, capability },
     'preview-window-toggle',
     { expectedOpen: true },
     { timeoutMs: 1000, retryDelayMs: 1 }

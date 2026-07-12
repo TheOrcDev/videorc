@@ -3,8 +3,14 @@ import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
+import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
+import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 
-const SMOKE_VIDEO_FPS = 30
+const SMOKE_VIDEO_FPS = positiveInteger(process.env.VIDEORC_SMOKE_VIDEO_FPS, 30)
+const SMOKE_VIDEO_WIDTH = positiveInteger(process.env.VIDEORC_SMOKE_VIDEO_WIDTH, 640)
+const SMOKE_VIDEO_HEIGHT = positiveInteger(process.env.VIDEORC_SMOKE_VIDEO_HEIGHT, 360)
+const SMOKE_VIDEO_BITRATE_KBPS = positiveInteger(process.env.VIDEORC_SMOKE_VIDEO_BITRATE_KBPS, 2000)
 const TEST_PATTERN_GATES = Object.freeze({
   // Synthetic source/layout smoke proves file health and timing. Some synthetic
   // layouts are intentionally static, so motion artifacts remain warnings here.
@@ -15,18 +21,37 @@ export const LAYOUT_PRESET_SCENARIOS = [
   { preset: 'screen-camera', label: 'Screen + camera' },
   { preset: 'screen-only', label: 'Screen only' },
   { preset: 'camera-only', label: 'Camera only' },
-  { preset: 'side-by-side', label: 'Side-by-side' }
+  { preset: 'side-by-side', label: 'Side-by-side' },
+  // The vertical scenes record a true PORTRAIT canvas and the artifact's
+  // probed dimensions are asserted below — a vertical scene that silently
+  // produced landscape pixels must fail here. 720x1280 is the smallest exact
+  // 9:16 canvas inside the backend's resolution bounds (width >= 640). One
+  // stacked and one inset scenario record real artifacts; the remaining
+  // vertical arrangements (camera-bottom, split, screen-only) are covered at
+  // scene-fixture and FFmpeg-filter level plus the layout-source-loop smoke.
+  {
+    preset: 'vertical-camera-top',
+    label: 'Vertical camera top 9:16',
+    video: { width: 720, height: 1280 }
+  },
+  {
+    preset: 'vertical-screen-camera',
+    label: 'Vertical screen + camera 9:16',
+    video: { width: 720, height: 1280 }
+  }
 ]
 
 export async function runBackendRecordingSmoke({
   connection,
   ffmpegPath,
-  ffprobePath = resolveSiblingFfprobe(ffmpegPath) ?? 'ffprobe',
+  ffprobePath = siblingFfprobePath(ffmpegPath) ?? 'ffprobe',
   outputDirectory,
   timeoutMs = 45000,
   recordingMs = 2000,
   label = 'App',
   analyze = true,
+  smoke,
+  bundledBackground,
   onHealth,
   scenarios = LAYOUT_PRESET_SCENARIOS
 }) {
@@ -61,27 +86,111 @@ export async function runBackendRecordingSmoke({
           ffmpegPath,
           ffprobePath,
           analyze,
+          smoke,
           scenario
         })
       )
     }
-    results.push(
-      await recordAssetBackgroundScenario({
-        ws,
-        timeoutMs,
-        recordingMs,
-        label,
-        outputDirectory,
-        ffmpegPath,
-        ffprobePath,
-        analyze
-      })
-    )
+    if (smoke) {
+      results.push(
+        await recordAssetBackgroundScenario({
+          ws,
+          smoke,
+          timeoutMs,
+          recordingMs,
+          label,
+          outputDirectory,
+          ffmpegPath,
+          ffprobePath,
+          analyze
+        })
+      )
+    } else {
+      console.log(`${label} smoke asset-background scenario skipped: no dev smoke authority.`)
+    }
+    if (bundledBackground) {
+      results.push(
+        await recordBundledBackgroundScenario({
+          ws,
+          timeoutMs,
+          recordingMs,
+          label,
+          outputDirectory,
+          ffmpegPath,
+          ffprobePath,
+          analyze,
+          bundledBackground
+        })
+      )
+    }
     await assertSessionPoster({ ws, connection, timeoutMs, ffmpegPath, label })
     return results
   } finally {
     ws?.close()
   }
+}
+
+async function recordBundledBackgroundScenario({
+  ws,
+  timeoutMs,
+  recordingMs,
+  label,
+  outputDirectory,
+  ffmpegPath,
+  ffprobePath,
+  analyze,
+  bundledBackground
+}) {
+  if (
+    typeof bundledBackground.assetId !== 'string' ||
+    typeof bundledBackground.managedAssetPath !== 'string' ||
+    typeof bundledBackground.sourcePath !== 'string'
+  ) {
+    throw new Error(
+      'Bundled background smoke requires an assetId, managedAssetPath, and sourcePath.'
+    )
+  }
+  if (!existsSync(bundledBackground.sourcePath)) {
+    throw new Error(`Bundled background source fixture is missing: ${bundledBackground.sourcePath}`)
+  }
+
+  const scenario = {
+    preset: 'screen-only',
+    label: bundledBackground.label ?? 'Bundled asset background 80% screen stage',
+    background: {
+      assetId: bundledBackground.assetId,
+      managedAssetPath: bundledBackground.managedAssetPath,
+      fit: 'stretch',
+      scale: 100,
+      offsetX: 0,
+      offsetY: 0,
+      blurPx: 0,
+      dimPercent: 0,
+      saturationPercent: 100,
+      vignettePercent: 0
+    }
+  }
+  const result = await recordScenario({
+    ws,
+    timeoutMs,
+    recordingMs,
+    label,
+    outputDirectory,
+    ffmpegPath,
+    ffprobePath,
+    analyze,
+    scenario
+  })
+  assertBundledBackgroundFrame({
+    outputPath: result.outputPath,
+    outputDirectory,
+    ffmpegPath,
+    sourcePath: bundledBackground.sourcePath
+  })
+  console.log(
+    `${label} smoke [${scenario.label}] packaged asset decode PASS: output border matches ${bundledBackground.assetId}`
+  )
+  return result
 }
 
 async function recordScenario({
@@ -93,17 +202,28 @@ async function recordScenario({
   ffmpegPath,
   ffprobePath,
   analyze,
+  smoke,
   scenario
 }) {
+  const outputDirectoryCapability = smoke
+    ? (
+        await requestSmokeCommand(
+          smoke,
+          'authorize-smoke-resource',
+          { kind: 'output-directory', path: outputDirectory },
+          { timeoutMs }
+        )
+      ).capabilityId
+    : undefined
   const started = await request(
     ws,
     timeoutMs,
     'session.start',
     sessionParams({
-      outputDirectory,
-      ffmpegPath,
+      outputDirectoryCapability,
       preset: scenario.preset,
-      background: scenario.background
+      background: scenario.background,
+      video: scenario.video
     })
   )
   if (!['recording', 'streaming'].includes(started.state)) {
@@ -147,6 +267,27 @@ async function recordScenario({
         `(report: ${reportPaths.mdPath})`
     )
   }
+  if (scenario.video) {
+    const probedWidth = quality.metrics.width
+    const probedHeight = quality.metrics.height
+    if (probedWidth !== scenario.video.width || probedHeight !== scenario.video.height) {
+      throw new Error(
+        `[${scenario.label}] Artifact dimensions ${probedWidth}x${probedHeight} do not match the ` +
+          `requested canvas ${scenario.video.width}x${scenario.video.height}.`
+      )
+    }
+  }
+
+  const durationFailures = evaluateRecordingWallDuration({
+    expectedDurationMs: recordingMs,
+    actualDurationSeconds: quality.metrics.durationSeconds
+  })
+  if (durationFailures.length > 0) {
+    throw new Error(
+      `[${scenario.label}] Recording duration gate failed: ${durationFailures.join('; ')} ` +
+        `(report: ${reportPaths.mdPath})`
+    )
+  }
 
   console.log(
     `${label} smoke [${scenario.label}] quality PASS: ` +
@@ -159,6 +300,7 @@ async function recordScenario({
 
 async function recordAssetBackgroundScenario({
   ws,
+  smoke,
   timeoutMs,
   recordingMs,
   label,
@@ -168,12 +310,18 @@ async function recordAssetBackgroundScenario({
   analyze
 }) {
   const backgroundPath = writeSolidBackgroundPng({ ffmpegPath, outputDirectory })
+  const imported = await requestSmokeCommand(
+    smoke,
+    'import-smoke-background',
+    { path: backgroundPath },
+    { timeoutMs }
+  )
   const scenario = {
     preset: 'screen-only',
     label: 'Asset background 80% screen stage',
     background: {
-      assetId: 'smoke-red-background',
-      managedAssetPath: backgroundPath,
+      assetId: imported.id,
+      managedAssetPath: imported.assetPath,
       fit: 'stretch',
       scale: 100,
       offsetX: 0,
@@ -193,6 +341,7 @@ async function recordAssetBackgroundScenario({
     ffmpegPath,
     ffprobePath,
     analyze,
+    smoke,
     scenario
   })
   assertAssetBackgroundFrame({
@@ -302,7 +451,7 @@ export function request(ws, timeoutMs, method, params) {
   })
 }
 
-function sessionParams({ outputDirectory, ffmpegPath, preset = 'screen-camera', background }) {
+function sessionParams({ outputDirectoryCapability, preset = 'screen-camera', background, video }) {
   return {
     sources: {
       testPattern: true
@@ -326,14 +475,13 @@ function sessionParams({ outputDirectory, ffmpegPath, preset = 'screen-camera', 
     output: {
       recordEnabled: true,
       streamEnabled: false,
-      outputDirectory,
-      ffmpegPath,
+      ...(outputDirectoryCapability ? { outputDirectoryCapability } : {}),
       video: {
         preset: 'custom',
-        width: 640,
-        height: 360,
-        fps: 30,
-        bitrateKbps: 2000
+        width: video?.width ?? SMOKE_VIDEO_WIDTH,
+        height: video?.height ?? SMOKE_VIDEO_HEIGHT,
+        fps: SMOKE_VIDEO_FPS,
+        bitrateKbps: SMOKE_VIDEO_BITRATE_KBPS
       },
       rtmp: {
         preset: 'custom',
@@ -343,6 +491,11 @@ function sessionParams({ outputDirectory, ffmpegPath, preset = 'screen-camera', 
     },
     scene: background ? sceneWithAssetBackground(background) : undefined
   }
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
 function sceneWithAssetBackground(background) {
@@ -455,6 +608,106 @@ function assertAssetBackgroundFrame({ outputPath, outputDirectory, ffmpegPath })
   }
 }
 
+function assertBundledBackgroundFrame({ outputPath, outputDirectory, ffmpegPath, sourcePath }) {
+  const width = 640
+  const height = 360
+  const recordedRawPath = join(outputDirectory, `bundled-background-recording-${Date.now()}.rgb`)
+  const referenceRawPath = join(outputDirectory, `bundled-background-reference-${Date.now()}.rgb`)
+  extractRgbFrame({
+    inputPath: outputPath,
+    outputPath: recordedRawPath,
+    ffmpegPath,
+    width,
+    height,
+    seekSeconds: 0.5,
+    label: 'extract bundled background recording frame'
+  })
+  extractRgbFrame({
+    inputPath: sourcePath,
+    outputPath: referenceRawPath,
+    ffmpegPath,
+    width,
+    height,
+    label: 'decode bundled background reference asset'
+  })
+
+  const recorded = readFileSync(recordedRawPath)
+  const reference = readFileSync(referenceRawPath)
+  const expectedBytes = width * height * 3
+  if (recorded.length < expectedBytes || reference.length < expectedBytes) {
+    throw new Error(
+      `Bundled background comparison is truncated: recording=${recorded.length}, reference=${reference.length}, expected=${expectedBytes}.`
+    )
+  }
+
+  const borderPoints = sampleGrid({ x0: 8, x1: 56, y0: 8, y1: 32, columns: 7, rows: 4 })
+    .concat(sampleGrid({ x0: 8, x1: 56, y0: 328, y1: 352, columns: 7, rows: 4 }))
+    .concat(sampleGrid({ x0: 584, x1: 632, y0: 8, y1: 352, columns: 4, rows: 9 }))
+  const meanDifference = meanRgbDifference(recorded, reference, width, borderPoints)
+  const referenceRange = rgbRange(reference, width, borderPoints)
+  if (referenceRange < 12) {
+    throw new Error(
+      `Bundled background reference has insufficient pixel variation for a decode proof: range=${referenceRange}.`
+    )
+  }
+  if (meanDifference > 48) {
+    throw new Error(
+      `Packaged bundled background pixels do not match the decoded source asset: mean RGB difference ${meanDifference.toFixed(1)} exceeded 48.`
+    )
+  }
+}
+
+function extractRgbFrame({ inputPath, outputPath, ffmpegPath, width, height, seekSeconds, label }) {
+  runCommand(
+    ffmpegPath,
+    [
+      '-v',
+      'error',
+      '-y',
+      ...(seekSeconds == null ? [] : ['-ss', String(seekSeconds)]),
+      '-i',
+      inputPath,
+      '-frames:v',
+      '1',
+      '-vf',
+      `scale=${width}:${height}`,
+      '-pix_fmt',
+      'rgb24',
+      '-f',
+      'rawvideo',
+      outputPath
+    ],
+    label
+  )
+}
+
+function meanRgbDifference(left, right, width, points) {
+  let total = 0
+  let samples = 0
+  for (const [x, y] of points) {
+    const offset = (y * width + x) * 3
+    for (let channel = 0; channel < 3; channel += 1) {
+      total += Math.abs((left[offset + channel] ?? 0) - (right[offset + channel] ?? 0))
+      samples += 1
+    }
+  }
+  return total / Math.max(1, samples)
+}
+
+function rgbRange(bytes, width, points) {
+  let minimum = 255
+  let maximum = 0
+  for (const [x, y] of points) {
+    const offset = (y * width + x) * 3
+    for (let channel = 0; channel < 3; channel += 1) {
+      const value = bytes[offset + channel] ?? 0
+      minimum = Math.min(minimum, value)
+      maximum = Math.max(maximum, value)
+    }
+  }
+  return maximum - minimum
+}
+
 function sampleGrid({ x0, x1, y0, y1, columns, rows }) {
   const points = []
   for (let yIndex = 0; yIndex < rows; yIndex += 1) {
@@ -489,19 +742,6 @@ function runCommand(command, args, label) {
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
-}
-
-function resolveSiblingFfprobe(ffmpegPath) {
-  if (typeof ffmpegPath !== 'string') {
-    return null
-  }
-  if (ffmpegPath.endsWith('ffmpeg')) {
-    return `${ffmpegPath.slice(0, -'ffmpeg'.length)}ffprobe`
-  }
-  if (ffmpegPath.endsWith('ffmpeg.exe')) {
-    return `${ffmpegPath.slice(0, -'ffmpeg.exe'.length)}ffprobe.exe`
-  }
-  return null
 }
 
 function formatMetricMs(value) {

@@ -12,7 +12,15 @@ import { cn } from '@/lib/utils'
 // It is deliberately a diagram, not pixels; "Open preview" is the ground truth.
 
 const STAGE_W = 160
-const STAGE_H = 90
+
+/** Stage height follows the OUTPUT canvas aspect — a portrait (9:16) canvas
+ * must not be drawn on a 16:9 stage or camera drag/snap positions lie
+ * (vertical scene plan S4). Display height is capped in CSS; the viewBox only
+ * carries the aspect. */
+function stageHeight(outputAspect: number): number {
+  const aspect = Number.isFinite(outputAspect) && outputAspect > 0 ? outputAspect : 16 / 9
+  return Math.round(STAGE_W / aspect)
+}
 
 export function SceneStage({
   scene,
@@ -22,6 +30,7 @@ export function SceneStage({
   cameraShape = 'rectangle',
   cameraCornerRadiusPct = 12,
   dragEnabled = false,
+  outputAspect = 16 / 9,
   onSelectSource,
   onTogglePreview,
   onCommitPosition,
@@ -37,12 +46,15 @@ export function SceneStage({
   cameraCornerRadiusPct?: number
   /** SC3: allow dragging the camera rect (disabled in split/full layouts + live sessions). */
   dragEnabled?: boolean
+  /** Output canvas aspect (width / height); drives the stage shape. */
+  outputAspect?: number
   onSelectSource: (sourceId: string) => void
   onTogglePreview: () => void
   onCommitPosition?: (sourceId: string, position: { x: number; y: number }) => void
   onSnapCorner?: (corner: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right') => void
 }): ReactElement {
   const sources = scene?.sources ?? []
+  const stageH = stageHeight(outputAspect)
   const svgRef = useRef<SVGSVGElement | null>(null)
   const dragRef = useRef<{
     sourceId: string
@@ -142,14 +154,14 @@ export function SceneStage({
       <svg
         ref={svgRef}
         aria-label="Scene composition diagram"
-        className="block w-full"
+        className="mx-auto block max-h-[420px] w-full"
         role="img"
-        viewBox={`0 0 ${STAGE_W} ${STAGE_H}`}
+        viewBox={`0 0 ${STAGE_W} ${stageH}`}
       >
         {/* Canvas */}
         <rect
           className={cn(hasBackground ? 'fill-primary/10' : 'fill-transparent')}
-          height={STAGE_H}
+          height={stageH}
           width={STAGE_W}
           x={0}
           y={0}
@@ -159,6 +171,7 @@ export function SceneStage({
             key={source.id}
             cameraCornerRadiusPct={cameraCornerRadiusPct}
             cameraShape={cameraShape}
+            stageH={stageH}
             draggable={dragEnabled && source.kind === 'camera' && source.transform.width < 1}
             dragPosition={dragPosition?.sourceId === source.id ? dragPosition : null}
             selected={source.id === selectedSourceId}
@@ -178,7 +191,7 @@ export function SceneStage({
             fontSize={5}
             textAnchor="middle"
             x={STAGE_W / 2}
-            y={STAGE_H / 2}
+            y={stageH / 2}
           >
             No sources in the scene yet
           </text>
@@ -228,6 +241,7 @@ export function SceneStage({
 
 function StageSourceRect({
   source,
+  stageH,
   selected,
   draggable = false,
   dragPosition,
@@ -239,6 +253,7 @@ function StageSourceRect({
   onPointerUp
 }: {
   source: SceneSource
+  stageH: number
   selected: boolean
   draggable?: boolean
   dragPosition: { x: number; y: number } | null
@@ -250,9 +265,9 @@ function StageSourceRect({
   onPointerUp?: (event: React.PointerEvent<SVGGElement>) => void
 }): ReactElement {
   const x = (dragPosition?.x ?? source.transform.x) * STAGE_W
-  const y = (dragPosition?.y ?? source.transform.y) * STAGE_H
+  const y = (dragPosition?.y ?? source.transform.y) * stageH
   const width = Math.max(2, source.transform.width * STAGE_W)
-  const height = Math.max(2, source.transform.height * STAGE_H)
+  const height = Math.max(2, source.transform.height * stageH)
   const camera = source.kind === 'camera'
   // Mirror the compositors' mask geometry in schematic form: circle = fully
   // rounded (its box is square by construction), rounded = pct% of the shorter

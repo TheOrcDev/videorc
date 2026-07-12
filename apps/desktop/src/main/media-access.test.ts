@@ -34,6 +34,15 @@ describe('requestMediaAccessWithRestart', () => {
     expect(d.restartBackend).toHaveBeenCalledOnce()
   })
 
+  it('reports a granted permission without claiming a deferred restart already ran', async () => {
+    const d = deps({ restartBackend: vi.fn(async () => false) })
+
+    await expect(requestMediaAccessWithRestart(d, 'camera')).resolves.toEqual({
+      granted: true,
+      restarted: false
+    })
+  })
+
   it('not-determined → user denies → no restart', async () => {
     const d = deps({ askForAccess: vi.fn(async () => false) })
     await expect(requestMediaAccessWithRestart(d, 'microphone')).resolves.toEqual({

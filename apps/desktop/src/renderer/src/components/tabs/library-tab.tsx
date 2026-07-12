@@ -86,6 +86,8 @@ export function LibraryTab({
     deleteSessions,
     renameSession
   } = useStudioCore()
+  const { recording } = useStudioRecordingState()
+  const captureProtected = isActiveRecordingState(recording.state)
   const { setActive } = useWorkspaceNav()
   const [filter, setFilter] = useState<LibraryFilter>('all')
   const [sort, setSort] = useState<LibrarySort>('newest')
@@ -150,14 +152,14 @@ export function LibraryTab({
 
   // Free space is an Electron-side directory fact (same source as Settings).
   useEffect(() => {
-    const directory = settings.outputDirectory?.trim()
-    if (!directory || !window.videorc?.checkDirectory) {
+    const directoryHandle = settings.outputDirectoryHandle
+    if (!directoryHandle || !window.videorc?.checkDirectory) {
       setFreeBytes(null)
       return
     }
     let cancelled = false
     void window.videorc
-      .checkDirectory(directory)
+      .checkDirectory(directoryHandle)
       .then((facts) => {
         if (!cancelled) {
           setFreeBytes(facts.freeBytes)
@@ -167,7 +169,7 @@ export function LibraryTab({
     return () => {
       cancelled = true
     }
-  }, [settings.outputDirectory, sessions.length])
+  }, [settings.outputDirectoryHandle, sessions.length])
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
@@ -230,6 +232,7 @@ export function LibraryTab({
         <div className="flex items-center gap-3 rounded-row border bg-muted/20 px-3 py-1.5 text-sm">
           <span className="text-muted-foreground">{selected.length} selected</span>
           <Button
+            disabled={captureProtected}
             size="sm"
             variant="destructive"
             onClick={() => setDeleting(sessions.filter((session) => selected.includes(session.id)))}
@@ -260,6 +263,7 @@ export function LibraryTab({
             <Checkbox
               aria-label="Select all visible recordings"
               checked={allVisibleSelected}
+              disabled={captureProtected}
               onCheckedChange={() =>
                 setSelected((current) => toggleAllLibrarySelection(current, visibleIds))
               }
@@ -281,6 +285,7 @@ export function LibraryTab({
                 <LibraryRow
                   key={session.id}
                   selected={selected.includes(session.id)}
+                  selectionDisabled={captureProtected || isLiveSession(session, recording)}
                   session={session}
                   onDelete={() => setDeleting([session])}
                   onOpenInAi={() => onOpenInAi(session.id)}
@@ -369,7 +374,7 @@ export function LibraryTab({
               Cancel
             </Button>
             <Button
-              disabled={deletePending}
+              disabled={deletePending || captureProtected}
               type="button"
               variant="destructive"
               onClick={() => void confirmDelete()}
@@ -386,6 +391,7 @@ export function LibraryTab({
 function LibraryRow({
   session,
   selected,
+  selectionDisabled,
   onToggleSelected,
   onOpenInAi,
   onRename,
@@ -393,6 +399,7 @@ function LibraryRow({
 }: {
   session: SessionSummary
   selected: boolean
+  selectionDisabled: boolean
   onToggleSelected: () => void
   onOpenInAi: () => void
   onRename: () => void
@@ -415,6 +422,7 @@ function LibraryRow({
       <Checkbox
         aria-label={`Select ${session.title || 'session'}`}
         checked={selected}
+        disabled={selectionDisabled}
         onCheckedChange={onToggleSelected}
       />
       <div className="flex min-w-0 items-center gap-3">
@@ -576,10 +584,10 @@ function RowActions({
   const canOpenComments = session.commentCount > 0
 
   const playFile = async (): Promise<void> => {
-    if (!filePath || !window.videorc?.openPath) {
+    if (!filePath || !window.videorc?.openSession) {
       return
     }
-    const problem = await window.videorc.openPath(filePath)
+    const problem = await window.videorc.openSession(session.id)
     if (problem) {
       toast.error(problem)
     }
@@ -589,7 +597,7 @@ function RowActions({
     if (!filePath) return
     setPhase('checking')
     try {
-      const next = await assessRecording(filePath)
+      const next = await assessRecording(session.id)
       setAssessment(next)
       setHasBackup(next.hasBackup)
       setPhase('assessed')
@@ -618,7 +626,7 @@ function RowActions({
     if (!filePath) return
     setPhase('repairing')
     try {
-      const next: GateStatus = await repairRecording(filePath)
+      const next: GateStatus = await repairRecording(session.id)
       setPhase('done')
       if (next.status === 'repaired') {
         setHasBackup(true)
@@ -641,7 +649,7 @@ function RowActions({
   const runRestore = async (): Promise<void> => {
     if (!filePath) return
     try {
-      const restored = await restoreRecording(filePath)
+      const restored = await restoreRecording(session.id)
       if (restored) {
         toast.success('Restored the original recording from backup.')
         setHasBackup(false)
@@ -705,7 +713,7 @@ function RowActions({
           </DropdownMenuItem>
           <DropdownMenuItem
             disabled={!filePath}
-            onClick={() => filePath && void window.videorc?.revealPath?.(filePath)}
+            onClick={() => filePath && void window.videorc?.revealSession?.(session.id)}
           >
             <FolderOpen />
             Show in Finder

@@ -60,17 +60,24 @@ describe('buildWindowsLocalGateSteps', () => {
       'fetch pinned Windows FFmpeg',
       'Windows package preflight',
       'package desktop Windows dir',
-      'packaged boot plus test-pattern recording smoke'
+      'packaged recording and bundled-background smoke',
+      'native Windows ScreenOnly and BMP smoke',
+      'recording-time Windows proof-surface smoke'
     ])
-    assert.deepEqual(steps.at(-1).args, ['smoke:packaged:bundled'])
+    const packaged = steps.find(
+      (step) => step.label === 'packaged recording and bundled-background smoke'
+    )
+    assert.deepEqual(packaged.args, ['smoke:packaged:bundled'])
     assert.match(
-      posixPath(steps.at(-1).env.VIDEORC_PACKAGED_APP_EXECUTABLE),
+      posixPath(packaged.env.VIDEORC_PACKAGED_APP_EXECUTABLE),
       /C:\/repo\/apps\/desktop\/release\/win-unpacked\/Videorc\.exe$/
     )
     assert.match(
-      posixPath(steps.at(-1).env.VIDEORC_SMOKE_OUTPUT_DIR),
+      posixPath(packaged.env.VIDEORC_SMOKE_OUTPUT_DIR),
       /C:\/repo\/docs\/acceptance\/artifacts\/windows\/\d{4}-\d{2}-\d{2}$/
     )
+    assert.deepEqual(steps.at(-2).args, ['smoke:windows-native-screen'])
+    assert.deepEqual(steps.at(-1).args, ['smoke:recording-native-preview'])
     assert.match(
       posixPath(windowsLocalGateOutputDir(steps)),
       /C:\/repo\/docs\/acceptance\/artifacts\/windows\/\d{4}-\d{2}-\d{2}$/
@@ -83,8 +90,11 @@ describe('buildWindowsLocalGateSteps', () => {
       repoRoot: 'C:/repo'
     })
 
+    const packaged = steps.find(
+      (step) => step.label === 'packaged recording and bundled-background smoke'
+    )
     assert.match(
-      posixPath(steps.at(-1).env.VIDEORC_SMOKE_OUTPUT_DIR),
+      posixPath(packaged.env.VIDEORC_SMOKE_OUTPUT_DIR),
       /C:\/repo\/docs\/acceptance\/artifacts\/windows\/2026-07-08-lab-1$/
     )
   })
@@ -105,6 +115,8 @@ describe('buildWindowsLocalGateSteps', () => {
     assert.match(report, /smoke:process-lifecycle/)
     assert.match(report, /package:preflight:windows/)
     assert.match(report, /smoke:packaged:bundled/)
+    assert.match(report, /smoke:windows-native-screen/)
+    assert.match(report, /smoke:recording-native-preview/)
   })
 
   it('builds an acceptance manifest with host, evidence, and command state', () => {
@@ -149,7 +161,9 @@ describe('buildWindowsLocalGateSteps', () => {
       VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'process-lifecycle')
     })
 
-    const packagedSmoke = manifest.steps.at(-1)
+    const packagedSmoke = manifest.steps.find(
+      (step) => step.label === 'packaged recording and bundled-background smoke'
+    )
     assert.deepEqual(
       {
         ...packagedSmoke,
@@ -159,8 +173,8 @@ describe('buildWindowsLocalGateSteps', () => {
         }
       },
       {
-        index: steps.length,
-        label: 'packaged boot plus test-pattern recording smoke',
+        index: packagedSmoke.index,
+        label: 'packaged recording and bundled-background smoke',
         command: 'pnpm',
         args: ['smoke:packaged:bundled'],
         env: {

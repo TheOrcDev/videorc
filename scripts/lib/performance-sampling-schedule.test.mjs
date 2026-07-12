@@ -122,8 +122,8 @@ describe('performance sampling schedule', () => {
     const clock = fakeClock()
     const scheduledAtMs = []
     const result = await collectPerformanceSamplesOnSchedule({
-      measurementMs: 4_000,
-      intervalMs: 500,
+      measurementMs: 8_000,
+      intervalMs: 1_000,
       nowMs: clock.now,
       sleep: clock.sleep,
       collectSample: async (sample) => {
@@ -134,27 +134,71 @@ describe('performance sampling schedule', () => {
     })
 
     assert.deepEqual(result.samples, [0, 1, 2, 3, 4, 5, 6, 7])
-    assert.deepEqual(scheduledAtMs, [0, 500, 1_000, 1_500, 2_000, 2_500, 3_000, 3_500])
+    assert.deepEqual(scheduledAtMs, [0, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000])
     assert.deepEqual(result.sampleTimings, [
       { sampleIndex: 0, scheduledAtMs: 0, observedAtMs: 300 },
-      { sampleIndex: 1, scheduledAtMs: 500, observedAtMs: 800 },
-      { sampleIndex: 2, scheduledAtMs: 1_000, observedAtMs: 1_300 },
-      { sampleIndex: 3, scheduledAtMs: 1_500, observedAtMs: 1_800 },
-      { sampleIndex: 4, scheduledAtMs: 2_000, observedAtMs: 2_300 },
-      { sampleIndex: 5, scheduledAtMs: 2_500, observedAtMs: 2_800 },
-      { sampleIndex: 6, scheduledAtMs: 3_000, observedAtMs: 3_300 },
-      { sampleIndex: 7, scheduledAtMs: 3_500, observedAtMs: 3_800 }
+      { sampleIndex: 1, scheduledAtMs: 1_000, observedAtMs: 1_300 },
+      { sampleIndex: 2, scheduledAtMs: 2_000, observedAtMs: 2_300 },
+      { sampleIndex: 3, scheduledAtMs: 3_000, observedAtMs: 3_300 },
+      { sampleIndex: 4, scheduledAtMs: 4_000, observedAtMs: 4_300 },
+      { sampleIndex: 5, scheduledAtMs: 5_000, observedAtMs: 5_300 },
+      { sampleIndex: 6, scheduledAtMs: 6_000, observedAtMs: 6_300 },
+      { sampleIndex: 7, scheduledAtMs: 7_000, observedAtMs: 7_300 }
     ])
     assert.equal(result.measurementStartedAtMs, 0)
-    assert.equal(result.measurementEndedAtMs, 4_000)
+    assert.equal(result.measurementEndedAtMs, 8_000)
     assert.deepEqual(result.evidence, {
       expectedSamples: 8,
       collectedSamples: 8,
       skippedDeadlineCount: 0,
       observations: result.sampleTimings,
-      maxSampleGapMs: 500,
-      measurementElapsedMs: 4_000
+      maxSampleGapMs: 1_000,
+      measurementElapsedMs: 8_000
     })
+  })
+
+  it('accepts the hosted census latency variance at the sentinel cadence', async () => {
+    const clock = fakeClock()
+    const completionLatenciesMs = [
+      114.433167, 76.167459, 891.288542, 105.272958, 109.979459, 172.271709, 578.2655, 205.86675
+    ]
+    const result = await collectPerformanceSamplesOnSchedule({
+      measurementMs: 8_000,
+      intervalMs: 1_000,
+      nowMs: clock.now,
+      sleep: clock.sleep,
+      collectSample: async ({ sampleIndex }) => {
+        clock.advance(completionLatenciesMs[sampleIndex])
+        return sampleIndex
+      }
+    })
+
+    assert.equal(result.evidence.collectedSamples, 8)
+    assert.equal(result.evidence.skippedDeadlineCount, 0)
+    assert.ok(Math.abs(result.evidence.maxSampleGapMs - 1_815.121083) < 1e-6)
+    assert.deepEqual(performanceSamplingEvidenceFailures(result.evidence, 8_000, 1_000), [])
+  })
+
+  it('still rejects a severe hosted stall at the sentinel cadence', async () => {
+    const clock = fakeClock()
+    const result = await collectPerformanceSamplesOnSchedule({
+      measurementMs: 8_000,
+      intervalMs: 1_000,
+      nowMs: clock.now,
+      sleep: clock.sleep,
+      collectSample: async ({ sampleIndex }) => {
+        clock.advance(sampleIndex === 2 ? 3_100 : 100)
+        return sampleIndex
+      }
+    })
+
+    assert.deepEqual(result.samples, [0, 1, 2, 5, 6, 7])
+    assert.equal(result.evidence.skippedDeadlineCount, 2)
+    assert.equal(result.evidence.maxSampleGapMs, 4_000)
+    assert.deepEqual(performanceSamplingEvidenceFailures(result.evidence, 8_000, 1_000), [
+      'performance sampling skipped 2 wall-clock deadlines; host sleep or a severe scheduling stall contaminated the run',
+      'performance sampling max gap 4000ms indicated host sleep or a scheduling stall'
+    ])
   })
 
   it('accepts hosted slow-first and fast-last completion latency on a valid schedule', async () => {

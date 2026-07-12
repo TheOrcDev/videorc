@@ -13,7 +13,7 @@ import {
 } from 'react'
 import { toast } from 'sonner'
 
-import { BackendClient } from '@/backendClient'
+import { BackendClient, BackendRequestError } from '@/backendClient'
 import { previewSurfaceBoundsChanged } from '../../../shared/native-preview-bounds'
 import {
   commentsRefreshRevisionIsCurrent,
@@ -51,9 +51,11 @@ import {
   rtmpDefaults,
   smokePreviewCompositorCaptureConfig,
   sourceSelectionChangeEvents,
+  layoutPresetMemoryPatch,
   STORAGE_KEYS,
   streamOutputVideosForTargets,
   streamOutputVideoSettings,
+  verticalOrientationVideoPatch,
   videoProfileCompatibility,
   videoPresets,
   type CaptureConfig,
@@ -73,6 +75,8 @@ import {
   isYouTubeChannelAuthFailure,
   shouldAutoRefreshYouTubeChannels
 } from '@/lib/youtube-channels'
+import { providerOAuthRetryDelayMs } from '@/lib/provider-oauth-retry'
+import { accountCallbackRetryDelayMs } from '@/lib/account-callback-retry'
 import {
   latestLayoutTransactionCommit,
   layoutTransactionBackendSnapshotIsStable,
@@ -89,6 +93,7 @@ import {
   nativePreviewSurfaceSyncNeedsCreate
 } from '@/lib/native-preview-surface-lifecycle'
 import type {
+  AccountCallbackEnvelope,
   AiCapabilities,
   CommentHighlightCommand,
   CommentHighlightState,
@@ -130,7 +135,6 @@ import type {
   CaptionsWindowState,
   CaptionStyleId,
   LiveChatSnapshot,
-  NativePreviewHostCommand,
   NotesWindowState,
   PreviewCameraStatus,
   PreviewScreenStatus,
@@ -148,6 +152,7 @@ import type {
   TwitchAppliedMetadata,
   PreparedYouTubeBroadcast,
   OAuthCompleteParams,
+  OAuthCallbackEnvelope,
   OAuthStartResult,
   OAuthProviderCredentialStatus,
   RecordingStatus,
@@ -156,6 +161,8 @@ import type {
   Scene,
   SceneCommitStatus,
   SceneConfigParams,
+  SessionCommentsPage,
+  SessionDeletionOperation,
   SessionLogEntry,
   SessionSummary,
   SourceSelection,
@@ -220,6 +227,7 @@ import {
   applyLiveChatSnapshot,
   chatSetupToastWarnings,
   liveChatSendOperationQueryDecision,
+  MAX_LIVE_CHAT_VIEW_MESSAGES,
   LiveChatRecoveryOverflowError,
   LiveChatMessageBatcher,
   reconcileLiveChatRecovery,
@@ -426,7 +434,7 @@ async function waitForRenderedCompositorSceneRevision(
     await sleep(NATIVE_PREVIEW_SCENE_FRAME_WAIT_INTERVAL_MS)
     let latestStatus: CompositorStatus
     try {
-      latestStatus = await activeClient.request<CompositorStatus>('compositor.status')
+      latestStatus = await activeClient.requestTyped('compositor.status')
     } catch {
       return initialStatus
     }
@@ -474,7 +482,7 @@ async function waitForLiveLayoutProof(
   while (Date.now() < deadline) {
     try {
       const [compositorStatus, diagnostics] = await Promise.all([
-        activeClient.request<CompositorStatus>('compositor.status'),
+        activeClient.requestTyped('compositor.status'),
         activeClient.request<DiagnosticStats>('diagnostics.stats')
       ])
       lastCompositorStatus = compositorStatus
@@ -679,7 +687,7 @@ export type StudioContextValue = {
   lastError: string | null
   runtimeInfo: RuntimeInfo | null
   // actions
-  refreshBackend: (ffmpegPathOverride?: string) => Promise<void>
+  refreshBackend: () => Promise<void>
   refreshPlatformAccounts: () => Promise<void>
   validatePlatformAccounts: () => Promise<PlatformAccountValidation[]>
   connectPlatformAccount: (platform: PlatformAccount['platform']) => Promise<void>
@@ -1291,6 +1299,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [connection, setConnection] = useState<BackendConnection | null>(null)
   const [client, setClient] = useState<BackendClient | null>(null)
   const clientRef = useRef<BackendClient | null>(null)
+  const accountCallbacksInFlightRef = useRef<Set<string>>(new Set())
+  const accountCallbacksCompletedRef = useRef<Set<string>>(new Set())
+  const providerOAuthCallbacksInFlightRef = useRef<Set<string>>(new Set())
+  const providerOAuthCallbacksCompletedRef = useRef<Set<string>>(new Set())
   const bootstrapGenerationRef = useRef(0)
   const [wsStatus, setWsStatus] = useState<WsStatus>('waiting')
   const wsStatusRef = useRef<WsStatus>('waiting')
@@ -1876,9 +1888,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
       try {
-        const messages = await client.request<LiveChatMessage[]>('sessions.comments.list', {
-          sessionId
-        })
+        let messages: LiveChatMessage[] = []
+        let cursor: string | undefined
+        do {
+          const page: SessionCommentsPage = await client.requestTyped('sessions.comments.list', {
+            sessionId,
+            cursor,
+            limit: Math.min(200, MAX_LIVE_CHAT_VIEW_MESSAGES - messages.length)
+          })
+          messages = [...page.messages, ...messages].slice(-MAX_LIVE_CHAT_VIEW_MESSAGES)
+          cursor = page.nextCursor
+        } while (cursor && messages.length < MAX_LIVE_CHAT_VIEW_MESSAGES)
         const snapshot = applyLiveChatSnapshot({
           sessionId,
           providers: [],
@@ -2094,7 +2114,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Late-bound mirror so applyRecordingStatus (declared earlier) can trigger the
   // consolidated frame-polling suppression defined with the preview window state.
   const syncFramePollingSuppressionRef = useRef<(() => void) | null>(null)
-  const nativePreviewFramePollingSuppressionRequestedRef = useRef<boolean | null>(null)
+  const nativePreviewFramePollingRequestKeyRef = useRef<string | null>(null)
   const nativePreviewCameraKeyRef = useRef<string | null>(null)
   const nativePreviewScreenKeyRef = useRef<string | null>(null)
   const nativePreviewCommittedSceneRef = useRef<{
@@ -2356,7 +2376,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     smokeWindow.__videorcSmokeHydrateRecordingStatus = async () => {
-      const status = await client.request<RecordingStatus>('recording.status')
+      const status = await client.requestTyped('recording.status')
       applyRecordingStatus(status)
       return status
     }
@@ -2767,18 +2787,52 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [applyScene]
   )
 
-  const refreshSessions = useCallback(async (activeClient: BackendClient | null) => {
-    if (!activeClient) {
-      return
-    }
+  const pendingDeletionResumeRef = useRef<Promise<void> | null>(null)
+  const resumePendingSessionDeletions = useCallback(
+    async (activeClient: BackendClient): Promise<void> => {
+      if (pendingDeletionResumeRef.current) {
+        return pendingDeletionResumeRef.current
+      }
+      const pending = (async () => {
+        const operations: SessionDeletionOperation[] =
+          await activeClient.requestTyped('sessions.delete.pending')
+        for (const operation of operations) {
+          try {
+            await window.videorc?.trashSessionDeletion?.(operation.operationId)
+          } catch {
+            // The backend tombstone remains pending; the next Library refresh
+            // retries the opaque operation id through Electron main.
+          }
+        }
+      })()
+      pendingDeletionResumeRef.current = pending
+      try {
+        await pending
+      } finally {
+        if (pendingDeletionResumeRef.current === pending) {
+          pendingDeletionResumeRef.current = null
+        }
+      }
+    },
+    []
+  )
 
-    const [nextSessions, nextTotals] = await Promise.all([
-      activeClient.request<SessionSummary[]>('sessions.list', { limit: 200 }),
-      activeClient.request<SessionStorageTotals>('sessions.storage')
-    ])
-    setSessions(nextSessions)
-    setSessionStorageTotals(nextTotals)
-  }, [])
+  const refreshSessions = useCallback(
+    async (activeClient: BackendClient | null) => {
+      if (!activeClient) {
+        return
+      }
+
+      await resumePendingSessionDeletions(activeClient)
+      const [nextSessions, nextTotals] = await Promise.all([
+        activeClient.request<SessionSummary[]>('sessions.list', { limit: 200 }),
+        activeClient.request<SessionStorageTotals>('sessions.storage')
+      ])
+      setSessions(nextSessions)
+      setSessionStorageTotals(nextTotals)
+    },
+    [resumePendingSessionDeletions]
+  )
 
   const refreshScreensForClient = useCallback(async (activeClient: BackendClient | null) => {
     if (!activeClient) {
@@ -3783,14 +3837,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           .request<StreamMetadataValidation>('streamTargets.metadata.validate', draft)
           .then(setStreamMetadataValidation)
       }),
-      nextClient.on('platformAccounts.oauth.callback', (payload) => {
-        const result = payload as {
-          platform?: string
-          status?: string
-          message?: string
-          accountConnected?: boolean
-          tokenStored?: boolean
-        }
+      nextClient.on('platformAccounts.oauth.callback', (result) => {
         if (result.status === 'success' && result.accountConnected) {
           void refreshPlatformAccountsForClient(nextClient)
           void validatePlatformAccountsForClient(nextClient)
@@ -3889,7 +3936,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return
         }
         setWsStatus('connected')
-        const ffmpegPath = settingsRef.current.ffmpegPath.trim() || undefined
         const bootstrapSnapshot = bootstrapGuard.snapshot()
         const commentHighlightRevisionAtBootstrapStart = commentHighlightRevision
         const captionsStatusRevisionAtBootstrapStart = captionsStatusRevisionRef.current
@@ -3914,10 +3960,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           nextSessions,
           nextSessionStorage
         ] = await Promise.all([
-          bootstrapRequest<BackendHealth>('health.ping', { ffmpegPath }),
+          bootstrapRequest<BackendHealth>('health.ping'),
           bootstrapRequest<EntitlementsSnapshot>('entitlements.get'),
           bootstrapRequest<VideorcAccountSnapshot>('account.get'),
-          bootstrapRequest<DeviceList>('devices.list', { ffmpegPath }),
+          bootstrapRequest<DeviceList>('devices.list'),
           bootstrapRequest<RecordingStatus>('recording.status'),
           bootstrapRequest<DiagnosticStats>('diagnostics.stats'),
           bootstrapRequest<CaptionsStatus>('captions.status.get'),
@@ -4245,78 +4291,73 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [patchLayout]
   )
 
-  const refreshBackend = useCallback(
-    async (ffmpegPathOverride?: string) => {
-      // S1 (plan 024): the two window `focus` listeners fire refreshBackend on
-      // TCC-prompt focus-return, and at grant/restart time `client` is still the
-      // OLD object (setClient(null) is deferred to effect cleanup), so a bare
-      // `if (!client)` guard let ~13 requests fan out into a closed socket. Gate
-      // on the live connection status too, so the restart window fans out nothing
-      // doomed. The focus listeners themselves stay (plan-021 re-kick recovery).
-      if (!client || wsStatusRef.current !== 'connected') {
-        return
-      }
+  const refreshBackend = useCallback(async () => {
+    // S1 (plan 024): the two window `focus` listeners fire refreshBackend on
+    // TCC-prompt focus-return, and at grant/restart time `client` is still the
+    // OLD object (setClient(null) is deferred to effect cleanup), so a bare
+    // `if (!client)` guard let ~13 requests fan out into a closed socket. Gate
+    // on the live connection status too, so the restart window fans out nothing
+    // doomed. The focus listeners themselves stay (plan-021 re-kick recovery).
+    if (!client || wsStatusRef.current !== 'connected') {
+      return
+    }
 
-      try {
-        setLastError(null)
-        const ffmpegPath =
-          (ffmpegPathOverride ?? settingsRef.current.ffmpegPath).trim() || undefined
-        const [
-          nextHealth,
-          nextEntitlements,
-          nextAccount,
-          nextDevices,
-          nextSessions,
-          nextSessionStorage,
-          nextDiagnostics,
-          nextScreens,
-          nextActiveScreen,
-          nextPlatformAccounts,
-          nextOauthProviderCredentials,
-          nextPlatformAccountValidations,
-          nextStreamMetadataDraft
-        ] = await Promise.all([
-          client.request<BackendHealth>('health.ping', { ffmpegPath }),
-          client.request<EntitlementsSnapshot>('entitlements.get'),
-          client.request<VideorcAccountSnapshot>('account.get'),
-          client.request<DeviceList>('devices.list', { ffmpegPath }),
-          client.request<SessionSummary[]>('sessions.list', { limit: 200 }),
-          client.request<SessionStorageTotals>('sessions.storage'),
-          client.request<DiagnosticStats>('diagnostics.stats'),
-          client.request<StreamScreen[]>('screens.list'),
-          client.request<StreamScreen | null>('screens.active'),
-          client.request<PlatformAccount[]>('platformAccounts.list'),
-          client.request<OAuthProviderCredentialStatus[]>(
-            'platformAccounts.oauth.providerCredentials'
-          ),
-          client.request<PlatformAccountValidation[]>('platformAccounts.validate'),
-          client.request<StreamMetadataDraft>('streamTargets.metadata.get')
-        ])
-        setAccount(nextAccount)
-        await refreshAiReadinessForClient(client, nextAccount)
-        const nextStreamMetadataValidation = await client.request<StreamMetadataValidation>(
-          'streamTargets.metadata.validate',
-          nextStreamMetadataDraft
-        )
-        setHealth(nextHealth)
-        setEntitlements(nextEntitlements)
-        setDeviceList(nextDevices)
-        setSessions(nextSessions)
-        setSessionStorageTotals(nextSessionStorage)
-        setDiagnosticStats(nextDiagnostics)
-        setScreens(nextScreens)
-        setActiveScreen(nextActiveScreen)
-        setPlatformAccounts(nextPlatformAccounts)
-        setOauthProviderCredentials(nextOauthProviderCredentials)
-        setPlatformAccountValidations(nextPlatformAccountValidations)
-        setStreamMetadataDraft(nextStreamMetadataDraft)
-        setStreamMetadataValidation(nextStreamMetadataValidation)
-      } catch (error) {
-        reportError(error)
-      }
-    },
-    [client, refreshAiReadinessForClient, reportError]
-  )
+    try {
+      setLastError(null)
+      const [
+        nextHealth,
+        nextEntitlements,
+        nextAccount,
+        nextDevices,
+        nextSessions,
+        nextSessionStorage,
+        nextDiagnostics,
+        nextScreens,
+        nextActiveScreen,
+        nextPlatformAccounts,
+        nextOauthProviderCredentials,
+        nextPlatformAccountValidations,
+        nextStreamMetadataDraft
+      ] = await Promise.all([
+        client.request<BackendHealth>('health.ping'),
+        client.request<EntitlementsSnapshot>('entitlements.get'),
+        client.request<VideorcAccountSnapshot>('account.get'),
+        client.request<DeviceList>('devices.list'),
+        client.request<SessionSummary[]>('sessions.list', { limit: 200 }),
+        client.request<SessionStorageTotals>('sessions.storage'),
+        client.request<DiagnosticStats>('diagnostics.stats'),
+        client.request<StreamScreen[]>('screens.list'),
+        client.request<StreamScreen | null>('screens.active'),
+        client.request<PlatformAccount[]>('platformAccounts.list'),
+        client.request<OAuthProviderCredentialStatus[]>(
+          'platformAccounts.oauth.providerCredentials'
+        ),
+        client.request<PlatformAccountValidation[]>('platformAccounts.validate'),
+        client.request<StreamMetadataDraft>('streamTargets.metadata.get')
+      ])
+      setAccount(nextAccount)
+      await refreshAiReadinessForClient(client, nextAccount)
+      const nextStreamMetadataValidation = await client.request<StreamMetadataValidation>(
+        'streamTargets.metadata.validate',
+        nextStreamMetadataDraft
+      )
+      setHealth(nextHealth)
+      setEntitlements(nextEntitlements)
+      setDeviceList(nextDevices)
+      setSessions(nextSessions)
+      setSessionStorageTotals(nextSessionStorage)
+      setDiagnosticStats(nextDiagnostics)
+      setScreens(nextScreens)
+      setActiveScreen(nextActiveScreen)
+      setPlatformAccounts(nextPlatformAccounts)
+      setOauthProviderCredentials(nextOauthProviderCredentials)
+      setPlatformAccountValidations(nextPlatformAccountValidations)
+      setStreamMetadataDraft(nextStreamMetadataDraft)
+      setStreamMetadataValidation(nextStreamMetadataValidation)
+    } catch (error) {
+      reportError(error)
+    }
+  }, [client, refreshAiReadinessForClient, reportError])
 
   // Real OS camera/mic access status (Electron getMediaAccessStatus, over IPC —
   // independent of the backend socket). Refresh on mount and whenever the window
@@ -4646,7 +4687,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applyScene(snapshot.scene)
       skipNextConfigSceneReloadRef.current = true
       setCaptureConfig((current) => {
-        const next = { ...current, layout: snapshot.layout }
+        // The committed preset becomes its mode's remembered scene — the
+        // orientation toggle re-enters each mode where the user left it.
+        const next = {
+          ...current,
+          ...layoutPresetMemoryPatch(snapshot.layout.layoutPreset),
+          layout: snapshot.layout
+        }
         captureConfigRef.current = next
         return next
       })
@@ -4662,9 +4709,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // The first `scene.get` is an ordering barrier for accepted overlapping layout
     // commands. The second proves the same scene contents surrounded the compositor
     // status read, since layout commits reuse the same scene id.
-    const sceneBefore = await client.request<Scene>('scene.get')
-    const compositorStatus = await client.request<CompositorStatus>('compositor.status')
-    const sceneAfter = await client.request<Scene>('scene.get')
+    const sceneBefore = await client.requestTyped('scene.get')
+    const compositorStatus = await client.requestTyped('compositor.status')
+    const sceneAfter = await client.requestTyped('scene.get')
     if (
       typeof compositorStatus.sceneRevision !== 'number' ||
       !compositorStatus.sceneLayout ||
@@ -4686,7 +4733,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client])
 
   const requestLayoutTransaction = useCallback(
-    (layout: LayoutSettings, options?: { pendingIndicator?: boolean }) => {
+    (
+      layout: LayoutSettings,
+      options?: { pendingIndicator?: boolean; videoOverride?: VideoSettings }
+    ) => {
       const sessionActive = isActiveRecordingState(recordingRef.current.state)
       if (!client || wsStatus !== 'connected') {
         toast.error('Backend socket is not connected — layout unchanged.')
@@ -4719,11 +4769,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             )
           }
           const method = sessionActive ? 'scene.layout.apply_live' : 'scene.layout.apply_preview'
-          const status = await client.request<LayoutTransactionStatus>(method, {
+          const status: LayoutTransactionStatus = await client.requestTyped(method, {
             intentId,
             sources: requestedSources,
             layout,
-            video: requestedConfig.video,
+            // The vertical orientation coupling patches React state and the
+            // transaction in the same tick; the ref may not have caught up,
+            // so the caller passes the canvas it just applied.
+            video: options?.videoOverride ?? requestedConfig.video,
             background: activeSceneBackground,
             protectedOverlayWindowIds
           })
@@ -4870,14 +4923,42 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const applyCameraPreset = useCallback(
     (patch: Partial<LayoutSettings>) => {
-      requestLayoutTransaction({
-        ...captureConfigRef.current.layout,
-        ...patch,
-        cameraTransformMode: 'preset',
-        cameraTransform: null
-      })
+      const current = captureConfigRef.current
+      const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
+
+      // Vertical scene ⇄ canvas orientation coupling, OFF-AIR ONLY: entering
+      // vertical flips the canvas to 1080×1920 and remembers the landscape
+      // profile; leaving restores it. Mid-session the canvas is fixed (the
+      // vertical card is disabled and the backend refuses the switch).
+      let videoOverride: VideoSettings | undefined
+      if (!isActiveRecordingState(recordingRef.current.state)) {
+        const coupling = verticalOrientationVideoPatch(
+          current.layout.layoutPreset,
+          nextPreset,
+          current.video,
+          current.verticalRestoreVideo
+        )
+        if (coupling) {
+          videoOverride = coupling.video
+          setCaptureConfig((config) => ({
+            ...config,
+            video: coupling.video,
+            verticalRestoreVideo: coupling.verticalRestoreVideo
+          }))
+        }
+      }
+
+      requestLayoutTransaction(
+        {
+          ...current.layout,
+          ...patch,
+          cameraTransformMode: 'preset',
+          cameraTransform: null
+        },
+        videoOverride ? { videoOverride } : undefined
+      )
     },
-    [requestLayoutTransaction]
+    [requestLayoutTransaction, setCaptureConfig]
   )
 
   const switchSourceDeviceLive = useCallback(
@@ -4945,7 +5026,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return previewCameraStatusRef.current
     }
 
-    if (runtimeInfo?.disableAutoPreview) {
+    if (runtimeInfo?.disableAutoPreview || runtimeInfo?.disableAutoSourcePreview) {
       return previewCameraStatusRef.current
     }
 
@@ -4976,8 +5057,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cameraId,
       width: captureConfig.video.width,
       height: captureConfig.video.height,
-      fps: captureConfig.video.fps,
-      ffmpegPath: settings.ffmpegPath.trim()
+      fps: captureConfig.video.fps
     })
     const current = previewCameraStatusRef.current
     if (
@@ -4991,8 +5071,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const status = await client.request<PreviewCameraStatus>('preview.camera.start', {
       sources: captureConfig.sources,
       layout: captureConfig.layout,
-      video: captureConfig.video,
-      ffmpegPath: settings.ffmpegPath.trim() || undefined
+      video: captureConfig.video
     })
     nativePreviewCameraKeyRef.current =
       status.state === 'failed' || status.state === 'device-missing' ? null : key
@@ -5015,8 +5094,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.video,
     client,
     runtimeInfo?.disableAutoPreview,
+    runtimeInfo?.disableAutoSourcePreview,
     runtimeInfo?.previewSmokeMode,
-    settings.ffmpegPath,
     wsStatus
   ])
 
@@ -5025,7 +5104,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return previewScreenStatusRef.current
     }
 
-    if (runtimeInfo?.disableAutoPreview) {
+    if (runtimeInfo?.disableAutoPreview || runtimeInfo?.disableAutoSourcePreview) {
       return previewScreenStatusRef.current
     }
 
@@ -5083,7 +5162,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       width: captureConfig.video.width,
       height: captureConfig.video.height,
       fps: captureConfig.video.fps,
-      ffmpegPath: settings.ffmpegPath.trim(),
       protectedOverlayWindowIds
     })
     const current = previewScreenStatusRef.current
@@ -5099,8 +5177,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const status = await client.request<PreviewScreenStatus>('preview.screen.start', {
       sources: captureConfig.sources,
       video: captureConfig.video,
-      protectedOverlayWindowIds,
-      ffmpegPath: settings.ffmpegPath.trim() || undefined
+      protectedOverlayWindowIds
     })
     nativePreviewScreenKeyRef.current =
       status.state === 'failed' || status.state === 'source-missing' ? null : key
@@ -5123,8 +5200,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.video,
     client,
     runtimeInfo?.disableAutoPreview,
+    runtimeInfo?.disableAutoSourcePreview,
     runtimeInfo?.previewSmokeMode,
-    settings.ffmpegPath,
     wsStatus
   ])
 
@@ -5188,7 +5265,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const status = await client.request<PreviewLiveStatus>('preview.live.start', {
         sources: captureConfig.sources,
         layout: captureConfig.layout,
-        ffmpegPath: settings.ffmpegPath.trim() || undefined,
         video: captureConfig.video
       })
       applyPreviewLiveStatus(status)
@@ -5220,7 +5296,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     ensureNativePreviewScreen,
     nativePreviewSurfaceEnabled,
     reportError,
-    settings.ffmpegPath,
     wsStatus
   ])
 
@@ -5261,7 +5336,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (!generationIsCurrent(nextGeneration)) {
             continue
           }
-          const applyHostCommands = window.videorc?.applyNativePreviewHostCommands
           const current = previewSurfaceStatusRef.current
           const surfaceAlreadyCreated = nativePreviewSurfaceCreatedRef.current
           if (
@@ -5296,18 +5370,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             nativePreviewCompositorSuppressedPresentsRef.current = 0
             resetNativePreviewCompositorTiming()
           }
-          const queuedCommands = await client.request<NativePreviewHostCommand[]>(
-            'preview.surface.take_native_host_commands'
-          )
-          const hostCommands = queuedCommands.filter((command) => command.kind !== 'update-bounds')
-          const hostStatus =
-            hostCommands.length > 0 && applyHostCommands
-              ? await applyHostCommands(hostCommands, nextGeneration)
-              : !surfaceAlreadyCreated
-                ? await window.videorc.createNativePreviewSurface(nextBounds, nextGeneration)
-                : window.videorc.getNativePreviewSurfaceStatus
-                  ? await window.videorc.getNativePreviewSurfaceStatus()
-                  : current
+          // Backend host commands carry privileged native-window lifecycle work.
+          // Electron main drains them with the admin credential, drops delayed
+          // placement echoes, and applies create/destroy for this generation.
+          // The renderer-scoped socket must never request this admin method.
+          const hostStatus = window.videorc.drainNativePreviewHostCommands
+            ? await window.videorc.drainNativePreviewHostCommands(nextGeneration)
+            : !surfaceAlreadyCreated
+              ? await window.videorc.createNativePreviewSurface(nextBounds, nextGeneration)
+              : window.videorc.getNativePreviewSurfaceStatus
+                ? await window.videorc.getNativePreviewSurfaceStatus()
+                : current
           if (!generationIsCurrent(nextGeneration)) {
             continue
           }
@@ -5322,10 +5395,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             continue
           }
           nativePreviewSurfaceCreatedRef.current = backendStatus.state === 'live'
-          const backendStatusAfterHostDrain =
-            queuedCommands.length > 0
-              ? { ...backendStatus, pendingHostCommandCount: 0 }
-              : backendStatus
+          const backendStatusAfterHostDrain = { ...backendStatus, pendingHostCommandCount: 0 }
           const surfaceStatus = mergePreviewSurfaceHostStatus(
             backendStatusAfterHostDrain,
             hostStatus
@@ -5426,25 +5496,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     ) {
       return
     }
+    const recordingActive = isActiveRecordingState(recordingRef.current.state)
     const suppress = nativePreviewFramePollingShouldSuppress({
-      recordingActive: isActiveRecordingState(recordingRef.current.state),
+      recordingActive,
       windowOpen: previewWindowRef.current.open,
       status: previewSurfaceStatusRef.current
     })
-    if (nativePreviewFramePollingSuppressionRequestedRef.current === suppress) {
+    const requestKey = `${suppress}:${recordingActive}`
+    if (nativePreviewFramePollingRequestKeyRef.current === requestKey) {
       return
     }
-    nativePreviewFramePollingSuppressionRequestedRef.current = suppress
+    nativePreviewFramePollingRequestKeyRef.current = requestKey
     void window.videorc
-      .setNativePreviewSurfaceFramePollingSuppressed(suppress)
+      .setNativePreviewSurfaceFramePollingSuppressed(suppress, recordingActive)
       .then((status) => {
-        if (nativePreviewFramePollingSuppressionRequestedRef.current === suppress) {
+        if (nativePreviewFramePollingRequestKeyRef.current === requestKey) {
           applyPreviewSurfaceStatus(status)
         }
       })
       .catch((error: unknown) => {
-        if (nativePreviewFramePollingSuppressionRequestedRef.current === suppress) {
-          nativePreviewFramePollingSuppressionRequestedRef.current = null
+        if (nativePreviewFramePollingRequestKeyRef.current === requestKey) {
+          nativePreviewFramePollingRequestKeyRef.current = null
         }
         console.error('Native preview frame-polling suppression failed:', error)
       })
@@ -5656,8 +5728,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // another native-surface scene with the same revision and different contents.
     const committed = nativePreviewCommittedSceneRef.current
     const committedStatus = committed?.compositorStatus ?? null
-    const compositorStatus =
-      committedStatus ?? (await client.request<CompositorStatus>('compositor.status'))
+    const compositorStatus = committedStatus ?? (await client.requestTyped('compositor.status'))
     const revision = compositorStatus.sceneRevision
     if (typeof revision !== 'number') {
       return
@@ -5742,15 +5813,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
     try {
       setLastError(null)
-      const path = await window.videorc.pickScreenImage()
-      if (!path) {
+      const selection = await window.videorc.pickScreenImage()
+      if (!selection) {
         return
       }
 
       setScreenImportPending(true)
       const screen = await client.request<StreamScreen>('screens.importImage', {
-        path,
-        ffmpegPath: settings.ffmpegPath.trim() || undefined
+        sourceCapability: selection.capabilityId
       })
       setScreens((current) => {
         const withoutExisting = current.filter((item) => item.id !== screen.id)
@@ -5763,7 +5833,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } finally {
       setScreenImportPending(false)
     }
-  }, [client, refreshScreensForClient, reportError, settings.ffmpegPath, wsStatus])
+  }, [client, refreshScreensForClient, reportError, wsStatus])
 
   const openSystemPermission = useCallback(
     async (pane: SystemPermissionPane) => {
@@ -5811,7 +5881,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setLastError(null)
       setSupportBundleExportPending(true)
       const params: SupportBundleExportParams = {
-        ffmpegPath: settings.ffmpegPath.trim() || undefined,
         // S2 (plan 024): the backend only knows its crate version (stuck at
         // 0.9.0); forward the real Electron app version so the bundle
         // identifies the shipped build. Absent → backend degrades to crate.
@@ -5825,22 +5894,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         'diagnostics.supportBundle.export',
         params
       )
-      const reveal = window.videorc?.revealPath
       toast.success('Support bundle exported.', {
-        description: result.path,
-        action: reveal
-          ? {
-              label: 'Reveal',
-              onClick: () => void reveal(result.path)
-            }
-          : undefined
+        description: basename(result.path)
       })
     } catch (error) {
       reportError(error)
     } finally {
       setSupportBundleExportPending(false)
     }
-  }, [client, reportError, runtimeInfo, settings.ffmpegPath, supportBundleExportPending])
+  }, [client, reportError, runtimeInfo, supportBundleExportPending])
 
   const sampleAudioMeter = useCallback(async () => {
     if (!client) {
@@ -5856,7 +5918,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setAudioMeterLoading(true)
       const result = await client.request<AudioMeterResult>('audio.meter.sample', {
         microphoneId: captureConfig.sources.microphoneId,
-        ffmpegPath: settings.ffmpegPath.trim() || undefined,
         microphoneGainDb: captureConfig.audio.microphoneGainDb,
         microphoneMuted: captureConfig.audio.microphoneMuted
       })
@@ -5871,8 +5932,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.audio.microphoneMuted,
     captureConfig.sources.microphoneId,
     client,
-    reportError,
-    settings.ffmpegPath
+    reportError
   ])
 
   const outputEnabled = captureConfig.recordEnabled || captureConfig.streamEnabled
@@ -6135,7 +6195,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (aiConsent && !currentCloudAiReadiness.ready) {
       setAiConsent(false)
     }
-  }, [aiConsent, currentCloudAiReadiness.ready])
+  }, [aiConsent, currentCloudAiReadiness.ready, setAiConsent])
 
   // Burn-in driver: a serial latest-wins scheduler replaces the old boolean
   // busy gate, which could permanently drop a final/style update that arrived
@@ -6545,71 +6605,185 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const signOutAccount = useCallback(async () => {
-    if (!client || wsStatus !== 'connected') {
+    const signOut = window.videorc?.signOutAccount
+    if (!signOut) {
       return
     }
     try {
-      const nextAccount = await client.request<VideorcAccountSnapshot>('account.sign_out')
+      const nextAccount = await signOut()
       setAccount(nextAccount)
-      await refreshAiReadinessForClient(client, nextAccount)
+      if (client && wsStatus === 'connected') {
+        await refreshAiReadinessForClient(client, nextAccount)
+      }
     } catch (error) {
       reportError(error)
     }
   }, [client, refreshAiReadinessForClient, reportError, wsStatus])
 
   const completeAccountSignIn = useCallback(
-    async (token: string) => {
-      if (!client || wsStatus !== 'connected') {
-        return
+    async (envelope: AccountCallbackEnvelope): Promise<'complete' | 'retry'> => {
+      const api = window.videorc
+      if (!client || wsStatus !== 'connected' || !api?.acknowledgeAccountCallback) {
+        return 'retry'
       }
+
+      const callbackUrl = new URL(envelope.url)
+      const code = callbackUrl.searchParams.get('code')?.trim()
+      const state = callbackUrl.searchParams.get('state')?.trim()
+      const verifier = callbackUrl.searchParams.get('verifier')?.trim()
+      if (
+        callbackUrl.protocol !== 'videorc:' ||
+        callbackUrl.hostname !== 'account' ||
+        callbackUrl.pathname !== '/callback' ||
+        !code ||
+        !state ||
+        !verifier ||
+        state !== envelope.state
+      ) {
+        throw new Error('Desktop account callback did not match its sign-in transaction.')
+      }
+      let nextAccount: VideorcAccountSnapshot
       try {
-        const nextAccount = await client.request<VideorcAccountSnapshot>(
-          'account.complete_sign_in',
-          {
-            token
-          }
-        )
-        setAccount(nextAccount)
+        nextAccount = await client.requestTyped('account.complete_sign_in', {
+          code,
+          state,
+          verifier,
+          intentGeneration: envelope.intentGeneration
+        })
+      } catch (error) {
+        if (error instanceof BackendRequestError && error.code === 'account-sign-in-superseded') {
+          // A newer sign-in or explicit sign-out is authoritative. Retire the
+          // durable stale envelope; retrying it could never be correct.
+          await api.acknowledgeAccountCallback(envelope.id)
+          accountCallbacksCompletedRef.current.add(envelope.id)
+          return 'complete'
+        }
+        throw error
+      }
+      // Backend persistence is the commit edge. Only ACK the durable envelope
+      // after that commit; UI/readiness refresh is intentionally outside it.
+      await api.acknowledgeAccountCallback(envelope.id)
+      accountCallbacksCompletedRef.current.add(envelope.id)
+      setAccount(nextAccount)
+      try {
         await refreshAiReadinessForClient(client, nextAccount)
       } catch (error) {
         reportError(error)
       }
+      return 'complete'
     },
     [client, refreshAiReadinessForClient, reportError, wsStatus]
   )
 
   useEffect(() => {
-    if (!window.videorc?.onOAuthCallbackUrl) {
+    if (
+      !window.videorc?.getPendingAccountCallbacks ||
+      !window.videorc.acknowledgeAccountCallback ||
+      !window.videorc.onAccountCallback ||
+      !client ||
+      wsStatus !== 'connected'
+    ) {
       return
     }
 
-    return window.videorc.onOAuthCallbackUrl((callbackUrl) => {
-      if (!client || wsStatus !== 'connected') {
-        toast.error('OAuth callback received before the backend was connected.')
+    let disposed = false
+    const retryAttempts = new Map<string, number>()
+    const retryTimers = new Set<number>()
+    const ownedCallbackIds = new Set<string>()
+    const exhaustedCallbackIds = new Set<string>()
+    const inFlightCallbacks = accountCallbacksInFlightRef.current
+    const exhaustRetries = (envelope: AccountCallbackEnvelope): void => {
+      retryAttempts.delete(envelope.id)
+      ownedCallbackIds.delete(envelope.id)
+      inFlightCallbacks.delete(envelope.id)
+      exhaustedCallbackIds.add(envelope.id)
+      toast.error(
+        'Account sign-in is still unavailable. Videorc kept the callback without acknowledging it.'
+      )
+    }
+    const scheduleRetry = (envelope: AccountCallbackEnvelope): void => {
+      if (disposed) return
+      const attempt = retryAttempts.get(envelope.id) ?? 0
+      const retryDelayMs = accountCallbackRetryDelayMs(
+        envelope.receivedAtMs,
+        envelope.expiresAtMs,
+        attempt,
+        Date.now()
+      )
+      if (retryDelayMs === null) {
+        exhaustRetries(envelope)
         return
       }
-
-      let parsed: URL
-      try {
-        parsed = new URL(callbackUrl)
-      } catch (error) {
-        reportError(error)
+      retryAttempts.set(envelope.id, attempt + 1)
+      if (attempt === 0) {
+        toast.error('Account sign-in is temporarily unavailable. Videorc will retry.')
+      }
+      const timer = window.setTimeout(() => {
+        retryTimers.delete(timer)
+        inFlightCallbacks.delete(envelope.id)
+        processEnvelope(envelope)
+      }, retryDelayMs)
+      retryTimers.add(timer)
+    }
+    const processEnvelope = (envelope: AccountCallbackEnvelope): void => {
+      if (
+        disposed ||
+        exhaustedCallbackIds.has(envelope.id) ||
+        accountCallbacksCompletedRef.current.has(envelope.id) ||
+        inFlightCallbacks.has(envelope.id)
+      ) {
         return
       }
+      ownedCallbackIds.add(envelope.id)
+      inFlightCallbacks.add(envelope.id)
+      void completeAccountSignIn(envelope)
+        .then((disposition) => {
+          if (disposition === 'retry' && !disposed) {
+            scheduleRetry(envelope)
+            return
+          }
+          retryAttempts.delete(envelope.id)
+          ownedCallbackIds.delete(envelope.id)
+          inFlightCallbacks.delete(envelope.id)
+        })
+        .catch(() => scheduleRetry(envelope))
+    }
+    void window.videorc
+      .getPendingAccountCallbacks()
+      .then((envelopes) => envelopes.forEach(processEnvelope))
+      .catch(reportError)
+    const unsubscribe = window.videorc.onAccountCallback(processEnvelope)
+    return () => {
+      disposed = true
+      retryTimers.forEach((timer) => window.clearTimeout(timer))
+      ownedCallbackIds.forEach((id) => inFlightCallbacks.delete(id))
+      unsubscribe()
+    }
+  }, [client, completeAccountSignIn, reportError, wsStatus])
 
-      // The product-account deep-link rides the same callback channel as OAuth.
-      if (parsed.hostname === 'account') {
-        const token = parsed.searchParams.get('token')?.trim()
-        if (token) {
-          void completeAccountSignIn(token)
-        }
-        return
+  const completeProviderOAuthCallback = useCallback(
+    async (envelope: OAuthCallbackEnvelope): Promise<'complete' | 'retry'> => {
+      const api = window.videorc
+      if (!client || wsStatus !== 'connected' || !api?.acknowledgeOAuthCallback) {
+        return 'retry'
+      }
+
+      const parsed = new URL(envelope.url)
+      if (
+        parsed.protocol !== 'videorc:' ||
+        parsed.hostname !== 'oauth' ||
+        parsed.pathname !== '/callback' ||
+        parsed.username ||
+        parsed.password ||
+        parsed.port ||
+        parsed.hash
+      ) {
+        throw new Error('Provider OAuth callback had an invalid redirect URI.')
       }
 
       const state = parsed.searchParams.get('state')?.trim()
-      if (!state) {
-        toast.error('OAuth callback was missing state.')
-        return
+      if (!state || state !== envelope.state) {
+        throw new Error('Provider OAuth callback state did not match its durable envelope.')
       }
 
       const params: OAuthCompleteParams = {
@@ -6619,9 +6793,101 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         errorDescription: parsed.searchParams.get('error_description') ?? undefined
       }
 
-      void client.request('platformAccounts.oauth.complete', params).catch(reportError)
-    })
-  }, [client, completeAccountSignIn, reportError, wsStatus])
+      // The backend consumes the pending OAuth state and persists any token.
+      // Only then may the main-process queue discard its single-use callback.
+      const result = await client.requestTyped('platformAccounts.oauth.complete', params)
+      if (result.retryable) {
+        return 'retry'
+      }
+      await api.acknowledgeOAuthCallback(envelope.id)
+      providerOAuthCallbacksCompletedRef.current.add(envelope.id)
+      return 'complete'
+    },
+    [client, wsStatus]
+  )
+
+  useEffect(() => {
+    if (
+      !window.videorc?.getPendingOAuthCallbacks ||
+      !window.videorc.acknowledgeOAuthCallback ||
+      !window.videorc.onOAuthCallbackUrl ||
+      !client ||
+      wsStatus !== 'connected'
+    ) {
+      return
+    }
+
+    let disposed = false
+    const retryAttempts = new Map<string, number>()
+    const retryTimers = new Set<number>()
+    const ownedCallbackIds = new Set<string>()
+    const exhaustedCallbackIds = new Set<string>()
+    const inFlightCallbacks = providerOAuthCallbacksInFlightRef.current
+    const exhaustRetries = (envelope: OAuthCallbackEnvelope): void => {
+      retryAttempts.delete(envelope.id)
+      ownedCallbackIds.delete(envelope.id)
+      inFlightCallbacks.delete(envelope.id)
+      exhaustedCallbackIds.add(envelope.id)
+      toast.error(
+        'OAuth completion is still unavailable. Videorc kept the callback without acknowledging it.'
+      )
+    }
+    const scheduleRetry = (envelope: OAuthCallbackEnvelope): void => {
+      if (disposed) return
+      const attempt = retryAttempts.get(envelope.id) ?? 0
+      const retryDelayMs = providerOAuthRetryDelayMs(envelope.receivedAtMs, attempt, Date.now())
+      if (retryDelayMs === null) {
+        exhaustRetries(envelope)
+        return
+      }
+      retryAttempts.set(envelope.id, attempt + 1)
+      if (attempt === 0) {
+        toast.error('OAuth completion is temporarily unavailable. Videorc will retry.')
+      }
+      const timer = window.setTimeout(() => {
+        retryTimers.delete(timer)
+        inFlightCallbacks.delete(envelope.id)
+        processEnvelope(envelope)
+      }, retryDelayMs)
+      retryTimers.add(timer)
+    }
+    const processEnvelope = (envelope: OAuthCallbackEnvelope): void => {
+      if (
+        disposed ||
+        exhaustedCallbackIds.has(envelope.id) ||
+        providerOAuthCallbacksCompletedRef.current.has(envelope.id) ||
+        inFlightCallbacks.has(envelope.id)
+      ) {
+        return
+      }
+      ownedCallbackIds.add(envelope.id)
+      inFlightCallbacks.add(envelope.id)
+      void completeProviderOAuthCallback(envelope)
+        .then((disposition) => {
+          if (disposition === 'retry' && !disposed) {
+            scheduleRetry(envelope)
+            return
+          }
+          retryAttempts.delete(envelope.id)
+          ownedCallbackIds.delete(envelope.id)
+          inFlightCallbacks.delete(envelope.id)
+        })
+        .catch(() => {
+          scheduleRetry(envelope)
+        })
+    }
+    void window.videorc
+      .getPendingOAuthCallbacks()
+      .then((envelopes) => envelopes.forEach(processEnvelope))
+      .catch(reportError)
+    const unsubscribe = window.videorc.onOAuthCallbackUrl(processEnvelope)
+    return () => {
+      disposed = true
+      retryTimers.forEach((timer) => window.clearTimeout(timer))
+      ownedCallbackIds.forEach((id) => inFlightCallbacks.delete(id))
+      unsubscribe()
+    }
+  }, [client, completeProviderOAuthCallback, reportError, wsStatus])
 
   const patchStreamMetadataDraft = useCallback((patch: Partial<StreamMetadataDraft>) => {
     setStreamMetadataDraft((current) => (current ? { ...current, ...patch } : current))
@@ -7198,14 +7464,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               message: streamingOverride ? 'Preparing livestream…' : 'Preparing recording…'
             }
         applyRecordingStatus(optimisticRecording)
+        const outputDirectory = settings.outputDirectoryHandle
+          ? await window.videorc?.authorizeOutputDirectory?.(settings.outputDirectoryHandle)
+          : null
+        if (settings.outputDirectoryHandle && !outputDirectory) {
+          throw new Error('The selected output folder is unavailable. Choose it again in Settings.')
+        }
+        const authorizedOutput = {
+          ...sessionParams.output,
+          ...(outputDirectory ? { outputDirectoryCapability: outputDirectory.capabilityId } : {})
+        }
         const nextSessionParams: StartSessionParams = streamingOverride
           ? {
               ...sessionParams,
-              output: { ...sessionParams.output, streamEnabled: true },
+              output: { ...authorizedOutput, streamEnabled: true },
               streaming: streamingOverride
             }
-          : sessionParams
-        const status = await client.request<RecordingStatus>('session.start', nextSessionParams)
+          : { ...sessionParams, output: authorizedOutput }
+        const status = await client.requestTyped('session.start', nextSessionParams)
         applyRecordingStatus(status)
         await refreshSessions(client)
         await activatePreparedYouTubeBroadcasts(streamingForStart, lifecycleRunId)
@@ -7237,6 +7513,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshSessions,
       reportError,
       sessionParams,
+      settings.outputDirectoryHandle,
       startBlockedReason,
       validatePlatformAccountsForClient
     ]
@@ -7608,7 +7885,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         recordingRef.current.sessionId,
         4000
       )
-      const status = await client.request<RecordingStatus>('session.stop')
+      const status = await client.requestTyped('session.stop')
       applyRecordingStatus(status)
       await completePreparedPlatformBroadcasts(cleaned)
     } catch (error) {
@@ -7637,33 +7914,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [client, refreshSessions]
   )
 
-  // Delete = files to the system Trash FIRST (Trash is the undo), then the
-  // rows. If any file refuses to move, its session row stays too — the list
-  // never lies about what is on disk.
+  // Delete is a durable two-phase operation. The backend first hides each row
+  // and atomically renames identity-matched media to operation-owned quarantine
+  // paths. Electron moves only those quarantine paths to the system Trash, and
+  // an acknowledgement removes the row after every move succeeds. Replacements
+  // at the original path can therefore never cross the backend-check/Electron-
+  // use boundary and be trashed by mistake.
   const deleteSessions = useCallback(
     async (targets: SessionSummary[]): Promise<void> => {
       if (!client) {
         throw new Error('Backend is not connected.')
       }
-      const paths = targets.flatMap((session) =>
-        [session.outputPath, session.mp4Path].filter((path): path is string => Boolean(path))
-      )
-      const trash = await window.videorc?.trashPaths?.(paths)
-      const failedPaths = new Set(trash?.failures ?? [])
-      const deletable = targets.filter(
-        (session) =>
-          !(session.outputPath && failedPaths.has(session.outputPath)) &&
-          !(session.mp4Path && failedPaths.has(session.mp4Path))
-      )
-      if (deletable.length > 0) {
-        await client.request('sessions.delete', {
-          sessionIds: deletable.map((session) => session.id)
-        })
+      const operations: SessionDeletionOperation[] = await client.requestTyped('sessions.delete', {
+        sessionIds: targets.map((session) => session.id)
+      })
+      let failedCount = 0
+      for (const operation of operations) {
+        const result = await window.videorc?.trashSessionDeletion?.(operation.operationId)
+        failedCount += result?.failedCount ?? operation.pathCount + operation.blockedPathCount
       }
       await refreshSessions(client)
-      if (failedPaths.size > 0) {
+      if (failedCount > 0) {
         throw new Error(
-          `${failedPaths.size} file(s) could not be moved to Trash; their sessions were kept.`
+          `${failedCount} file(s) could not be moved to Trash; their sessions were kept.`
         )
       }
     },
@@ -7685,19 +7958,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!client) {
       throw new Error('Backend is not connected.')
     }
-    const sourcePath = await window.videorc?.pickFile?.()
-    if (!sourcePath) {
+    const source = await window.videorc?.pickFile?.()
+    if (!source) {
       return
+    }
+    const outputDirectory = settings.outputDirectoryHandle
+      ? await window.videorc?.authorizeOutputDirectory?.(settings.outputDirectoryHandle)
+      : null
+    if (settings.outputDirectoryHandle && !outputDirectory) {
+      throw new Error('The selected output folder is unavailable. Choose it again in Settings.')
     }
     // Blank means the platform default — the backend resolves and creates it,
     // exactly like recording does (Settings: "Blank uses the default").
     await client.request('sessions.import', {
-      sourcePath,
-      outputDirectory: settings.outputDirectory?.trim() ?? '',
-      ffmpegPath: settings.ffmpegPath.trim() || undefined
+      sourceCapability: source.capabilityId,
+      outputDirectoryCapability: outputDirectory?.capabilityId
     })
     await refreshSessions(client)
-  }, [client, refreshSessions, settings.ffmpegPath, settings.outputDirectory])
+  }, [client, refreshSessions, settings.outputDirectoryHandle])
 
   const ensureSessionPoster = useCallback(
     async (sessionId: string): Promise<boolean> => {
@@ -7706,15 +7984,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       try {
         const result = await client.request<{ available: boolean }>('sessions.poster', {
-          sessionId,
-          ffmpegPath: settings.ffmpegPath.trim() || undefined
+          sessionId
         })
         return result.available
       } catch {
         return false
       }
     },
-    [client, settings.ffmpegPath]
+    [client]
   )
 
   const remuxSession = useCallback(
@@ -7726,8 +8003,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       try {
         setLastError(null)
         await client.request('session.remux_mp4', {
-          sessionId,
-          ffmpegPath: settings.ffmpegPath.trim() || undefined
+          sessionId
         })
         await refreshSessions(client)
         toast.success('Remuxed recording to MP4.')
@@ -7735,7 +8011,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         reportError(error)
       }
     },
-    [client, refreshSessions, reportError, settings.ffmpegPath]
+    [client, refreshSessions, reportError]
   )
 
   const runAiWorkflow = useCallback(
@@ -7760,7 +8036,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const result = await client.request<AiWorkflowResult>('ai.run_post_recording', {
           sessionId,
           consentToUploadAudio: aiConsent,
-          ffmpegPath: settings.ffmpegPath.trim() || undefined,
           outputs: options?.outputs,
           tone: options?.tone
         })
@@ -7798,8 +8073,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       currentCloudAiReadiness.ready,
       currentCloudAiReadiness.title,
       refreshSessions,
-      reportError,
-      settings.ffmpegPath
+      reportError
     ]
   )
 
@@ -7857,15 +8131,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const result = await client.request<ClipExportResult>('ai.clip.export', {
           sessionId,
           startMs,
-          endMs,
-          ffmpegPath: settings.ffmpegPath.trim() || undefined
+          endMs
         })
         toast.success('Clip exported next to the recording.', {
           description: basename(result.path),
           action: {
             label: 'Reveal',
             onClick: () => {
-              void window.videorc?.revealPath?.(result.path)
+              void window.videorc?.revealSession?.(sessionId)
             }
           }
         })
@@ -7873,35 +8146,35 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         reportError(error)
       }
     },
-    [client, reportError, settings.ffmpegPath]
+    [client, reportError]
   )
 
   const assessRecording = useCallback(
-    async (path: string): Promise<FileAssessment> => {
+    async (sessionId: string): Promise<FileAssessment> => {
       if (!client) {
         throw new Error('Backend is not connected.')
       }
-      return client.request<FileAssessment>('repair.assess_file', { path })
+      return client.requestTyped('repair.assess_file', { sessionId })
     },
     [client]
   )
 
   const repairRecording = useCallback(
-    async (path: string): Promise<GateStatus> => {
+    async (sessionId: string): Promise<GateStatus> => {
       if (!client) {
         throw new Error('Backend is not connected.')
       }
-      return client.request<GateStatus>('repair.repair_file', { path })
+      return client.requestTyped('repair.repair_file', { sessionId })
     },
     [client]
   )
 
   const restoreRecording = useCallback(
-    async (path: string): Promise<boolean> => {
+    async (sessionId: string): Promise<boolean> => {
       if (!client) {
         throw new Error('Backend is not connected.')
       }
-      const result = await client.request<{ restored: boolean }>('repair.restore_file', { path })
+      const result = await client.requestTyped('repair.restore_file', { sessionId })
       return result.restored
     },
     [client]

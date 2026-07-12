@@ -19,7 +19,7 @@ const launched = await launchDevApp({
 const smoke = launched.connections['preview-motion-ready']
 const cmd = async (command, params = {}) => {
   const r = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${smoke.capability}` },
     body: JSON.stringify({ command, params })
   })
   const j = await r.json()

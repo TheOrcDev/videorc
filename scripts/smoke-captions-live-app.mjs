@@ -89,7 +89,9 @@ try {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_PREVIEW_MOTION: '1',
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
-      VIDEORC_SMOKE_STATE_DIR: stateRoot
+      VIDEORC_SMOKE_STATE_DIR: outputDirectory,
+      VIDEORC_APP_DATA_DIR: appDataDir,
+      VIDEORC_USER_DATA_DIR: join(stateRoot, 'user-data')
     }
   })
   backend = await connectBackend(launched.connections['backend-ready'], timeoutMs)
@@ -119,12 +121,16 @@ try {
   await sleep(listenerBindMs)
   assertListenerRunning(listener)
 
+  const outputAuthorization = await smokeCommand(smoke, 'authorize-smoke-resource', {
+    kind: 'output-directory',
+    path: outputDirectory
+  })
   const captureRequestedAt = Date.now()
   const started = await request(
     backend,
     timeoutMs,
     'session.start',
-    sessionParams({ outputDirectory, target })
+    sessionParams({ outputDirectoryCapability: outputAuthorization.capabilityId, target })
   )
   if (started.state !== 'recording' || !started.sessionId || !started.outputPath) {
     throw new Error(`Caption smoke did not enter record+stream: ${JSON.stringify(started)}`)
@@ -183,7 +189,7 @@ try {
     throw new Error(`Could not mute the active native source: ${JSON.stringify(muteUpdate)}`)
   }
   const mutedAudioStart = fake.state.chunkAudio.length
-  const mutedInjection = await injectPreControlsPcm(backend, started.sessionId)
+  const mutedInjection = await injectPreControlsPcm(smoke, started.sessionId)
   await waitFor(
     () => fake.state.chunkAudio.length > mutedAudioStart,
     timeoutMs,
@@ -208,7 +214,7 @@ try {
     throw new Error(`Could not unmute the active native source: ${JSON.stringify(baselineUpdate)}`)
   }
   const baselineAudioStart = fake.state.chunkAudio.length
-  const baselineInjection = await injectPreControlsPcm(backend, started.sessionId)
+  const baselineInjection = await injectPreControlsPcm(smoke, started.sessionId)
   await waitFor(
     () => observed.updates.some((update) => update.kind === 'final' && update.text === finalText),
     timeoutMs,
@@ -232,7 +238,7 @@ try {
     throw new Error(`Could not update active native gain: ${JSON.stringify(gainUpdate)}`)
   }
   const gainedAudioStart = fake.state.chunkAudio.length
-  const gainedInjection = await injectPreControlsPcm(backend, started.sessionId)
+  const gainedInjection = await injectPreControlsPcm(smoke, started.sessionId)
   await waitFor(
     () =>
       fake.state.chunkAudio
@@ -266,7 +272,7 @@ try {
       )}`
     )
   }
-  const overlaySnapshot = await waitForCaptionOverlay(backend)
+  const overlaySnapshot = await waitForCaptionOverlay(smoke)
 
   // Leave the settled line on screen long enough for multiple independently
   // decoded frames. Its readable dwell is longer than this capture window.
@@ -557,7 +563,7 @@ async function hydrateRendererActiveSession(smoke) {
   }
 }
 
-function sessionParams({ outputDirectory, target }) {
+function sessionParams({ outputDirectoryCapability, target }) {
   return {
     sources: { testPattern: true, microphoneId: captionTestMicrophoneId },
     layout: {
@@ -581,8 +587,7 @@ function sessionParams({ outputDirectory, target }) {
     output: {
       recordEnabled: true,
       streamEnabled: true,
-      outputDirectory,
-      ffmpegPath,
+      outputDirectoryCapability,
       video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 },
       rtmp: { preset: 'custom', serverUrl: target.serverUrl, streamKey: target.streamKey }
     },
@@ -631,11 +636,11 @@ async function waitForCaptionStatus(connection, predicate) {
   throw new Error(`Timed out waiting for live caption status: ${JSON.stringify(latest)}`)
 }
 
-async function waitForCaptionOverlay(connection) {
+async function waitForCaptionOverlay(smoke) {
   const deadline = Date.now() + Math.min(timeoutMs, 30_000)
   let latest = null
   while (Date.now() < deadline) {
-    latest = await request(connection, timeoutMs, 'captions.test.snapshot', {})
+    latest = await requestDebugBackend(smoke, 'captions.test.snapshot', {})
     if (
       latest?.overlays?.auxiliary?.active &&
       latest.overlays.auxiliary.revision > 0 &&
@@ -803,8 +808,8 @@ function artifactInventory(directory) {
   }
 }
 
-async function injectPreControlsPcm(connection, sessionId) {
-  const injection = await request(connection, timeoutMs, 'audio.test.inject-pcm', {
+async function injectPreControlsPcm(smoke, sessionId) {
+  const injection = await requestDebugBackend(smoke, 'audio.test.inject-pcm', {
     sessionId,
     durationMs: injectionMs,
     rawPeak: rawTonePeak
@@ -816,6 +821,10 @@ async function injectPreControlsPcm(connection, sessionId) {
     )
   }
   return injection
+}
+
+function requestDebugBackend(smoke, method, params) {
+  return smokeCommand(smoke, 'backend-debug-rpc', { method, params, timeoutMs })
 }
 
 function replaceExtension(filePath, nextExtension) {
@@ -840,7 +849,10 @@ async function requestSafe(ws, method, params) {
 async function smokeCommand(smoke, command, params = {}) {
   const response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${smoke.capability}`
+    },
     body: JSON.stringify({ command, params }),
     signal: AbortSignal.timeout(timeoutMs)
   })

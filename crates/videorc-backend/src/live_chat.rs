@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep, timeout};
 
+use crate::live_chat_persistence::LiveChatPersistenceFailure;
 use crate::state::AppState;
 use crate::streaming::{PlatformAccount, StreamPlatform, stream_platform_id};
 
@@ -439,12 +440,15 @@ pub const DEFAULT_MAX_CHAT_MESSAGES: usize = 5_000;
 pub type LiveChatSlot = Arc<tokio::sync::Mutex<LiveChatCoordinator>>;
 
 /// Outcome of ingesting one message into the bounded, de-duplicated buffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// New and updated outcomes carry the authoritative buffered value so callers
+/// can persist and emit it without scanning the full message deque again.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestOutcome {
     /// A new message was buffered (the caller should emit it to the renderer).
-    New,
+    New(LiveChatMessage),
     /// An existing message was replaced by a provider tombstone.
-    Updated,
+    Updated(LiveChatMessage),
     /// The message id was already present and was skipped.
     Duplicate,
 }
@@ -612,6 +616,9 @@ pub struct ProviderSendReceipt {
 
 pub struct LiveChatCoordinator {
     session_id: Option<String>,
+    /// Monotonic lifecycle ticket. Provider deliveries capture it before
+    /// persistence and must still own it before emitting into the renderer.
+    generation: u64,
     providers: Vec<LiveChatProviderState>,
     messages: VecDeque<LiveChatMessage>,
     /// Ids currently in `messages` — the de-duplication set, kept in lock-step with the
@@ -634,6 +641,47 @@ pub struct LiveChatCoordinator {
     send_operations_in_flight: HashMap<String, InFlightSendOperation>,
 }
 
+struct ReversibleIngest {
+    outcome: IngestOutcome,
+    undo: LiveChatIngestUndo,
+}
+
+/// Constant-size undo data for one coordinator ingest. A delivery failure must
+/// never clone the complete (normally 5,000-row) transcript merely to make one
+/// provider message retryable.
+enum LiveChatIngestUndo {
+    Duplicate {
+        previous_duplicates_skipped: u64,
+    },
+    Updated {
+        index: usize,
+        previous: Box<LiveChatMessage>,
+        applied: Box<LiveChatMessage>,
+    },
+    New {
+        inserted_id: String,
+        inserted_received_at: String,
+        trimmed: Option<Box<LiveChatMessage>>,
+        provider_update: Option<(usize, Option<String>)>,
+        previous_unread_count: u64,
+        previous_trimmed_count: u64,
+        previous_messages_received: u64,
+    },
+}
+
+#[cfg(test)]
+impl LiveChatIngestUndo {
+    /// Regression metric for rollback space complexity. This count is bounded by
+    /// the one ingest being reversed, never by the transcript capacity.
+    fn retained_buffer_rows(&self) -> usize {
+        match self {
+            Self::Duplicate { .. } => 0,
+            Self::Updated { .. } => 2,
+            Self::New { trimmed, .. } => usize::from(trimmed.is_some()),
+        }
+    }
+}
+
 impl Default for LiveChatCoordinator {
     fn default() -> Self {
         Self::new(DEFAULT_MAX_CHAT_MESSAGES)
@@ -644,6 +692,7 @@ impl LiveChatCoordinator {
     pub fn new(max_messages: usize) -> Self {
         Self {
             session_id: None,
+            generation: 0,
             providers: Vec::new(),
             messages: VecDeque::new(),
             seen: HashSet::new(),
@@ -709,6 +758,7 @@ impl LiveChatCoordinator {
     /// installing the provider rows for this session.
     pub fn start_session(&mut self, session_id: String, providers: Vec<LiveChatProviderState>) {
         self.abort_tasks();
+        self.generation = self.generation.wrapping_add(1);
         self.session_id = Some(session_id);
         self.providers = providers;
         self.messages.clear();
@@ -725,6 +775,7 @@ impl LiveChatCoordinator {
     /// retained so the app can keep showing it until the local view is cleared.
     pub fn stop_session(&mut self) {
         self.abort_tasks();
+        self.generation = self.generation.wrapping_add(1);
         for provider in &mut self.providers {
             if provider.state != LiveChatProviderConnectionState::Unsupported {
                 provider.state = LiveChatProviderConnectionState::Ended;
@@ -737,6 +788,7 @@ impl LiveChatCoordinator {
     /// Clear the local message view (buffer + unread) without touching providers, the
     /// session, or platform-side messages — the `liveChat.clearLocal` semantics.
     pub fn clear_local(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.messages.clear();
         self.seen.clear();
         self.unread_count = 0;
@@ -744,15 +796,22 @@ impl LiveChatCoordinator {
 
     /// Buffer one message, or replace an existing row with a provider deletion tombstone.
     /// A tombstone always wins over the original, including when it arrives first.
-    pub fn ingest(&mut self, mut message: LiveChatMessage) -> IngestOutcome {
+    #[allow(dead_code)]
+    pub fn ingest(&mut self, message: LiveChatMessage) -> IngestOutcome {
+        self.ingest_reversible(message).outcome
+    }
+
+    fn ingest_reversible(&mut self, mut message: LiveChatMessage) -> ReversibleIngest {
         if self.seen.contains(&message.id) {
-            if let Some(existing) = self
+            if let Some(index) = self
                 .messages
-                .iter_mut()
-                .find(|existing| existing.id == message.id)
+                .iter()
+                .position(|existing| existing.id == message.id)
                 && message.is_deleted
-                && !existing.is_deleted
+                && !self.messages[index].is_deleted
             {
+                let existing = &mut self.messages[index];
+                let previous = existing.clone();
                 // Keep the original row's identity and chronological position, but
                 // discard its provider-visible content. The deletion event supplies
                 // the safe replacement text and raw event type.
@@ -765,32 +824,129 @@ impl LiveChatCoordinator {
                 message.received_at = existing.received_at.clone();
                 message.fragments.clear();
                 message.amount_text = None;
-                *existing = message;
-                return IngestOutcome::Updated;
+                *existing = message.clone();
+                return ReversibleIngest {
+                    outcome: IngestOutcome::Updated(message.clone()),
+                    undo: LiveChatIngestUndo::Updated {
+                        index,
+                        previous: Box::new(previous),
+                        applied: Box::new(message),
+                    },
+                };
             }
+            let previous_duplicates_skipped = self.duplicates_skipped;
             self.duplicates_skipped += 1;
-            return IngestOutcome::Duplicate;
+            return ReversibleIngest {
+                outcome: IngestOutcome::Duplicate,
+                undo: LiveChatIngestUndo::Duplicate {
+                    previous_duplicates_skipped,
+                },
+            };
         }
-        if let Some(provider) = self.providers.iter_mut().find(|provider| {
+        let provider_update = self.providers.iter().position(|provider| {
             provider.platform == message.platform
                 && provider.target_id.as_deref() == message.target_id.as_deref()
-        }) {
-            provider.last_message_at = Some(message.received_at.clone());
-        }
-        self.seen.insert(message.id.clone());
-        self.messages.push_back(message);
+        });
+        let provider_update = provider_update.map(|index| {
+            let previous = self.providers[index].last_message_at.clone();
+            self.providers[index].last_message_at = Some(message.received_at.clone());
+            (index, previous)
+        });
+        let previous_unread_count = self.unread_count;
+        let previous_trimmed_count = self.trimmed_count;
+        let previous_messages_received = self.messages_received;
+        let inserted_id = message.id.clone();
+        let inserted_received_at = message.received_at.clone();
+        self.seen.insert(inserted_id.clone());
+        self.messages.push_back(message.clone());
         self.unread_count += 1;
         self.messages_received += 1;
-        while self.messages.len() > self.max_messages {
-            match self.messages.pop_front() {
-                Some(trimmed) => {
+        debug_assert!(self.messages.len() <= self.max_messages + 1);
+        let trimmed = if self.messages.len() > self.max_messages {
+            self.messages
+                .pop_front()
+                .inspect(|trimmed| {
                     self.seen.remove(&trimmed.id);
                     self.trimmed_count += 1;
+                })
+                .map(Box::new)
+        } else {
+            None
+        };
+        ReversibleIngest {
+            outcome: IngestOutcome::New(message),
+            undo: LiveChatIngestUndo::New {
+                inserted_id,
+                inserted_received_at,
+                trimmed,
+                provider_update,
+                previous_unread_count,
+                previous_trimmed_count,
+                previous_messages_received,
+            },
+        }
+    }
+
+    fn rollback_ingest(&mut self, undo: LiveChatIngestUndo) {
+        match undo {
+            LiveChatIngestUndo::Duplicate {
+                previous_duplicates_skipped,
+            } => {
+                if self.duplicates_skipped == previous_duplicates_skipped.saturating_add(1) {
+                    self.duplicates_skipped = previous_duplicates_skipped;
                 }
-                None => break,
+            }
+            LiveChatIngestUndo::Updated {
+                index,
+                previous,
+                applied,
+            } => {
+                if self.messages.get(index) == Some(applied.as_ref())
+                    && let Some(message) = self.messages.get_mut(index)
+                {
+                    *message = *previous;
+                }
+            }
+            LiveChatIngestUndo::New {
+                inserted_id,
+                inserted_received_at,
+                trimmed,
+                provider_update,
+                previous_unread_count,
+                previous_trimmed_count,
+                previous_messages_received,
+            } => {
+                if self
+                    .messages
+                    .back()
+                    .map(|message| (message.id.as_str(), message.received_at.as_str()))
+                    != Some((inserted_id.as_str(), inserted_received_at.as_str()))
+                {
+                    // A lifecycle operation replaced the transcript while persistence
+                    // was pending. Do not mutate that newer session to restore old data.
+                    return;
+                }
+                self.messages.pop_back();
+                self.seen.remove(&inserted_id);
+                if let Some(trimmed) = trimmed {
+                    self.seen.insert(trimmed.id.clone());
+                    self.messages.push_front(*trimmed);
+                }
+                self.unread_count = previous_unread_count;
+                self.trimmed_count = previous_trimmed_count;
+                self.messages_received = previous_messages_received;
+                if let Some((index, previous)) = provider_update
+                    && self
+                        .providers
+                        .get(index)
+                        .and_then(|provider| provider.last_message_at.as_deref())
+                        == Some(inserted_received_at.as_str())
+                    && let Some(provider) = self.providers.get_mut(index)
+                {
+                    provider.last_message_at = previous;
+                }
             }
         }
-        IngestOutcome::New
     }
 
     /// Update one provider's connection state + message (e.g. connecting → connected → ended).
@@ -1082,10 +1238,12 @@ pub async fn start_live_chat(state: &AppState, params: LiveChatStartParams) -> L
             provider.message = "Waiting for X broadcast context.".to_string();
         }
     }
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     {
         let mut coordinator = state.live_chat.lock().await;
         coordinator.start_session(params.session_id.clone(), providers);
     }
+    drop(lifecycle_delivery);
     if let Some(fake) = params.fake.clone() {
         let handle = tokio::spawn(run_fake_connector(
             state.clone(),
@@ -1679,10 +1837,12 @@ async fn send_to_destination(
 
 /// Stop the active chat session, aborting connectors and marking providers ended.
 pub async fn stop_live_chat(state: &AppState) -> LiveChatSnapshot {
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     {
         let mut coordinator = state.live_chat.lock().await;
         coordinator.stop_session();
     }
+    drop(lifecycle_delivery);
     let snapshot = current_status(state).await;
     state.emit_event("liveChat.snapshot", snapshot.clone());
     snapshot
@@ -1690,10 +1850,12 @@ pub async fn stop_live_chat(state: &AppState) -> LiveChatSnapshot {
 
 /// Clear the local message view (not platform messages) and emit `liveChat.cleared`.
 pub async fn clear_local_live_chat(state: &AppState) -> LiveChatSnapshot {
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     {
         let mut coordinator = state.live_chat.lock().await;
         coordinator.clear_local();
     }
+    drop(lifecycle_delivery);
     let snapshot = current_status(state).await;
     state.emit_event("liveChat.cleared", snapshot.clone());
     snapshot
@@ -1724,30 +1886,101 @@ pub async fn current_diagnostics(state: &AppState) -> LiveChatDiagnostics {
 }
 
 /// Lock the coordinator, ingest one message, and emit it when it is new or tombstoned.
-pub(crate) async fn deliver_message(state: &AppState, message: LiveChatMessage) {
-    let authoritative_message = {
+pub(crate) async fn deliver_message(state: &AppState, message: LiveChatMessage) -> bool {
+    try_deliver_message(state, message).await.is_ok()
+}
+
+pub(crate) async fn try_deliver_message(
+    state: &AppState,
+    message: LiveChatMessage,
+) -> std::result::Result<(), LiveChatPersistenceFailure> {
+    try_deliver_messages(state, vec![message]).await
+}
+
+/// Persist and emit one sequential provider delivery as one atomic transaction. The
+/// delivery guard plus constant-size per-message undo records make a terminal
+/// persistence failure retryable without cloning the full transcript. Transient
+/// database failures remain inside the worker and apply backpressure.
+pub(crate) async fn try_deliver_messages(
+    state: &AppState,
+    messages: Vec<LiveChatMessage>,
+) -> std::result::Result<(), LiveChatPersistenceFailure> {
+    if messages.is_empty() {
+        return Ok(());
+    }
+    let _delivery = state.live_chat_persistence.begin_delivery().await;
+    let (delivery_generation, delivery_session_id, undos, authoritative_messages) = {
         let mut coordinator = state.live_chat.lock().await;
-        let outcome = coordinator.ingest(message.clone());
-        (outcome != IngestOutcome::Duplicate)
-            .then(|| {
-                coordinator
-                    .messages
-                    .iter()
-                    .find(|candidate| candidate.id == message.id)
-                    .cloned()
-            })
-            .flatten()
-    };
-    if let Some(message) = authoritative_message {
-        if let Err(error) = state.database.save_live_chat_message(&message) {
-            state.emit_log(
-                "warn",
-                format!(
-                    "Could not persist live chat message {}: {error}",
-                    message.id
-                ),
-            );
+        let Some(delivery_session_id) = coordinator.session_id.clone() else {
+            return Err(LiveChatPersistenceFailure::terminal(
+                "Live-chat delivery arrived after its session ended.",
+            ));
+        };
+        if messages
+            .iter()
+            .any(|message| message.session_id != delivery_session_id)
+        {
+            return Err(LiveChatPersistenceFailure::terminal(
+                "Live-chat delivery belonged to a replaced session.",
+            ));
         }
+        let delivery_generation = coordinator.generation;
+        let mut undos = Vec::with_capacity(messages.len());
+        let mut authoritative_messages = Vec::with_capacity(messages.len());
+        for message in messages {
+            let ingested = coordinator.ingest_reversible(message);
+            match ingested.outcome {
+                IngestOutcome::New(message) | IngestOutcome::Updated(message) => {
+                    authoritative_messages.push(message);
+                }
+                IngestOutcome::Duplicate => {}
+            }
+            undos.push(ingested.undo);
+        }
+        (
+            delivery_generation,
+            delivery_session_id,
+            undos,
+            authoritative_messages,
+        )
+    };
+    if authoritative_messages.is_empty() {
+        return Ok(());
+    }
+    if let Err(error) = state
+        .live_chat_persistence
+        .persist_batch(authoritative_messages.clone())
+        .await
+    {
+        let mut coordinator = state.live_chat.lock().await;
+        for undo in undos.into_iter().rev() {
+            coordinator.rollback_ingest(undo);
+        }
+        drop(coordinator);
+        state.emit_log(
+            "warn",
+            format!(
+                "Could not persist {} live chat message(s); exact-message retry remains eligible: {error}",
+                authoritative_messages.len()
+            ),
+        );
+        return Err(error);
+    }
+    let delivery_still_current = {
+        let coordinator = state.live_chat.lock().await;
+        coordinator.generation == delivery_generation
+            && coordinator.session_id.as_deref() == Some(delivery_session_id.as_str())
+    };
+    if !delivery_still_current {
+        state.emit_log(
+            "warn",
+            "Persisted live-chat delivery was suppressed because its session was replaced.",
+        );
+        return Err(LiveChatPersistenceFailure::terminal(
+            "Live-chat delivery completed after its session was replaced.",
+        ));
+    }
+    for message in authoritative_messages {
         if message.is_deleted {
             crate::comment_highlight::clear_comment_highlight_for_message(
                 state,
@@ -1758,6 +1991,7 @@ pub(crate) async fn deliver_message(state: &AppState, message: LiveChatMessage) 
         }
         state.emit_event("liveChat.message", message);
     }
+    Ok(())
 }
 
 /// Set a provider's connection state and emit `liveChat.providerStatus`.
@@ -2008,10 +2242,10 @@ mod tests {
     fn coordinator_caps_buffer_and_reports_trimmed_count() {
         let mut coordinator = LiveChatCoordinator::new(3);
         for seq in 0..5 {
-            assert_eq!(
+            assert!(matches!(
                 coordinator.ingest(fake_message("s1", StreamPlatform::Youtube, None, seq)),
-                IngestOutcome::New
-            );
+                IngestOutcome::New(_)
+            ));
         }
         let snapshot = coordinator.snapshot("now".to_string());
         assert_eq!(snapshot.messages.len(), 3);
@@ -2028,10 +2262,44 @@ mod tests {
     }
 
     #[test]
+    fn full_buffer_reversible_ingest_keeps_constant_size_undo() {
+        let mut coordinator = LiveChatCoordinator::new(DEFAULT_MAX_CHAT_MESSAGES);
+        coordinator.start_session("s1".to_string(), vec![provider_row(StreamPlatform::Twitch)]);
+        for sequence in 0..DEFAULT_MAX_CHAT_MESSAGES as u32 {
+            coordinator.ingest(fake_message("s1", StreamPlatform::Twitch, None, sequence));
+        }
+        let first_id = coordinator.messages.front().unwrap().id.clone();
+        let last_id = coordinator.messages.back().unwrap().id.clone();
+        let diagnostics = coordinator.diagnostics();
+
+        let ingested = coordinator.ingest_reversible(fake_message(
+            "s1",
+            StreamPlatform::Twitch,
+            None,
+            DEFAULT_MAX_CHAT_MESSAGES as u32,
+        ));
+        assert!(matches!(ingested.outcome, IngestOutcome::New(_)));
+        assert_eq!(
+            ingested.undo.retained_buffer_rows(),
+            1,
+            "undo space must stay one row even when the 5,000-row buffer is full"
+        );
+        coordinator.rollback_ingest(ingested.undo);
+
+        assert_eq!(coordinator.messages.len(), DEFAULT_MAX_CHAT_MESSAGES);
+        assert_eq!(coordinator.messages.front().unwrap().id, first_id);
+        assert_eq!(coordinator.messages.back().unwrap().id, last_id);
+        assert_eq!(coordinator.diagnostics(), diagnostics);
+    }
+
+    #[test]
     fn coordinator_skips_duplicate_message_ids() {
         let mut coordinator = LiveChatCoordinator::new(10);
         let message = fake_message("s1", StreamPlatform::Youtube, None, 0);
-        assert_eq!(coordinator.ingest(message.clone()), IngestOutcome::New);
+        assert_eq!(
+            coordinator.ingest(message.clone()),
+            IngestOutcome::New(message.clone())
+        );
         assert_eq!(coordinator.ingest(message), IngestOutcome::Duplicate);
         assert_eq!(coordinator.duplicates_skipped(), 1);
         assert_eq!(coordinator.snapshot("now".to_string()).messages.len(), 1);
@@ -2052,13 +2320,19 @@ mod tests {
     fn provider_deletion_tombstones_the_original_without_creating_a_second_row() {
         let mut coordinator = LiveChatCoordinator::new(10);
         let original = fake_message("s1", StreamPlatform::Twitch, Some("target-1"), 1);
-        assert_eq!(coordinator.ingest(original.clone()), IngestOutcome::New);
+        assert_eq!(
+            coordinator.ingest(original.clone()),
+            IngestOutcome::New(original.clone())
+        );
 
         let tombstone = deletion_for(original.clone(), "2026-07-10T12:00:10Z");
-        assert_eq!(coordinator.ingest(tombstone), IngestOutcome::Updated);
+        let IngestOutcome::Updated(authoritative) = coordinator.ingest(tombstone) else {
+            panic!("provider deletion must update the buffered message")
+        };
 
         let snapshot = coordinator.snapshot("now".to_string());
         assert_eq!(snapshot.messages.len(), 1);
+        assert_eq!(authoritative, snapshot.messages[0]);
         assert_eq!(snapshot.messages[0].id, original.id);
         assert!(snapshot.messages[0].is_deleted);
         assert_eq!(snapshot.messages[0].event_type, LiveChatEventType::Deleted);
@@ -2074,13 +2348,22 @@ mod tests {
         let mut coordinator = LiveChatCoordinator::new(10);
         let original = fake_message("s1", StreamPlatform::Youtube, Some("target-1"), 2);
         let tombstone = deletion_for(original.clone(), "2026-07-10T12:00:10Z");
-        assert_eq!(coordinator.ingest(tombstone), IngestOutcome::New);
+        assert!(matches!(
+            coordinator.ingest(tombstone),
+            IngestOutcome::New(_)
+        ));
         assert_eq!(coordinator.ingest(original), IngestOutcome::Duplicate);
 
         let other_target = fake_message("s1", StreamPlatform::Youtube, Some("target-2"), 2);
-        assert_eq!(coordinator.ingest(other_target), IngestOutcome::New);
+        assert!(matches!(
+            coordinator.ingest(other_target),
+            IngestOutcome::New(_)
+        ));
         let other_session = fake_message("s2", StreamPlatform::Youtube, Some("target-1"), 2);
-        assert_eq!(coordinator.ingest(other_session), IngestOutcome::New);
+        assert!(matches!(
+            coordinator.ingest(other_session),
+            IngestOutcome::New(_)
+        ));
 
         let snapshot = coordinator.snapshot("now".to_string());
         assert_eq!(snapshot.messages.len(), 3);
@@ -2116,6 +2399,156 @@ mod tests {
             crate::comment_highlight::CommentHighlightPhase::Idle
         );
         assert_eq!(highlight.reason.as_deref(), Some("message-deleted"));
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_restores_dedup_state_for_redelivery() {
+        let (events, _) = broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_in_memory_for_tests(),
+        );
+        let message = fake_message("late-session", StreamPlatform::Youtube, Some("target-1"), 7);
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("late-session".to_string(), Vec::new());
+
+        assert!(!deliver_message(&state, message.clone()).await);
+        {
+            let coordinator = state.live_chat.lock().await;
+            assert!(coordinator.messages.is_empty());
+            assert!(!coordinator.seen.contains(&message.id));
+            assert_eq!(coordinator.messages_received, 0);
+        }
+
+        state
+            .database
+            .ensure_fake_live_chat_session("late-session")
+            .unwrap();
+        assert!(deliver_message(&state, message.clone()).await);
+        assert_eq!(state.live_chat.lock().await.messages.len(), 1);
+        assert_eq!(
+            state
+                .database
+                .list_live_chat_messages_recent("late-session", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_for_a_replaced_session_is_rejected_before_persistence_or_emit() {
+        let (events, mut receiver) = broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_in_memory_for_tests(),
+        );
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("new-session".to_string(), Vec::new());
+
+        let delivered = deliver_message(
+            &state,
+            fake_message("old-session", StreamPlatform::Youtube, None, 9),
+        )
+        .await;
+
+        assert!(!delivered);
+        assert!(state.live_chat.lock().await.messages.is_empty());
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn session_replacement_waits_for_persistence_and_cannot_receive_the_old_message() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Condvar, Mutex};
+
+        let (events, _) = broadcast::channel(16);
+        let mut state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_in_memory_for_tests(),
+        );
+        let writer_started = Arc::new(AtomicBool::new(false));
+        let release_writer = Arc::new((Mutex::new(false), Condvar::new()));
+        let writer_started_for_task = writer_started.clone();
+        let release_writer_for_task = release_writer.clone();
+        state.live_chat_persistence =
+            crate::live_chat_persistence::LiveChatPersistence::with_writer(Arc::new(move |_| {
+                writer_started_for_task.store(true, Ordering::SeqCst);
+                let (released, signal) = &*release_writer_for_task;
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = signal.wait(released).unwrap();
+                }
+                Ok(())
+            }));
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("old-session".to_string(), Vec::new());
+
+        let delivery_state = state.clone();
+        let delivery = tokio::spawn(async move {
+            try_deliver_message(
+                &delivery_state,
+                fake_message("old-session", StreamPlatform::Twitch, None, 1),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !writer_started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("persistence writer did not block");
+
+        let replacement_state = state.clone();
+        let replacement = tokio::spawn(async move {
+            start_live_chat(
+                &replacement_state,
+                LiveChatStartParams {
+                    session_id: "new-session".to_string(),
+                    platforms: Vec::new(),
+                    destinations: Vec::new(),
+                    fake: None,
+                    fakes: Vec::new(),
+                    youtube: None,
+                    twitch: None,
+                    x: None,
+                },
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !replacement.is_finished(),
+            "session replacement must wait for the in-flight delivery"
+        );
+
+        {
+            let (released, signal) = &*release_writer;
+            *released.lock().unwrap() = true;
+            signal.notify_all();
+        }
+        delivery.await.unwrap().unwrap();
+        replacement.await.unwrap();
+
+        let snapshot = current_status(&state).await;
+        assert_eq!(snapshot.session_id.as_deref(), Some("new-session"));
+        assert!(snapshot.messages.is_empty());
     }
 
     #[test]

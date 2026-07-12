@@ -48,11 +48,12 @@
 
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { deflateSync } from 'node:zlib'
 
 import { launchDevApp, repoRoot, stopProcess } from './lib/app-launcher.mjs'
 import { launchAvSyncStimulus, stopAvSyncStimulus } from './lib/av-sync-stimulus.mjs'
+import { resolveExistingSiblingFfprobe } from './lib/ffmpeg-sibling-paths.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import {
   focusScreenMotionStimulus,
@@ -123,7 +124,7 @@ const config = {
   ffmpegPath: process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg',
   ffprobePath:
     process.env.VIDEORC_SMOKE_FFPROBE_PATH ??
-    siblingFfprobe(process.env.VIDEORC_SMOKE_FFMPEG_PATH) ??
+    resolveExistingSiblingFfprobe(process.env.VIDEORC_SMOKE_FFMPEG_PATH) ??
     'ffprobe',
   // Stream sessions must exercise the backend's DEFAULT bridge selector. On macOS
   // this is the product VideoToolbox H.264 path; raw-YUV is an explicit debug
@@ -336,7 +337,9 @@ async function main() {
     `Launching ${config.packagedExecutable ? 'packaged' : 'dev'} app for real-source baseline (no preview-motion synthetic mode)…`
   )
   const requiresPreviewHostCommandServer = !config.noPreviewSurface && !config.fallbackLivePreview
-  const needsSmokeCommandServer = requiresPreviewHostCommandServer || config.notesOverlay
+  const needsSmokeResourceAuthorization = !config.packagedExecutable
+  const needsSmokeCommandServer =
+    requiresPreviewHostCommandServer || config.notesOverlay || needsSmokeResourceAuthorization
   launched = await launchDevApp({
     timeoutMs: config.timeoutMs,
     spawnSpec: config.packagedExecutable
@@ -354,6 +357,7 @@ async function main() {
     // renderer cannot race it with automatic source/surface refreshes.
     env: {
       VIDEORC_SMOKE_OUTPUT_DIR: config.outputDirectory,
+      VIDEORC_SMOKE_STATE_DIR: config.outputDirectory,
       VIDEORC_NATIVE_PREVIEW_SURFACE: config.noPreviewSurface ? '0' : '1',
       VIDEORC_DISABLE_AUTO_PREVIEW: '1',
       VIDEORC_SMOKE_COMMAND_SERVER: needsSmokeCommandServer ? '1' : '0',
@@ -568,7 +572,7 @@ async function main() {
     const scenarioStartedAt = Date.now()
     let started
     try {
-      started = await request(ws, config.timeoutMs, 'session.start', sessionParams(sourceSelection))
+      started = await startSession(ws, sourceSelection)
     } catch (error) {
       if (sources.screen && isPreviewFrameStartupError(error)) {
         console.log(
@@ -577,12 +581,7 @@ async function main() {
         try {
           await restartPreviewScreenSource(ws, screenPreviewParams)
           await waitForPreviewSourceReadiness(ws, sources, screenPreviewParams)
-          started = await request(
-            ws,
-            config.timeoutMs,
-            'session.start',
-            sessionParams(sourceSelection)
-          )
+          started = await startSession(ws, sourceSelection)
         } catch (retryError) {
           return await writeBlockedBeforeEncoding({
             ws,
@@ -3247,7 +3246,31 @@ function previewSurfaceBounds() {
   }
 }
 
-function sessionParams(sources) {
+async function startSession(ws, sources) {
+  let outputDirectoryCapability
+  if (!config.packagedExecutable) {
+    const smoke = launched?.connections?.['preview-motion-ready']
+    if (!smoke) {
+      throw new Error('Dev recording start requires the main-process smoke command server.')
+    }
+    const selection = await smokeCommand(smoke, 'authorize-smoke-resource', {
+      kind: 'output-directory',
+      path: config.outputDirectory
+    })
+    if (typeof selection?.capabilityId !== 'string') {
+      throw new Error('Smoke output-directory authorization returned no capability.')
+    }
+    outputDirectoryCapability = selection.capabilityId
+  }
+  return request(
+    ws,
+    config.timeoutMs,
+    'session.start',
+    sessionParams(sources, outputDirectoryCapability)
+  )
+}
+
+function sessionParams(sources, outputDirectoryCapability) {
   if (config.streamEnabled && (!config.streamServerUrl || !config.streamKey)) {
     throw new Error(
       'VIDEORC_BASELINE_STREAM=1 requires VIDEORC_BASELINE_STREAM_SERVER_URL and VIDEORC_BASELINE_STREAM_KEY.'
@@ -3259,8 +3282,7 @@ function sessionParams(sources) {
     output: {
       recordEnabled: true,
       streamEnabled: config.streamEnabled,
-      outputDirectory: config.outputDirectory,
-      ffmpegPath: config.ffmpegPath,
+      ...(outputDirectoryCapability ? { outputDirectoryCapability } : {}),
       video: videoSettings(),
       rtmp: config.streamEnabled
         ? { preset: 'custom', serverUrl: config.streamServerUrl, streamKey: config.streamKey }
@@ -3549,7 +3571,10 @@ async function smokeCommand(smoke, command, params = {}, timeoutMs = config.time
   try {
     const response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${smoke.capability}`
+      },
       body: JSON.stringify({ command, params }),
       signal: controller.signal
     })
@@ -3623,12 +3648,6 @@ async function teardownPerformanceApp() {
   }
 
   return result
-}
-
-function siblingFfprobe(ffmpegPath) {
-  if (!ffmpegPath || !ffmpegPath.includes('/')) return null
-  const candidate = join(dirname(ffmpegPath), 'ffprobe')
-  return existsSync(candidate) ? candidate : null
 }
 
 function sleep(ms) {

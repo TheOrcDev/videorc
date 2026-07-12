@@ -4,8 +4,29 @@ import type {
   ServerEvent,
   ServerResponse
 } from '../../shared/backend'
+import type {
+  BackendEvent,
+  BackendEventMap,
+  BackendRpcMethod,
+  BackendRpcParams,
+  BackendRpcResult
+} from '../../shared/backend-rpc-contract'
+
+type BackendContractRuntime = typeof import('../../shared/backend-rpc-contract')
+
+let backendContractRuntimePromise: Promise<BackendContractRuntime> | null = null
+let backendContractRuntime: BackendContractRuntime | null = null
+
+function loadBackendContractRuntime(): Promise<BackendContractRuntime> {
+  backendContractRuntimePromise ??= import('../../shared/backend-rpc-contract').then((runtime) => {
+    backendContractRuntime = runtime
+    return runtime
+  })
+  return backendContractRuntimePromise
+}
 
 type PendingRequest = {
+  method: string
   resolve: (value: unknown) => void
   reject: (reason?: unknown) => void
   socket: WebSocket
@@ -17,6 +38,17 @@ type EventHandler = (payload: unknown) => void
 export interface BackendRequestOptions {
   timeoutMs?: number
   signal?: AbortSignal
+}
+
+export class BackendRequestError extends Error {
+  readonly name = 'BackendRequestError'
+
+  constructor(
+    readonly code: string,
+    message: string
+  ) {
+    super(message)
+  }
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
@@ -41,6 +73,7 @@ export function backendRequestTimeoutMs(method: string): number {
 
 export class BackendClient {
   private ws: WebSocket | null = null
+  private connectPromise: Promise<void> | null = null
   private pending = new Map<string, PendingRequest>()
   private handlers = new Map<string, Set<EventHandler>>()
   private requestCounter = 0
@@ -59,6 +92,33 @@ export class BackendClient {
     if (this.ws?.readyState === WebSocket.OPEN) {
       return Promise.resolve()
     }
+    if (this.connectPromise) {
+      return this.connectPromise
+    }
+
+    const attempt = this.connectAfterContractLoad()
+    this.connectPromise = attempt.then(
+      () => {
+        if (this.connectPromise === trackedAttempt) this.connectPromise = null
+      },
+      (error: unknown) => {
+        if (this.connectPromise === trackedAttempt) this.connectPromise = null
+        throw error
+      }
+    )
+    const trackedAttempt = this.connectPromise
+    return trackedAttempt
+  }
+
+  private async connectAfterContractLoad(): Promise<void> {
+    try {
+      await loadBackendContractRuntime()
+    } catch {
+      throw new Error('Backend protocol validator could not load.')
+    }
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      return
+    }
 
     return new Promise((resolve, reject) => {
       const url = `ws://${this.connection.host}:${this.connection.port}/ws?token=${encodeURIComponent(
@@ -69,7 +129,7 @@ export class BackendClient {
 
       ws.onopen = () => resolve()
       ws.onerror = () => reject(new Error('Could not connect to the Rust backend.'))
-      ws.onmessage = (event) => this.handleMessage(event.data, ws)
+      ws.onmessage = (event) => void this.handleMessage(event.data, ws)
       ws.onclose = () => {
         this.rejectPendingForSocket(ws, new Error('Backend connection closed.'))
         if (this.ws === ws) {
@@ -103,6 +163,15 @@ export class BackendClient {
       return Promise.reject(abortError(method))
     }
 
+    if (!backendContractRuntime) {
+      return Promise.reject(new Error('Backend protocol validator is not ready.'))
+    }
+    try {
+      backendContractRuntime.validateBackendRpcParams(method, params)
+    } catch (error) {
+      return Promise.reject(error)
+    }
+
     const id = `renderer-${Date.now()}-${++this.requestCounter}`
     const command: ClientCommand = { id, method, params }
     const timeoutMs = normalizeTimeoutMs(options.timeoutMs, backendRequestTimeoutMs(method))
@@ -122,6 +191,7 @@ export class BackendClient {
         }
       }
       this.pending.set(id, {
+        method,
         resolve: resolve as (value: unknown) => void,
         reject,
         socket: ws,
@@ -145,6 +215,11 @@ export class BackendClient {
     })
   }
 
+  on<TEvent extends BackendEvent>(
+    event: TEvent,
+    handler: (payload: BackendEventMap[TEvent]) => void
+  ): () => void
+  on(event: string, handler: EventHandler): () => void
   on(event: string, handler: EventHandler): () => void {
     const handlers = this.handlers.get(event) ?? new Set<EventHandler>()
     handlers.add(handler)
@@ -159,11 +234,17 @@ export class BackendClient {
   }
 
   private handleMessage(raw: string, socket: WebSocket): void {
+    const contract = backendContractRuntime
+    if (!contract) {
+      this.emit('error', { message: 'Backend protocol validator could not load.' })
+      return
+    }
+
     let parsed: ServerResponse | ServerEvent
     try {
-      parsed = JSON.parse(raw) as ServerResponse | ServerEvent
+      parsed = contract.parseBackendWireMessage(raw)
     } catch {
-      this.emit('error', { message: 'Backend sent invalid JSON.' })
+      this.emit('error', { message: 'Backend sent an invalid websocket message.' })
       return
     }
 
@@ -176,14 +257,41 @@ export class BackendClient {
       this.pending.delete(parsed.id)
       pending.cleanup()
       if (parsed.ok) {
-        pending.resolve(parsed.payload)
+        try {
+          pending.resolve(contract.validateBackendRpcResult(pending.method, parsed.payload))
+        } catch (error) {
+          pending.reject(error)
+        }
       } else {
-        pending.reject(new Error(parsed.error?.message ?? 'Backend request failed.'))
+        pending.reject(
+          new BackendRequestError(
+            parsed.error?.code ?? 'backend-request-failed',
+            parsed.error?.message ?? 'Backend request failed.'
+          )
+        )
       }
       return
     }
 
-    this.emit(parsed.event, parsed.payload)
+    try {
+      this.emit(parsed.event, contract.validateBackendEventPayload(parsed.event, parsed.payload))
+    } catch {
+      this.emit('error', { message: `Backend event "${parsed.event}" failed validation.` })
+    }
+  }
+
+  /**
+   * Strictly typed companion for new/high-risk call sites. Existing request<T>
+   * calls remain source-compatible while migrations move onto this method.
+   */
+  requestTyped<TMethod extends BackendRpcMethod>(
+    method: TMethod,
+    ...args: undefined extends BackendRpcParams<TMethod>
+      ? [params?: BackendRpcParams<TMethod>, options?: BackendRequestOptions]
+      : [params: BackendRpcParams<TMethod>, options?: BackendRequestOptions]
+  ): Promise<BackendRpcResult<TMethod>> {
+    const [params, options = {}] = args
+    return this.request<BackendRpcResult<TMethod>>(method, params, options)
   }
 
   private rejectPending(id: string, error: Error): void {

@@ -15,6 +15,7 @@ import { useRef, useState, type ReactElement } from 'react'
 import { ConfigGrid } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { SourceSelect } from '@/components/source-select'
+import { MicPickerPreview } from '@/components/studio/mic-picker-preview'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -406,6 +407,9 @@ export function SourcesTab(): ReactElement {
             }))
           }
         />
+        {/* See-before-you-pick: live waveform of the selected mic (shared with
+            the Quick Settings popover). */}
+        <MicPickerPreview deviceName={selectedMicrophone?.name} />
         <div className="flex items-center justify-between text-sm">
           <span className="flex items-center gap-2 text-muted-foreground">
             {captureConfig.audio.microphoneMuted ? (

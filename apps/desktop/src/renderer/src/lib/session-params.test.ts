@@ -19,13 +19,12 @@ function captureConfig(patch: Partial<CaptureConfig> = {}): CaptureConfig {
 }
 
 describe('buildStartSessionParams', () => {
-  it('normalizes blank local paths to undefined', () => {
+  it('never forwards renderer-owned filesystem or executable paths', () => {
     const params = buildStartSessionParams({
       captureConfig: captureConfig(),
       scene,
       settings: {
-        outputDirectory: '   ',
-        ffmpegPath: ''
+        outputDirectory: '   '
       }
     })
 
@@ -33,7 +32,7 @@ describe('buildStartSessionParams', () => {
     expect(params.output.ffmpegPath).toBeUndefined()
   })
 
-  it('trims output paths and RTMP fields without changing the selected preset', () => {
+  it('ignores legacy path settings while trimming RTMP fields', () => {
     const params = buildStartSessionParams({
       captureConfig: captureConfig({
         rtmpServerUrl: '  rtmp://example.test/live  ',
@@ -43,11 +42,11 @@ describe('buildStartSessionParams', () => {
       settings: {
         outputDirectory: '  /tmp/videos  ',
         ffmpegPath: '  /opt/bin/ffmpeg  '
-      }
+      } as { outputDirectory: string; ffmpegPath: string }
     })
 
-    expect(params.output.outputDirectory).toBe('/tmp/videos')
-    expect(params.output.ffmpegPath).toBe('/opt/bin/ffmpeg')
+    expect(params.output.outputDirectory).toBeUndefined()
+    expect(params.output.ffmpegPath).toBeUndefined()
     expect(params.output.rtmp).toEqual({
       preset: 'youtube',
       serverUrl: 'rtmp://example.test/live',
@@ -60,8 +59,7 @@ describe('buildStartSessionParams', () => {
       captureConfig: captureConfig(),
       scene,
       settings: {
-        outputDirectory: '',
-        ffmpegPath: ''
+        outputDirectory: ''
       }
     })
 
@@ -74,8 +72,7 @@ describe('buildStartSessionParams', () => {
       scene,
       sceneEditMode: true,
       settings: {
-        outputDirectory: '',
-        ffmpegPath: ''
+        outputDirectory: ''
       }
     })
 
@@ -103,7 +100,7 @@ describe('buildStartSessionParams', () => {
     const params = buildStartSessionParams({
       captureConfig: captureConfig(),
       scene: withBackground,
-      settings: { outputDirectory: '', ffmpegPath: '' }
+      settings: { outputDirectory: '' }
     })
 
     expect(params.scene).toBe(withBackground)
@@ -125,8 +122,7 @@ describe('buildStartSessionParams', () => {
       captureConfig: config,
       scene,
       settings: {
-        outputDirectory: '',
-        ffmpegPath: ''
+        outputDirectory: ''
       }
     })
 
@@ -150,7 +146,7 @@ describe('buildStartSessionParams', () => {
     const params = buildStartSessionParams({
       captureConfig: config,
       scene,
-      settings: { outputDirectory: '', ffmpegPath: '' }
+      settings: { outputDirectory: '' }
     })
 
     expect(params.captions).toEqual({ ...config.captions, suppressedForSession: false })
@@ -163,7 +159,7 @@ describe('buildStartSessionParams', () => {
     const params = buildStartSessionParams({
       captureConfig: config,
       scene,
-      settings: { outputDirectory: '', ffmpegPath: '' },
+      settings: { outputDirectory: '' },
       suppressCaptionsForSession: true
     })
 
@@ -185,7 +181,7 @@ describe('buildStartSessionParams', () => {
     const params = buildStartSessionParams({
       captureConfig: config,
       scene,
-      settings: { outputDirectory: '', ffmpegPath: '' }
+      settings: { outputDirectory: '' }
     })
 
     expect(params.captions).toMatchObject({
@@ -208,7 +204,7 @@ describe('buildStartSessionParams', () => {
     const params = buildStartSessionParams({
       captureConfig: config,
       scene,
-      settings: { outputDirectory: '', ffmpegPath: '' }
+      settings: { outputDirectory: '' }
     })
 
     expect(params.captions).toMatchObject({
@@ -236,8 +232,7 @@ describe('buildStartSessionParams', () => {
       captureConfig: config,
       scene,
       settings: {
-        outputDirectory: '',
-        ffmpegPath: ''
+        outputDirectory: ''
       }
     })
 
@@ -269,8 +264,7 @@ describe('buildStartSessionParams', () => {
       captureConfig: config,
       scene,
       settings: {
-        outputDirectory: '',
-        ffmpegPath: ''
+        outputDirectory: ''
       }
     })
 

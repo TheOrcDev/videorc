@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp } from './lib/app-launcher.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -13,7 +14,6 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 // recording still finalizes.
 // No Docker or external services: the listeners are plain `ffmpeg -listen 1`.
 
-const repoRoot = resolve(import.meta.dirname, '..')
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-multistream-smoke-${Date.now()}`)
 )
@@ -83,14 +83,28 @@ const allTargets = badTarget ? [...targets, badTarget] : targets
 
 mkdirSync(outputDirectory, { recursive: true })
 
-let appProcess
 let stopping = false
+let stopApp = async () => {}
 const listeners = []
 
 try {
   // 1. Launch the dev app + backend first so the RTMP listeners only idle briefly
   //    before the publisher connects (a long idle can trip FFmpeg's accept timeout).
-  const connection = await launchAndReadConnection()
+  const launch = await launchDevApp({
+    env: {
+      // Dev builds resolve to Developer entitlements (multistream enabled);
+      // VIDEORC_PREMIUM_FEATURES is downgrade-only and unlocks nothing.
+      VIDEORC_SMOKE_COMMAND_SERVER: '1',
+      VIDEORC_SMOKE_STATE_DIR: outputDirectory,
+      VIDEORC_USER_DATA_DIR: userDataDir
+    },
+    timeoutMs,
+    requiredMarkers: ['backend-ready', 'preview-motion-ready'],
+    onLine: (line) => console.log(line)
+  })
+  stopApp = launch.stop
+  const connection = launch.connections['backend-ready']
+  const smoke = launch.connections['preview-motion-ready']
 
   // 2. Stand up one local RTMP listener per target.
   for (const target of targets) {
@@ -130,7 +144,18 @@ try {
     }
     console.log(`Multistream smoke using FFmpeg: ${ffmpegPath}`)
 
-    const started = await request(ws, timeoutMs, 'session.start', multistreamParams())
+    const recordingDirectory = await requestSmokeCommand(
+      smoke,
+      'authorize-smoke-resource',
+      { kind: 'output-directory', path: outputDirectory },
+      { timeoutMs }
+    )
+    const started = await request(
+      ws,
+      timeoutMs,
+      'session.start',
+      multistreamParams(recordingDirectory.capabilityId)
+    )
     if (started.state !== 'recording') {
       throw new Error(`Expected recording state after start, got ${started.state}.`)
     }
@@ -154,6 +179,7 @@ try {
     ws.close()
   }
 } finally {
+  stopping = true
   for (const listener of listeners) {
     await stopListener(listener)
   }
@@ -293,7 +319,7 @@ async function verifyResults(outputPath, targetSnapshots, diagnosticSamples) {
   )
 }
 
-function multistreamParams() {
+function multistreamParams(outputDirectoryCapability) {
   const timestamp = '2026-01-01T00:00:00.000Z'
   return {
     sources: { testPattern: true },
@@ -316,8 +342,7 @@ function multistreamParams() {
     output: {
       recordEnabled: true,
       streamEnabled: true,
-      outputDirectory,
-      ffmpegPath,
+      outputDirectoryCapability,
       video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 },
       // Legacy single-RTMP bridge fields. Ignored when `streaming` is present, but
       // kept valid so the fallback path never chokes on empty credentials.
@@ -405,68 +430,6 @@ function stopListener(proc) {
       resolveStop()
     }
   })
-}
-
-// --- dev app lifecycle (mirrors scripts/smoke-dev-app.mjs) ---
-
-function launchAndReadConnection() {
-  return new Promise((resolveConnection, rejectConnection) => {
-    const timer = setTimeout(() => {
-      rejectConnection(new Error(`Timed out waiting for dev backend READY after ${timeoutMs}ms.`))
-    }, timeoutMs)
-
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
-      detached: true,
-      env: smokeAppEnv({
-        // Dev builds resolve to Developer entitlements (multistream enabled);
-        // VIDEORC_PREMIUM_FEATURES is downgrade-only and unlocks nothing.
-        VIDEORC_USER_DATA_DIR: userDataDir,
-        VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
-      }),
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-
-    appProcess.stdout.setEncoding('utf8')
-    appProcess.stderr.setEncoding('utf8')
-    appProcess.stdout.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.stderr.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.on('error', (error) => {
-      clearTimeout(timer)
-      rejectConnection(error)
-    })
-    appProcess.on('exit', (code, signal) => {
-      clearTimeout(timer)
-      rejectConnection(
-        new Error(`Dev app exited before smoke test completed: code=${code} signal=${signal}`)
-      )
-    })
-  })
-}
-
-function handleAppOutput(text, resolveConnection, timer) {
-  for (const line of text.split(/\r?\n/)) {
-    if (line.trim() && !stopping) {
-      console.log(line)
-    }
-
-    const marker = '[smoke] backend-ready '
-    const index = line.indexOf(marker)
-    if (index === -1) {
-      continue
-    }
-
-    clearTimeout(timer)
-    resolveConnection(JSON.parse(line.slice(index + marker.length)))
-  }
-}
-
-async function stopApp() {
-  if (!appProcess?.pid || appProcess.killed) {
-    return
-  }
-  stopping = true
-  await stopProcess(appProcess)
 }
 
 function sleep(ms) {

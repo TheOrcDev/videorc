@@ -1,5 +1,5 @@
 import { ArrowSquareOut, PushPinSimple, VideoCamera, Warning } from '@phosphor-icons/react'
-import type { ReactElement } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
@@ -18,6 +18,10 @@ type PreviewStageProps = {
   previewLiveStatus?: PreviewLiveStatus
   previewSurfaceStatus?: PreviewSurfaceStatus
   nativePreviewSurfaceEnabled?: boolean
+  /** Rendered at the left of the docked frame's control row (session status
+   * badge) — the docked preview stands alone, without the Studio panel header
+   * that normally carries it. */
+  dockedFooterStart?: ReactNode
   onRetry?: () => void
   onOpenPermissions?: () => void
   className?: string
@@ -27,6 +31,7 @@ export function PreviewStage({
   previewLiveStatus,
   previewSurfaceStatus,
   nativePreviewSurfaceEnabled = false,
+  dockedFooterStart,
   onRetry,
   onOpenPermissions,
   className
@@ -54,6 +59,7 @@ export function PreviewStage({
           height: captureConfig.video.height
         }}
         className={className}
+        footerStart={dockedFooterStart}
         previewSurfaceStatus={previewSurfaceStatus}
         previewWindow={previewWindow}
         slotRef={slotRef}
@@ -85,9 +91,20 @@ export function PreviewStage({
 }
 
 /** All three preview states occupy the same output-aspect rect so the Studio
- * layout never jumps when the preview opens, docks, or closes. */
+ * layout never jumps when the preview opens, docks, or closes. Portrait
+ * canvases (the vertical 9:16 profile) keep the LANDSCAPE footprint: a raw
+ * 9:16 slot would tower ~2.4× over the Studio column, so the strip stays 16:9
+ * and the native surface pillarboxes the portrait video inside it (the
+ * surface contain-fits within the slot; the detached window is truly
+ * portrait). */
 function previewAspectRatio(aspect: { width: number; height: number }): string {
-  return aspect.width > 0 && aspect.height > 0 ? `${aspect.width} / ${aspect.height}` : '16 / 9'
+  if (aspect.width <= 0 || aspect.height <= 0) {
+    return '16 / 9'
+  }
+  if (aspect.height > aspect.width) {
+    return '16 / 9'
+  }
+  return `${aspect.width} / ${aspect.height}`
 }
 
 // Docked ("stick") mode: the native preview surface floats glued over the slot
@@ -98,6 +115,7 @@ function DockedPreviewFrame({
   previewSurfaceStatus,
   aspect,
   slotRef,
+  footerStart,
   onPopOut,
   onClose,
   onOpenPermissions,
@@ -107,6 +125,7 @@ function DockedPreviewFrame({
   previewSurfaceStatus?: PreviewSurfaceStatus
   aspect: { width: number; height: number }
   slotRef: (element: HTMLElement | null) => void
+  footerStart?: ReactNode
   onPopOut: () => void
   onClose: () => void
   onOpenPermissions?: () => void
@@ -145,7 +164,11 @@ function DockedPreviewFrame({
           <span className="text-xs text-[#A1A1AA]">{status.detail}</span>
         </div>
       </div>
-      <div className="flex items-center justify-end gap-1.5 px-3 py-1.5">
+      {/* Slim control row under the bare strip (the docked preview has no
+          panel around it): session status left, dock controls right, flush
+          with the video edges. */}
+      <div className="flex items-center justify-end gap-1.5 pt-2">
+        {footerStart ? <div className="mr-auto flex items-center">{footerStart}</div> : null}
         {showPermissionAction && onOpenPermissions ? (
           <Button size="sm" variant="outline" onClick={onOpenPermissions}>
             Open permissions
