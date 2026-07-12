@@ -3,7 +3,6 @@ import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { LayoutPreset } from '@/lib/backend'
@@ -67,41 +66,51 @@ export function ScenesGallery(): ReactElement {
         <div className="flex items-center gap-1.5">
           {/* The mode toggle changes the canvas orientation, and the encoder
               canvas is fixed at session start — disabled while live (the
-              backend refuses cross-orientation scene switches too). */}
-          <ToggleGroup
+              backend refuses cross-orientation scene switches too). Composed
+              from Button, not radix ToggleGroup: the gallery is in the EAGER
+              Studio chunk and ToggleGroup lives only in lazy tab chunks —
+              importing it here blows the renderer initial asset budget. */}
+          <div
             aria-label="Studio orientation"
-            disabled={isSessionActive}
-            size="sm"
-            spacing={0}
+            className="flex items-center overflow-hidden rounded-chip border"
+            role="group"
             title={
               isSessionActive
                 ? 'The canvas is fixed while a session is running — stop to switch orientation.'
                 : undefined
             }
-            type="single"
-            value={mode}
-            variant="outline"
-            onValueChange={(value) => {
-              if (value) {
-                switchMode(value as LayoutOrientation)
-              }
-            }}
           >
-            <ToggleGroupItem
+            <Button
               aria-label="Horizontal studio (16:9)"
+              aria-pressed={mode === 'horizontal'}
+              className={cn(
+                'size-8 rounded-none',
+                mode === 'horizontal' ? 'bg-accent text-foreground' : 'text-muted-foreground'
+              )}
+              disabled={isSessionActive}
+              size="icon"
               title="Horizontal · 16:9"
-              value="horizontal"
+              variant="ghost"
+              onClick={() => switchMode('horizontal')}
             >
               <Monitor className="size-4" />
-            </ToggleGroupItem>
-            <ToggleGroupItem
+            </Button>
+            <Button
               aria-label="Vertical studio (9:16)"
+              aria-pressed={mode === 'vertical'}
+              className={cn(
+                'size-8 rounded-none border-l',
+                mode === 'vertical' ? 'bg-accent text-foreground' : 'text-muted-foreground'
+              )}
+              disabled={isSessionActive}
+              size="icon"
               title="Vertical · 9:16"
-              value="vertical"
+              variant="ghost"
+              onClick={() => switchMode('vertical')}
             >
               <DeviceMobile className="size-4" />
-            </ToggleGroupItem>
-          </ToggleGroup>
+            </Button>
+          </div>
           <Button size="sm" variant="ghost" onClick={() => openStudioPanel('layouts')}>
             Edit scene
           </Button>
