@@ -9,6 +9,7 @@ import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs
 import {
   assertBmpHeaders,
   assertNonblankBmp,
+  nativeWindowsCompositorUsesScreen,
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive
 } from './lib/windows-native-screen-gates.mjs'
@@ -82,7 +83,7 @@ try {
   }
   const recordingStartedAt = Date.now()
   const activeRecording = await waitForActiveNativeScreenRecording(ws, screen.id)
-  if (activeRecording.compositor.activeScreenId !== screen.id) {
+  if (!nativeWindowsCompositorUsesScreen(activeRecording.compositor, screen.id)) {
     throw new Error(
       `Recording compositor did not retain selected native screen ${screen.id}: ${JSON.stringify(activeRecording)}`
     )

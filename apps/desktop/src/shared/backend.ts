@@ -1262,6 +1262,7 @@ export interface CompositorStatus {
   frameSceneRevision?: number
   sceneId?: string
   sceneLayout?: LayoutSettings
+  /** Persisted takeover-image id; native capture identity is carried by sceneSources and sources. */
   activeScreenId?: string
   sceneSources: CompositorSceneSourceStatus[]
   sources: CompositorSourceStatus[]
@@ -1318,6 +1319,7 @@ export interface PreviewSurfaceSceneState {
   sceneId?: string
   layout: LayoutSettings
   sources: PreviewSurfaceSceneLayer[]
+  /** Persisted takeover-image id, not the selected native capture device id. */
   activeScreenId?: string
   /** Normalized per-side inset derived from background visibilityPercent. */
   backgroundStageMargin?: number

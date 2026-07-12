@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   assertBmpHeaders,
   assertNonblankBmp,
+  nativeWindowsCompositorUsesScreen,
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive,
   selectNativeWindowsScreen
@@ -41,16 +42,40 @@ test('native ScreenOnly recording proof joins recording, compositor, and source 
     },
     compositor: {
       state: 'live',
-      activeScreenId: sourceId,
-      sceneLayout: { layoutPreset: 'screen-only' }
+      sceneRevision: 42,
+      frameSceneRevision: 42,
+      sceneLayout: { layoutPreset: 'screen-only' },
+      sceneSources: [
+        {
+          kind: 'screen',
+          deviceId: sourceId,
+          visible: true,
+          state: 'referenced'
+        }
+      ],
+      sources: [{ kind: 'screen', sourceId, state: 'live', sequence: 17 }]
     },
     recording: { state: 'recording' }
   }
 
   assert.equal(nativeWindowsScreenRecordingActive(evidence, sourceId), true)
+  assert.equal(nativeWindowsCompositorUsesScreen(evidence.compositor, sourceId), true)
   assert.equal(
     nativeWindowsScreenRecordingActive(
-      { ...evidence, compositor: { ...evidence.compositor, activeScreenId: 'screen:other' } },
+      {
+        ...evidence,
+        compositor: {
+          ...evidence.compositor,
+          sceneSources: [
+            {
+              kind: 'screen',
+              deviceId: 'screen:other',
+              visible: true,
+              state: 'referenced'
+            }
+          ]
+        }
+      },
       sourceId
     ),
     false
@@ -69,7 +94,60 @@ test('native ScreenOnly recording proof joins recording, compositor, and source 
     false
   )
   assert.equal(
+    nativeWindowsScreenRecordingActive(
+      {
+        ...evidence,
+        compositor: {
+          ...evidence.compositor,
+          sceneSources: evidence.compositor.sceneSources.map((source) => ({
+            ...source,
+            visible: false
+          }))
+        }
+      },
+      sourceId
+    ),
+    false
+  )
+  assert.equal(
     nativeWindowsScreenRecordingActive({ ...evidence, recording: { state: 'idle' } }, sourceId),
+    false
+  )
+  assert.equal(
+    nativeWindowsScreenRecordingActive(
+      {
+        ...evidence,
+        compositor: { ...evidence.compositor, sources: [] }
+      },
+      sourceId
+    ),
+    false
+  )
+  assert.equal(
+    nativeWindowsScreenRecordingActive(
+      {
+        ...evidence,
+        compositor: { ...evidence.compositor, frameSceneRevision: 41 }
+      },
+      sourceId
+    ),
+    false
+  )
+  assert.equal(
+    nativeWindowsScreenRecordingActive(
+      {
+        ...evidence,
+        compositor: {
+          ...evidence.compositor,
+          activeScreenId: 'takeover-1',
+          sceneSources: [
+            ...evidence.compositor.sceneSources,
+            { kind: 'screen-image', visible: true, state: 'live' }
+          ]
+        }
+      },
+      sourceId
+    ),
     false
   )
 })

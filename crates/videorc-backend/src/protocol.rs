@@ -2053,6 +2053,9 @@ pub struct CompositorStatus {
     pub scene_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scene_layout: Option<LayoutSettings>,
+    /// Persisted `StreamScreen` takeover image layered above the live scene.
+    /// Native screen/window capture authority lives in `scene_sources` and
+    /// `sources`; this field is not the selected capture device id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_screen_id: Option<String>,
     #[serde(default)]

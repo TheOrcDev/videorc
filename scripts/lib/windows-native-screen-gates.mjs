@@ -33,10 +33,38 @@ export function nativeWindowsScreenRecordingActive(evidence, sourceId) {
   return (
     diagnostics?.activeOutputMode === 'record' &&
     recording?.state === 'recording' &&
-    compositor?.state === 'live' &&
-    compositor?.activeScreenId === sourceId &&
-    compositor?.sceneLayout?.layoutPreset === 'screen-only' &&
+    nativeWindowsCompositorUsesScreen(compositor, sourceId) &&
     sourceEntry?.status === 'live'
+  )
+}
+
+export function nativeWindowsCompositorUsesScreen(compositor, sourceId) {
+  const visibleTakeover = compositor?.sceneSources?.some(
+    (source) => source?.kind === 'screen-image' && source?.visible === true
+  )
+  const sceneSource = compositor?.sceneSources?.find(
+    (source) =>
+      source?.kind === 'screen' &&
+      source?.deviceId === sourceId &&
+      source?.visible === true &&
+      source?.state === 'referenced'
+  )
+  const liveSource = compositor?.sources?.find(
+    (source) =>
+      source?.kind === 'screen' &&
+      source?.sourceId === sourceId &&
+      source?.state === 'live' &&
+      Number.isSafeInteger(source?.sequence) &&
+      source.sequence > 0
+  )
+  return (
+    compositor?.state === 'live' &&
+    compositor?.sceneLayout?.layoutPreset === 'screen-only' &&
+    compositor?.sceneRevision != null &&
+    compositor?.frameSceneRevision === compositor.sceneRevision &&
+    visibleTakeover !== true &&
+    sceneSource != null &&
+    liveSource != null
   )
 }
 

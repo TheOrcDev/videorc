@@ -1930,11 +1930,13 @@ async fn export_mp4_from_mkv(ffmpeg_path: &str, input: &Path, output: &Path) -> 
         bail!("FFmpeg MP4 export failed with {status}");
     }
 
-    let output = output.to_path_buf();
+    Ok(())
+}
+
+async fn sync_nonempty_staged_mp4_for_publication(output: PathBuf) -> Result<()> {
     tokio::task::spawn_blocking(move || sync_nonempty_staged_mp4(&output))
         .await
         .context("Could not join staged MP4 sync task")??;
-
     Ok(())
 }
 
@@ -4539,7 +4541,16 @@ where
         ),
     );
     let export_result = match verify_prepared_mp4_export_staging(&staging) {
-        Ok(()) => exporter(input.to_path_buf(), staging.output_path.clone()).await,
+        Ok(()) => match exporter(input.to_path_buf(), staging.output_path.clone()).await {
+            Ok(()) => {
+                // Finalization owns this durability boundary instead of
+                // trusting each exporter callback to open a Windows-flushable
+                // handle. That keeps production FFmpeg and crash-injection
+                // exporters under the same validation and identity contract.
+                sync_nonempty_staged_mp4_for_publication(staging.output_path.clone()).await
+            }
+            Err(error) => Err(error),
+        },
         Err(error) => Err(error),
     }
     .and_then(|()| verify_prepared_mp4_export_staging(&staging));
