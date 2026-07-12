@@ -795,6 +795,8 @@ pub enum VideoPreset {
     StreamYoutube4k30,
     #[serde(rename = "stream-1080p60")]
     Stream1080p60,
+    #[serde(rename = "vertical-1080x1920")]
+    Vertical1080x1920,
     Custom,
 }
 
@@ -3334,6 +3336,17 @@ mod tests {
         assert_eq!(
             serde_json::to_value(VideoPreset::StreamYoutube4k30).unwrap(),
             serde_json::json!("stream-youtube-4k30")
+        );
+        // The 0.9.31 wire bug: the renderer's 'vertical-1080x1920' had no Rust
+        // variant, so entering vertical mode failed to deserialize. Pin BOTH
+        // directions so a renderer-only preset can never ship again.
+        assert_eq!(
+            serde_json::to_value(VideoPreset::Vertical1080x1920).unwrap(),
+            serde_json::json!("vertical-1080x1920")
+        );
+        assert_eq!(
+            serde_json::from_value::<VideoPreset>(serde_json::json!("vertical-1080x1920")).unwrap(),
+            VideoPreset::Vertical1080x1920
         );
     }
 
