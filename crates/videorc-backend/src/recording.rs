@@ -8464,6 +8464,15 @@ fn video_preset_defaults(preset: VideoPreset) -> VideoSettings {
             fps: 60,
             bitrate_kbps: 9000,
         },
+        // Mirrors videoPresets['vertical-1080x1920'] in capture.ts — the
+        // portrait canvas the vertical Studio mode applies.
+        VideoPreset::Vertical1080x1920 => VideoSettings {
+            preset,
+            width: 1080,
+            height: 1920,
+            fps: 30,
+            bitrate_kbps: 9000,
+        },
         VideoPreset::Custom => VideoSettings {
             preset,
             width: 1920,
