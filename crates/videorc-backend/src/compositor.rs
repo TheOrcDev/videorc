@@ -30,7 +30,7 @@ use crate::preview_screen::{
     preview_screen_frame_source, try_preview_screen_frame_source,
 };
 use crate::protocol::{
-    BackgroundFit, CameraFit, CameraShape, CompositorBackend, CompositorFramePipelineStatus,
+    BackgroundFit, CameraShape, CompositorBackend, CompositorFramePipelineStatus,
     CompositorFrameReady, CompositorImageCacheStatus, CompositorSceneSourceFit,
     CompositorSceneSourceKind, CompositorSceneSourceStatus, CompositorSceneUpdateParams,
     CompositorSourceKind, CompositorSourceStatus, CompositorState, CompositorStatus,
@@ -2528,7 +2528,10 @@ fn try_gpu_compose(
                         frame.width,
                         frame.height,
                         rect,
-                        matches!(layout.camera_fit, CameraFit::Fit) && layout.camera_zoom <= 100,
+                        matches!(
+                            scene_source_fit(&SceneSourceKind::Camera, layout),
+                            SceneFit::Contain
+                        ),
                         source_crop,
                         inputs.width,
                         inputs.height,
@@ -2554,7 +2557,10 @@ fn try_gpu_compose(
                         placeholder.width as u32,
                         placeholder.height as u32,
                         rect,
-                        matches!(layout.camera_fit, CameraFit::Fit) && layout.camera_zoom <= 100,
+                        matches!(
+                            scene_source_fit(&SceneSourceKind::Camera, layout),
+                            SceneFit::Contain
+                        ),
                         source_crop,
                         inputs.width,
                         inputs.height,
@@ -3500,8 +3506,10 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                     rect,
                     SourceRenderOptions {
                         crop: scene_crop_from_transform(&transform),
-                        contain: matches!(snapshot.layout.camera_fit, CameraFit::Fit)
-                            && snapshot.layout.camera_zoom <= 100,
+                        contain: matches!(
+                            scene_source_fit(&SceneSourceKind::Camera, &snapshot.layout),
+                            SceneFit::Contain
+                        ),
                         mirror_x: snapshot.layout.camera_mirror,
                         mask: camera_mask(&snapshot.layout),
                     },
@@ -7499,6 +7507,95 @@ mod tests {
         assert_eq!(y_at(&bytes, 100, 50, 50), blue_y);
         assert_eq!(y_at(&bytes, 100, 89, 89), blue_y);
         assert_eq!(y_at(&bytes, 100, 90, 90), red_y);
+    }
+
+    #[test]
+    fn vertical_bands_fill_without_letterbox() {
+        // The 2026-07-13 owner report: vertical bands rendered their landscape
+        // sources contain-fit — thin strips with black above and below. Bands
+        // must COVER: every row inside both bands carries source pixels, even
+        // with the user's camera Fit preference set (bands ignore it).
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.layout_preset = LayoutPreset::VerticalCameraTop;
+        layout.camera_fit = crate::protocol::CameraFit::Fit;
+        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            sources: crate::protocol::SourceSelection {
+                screen_id: Some("screen:screencapturekit:1".to_string()),
+                window_id: None,
+                camera_id: Some("camera:avfoundation:0".to_string()),
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: layout.clone(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width: 90,
+                height: 160,
+                fps: 30,
+                bitrate_kbps: 2000,
+            }),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        let snapshot = CompositorSceneSnapshot {
+            revision: 1,
+            scene: Some(scene),
+            layout,
+            active_screen: None,
+        };
+        // Landscape sources into portrait bands: red camera, blue screen (BGRA).
+        let camera_frame = Arc::new(crate::frame_store::StoredFrame {
+            sequence: 1,
+            width: 160,
+            height: 90,
+            pixel_format: PreviewCameraPixelFormat::Bgra8,
+            metadata: (),
+            bytes: [0, 0, 255, 255].repeat(160 * 90),
+            source_iosurface: None,
+            source_pixel_buffer: None,
+            recycle_pool: None,
+            captured_at: Instant::now(),
+        });
+        let screen_frame = Arc::new(crate::frame_store::StoredFrame {
+            sequence: 1,
+            width: 160,
+            height: 90,
+            pixel_format: PreviewScreenPixelFormat::Bgra8,
+            metadata: (),
+            bytes: [255, 0, 0, 255].repeat(160 * 90),
+            source_iosurface: None,
+            source_pixel_buffer: None,
+            recycle_pool: None,
+            captured_at: Instant::now(),
+        });
+        let mut bytes = vec![0; raw_yuv420p_len(90, 160)];
+
+        render_compositor_yuv420p_frame(
+            CompositorRenderInputs {
+                sequence: 1,
+                width: 90,
+                height: 160,
+                snapshot: Some(&snapshot),
+                active_image_source: None,
+                background_image_source: None,
+                camera_frame: Some(&camera_frame),
+                screen_frame: Some(&screen_frame),
+                caption_overlay: None,
+                highlight_overlay: None,
+            },
+            &mut bytes,
+        );
+
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
+        let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        // Camera band = rows 0..64 (40% of 160). Edge rows carry camera, not black.
+        assert_eq!(y_at(&bytes, 90, 45, 2), red_y, "camera band top edge");
+        assert_eq!(y_at(&bytes, 90, 45, 60), red_y, "camera band bottom edge");
+        assert_eq!(y_at(&bytes, 90, 2, 30), red_y, "camera band left edge");
+        // Screen band = rows 64..160. Edge rows carry screen, not black.
+        assert_eq!(y_at(&bytes, 90, 45, 68), blue_y, "screen band top edge");
+        assert_eq!(y_at(&bytes, 90, 45, 156), blue_y, "screen band bottom edge");
+        assert_eq!(y_at(&bytes, 90, 87, 120), blue_y, "screen band right edge");
     }
 
     #[test]

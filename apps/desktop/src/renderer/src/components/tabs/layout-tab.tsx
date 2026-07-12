@@ -410,18 +410,30 @@ export function LayoutTab(): ReactElement {
               ) : null}
 
               <span className="pt-2 text-[12.5px] leading-none font-medium text-subtle">Lens</span>
-              <Field>
-                <FieldLabel>Fit</FieldLabel>
-                <ToggleGroup
-                  type="single"
-                  value={layout.cameraFit}
-                  variant="outline"
-                  onValueChange={(value) => value && patchLayout({ cameraFit: value as CameraFit })}
-                >
-                  <ToggleGroupItem value="fill">Fill crop</ToggleGroupItem>
-                  <ToggleGroupItem value="fit">Fit frame</ToggleGroupItem>
-                </ToggleGroup>
-              </Field>
+              {/* Vertical bands ALWAYS fill and crop — a "Fit frame" band would
+                  letterbox the short-form frame (2026-07-13 fill-crop plan), so
+                  the toggle is hidden and honest copy replaces it. Zoom and pan
+                  below still frame the crop. */}
+              {isVerticalStack ? (
+                <p className="text-sm text-muted-foreground">
+                  The camera band always fills and crops. Use zoom and pan to frame yourself.
+                </p>
+              ) : (
+                <Field>
+                  <FieldLabel>Fit</FieldLabel>
+                  <ToggleGroup
+                    type="single"
+                    value={layout.cameraFit}
+                    variant="outline"
+                    onValueChange={(value) =>
+                      value && patchLayout({ cameraFit: value as CameraFit })
+                    }
+                  >
+                    <ToggleGroupItem value="fill">Fill crop</ToggleGroupItem>
+                    <ToggleGroupItem value="fit">Fit frame</ToggleGroupItem>
+                  </ToggleGroup>
+                </Field>
+              )}
 
               <Field orientation="horizontal">
                 <FieldContent>

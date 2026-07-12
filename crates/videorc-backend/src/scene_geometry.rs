@@ -163,12 +163,40 @@ pub fn scene_crop_from_transform(transform: &SceneTransform) -> SceneCrop {
     }
 }
 
+/// True for every vertical-mode preset: their regions are short-form bands
+/// that must be FILLED — internal letterboxing is the bug (owner report,
+/// 2026-07-13 fill-crop plan), not a fidelity feature.
+fn vertical_fill_preset(preset: &LayoutPreset) -> bool {
+    matches!(
+        preset,
+        LayoutPreset::VerticalCameraTop
+            | LayoutPreset::VerticalCameraBottom
+            | LayoutPreset::VerticalSplit
+            | LayoutPreset::VerticalScreenCamera
+            | LayoutPreset::VerticalScreenOnly
+    )
+}
+
 /// The shared fit policy for source status, FFmpeg filters, CPU blits, and
-/// Metal placement. Side-by-side intentionally covers its narrow screen region;
-/// all full-frame screen/window presets contain so UI edges are never cropped.
+/// Metal placement. Side-by-side and ALL vertical presets cover their regions
+/// (short-form bands are filled, center-cropped — never letterboxed); the
+/// horizontal full-frame screen/window presets contain so UI edges are never
+/// cropped. Vertical BAND cameras cover unconditionally — a contain camera
+/// band letterboxes exactly like the reported bug; zoom/pan still frame the
+/// crop. The vertical screen+camera inset bubble keeps the user's Fit choice
+/// like its horizontal twin.
 pub fn scene_source_fit(kind: &SceneSourceKind, layout: &LayoutSettings) -> SceneFit {
     match kind {
         SceneSourceKind::Camera => {
+            let band_camera = matches!(
+                layout.layout_preset,
+                LayoutPreset::VerticalCameraTop
+                    | LayoutPreset::VerticalCameraBottom
+                    | LayoutPreset::VerticalSplit
+            );
+            if band_camera {
+                return SceneFit::Cover;
+            }
             if matches!(layout.camera_fit, CameraFit::Fit) && layout.camera_zoom <= 100 {
                 SceneFit::Contain
             } else {
@@ -176,7 +204,9 @@ pub fn scene_source_fit(kind: &SceneSourceKind, layout: &LayoutSettings) -> Scen
             }
         }
         SceneSourceKind::Screen | SceneSourceKind::Window => {
-            if matches!(layout.layout_preset, LayoutPreset::SideBySide) {
+            if matches!(layout.layout_preset, LayoutPreset::SideBySide)
+                || vertical_fill_preset(&layout.layout_preset)
+            {
                 SceneFit::Cover
             } else {
                 SceneFit::Contain
@@ -436,44 +466,71 @@ mod tests {
 
     #[test]
     fn preset_fit_and_mask_policy_table_is_renderer_independent() {
+        // Columns: preset, screen fit, camera fit (with CameraFit::Fit set —
+        // band cameras must IGNORE it and cover), mask. Every vertical preset
+        // covers its regions: short-form bands are filled, never letterboxed
+        // (2026-07-13 fill-crop plan, owner report).
         let cases = [
             (
                 LayoutPreset::ScreenCamera,
                 SceneFit::Contain,
+                SceneFit::Contain,
                 SceneMask::Rounded { radius_pct: 12 },
             ),
-            (LayoutPreset::ScreenOnly, SceneFit::Contain, SceneMask::None),
-            (LayoutPreset::CameraOnly, SceneFit::Contain, SceneMask::None),
-            (LayoutPreset::SideBySide, SceneFit::Cover, SceneMask::None),
-            // Vertical family: the inset twin masks exactly like ScreenCamera;
-            // the banded scenes keep a rectangular camera and CONTAIN screens.
+            (
+                LayoutPreset::ScreenOnly,
+                SceneFit::Contain,
+                SceneFit::Contain,
+                SceneMask::None,
+            ),
+            (
+                LayoutPreset::CameraOnly,
+                SceneFit::Contain,
+                SceneFit::Contain,
+                SceneMask::None,
+            ),
+            (
+                LayoutPreset::SideBySide,
+                SceneFit::Cover,
+                SceneFit::Contain,
+                SceneMask::None,
+            ),
+            // The inset twin masks exactly like ScreenCamera and keeps the
+            // user's camera Fit for its bubble; its SCREEN covers the frame.
             (
                 LayoutPreset::VerticalScreenCamera,
+                SceneFit::Cover,
                 SceneFit::Contain,
                 SceneMask::Rounded { radius_pct: 12 },
             ),
             (
                 LayoutPreset::VerticalCameraTop,
-                SceneFit::Contain,
+                SceneFit::Cover,
+                SceneFit::Cover,
                 SceneMask::None,
             ),
             (
                 LayoutPreset::VerticalCameraBottom,
-                SceneFit::Contain,
+                SceneFit::Cover,
+                SceneFit::Cover,
                 SceneMask::None,
             ),
             (
                 LayoutPreset::VerticalSplit,
-                SceneFit::Contain,
+                SceneFit::Cover,
+                SceneFit::Cover,
                 SceneMask::None,
             ),
+            // Screen-only scenes never render a camera; the camera column
+            // just documents the fallthrough (user Fit honored, moot here).
             (
                 LayoutPreset::VerticalScreenOnly,
+                SceneFit::Cover,
                 SceneFit::Contain,
                 SceneMask::None,
             ),
         ];
-        for (preset, expected_screen_fit, expected_mask) in cases {
+        for (preset, expected_screen_fit, expected_camera_fit, expected_mask) in cases {
             let mut layout = layout();
             layout.layout_preset = preset.clone();
             layout.camera_shape = CameraShape::Rounded;
@@ -482,6 +539,11 @@ mod tests {
                 scene_source_fit(&SceneSourceKind::Screen, &layout),
                 expected_screen_fit,
                 "screen fit for {preset:?}"
+            );
+            assert_eq!(
+                scene_source_fit(&SceneSourceKind::Camera, &layout),
+                expected_camera_fit,
+                "camera fit for {preset:?}"
             );
             assert_eq!(camera_mask(&layout), expected_mask, "mask for {preset:?}");
         }

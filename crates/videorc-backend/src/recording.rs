@@ -7602,8 +7602,16 @@ fn video_filter(
         return vertical_video_filter(camera_input_index, params, preview, &bands);
     }
 
+    // Full-frame vertical scenes cover the portrait canvas (fill + crop);
+    // horizontal full-frame scenes keep contain+pad so UI edges survive.
+    let vertical_full_frame = matches!(
+        params.layout.layout_preset,
+        LayoutPreset::VerticalScreenCamera | LayoutPreset::VerticalScreenOnly
+    );
     let base_scale = if preview {
         "scale=w=960:h=-2".to_string()
+    } else if vertical_full_frame {
+        cover_scale_filter(&params.output.video)
     } else {
         output_scale_filter(&params.output.video)
     };
@@ -7732,11 +7740,12 @@ fn vertical_video_filter(
     let (camera_height, screen_height) = vertical_band_heights(video.height, bands.camera_fraction);
     let fps = video.fps;
 
-    // Screen CONTAINS in its band (nothing on the user's screen may be cropped
-    // away) and pads with black; the camera band fills via the shared camera
-    // frame filter (fit/fill/zoom preserved).
+    // Short-form bands are FILLED (2026-07-13 fill-crop plan): the screen
+    // covers its band (scale to fill + center crop, mirroring the compositor's
+    // vertical fit) and the camera band always fills too — the user's Fit
+    // preference must not letterbox a band (zoom/pan still frame the crop).
     let screen = format!(
-        "[0:v]setpts=PTS-STARTPTS,scale={width}:{screen_height}:force_original_aspect_ratio=decrease,pad={width}:{screen_height}:(ow-iw)/2:(oh-ih)/2:color=black,fps={fps},format=yuv420p[vt_screen]"
+        "[0:v]setpts=PTS-STARTPTS,scale={width}:{screen_height}:force_original_aspect_ratio=increase,crop={width}:{screen_height},fps={fps},format=yuv420p[vt_screen]"
     );
     let camera = match camera_input_index {
         Some(index) => {
@@ -7745,7 +7754,9 @@ fn vertical_video_filter(
             } else {
                 ""
             };
-            let frame = camera_frame_filter(width, camera_height, &params.layout);
+            let mut band_layout = params.layout.clone();
+            band_layout.camera_fit = CameraFit::Fill;
+            let frame = camera_frame_filter(width, camera_height, &band_layout);
             format!(
                 "[{index}:v]setpts=PTS-STARTPTS,{mirror}{frame},fps={fps},format=yuv420p[vt_camera]"
             )
@@ -7766,6 +7777,15 @@ fn vertical_video_filter(
 fn output_scale_filter(video: &VideoSettings) -> String {
     format!(
         "scale=w={}:h={}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2",
+        video.width, video.height, video.width, video.height
+    )
+}
+
+/// Cover variant for full-frame vertical scenes: fill the portrait canvas and
+/// center-crop instead of padding — short-form output carries no letterbox.
+fn cover_scale_filter(video: &VideoSettings) -> String {
+    format!(
+        "scale=w={}:h={}:force_original_aspect_ratio=increase,crop={}:{}",
         video.width, video.height, video.width, video.height
     )
 }
@@ -11413,22 +11433,24 @@ mod tests {
     }
 
     #[test]
-    fn vertical_filter_stacks_camera_band_over_padded_screen() {
+    fn vertical_filter_stacks_camera_band_over_covered_screen() {
         let mut params = base_params(true, false);
         params.layout.layout_preset = LayoutPreset::VerticalCameraTop;
         params.output.video.width = 1080;
         params.output.video.height = 1920;
 
         let filter = video_filter(Some(1), &params, false);
-        // Camera band on top, screen below; screen pads (contains), never crops.
+        // Camera band on top, screen below; both bands COVER — fill + center
+        // crop, never letterboxed (2026-07-13 fill-crop plan).
         assert!(
             filter.contains("[vt_camera][vt_screen]vstack=inputs=2"),
             "stacked filter: {filter}"
         );
         assert!(
-            filter.contains("pad=1080:1152"),
-            "screen contains: {filter}"
+            filter.contains("scale=1080:1152:force_original_aspect_ratio=increase,crop=1080:1152"),
+            "screen covers: {filter}"
         );
+        assert!(!filter.contains("pad="), "no letterbox pad: {filter}");
         assert!(!filter.contains("overlay"));
 
         // Without a camera input the band renders black instead of collapsing.
@@ -11447,14 +11469,14 @@ mod tests {
         params.output.video.height = 1920;
 
         let filter = video_filter(Some(1), &params, false);
-        // Screen band on top, camera below — the mirrored stack.
+        // Screen band on top, camera below — the mirrored stack; bands cover.
         assert!(
             filter.contains("[vt_screen][vt_camera]vstack=inputs=2"),
             "stacked filter: {filter}"
         );
         assert!(
-            filter.contains("pad=1080:1152"),
-            "screen contains: {filter}"
+            filter.contains("scale=1080:1152:force_original_aspect_ratio=increase,crop=1080:1152"),
+            "screen covers: {filter}"
         );
         assert!(!filter.contains("overlay"));
     }
@@ -11467,12 +11489,15 @@ mod tests {
         params.output.video.height = 1920;
 
         let filter = video_filter(Some(1), &params, false);
-        // 50/50: screen contains in the top 960, camera fills the bottom 960.
+        // 50/50: both halves cover their 960 bands.
         assert!(
             filter.contains("[vt_screen][vt_camera]vstack=inputs=2"),
             "stacked filter: {filter}"
         );
-        assert!(filter.contains("pad=1080:960"), "screen contains: {filter}");
+        assert!(
+            filter.contains("scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960"),
+            "screen covers: {filter}"
+        );
         let no_camera = video_filter(None, &params, false);
         assert!(
             no_camera.contains("color=c=black:s=1080x960"),
@@ -11482,8 +11507,9 @@ mod tests {
 
     #[test]
     fn vertical_screen_camera_filter_rides_the_overlay_path() {
-        // The inset scene composes exactly like screen-camera: full-canvas
-        // screen (contained) with the camera overlaid at the user's corner.
+        // The inset scene composes like screen-camera — full-canvas screen
+        // with the camera overlaid — but the portrait screen COVERS the
+        // canvas (fill + crop): short-form output carries no letterbox.
         let mut params = base_params(true, false);
         params.layout.layout_preset = LayoutPreset::VerticalScreenCamera;
         params.output.video.width = 1080;
@@ -11493,8 +11519,10 @@ mod tests {
         assert!(filter.contains("overlay=x="), "overlay path: {filter}");
         assert!(!filter.contains("vstack"), "no stacking: {filter}");
         assert!(
-            filter.contains("scale=w=1080:h=1920:force_original_aspect_ratio=decrease"),
-            "portrait contain: {filter}"
+            filter.contains(
+                "scale=w=1080:h=1920:force_original_aspect_ratio=increase,crop=1080:1920"
+            ),
+            "portrait cover: {filter}"
         );
     }
 
@@ -11511,8 +11539,10 @@ mod tests {
         assert!(!filter.contains("overlay"), "no overlay: {filter}");
         assert!(!filter.contains("vstack"), "no stacking: {filter}");
         assert!(
-            filter.contains("scale=w=1080:h=1920:force_original_aspect_ratio=decrease"),
-            "portrait contain: {filter}"
+            filter.contains(
+                "scale=w=1080:h=1920:force_original_aspect_ratio=increase,crop=1080:1920"
+            ),
+            "portrait cover: {filter}"
         );
     }
 
