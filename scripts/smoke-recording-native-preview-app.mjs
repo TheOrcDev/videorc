@@ -17,7 +17,10 @@ import {
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
 import { previewWindowSurfaceReady } from './lib/native-preview-window-gates.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
-import { nativeWindowsScreenCandidates } from './lib/windows-native-screen-gates.mjs'
+import {
+  nativeWindowsScreenCandidates,
+  nativeWindowsScreenRecordingActive
+} from './lib/windows-native-screen-gates.mjs'
 import {
   analyzeStartupResolution,
   writeStartupReports
@@ -484,19 +487,24 @@ async function waitForActiveSceneDiagnostics(ws, sceneRevision, outputMode) {
 
 async function waitForPackagedActiveSceneDiagnostics(ws, screenId) {
   const deadline = Date.now() + timeoutMs
-  let lastDiagnostics = null
+  let lastEvidence = null
   while (Date.now() < deadline) {
-    lastDiagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
+    const [diagnostics, compositor, recording] = await Promise.all([
+      request(ws, timeoutMs, 'diagnostics.stats'),
+      request(ws, timeoutMs, 'compositor.status'),
+      request(ws, timeoutMs, 'recording.status')
+    ])
+    lastEvidence = { diagnostics, compositor, recording }
     if (
-      lastDiagnostics.activeOutputMode === 'record' &&
-      (!screenId || lastDiagnostics.activeScreenId === screenId)
+      (!screenId && diagnostics.activeOutputMode === 'record') ||
+      (screenId && nativeWindowsScreenRecordingActive(lastEvidence, screenId))
     ) {
-      return lastDiagnostics
+      return diagnostics
     }
     await sleep(150)
   }
   throw new Error(
-    `Packaged recording diagnostics did not report the active scene/source. Last diagnostics: ${JSON.stringify(lastDiagnostics)}`
+    `Packaged recording diagnostics did not report the active scene/source authority. Last evidence: ${JSON.stringify(lastEvidence)}`
   )
 }
 

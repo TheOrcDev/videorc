@@ -651,7 +651,6 @@ pub(crate) fn capture_session_directory_object_identity(
 
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::ffi::OsStrExt;
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         use windows::Win32::Foundation::HANDLE;
         use windows::Win32::Storage::FileSystem::{
@@ -675,11 +674,7 @@ pub(crate) fn capture_session_directory_object_identity(
                 path.display()
             );
         }
-        let path_wide = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
+        let path_wide = crate::atomic_file::windows_verbatim_path(path)?;
         let raw_handle = unsafe {
             CreateFileW(
                 PCWSTR(path_wide.as_ptr()),
@@ -1127,39 +1122,6 @@ fn sync_directory(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
-fn replace_recovery_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    std::fs::rename(source, destination)
-}
-
-#[cfg(target_os = "windows")]
-fn replace_recovery_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-    use windows::core::PCWSTR;
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    unsafe {
-        MoveFileExW(
-            PCWSTR(source.as_ptr()),
-            PCWSTR(destination.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    }
-    .map_err(std::io::Error::other)
-}
-
 impl Database {
     pub fn open_default() -> Result<Self> {
         let path = default_database_path();
@@ -1487,7 +1449,7 @@ impl Database {
             .sync_all()
             .with_context(|| format!("Could not sync {}", temporary_path.display()))?;
         drop(temporary);
-        if let Err(error) = replace_recovery_file(&temporary_path, path) {
+        if let Err(error) = crate::atomic_file::replace_file(&temporary_path, path) {
             let _ = std::fs::remove_file(&temporary_path);
             return Err(error).with_context(|| {
                 format!("Could not atomically update recovery {}", path.display())

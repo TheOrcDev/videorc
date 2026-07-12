@@ -864,7 +864,7 @@ fn persist_pending_oauth_sessions(
     temporary.write_all(&payload)?;
     temporary.sync_all()?;
     drop(temporary);
-    if let Err(error) = replace_oauth_store_file(&temporary_path, path) {
+    if let Err(error) = crate::atomic_file::replace_file(&temporary_path, path) {
         let _ = std::fs::remove_file(&temporary_path);
         return Err(error).with_context(|| format!("Could not commit {}", path.display()));
     }
@@ -873,39 +873,6 @@ fn persist_pending_oauth_sessions(
         std::fs::File::open(parent)?.sync_all()?;
     }
     Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn replace_oauth_store_file(source: &Path, destination: &Path) -> io::Result<()> {
-    std::fs::rename(source, destination)
-}
-
-#[cfg(target_os = "windows")]
-fn replace_oauth_store_file(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-    use windows::core::PCWSTR;
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    unsafe {
-        MoveFileExW(
-            PCWSTR(source.as_ptr()),
-            PCWSTR(destination.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    }
-    .map_err(io::Error::other)
 }
 
 impl OAuthSessions {

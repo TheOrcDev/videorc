@@ -266,7 +266,7 @@ fn write_json_file(path: &Path, secrets: &BTreeMap<String, String>) -> Result<()
     file.sync_all()
         .with_context(|| format!("Could not sync secret store {}", tmp.display()))?;
     drop(file);
-    if let Err(error) = replace_secret_store_file(&tmp, path) {
+    if let Err(error) = crate::atomic_file::replace_file(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(error)
             .with_context(|| format!("Could not commit secret store {}", path.display()));
@@ -278,39 +278,6 @@ fn write_json_file(path: &Path, secrets: &BTreeMap<String, String>) -> Result<()
             .with_context(|| format!("Could not sync secret store dir {}", parent.display()))?;
     }
     Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn replace_secret_store_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    std::fs::rename(source, destination)
-}
-
-#[cfg(target_os = "windows")]
-fn replace_secret_store_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-    use windows::core::PCWSTR;
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    unsafe {
-        MoveFileExW(
-            PCWSTR(source.as_ptr()),
-            PCWSTR(destination.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    }
-    .map_err(std::io::Error::other)
 }
 
 pub fn put_secret(secret_ref: &str, value: &str) -> Result<()> {

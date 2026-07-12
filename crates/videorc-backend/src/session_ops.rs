@@ -271,20 +271,11 @@ pub(crate) fn rename_session_file_no_replace(source: &Path, destination: &Path) 
 
 #[cfg(target_os = "windows")]
 pub(crate) fn rename_session_file_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
     use windows::core::PCWSTR;
 
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+    let source = crate::atomic_file::windows_verbatim_path(source)?;
+    let destination = crate::atomic_file::windows_verbatim_path(destination)?;
     unsafe {
         MoveFileExW(
             PCWSTR(source.as_ptr()),

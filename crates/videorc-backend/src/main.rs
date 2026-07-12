@@ -1,5 +1,6 @@
 mod account;
 mod ai;
+mod atomic_file;
 mod audio;
 mod backend_authority;
 mod camera_capture;
