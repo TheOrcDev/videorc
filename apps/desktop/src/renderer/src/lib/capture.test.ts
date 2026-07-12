@@ -21,7 +21,10 @@ import {
   microphonePickerDevices,
   isScreenCaptureKitCaptureDevice,
   isSelectableCaptureDevice,
+  HORIZONTAL_LAYOUT_PRESETS,
+  VERTICAL_LAYOUT_PRESETS,
   layoutPresetNeedsCamera,
+  layoutPresetOrientation,
   verticalOrientationVideoPatch,
   layoutPresetNeedsScreen,
   loadCaptureConfig,
@@ -721,7 +724,11 @@ describe('layout preset source requirements', () => {
     expect(layoutPresetNeedsScreen('screen-camera')).toBe(true)
     expect(layoutPresetNeedsScreen('screen-only')).toBe(true)
     expect(layoutPresetNeedsScreen('side-by-side')).toBe(true)
-    expect(layoutPresetNeedsScreen('vertical')).toBe(true)
+    expect(layoutPresetNeedsScreen('vertical-camera-top')).toBe(true)
+    expect(layoutPresetNeedsScreen('vertical-camera-bottom')).toBe(true)
+    expect(layoutPresetNeedsScreen('vertical-split')).toBe(true)
+    expect(layoutPresetNeedsScreen('vertical-screen-camera')).toBe(true)
+    expect(layoutPresetNeedsScreen('vertical-screen-only')).toBe(true)
     expect(layoutPresetNeedsScreen('camera-only')).toBe(false)
   })
 
@@ -729,8 +736,23 @@ describe('layout preset source requirements', () => {
     expect(layoutPresetNeedsCamera('camera-only')).toBe(true)
     expect(layoutPresetNeedsCamera('side-by-side')).toBe(true)
     expect(layoutPresetNeedsCamera('screen-camera')).toBe(true)
-    expect(layoutPresetNeedsCamera('vertical')).toBe(true)
+    expect(layoutPresetNeedsCamera('vertical-camera-top')).toBe(true)
+    expect(layoutPresetNeedsCamera('vertical-camera-bottom')).toBe(true)
+    expect(layoutPresetNeedsCamera('vertical-split')).toBe(true)
+    expect(layoutPresetNeedsCamera('vertical-screen-camera')).toBe(true)
     expect(layoutPresetNeedsCamera('screen-only')).toBe(false)
+    expect(layoutPresetNeedsCamera('vertical-screen-only')).toBe(false)
+  })
+
+  it('classifies every preset into exactly one orientation class', () => {
+    // The class drives the Studio mode, the canvas coupling, and the live
+    // blocker — a misclassified preset breaks all three.
+    for (const preset of HORIZONTAL_LAYOUT_PRESETS) {
+      expect(layoutPresetOrientation(preset)).toBe('horizontal')
+    }
+    for (const preset of VERTICAL_LAYOUT_PRESETS) {
+      expect(layoutPresetOrientation(preset)).toBe('vertical')
+    }
   })
 
   it('treats native screen/window, avfoundation fallback, and test pattern as screen-capable for layouts', () => {
@@ -1419,36 +1441,62 @@ describe('camera shape and aspect (2026-07-06)', () => {
     expect(layout.cameraShape).toBe('rectangle')
     expect(layout.cameraAspect).toBe('source')
   })
+
+  it('migrates the dev-era vertical preset to its renamed variant', () => {
+    // 'vertical' never shipped, but dev configs persisted it before the
+    // orientation-mode split — mirror the backend serde alias.
+    expect(normalizeLayoutSettings({ layoutPreset: 'vertical' }).layoutPreset).toBe(
+      'vertical-camera-top'
+    )
+    expect(normalizeLayoutSettings({ layoutPreset: 'diagonal' }).layoutPreset).toBe(
+      defaultCaptureConfig.layout.layoutPreset
+    )
+  })
 })
 
 describe('vertical orientation video coupling', () => {
   const landscape = videoPresets['record-4k30']
   const vertical = videoPresets['vertical-1080x1920']
 
-  it('entering vertical applies the portrait profile and remembers the landscape canvas', () => {
-    const patch = verticalOrientationVideoPatch('screen-camera', 'vertical', landscape, null)
+  it('entering vertical mode applies the portrait profile and remembers the landscape canvas', () => {
+    const patch = verticalOrientationVideoPatch(
+      'screen-camera',
+      'vertical-camera-top',
+      landscape,
+      null
+    )
     expect(patch).toEqual({ video: vertical, verticalRestoreVideo: landscape })
   })
 
-  it('entering vertical keeps a canvas the user already made portrait', () => {
+  it('entering vertical mode keeps a canvas the user already made portrait', () => {
     const customPortrait = { ...landscape, preset: 'custom' as const, width: 1440, height: 2560 }
     expect(
-      verticalOrientationVideoPatch('screen-only', 'vertical', customPortrait, null)
+      verticalOrientationVideoPatch('screen-only', 'vertical-screen-camera', customPortrait, null)
     ).toBeNull()
   })
 
-  it('leaving vertical restores exactly the remembered landscape canvas once', () => {
-    const patch = verticalOrientationVideoPatch('vertical', 'screen-camera', vertical, landscape)
+  it('leaving vertical mode restores exactly the remembered landscape canvas once', () => {
+    const patch = verticalOrientationVideoPatch(
+      'vertical-camera-top',
+      'screen-camera',
+      vertical,
+      landscape
+    )
     expect(patch).toEqual({ video: landscape, verticalRestoreVideo: null })
   })
 
-  it('leaving vertical falls back to the default landscape profile with nothing remembered', () => {
-    const patch = verticalOrientationVideoPatch('vertical', 'side-by-side', vertical, null)
+  it('leaving vertical mode falls back to the default landscape profile with nothing remembered', () => {
+    const patch = verticalOrientationVideoPatch('vertical-split', 'side-by-side', vertical, null)
     expect(patch).toEqual({ video: defaultCaptureConfig.video, verticalRestoreVideo: null })
   })
 
-  it('leaving vertical never clobbers a canvas the user already made landscape', () => {
-    const patch = verticalOrientationVideoPatch('vertical', 'screen-camera', landscape, vertical)
+  it('leaving vertical mode never clobbers a canvas the user already made landscape', () => {
+    const patch = verticalOrientationVideoPatch(
+      'vertical-camera-top',
+      'screen-camera',
+      landscape,
+      vertical
+    )
     expect(patch).toEqual({ video: landscape, verticalRestoreVideo: null })
   })
 
@@ -1456,6 +1504,18 @@ describe('vertical orientation video coupling', () => {
     expect(
       verticalOrientationVideoPatch('screen-camera', 'side-by-side', landscape, null)
     ).toBeNull()
-    expect(verticalOrientationVideoPatch('vertical', 'vertical', vertical, landscape)).toBeNull()
+    // Scene switches WITHIN vertical mode must never touch the canvas — this
+    // is what keeps them live-safe during a running session.
+    expect(
+      verticalOrientationVideoPatch('vertical-camera-top', 'vertical-split', vertical, landscape)
+    ).toBeNull()
+    expect(
+      verticalOrientationVideoPatch(
+        'vertical-screen-camera',
+        'vertical-screen-only',
+        vertical,
+        landscape
+      )
+    ).toBeNull()
   })
 })

@@ -136,8 +136,9 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
                 scene.sources.push(base_source(&params.sources));
             }
         }
-        LayoutPreset::ScreenOnly => {
-            // Screen-only never composites the camera.
+        LayoutPreset::ScreenOnly | LayoutPreset::VerticalScreenOnly => {
+            // Screen-only never composites the camera; the vertical variant is
+            // the same full-frame contain on the portrait canvas.
             scene.sources.push(base_source(&params.sources));
         }
         LayoutPreset::SideBySide => {
@@ -167,31 +168,35 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
                 scene.sources.push(camera);
             }
         }
-        LayoutPreset::Vertical => {
-            // Stacked portrait arrangement (9:16 short-form): camera band on
-            // top, screen below. Fractions are canvas-normalized so the
-            // arrangement stays sane even if applied to a landscape canvas.
-            // Like side-by-side regions, the camera band keeps no bubble mask
-            // and the screen band CONTAINS (nothing on the user's screen may
-            // be cropped away); the camera honors the user's Fit/Fill.
-            let mut base = base_source(&params.sources);
-            base.transform =
-                vertical_band_transform(VERTICAL_CAMERA_BAND, 1.0 - VERTICAL_CAMERA_BAND);
-            base.default_transform = base.transform.clone();
-            scene.sources.push(base);
-
-            if let Some(camera_id) = params.sources.camera_id.clone() {
-                let mut camera =
-                    camera_source(camera_id, &params.layout, output_width, output_height);
-                camera.transform = vertical_band_transform(0.0, VERTICAL_CAMERA_BAND);
-                camera.default_transform = camera.transform.clone();
-                scene.sources.push(camera);
-            }
+        // Stacked portrait arrangements (9:16 short-form). Fractions are
+        // canvas-normalized so they stay sane even on a landscape canvas.
+        LayoutPreset::VerticalCameraTop => {
+            let bands = VerticalStackBands {
+                camera_y: 0.0,
+                camera_height: VERTICAL_CAMERA_BAND,
+            };
+            push_vertical_stack(&mut scene, &params, output_width, output_height, bands);
+        }
+        LayoutPreset::VerticalCameraBottom => {
+            let bands = VerticalStackBands {
+                camera_y: 1.0 - VERTICAL_CAMERA_BAND,
+                camera_height: VERTICAL_CAMERA_BAND,
+            };
+            push_vertical_stack(&mut scene, &params, output_width, output_height, bands);
+        }
+        LayoutPreset::VerticalSplit => {
+            let bands = VerticalStackBands {
+                camera_y: 0.5,
+                camera_height: 0.5,
+            };
+            push_vertical_stack(&mut scene, &params, output_width, output_height, bands);
         }
         // Explicit arm (no wildcard): a new preset must state its composition
         // here or fail to compile — the old `_ =>` silently composited unknown
-        // presets as screen-camera.
-        LayoutPreset::ScreenCamera => {
+        // presets as screen-camera. The vertical variant is the identical
+        // arrangement on the portrait canvas: screen full-frame contain,
+        // camera as the user's corner/size/shape inset bubble.
+        LayoutPreset::ScreenCamera | LayoutPreset::VerticalScreenCamera => {
             scene.sources.push(base_source(&params.sources));
             if let Some(camera_id) = params.sources.camera_id.clone() {
                 scene.sources.push(camera_source(
@@ -376,9 +381,48 @@ fn region_transform(x: f64, width: f64) -> SceneTransform {
     }
 }
 
-/// Camera band height for the Vertical (9:16) preset: face on top, content
-/// below — the short-form idiom. Owner taste review may tune this (0.35-0.45).
-const VERTICAL_CAMERA_BAND: f64 = 0.4;
+/// Camera band height for the stacked vertical (9:16) presets. Owner taste
+/// review may tune this (0.35-0.45); Split ignores it and shares evenly.
+/// Shared with the legacy FFmpeg path (recording.rs) so the two render paths
+/// cannot drift apart.
+pub(crate) const VERTICAL_CAMERA_BAND: f64 = 0.4;
+
+/// Camera band geometry for a stacked vertical preset; the screen takes the
+/// complementary band.
+struct VerticalStackBands {
+    camera_y: f64,
+    camera_height: f64,
+}
+
+/// Push the stacked vertical arrangement: camera band at the given geometry,
+/// screen in the complementary band. Like side-by-side regions, the camera
+/// band keeps no bubble mask and the screen band CONTAINS (nothing on the
+/// user's screen may be cropped away); the camera honors the user's Fit/Fill.
+fn push_vertical_stack(
+    scene: &mut Scene,
+    params: &SceneConfigParams,
+    output_width: u32,
+    output_height: u32,
+    bands: VerticalStackBands,
+) {
+    let (screen_y, screen_height) = if bands.camera_y == 0.0 {
+        (bands.camera_height, 1.0 - bands.camera_height)
+    } else {
+        (0.0, bands.camera_y)
+    };
+
+    let mut base = base_source(&params.sources);
+    base.transform = vertical_band_transform(screen_y, screen_height);
+    base.default_transform = base.transform.clone();
+    scene.sources.push(base);
+
+    if let Some(camera_id) = params.sources.camera_id.clone() {
+        let mut camera = camera_source(camera_id, &params.layout, output_width, output_height);
+        camera.transform = vertical_band_transform(bands.camera_y, bands.camera_height);
+        camera.default_transform = camera.transform.clone();
+        scene.sources.push(camera);
+    }
+}
 
 fn vertical_band_transform(y: f64, height: f64) -> SceneTransform {
     SceneTransform {
@@ -501,9 +545,9 @@ mod tests {
     };
 
     #[test]
-    fn vertical_preset_stacks_camera_band_over_contained_screen() {
+    fn vertical_camera_top_stacks_camera_band_over_contained_screen() {
         let mut params = base_params();
-        params.layout.layout_preset = LayoutPreset::Vertical;
+        params.layout.layout_preset = LayoutPreset::VerticalCameraTop;
         let scene = scene_from_capture_config(params);
 
         assert_eq!(scene.sources.len(), 2);
@@ -525,11 +569,76 @@ mod tests {
     }
 
     #[test]
-    fn vertical_preset_without_camera_keeps_the_screen_band() {
-        // Transient state only — the selection blocker refuses vertical
+    fn vertical_camera_bottom_mirrors_the_stack() {
+        let mut params = base_params();
+        params.layout.layout_preset = LayoutPreset::VerticalCameraBottom;
+        let scene = scene_from_capture_config(params);
+
+        assert_eq!(scene.sources.len(), 2);
+        let screen = &scene.sources[0];
+        let camera = &scene.sources[1];
+
+        // Screen fills the upper band edge-to-edge.
+        assert_eq!(screen.transform.y, 0.0);
+        assert_eq!(screen.transform.width, 1.0);
+        assert_eq!(screen.transform.height, 1.0 - VERTICAL_CAMERA_BAND);
+
+        // Camera band sits at the bottom, full width.
+        assert_eq!(camera.transform.y, 1.0 - VERTICAL_CAMERA_BAND);
+        assert_eq!(camera.transform.width, 1.0);
+        assert_eq!(camera.transform.height, VERTICAL_CAMERA_BAND);
+        assert_eq!(camera.default_transform, camera.transform);
+    }
+
+    #[test]
+    fn vertical_split_shares_the_canvas_evenly_screen_on_top() {
+        let mut params = base_params();
+        params.layout.layout_preset = LayoutPreset::VerticalSplit;
+        let scene = scene_from_capture_config(params);
+
+        assert_eq!(scene.sources.len(), 2);
+        let screen = &scene.sources[0];
+        let camera = &scene.sources[1];
+
+        assert_eq!(screen.transform.y, 0.0);
+        assert_eq!(screen.transform.height, 0.5);
+        assert_eq!(camera.transform.y, 0.5);
+        assert_eq!(camera.transform.height, 0.5);
+        assert_eq!(screen.transform.width, 1.0);
+        assert_eq!(camera.transform.width, 1.0);
+    }
+
+    #[test]
+    fn vertical_screen_camera_composes_exactly_like_screen_camera() {
+        // The inset scene delegates: full-frame screen + the user's camera
+        // bubble (corner/size/shape/drag) — only the canvas differs.
+        let mut landscape = base_params();
+        landscape.layout.layout_preset = LayoutPreset::ScreenCamera;
+        let mut portrait = base_params();
+        portrait.layout.layout_preset = LayoutPreset::VerticalScreenCamera;
+
+        let landscape_scene = scene_from_capture_config(landscape);
+        let portrait_scene = scene_from_capture_config(portrait);
+
+        assert_eq!(landscape_scene.sources, portrait_scene.sources);
+    }
+
+    #[test]
+    fn vertical_screen_only_composes_exactly_like_screen_only() {
+        let mut params = base_params();
+        params.layout.layout_preset = LayoutPreset::VerticalScreenOnly;
+        let scene = scene_from_capture_config(params);
+
+        assert_eq!(scene.sources.len(), 1);
+        assert_eq!(scene.sources[0].transform, full_frame_transform());
+    }
+
+    #[test]
+    fn vertical_stack_without_camera_keeps_the_screen_band() {
+        // Transient state only — the selection blocker refuses these presets
         // without a camera; the band stays consistent with side-by-side.
         let mut params = base_params();
-        params.layout.layout_preset = LayoutPreset::Vertical;
+        params.layout.layout_preset = LayoutPreset::VerticalCameraTop;
         params.sources.camera_id = None;
         let scene = scene_from_capture_config(params);
 

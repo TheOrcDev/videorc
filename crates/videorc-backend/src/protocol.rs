@@ -461,7 +461,30 @@ pub enum LayoutPreset {
     ScreenOnly,
     CameraOnly,
     SideBySide,
-    Vertical,
+    /// The alias covers dev-era configs and session rows written while the
+    /// preset was plain "vertical" (never shipped in a release).
+    #[serde(alias = "vertical")]
+    VerticalCameraTop,
+    VerticalCameraBottom,
+    VerticalSplit,
+    VerticalScreenCamera,
+    VerticalScreenOnly,
+}
+
+impl LayoutPreset {
+    /// Orientation class: vertical presets exist only in the Studio's
+    /// vertical mode and imply a portrait canvas. The classes may not be
+    /// crossed while a session runs — the encoder canvas is fixed at start.
+    pub fn is_vertical(&self) -> bool {
+        matches!(
+            self,
+            LayoutPreset::VerticalCameraTop
+                | LayoutPreset::VerticalCameraBottom
+                | LayoutPreset::VerticalSplit
+                | LayoutPreset::VerticalScreenCamera
+                | LayoutPreset::VerticalScreenOnly
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -3170,8 +3193,49 @@ mod tests {
             serde_json::json!("side-by-side")
         );
         assert_eq!(
-            serde_json::to_value(LayoutPreset::Vertical).unwrap(),
-            serde_json::json!("vertical")
+            serde_json::to_value(LayoutPreset::VerticalCameraTop).unwrap(),
+            serde_json::json!("vertical-camera-top")
+        );
+        assert_eq!(
+            serde_json::to_value(LayoutPreset::VerticalCameraBottom).unwrap(),
+            serde_json::json!("vertical-camera-bottom")
+        );
+        assert_eq!(
+            serde_json::to_value(LayoutPreset::VerticalSplit).unwrap(),
+            serde_json::json!("vertical-split")
+        );
+        assert_eq!(
+            serde_json::to_value(LayoutPreset::VerticalScreenCamera).unwrap(),
+            serde_json::json!("vertical-screen-camera")
+        );
+        assert_eq!(
+            serde_json::to_value(LayoutPreset::VerticalScreenOnly).unwrap(),
+            serde_json::json!("vertical-screen-only")
+        );
+    }
+
+    #[test]
+    fn layout_preset_orientation_classes_are_exhaustive() {
+        // The class gates live scene switches (the canvas is fixed while a
+        // session runs) — a misclassified preset silently breaks that gate.
+        assert!(!LayoutPreset::ScreenCamera.is_vertical());
+        assert!(!LayoutPreset::ScreenOnly.is_vertical());
+        assert!(!LayoutPreset::CameraOnly.is_vertical());
+        assert!(!LayoutPreset::SideBySide.is_vertical());
+        assert!(LayoutPreset::VerticalCameraTop.is_vertical());
+        assert!(LayoutPreset::VerticalCameraBottom.is_vertical());
+        assert!(LayoutPreset::VerticalSplit.is_vertical());
+        assert!(LayoutPreset::VerticalScreenCamera.is_vertical());
+        assert!(LayoutPreset::VerticalScreenOnly.is_vertical());
+    }
+
+    #[test]
+    fn layout_preset_accepts_the_dev_era_vertical_alias() {
+        // "vertical" was the preset's wire name before the orientation-mode
+        // split; it never shipped, but dev configs and session rows carry it.
+        assert_eq!(
+            serde_json::from_value::<LayoutPreset>(serde_json::json!("vertical")).unwrap(),
+            LayoutPreset::VerticalCameraTop
         );
     }
 

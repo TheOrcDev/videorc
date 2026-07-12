@@ -230,16 +230,27 @@ fn target_screen_is_live(
 /// exactly what is missing instead of degrading silently.
 pub fn preset_selection_blocker(params: &SceneConfigParams) -> Option<String> {
     let preset = &params.layout.layout_preset;
+    // The inset scenes (ScreenCamera + its vertical twin) tolerate a missing
+    // camera — the screen still fills the frame; the banded arrangements
+    // would show a dead band, so the camera is required there.
     let needs_camera = matches!(
         preset,
-        LayoutPreset::CameraOnly | LayoutPreset::SideBySide | LayoutPreset::Vertical
+        LayoutPreset::CameraOnly
+            | LayoutPreset::SideBySide
+            | LayoutPreset::VerticalCameraTop
+            | LayoutPreset::VerticalCameraBottom
+            | LayoutPreset::VerticalSplit
     );
     let needs_screen = matches!(
         preset,
         LayoutPreset::ScreenOnly
             | LayoutPreset::ScreenCamera
             | LayoutPreset::SideBySide
-            | LayoutPreset::Vertical
+            | LayoutPreset::VerticalCameraTop
+            | LayoutPreset::VerticalCameraBottom
+            | LayoutPreset::VerticalSplit
+            | LayoutPreset::VerticalScreenCamera
+            | LayoutPreset::VerticalScreenOnly
     );
     let camera_selected = params.sources.camera_id.is_some();
     let screen_selected = params.sources.test_pattern
@@ -386,23 +397,26 @@ async fn apply_scene_transaction(
     let intent_id = begin_layout_intent(state, requested_intent_id, needs).await?;
     let session_active = state.recording.lock().await.is_some();
 
-    // Vertical implies a portrait canvas and the encoder canvas is fixed at
-    // session start — switching INTO vertical mid-session is refused honestly
-    // (the renderer disables the card too; this is defense in depth). Being
-    // live in vertical stays fully mutable: source switches, backgrounds, and
-    // scene commits within the running vertical session all pass.
-    if session_active && matches!(params.layout.layout_preset, LayoutPreset::Vertical) {
-        let already_vertical = {
+    // Orientation classes imply the canvas (vertical = portrait) and the
+    // encoder canvas is fixed at session start — crossing classes mid-session
+    // is refused honestly in BOTH directions (the renderer hides cross-mode
+    // scenes too; this is defense in depth). Scene switches WITHIN a class
+    // stay fully live: sources, backgrounds, and any same-orientation preset.
+    if session_active {
+        let requested_vertical = params.layout.layout_preset.is_vertical();
+        // An unknown running layout is treated as horizontal — the
+        // conservative reading the pre-split blocker used.
+        let running_vertical = {
             let compositor = state.compositor.lock().await;
             compositor
                 .status
                 .scene_layout
                 .as_ref()
-                .is_some_and(|layout| matches!(layout.layout_preset, LayoutPreset::Vertical))
+                .is_some_and(|layout| layout.layout_preset.is_vertical())
         };
-        if !already_vertical {
+        if running_vertical != requested_vertical {
             bail!(
-                "Vertical changes the canvas orientation — stop the session before switching to it."
+                "Switching between horizontal and vertical scenes changes the canvas orientation — stop the session first."
             );
         }
     }

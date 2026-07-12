@@ -40,7 +40,7 @@ const LAYOUT_PRESETS = [
   { id: 'screen-only', label: 'Screen only', enabled: true },
   { id: 'camera-only', label: 'Camera only', enabled: true },
   { id: 'side-by-side', label: 'Side-by-side', enabled: true },
-  { id: 'vertical', label: 'Vertical (9:16)', enabled: true }
+  { id: 'vertical-camera-top', label: 'Vertical (9:16)', enabled: true }
 ] as const
 
 export function LayoutTab(): ReactElement {
@@ -78,7 +78,7 @@ export function LayoutTab(): ReactElement {
   const hasScreen = hasSelectedScreenSource(captureConfig.sources)
   const isCameraOnly = layout.layoutPreset === 'camera-only'
   const isSideBySide = layout.layoutPreset === 'side-by-side'
-  const isVertical = layout.layoutPreset === 'vertical'
+  const isVertical = layout.layoutPreset === 'vertical-camera-top'
   const showOverlayControls = layout.layoutPreset === 'screen-camera'
 
   return (

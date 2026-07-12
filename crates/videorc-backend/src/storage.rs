@@ -4630,7 +4630,11 @@ pub fn session_scene_label(
             crate::protocol::LayoutPreset::ScreenOnly => "Screen only",
             crate::protocol::LayoutPreset::CameraOnly => "Camera only",
             crate::protocol::LayoutPreset::SideBySide => "Side by side",
-            crate::protocol::LayoutPreset::Vertical => "Vertical",
+            crate::protocol::LayoutPreset::VerticalCameraTop => "Vertical · Camera top",
+            crate::protocol::LayoutPreset::VerticalCameraBottom => "Vertical · Camera bottom",
+            crate::protocol::LayoutPreset::VerticalSplit => "Vertical · Split",
+            crate::protocol::LayoutPreset::VerticalScreenCamera => "Vertical · Screen + Camera",
+            crate::protocol::LayoutPreset::VerticalScreenOnly => "Vertical · Screen only",
         }
         .to_string(),
     )

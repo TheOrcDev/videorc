@@ -50,7 +50,7 @@ const QUICK_PRESETS: { id: LayoutPreset; label: string }[] = [
   { id: 'screen-only', label: 'Screen' },
   { id: 'camera-only', label: 'Camera' },
   { id: 'side-by-side', label: 'Side by side' },
-  { id: 'vertical', label: 'Vertical (9:16)' }
+  { id: 'vertical-camera-top', label: 'Vertical (9:16)' }
 ]
 
 function presetLabel(preset: LayoutPreset): string {

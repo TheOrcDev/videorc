@@ -64,12 +64,44 @@ export type LegacyStreamKeyMigrationCandidate = {
   streamKey: string
 }
 
+/** The Studio's horizontal scene set, in gallery order. */
+export const HORIZONTAL_LAYOUT_PRESETS: readonly LayoutPreset[] = [
+  'screen-camera',
+  'screen-only',
+  'camera-only',
+  'side-by-side'
+]
+
+/** The Studio's vertical (9:16 short-form) scene set, in gallery order. */
+export const VERTICAL_LAYOUT_PRESETS: readonly LayoutPreset[] = [
+  'vertical-camera-top',
+  'vertical-camera-bottom',
+  'vertical-split',
+  'vertical-screen-camera',
+  'vertical-screen-only'
+]
+
+export type LayoutOrientation = 'horizontal' | 'vertical'
+
+/**
+ * Orientation class of a scene preset. Every preset belongs to exactly one
+ * Studio mode — the mode is DERIVED from the active preset, never stored, so
+ * mode and scene cannot drift apart. Mirrors the backend
+ * `LayoutPreset::is_vertical`.
+ */
+export function layoutPresetOrientation(preset: LayoutPreset): LayoutOrientation {
+  return (VERTICAL_LAYOUT_PRESETS as readonly string[]).includes(preset) ? 'vertical' : 'horizontal'
+}
+
 export function layoutPresetNeedsCamera(preset: LayoutPreset): boolean {
   return (
     preset === 'screen-camera' ||
     preset === 'camera-only' ||
     preset === 'side-by-side' ||
-    preset === 'vertical'
+    preset === 'vertical-camera-top' ||
+    preset === 'vertical-camera-bottom' ||
+    preset === 'vertical-split' ||
+    preset === 'vertical-screen-camera'
   )
 }
 
@@ -78,7 +110,11 @@ export function layoutPresetNeedsScreen(preset: LayoutPreset): boolean {
     preset === 'screen-camera' ||
     preset === 'screen-only' ||
     preset === 'side-by-side' ||
-    preset === 'vertical'
+    preset === 'vertical-camera-top' ||
+    preset === 'vertical-camera-bottom' ||
+    preset === 'vertical-split' ||
+    preset === 'vertical-screen-camera' ||
+    preset === 'vertical-screen-only'
   )
 }
 
@@ -92,14 +128,15 @@ export type VerticalOrientationVideoPatch = {
 }
 
 /**
- * Off-air orientation coupling for the Vertical scene: entering `vertical`
- * flips the canvas to the vertical profile and remembers the landscape
+ * Off-air orientation coupling for the Studio modes: entering a vertical
+ * scene flips the canvas to the portrait profile and remembers the landscape
  * settings; leaving restores exactly what was there. Returns null when no
- * video change is needed — same orientation class, a canvas the user already
- * made portrait (entering), or a canvas the user already made landscape while
- * in the vertical scene (leaving — their explicit choice wins). Callers MUST
- * NOT apply this mid-session: the encoder canvas is fixed at session start
- * (the backend refuses live switches into vertical as defense in depth).
+ * video change is needed — same orientation class (scene switches WITHIN a
+ * mode never touch the canvas), a canvas the user already made portrait
+ * (entering), or a canvas the user already made landscape while in vertical
+ * mode (leaving — their explicit choice wins). Callers MUST NOT apply this
+ * mid-session: the encoder canvas is fixed at session start (the backend
+ * refuses cross-orientation switches as defense in depth).
  */
 export function verticalOrientationVideoPatch(
   fromPreset: LayoutPreset,
@@ -107,8 +144,8 @@ export function verticalOrientationVideoPatch(
   video: VideoSettings,
   verticalRestoreVideo: VideoSettings | null
 ): VerticalOrientationVideoPatch | null {
-  const fromVertical = fromPreset === 'vertical'
-  const toVertical = toPreset === 'vertical'
+  const fromVertical = layoutPresetOrientation(fromPreset) === 'vertical'
+  const toVertical = layoutPresetOrientation(toPreset) === 'vertical'
   if (fromVertical === toVertical) {
     return null
   }
@@ -864,15 +901,21 @@ function stringList(value: unknown): string[] {
 }
 
 const LAYOUT_PRESET_VALUES: readonly LayoutPreset[] = [
-  'screen-camera',
-  'screen-only',
-  'camera-only',
-  'side-by-side',
-  'vertical'
+  ...HORIZONTAL_LAYOUT_PRESETS,
+  ...VERTICAL_LAYOUT_PRESETS
 ]
 
 function isLayoutPreset(value: unknown): value is LayoutPreset {
   return typeof value === 'string' && (LAYOUT_PRESET_VALUES as readonly string[]).includes(value)
+}
+
+/**
+ * Pre-split wire names for presets that were renamed. 'vertical' never
+ * shipped in a release, but dev-era persisted configs carry it — mirror the
+ * backend's serde alias instead of silently resetting those to the default.
+ */
+const LEGACY_LAYOUT_PRESET_ALIASES: Record<string, LayoutPreset> = {
+  vertical: 'vertical-camera-top'
 }
 
 const SIDE_BY_SIDE_SPLITS: readonly SideBySideSplit[] = ['50-50', '60-40', '70-30']
@@ -917,7 +960,9 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
     ...candidate,
     layoutPreset: isLayoutPreset(candidate.layoutPreset)
       ? candidate.layoutPreset
-      : defaultCaptureConfig.layout.layoutPreset,
+      : (typeof candidate.layoutPreset === 'string' &&
+          LEGACY_LAYOUT_PRESET_ALIASES[candidate.layoutPreset]) ||
+        defaultCaptureConfig.layout.layoutPreset,
     cameraTransformMode,
     cameraTransform: cameraTransformMode === 'custom' ? cameraTransform : null,
     cameraMargin: clampNumber(

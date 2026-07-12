@@ -843,13 +843,19 @@ pub async fn start_session(
     let use_encoder_bridge =
         should_use_compositor_encoder_bridge(&state, &params, active_screen.as_ref()).await?;
     emit_foundation_health_events(&state, &session_id, &params, use_encoder_bridge)?;
-    // The legacy FFmpeg screen+camera overlay and side-by-side paths both rely on the
-    // camera device index. The protected compositor bridge uses native source frames, so
-    // an unavailable FFmpeg camera index is not itself a recording-path failure there.
+    // The legacy FFmpeg screen+camera overlay, side-by-side, and vertical stack
+    // paths all rely on the camera device index. The protected compositor bridge
+    // uses native source frames, so an unavailable FFmpeg camera index is not
+    // itself a recording-path failure there.
     if !use_encoder_bridge
         && matches!(
             params.layout.layout_preset,
-            LayoutPreset::ScreenCamera | LayoutPreset::SideBySide | LayoutPreset::Vertical
+            LayoutPreset::ScreenCamera
+                | LayoutPreset::SideBySide
+                | LayoutPreset::VerticalCameraTop
+                | LayoutPreset::VerticalCameraBottom
+                | LayoutPreset::VerticalSplit
+                | LayoutPreset::VerticalScreenCamera
         )
         && params.sources.camera_id.is_some()
         && capture.camera_index.is_none()
@@ -4822,9 +4828,12 @@ async fn resolve_capture_inputs(ffmpeg_path: &str, params: &StartSessionParams) 
     } else {
         resolve_primary_screen_video_input(ffmpeg_path, params.sources.screen_id.as_deref()).await
     };
-    // Screen-only intentionally skips the camera overlay so no camera permission
-    // is requested.
-    let camera_index = if matches!(params.layout.layout_preset, LayoutPreset::ScreenOnly) {
+    // The screen-only scenes intentionally skip the camera overlay so no
+    // camera permission is requested.
+    let camera_index = if matches!(
+        params.layout.layout_preset,
+        LayoutPreset::ScreenOnly | LayoutPreset::VerticalScreenOnly
+    ) {
         None
     } else {
         resolve_camera_input(ffmpeg_path, params.sources.camera_id.as_deref()).await
@@ -7588,8 +7597,8 @@ fn video_filter(
         return side_by_side_video_filter(camera_input_index, params, preview);
     }
 
-    if matches!(params.layout.layout_preset, LayoutPreset::Vertical) {
-        return vertical_video_filter(camera_input_index, params, preview);
+    if let Some(bands) = vertical_stack_filter_bands(&params.layout.layout_preset) {
+        return vertical_video_filter(camera_input_index, params, preview, &bands);
     }
 
     let base_scale = if preview {
@@ -7669,12 +7678,44 @@ fn side_by_side_video_filter(
     format!("{screen};{camera};[{left}][{right}]hstack=inputs=2{final_scale}[v]")
 }
 
-/// Camera band height for the Vertical preset's legacy FFmpeg path — mirrors
-/// scene.rs VERTICAL_CAMERA_BAND (0.4) and the compositor arrangement: camera
-/// band on top (covers), screen below (contains, never cropped). Heights are
-/// evened for yuv420p.
-fn vertical_band_heights(canvas_height: u32) -> (u32, u32) {
-    let camera = ((f64::from(canvas_height) * 0.4).round() as u32 / 2) * 2;
+/// Band geometry for a stacked vertical preset on the legacy FFmpeg path —
+/// mirrors the scene.rs arrangements: camera band covers, screen band
+/// contains (nothing on the user's screen may be cropped away).
+struct VerticalStackFilterBands {
+    camera_fraction: f64,
+    camera_on_top: bool,
+}
+
+/// Exhaustive on purpose: a new preset must state its legacy-path
+/// composition here (stacked, or None for the overlay/base paths) or fail to
+/// compile — no preset may silently ride the screen-camera overlay.
+fn vertical_stack_filter_bands(preset: &LayoutPreset) -> Option<VerticalStackFilterBands> {
+    match preset {
+        LayoutPreset::VerticalCameraTop => Some(VerticalStackFilterBands {
+            camera_fraction: crate::scene::VERTICAL_CAMERA_BAND,
+            camera_on_top: true,
+        }),
+        LayoutPreset::VerticalCameraBottom => Some(VerticalStackFilterBands {
+            camera_fraction: crate::scene::VERTICAL_CAMERA_BAND,
+            camera_on_top: false,
+        }),
+        LayoutPreset::VerticalSplit => Some(VerticalStackFilterBands {
+            camera_fraction: 0.5,
+            camera_on_top: false,
+        }),
+        LayoutPreset::ScreenCamera
+        | LayoutPreset::ScreenOnly
+        | LayoutPreset::CameraOnly
+        | LayoutPreset::SideBySide
+        | LayoutPreset::VerticalScreenCamera
+        | LayoutPreset::VerticalScreenOnly => None,
+    }
+}
+
+/// Camera band height for a stacked vertical preset's legacy FFmpeg path.
+/// Heights are evened for yuv420p.
+fn vertical_band_heights(canvas_height: u32, camera_fraction: f64) -> (u32, u32) {
+    let camera = ((f64::from(canvas_height) * camera_fraction).round() as u32 / 2) * 2;
     let camera = camera.clamp(2, canvas_height.saturating_sub(2));
     (camera, canvas_height - camera)
 }
@@ -7683,10 +7724,11 @@ fn vertical_video_filter(
     camera_input_index: Option<usize>,
     params: &StartSessionParams,
     preview: bool,
+    bands: &VerticalStackFilterBands,
 ) -> String {
     let video = &params.output.video;
     let width = video.width;
-    let (camera_height, screen_height) = vertical_band_heights(video.height);
+    let (camera_height, screen_height) = vertical_band_heights(video.height, bands.camera_fraction);
     let fps = video.fps;
 
     // Screen CONTAINS in its band (nothing on the user's screen may be cropped
@@ -7712,7 +7754,12 @@ fn vertical_video_filter(
         }
     };
     let final_scale = if preview { ",scale=w=960:h=-2" } else { "" };
-    format!("{screen};{camera};[vt_camera][vt_screen]vstack=inputs=2{final_scale}[v]")
+    let stack_order = if bands.camera_on_top {
+        "[vt_camera][vt_screen]"
+    } else {
+        "[vt_screen][vt_camera]"
+    };
+    format!("{screen};{camera};{stack_order}vstack=inputs=2{final_scale}[v]")
 }
 
 fn output_scale_filter(video: &VideoSettings) -> String {
@@ -11339,21 +11386,26 @@ mod tests {
 
     #[test]
     fn vertical_band_heights_are_even_and_tile_the_canvas() {
-        let (camera, screen) = vertical_band_heights(1920);
+        let (camera, screen) = vertical_band_heights(1920, crate::scene::VERTICAL_CAMERA_BAND);
         assert_eq!(camera, 768);
         assert_eq!(screen, 1152);
+        let (camera, screen) = vertical_band_heights(1920, 0.5);
+        assert_eq!(camera, 960);
+        assert_eq!(screen, 960);
         for height in [720, 1080, 1919, 1921] {
-            let (camera, screen) = vertical_band_heights(height);
-            assert_eq!(camera % 2, 0);
-            assert_eq!(camera + screen, height);
-            assert!(camera >= 2);
+            for fraction in [crate::scene::VERTICAL_CAMERA_BAND, 0.5] {
+                let (camera, screen) = vertical_band_heights(height, fraction);
+                assert_eq!(camera % 2, 0);
+                assert_eq!(camera + screen, height);
+                assert!(camera >= 2);
+            }
         }
     }
 
     #[test]
     fn vertical_filter_stacks_camera_band_over_padded_screen() {
         let mut params = base_params(true, false);
-        params.layout.layout_preset = LayoutPreset::Vertical;
+        params.layout.layout_preset = LayoutPreset::VerticalCameraTop;
         params.output.video.width = 1080;
         params.output.video.height = 1920;
 
@@ -11374,6 +11426,83 @@ mod tests {
         assert!(
             no_camera.contains("color=c=black:s=1080x768"),
             "{no_camera}"
+        );
+    }
+
+    #[test]
+    fn vertical_camera_bottom_filter_mirrors_the_stack_order() {
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalCameraBottom;
+        params.output.video.width = 1080;
+        params.output.video.height = 1920;
+
+        let filter = video_filter(Some(1), &params, false);
+        // Screen band on top, camera below — the mirrored stack.
+        assert!(
+            filter.contains("[vt_screen][vt_camera]vstack=inputs=2"),
+            "stacked filter: {filter}"
+        );
+        assert!(
+            filter.contains("pad=1080:1152"),
+            "screen contains: {filter}"
+        );
+        assert!(!filter.contains("overlay"));
+    }
+
+    #[test]
+    fn vertical_split_filter_shares_the_canvas_evenly() {
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalSplit;
+        params.output.video.width = 1080;
+        params.output.video.height = 1920;
+
+        let filter = video_filter(Some(1), &params, false);
+        // 50/50: screen contains in the top 960, camera fills the bottom 960.
+        assert!(
+            filter.contains("[vt_screen][vt_camera]vstack=inputs=2"),
+            "stacked filter: {filter}"
+        );
+        assert!(filter.contains("pad=1080:960"), "screen contains: {filter}");
+        let no_camera = video_filter(None, &params, false);
+        assert!(
+            no_camera.contains("color=c=black:s=1080x960"),
+            "{no_camera}"
+        );
+    }
+
+    #[test]
+    fn vertical_screen_camera_filter_rides_the_overlay_path() {
+        // The inset scene composes exactly like screen-camera: full-canvas
+        // screen (contained) with the camera overlaid at the user's corner.
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalScreenCamera;
+        params.output.video.width = 1080;
+        params.output.video.height = 1920;
+
+        let filter = video_filter(Some(1), &params, false);
+        assert!(filter.contains("overlay=x="), "overlay path: {filter}");
+        assert!(!filter.contains("vstack"), "no stacking: {filter}");
+        assert!(
+            filter.contains("scale=w=1080:h=1920:force_original_aspect_ratio=decrease"),
+            "portrait contain: {filter}"
+        );
+    }
+
+    #[test]
+    fn vertical_screen_only_filter_skips_the_camera_entirely() {
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalScreenOnly;
+        params.output.video.width = 1080;
+        params.output.video.height = 1920;
+
+        // The capture layer never resolves a camera for screen-only scenes;
+        // the base path then renders the screen alone.
+        let filter = video_filter(None, &params, false);
+        assert!(!filter.contains("overlay"), "no overlay: {filter}");
+        assert!(!filter.contains("vstack"), "no stacking: {filter}");
+        assert!(
+            filter.contains("scale=w=1080:h=1920:force_original_aspect_ratio=decrease"),
+            "portrait contain: {filter}"
         );
     }
 

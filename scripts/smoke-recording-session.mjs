@@ -27,7 +27,7 @@ export const LAYOUT_PRESET_SCENARIOS = [
   // landscape pixels must fail here. 720x1280 is the smallest exact 9:16
   // canvas inside the backend's resolution bounds (width >= 640).
   {
-    preset: 'vertical',
+    preset: 'vertical-camera-top',
     label: 'Vertical 9:16',
     video: { width: 720, height: 1280 }
   }

@@ -1418,7 +1418,13 @@ fn windows_camera_preview_ffmpeg_args_opts(
 }
 
 fn camera_capture_target_dimensions(layout: &LayoutSettings, video: &VideoSettings) -> (u32, u32) {
-    if layout.layout_preset != LayoutPreset::ScreenCamera {
+    // Only the inset scenes (ScreenCamera + its vertical twin) render the
+    // camera as a small overlay box; everywhere else the camera can span the
+    // canvas, so capture at full output size.
+    if !matches!(
+        layout.layout_preset,
+        LayoutPreset::ScreenCamera | LayoutPreset::VerticalScreenCamera
+    ) {
         return (video.width, video.height);
     }
 
