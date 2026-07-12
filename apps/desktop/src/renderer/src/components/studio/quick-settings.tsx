@@ -35,7 +35,8 @@ import {
   capturePickerDevices,
   microphonePickerDevices,
   layoutPresetNeedsCamera,
-  layoutPresetNeedsScreen
+  layoutPresetNeedsScreen,
+  layoutPresetOrientation
 } from '@/lib/capture'
 
 // Lazy like the tab chunks (app-shell): the preview (and the live-waveform it
@@ -45,16 +46,29 @@ const MicPickerPreview = lazy(async () => ({
   default: (await import('@/components/studio/mic-picker-preview')).MicPickerPreview
 }))
 
-const QUICK_PRESETS: { id: LayoutPreset; label: string }[] = [
+// Mode-scoped like the Scenes gallery: the picker offers only the current
+// orientation's scenes (the gallery's header toggle is the one home for
+// switching modes — one-home-per-control).
+const HORIZONTAL_QUICK_PRESETS: { id: LayoutPreset; label: string }[] = [
   { id: 'screen-camera', label: 'Screen + Cam' },
   { id: 'screen-only', label: 'Screen' },
   { id: 'camera-only', label: 'Camera' },
-  { id: 'side-by-side', label: 'Side by side' },
-  { id: 'vertical-camera-top', label: 'Vertical (9:16)' }
+  { id: 'side-by-side', label: 'Side by side' }
+]
+
+const VERTICAL_QUICK_PRESETS: { id: LayoutPreset; label: string }[] = [
+  { id: 'vertical-camera-top', label: 'Camera top' },
+  { id: 'vertical-camera-bottom', label: 'Camera bottom' },
+  { id: 'vertical-split', label: 'Split' },
+  { id: 'vertical-screen-camera', label: 'Screen + Cam' },
+  { id: 'vertical-screen-only', label: 'Screen' }
 ]
 
 function presetLabel(preset: LayoutPreset): string {
-  return QUICK_PRESETS.find((entry) => entry.id === preset)?.label ?? preset
+  return (
+    [...HORIZONTAL_QUICK_PRESETS, ...VERTICAL_QUICK_PRESETS].find((entry) => entry.id === preset)
+      ?.label ?? preset
+  )
 }
 
 // Resolution options mirroring the Output tab (recording-tab.tsx); picking one
@@ -265,7 +279,10 @@ export function QuickSettings(): ReactElement {
           </PopoverTrigger>
           <PopoverContent align="start" className="w-64 p-2">
             <div className="grid grid-cols-2 gap-1.5">
-              {QUICK_PRESETS.map((preset) => (
+              {(layoutPresetOrientation(captureConfig.layout.layoutPreset) === 'vertical'
+                ? VERTICAL_QUICK_PRESETS
+                : HORIZONTAL_QUICK_PRESETS
+              ).map((preset) => (
                 <Button
                   key={preset.id}
                   disabled={
