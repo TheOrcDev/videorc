@@ -143,7 +143,7 @@ describe('buildRecordingStudioGateSteps', () => {
     )
     assert.equal(
       packageJson.scripts['smoke:preview-interaction-stress:devices'],
-      'VIDEORC_PREVIEW_INTERACTION_DEVICE_SMOKE=1 node scripts/smoke-preview-interaction-stress-app.mjs'
+      'node scripts/run-with-env.mjs --platform=darwin VIDEORC_PREVIEW_INTERACTION_DEVICE_SMOKE=1 -- node scripts/smoke-preview-interaction-stress-app.mjs'
     )
   })
 

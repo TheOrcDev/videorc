@@ -16,6 +16,9 @@ import {
 
 const SMOKE_ENV_KEYS = [
   'VIDEORC_APP_DATA_DIR',
+  'VIDEORC_DATABASE_PATH',
+  'VIDEORC_RECORDINGS_DIR',
+  'VIDEORC_SECRETS_PATH',
   'VIDEORC_USER_DATA_DIR',
   'VIDEORC_SMOKE_STATE_DIR',
   'VIDEORC_SMOKE_OUTPUT_DIR',
@@ -52,6 +55,68 @@ test('smokeAppEnv reuses the smoke output dir as the default isolated state dir'
 
     assert.equal(env.VIDEORC_APP_DATA_DIR, resolve(outputDir, 'app-data'))
     assert.equal(env.VIDEORC_USER_DATA_DIR, resolve(outputDir, 'user-data'))
+  })
+})
+
+test('smokeAppEnv never inherits state paths from the parent shell', () => {
+  withCleanSmokeEnv(() => {
+    process.env.VIDEORC_APP_DATA_DIR = '/real/profile/app-data'
+    process.env.VIDEORC_USER_DATA_DIR = '/real/profile/user-data'
+    process.env.VIDEORC_DATABASE_PATH = '/real/profile/videorc.sqlite3'
+    process.env.VIDEORC_SECRETS_PATH = '/real/profile/videorc-secrets.json'
+    process.env.VIDEORC_RECORDINGS_DIR = '/real/profile/recordings'
+    process.env.VIDEORC_SMOKE_OUTPUT_DIR = '/old/smoke-output'
+
+    const stateDir = '/tmp/videorc-current-smoke'
+    const env = smokeAppEnv({ VIDEORC_SMOKE_STATE_DIR: stateDir })
+
+    assert.equal(env.VIDEORC_APP_DATA_DIR, resolve(stateDir, 'app-data'))
+    assert.equal(env.VIDEORC_USER_DATA_DIR, resolve(stateDir, 'user-data'))
+    assert.equal(env.VIDEORC_DATABASE_PATH, resolve(stateDir, 'app-data/videorc.sqlite3'))
+    assert.equal(env.VIDEORC_SECRETS_PATH, resolve(stateDir, 'app-data/videorc-secrets.json'))
+    assert.equal(env.VIDEORC_RECORDINGS_DIR, resolve(stateDir, 'app-data/recordings'))
+    assert.equal(env.VIDEORC_SMOKE_OUTPUT_DIR, undefined)
+  })
+})
+
+test('smokeAppEnv accepts explicit state paths only inside the current smoke roots', () => {
+  withCleanSmokeEnv(() => {
+    const stateDir = '/tmp/videorc-current-smoke'
+    const env = smokeAppEnv({
+      VIDEORC_SMOKE_STATE_DIR: stateDir,
+      VIDEORC_DATABASE_PATH: resolve(stateDir, 'custom/db.sqlite3'),
+      VIDEORC_SECRETS_PATH: resolve(stateDir, 'custom/secrets.json'),
+      VIDEORC_RECORDINGS_DIR: resolve(stateDir, 'custom/recordings')
+    })
+
+    assert.equal(env.VIDEORC_DATABASE_PATH, resolve(stateDir, 'custom/db.sqlite3'))
+    assert.equal(env.VIDEORC_SECRETS_PATH, resolve(stateDir, 'custom/secrets.json'))
+    assert.equal(env.VIDEORC_RECORDINGS_DIR, resolve(stateDir, 'custom/recordings'))
+
+    assert.throws(
+      () =>
+        smokeAppEnv({
+          VIDEORC_SMOKE_STATE_DIR: stateDir,
+          VIDEORC_DATABASE_PATH: '/real/profile/videorc.sqlite3'
+        }),
+      /VIDEORC_DATABASE_PATH must be inside/
+    )
+    assert.throws(
+      () =>
+        smokeAppEnv({
+          VIDEORC_SMOKE_STATE_DIR: stateDir,
+          VIDEORC_SECRETS_PATH: '/real/profile/videorc-secrets.json'
+        }),
+      /VIDEORC_SECRETS_PATH must be inside/
+    )
+    assert.throws(
+      () =>
+        smokeAppEnv({
+          VIDEORC_SMOKE_STATE_DIR: stateDir,
+          VIDEORC_RECORDINGS_DIR: '/real/profile/recordings'
+        }),
+      /VIDEORC_RECORDINGS_DIR must be inside/
+    )
   })
 })
 
@@ -175,6 +240,30 @@ test(
         process.kill(-fixturePid, 'SIGKILL')
       }
     }
+  }
+)
+
+test(
+  'launchDevApp rejects a smoke command marker without a capability',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const fixtureScript = `
+      console.log('[smoke] preview-motion-ready ' + JSON.stringify({ host: '127.0.0.1', port: 43210 }))
+      setInterval(() => {}, 1_000)
+    `
+
+    await assert.rejects(
+      launchDevApp({
+        timeoutMs: 2_000,
+        requiredMarkers: ['preview-motion-ready'],
+        spawnSpec: {
+          command: process.execPath,
+          args: ['-e', fixtureScript],
+          cwd: process.cwd()
+        }
+      }),
+      /Invalid \[smoke\] preview-motion-ready marker:.*per-run capability/
+    )
   }
 )
 

@@ -2,9 +2,11 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp } from './lib/app-launcher.mjs'
+import { resolveExistingSiblingFfprobe } from './lib/ffmpeg-sibling-paths.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
   collectPerformanceMetadata,
   createPerformanceReport,
@@ -30,7 +32,7 @@ const outputDirectory = resolve(
 )
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath =
-  process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? resolveSiblingFfprobe(ffmpegPath) ?? 'ffprobe'
+  process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? resolveExistingSiblingFfprobe(ffmpegPath) ?? 'ffprobe'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const recordingMs = Number(process.env.VIDEORC_PERF_RECORDING_MS ?? 20000)
 const warmupMs = Number(process.env.VIDEORC_PERF_WARMUP_MS ?? 12000)
@@ -52,16 +54,27 @@ const scenarios = [
   { label: '1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
 ]
 
-let appProcess
-let stopping = false
+let stopApp = async () => {}
 let results = []
 let runError = null
 
 mkdirSync(outputDirectory, { recursive: true })
 
 try {
-  const connection = await launchAndReadConnection()
-  results = await runPerformanceSmoke(connection)
+  const launch = await launchDevApp({
+    env: {
+      VIDEORC_SMOKE_COMMAND_SERVER: '1',
+      VIDEORC_SMOKE_STATE_DIR: outputDirectory
+    },
+    timeoutMs,
+    requiredMarkers: ['backend-ready', 'preview-motion-ready'],
+    onLine: (line) => console.log(line)
+  })
+  stopApp = launch.stop
+  results = await runPerformanceSmoke(
+    launch.connections['backend-ready'],
+    launch.connections['preview-motion-ready']
+  )
 } catch (error) {
   runError = error
 } finally {
@@ -91,7 +104,7 @@ if (!runError && !explicitOutputDirectory && process.env.VIDEORC_PERF_RETAIN_ART
 }
 if (runError) throw runError
 
-async function runPerformanceSmoke(connection) {
+async function runPerformanceSmoke(connection, smoke) {
   const ws = await connectBackend(connection, timeoutMs)
   const samples = []
   const scenarioResults = []
@@ -116,7 +129,7 @@ async function runPerformanceSmoke(connection) {
     console.log(`Recording performance smoke using FFprobe: ${ffprobePath}`)
 
     for (const scenario of scenarios) {
-      scenarioResults.push(await runScenario(ws, connection, samples, scenario))
+      scenarioResults.push(await runScenario(ws, connection, smoke, samples, scenario))
     }
     return scenarioResults
   } finally {
@@ -124,12 +137,23 @@ async function runPerformanceSmoke(connection) {
   }
 }
 
-async function runScenario(ws, connection, samples, scenario) {
+async function runScenario(ws, connection, smoke, samples, scenario) {
   samples.length = 0
   await request(ws, timeoutMs, 'preview.live.start', previewParams(scenario))
 
   const scenarioStartedAt = Date.now()
-  const started = await request(ws, timeoutMs, 'session.start', sessionParams(scenario))
+  const recordingDirectory = await requestSmokeCommand(
+    smoke,
+    'authorize-smoke-resource',
+    { kind: 'output-directory', path: outputDirectory },
+    { timeoutMs }
+  )
+  const started = await request(
+    ws,
+    timeoutMs,
+    'session.start',
+    sessionParams(scenario, recordingDirectory.capabilityId)
+  )
   if (started.state !== 'recording') {
     throw new Error(
       `[${scenario.label}] Expected recording state after start, got ${started.state}.`
@@ -194,7 +218,7 @@ async function runScenario(ws, connection, samples, scenario) {
   }
 }
 
-function sessionParams(scenario) {
+function sessionParams(scenario, outputDirectoryCapability) {
   return {
     sources: { testPattern: true },
     layout: {
@@ -216,8 +240,7 @@ function sessionParams(scenario) {
     output: {
       recordEnabled: true,
       streamEnabled: false,
-      outputDirectory,
-      ffmpegPath,
+      ...(outputDirectoryCapability ? { outputDirectoryCapability } : {}),
       video: {
         preset: 'custom',
         width: scenario.width,
@@ -299,71 +322,6 @@ function run(command, args) {
     child.on('error', rejectRun)
     child.on('exit', (code) => resolveRun({ status: code ?? 1, stdout, stderr }))
   })
-}
-
-function launchAndReadConnection() {
-  return new Promise((resolveConnection, rejectConnection) => {
-    const timer = setTimeout(() => {
-      rejectConnection(new Error(`Timed out waiting for dev backend READY after ${timeoutMs}ms.`))
-    }, timeoutMs)
-
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
-      detached: true,
-      env: smokeAppEnv({
-        VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
-      }),
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-
-    appProcess.stdout.setEncoding('utf8')
-    appProcess.stderr.setEncoding('utf8')
-    appProcess.stdout.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.stderr.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.on('error', (error) => {
-      clearTimeout(timer)
-      rejectConnection(error)
-    })
-    appProcess.on('exit', (code, signal) => {
-      clearTimeout(timer)
-      rejectConnection(
-        new Error(`Dev app exited before smoke test completed: code=${code} signal=${signal}`)
-      )
-    })
-  })
-}
-
-function handleAppOutput(text, resolveConnection, timer) {
-  for (const line of text.split(/\r?\n/)) {
-    if (line.trim() && !stopping) {
-      console.log(line)
-    }
-
-    const marker = '[smoke] backend-ready '
-    const index = line.indexOf(marker)
-    if (index === -1) {
-      continue
-    }
-
-    clearTimeout(timer)
-    resolveConnection(JSON.parse(line.slice(index + marker.length)))
-  }
-}
-
-async function stopApp() {
-  if (!appProcess?.pid || appProcess.killed) {
-    return
-  }
-  stopping = true
-  await stopProcess(appProcess)
-}
-
-function resolveSiblingFfprobe(path) {
-  if (!path.includes('/')) {
-    return null
-  }
-  const candidate = join(dirname(path), 'ffprobe')
-  return existsSync(candidate) ? candidate : null
 }
 
 function sleep(ms) {

@@ -96,7 +96,8 @@ function smokeCommand(smoke, command, params = {}) {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'content-length': Buffer.byteLength(body)
+          'content-length': Buffer.byteLength(body),
+          authorization: `Bearer ${smoke.capability}`
         },
         timeout: timeoutMs
       },

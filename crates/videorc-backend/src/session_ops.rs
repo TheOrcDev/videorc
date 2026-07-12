@@ -4,12 +4,15 @@
 //! durations probed, posters extracted.
 
 use anyhow::{Context, Result, bail};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::ffi::CString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Output as ProcessOutput;
 
 use crate::process_job::output_owned_tokio;
 use crate::state::AppState;
+use crate::storage::{SessionFileBoundIdentity, SessionFileOperation};
 
 const IMPORTABLE_EXTENSIONS: [&str; 5] = ["mp4", "mov", "m4v", "mkv", "webm"];
 
@@ -33,14 +36,17 @@ pub fn duplicate_candidate_path(source: &Path, attempt: u32) -> PathBuf {
     source.with_file_name(format!("{stem}{suffix}{extension}"))
 }
 
-fn first_free_duplicate_path(source: &Path) -> PathBuf {
-    for attempt in 0..100 {
+fn first_free_duplicate_path(source: &Path) -> Result<PathBuf> {
+    for attempt in 0..10_000 {
         let candidate = duplicate_candidate_path(source, attempt);
-        if !candidate.exists() {
-            return candidate;
+        if !candidate
+            .try_exists()
+            .with_context(|| format!("Could not inspect duplicate path {}", candidate.display()))?
+        {
+            return Ok(candidate);
         }
     }
-    duplicate_candidate_path(source, 100)
+    bail!("Could not find a free destination after 10,000 duplicate names.")
 }
 
 pub fn import_extension_allowed(path: &Path) -> bool {
@@ -79,16 +85,243 @@ fn resolve_import_output_dir(output_directory: &str, default_dir: PathBuf) -> Re
 
 /// Copy-safe destination inside the output directory for an import (pure
 /// candidate builder; uniqueness handled like Duplicate).
-fn import_destination(output_directory: &Path, source: &Path) -> PathBuf {
+fn import_destination(output_directory: &Path, source: &Path) -> Result<PathBuf> {
     let name = source
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("Imported recording.mp4");
     let base = output_directory.join(name);
-    if !base.exists() {
-        return base;
+    if !base
+        .try_exists()
+        .with_context(|| format!("Could not inspect import path {}", base.display()))?
+    {
+        return Ok(base);
     }
     first_free_duplicate_path(&base)
+}
+
+fn staging_path_for(destination: &Path, session_id: &str) -> PathBuf {
+    let name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("recording");
+    destination.with_file_name(format!(".{name}.{session_id}.videorc-partial"))
+}
+
+async fn copy_and_publish_session_file(
+    state: &AppState,
+    operation: &SessionFileOperation,
+    source: &Path,
+) -> Result<u64> {
+    let source = source.to_path_buf();
+    let staging = PathBuf::from(&operation.staging_path);
+    let destination = PathBuf::from(&operation.final_path);
+    let copy_source = source.clone();
+    let copy_staging = staging.clone();
+    let database = state.database.clone();
+    let operation_id = operation.id.clone();
+    let copied = tokio::task::spawn_blocking(move || -> Result<(u64, SessionFileBoundIdentity)> {
+        let mut source_file = std::fs::File::open(&copy_source)
+            .with_context(|| format!("Could not open {}", copy_source.display()))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut staging_file = options
+            .open(&copy_staging)
+            .with_context(|| format!("Could not create {}", copy_staging.display()))?;
+        staging_file.sync_all()?;
+        sync_session_file_parent(&copy_staging)?;
+        let object_identity = crate::storage::capture_session_file_object_identity_from_file(
+            &staging_file,
+            &copy_staging,
+        )?;
+        database
+            .bind_session_file_operation_object_identity(&operation_id, &object_identity)
+            .context("Could not bind the managed copy to its open staging file")?;
+        let bytes = std::io::copy(&mut source_file, &mut staging_file)?;
+        staging_file.sync_all()?;
+        let content_identity = crate::storage::capture_session_file_content_identity_from_file(
+            &mut staging_file,
+            &copy_staging,
+        )?;
+        database
+            .bind_session_file_operation_content_identity(&operation_id, &content_identity)
+            .context("Could not bind the managed copy to its staged bytes")?;
+        Ok((
+            bytes,
+            SessionFileBoundIdentity {
+                content_identity,
+                object_identity,
+            },
+        ))
+    })
+    .await
+    .context("Copy task failed.")?;
+
+    let copied = match copied {
+        Ok(copied) => copied,
+        Err(error) => {
+            let cleanup = state
+                .database
+                .cancel_session_file_operation(operation)
+                .err()
+                .map(|cleanup_error| format!(" Cleanup also failed: {cleanup_error:#}."))
+                .unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Could not stage the managed copy: {error}.{cleanup}"
+            ));
+        }
+    };
+
+    let (copied, expected_ownership) = copied;
+
+    let publish_staging = staging.clone();
+    let publish_destination = destination.clone();
+    let published = tokio::task::spawn_blocking(move || {
+        publish_identity_bound_session_file(
+            &publish_staging,
+            &publish_destination,
+            &expected_ownership,
+        )
+    })
+    .await
+    .context("Publish task failed.")?;
+
+    match published {
+        Ok(()) => Ok(copied),
+        Err(error) => {
+            let cleanup = state
+                .database
+                .cancel_session_file_operation(operation)
+                .err()
+                .map(|cleanup_error| format!(" Cleanup also failed: {cleanup_error:#}."))
+                .unwrap_or_default();
+            Err(anyhow::anyhow!(
+                "Could not publish the managed copy: {error}.{cleanup}"
+            ))
+        }
+    }
+}
+
+fn publish_identity_bound_session_file(
+    staging: &Path,
+    destination: &Path,
+    expected: &SessionFileBoundIdentity,
+) -> Result<()> {
+    rename_session_file_no_replace(staging, destination)?;
+    sync_session_file_parent(destination)?;
+    if crate::storage::capture_session_file_bound_identity(destination)?.as_ref() == Some(expected)
+    {
+        return Ok(());
+    }
+    if rename_session_file_no_replace(destination, staging).is_ok() {
+        let _ = sync_session_file_parent(staging);
+    }
+    bail!("Managed staging file changed during publication; the raced file was not adopted.")
+}
+
+/// Atomically publish a same-directory staging file without ever replacing an
+/// existing destination. Cleanup can therefore distinguish an operation-owned
+/// final file (staging disappeared) from a raced external file (staging remains).
+#[cfg(target_os = "macos")]
+pub(crate) fn rename_session_file_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())?;
+    let result =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn rename_session_file_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())?;
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn rename_session_file_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+    use windows::core::PCWSTR;
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|error| {
+        let hresult = error.code().0 as u32;
+        if hresult & 0xffff_0000 == 0x8007_0000 {
+            io::Error::from_raw_os_error((hresult & 0xffff) as i32)
+        } else {
+            io::Error::other(error)
+        }
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+pub(crate) fn rename_session_file_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    std::fs::hard_link(source, destination)?;
+    std::fs::remove_file(source)
+}
+
+pub(crate) fn sync_session_file_parent(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    // MoveFileExW uses MOVEFILE_WRITE_THROUGH above; opening directories for
+    // FlushFileBuffers is not portable through std on Windows.
+    Ok(())
+}
+
+fn finish_session_file_operation_best_effort(state: &AppState, operation_id: &str) {
+    if let Err(error) = state.database.finish_session_file_operation(operation_id) {
+        state.emit_log(
+            "warn",
+            format!(
+                "Session file was committed, but operation {operation_id} remains for startup reconciliation: {error:#}"
+            ),
+        );
+    }
 }
 
 pub(crate) async fn probe_duration_ms(ffmpeg_path: &str, file: &Path) -> Option<i64> {
@@ -134,42 +367,50 @@ pub async fn duplicate_session(state: &AppState, session_id: &str) -> Result<Str
         .or(facts.output_path.clone())
         .ok_or_else(|| anyhow::anyhow!("This session has no local file to duplicate."))?;
     let source = PathBuf::from(&visible);
-    if !source.exists() {
+    if !source
+        .try_exists()
+        .with_context(|| format!("Could not inspect recording file {}", source.display()))?
+    {
         bail!("The recording file is missing on disk.");
     }
-    let destination = first_free_duplicate_path(&source);
-    let copy_source = source.clone();
-    let copy_destination = destination.clone();
-    tokio::task::spawn_blocking(move || std::fs::copy(&copy_source, &copy_destination))
-        .await
-        .context("Copy task failed.")?
-        .with_context(|| format!("Could not copy {}", source.display()))?;
-
     let new_id = uuid::Uuid::new_v4().to_string();
+    let destination = first_free_duplicate_path(&source)?;
+    let staging = staging_path_for(&destination, &new_id);
+    let operation = state.database.begin_session_file_operation(
+        "duplicate",
+        &new_id,
+        &staging,
+        &destination,
+    )?;
+    let size = copy_and_publish_session_file(state, &operation, &source).await? as i64;
     let new_title = format!("{} (copy)", title.trim());
     let destination_string = destination.display().to_string();
-    let size = std::fs::metadata(&destination)
-        .map(|metadata| metadata.len() as i64)
-        .ok();
     // The copy takes the same slot the source's visible file had.
     let (new_output, new_mp4) = if mp4_path.is_some() {
         (None, Some(destination_string.clone()))
     } else {
         (Some(destination_string.clone()), None)
     };
-    let inserted = state.database.clone_session_row(
+    let inserted = match state.database.clone_session_row(
         session_id,
         &new_id,
         &new_title,
         new_output.as_deref(),
         new_mp4.as_deref(),
         &chrono::Utc::now().to_rfc3339(),
-        size,
-    )?;
+        Some(size),
+    ) {
+        Ok(inserted) => inserted,
+        Err(error) => {
+            let _ = state.database.cancel_session_file_operation(&operation);
+            return Err(error);
+        }
+    };
     if !inserted {
-        let _ = std::fs::remove_file(&destination);
+        let _ = state.database.cancel_session_file_operation(&operation);
         bail!("Session row vanished while duplicating.");
     }
+    finish_session_file_operation_best_effort(state, &operation.id);
     // Poster: copy the source's if present, else extract lazily later.
     let source_poster = crate::posters::poster_path(session_id);
     if source_poster.exists() {
@@ -187,7 +428,10 @@ pub async fn import_recording(
     ffmpeg_path: &str,
 ) -> Result<String> {
     let source = PathBuf::from(source_path);
-    if !source.exists() {
+    if !source
+        .try_exists()
+        .with_context(|| format!("Could not inspect import file {}", source.display()))?
+    {
         bail!("That file does not exist.");
     }
     if !import_extension_allowed(&source) {
@@ -195,15 +439,14 @@ pub async fn import_recording(
     }
     let output_dir =
         resolve_import_output_dir(output_directory, crate::recording::default_recordings_dir())?;
-    let destination = import_destination(&output_dir, &source);
-    let copy_source = source.clone();
-    let copy_destination = destination.clone();
-    tokio::task::spawn_blocking(move || std::fs::copy(&copy_source, &copy_destination))
-        .await
-        .context("Copy task failed.")?
-        .with_context(|| format!("Could not copy {}", source.display()))?;
-
+    let destination = import_destination(&output_dir, &source)?;
     let id = uuid::Uuid::new_v4().to_string();
+    let staging = staging_path_for(&destination, &id);
+    let operation =
+        state
+            .database
+            .begin_session_file_operation("import", &id, &staging, &destination)?;
+    let file_size_bytes = copy_and_publish_session_file(state, &operation, &source).await? as i64;
     let now = chrono::Utc::now().to_rfc3339();
     let title = source
         .file_stem()
@@ -216,7 +459,7 @@ pub async fn import_recording(
         .and_then(|value| value.to_str())
         .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "mp4" | "mov" | "m4v"))
         .unwrap_or(false);
-    state.database.create_session(&crate::storage::NewSession {
+    let new_session = crate::storage::NewSession {
         id: id.clone(),
         title,
         started_at: now.clone(),
@@ -258,15 +501,19 @@ pub async fn import_recording(
                 stream_key: String::new(),
             },
         },
-    })?;
+    };
     let duration_ms = probe_duration_ms(ffmpeg_path, &destination).await;
-    state.database.finish_session(
-        &id,
-        "completed",
-        Some(now),
-        is_mp4_family.then(|| destination_string.clone()),
+    if let Err(error) = state.database.create_completed_session(
+        &new_session,
+        &now,
+        is_mp4_family.then_some(destination_string.as_str()),
         duration_ms,
-    )?;
+        Some(file_size_bytes),
+    ) {
+        let _ = state.database.cancel_session_file_operation(&operation);
+        return Err(error);
+    }
+    finish_session_file_operation_best_effort(state, &operation.id);
     crate::posters::ensure_session_poster(
         state,
         &id,
@@ -281,6 +528,12 @@ pub async fn import_recording(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sampled_identity_collision_bytes(middle: u8) -> Vec<u8> {
+        let mut bytes = vec![0x31; 192 * 1024];
+        bytes[64 * 1024..128 * 1024].fill(middle);
+        bytes
+    }
 
     fn long_running_probe_command(pid_file: &Path) -> tokio::process::Command {
         #[cfg(target_os = "windows")]
@@ -408,5 +661,81 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("does not exist"), "{error}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn no_replace_publish_preserves_an_existing_destination() {
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-no-replace-publish-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let staging = directory.join("staging.partial");
+        let destination = directory.join("recording.mp4");
+        std::fs::write(&staging, b"new bytes").unwrap();
+        std::fs::write(&destination, b"existing bytes").unwrap();
+
+        let error = rename_session_file_no_replace(&staging, &destination).unwrap_err();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing bytes");
+        assert_eq!(std::fs::read(&staging).unwrap(), b"new bytes");
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied | io::ErrorKind::Other
+        ));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn identity_bound_publish_rejects_a_same_sample_replacement() {
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-identity-bound-publish-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let staging = directory.join("staging.partial");
+        let replacement = directory.join("replacement.partial");
+        let destination = directory.join("recording.mp4");
+        std::fs::write(&staging, sampled_identity_collision_bytes(0x41)).unwrap();
+        let expected = crate::storage::capture_session_file_bound_identity(&staging)
+            .unwrap()
+            .unwrap();
+        let original_modified = std::fs::metadata(&staging).unwrap().modified().unwrap();
+
+        std::fs::write(&replacement, sampled_identity_collision_bytes(0x42)).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+        let replacement_ownership =
+            crate::storage::capture_session_file_bound_identity(&replacement)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            replacement_ownership.content_identity,
+            expected.content_identity
+        );
+        assert_ne!(
+            replacement_ownership.object_identity,
+            expected.object_identity
+        );
+        std::fs::remove_file(&staging).unwrap();
+        rename_session_file_no_replace(&replacement, &staging).unwrap();
+
+        let error =
+            publish_identity_bound_session_file(&staging, &destination, &expected).unwrap_err();
+
+        assert!(error.to_string().contains("raced file was not adopted"));
+        assert!(!destination.exists());
+        assert_eq!(
+            crate::storage::capture_session_file_bound_identity(&staging)
+                .unwrap()
+                .unwrap()
+                .object_identity,
+            replacement_ownership.object_identity
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }

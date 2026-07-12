@@ -1,4 +1,5 @@
 import type { BackgroundImportResult } from './background-import'
+export type { BackgroundImportResult } from './background-import'
 
 export interface BackendConnection {
   host: string
@@ -40,7 +41,6 @@ export interface SupportBundleExportResult {
 }
 
 export interface SupportBundleExportParams {
-  outputDirectory?: string
   ffmpegPath?: string
   appVersion?: string
   rendererDiagnostics?: RendererDiagnosticsSnapshot
@@ -212,6 +212,21 @@ export interface DirectoryFacts {
   exists: boolean
   writable: boolean
   freeBytes: number | null
+}
+
+export type ResourceCapabilityKind =
+  | 'input-file'
+  | 'output-directory'
+  | 'open-path'
+  | 'reveal-path'
+  | 'trash-path'
+  | 'background-asset'
+
+export interface ResourceSelection {
+  capabilityId: string
+  kind: ResourceCapabilityKind
+  displayName: string
+  directoryHandleId?: string
 }
 
 export interface BackendLifecycleEvent {
@@ -996,6 +1011,7 @@ export interface OAuthCallbackResult {
   message?: string
   tokenStored: boolean
   accountConnected: boolean
+  retryable: boolean
   receivedAt: string
 }
 
@@ -1033,6 +1049,7 @@ export interface OutputSettings {
   recordEnabled: boolean
   streamEnabled: boolean
   outputDirectory?: string
+  outputDirectoryCapability?: string
   ffmpegPath?: string
   video: VideoSettings
   rtmp: RtmpSettings
@@ -1302,6 +1319,8 @@ export interface PreviewSurfaceSceneState {
   layout: LayoutSettings
   sources: PreviewSurfaceSceneLayer[]
   activeScreenId?: string
+  /** Normalized per-side inset derived from background visibilityPercent. */
+  backgroundStageMargin?: number
   updatedAt: string
 }
 
@@ -2309,8 +2328,42 @@ export interface SessionStorageTotals {
   totalBytes: number
 }
 
+/** Renderer-safe handle for a durable Library delete. Electron main resolves
+ * the operation id over its admin backend channel immediately before Trash. */
+export interface SessionDeletionOperation {
+  operationId: string
+  sessionId: string
+  pathCount: number
+  blockedPathCount: number
+}
+
+/** Backend result after Electron reports which Trash moves, if any, failed. */
+export interface SessionDeletionCompletion {
+  sessionId: string
+  deleted: boolean
+  pendingPaths: string[]
+}
+
 export interface SessionCommentsListParams {
   sessionId: string
+  cursor?: string
+  limit?: number
+}
+
+export const DEFAULT_SESSION_COMMENTS_PAGE_LIMIT = 200
+
+export function normalizeSessionCommentsListParams(
+  params: SessionCommentsListParams
+): SessionCommentsListParams & { limit: number } {
+  return {
+    ...params,
+    limit: params.limit ?? DEFAULT_SESSION_COMMENTS_PAGE_LIMIT
+  }
+}
+
+export interface SessionCommentsPage {
+  messages: LiveChatMessage[]
+  nextCursor?: string
 }
 
 export type StreamScreenStatus = 'ready' | 'missing'
@@ -2367,6 +2420,7 @@ export interface RuntimeInfo {
   commentsWindowRecordingOverlayAllowed?: boolean
   previewSmokeMode?: boolean
   disableAutoPreview?: boolean
+  disableAutoSourcePreview?: boolean
   nativePreviewSurfaceStageSuspended?: boolean
 }
 
@@ -2611,21 +2665,35 @@ export type UpdateStatus =
   | { phase: 'error'; message: string }
   | { phase: 'unsupported' }
 
+export type AccountCallbackEnvelope = {
+  id: string
+  url: string
+  state: string
+  intentGeneration: number
+  receivedAtMs: number
+  expiresAtMs: number
+}
+
+export type OAuthCallbackEnvelope = {
+  id: string
+  url: string
+  state: string
+  receivedAtMs: number
+}
+
 export interface VideorcApi {
   getBackendConnection: () => Promise<BackendConnection | null>
   getBackendLogs: () => Promise<BackendLogEvent[]>
   getRuntimeInfo: () => Promise<RuntimeInfo>
-  pickScreenImage: () => Promise<string | null>
-  /** Pick any file via a native open dialog; returns its path or null. */
-  pickFile: () => Promise<string | null>
-  pickDirectory: () => Promise<string | null>
-  checkDirectory: (path: string) => Promise<DirectoryFacts>
-  createDirectory: (path: string) => Promise<DirectoryFacts>
+  pickScreenImage: () => Promise<ResourceSelection | null>
+  pickFile: () => Promise<ResourceSelection | null>
+  pickDirectory: () => Promise<ResourceSelection | null>
+  checkDirectory: (directoryHandleId: string) => Promise<DirectoryFacts>
+  authorizeOutputDirectory: (directoryHandleId: string) => Promise<ResourceSelection>
   // Picks a PNG/JPG/WebP and copies it into app-support storage, returning the
   // managed asset (Assets Tab plan, slice A4).
   importBackgroundImage: () => Promise<BackgroundImportResult | null>
-  importBackgroundImagePath?: (sourcePath: string) => Promise<BackgroundImportResult | null>
-  backgroundAssetExists: (assetPath: string) => Promise<boolean>
+  backgroundAssetExists: (assetId: string) => Promise<boolean>
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */
   cacheChatAvatar: (url: string) => Promise<string | null>
@@ -2649,6 +2717,13 @@ export interface VideorcApi {
     resolution: CommentsCommandResolution<LiveChatSnapshot>
   ) => Promise<boolean>
   getBundledBackgroundAssets: () => Promise<BackgroundImportResult[]>
+  beginAccountSignIn: (authorizeUrl: string) => Promise<void>
+  signOutAccount: () => Promise<VideorcAccountSnapshot>
+  getPendingAccountCallbacks: () => Promise<AccountCallbackEnvelope[]>
+  acknowledgeAccountCallback: (callbackId: string) => Promise<boolean>
+  onAccountCallback: (callback: (envelope: AccountCallbackEnvelope) => void) => () => void
+  getPendingOAuthCallbacks: () => Promise<OAuthCallbackEnvelope[]>
+  acknowledgeOAuthCallback: (callbackId: string) => Promise<boolean>
   openOAuthUrl: (authUrl: string) => Promise<void>
   getOAuthCallbackRedirectUri: (platform?: string) => Promise<string | null>
   getNativePreviewSurfaceMode: () => Promise<boolean>
@@ -2673,6 +2748,7 @@ export interface VideorcApi {
   setNotesWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<NotesWindowState>
   getNotesDocument: () => Promise<NotesDocument>
   saveNotesDocument: (patch: Partial<NotesDocument>) => Promise<NotesDocument>
+  onNotesFlushRequest: (callback: () => void) => () => void
   onNotesWindowState: (callback: (state: NotesWindowState) => void) => () => void
   onNotesDocument: (callback: (document: NotesDocument) => void) => () => void
   openCommentsWindow: () => Promise<CommentsWindowState>
@@ -2711,6 +2787,7 @@ export interface VideorcApi {
     commands: NativePreviewHostCommand[],
     generation?: number
   ) => Promise<PreviewSurfaceStatus>
+  drainNativePreviewHostCommands: (generation?: number) => Promise<PreviewSurfaceStatus>
   updateNativePreviewSurfaceScene: (
     scene: PreviewSurfaceSceneUpdateParams
   ) => Promise<PreviewSurfaceStatus>
@@ -2742,19 +2819,18 @@ export interface VideorcApi {
     pane: 'camera' | 'microphone'
   ) => Promise<{ granted: boolean; restarted: boolean }>
   revealPermissionTarget: () => Promise<void>
-  revealPath: (path: string) => Promise<void>
+  revealSelectedResource: (capabilityId: string) => Promise<void>
+  revealSession: (sessionId: string) => Promise<void>
+  revealBackgroundAsset: (assetId: string) => Promise<void>
   obsDiscover?: () => Promise<ObsDiscovery>
   obsRead?: (collection: string, profile: string) => Promise<ObsSetup | null>
   obsReadStreamKey?: (profile: string) => Promise<string | null>
   pushViewerSample?: (sample: ViewerSample | null) => Promise<void>
   getViewerSample?: () => Promise<ViewerSample | null>
   onViewerSample?: (callback: (sample: ViewerSample | null) => void) => () => void
-  /** Open a file in the system default app (Library Play); resolves to an
-   * error string when the OS refuses, empty string on success. */
-  openPath: (path: string) => Promise<string>
-  /** Move files to the system Trash; returns the paths that could not move. */
-  trashPaths: (paths: string[]) => Promise<{ failures: string[] }>
-  onOAuthCallbackUrl: (callback: (callbackUrl: string) => void) => () => void
+  openSession: (sessionId: string) => Promise<string>
+  trashSessionDeletion: (operationId: string) => Promise<{ deleted: boolean; failedCount: number }>
+  onOAuthCallbackUrl: (callback: (envelope: OAuthCallbackEnvelope) => void) => () => void
   /**
    * Page-navigation shortcuts (⌘1–⌘9, ⌘,) routed from the main process. They
    * must come through main: Chromium reserves ⌘+digit (tab switching) and
@@ -3045,6 +3121,8 @@ export interface ObsSource {
   applicationHint?: string
   /** Image file path for image sources. */
   filePath?: string
+  /** Main-imported managed copy; renderer receives this instead of filePath. */
+  managedBackground?: BackgroundImportResult
   /** Mixer state OBS stored on the source (mics). volume is a 0..1 multiplier. */
   volume?: number
   muted?: boolean
@@ -3093,6 +3171,7 @@ export interface ObsSetup {
   outputHeight: number
   fps: number
   recordingPath?: string
+  recordingDirectory?: ResourceSelection
   sources: ObsSource[]
   scenes: ObsScene[]
   globalMicDeviceName?: string

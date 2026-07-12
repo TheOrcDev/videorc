@@ -121,3 +121,15 @@ export function nativePreviewFramePollingSuppressionStatus(
         : 'Electron proof preview surface frame polling is enabled.'
   }
 }
+
+/**
+ * A renderer may deliver its pre-close "unsuppress" request after the preview
+ * window has already been destroyed. Return a complete, still-suppressed status
+ * for that stale request; callers may resume through the normal suppression
+ * path once a replacement window exists.
+ */
+export function nativePreviewClosedWindowUnsuppressStatus(
+  status: PreviewSurfaceStatus
+): PreviewSurfaceStatus {
+  return nativePreviewFramePollingSuppressionStatus(status, true)
+}

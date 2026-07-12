@@ -18,9 +18,10 @@ use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use crate::live_chat::{
-    LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState, deliver_message,
-    live_chat_message_id, set_provider_and_emit,
+    LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState, live_chat_message_id,
+    set_provider_and_emit, try_deliver_message,
 };
+use crate::live_chat_persistence::LiveChatPersistenceFailure;
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
 
@@ -172,6 +173,20 @@ pub async fn run_x_chat_connector(state: AppState, session_id: String, config: X
             return;
         }
 
+        if let Some(failure) = error.downcast_ref::<LiveChatPersistenceFailure>()
+            && failure.is_terminal()
+        {
+            set_provider_and_emit(
+                &state,
+                StreamPlatform::X,
+                config.target_id.as_deref(),
+                LiveChatProviderConnectionState::Failed,
+                &format!("X live chat stopped because comments storage failed: {failure}"),
+            )
+            .await;
+            return;
+        }
+
         if reached_ready {
             reconnect_attempts = 0;
             backoff_ms = MIN_RECONNECT_BACKOFF_MS;
@@ -216,14 +231,7 @@ async fn run_x_chat_session(
     ensure_active_session(state, session_id).await?;
     let access = access_chat(&client, config, &chat_token).await?;
     ensure_active_session(state, session_id).await?;
-    let endpoint = access
-        .endpoint
-        .or(access.replay_endpoint)
-        .context("X chat access response did not include an endpoint.")?;
-    let access_token = access
-        .access_token
-        .or(access.replay_access_token)
-        .context("X chat access response did not include an access token.")?;
+    let (endpoint, access_token) = select_chat_access_pair(access)?;
     let ws_url = chat_ws_url(&endpoint)?;
     let (mut ws, _response) = timeout(WEBSOCKET_HANDSHAKE_TIMEOUT, connect_async(&ws_url))
         .await
@@ -281,7 +289,47 @@ async fn run_x_chat_session(
                                 reached_ready,
                             )
                             .await?;
-                            deliver_message(state, chat_message).await;
+                            let mut persistence_backoff_ms = MIN_RECONNECT_BACKOFF_MS;
+                            let mut waited_for_storage = false;
+                            loop {
+                                match try_deliver_message(state, chat_message.clone()).await {
+                                    Ok(()) => break,
+                                    Err(error) if error.is_terminal() => {
+                                        return Err(error.into());
+                                    }
+                                    Err(error) => {
+                                        // Neither the live nor replay X socket promises
+                                        // redelivery for a frame already read. Preserve
+                                        // this exact normalized message locally and do
+                                        // not read a later frame until it is durable.
+                                        waited_for_storage = true;
+                                        set_provider_and_emit(
+                                            state,
+                                            StreamPlatform::X,
+                                            config.target_id.as_deref(),
+                                            LiveChatProviderConnectionState::Waiting,
+                                            &format!(
+                                                "Waiting for comments storage before accepting more X messages: {error}"
+                                            ),
+                                        )
+                                        .await;
+                                        sleep(Duration::from_millis(persistence_backoff_ms)).await;
+                                        persistence_backoff_ms =
+                                            next_reconnect_backoff_ms(persistence_backoff_ms);
+                                        ensure_active_session(state, session_id).await?;
+                                    }
+                                }
+                            }
+                            if waited_for_storage {
+                                set_provider_and_emit(
+                                    state,
+                                    StreamPlatform::X,
+                                    config.target_id.as_deref(),
+                                    LiveChatProviderConnectionState::Connected,
+                                    "X live chat connected; comments storage recovered (read-only).",
+                                )
+                                .await;
+                            }
                         }
                     }
                     Message::Ping(payload) => {
@@ -295,6 +343,20 @@ async fn run_x_chat_session(
             }
         }
     }
+}
+
+fn select_chat_access_pair(access: XChatAccessResponse) -> Result<(String, String)> {
+    if let (Some(endpoint), Some(access_token)) = (access.endpoint, access.access_token) {
+        return Ok((endpoint, access_token));
+    }
+    if let (Some(endpoint), Some(access_token)) =
+        (access.replay_endpoint, access.replay_access_token)
+    {
+        return Ok((endpoint, access_token));
+    }
+    anyhow::bail!(
+        "X chat access response did not include a matching live or replay endpoint/token pair."
+    )
 }
 
 async fn mark_connected(
@@ -552,6 +614,7 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum MockSocketMode {
         Deliver,
+        DeliverOnce,
         DropFirstThenDeliver,
         HangHandshake,
         WaitForRelease,
@@ -581,6 +644,7 @@ mod tests {
         token_calls: Arc<AtomicUsize>,
         access_calls: Arc<Mutex<Vec<MockAccessCall>>>,
         socket_connections: Arc<AtomicUsize>,
+        chat_messages_sent: Arc<AtomicUsize>,
         socket_frames: Arc<Mutex<Vec<Value>>>,
         release_message: Arc<Notify>,
     }
@@ -681,9 +745,21 @@ mod tests {
 
             match state.mode {
                 MockSocketMode::Deliver | MockSocketMode::DropFirstThenDeliver => {
+                    state.chat_messages_sent.fetch_add(1, Ordering::SeqCst);
                     let _ = socket
                         .send(AxumMessage::Text(mock_chat_frame("message-1").into()))
                         .await;
+                }
+                MockSocketMode::DeliverOnce => {
+                    if state
+                        .chat_messages_sent
+                        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        let _ = socket
+                            .send(AxumMessage::Text(mock_chat_frame("message-1").into()))
+                            .await;
+                    }
                 }
                 MockSocketMode::HangHandshake => unreachable!("handshake remains pending"),
                 MockSocketMode::WaitForRelease => {
@@ -718,6 +794,7 @@ mod tests {
             token_calls: Arc::new(AtomicUsize::new(0)),
             access_calls: Arc::new(Mutex::new(Vec::new())),
             socket_connections: Arc::new(AtomicUsize::new(0)),
+            chat_messages_sent: Arc::new(AtomicUsize::new(0)),
             socket_frames: Arc::new(Mutex::new(Vec::new())),
             release_message: Arc::new(Notify::new()),
         };
@@ -772,6 +849,10 @@ mod tests {
     }
 
     async fn start_test_session(state: &AppState, session_id: &str) {
+        state
+            .database
+            .ensure_fake_live_chat_session(session_id)
+            .unwrap();
         state
             .live_chat
             .lock()
@@ -836,6 +917,44 @@ mod tests {
         }
     }
 
+    async fn wait_for_persistence_rejection(state: &AppState) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if state.recent_logs(16).iter().any(|entry| {
+                entry
+                    .message
+                    .contains("exact-message retry remains eligible")
+            }) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for forced X persistence rejection"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn wait_for_persisted_message(state: &AppState, provider_message_id: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if state
+                .database
+                .list_live_chat_messages_recent("session-1", 10)
+                .unwrap()
+                .iter()
+                .any(|message| message.provider_message_id == provider_message_id)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for durable X message {provider_message_id}"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     async fn wait_for_provider_state(
         state: &AppState,
         expected: LiveChatProviderConnectionState,
@@ -874,6 +993,45 @@ mod tests {
             chat_ws_url("http://127.0.0.1:4321").unwrap(),
             "ws://127.0.0.1:4321/chatapi/v1/chatnow"
         );
+    }
+
+    #[test]
+    fn access_selection_keeps_endpoint_and_token_from_the_same_mode() {
+        let live = select_chat_access_pair(XChatAccessResponse {
+            endpoint: Some("https://live.example".to_string()),
+            access_token: Some("live-token".to_string()),
+            replay_endpoint: Some("https://replay.example".to_string()),
+            replay_access_token: Some("replay-token".to_string()),
+        })
+        .unwrap();
+        assert_eq!(
+            live,
+            ("https://live.example".to_string(), "live-token".to_string())
+        );
+
+        let replay = select_chat_access_pair(XChatAccessResponse {
+            endpoint: Some("https://incomplete-live.example".to_string()),
+            access_token: None,
+            replay_endpoint: Some("https://replay.example".to_string()),
+            replay_access_token: Some("replay-token".to_string()),
+        })
+        .unwrap();
+        assert_eq!(
+            replay,
+            (
+                "https://replay.example".to_string(),
+                "replay-token".to_string()
+            )
+        );
+
+        let error = select_chat_access_pair(XChatAccessResponse {
+            endpoint: Some("https://live.example".to_string()),
+            access_token: None,
+            replay_endpoint: None,
+            replay_access_token: Some("replay-token".to_string()),
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("matching"));
     }
 
     #[test]
@@ -1008,6 +1166,46 @@ mod tests {
         drop(access_calls);
         assert_eq!(server.state.socket_frames.lock().await.len(), 4);
         assert_eq!(current_diagnostics(&state).await.reconnect_count, 1);
+    }
+
+    #[tokio::test]
+    async fn persistence_rejection_retries_retained_x_message_without_server_replay() {
+        let server = spawn_mock_x_server(MockSocketMode::DeliverOnce).await;
+        let state = test_state();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-1".to_string(), vec![x_provider_row()]);
+
+        let connector = tokio::spawn(run_x_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            mock_config(&server),
+        ));
+        wait_for_persistence_rejection(&state).await;
+        assert!(current_status(&state).await.messages.is_empty());
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
+        let message = wait_for_message(&state, "message-1").await;
+        wait_for_persisted_message(&state, "message-1").await;
+        connector.abort();
+        let _ = server.shutdown.send(());
+
+        assert_eq!(message.session_id, "session-1");
+        assert_eq!(message.provider_message_id, "message-1");
+        assert_eq!(server.state.chat_messages_sent.load(Ordering::SeqCst), 1);
+        assert_eq!(server.state.socket_connections.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state
+                .database
+                .list_live_chat_messages_recent("session-1", 10)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

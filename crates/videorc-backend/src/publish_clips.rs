@@ -46,7 +46,9 @@ pub async fn suggest_clips(
         .duration_ms
         .and_then(|value| u64::try_from(value).ok());
 
-    let messages = state.database.list_live_chat_messages(&params.session_id)?;
+    let messages = state
+        .database
+        .list_live_chat_messages_recent(&params.session_id, 5_000)?;
     let message_offsets_ms: Vec<u64> = messages
         .iter()
         .filter_map(|message| DateTime::parse_from_rfc3339(&message.received_at).ok())

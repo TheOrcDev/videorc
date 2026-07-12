@@ -193,7 +193,10 @@ function stackContactSheet(previews, sheetPath) {
 async function smokeCommand(smoke, command, params = {}) {
   const response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${smoke.capability}`
+    },
     body: JSON.stringify({ command, params }),
     signal: AbortSignal.timeout(timeoutMs)
   })

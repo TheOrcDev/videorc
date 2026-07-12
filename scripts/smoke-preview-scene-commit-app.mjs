@@ -50,11 +50,15 @@ try {
   const highRevision = Math.max(Number(beforeCompositor.sceneRevision ?? 0), Date.now() + 1_000_000)
   const layout = beforeCompositor.sceneLayout ?? defaultLayout()
 
-  const highStatus = await request(ws, timeoutMs, 'compositor.scene.update', {
-    revision: highRevision,
-    scene: beforeScene,
-    layout,
-    activeScreen: null
+  const highStatus = await smokeCommand(smoke, 'backend-debug-rpc', {
+    method: 'compositor.scene.update',
+    params: {
+      revision: highRevision,
+      scene: beforeScene,
+      layout,
+      activeScreen: null
+    },
+    timeoutMs
   })
   if (highStatus.sceneRevision !== highRevision) {
     throw new Error(
@@ -379,7 +383,8 @@ function smokeCommand(smoke, command, params = {}) {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'content-length': Buffer.byteLength(body)
+          'content-length': Buffer.byteLength(body),
+          authorization: `Bearer ${smoke.capability}`
         },
         timeout: timeoutMs
       },

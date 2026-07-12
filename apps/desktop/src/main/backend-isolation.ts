@@ -1,4 +1,6 @@
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+
+import { isPathInsideAnyRoot } from './managed-asset-paths'
 
 // When a harness isolates the app's data dirs (VIDEORC_APP_DATA_DIR /
 // VIDEORC_USER_DATA_DIR), the backend must be isolated WITH it: the backend
@@ -21,23 +23,31 @@ export function backendIsolationEnv(
     >
   >
 ): Record<string, string> {
-  const isolatedRoot = env.VIDEORC_APP_DATA_DIR?.trim() || env.VIDEORC_USER_DATA_DIR?.trim()
+  const isolatedRoots = [env.VIDEORC_APP_DATA_DIR?.trim(), env.VIDEORC_USER_DATA_DIR?.trim()]
+    .filter((path): path is string => Boolean(path))
+    .map((path) => resolve(path))
+  const isolatedRoot = isolatedRoots[0]
   if (!isolatedRoot) {
     return {}
   }
 
   const overrides: Record<string, string> = {}
-  if (!env.VIDEORC_DATABASE_PATH?.trim()) {
+  if (!pathStaysInsideIsolation(env.VIDEORC_DATABASE_PATH, isolatedRoots)) {
     overrides.VIDEORC_DATABASE_PATH = join(isolatedRoot, 'videorc.sqlite3')
   }
-  if (!env.VIDEORC_SECRETS_PATH?.trim()) {
+  if (!pathStaysInsideIsolation(env.VIDEORC_SECRETS_PATH, isolatedRoots)) {
     overrides.VIDEORC_SECRETS_PATH = join(isolatedRoot, 'videorc-secrets.json')
   }
   // F-016: recordings joined the isolation contract late — without this an
   // isolated smoke still dumped its capture files into the user's real
   // ~/Movies/Videorc/Recordings.
-  if (!env.VIDEORC_RECORDINGS_DIR?.trim()) {
+  if (!pathStaysInsideIsolation(env.VIDEORC_RECORDINGS_DIR, isolatedRoots)) {
     overrides.VIDEORC_RECORDINGS_DIR = join(isolatedRoot, 'recordings')
   }
   return overrides
+}
+
+function pathStaysInsideIsolation(value: string | undefined, roots: readonly string[]): boolean {
+  const candidate = value?.trim()
+  return Boolean(candidate && isPathInsideAnyRoot(candidate, roots))
 }

@@ -53,6 +53,7 @@ try {
         VIDEORC_CAPTION_CONTRACT_TEST: '1',
         VIDEORC_DISABLE_AUTO_PREVIEW: '1',
         VIDEORC_DISABLE_BACKEND_REAP: '1',
+        VIDEORC_ENABLE_SMOKE_RPC: '1',
         VIDEORC_APP_DATA_DIR: appDataDir,
         VIDEORC_DATABASE_PATH: join(appDataDir, 'videorc.sqlite3'),
         VIDEORC_SECRETS_PATH: secretsPath,
@@ -62,7 +63,10 @@ try {
     stdio: ['ignore', 'pipe', 'pipe']
   })
   const ready = await waitForBackendReady(backendProcess, timeoutMs)
-  backend = await connectBackend(ready, timeoutMs)
+  if (typeof ready.adminToken !== 'string' || ready.adminToken.length < 32) {
+    throw new Error('Debug backend READY omitted its private smoke admin credential.')
+  }
+  backend = await connectBackend({ ...ready, token: ready.adminToken, adminToken: undefined }, timeoutMs)
   const observed = collectCaptionEvents(backend)
 
   await proveRealtimeContract({ backend, observed, fake })

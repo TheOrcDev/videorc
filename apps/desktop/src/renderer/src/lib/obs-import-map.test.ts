@@ -56,7 +56,12 @@ describe('mapObsSetup on the real fixture', () => {
     outputWidth: 3840,
     outputHeight: 2160,
     fps: 24,
-    recordingPath: '/Users/fixture/Movies',
+    recordingDirectory: {
+      capabilityId: 'resource:11111111-1111-4111-8111-111111111111',
+      directoryHandleId: 'directory:22222222-2222-4222-8222-222222222222',
+      kind: 'output-directory',
+      displayName: 'Movies'
+    },
     sources: parsed.sources,
     scenes: parsed.scenes,
     hasDesktopAudio: parsed.hasDesktopAudio,
@@ -66,7 +71,7 @@ describe('mapObsSetup on the real fixture', () => {
 
   it('maps output, recording folder, and a real layout preset', () => {
     expect(result.video).toEqual({ width: 3840, height: 2160, fps: 24 })
-    expect(result.outputDirectory).toBe('/Users/fixture/Movies')
+    expect(result.outputDirectory?.displayName).toBe('Movies')
     expect(['screen-camera', 'screen-only', 'camera-only']).toContain(result.layout.layoutPreset)
   })
 
@@ -239,13 +244,25 @@ describe('mapping table rows', () => {
       name: 'BG',
       kind: 'image' as const,
       obsKind: 'image_source',
-      filePath: '/tmp/bg.png'
+      managedBackground: {
+        id: 'bg-managed',
+        name: 'BG',
+        assetPath: 'videorc-asset://background/bg-managed.png',
+        thumbnailPath: 'videorc-asset://background/bg-managed.png',
+        fileName: 'bg-managed.png'
+      }
     }
     const bg2 = {
       name: 'BG2',
       kind: 'image' as const,
       obsKind: 'image_source',
-      filePath: '/tmp/b2.png'
+      managedBackground: {
+        id: 'bg2-managed',
+        name: 'BG2',
+        assetPath: 'videorc-asset://background/bg2-managed.png',
+        thumbnailPath: 'videorc-asset://background/bg2-managed.png',
+        fileName: 'bg2-managed.png'
+      }
     }
     const result = mapObsSetup(
       setupFrom({
@@ -254,7 +271,7 @@ describe('mapping table rows', () => {
       }),
       DEVICES
     )
-    expect(result.backgroundImagePath).toBe('/tmp/bg.png')
+    expect(result.backgroundAsset?.id).toBe('bg-managed')
     expect(reportNotes(result, 'skipped').join('\n')).toContain('BG2')
   })
 })

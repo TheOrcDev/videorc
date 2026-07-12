@@ -38,6 +38,14 @@ export function buildWindowsLocalGateSteps({
   }
   const executable =
     packagedAppExecutable ?? resolve(repoRoot, 'apps/desktop/release/win-unpacked/Videorc.exe')
+  const packagedFfmpeg = resolve(
+    repoRoot,
+    'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffmpeg.exe'
+  )
+  const packagedFfprobe = resolve(
+    repoRoot,
+    'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffprobe.exe'
+  )
   const outputDir = acceptanceDir
     ? resolve(repoRoot, acceptanceDir)
     : defaultWindowsAcceptanceArtifactDir({ repoRoot })
@@ -87,12 +95,43 @@ export function buildWindowsLocalGateSteps({
       args: ['--filter', '@videorc/desktop', 'package']
     },
     {
-      label: 'packaged boot plus test-pattern recording smoke',
+      label: 'packaged recording and bundled-background smoke',
       command: 'pnpm',
       args: ['smoke:packaged:bundled'],
       env: {
         VIDEORC_PACKAGED_APP_EXECUTABLE: executable,
         VIDEORC_SMOKE_OUTPUT_DIR: outputDir
+      }
+    },
+    {
+      label: 'native Windows ScreenOnly and BMP smoke',
+      command: 'pnpm',
+      args: ['smoke:windows-native-screen'],
+      env: {
+        VIDEORC_PERF_APP_EXECUTABLE: executable,
+        VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'native-screen'),
+        VIDEORC_SMOKE_FFMPEG_PATH: packagedFfmpeg,
+        VIDEORC_SMOKE_FFPROBE_PATH: packagedFfprobe,
+        VIDEORC_SMOKE_TIMEOUT_MS: '180000',
+        VIDEORC_WINDOWS_NATIVE_SCREEN_RECORDING_MS: '6000'
+      }
+    },
+    {
+      label: 'recording-time Windows proof-surface smoke',
+      command: 'pnpm',
+      args: ['smoke:recording-native-preview'],
+      env: {
+        VIDEORC_PERF_APP_EXECUTABLE: executable,
+        VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'proof-preview'),
+        VIDEORC_SMOKE_FFMPEG_PATH: packagedFfmpeg,
+        VIDEORC_SMOKE_FFPROBE_PATH: packagedFfprobe,
+        VIDEORC_SMOKE_TIMEOUT_MS: '180000',
+        VIDEORC_NATIVE_PREVIEW_RECORDING_MS: '8000',
+        VIDEORC_NATIVE_PREVIEW_WARMUP_MS: '2000',
+        VIDEORC_NATIVE_PREVIEW_MEASUREMENT_MS: '4000',
+        VIDEORC_EXPECT_NATIVE_METAL_PREVIEW: '0',
+        VIDEORC_NATIVE_PREVIEW_EXERCISE_PROOF_POLLING: '1',
+        VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'raw-yuv420p'
       }
     }
   ]
@@ -133,7 +172,7 @@ export function formatWindowsLocalGatePlan({ host, steps }) {
 
 export function windowsLocalGateOutputDir(steps) {
   const packagedSmoke = steps.find(
-    (step) => step.label === 'packaged boot plus test-pattern recording smoke'
+    (step) => step.label === 'packaged recording and bundled-background smoke'
   )
   if (packagedSmoke?.env?.VIDEORC_SMOKE_OUTPUT_DIR) {
     return packagedSmoke.env.VIDEORC_SMOKE_OUTPUT_DIR

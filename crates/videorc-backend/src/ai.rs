@@ -768,7 +768,10 @@ fn build_chat_context(state: &AppState, session_id: &str) -> Option<Value> {
                 .ok()
                 .map(|started| started.timestamp_millis())
         })?;
-    let messages = state.database.list_live_chat_messages(session_id).ok()?;
+    let messages = state
+        .database
+        .list_live_chat_messages_recent(session_id, 500)
+        .ok()?;
     if messages.is_empty() {
         return None;
     }

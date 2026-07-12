@@ -21,6 +21,7 @@ use crate::diagnostics::{
 };
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats};
+use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
 use crate::protocol::{
     CameraAspect, CameraCapabilityFormat, CameraShape, CameraSize, CameraTransformMode,
     LayoutPreset, LayoutSettings, PreviewCameraStartParams, PreviewCameraState,
@@ -796,6 +797,43 @@ pub async fn latest_preview_camera_png(
         .await
         .ok()
         .flatten()
+}
+
+/// Latest-wins BGRA/BMP transport used by the production Windows proof
+/// surface. Unlike the debug PNG route this performs no compression and
+/// preserves the capture frame sequence for duplicate suppression.
+pub async fn latest_preview_camera_bmp(
+    state: &AppState,
+    requested_max_width: Option<u32>,
+    cursor: Option<PreviewBmpCursor>,
+) -> Option<LatestPreviewBmpPoll> {
+    let (generation, frame) = {
+        let slot = state.preview_camera.lock().await;
+        let active = slot.active.as_ref()?;
+        let generation = slot.run_id.clone()?;
+        let shared = Arc::clone(&active.shared);
+        drop(slot);
+        let guard = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (generation, guard.frame_store.latest()?)
+    };
+
+    let max_width = preview_camera_png_max_width(requested_max_width);
+    tokio::task::spawn_blocking(move || {
+        encode_latest_bgra_bmp(
+            cursor.as_ref(),
+            generation,
+            frame.sequence,
+            frame.width,
+            frame.height,
+            &frame.bytes,
+            max_width,
+        )
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 fn encode_preview_camera_png(

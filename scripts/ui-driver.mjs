@@ -10,7 +10,7 @@
 // staging under .tmp — copy the ones acceptance needs into a dated folder).
 // Born as the launch-QA driver (2026-07-02); promoted in UX-rework slice E0.
 
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -54,8 +54,12 @@ writeFileSync(
     },
     null,
     2
-  )
+  ),
+  { encoding: 'utf8', mode: 0o600 }
 )
+// The file contains the per-run command capability. Tighten an existing
+// well-known file too: writeFile's mode only applies when it creates the file.
+chmodSync(UI_DRIVER_CONNECTION_FILE, 0o600)
 console.log(`UI driver ready — connection info at ${UI_DRIVER_CONNECTION_FILE}`)
 console.log(`Sweep captures: ${sweepDir}`)
 

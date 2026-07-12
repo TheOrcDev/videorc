@@ -24,16 +24,17 @@ import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { devAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { assertSmokeCommandConnection } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
-const repoRoot = resolve(import.meta.dirname, '..')
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 // First-frame contract budget. Generous vs the product target so a slow cold
 // dev boot does not flake the gate; the contract is "converges at all".
 const contractMs = Number(process.env.VIDEORC_PREVIEW_LAUNCH_CONTRACT_MS ?? 20000)
 const outputDirectory = resolve(
-  process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-preview-real-launch-${Date.now()}`)
+  process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
+    join(tmpdir(), `videorc-preview-real-launch-${Date.now()}`)
 )
 
 let appProcess = null
@@ -47,6 +48,7 @@ try {
 }
 
 async function runRealLaunchContract(connection, smoke) {
+  assertSmokeCommandConnection(smoke)
   const ws = await connectBackend(connection, timeoutMs)
   try {
     // Profile-pollution guard: an "isolated" smoke whose backend still uses the
@@ -54,9 +56,15 @@ async function runRealLaunchContract(connection, smoke) {
     // profile ended up with smoke test-pattern sessions — the user's preview
     // showed the smoke's bars). The backend must live inside the smoke dir.
     const health = await request(ws, timeoutMs, 'health.ping')
-    if (!String(health.databasePath ?? '').startsWith(outputDirectory)) {
+    if (health.databasePath !== 'managed-app-data') {
       throw new Error(
-        `preview-real-launch: FAIL — smoke backend is using the REAL user profile database (${health.databasePath}); expected it under ${outputDirectory}. Backend state is not isolated.`
+        `preview-real-launch: FAIL — renderer health leaked its database path (${String(health.databasePath)}).`
+      )
+    }
+    const stateIsolation = await smokeCommand(smoke, 'inspect-backend-state-isolation')
+    if (stateIsolation.isolated !== true) {
+      throw new Error(
+        `preview-real-launch: FAIL — backend state is not isolated: ${JSON.stringify(stateIsolation)}`
       )
     }
 
@@ -204,9 +212,7 @@ function launchAndReadConnections() {
     }, timeoutMs)
     const connections = { backend: null, smoke: null }
 
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
-      detached: true,
+    const spawnSpec = devAppSpawnSpec({
       env: smokeAppEnv({
         VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
         VIDEORC_USER_DATA_DIR: join(outputDirectory, 'user-data'),
@@ -215,9 +221,9 @@ function launchAndReadConnections() {
         // preview scene. The app must run its real capture config.
         VIDEORC_SMOKE_COMMAND_SERVER: '1',
         VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
-      }),
-      stdio: ['ignore', 'pipe', 'pipe']
+      })
     })
+    appProcess = spawn(spawnSpec.command, spawnSpec.args, spawnSpec.options)
 
     const maybeResolve = () => {
       if (connections.backend && connections.smoke) {
@@ -296,7 +302,8 @@ function sendSmokeCommand(smoke, command, params = {}) {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'content-length': Buffer.byteLength(body)
+          'content-length': Buffer.byteLength(body),
+          authorization: `Bearer ${smoke.capability}`
         }
       },
       (response) => {

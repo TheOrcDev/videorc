@@ -79,6 +79,7 @@ try {
     timeoutMs,
     env: {
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
+      VIDEORC_SMOKE_STATE_DIR: outputDirectory,
       VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       ...(deviceMode ? {} : { VIDEORC_SMOKE_PREVIEW_MOTION: '1' }),
@@ -244,9 +245,7 @@ try {
   }
   await oracle?.stop()
   if (smoke) {
-    await smokeCommand(smoke, 'preview-lifecycle-attempt-app-quit', {}, 2000).catch(
-      () => undefined
-    )
+    await smokeCommand(smoke, 'preview-lifecycle-attempt-app-quit', {}, 2000).catch(() => undefined)
   }
   await launched?.stop()
 }
@@ -284,15 +283,15 @@ async function runRapidScenePhase({ smoke, ws, oracle }) {
           preset,
           settleMs: 0
         })
-        const [surface, scene, compositor, nativeStatus] = await Promise.all([
-          smokeCommand(smoke, 'preview-surface-scene-state'),
-          request(ws, timeoutMs, 'scene.get'),
-          request(ws, timeoutMs, 'compositor.status'),
-          smokeCommand(smoke, 'native-preview-surface-status')
-        ])
-        const transition = { round, preset, selected, surface, scene, compositor, nativeStatus }
-        transitions.push(transition)
-        failures.push(...sceneConvergenceFailures(label, transition))
+        const transition = await waitForSceneConvergence({
+          label,
+          preset,
+          selected,
+          smoke,
+          ws
+        })
+        transitions.push({ round, ...transition })
+        failures.push(...transition.failures)
       } catch (error) {
         failures.push(`${label} command failed: ${error?.message ?? error}`)
       }
@@ -378,14 +377,17 @@ async function runDeviceRecordingPhase({ smoke, ws, oracle }) {
   }
   const failures = []
   const startedAt = Date.now()
+  const recordingDirectory = await smokeCommand(smoke, 'authorize-smoke-resource', {
+    path: outputDirectory,
+    kind: 'output-directory'
+  })
   const started = await request(ws, timeoutMs, 'session.start', {
     sources: deviceCaptureSources,
     layout: deviceLayout('screen-camera'),
     output: {
       recordEnabled: true,
       streamEnabled: false,
-      outputDirectory,
-      ffmpegPath,
+      outputDirectoryCapability: recordingDirectory.capabilityId,
       video: deviceVideo(),
       rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
     }
@@ -487,10 +489,7 @@ async function runDeviceRecordingPhase({ smoke, ws, oracle }) {
       stopRequestedAt,
       timeoutMs
     })
-    const artifact = await analyzeDeviceRecordingArtifact(
-      outputPath,
-      deviceRecordingMs
-    )
+    const artifact = await analyzeDeviceRecordingArtifact(outputPath, deviceRecordingMs)
     return {
       startedAt,
       finishedAt: Date.now(),
@@ -1007,6 +1006,7 @@ function smokeCommand(smoke, command, params = {}, requestTimeoutMs = Math.min(t
         headers: {
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(body),
+          authorization: `Bearer ${smoke.capability}`,
           connection: 'close'
         },
         timeout: requestTimeoutMs
@@ -1044,10 +1044,7 @@ function smokeCommand(smoke, command, params = {}, requestTimeoutMs = Math.min(t
   })
 }
 
-async function startCgWindowOracle(
-  directory,
-  { pixelCapture = false, expectedWindowPid } = {}
-) {
+async function startCgWindowOracle(directory, { pixelCapture = false, expectedWindowPid } = {}) {
   const expectedPid = Number.isSafeInteger(expectedWindowPid) ? expectedWindowPid : -1
   const sourcePath = join(directory, 'cg-window-oracle.swift')
   const source = pixelCapture

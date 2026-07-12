@@ -60,6 +60,25 @@ describe('preview interaction stress contract', () => {
     assert.match(result.failures.join('\n'), /presented-frame stall 260ms exceeded 250ms/)
   })
 
+  it('scopes presented frame counters to their compositor run', () => {
+    const result = analyzeNativeStatusSamples(
+      [sample(0, 40, 'run-a'), sample(20, 41, 'run-a'), sample(40, 1, 'run-b')],
+      { maxFrameStallMs: 250, maxSampleGapMs: 250, maxDroppedFrameDelta: 8 }
+    )
+
+    assert.equal(result.compositorRunTransitions, 1)
+    assert.doesNotMatch(result.failures.join('\n'), /moved backwards/)
+  })
+
+  it('still rejects a presented frame regression inside one compositor run', () => {
+    const result = analyzeNativeStatusSamples(
+      [sample(0, 40, 'run-a'), sample(20, 41, 'run-a'), sample(40, 1, 'run-a')],
+      { maxFrameStallMs: 250, maxSampleGapMs: 250, maxDroppedFrameDelta: 8 }
+    )
+
+    assert.match(result.failures.join('\n'), /presented frame moved backwards from 41 to 1/)
+  })
+
   it('enforces the production profile frame-stall limit', () => {
     const result = analyzeNativeStatusSamples(
       [sample(0, 40), sample(100, 40), sample(260, 40), sample(300, 41)],
@@ -347,7 +366,7 @@ describe('preview interaction stress contract', () => {
   })
 })
 
-function sample(at, frame) {
+function sample(at, frame, runId) {
   return {
     at,
     status: {
@@ -358,7 +377,8 @@ function sample(at, frame) {
       framesRendered: frame,
       presentedFrameId: frame,
       droppedFrames: 0,
-      pendingHostCommandCount: 0
+      pendingHostCommandCount: 0,
+      ...(runId ? { nativePreviewCompositorRunId: runId } : {})
     }
   }
 }

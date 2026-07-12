@@ -10,10 +10,10 @@ import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { devAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { assertSmokeCommandConnection } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
-const repoRoot = resolve(import.meta.dirname, '..')
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 100000)
 const measurementMs = Number(process.env.VIDEORC_PREVIEW_MOTION_SAMPLE_MS ?? 10000)
@@ -46,6 +46,7 @@ try {
 }
 
 async function runPreviewMotionSmoke(connection, smoke) {
+  assertSmokeCommandConnection(smoke)
   const ws = await connectBackend(connection, timeoutMs)
   try {
     const health = await request(ws, timeoutMs, 'health.ping', { ffmpegPath })
@@ -261,7 +262,10 @@ async function smokeCommand(smoke, command, params = {}) {
 async function sendSmokeCommand(smoke, command, params = {}) {
   const response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${smoke.capability}`
+    },
     body: JSON.stringify({ command, params })
   })
   const payload = await response.json()
@@ -278,17 +282,15 @@ function launchAndReadConnections() {
     }, timeoutMs)
     const connections = { backend: null, smoke: null }
 
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
-      detached: true,
+    const spawnSpec = devAppSpawnSpec({
       env: smokeAppEnv({
         VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
         VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
         VIDEORC_SMOKE_PREVIEW_MOTION: '1',
         VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
-      }),
-      stdio: ['ignore', 'pipe', 'pipe']
+      })
     })
+    appProcess = spawn(spawnSpec.command, spawnSpec.args, spawnSpec.options)
 
     const maybeResolve = () => {
       if (connections.backend && connections.smoke) {

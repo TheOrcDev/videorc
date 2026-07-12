@@ -1,11 +1,13 @@
 import type {
   CameraAspect,
+  BackgroundImportResult,
   CameraTransform,
   Device,
   LayoutPreset,
   ObsScene,
   ObsSetup,
   ObsSource,
+  ResourceSelection,
   SourceSelection
 } from '@/lib/backend'
 
@@ -35,7 +37,7 @@ export interface ObsImportPlanResult {
   }
   video: { width: number; height: number; fps: number }
   audio: { microphoneGainDb?: number; microphoneMuted?: boolean }
-  outputDirectory?: string
+  outputDirectory?: ResourceSelection
   stream?:
     | { kind: 'rtmp-custom'; serverUrl: string; hasKey: boolean }
     | {
@@ -46,7 +48,7 @@ export interface ObsImportPlanResult {
         hasKey: boolean
       }
     | { kind: 'oauth-suggest'; platform: 'twitch' | 'other'; serviceLabel: string }
-  backgroundImagePath?: string
+  backgroundAsset?: BackgroundImportResult
   report: ObsImportReportLine[]
 }
 
@@ -186,9 +188,13 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
     subject: 'Output',
     note: `${setup.outputWidth}×${setup.outputHeight} at ${setup.fps} fps`
   })
-  if (setup.recordingPath) {
-    result.outputDirectory = setup.recordingPath
-    report.push({ verdict: 'imported', subject: 'Recording folder', note: setup.recordingPath })
+  if (setup.recordingDirectory) {
+    result.outputDirectory = setup.recordingDirectory
+    report.push({
+      verdict: 'imported',
+      subject: 'Recording folder',
+      note: setup.recordingDirectory.displayName
+    })
   }
 
   if (!scene) {
@@ -341,8 +347,8 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
   )
   if (imageItems.length > 0) {
     const bottom = sourcesByName.get(imageItems[0].sourceName)
-    if (bottom?.filePath) {
-      result.backgroundImagePath = bottom.filePath
+    if (bottom?.managedBackground) {
+      result.backgroundAsset = bottom.managedBackground
       report.push({
         verdict: 'approximated',
         subject: bottom.name,

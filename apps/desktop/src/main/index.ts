@@ -4,24 +4,27 @@ import {
   contentTracing,
   desktopCapturer,
   dialog,
-  ipcMain,
   nativeImage,
   nativeTheme,
   net,
   protocol,
+  safeStorage,
   screen,
+  session,
   shell,
   systemPreferences,
   type BrowserWindowConstructorOptions,
   type NativeImage
 } from 'electron'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync
@@ -48,9 +51,21 @@ import {
   ownedProcessStartupLockPath
 } from './backend-owned-processes'
 import { stopBackendProcess } from './backend-process-shutdown'
+import {
+  acquireBackendInterruptionLease,
+  type BackendInterruptionLease
+} from './backend-interruption'
+import { runBackendInterruptingAction } from './interruption-actions'
+import { AccountSignInTransactions } from './account-sign-in-transactions'
+import { ProviderOAuthCallbacks } from './provider-oauth-callbacks'
+import {
+  createSafeStoragePersistenceCodec,
+  type SecurePersistenceCodec
+} from './secure-persistence-codec'
 import { createNativePreviewHelperProcessDriver } from './native-preview-helper-process-driver'
 import { runNativePreviewDriverReset } from './native-preview-driver-reset'
 import {
+  nativePreviewClosedWindowUnsuppressStatus,
   nativePreviewDriverFailureFallbackStatus,
   nativePreviewFramePollingSuppressionStatus,
   nativePreviewHelperFallbackAllowed,
@@ -64,6 +79,7 @@ import { loadNativePreviewInProcessDriver } from './native-preview-in-process-lo
 import { resolveNativePreviewInProcessModule } from './native-preview-in-process-module-path'
 import { NativePreviewLatestPump } from './native-preview-latest-pump'
 import { NativePreviewMotionReconciler } from './native-preview-motion-reconciler'
+import { drainNativePreviewHostCommands as drainNativePreviewHostCommandsWith } from './native-preview-host-command-drain'
 import {
   NativePreviewMutationQueue,
   NativePreviewPlacementQueue,
@@ -77,8 +93,33 @@ import { loadNativePreviewRealSurfaceDriver } from './native-preview-real-surfac
 import { compositorSceneConflictsWithCommitted } from '../shared/native-preview-scene-authority'
 import { applyCommentsSnapshotDelta } from '../shared/comments-snapshot-delta'
 import { compositorStatusFromFrameReady } from '../shared/compositor-frame-ready'
+import {
+  parseMainBackendWireMessage,
+  parseMainCompositorFrameReadyEvent,
+  parseMainCompositorStatusEvent,
+  parseMainRecordingStatus,
+  parseMainRecordingStatusEvent
+} from './backend-event-message'
 import { safeConsole } from './safe-console'
+import { parseBackendBootstrap, publicBackendConnectionJson } from './backend-bootstrap'
+import { trashPaths } from './trash-paths'
+import {
+  MainResourceCapabilityRegistry,
+  type ResourceCapabilityKind,
+  type ResourceSelection
+} from './resource-capabilities'
+import { PersistentDirectoryAuthority } from './persistent-directory-authority'
 import { SmokeAppQuitGuard } from './smoke-app-quit-guard'
+import {
+  PACKAGED_SMOKE_COMMAND_NAMES,
+  SMOKE_BACKEND_RPC_METHOD_NAMES,
+  createSmokeCommandCapability,
+  handleSmokeCommandRequest,
+  smokeCommandServerAllowed,
+  smokePreviewFrameUrl,
+  validateSmokeBackendRpcRequest,
+  validateSmokeResourceAuthorization
+} from './smoke-command-security'
 import { runTimedBoundsStorm } from './smoke-window-bounds-storm'
 import {
   assertPermissionShortcutSupported,
@@ -96,7 +137,17 @@ import {
   writeGpuFallbackState
 } from './gpu-fallback'
 import { createMediaPermissionGrantWatcher } from './system-permission-watch'
+import {
+  flushPermissionRestart,
+  idleDeferredPermissionRestartState,
+  requestPermissionRestart,
+  type DeferredPermissionRestartState
+} from './deferred-permission-restart'
 import { isPathInsideAnyRoot } from './managed-asset-paths'
+import {
+  managedImageDecodeScript,
+  normalizeManagedImageDecodeResult
+} from './managed-asset-renderer-probe'
 import { PreviewSupervisorModel, previewWindowTargetAction } from './preview-supervisor'
 import {
   composeDockedScreenRect,
@@ -127,7 +178,9 @@ import {
   type PresentingAssessment,
   type PresentingWatchState
 } from './native-preview-first-frame'
+import { NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT } from './native-preview-proof-poller-runtime'
 import {
+  nativePreviewProofFrameUrl,
   nativePreviewProofPollingProfile,
   nativePreviewProofPollingProfileKey
 } from '../shared/native-preview-proof-polling'
@@ -138,6 +191,24 @@ import {
 } from './native-preview-main-pump-health'
 import { discoverObs, readObsSetup, readObsStreamKey } from './obs-import'
 import { initAutoUpdater, registerUpdaterIpc } from './updater'
+import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
+import {
+  MAX_NOTES_TEXT_LENGTH,
+  type ElectronEventChannel,
+  type ElectronIpcEventMap
+} from '../shared/electron-ipc-contract'
+import {
+  installRendererSessionPermissions,
+  installWebContentsSecurity,
+  registerRendererWindow,
+  rendererWindowWebPreferences,
+  trustRendererDocument
+} from './web-contents-security'
+import {
+  inlineRendererDocumentCsp,
+  nativePreviewSurfaceDocumentCsp,
+  trustedRendererDevServerUrl
+} from '../shared/renderer-security-policy'
 import {
   CommentsCommandBroker,
   commentsViewModeSenderAllowed,
@@ -145,6 +216,17 @@ import {
   parseCommentsViewMode
 } from './comments-command-broker'
 import { reconcileCommentsSendOperation } from '../shared/comments-send-operation'
+import {
+  captureStateAfterStatusPayload,
+  captureStateAfterTransportLoss,
+  captureStateBlocksInterruption,
+  type MainCaptureState
+} from '../shared/capture-state'
+import {
+  previewProofBackgroundStageMargin,
+  previewProofLayerFit,
+  previewProofLayerShape
+} from '../shared/native-preview-proof-geometry'
 import {
   DEFAULT_NATIVE_PREVIEW_MAX_HANDOFF_AGE_MS,
   compositorStatusMetalTargetHandoff,
@@ -173,9 +255,9 @@ import {
   type BackgroundImportResult
 } from '../shared/background-import'
 import type {
+  AccountCallbackEnvelope,
   BackendConnection,
   BackendLogEvent,
-  CameraShape,
   CaptionWindowSnapshot,
   CaptionsUpdate,
   CaptionsWindowState,
@@ -189,7 +271,6 @@ import type {
   CommentsViewMode,
   CommentsViewSnapshot,
   CommentsWindowState,
-  CompositorFrameReady,
   CompositorSceneSourceStatus,
   CompositorStatus,
   LayoutSettings,
@@ -198,6 +279,8 @@ import type {
   NotesDocument,
   NotesFontScale,
   NotesWindowState,
+  OAuthCallbackEnvelope,
+  ObsSetup,
   PreviewSurfaceCompositorUpdateParams,
   PreviewSurfaceBounds,
   PreviewSurfaceSceneLayer,
@@ -213,7 +296,9 @@ import type {
   SceneTransform,
   StreamScreen,
   SystemPermissionPane,
-  RuntimeInfo
+  RuntimeInfo,
+  VideorcAccountSnapshot,
+  ViewerSample
 } from '../shared/backend'
 
 let mainWindow: BrowserWindow | null = null
@@ -223,7 +308,9 @@ let notesWindowLastFrame: Electron.Rectangle | null = null
 let notesWindowAlwaysOnTop = false
 let notesWindowClosing = false
 let notesWindowContentProtected = false
-let latestViewerSample: unknown = null
+let notesWindowCloseFlushReady = false
+let notesWindowCloseFlushTimer: ReturnType<typeof setTimeout> | null = null
+let latestViewerSample: ViewerSample | null = null
 let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
@@ -320,6 +407,12 @@ let backendPermissionTargetPath: string | null = null
 let ownedProcessRegistry: OwnedProcessRegistry | null = null
 let ownedProcessRegistryLockDepth = 0
 let backendConnection: BackendConnection | null = null
+let backendAdminConnection: BackendConnection | null = null
+let backendAuthorityReady: Promise<void> = Promise.resolve()
+const mainResourceCapabilities = new MainResourceCapabilityRegistry()
+let mainCaptureState: MainCaptureState = 'unknown'
+let deferredPermissionRestartState: DeferredPermissionRestartState =
+  idleDeferredPermissionRestartState
 let smokePreviewMotionServer: HttpServer | null = null
 let smokePreviewCompositorFrameId = 0
 let nativePreviewSurfaceScene: PreviewSurfaceSceneState | null = null
@@ -331,9 +424,12 @@ let nativePreviewSurfaceSceneRevisionGuardUntilMs = 0
 let stdoutBuffer = ''
 let appIsQuitting = false
 let appIcon: NativeImage | null | undefined
-const PREVIEW_BACKGROUND_STAGE_MARGIN = 0.1
 const backendLogs: BackendLogEvent[] = []
-const pendingOAuthCallbackUrls: string[] = []
+const earlyProtocolCallbackUrls: string[] = []
+let accountSignInTransactions: AccountSignInTransactions | null = null
+let providerOAuthCallbacks: ProviderOAuthCallbacks | null = null
+let oauthPersistenceCodec: SecurePersistenceCodec | null = null
+let persistentDirectoryAuthority: PersistentDirectoryAuthority | null = null
 const OAUTH_CALLBACK_PROTOCOL = 'videorc'
 const OAUTH_APP_PROTOCOL_REDIRECT_URI = 'videorc://oauth/callback'
 // v1 default: the native preview surface is always on; the env var is a developer
@@ -358,7 +454,8 @@ nativeTheme.themeSource = 'dark'
 type GlassVibrancyMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>[0]>
 const isMac = process.platform === 'darwin'
 const isWindows = process.platform === 'win32'
-const mainWindowSandboxEnabled = !isWindows
+
+installWebContentsSecurity(app)
 const glassVibrancyEnabled = process.env.VIDEORC_GLASS_VIBRANCY !== '0'
 const glassVibrancyRaw = process.env.VIDEORC_GLASS_VIBRANCY
 const glassVibrancyMaterial: GlassVibrancyMaterial =
@@ -395,7 +492,9 @@ function queueGlassGeometryBroadcast(): void {
     glassGeometryTimer = null
     const geometry = glassGeometry()
     if (geometry && glassWallpaperDataUrl) {
-      mainWindow?.webContents.send('glass:geometry', geometry)
+      if (mainWindow) {
+        sendElectronEvent(mainWindow.webContents, 'glass:geometry', geometry)
+      }
     }
   }, 40)
 }
@@ -433,10 +532,12 @@ async function refreshGlassWallpaper(): Promise<void> {
     glassWallpaperSourcePath = wallpaperPath
     const geometry = glassGeometry()
     if (geometry) {
-      mainWindow?.webContents.send('glass:wallpaper', {
-        imageDataUrl: glassWallpaperDataUrl,
-        ...geometry
-      })
+      if (mainWindow) {
+        sendElectronEvent(mainWindow.webContents, 'glass:wallpaper', {
+          imageDataUrl: glassWallpaperDataUrl,
+          ...geometry
+        })
+      }
     }
   } catch {
     /* unreadable wallpaper: stay on the plain translucent glass */
@@ -523,9 +624,19 @@ app.on('child-process-gone', (_event, details) => {
 // occlusion-driven compositor suspension needs these process-level switches.
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
-const smokeCommandServerEnabled =
+const packagedSmokeHarnessCapability =
+  app.isPackaged && process.env.VIDEORC_PACKAGED_SMOKE_TEST === '1'
+    ? process.env.VIDEORC_SMOKE_COMMAND_CAPABILITY
+    : undefined
+const smokeCommandServerEnabled = smokeCommandServerAllowed(
   process.env.VIDEORC_SMOKE_PREVIEW_MOTION === '1' ||
-  process.env.VIDEORC_SMOKE_COMMAND_SERVER === '1'
+    process.env.VIDEORC_SMOKE_COMMAND_SERVER === '1',
+  app.isPackaged,
+  packagedSmokeHarnessCapability
+)
+const smokeCommandCapability = smokeCommandServerEnabled
+  ? (packagedSmokeHarnessCapability ?? createSmokeCommandCapability())
+  : ''
 const smokeAppQuitGuard = new SmokeAppQuitGuard(process.env.VIDEORC_PREVIEW_LIFECYCLE_PROBE === '1')
 const NATIVE_PREVIEW_INVALID_ACTIVATION_WARN_THRESHOLD = 3
 const requireNativePreviewRealSurfaceModule = createRequire(__filename)
@@ -589,7 +700,11 @@ let firstFrameWatchdogStartedAtMs = 0
 let firstFrameLedger: FirstFrameLedger = emptyFirstFrameLedger()
 let firstFrameLastFramesRendered: number | null = null
 let firstFrameLastPresentedFrameId: number | null = null
-let firstFrameLastHint: string | null = null
+// `undefined` means no hint state has been published since the watchdog was
+// initialized. `null` is a real state: the wait hint is hidden. Keeping those
+// states distinct makes the first hide update observable without a magic
+// string sentinel (and keeps this source file valid text).
+let firstFrameLastHint: string | null | undefined
 let firstFrameTickInFlight = false
 // After the first frame lands the watchdog does NOT stop: it flips into the
 // presenting watch (plan 021 F1) and keeps assessing the same chain so a
@@ -604,7 +719,7 @@ function startFirstFrameWatchdog(): void {
   firstFrameLedger = emptyFirstFrameLedger()
   firstFrameLastFramesRendered = null
   firstFrameLastPresentedFrameId = null
-  firstFrameLastHint = null
+  firstFrameLastHint = undefined
   firstFrameWatchdogMode = 'first-frame'
   presentingWatch = emptyPresentingWatch()
   presentingWatchLastKind = 'presenting'
@@ -639,14 +754,11 @@ function setFirstFrameStatus(
 // helper NSWindow; a click that raises the preview window above the helper for
 // one IPC hop would otherwise flash the "Waiting for preview" words. Hiding the
 // container means a z-order flash uncovers only the solid base, never the text.
-const PREVIEW_WAIT_HINT_HIDDEN = ' hidden'
-
 function updatePreviewWindowWaitDetail(text: string | null): void {
-  const key = text ?? PREVIEW_WAIT_HINT_HIDDEN
-  if (key === firstFrameLastHint) {
+  if (text === firstFrameLastHint) {
     return
   }
-  firstFrameLastHint = key
+  firstFrameLastHint = text
   const window = previewWindow
   if (!window || window.isDestroyed() || window.webContents.isDestroyed()) {
     return
@@ -724,7 +836,7 @@ async function runFirstFrameWatchdogTick(): Promise<void> {
       firstFrameLastPresentedFrameId = presentedFrameId
     }
     const mainPumpSocket = backendEventSocket
-    const mainPumpConnection = backendConnection
+    const mainPumpConnection = backendAdminConnection
     if (
       mainPumpSocket &&
       mainPumpConnection &&
@@ -868,7 +980,7 @@ function runFirstFrameHealingAction(
       // scene (2026-07-01 incident class).
       const window = mainWindow
       if (window && !window.webContents.isDestroyed()) {
-        window.webContents.send('preview-surface:resync-scene')
+        sendElectronEvent(window.webContents, 'preview-surface:resync-scene', undefined)
       }
       return
     }
@@ -1000,12 +1112,11 @@ function createWindow(): void {
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: mainWindowSandboxEnabled,
-      contextIsolation: true,
-      nodeIntegration: false,
+      ...rendererWindowWebPreferences('main'),
       backgroundThrottling: false
     }
   })
+  registerRendererWindow(mainWindow, 'main')
 
   let mainWindowShown = false
   const showMainWindow = (): void => {
@@ -1020,11 +1131,14 @@ function createWindow(): void {
   // the user with an invisible app.
   setTimeout(showMainWindow, 3000)
 
-  const rendererUrl = process.env.ELECTRON_RENDERER_URL
+  const rendererUrl = trustedRendererDevServerUrl(process.env.ELECTRON_RENDERER_URL, app.isPackaged)
   if (rendererUrl) {
+    trustRendererDocument(mainWindow, rendererUrl)
     mainWindow.loadURL(rendererUrl)
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    const rendererPath = join(__dirname, '../renderer/index.html')
+    trustRendererDocument(mainWindow, pathToFileURL(rendererPath).toString())
+    mainWindow.loadFile(rendererPath)
   }
 
   // Page-navigation shortcuts must be caught here, not in the renderer:
@@ -1042,7 +1156,9 @@ function createWindow(): void {
     const isDigit = input.key >= '1' && input.key <= '9'
     if (isDigit || input.key === ',') {
       event.preventDefault()
-      mainWindow?.webContents.send('shortcut:navigate', input.key)
+      if (mainWindow) {
+        sendElectronEvent(mainWindow.webContents, 'shortcut:navigate', input.key)
+      }
     }
   })
 
@@ -1110,8 +1226,12 @@ function createWindow(): void {
 
   if (backendConnection) {
     mainWindow.webContents.once('did-finish-load', () => {
-      mainWindow?.webContents.send('backend:connection', backendConnection)
-      flushOAuthCallbackUrls()
+      void backendAuthorityReady.then(() => {
+        if (mainWindow && backendConnection) {
+          sendElectronEvent(mainWindow.webContents, 'backend:connection', backendConnection)
+        }
+        flushOAuthCallbackUrls()
+      })
     })
   } else {
     mainWindow.webContents.once('did-finish-load', () => {
@@ -1449,7 +1569,7 @@ function emitNotesWindowState(message?: string): void {
   for (const window of [mainWindow, notesWindow]) {
     if (window && !window.webContents.isDestroyed()) {
       try {
-        window.webContents.send('notes-window:state', state)
+        sendElectronEvent(window.webContents, 'notes-window:state', state)
       } catch (error) {
         if (!appIsQuitting) {
           safeConsole.warn('Notes window state emit failed:', error)
@@ -1466,7 +1586,7 @@ function emitNotesDocument(document: NotesDocument): void {
   for (const window of [mainWindow, notesWindow]) {
     if (window && !window.webContents.isDestroyed()) {
       try {
-        window.webContents.send('notes-window:document', document)
+        sendElectronEvent(window.webContents, 'notes-window:document', document)
       } catch (error) {
         if (!appIsQuitting) {
           safeConsole.warn('Notes document emit failed:', error)
@@ -1489,6 +1609,8 @@ function saveNotesDocument(patch: Partial<NotesDocument>): NotesDocument {
 }
 
 function notesWindowHtml(document: NotesDocument): string {
+  const scriptNonce = randomBytes(24).toString('base64url')
+  const contentSecurityPolicy = inlineRendererDocumentCsp(scriptNonce)
   const initialDocumentJson = jsonForInlineScript(document)
   const initialAlwaysOnTopJson = jsonForInlineScript(notesWindowAlwaysOnTop)
   const smokeMarkerCss = notesWindowSmokeMarkerEnabled
@@ -1512,7 +1634,9 @@ function notesWindowHtml(document: NotesDocument): string {
       letter-spacing: 0; text-transform: uppercase;
     }`
     : ''
-  return `<!doctype html><html><head><meta charset="utf-8"><style>
+  return `<!doctype html><html><head><meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy}">
+    <style>
     html, body { margin: 0; height: 100%; background: ${DARK_WINDOW_PALETTE.base}; color: ${DARK_WINDOW_PALETTE.textPrimary};
       font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       overflow: hidden; user-select: none; -webkit-user-select: none; }
@@ -1558,9 +1682,9 @@ function notesWindowHtml(document: NotesDocument): string {
       <button type="button" data-scale="md">Md</button>
       <button type="button" data-scale="lg">Lg</button>
     </div>
-    <textarea spellcheck="false" placeholder="Notes for this recording..."></textarea>
+    <textarea maxlength="${MAX_NOTES_TEXT_LENGTH}" spellcheck="false" placeholder="Notes for this recording..."></textarea>
     <div class="footer"><span id="word-count">0 words</span><span id="save-state">Saved</span></div>
-    <script>
+    <script nonce="${scriptNonce}">
       (() => {
         const initialDocument = ${initialDocumentJson};
         const initialAlwaysOnTop = ${initialAlwaysOnTopJson};
@@ -1601,13 +1725,16 @@ function notesWindowHtml(document: NotesDocument): string {
           }
         }
 
-        function save() {
+        async function save() {
           window.clearTimeout(saveTimer);
           saveTimer = null;
           saveState.textContent = 'Saving';
-          window.videorc?.saveNotesDocument?.({ text: textarea.value, fontScale })
-            .then(() => { saveState.textContent = 'Saved'; })
-            .catch(() => { saveState.textContent = 'Save failed'; });
+          try {
+            await window.videorc?.saveNotesDocument?.({ text: textarea.value, fontScale });
+            saveState.textContent = 'Saved';
+          } catch {
+            saveState.textContent = 'Save failed';
+          }
         }
 
         function queueSave() {
@@ -1651,12 +1778,14 @@ function notesWindowHtml(document: NotesDocument): string {
           });
         }
         const unsubscribeNotesWindowState = window.videorc?.onNotesWindowState?.(applyNotesWindowState);
+        const unsubscribeNotesFlushRequest = window.videorc?.onNotesFlushRequest?.(() => {
+          void save();
+        });
         window.videorc?.getNotesWindowState?.().then(applyNotesWindowState).catch(() => {});
         window.addEventListener('beforeunload', () => {
           unsubscribeNotesWindowState?.();
-          save();
+          unsubscribeNotesFlushRequest?.();
         });
-        window.__videorcNotesSnapshot = () => ({ text: textarea.value, fontScale });
         render();
         textarea.focus();
       })();
@@ -1708,7 +1837,7 @@ function attachAuxWindowShortcuts(window: BrowserWindow): void {
         }
         mainWindow.show()
         mainWindow.focus()
-        mainWindow.webContents.send('shortcut:navigate', input.key)
+        sendElectronEvent(mainWindow.webContents, 'shortcut:navigate', input.key)
       }
     }
   })
@@ -1719,7 +1848,10 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     return notesWindowState()
   }
   const existingWindow = notesWindow
-  if (notesWindowIsOpen() && existingWindow) {
+  if (existingWindow && !existingWindow.isDestroyed()) {
+    if (notesWindowClosing) {
+      return notesWindowState('Notes is finishing its last save before closing.')
+    }
     if (existingWindow.isMinimized()) {
       existingWindow.restore()
     }
@@ -1745,13 +1877,13 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false,
+      ...rendererWindowWebPreferences('notes'),
       backgroundThrottling: false
     }
   })
+  registerRendererWindow(window, 'notes')
   notesWindowClosing = false
+  notesWindowCloseFlushReady = false
   notesWindow = window
   attachAuxWindowShortcuts(window)
   notesWindowAlwaysOnTop = notesWindowAlwaysOnTopPreference(prefs)
@@ -1774,33 +1906,37 @@ async function openNotesWindow(): Promise<NotesWindowState> {
       }
     })
   }
-  window.on('close', () => {
+  window.on('close', (event) => {
     if (notesWindow === window) {
+      if (!notesWindowCloseFlushReady) {
+        event.preventDefault()
+        requestNotesWindowCloseFlush(window)
+        return
+      }
       notesWindowClosing = true
       notesWindowLastFrame = window.getBounds()
       saveNotesWindowPrefs({ frame: notesWindowLastFrame, open: false })
-      void window.webContents
-        .executeJavaScript('window.__videorcNotesSnapshot?.() ?? null', true)
-        .then((snapshot: Partial<NotesDocument> | null) => {
-          if (snapshot) {
-            saveNotesDocument(snapshot)
-          }
-        })
-        .catch(() => {})
     }
   })
   window.on('closed', () => {
     if (notesWindow === window) {
       notesWindow = null
       notesWindowClosing = false
+      notesWindowCloseFlushReady = false
+      if (notesWindowCloseFlushTimer) {
+        clearTimeout(notesWindowCloseFlushTimer)
+        notesWindowCloseFlushTimer = null
+      }
       notesWindowContentProtected = false
       emitNotesWindowState()
     }
   })
 
-  await window.loadURL(
-    `data:text/html;charset=utf-8,${encodeURIComponent(notesWindowHtml(defaultNotesDocument(prefs)))}`
-  )
+  const notesDocumentUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
+    notesWindowHtml(defaultNotesDocument(prefs))
+  )}`
+  trustRendererDocument(window, notesDocumentUrl)
+  await window.loadURL(notesDocumentUrl)
   window.show()
   window.focus()
   emitNotesWindowState()
@@ -1808,9 +1944,41 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   return notesWindowState()
 }
 
+function finishNotesWindowClose(window: BrowserWindow): void {
+  if (notesWindow !== window || window.isDestroyed()) {
+    return
+  }
+  if (notesWindowCloseFlushTimer) {
+    clearTimeout(notesWindowCloseFlushTimer)
+    notesWindowCloseFlushTimer = null
+  }
+  notesWindowCloseFlushReady = true
+  setImmediate(() => {
+    if (notesWindow === window && !window.isDestroyed()) {
+      window.close()
+    }
+  })
+}
+
+function requestNotesWindowCloseFlush(window: BrowserWindow): void {
+  if (notesWindow !== window || window.isDestroyed() || notesWindowClosing) {
+    return
+  }
+  notesWindowClosing = true
+  try {
+    sendElectronEvent(window.webContents, 'notes-window:flush-request', undefined)
+  } catch {
+    finishNotesWindowClose(window)
+    return
+  }
+  notesWindowCloseFlushTimer = setTimeout(() => {
+    safeConsole.warn('Notes close flush timed out; closing with the last acknowledged save.')
+    finishNotesWindowClose(window)
+  }, 1_500)
+}
+
 function closeNotesWindow(message?: string): NotesWindowState {
   if (notesWindow && !notesWindow.isDestroyed()) {
-    notesWindowClosing = true
     notesWindow.close()
   }
   return notesWindowState(message)
@@ -2003,14 +2171,14 @@ function cacheCommentsSendResult(operation: CommentsSendOperation): 'live' | 'hi
 function emitCommentsView(): void {
   const view = currentCommentsView()
   if (view && commentsWindow && !commentsWindow.webContents.isDestroyed()) {
-    commentsWindow.webContents.send('comments-window:snapshot', view)
+    sendElectronEvent(commentsWindow.webContents, 'comments-window:snapshot', view)
   }
 }
 
 function emitCommentHighlightState(state: CommentHighlightState): void {
   latestCommentHighlightState = state
   if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
-    commentsWindow.webContents.send('comments-window:highlight-state', state)
+    sendElectronEvent(commentsWindow.webContents, 'comments-window:highlight-state', state)
   }
 }
 
@@ -2171,7 +2339,7 @@ function emitCommentsWindowState(message?: string): void {
       (window !== commentsWindow || !commentsWindowClosing)
     ) {
       try {
-        window.webContents.send('comments-window:state', state)
+        sendElectronEvent(window.webContents, 'comments-window:state', state)
       } catch (error) {
         if (!appIsQuitting) {
           safeConsole.warn('Comments window state emit failed:', error)
@@ -2212,12 +2380,11 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false,
+      ...rendererWindowWebPreferences('comments'),
       backgroundThrottling: false
     }
   })
+  registerRendererWindow(window, 'comments')
   commentsWindowClosing = false
   commentsWindow = window
   attachAuxWindowShortcuts(window)
@@ -2257,11 +2424,15 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     }
   })
 
-  const rendererUrl = process.env.ELECTRON_RENDERER_URL
+  const rendererUrl = trustedRendererDevServerUrl(process.env.ELECTRON_RENDERER_URL, app.isPackaged)
   if (rendererUrl) {
-    await window.loadURL(`${rendererUrl}/comments.html`)
+    const commentsUrl = new URL('comments.html', rendererUrl).toString()
+    trustRendererDocument(window, commentsUrl)
+    await window.loadURL(commentsUrl)
   } else {
-    await window.loadFile(join(__dirname, '../renderer/comments.html'))
+    const commentsPath = join(__dirname, '../renderer/comments.html')
+    trustRendererDocument(window, pathToFileURL(commentsPath).toString())
+    await window.loadFile(commentsPath)
   }
   window.show()
   window.focus()
@@ -2386,7 +2557,7 @@ function emitCaptionsWindowState(message?: string): void {
   for (const window of [mainWindow, captionsWindow]) {
     if (window && !window.webContents.isDestroyed()) {
       try {
-        window.webContents.send('captions-window:state', state)
+        sendElectronEvent(window.webContents, 'captions-window:state', state)
       } catch (error) {
         if (!appIsQuitting) {
           safeConsole.warn('Captions window state emit failed:', error)
@@ -2427,12 +2598,11 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false,
+      ...rendererWindowWebPreferences('captions'),
       backgroundThrottling: false
     }
   })
+  registerRendererWindow(window, 'captions')
   captionsWindowClosing = false
   captionsWindow = window
   captionsWindowAlwaysOnTop = captionsWindowAlwaysOnTopPreference(prefs)
@@ -2463,11 +2633,15 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     }
   })
 
-  const rendererUrl = process.env.ELECTRON_RENDERER_URL
+  const rendererUrl = trustedRendererDevServerUrl(process.env.ELECTRON_RENDERER_URL, app.isPackaged)
   if (rendererUrl) {
-    await window.loadURL(`${rendererUrl}/captions.html`)
+    const captionsUrl = new URL('captions.html', rendererUrl).toString()
+    trustRendererDocument(window, captionsUrl)
+    await window.loadURL(captionsUrl)
   } else {
-    await window.loadFile(join(__dirname, '../renderer/captions.html'))
+    const captionsPath = join(__dirname, '../renderer/captions.html')
+    trustRendererDocument(window, pathToFileURL(captionsPath).toString())
+    await window.loadFile(captionsPath)
   }
   window.show()
   window.focus()
@@ -2687,7 +2861,7 @@ function emitPreviewWindowState(): void {
   }
   if (mainWindow && !mainWindow.webContents.isDestroyed()) {
     try {
-      mainWindow.webContents.send('preview-window:state', previewWindowState())
+      sendElectronEvent(mainWindow.webContents, 'preview-window:state', previewWindowState())
     } catch (error) {
       if (!appIsQuitting) {
         safeConsole.warn('Preview window state emit failed:', error)
@@ -2967,7 +3141,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     startFirstFrameWatchdog()
   } else {
     stopFirstFrameWatchdog()
-    firstFrameLastHint = null
+    firstFrameLastHint = undefined
     setFirstFrameStatus('pending', 'Waiting for the Windows preview surface to deliver pixels.')
     updatePreviewWindowWaitDetail('Waiting for the Windows preview surface to deliver pixels.')
   }
@@ -3202,7 +3376,7 @@ function accountUnpresentedNativePreviewFrame(
 }
 
 function backendPreviewFrameUrl(
-  path: '/preview/camera/live.png' | '/preview/screen/live.png',
+  path: '/preview/camera/latest.bmp' | '/preview/screen/latest.bmp',
   maxWidth?: number
 ): string | undefined {
   if (
@@ -3212,24 +3386,17 @@ function backendPreviewFrameUrl(
   ) {
     return undefined
   }
-  if (process.env.VIDEORC_SMOKE_PREVIEW_FRAME_POLLING === '1') {
-    const address = smokePreviewMotionServer?.address()
-    if (address && typeof address !== 'string') {
-      const params = new URLSearchParams()
-      if (typeof maxWidth === 'number' && Number.isFinite(maxWidth) && maxWidth > 0) {
-        params.set('maxWidth', String(Math.max(1, Math.round(maxWidth))))
-      }
-      return `http://${address.address}:${address.port}/preview-frame.png?${params.toString()}`
-    }
-  }
-  const params = new URLSearchParams({ token: backendConnection.token })
-  if (typeof maxWidth === 'number' && Number.isFinite(maxWidth) && maxWidth > 0) {
-    params.set('maxWidth', String(Math.max(1, Math.round(maxWidth))))
-  }
-  return `http://${backendConnection.host}:${backendConnection.port}${path}?${params.toString()}`
+  const baseUrl =
+    process.env.VIDEORC_SMOKE_PREVIEW_FRAME_POLLING === '1'
+      ? smokePreviewFrameUrl()
+      : `http://${backendConnection.host}:${backendConnection.port}${path}?${new URLSearchParams({ token: backendConnection.token }).toString()}`
+  return nativePreviewProofFrameUrl(baseUrl, maxWidth)
 }
 
 function fileUrlFromPath(path: string): string {
+  if (path.startsWith(`${MANAGED_ASSET_SCHEME}://`)) {
+    return path
+  }
   return pathToFileURL(path).toString()
 }
 
@@ -3280,12 +3447,15 @@ function fullFrameTransform(): SceneTransform {
   }
 }
 
-function insetTransformForBackground(transform: SceneTransform): SceneTransform {
-  const stageScale = 1 - PREVIEW_BACKGROUND_STAGE_MARGIN * 2
+function insetTransformForBackground(
+  transform: SceneTransform,
+  stageMargin: number
+): SceneTransform {
+  const stageScale = 1 - stageMargin * 2
   return {
     ...transform,
-    x: PREVIEW_BACKGROUND_STAGE_MARGIN + transform.x * stageScale,
-    y: PREVIEW_BACKGROUND_STAGE_MARGIN + transform.y * stageScale,
+    x: stageMargin + transform.x * stageScale,
+    y: stageMargin + transform.y * stageScale,
     width: transform.width * stageScale,
     height: transform.height * stageScale
   }
@@ -3294,10 +3464,10 @@ function insetTransformForBackground(transform: SceneTransform): SceneTransform 
 function transformForPreviewBackground(
   transform: SceneTransform,
   sourceKind: PreviewSurfaceSceneLayerKind,
-  backgroundActive: boolean
+  stageMargin: number
 ): SceneTransform {
-  return backgroundActive && previewLayerUsesBackgroundStage(sourceKind)
-    ? insetTransformForBackground(transform)
+  return stageMargin > 0 && previewLayerUsesBackgroundStage(sourceKind)
+    ? insetTransformForBackground(transform, stageMargin)
     : transform
 }
 
@@ -3334,30 +3504,14 @@ function existingPreviewBackgroundLayer(): PreviewSurfaceSceneLayer | null {
   )
 }
 
-function previewLayerFit(source: SceneSource, layout: LayoutSettings): 'contain' | 'cover' {
-  if (source.kind === 'camera') {
-    return layout.cameraFit === 'fit' ? 'contain' : 'cover'
-  }
-  return layout.layoutPreset === 'side-by-side' ? 'cover' : 'contain'
-}
-
-function previewLayerShape(source: SceneSource, layout: LayoutSettings): CameraShape | undefined {
-  if (source.kind !== 'camera') {
-    return undefined
-  }
-  return layout.layoutPreset === 'screen-camera' && layout.cameraShape === 'circle'
-    ? 'circle'
-    : 'rectangle'
-}
-
 // A floor on the requested full-canvas width so preview frames stay sharp even
 // before the surface reports bounds (drawable would otherwise be undefined → the
-// backend uses its low PNG default) or when a non-Retina scaleFactor understates
+// backend uses its low frame-width default) or when a non-Retina scaleFactor understates
 // the device pixels. Per-layer requests still scale by the layer's fraction of
 // the canvas and stay capped at the source's real width.
 const PREVIEW_MIN_DRAWABLE_WIDTH = 1280
 // Upper bound on a single requested frame width so a large window on a 4K/5K
-// Retina panel can't ask for an enormous PNG every poll. 1920 is plenty sharp
+// Retina panel can't ask for an enormous raw frame every poll. 1920 is plenty sharp
 // for a preview; the backend clamps further (camera 1920 / screen 2560) and the
 // per-source `sourceWidth` cap keeps us from ever upscaling past the real frame.
 const PREVIEW_MAX_DRAWABLE_WIDTH = 1920
@@ -3403,10 +3557,10 @@ function previewLayerFrameUrl(source: SceneSource): string | undefined {
   const maxWidth = previewLayerSnapshotWidth(source.transform)
   logPreviewFrameSizing(source.kind, maxWidth)
   if (source.kind === 'camera') {
-    return backendPreviewFrameUrl('/preview/camera/live.png', maxWidth)
+    return backendPreviewFrameUrl('/preview/camera/latest.bmp', maxWidth)
   }
   if (source.kind === 'screen' || source.kind === 'window') {
-    return backendPreviewFrameUrl('/preview/screen/live.png', maxWidth)
+    return backendPreviewFrameUrl('/preview/screen/latest.bmp', maxWidth)
   }
   return undefined
 }
@@ -3415,21 +3569,27 @@ function buildPreviewSurfaceScene(
   params: PreviewSurfaceSceneUpdateParams
 ): PreviewSurfaceSceneState {
   const backgroundLayer = previewBackgroundLayer(params.scene)
-  const backgroundActive = Boolean(backgroundLayer)
+  const backgroundStageMargin = backgroundLayer
+    ? previewProofBackgroundStageMargin(params.scene?.background)
+    : 0
   const layers: PreviewSurfaceSceneLayer[] = [
     ...(backgroundLayer ? [backgroundLayer] : []),
     ...(params.scene?.sources ?? []).map((source) => ({
       id: source.id,
       name: source.name,
       kind: source.kind,
-      transform: transformForPreviewBackground(source.transform, source.kind, backgroundActive),
+      transform: transformForPreviewBackground(
+        source.transform,
+        source.kind,
+        backgroundStageMargin
+      ),
       visible: source.visible,
       frameUrl: nativePreviewSurfaceFramePollingSuppressed
         ? undefined
         : previewLayerFrameUrl(source),
-      fit: previewLayerFit(source, params.layout),
+      fit: previewProofLayerFit(source, params.layout),
       mirror: source.kind === 'camera' ? params.layout.cameraMirror : false,
-      shape: previewLayerShape(source, params.layout)
+      shape: previewProofLayerShape(source, params.layout)
     }))
   ]
 
@@ -3442,7 +3602,7 @@ function buildPreviewSurfaceScene(
       transform: transformForPreviewBackground(
         fullFrameTransform(),
         'screen-image',
-        backgroundActive
+        backgroundStageMargin
       ),
       visible: true,
       imageUrl: fileUrlFromPath(activeScreen.imagePath),
@@ -3457,6 +3617,7 @@ function buildPreviewSurfaceScene(
     layout: params.layout,
     sources: layers,
     activeScreenId: activeScreen?.id,
+    backgroundStageMargin,
     updatedAt: new Date().toISOString()
   }
 }
@@ -3470,14 +3631,22 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
   const suppressFramePolling =
     nativePreviewSurfaceFramePollingSuppressed || status.suppressFramePolling === true
   const backgroundLayer = existingPreviewBackgroundLayer()
-  const backgroundActive = Boolean(backgroundLayer)
+  const backgroundStageMargin = backgroundLayer
+    ? (nativePreviewSurfaceScene?.backgroundStageMargin ??
+      nativePreviewCommittedCompositorScene?.backgroundStageMargin ??
+      0)
+    : 0
   const layers: PreviewSurfaceSceneLayer[] = [
     ...(backgroundLayer ? [backgroundLayer] : []),
     ...(status.sceneSources ?? []).filter(compositorSceneSourceIsPreviewLayer).map((source) => ({
       id: source.id,
       name: source.name,
       kind: source.kind,
-      transform: transformForPreviewBackground(source.transform, source.kind, backgroundActive),
+      transform: transformForPreviewBackground(
+        source.transform,
+        source.kind,
+        backgroundStageMargin
+      ),
       visible: source.visible,
       frameUrl: suppressFramePolling ? undefined : compositorLayerFrameUrl(source),
       imageUrl:
@@ -3496,6 +3665,7 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
     layout: status.sceneLayout,
     sources: layers,
     activeScreenId: status.activeScreenId,
+    backgroundStageMargin,
     updatedAt: status.updatedAt
   }
 }
@@ -3563,10 +3733,10 @@ function compositorLayerFrameUrl(
 ): string | undefined {
   const maxWidth = previewLayerSnapshotWidth(source.transform, source.width)
   if (source.kind === 'camera') {
-    return backendPreviewFrameUrl('/preview/camera/live.png', maxWidth)
+    return backendPreviewFrameUrl('/preview/camera/latest.bmp', maxWidth)
   }
   if (source.kind === 'screen' || source.kind === 'window') {
-    return backendPreviewFrameUrl('/preview/screen/live.png', maxWidth)
+    return backendPreviewFrameUrl('/preview/screen/latest.bmp', maxWidth)
   }
   return undefined
 }
@@ -3576,12 +3746,15 @@ function jsonForInlineScript(value: unknown): string {
 }
 
 function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null): string {
+  const scriptNonce = randomBytes(24).toString('base64url')
+  const contentSecurityPolicy = nativePreviewSurfaceDocumentCsp(scriptNonce)
   const initialSceneJson = jsonForInlineScript(initialScene)
   return `
 <!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy}" />
     <style>
       html, body {
         margin: 0;
@@ -3656,7 +3829,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
   <body>
     <div id="scene-root"></div>
     <div id="readout">native scene surface</div>
-    <script>
+    <script nonce="${scriptNonce}">
       (() => {
         const root = document.getElementById('scene-root');
         const readout = document.getElementById('readout');
@@ -3679,16 +3852,13 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         const inputToPresentLatencies = [];
         let scene = ${initialSceneJson};
         let frames = 0;
+        let blankFrames = 0;
         let liveLayerCount = 0;
         let startedAt = performance.now();
 
         function percent(value) {
           const next = Number.isFinite(value) ? value : 0;
           return String(next * 100) + '%';
-        }
-
-        function cacheBust(url) {
-          return url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
         }
 
         function profiledFrameUrl(url) {
@@ -3703,6 +3873,34 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           } catch {
             return url;
           }
+        }
+
+        function frameRequestUrl(url, poller) {
+          const profiled = profiledFrameUrl(url);
+          try {
+            const parsed = new URL(profiled);
+            if (
+              typeof poller.generation === 'string' &&
+              poller.generation.length > 0 &&
+              Number.isSafeInteger(poller.sequence) &&
+              poller.sequence >= 0
+            ) {
+              parsed.searchParams.set('afterGeneration', poller.generation);
+              parsed.searchParams.set('afterSequence', String(poller.sequence));
+            }
+            return parsed.toString();
+          } catch {
+            return profiled;
+          }
+        }
+
+        function responseFrameCursor(response) {
+          const generation = response.headers.get('x-videorc-frame-generation');
+          const rawSequence = response.headers.get('x-videorc-frame-sequence');
+          const sequence = rawSequence === null ? Number.NaN : Number(rawSequence);
+          return typeof generation === 'string' && generation.length > 0 && Number.isSafeInteger(sequence) && sequence >= 0
+            ? { generation, sequence }
+            : null;
         }
 
         function cropStyle(transform) {
@@ -3720,11 +3918,38 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           };
         }
 
+        function layerBorderRadius(layer) {
+          if (layer.shape === 'circle') {
+            return '9999px';
+          }
+          if (layer.shape !== 'rounded') {
+            return '0';
+          }
+          const transform = layer.transform ?? {};
+          const width = root.clientWidth * Math.max(0, Number(transform.width ?? 0));
+          const height = root.clientHeight * Math.max(0, Number(transform.height ?? 0));
+          const radiusPct = Math.min(
+            50,
+            Math.max(0, Number(scene?.layout?.cameraCornerRadiusPct ?? 0))
+          );
+          return String(Math.min(width, height) * radiusPct / 100) + 'px';
+        }
+
+        function refreshLayerMasks() {
+          for (const entry of layers.values()) {
+            if (entry.layer) {
+              entry.element.style.borderRadius = layerBorderRadius(entry.layer);
+            }
+          }
+        }
+
+        ${NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT}
+
         function markLive(kind, sourceId) {
           sourceFrames.set(sourceId, (sourceFrames.get(sourceId) ?? 0) + 1);
           const poller = pollers.get(sourceId);
           if (poller) {
-            poller.lastSuccessAt = performance.now();
+            markProofPollerFrameAdvance(poller, performance.now());
           }
           liveLayerCount = [...layers.values()].filter(({ image }) => image?.dataset.live === '1').length;
           if (liveLayerCount > 0) {
@@ -3734,20 +3959,11 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         }
 
         function stopMissingPollers(activeIds) {
-          for (const [id, poller] of pollers) {
+          for (const id of Array.from(pollers.keys())) {
             if (!activeIds.has(id)) {
-              poller.cancelled = true;
-              pollers.delete(id);
+              stopLayerPoller(id);
             }
           }
-        }
-
-        function stopLayerPoller(id) {
-          const existingPoller = pollers.get(id);
-          if (existingPoller) {
-            existingPoller.cancelled = true;
-          }
-          pollers.delete(id);
         }
 
         function stopAllPollers() {
@@ -3785,20 +4001,25 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           if (existing?.url === url && existing?.image === image) {
             return;
           }
-          if (existing) {
-            existing.cancelled = true;
-          }
+          const preservedFrame = existing
+            ? stopLayerPoller(id, { preserveFrame: true })
+            : null;
           const poller = {
             url,
             image,
             cancelled: false,
             pending: false,
-            startedAt: performance.now(),
-            lastSuccessAt: null
+            startedAt: preservedFrame?.startedAt ?? performance.now(),
+            lastFrameAdvanceAt: preservedFrame?.lastFrameAdvanceAt ?? null,
+            lastTransportSuccessAt: preservedFrame?.lastTransportSuccessAt ?? null,
+            generation: null,
+            sequence: null,
+            objectUrl: preservedFrame?.objectUrl ?? null,
+            abortController: null
           };
           pollers.set(id, poller);
 
-          const poll = () => {
+          const poll = async () => {
             if (poller.cancelled) {
               return;
             }
@@ -3807,22 +4028,77 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               return;
             }
             poller.pending = true;
-            const next = new Image();
-            next.decoding = 'async';
-            next.onload = () => {
-              if (!poller.cancelled) {
-                image.src = next.src;
-                image.dataset.live = '1';
-                markLive(kind, id);
+            let retryDelayMs = framePollingIntervalMs;
+            const abortController = new AbortController();
+            poller.abortController = abortController;
+            try {
+              const response = await fetch(frameRequestUrl(url, poller), {
+                cache: 'no-store',
+                signal: abortController.signal
+              });
+              if (poller.cancelled) {
+                return;
+              }
+              const cursor = responseFrameCursor(response);
+              if (response.status === 204) {
+                markProofPollerTransportSuccess(poller, performance.now());
+                if (cursor) {
+                  poller.generation = cursor.generation;
+                  poller.sequence = cursor.sequence;
+                }
+                // Transport is healthy, but the source frame did not advance.
+                // Keep the last decoded image while the liveness clock ages.
+                return;
+              }
+              if (!response.ok) {
+                throw new Error('Preview frame request failed with status ' + response.status);
+              }
+              markProofPollerTransportSuccess(poller, performance.now());
+              const blob = await response.blob();
+              if (poller.cancelled) {
+                return;
+              }
+              const objectUrl = URL.createObjectURL(blob);
+              const next = new Image();
+              next.decoding = 'async';
+              try {
+                await new Promise((resolve, reject) => {
+                  next.onload = resolve;
+                  next.onerror = reject;
+                  next.src = objectUrl;
+                });
+              } catch (error) {
+                URL.revokeObjectURL(objectUrl);
+                throw error;
+              }
+              if (poller.cancelled) {
+                URL.revokeObjectURL(objectUrl);
+                return;
+              }
+              if (proofImageIsBlank(next)) {
+                blankFrames += 1;
+                URL.revokeObjectURL(objectUrl);
+                throw new Error('Preview frame decoded without any visible pixels.');
+              }
+              presentProofPollerFrame(poller, objectUrl);
+              if (cursor) {
+                poller.generation = cursor.generation;
+                poller.sequence = cursor.sequence;
+              }
+              markLive(kind, id);
+            } catch (error) {
+              if (!poller.cancelled && error?.name !== 'AbortError') {
+                retryDelayMs = Math.max(250, framePollingIntervalMs);
+              }
+            } finally {
+              if (poller.abortController === abortController) {
+                poller.abortController = null;
               }
               poller.pending = false;
-              window.setTimeout(poll, framePollingIntervalMs);
-            };
-            next.onerror = () => {
-              poller.pending = false;
-              window.setTimeout(poll, Math.max(250, framePollingIntervalMs));
-            };
-            next.src = cacheBust(profiledFrameUrl(url));
+              if (!poller.cancelled) {
+                window.setTimeout(poll, retryDelayMs);
+              }
+            }
           };
 
           poll();
@@ -3843,6 +4119,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             layers.set(id, entry);
           }
 
+          entry.layer = layer;
           const { element, image } = entry;
           const transform = layer.transform ?? {};
           element.dataset.kind = layer.kind ?? 'unknown';
@@ -3852,7 +4129,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           element.style.top = percent(transform.y);
           element.style.width = percent(transform.width || 0);
           element.style.height = percent(transform.height || 0);
-          element.style.borderRadius = layer.shape === 'circle' ? '9999px' : '0';
+          element.style.borderRadius = layerBorderRadius(layer);
           element.style.zIndex = layer.kind === 'background' ? '0' : '1';
 
           const crop = cropStyle(transform);
@@ -3922,6 +4199,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         window.__videorcSetPreviewScene = applyScene;
         window.__videorcSetFramePollingSuppressed = setFramePollingSuppressed;
         window.__videorcSetFramePollingProfile = setFramePollingProfile;
+        window.addEventListener('resize', refreshLayerMasks);
 
         function applyCompositorStatus(nextStatus) {
           pendingCompositorStatus = nextStatus;
@@ -4028,16 +4306,25 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               return sorted[index];
             };
             const elapsed = Math.max(1, performance.now() - startedAt);
+            const measuredAt = performance.now();
             const sourceFrameAges = [...pollers.values()].map((poller) =>
-              Math.max(0, performance.now() - (poller.lastSuccessAt ?? poller.startedAt))
+              proofPollerFrameAgeMs(poller, measuredAt)
+            );
+            const sourceTransportAges = [...pollers.values()].map((poller) =>
+              proofPollerTransportAgeMs(poller, measuredAt)
             );
             const sourceFrameAgeMs = sourceFrameAges.length > 0
               ? Math.max(...sourceFrameAges)
               : null;
+            const sourceTransportAgeMs = sourceTransportAges.length > 0
+              ? Math.max(...sourceTransportAges)
+              : null;
             const sourceFreshnessBudgetMs = Math.max(1500, framePollingIntervalMs * 8);
             const freshSourceLayerCount = [...pollers.values()].filter((poller) =>
-              poller.lastSuccessAt != null &&
-              performance.now() - poller.lastSuccessAt <= sourceFreshnessBudgetMs
+              proofPollerFrameIsFresh(poller, measuredAt, sourceFreshnessBudgetMs)
+            ).length;
+            const healthySourceTransportCount = [...pollers.values()].filter((poller) =>
+              proofPollerTransportIsFresh(poller, measuredAt, sourceFreshnessBudgetMs)
             ).length;
             return {
               frames,
@@ -4063,6 +4350,8 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               freshSourceLayerCount,
               sourceFrames: Object.fromEntries(sourceFrames),
               sourceFrameAgeMs,
+              sourceTransportAgeMs,
+              healthySourceTransportCount,
               intervalP50Ms: percentile(intervals, 50),
               intervalP95Ms: percentile(intervals, 95),
               intervalP99Ms: percentile(intervals, 99),
@@ -4071,7 +4360,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               framePollingMaxWidth,
               proofSurfaceSuspended,
               sourcePixelsPresent: liveLayerCount > 0,
-              blankFrames: 0,
+              blankFrames,
               width: window.innerWidth,
               height: window.innerHeight
             };
@@ -4497,6 +4786,24 @@ async function applyNativePreviewHostCommands(
         : await updateNativePreviewSurfaceBounds(command.bounds, generation)
   }
   return status
+}
+
+async function drainBackendNativePreviewHostCommands(
+  generation = previewWindowSurfaceGeneration()
+): Promise<PreviewSurfaceStatus> {
+  if (!previewWindowSurfaceGenerationIsCurrent(generation)) {
+    return nativePreviewSurfaceStatus
+  }
+  return drainNativePreviewHostCommandsWith({
+    generation,
+    takeCommands: () =>
+      requestBackendAdmin<NativePreviewHostCommand[]>('preview.surface.take_native_host_commands'),
+    applyCommands: (commands, requestedGeneration) =>
+      runNativePreviewSurfaceMutation(() =>
+        applyNativePreviewHostCommands(commands, requestedGeneration)
+      ),
+    currentStatus: () => nativePreviewSurfaceStatus
+  })
 }
 
 // Push a visibility-only bounds update to both surface hosts using the current
@@ -5142,7 +5449,7 @@ async function tryPresentNativePreviewRealSurfaceCompositor(
       scene: nativePreviewSurfaceScene,
       suppressFramePolling:
         nativePreviewSurfaceFramePollingSuppressed || status.suppressFramePolling === true,
-      frameAgeMs: status.frameAgeMs,
+      frameAgeMs: status.frameAgeMs ?? undefined,
       compositorUpdatedAt: status.updatedAt
     })
   } catch (error) {
@@ -6075,27 +6382,86 @@ function oauthCallbackRedirectUri(platform?: string): string | null {
   return null
 }
 
-function sendOAuthCallbackUrl(callbackUrl: string): void {
+function accountSignInCoordinator(): AccountSignInTransactions {
+  if (!accountSignInTransactions) {
+    accountSignInTransactions = new AccountSignInTransactions(
+      join(app.getPath('userData'), 'account-sign-in-transactions.json'),
+      {
+        codec: protectedOAuthPersistenceCodec(),
+        allowLoopbackAuthorizeOrigin: !app.isPackaged
+      }
+    )
+  }
+  return accountSignInTransactions
+}
+
+function protectedOAuthPersistenceCodec(): SecurePersistenceCodec {
+  if (!oauthPersistenceCodec) {
+    oauthPersistenceCodec = createSafeStoragePersistenceCodec(safeStorage)
+  }
+  return oauthPersistenceCodec
+}
+
+function outputDirectoryAuthority(): PersistentDirectoryAuthority {
+  if (!persistentDirectoryAuthority) {
+    persistentDirectoryAuthority = new PersistentDirectoryAuthority(
+      join(app.getPath('userData'), 'output-directory-authority.json'),
+      protectedOAuthPersistenceCodec(),
+      (path) => {
+        try {
+          return readFileSync(path, 'utf8')
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            return null
+          }
+          throw error
+        }
+      }
+    )
+  }
+  return persistentDirectoryAuthority
+}
+
+function providerOAuthCallbackCoordinator(): ProviderOAuthCallbacks {
+  if (!providerOAuthCallbacks) {
+    providerOAuthCallbacks = new ProviderOAuthCallbacks(
+      join(app.getPath('userData'), 'provider-oauth-callbacks.json'),
+      { codec: protectedOAuthPersistenceCodec() }
+    )
+  }
+  return providerOAuthCallbacks
+}
+
+function sendAccountCallback(envelope: AccountCallbackEnvelope): void {
   if (!mainWindow || mainWindow.webContents.isDestroyed()) {
-    pendingOAuthCallbackUrls.push(callbackUrl)
     return
   }
+  sendElectronEvent(mainWindow.webContents, 'account:callback', envelope)
+}
 
-  mainWindow.webContents.send('oauth:callback-url', callbackUrl)
+function sendOAuthCallback(envelope: OAuthCallbackEnvelope): void {
+  if (!mainWindow || mainWindow.webContents.isDestroyed()) return
+  sendElectronEvent(mainWindow.webContents, 'oauth:callback-url', envelope)
 }
 
 function flushOAuthCallbackUrls(): void {
-  if (
-    !mainWindow ||
-    mainWindow.webContents.isDestroyed() ||
-    pendingOAuthCallbackUrls.length === 0
-  ) {
+  if (!mainWindow || mainWindow.webContents.isDestroyed()) {
     return
   }
 
-  const callbackUrls = pendingOAuthCallbackUrls.splice(0)
-  for (const callbackUrl of callbackUrls) {
-    mainWindow.webContents.send('oauth:callback-url', callbackUrl)
+  try {
+    for (const envelope of providerOAuthCallbackCoordinator().pending()) {
+      sendOAuthCallback(envelope)
+    }
+  } catch {
+    logBackend('warn', 'Provider callback recovery data is unavailable; continuing without it.')
+  }
+  try {
+    for (const envelope of accountSignInCoordinator().pending()) {
+      sendAccountCallback(envelope)
+    }
+  } catch {
+    logBackend('warn', 'Account callback recovery data is unavailable; continuing without it.')
   }
 }
 
@@ -6107,9 +6473,6 @@ function dispatchOAuthCallbackUrl(rawUrl: string): void {
     return
   }
 
-  // Both the platform OAuth callback (videorc://oauth/callback) and the product
-  // account callback (videorc://account/callback) ride this one channel; the
-  // renderer routes by hostname.
   if (
     parsed.protocol !== `${OAUTH_CALLBACK_PROTOCOL}:` ||
     !(
@@ -6120,7 +6483,21 @@ function dispatchOAuthCallbackUrl(rawUrl: string): void {
     return
   }
 
-  sendOAuthCallbackUrl(parsed.toString())
+  if (parsed.hostname === 'account') {
+    try {
+      sendAccountCallback(accountSignInCoordinator().accept(parsed.toString()))
+    } catch (error) {
+      // Never log the callback URL: it carries a short-lived authorization code.
+      logBackend('warn', `Rejected desktop account callback: ${errorMessage(error)}`)
+    }
+    return
+  }
+  try {
+    sendOAuthCallback(providerOAuthCallbackCoordinator().accept(parsed.toString()))
+  } catch (error) {
+    // Never log the callback URL: it carries a short-lived provider code.
+    logBackend('warn', `Rejected provider OAuth callback: ${errorMessage(error)}`)
+  }
 }
 
 function workspaceRoot(): string {
@@ -6401,6 +6778,11 @@ function startBackendWithRegistryLock(): void {
       VIDEORC_BUNDLED_FFMPEG_PATH: ffmpegBinDir
         ? join(ffmpegBinDir, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
         : '',
+      VIDEORC_MANAGED_BACKGROUND_ROOTS: managedBackgroundRoots().join(delimiter),
+      // Debug smoke/test RPCs are a second, explicit capability boundary in
+      // addition to the admin backend credential. Release builds compile the
+      // handlers out regardless of this value.
+      VIDEORC_ENABLE_SMOKE_RPC: smokeCommandServerEnabled && !app.isPackaged ? '1' : '0',
       // The backend's watchdog also exits when THIS process dies — the ppid
       // check alone misses the dev chain (electron -> cargo -> backend), where
       // killing Electron leaves cargo alive as the backend's parent.
@@ -6430,6 +6812,9 @@ function startBackendWithRegistryLock(): void {
     logBackend('warn', `Backend exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`)
     backendProcess = null
     backendConnection = null
+    backendAdminConnection = null
+    backendAuthorityReady = Promise.resolve()
+    mainResourceCapabilities.clear()
     disconnectBackendEventSocket()
     scheduleBackendRestart(code, signal)
   })
@@ -6516,6 +6901,7 @@ function disconnectBackendEventSocket(): void {
   }
   const socket = backendEventSocket
   backendEventSocket = null
+  mainCaptureState = captureStateAfterTransportLoss()
   clearNativePreviewMainPumpWork()
   void setNativePreviewMainPumpActive(false)
   if (socket) {
@@ -6528,12 +6914,12 @@ function disconnectBackendEventSocket(): void {
 }
 
 function scheduleBackendEventSocketRetry(connection: BackendConnection): void {
-  if (backendConnection !== connection || backendEventSocketRetryTimer) {
+  if (backendAdminConnection !== connection || backendEventSocketRetryTimer) {
     return
   }
   backendEventSocketRetryTimer = setTimeout(() => {
     backendEventSocketRetryTimer = null
-    if (backendConnection === connection) {
+    if (backendAdminConnection === connection) {
       connectBackendEventSocket(connection)
     }
   }, 2000)
@@ -6548,6 +6934,7 @@ function retireBackendEventSocket(
     return
   }
   backendEventSocket = null
+  mainCaptureState = captureStateAfterTransportLoss()
   nativePreviewMainPumpDisconnectCount += 1
   nativePreviewMainPumpLastDisconnectReason = reason
   clearNativePreviewMainPumpWork()
@@ -6562,96 +6949,115 @@ function retireBackendEventSocket(
 }
 
 function connectBackendEventSocket(connection: BackendConnection): void {
-  // Escape hatch: fall back to the renderer-driven present pump.
-  if (process.env.VIDEORC_MAIN_PRESENT_PUMP === '0') {
-    return
-  }
+  // Capture activity is security-sensitive main-process state even when the
+  // native preview pump is disabled. The escape hatch disables only preview
+  // presentation; this event connection still owns update/permission safety.
+  const mainPresentPumpEnabled = process.env.VIDEORC_MAIN_PRESENT_PUMP !== '0'
   disconnectBackendEventSocket()
   const socket = new WebSocket(
     `ws://${connection.host}:${connection.port}/ws?token=${encodeURIComponent(connection.token)}`
   )
   const eventFilterRequestId = `main-event-filter-${Date.now()}`
+  const recordingStatusRequestId = `main-recording-status-${Date.now()}`
   backendEventSocket = socket
   socket.onopen = () => {
     if (backendEventSocket === socket) {
-      logBackend('info', 'Main present pump connected to backend events.')
+      logBackend('info', 'Main process connected to backend events.')
+      const includedEvents = ['recording.status']
+      if (mainPresentPumpEnabled) {
+        includedEvents.push('preview.frameReady', 'compositor.status')
+      }
       socket.send(
         JSON.stringify({
           id: eventFilterRequestId,
           method: 'events.setIncluded',
-          params: { events: ['preview.frameReady', 'compositor.status'] }
+          params: { events: includedEvents }
         })
       )
     }
   }
   socket.onmessage = (event) => {
-    if (backendEventSocket !== socket || typeof event.data !== 'string') {
+    if (backendEventSocket !== socket) {
       return
     }
-    let parsed: { event?: string; payload?: unknown; id?: string; ok?: boolean }
+    if (typeof event.data !== 'string') {
+      retireBackendEventSocket(socket, connection, 'backend sent a non-text event message')
+      return
+    }
     try {
-      parsed = JSON.parse(event.data) as {
-        event?: string
-        payload?: unknown
-        id?: string
-        ok?: boolean
+      const parsed = parseMainBackendWireMessage(event.data)
+      if ('id' in parsed) {
+        if (parsed.id === eventFilterRequestId) {
+          if (parsed.ok === true) {
+            socket.send(
+              JSON.stringify({ id: recordingStatusRequestId, method: 'recording.status' })
+            )
+            if (mainPresentPumpEnabled) {
+              nativePreviewMainStatusPump.cancelPending()
+              void setNativePreviewMainPumpActive(true)
+            }
+          } else {
+            throw new Error('Main backend event filter was rejected.')
+          }
+          return
+        }
+        if (parsed.id === recordingStatusRequestId) {
+          if (parsed.ok !== true) {
+            throw new Error('Initial recording status request was rejected.')
+          }
+          updateMainCaptureState(parseMainRecordingStatus(parsed.payload))
+        }
+        // Responses to fire-and-forget present reports are deliberately ignored.
+        return
       }
-    } catch {
-      return
-    }
-    if (parsed.id === eventFilterRequestId) {
-      if (parsed.ok === true) {
-        nativePreviewMainStatusPump.cancelPending()
-        void setNativePreviewMainPumpActive(true)
-      } else {
-        logBackend('warn', 'Main present pump event filter was rejected; using renderer fallback.')
-        socket.close()
+
+      if (parsed.event === 'recording.status') {
+        updateMainCaptureState(parseMainRecordingStatusEvent(parsed.payload))
+        return
       }
-      return
-    }
-    if (
-      nativePreviewMainSmokeDropPresentEvents &&
-      (parsed.event === 'preview.frameReady' || parsed.event === 'compositor.status')
-    ) {
-      return
-    }
-    // Responses to the fire-and-forget present reports also arrive here. The
-    // compact frame lane drives presentation; full status stays on its slow
-    // diagnostics cadence and is retained only as expansion context.
-    // Event-driven on purpose: new frames exist exactly when events arrive,
-    // and re-presenting the same frame between clusters changes no pixels
-    // (measured: it only aged statuses into fetch territory). Presented frame
-    // age p95 is the content-freshness gate, and it IMPROVED vs the renderer
-    // pump (57ms vs 77ms).
-    if (parsed.event === 'preview.frameReady' && parsed.payload) {
-      const receivedAtMs = Date.now()
-      nativePreviewMainLastFrameReadyAtMs = receivedAtMs
-      nativePreviewMainLastPresentDrivingEventAtMs = receivedAtMs
-      const status = compositorStatusFromFrameReady(
-        parsed.payload as CompositorFrameReady,
-        nativePreviewMainLatestCompositorStatus
-      )
-      nativePreviewMainLatestCompositorStatus = status
-      nativePreviewMainStatusPump.enqueue(status)
-      return
-    }
-    if (parsed.event === 'compositor.status' && parsed.payload) {
-      const status = parsed.payload as CompositorStatus
-      nativePreviewMainLatestCompositorStatus = status
-      // Compatibility for a backend without the compact event. Current
-      // backends never enter this branch after frame-ready starts flowing. A
-      // fresh connection gets one grace window so a queued diagnostics status
-      // cannot beat the first compact frame and offer an expired IOSurface.
       if (
-        mainPumpStatusCompatibilityMayPresent({
-          activatedAtMs: nativePreviewMainPumpActivatedAtMs,
-          lastFrameReadyAtMs: nativePreviewMainLastFrameReadyAtMs,
-          nowMs: Date.now()
-        })
+        nativePreviewMainSmokeDropPresentEvents &&
+        (parsed.event === 'preview.frameReady' || parsed.event === 'compositor.status')
       ) {
-        nativePreviewMainLastPresentDrivingEventAtMs = Date.now()
-        nativePreviewMainStatusPump.enqueue(status)
+        return
       }
+      // The compact frame lane drives presentation; full status stays on its
+      // slow diagnostics cadence and is retained only as expansion context.
+      if (parsed.event === 'preview.frameReady') {
+        const receivedAtMs = Date.now()
+        nativePreviewMainLastFrameReadyAtMs = receivedAtMs
+        nativePreviewMainLastPresentDrivingEventAtMs = receivedAtMs
+        const status = compositorStatusFromFrameReady(
+          parseMainCompositorFrameReadyEvent(parsed.payload),
+          nativePreviewMainLatestCompositorStatus
+        )
+        nativePreviewMainLatestCompositorStatus = status
+        nativePreviewMainStatusPump.enqueue(status)
+        return
+      }
+      if (parsed.event === 'compositor.status') {
+        const status = parseMainCompositorStatusEvent(parsed.payload)
+        nativePreviewMainLatestCompositorStatus = status
+        // Compatibility for a backend without the compact event. A fresh
+        // connection gets one grace window so queued diagnostics cannot beat
+        // the first compact frame and offer an expired IOSurface.
+        if (
+          mainPumpStatusCompatibilityMayPresent({
+            activatedAtMs: nativePreviewMainPumpActivatedAtMs,
+            lastFrameReadyAtMs: nativePreviewMainLastFrameReadyAtMs,
+            nowMs: Date.now()
+          })
+        ) {
+          nativePreviewMainLastPresentDrivingEventAtMs = Date.now()
+          nativePreviewMainStatusPump.enqueue(status)
+        }
+      }
+    } catch (error) {
+      retireBackendEventSocket(
+        socket,
+        connection,
+        `invalid backend event message: ${errorMessageText(error)}`
+      )
     }
   }
   socket.onclose = (event) => {
@@ -6661,6 +7067,142 @@ function connectBackendEventSocket(connection: BackendConnection): void {
   socket.onerror = () => {
     // onclose follows and owns the retry.
   }
+}
+
+const MAIN_BACKEND_ADMIN_METHODS = new Set([
+  ...SMOKE_BACKEND_RPC_METHOD_NAMES,
+  'health.ping',
+  'account.auth.begin_intent',
+  'account.sign_out',
+  'resource.capability.issue',
+  'resource.capability.revoke',
+  'resource.capability.register_background',
+  'resource.admin.resolve_session_path',
+  'resource.admin.resolve_screen_path',
+  'resource.admin.resolve_background_path',
+  'preview.surface.take_native_host_commands',
+  'sessions.delete.resolve',
+  'sessions.delete.complete'
+])
+
+async function requestBackendAdmin<T>(
+  method: string,
+  params: Record<string, unknown> = {},
+  timeoutMs = 15_000
+): Promise<T> {
+  if (!MAIN_BACKEND_ADMIN_METHODS.has(method)) {
+    throw new Error(`Backend admin method is not allowlisted: ${method}`)
+  }
+  const waitStartedAt = Date.now()
+  const connection = await waitForBackendAdminConnection(timeoutMs)
+  const requestTimeoutMs = Math.max(1, timeoutMs - (Date.now() - waitStartedAt))
+  const requestId = `main-admin-${randomUUID()}`
+  return new Promise<T>((resolveRequest, rejectRequest) => {
+    const socket = new WebSocket(
+      `ws://${connection.host}:${connection.port}/ws?token=${encodeURIComponent(connection.token)}`
+    )
+    let settled = false
+    const timer = setTimeout(() => {
+      finish(() => rejectRequest(new Error(`Backend admin request ${method} timed out.`)))
+    }, requestTimeoutMs)
+    const finish = (callback: () => void): void => {
+      if (settled) {
+        return
+      }
+      settled = true
+      clearTimeout(timer)
+      try {
+        socket.close()
+      } catch {
+        // Already closed.
+      }
+      callback()
+    }
+    socket.onopen = () => {
+      if (backendAdminConnection !== connection) {
+        finish(() => rejectRequest(new Error('Backend restarted before admin request dispatch.')))
+        return
+      }
+      socket.send(JSON.stringify({ id: requestId, method, params }))
+    }
+    socket.onmessage = (event) => {
+      if (typeof event.data !== 'string') {
+        return
+      }
+      let message: unknown
+      try {
+        message = JSON.parse(event.data)
+      } catch {
+        return
+      }
+      if (
+        !message ||
+        typeof message !== 'object' ||
+        (message as { id?: unknown }).id !== requestId
+      ) {
+        return
+      }
+      const response = message as {
+        ok?: unknown
+        payload?: unknown
+        error?: { message?: unknown }
+      }
+      if (response.ok === true) {
+        finish(() => resolveRequest(response.payload as T))
+      } else {
+        const detail =
+          typeof response.error?.message === 'string'
+            ? response.error.message
+            : `Backend admin request ${method} failed.`
+        finish(() => rejectRequest(new Error(detail)))
+      }
+    }
+    socket.onerror = () => {
+      finish(() => rejectRequest(new Error(`Backend admin request ${method} could not connect.`)))
+    }
+    socket.onclose = () => {
+      finish(() => rejectRequest(new Error(`Backend admin request ${method} closed early.`)))
+    }
+  })
+}
+
+async function waitForBackendAdminConnection(timeoutMs: number): Promise<BackendConnection> {
+  const deadline = Date.now() + Math.max(1, timeoutMs)
+  while (backendProcess && !appIsQuitting && Date.now() < deadline) {
+    const connection = backendAdminConnection
+    if (connection) {
+      return connection
+    }
+    await delay(25)
+  }
+  throw new Error('Backend admin connection is unavailable.')
+}
+
+async function issueResourceCapability(
+  path: string,
+  kind: ResourceCapabilityKind,
+  options: { ttlMs?: number; useCount?: number } = {}
+): Promise<ResourceSelection> {
+  const result = await requestBackendAdmin<{
+    capabilityId: string
+    kind: ResourceCapabilityKind
+    expiresInMs: number
+    useCount: number
+  }>('resource.capability.issue', {
+    path,
+    kind,
+    ttlMs: options.ttlMs ?? 5 * 60_000,
+    useCount: options.useCount ?? 1
+  })
+  if (result.kind !== kind) {
+    throw new Error('Backend resource capability kind did not match the picker request.')
+  }
+  return mainResourceCapabilities.remember(
+    result.capabilityId,
+    result.kind,
+    path,
+    result.expiresInMs
+  )
 }
 
 async function handleMainPumpCompositorStatus(status: CompositorStatus): Promise<void> {
@@ -6771,15 +7313,34 @@ function handleBackendStdout(text: string): void {
 
     if (trimmed.startsWith('READY ')) {
       try {
-        backendConnection = JSON.parse(trimmed.slice('READY '.length)) as BackendConnection
+        const bootstrap = parseBackendBootstrap(JSON.parse(trimmed.slice('READY '.length)))
+        backendConnection = bootstrap.renderer
+        backendAdminConnection = bootstrap.admin
         logBackend('info', `Backend ready on ${backendConnection.host}:${backendConnection.port}`)
         recordBackendRuntimeProcess(backendConnection)
         if (process.env.VIDEORC_SMOKE_PRINT_BACKEND_READY === '1') {
-          safeConsole.log(`[smoke] backend-ready ${JSON.stringify(backendConnection)}`)
+          // The admin credential is private bootstrap authority. Even debug
+          // smoke output receives only the renderer-scoped connection.
+          safeConsole.log(`[smoke] backend-ready ${publicBackendConnectionJson(backendConnection)}`)
         }
-        sendToWindows('backend:connection', backendConnection)
-        sendToWindows('backend:lifecycle', { state: 'running' })
-        connectBackendEventSocket(backendConnection)
+        connectBackendEventSocket(backendAdminConnection)
+        const rendererConnection = backendConnection
+        const adminConnection = backendAdminConnection
+        backendAuthorityReady = rehydrateManagedBackgroundAssets().catch(() => {
+          logBackend(
+            'warn',
+            'Managed background authority could not be fully restored; affected assets remain unavailable.'
+          )
+        })
+        void backendAuthorityReady.then(() => {
+          if (
+            backendConnection === rendererConnection &&
+            backendAdminConnection === adminConnection
+          ) {
+            sendToWindows('backend:connection', rendererConnection)
+            sendToWindows('backend:lifecycle', { state: 'running' })
+          }
+        })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         logBackend('error', `Could not parse backend READY line: ${message}`)
@@ -6846,7 +7407,10 @@ async function primeScreenCapturePermission(): Promise<void> {
 // Diagnostic tallies for probes: how chatty is main->renderer IPC really?
 const sendToWindowsCounts = new Map<string, number>()
 
-function sendToWindows(channel: string, ...args: unknown[]): void {
+function sendToWindows<TChannel extends ElectronEventChannel>(
+  channel: TChannel,
+  payload: ElectronIpcEventMap[TChannel]
+): void {
   sendToWindowsCounts.set(channel, (sendToWindowsCounts.get(channel) ?? 0) + 1)
   for (const window of BrowserWindow.getAllWindows()) {
     if (window === nativePreviewSurfaceWindow) {
@@ -6860,7 +7424,7 @@ function sendToWindows(channel: string, ...args: unknown[]): void {
       if (window.webContents.mainFrame.isDestroyed()) {
         continue
       }
-      window.webContents.send(channel, ...args)
+      sendElectronEvent(window.webContents, channel, payload)
     } catch {
       // The renderer can be disposed between the destroyed check and send during app shutdown.
     }
@@ -6879,7 +7443,12 @@ function startSmokePreviewMotionServer(): void {
     const address = smokePreviewMotionServer?.address()
     if (address && typeof address !== 'string') {
       safeConsole.log(
-        `[smoke] preview-motion-ready ${JSON.stringify({ host: address.address, port: address.port, appPid: process.pid })}`
+        `[smoke] preview-motion-ready ${JSON.stringify({
+          host: address.address,
+          port: address.port,
+          appPid: process.pid,
+          ...(app.isPackaged ? {} : { capability: smokeCommandCapability })
+        })}`
       )
     }
   })
@@ -6889,42 +7458,11 @@ async function handleSmokePreviewMotionRequest(
   request: IncomingMessage,
   response: HttpResponse
 ): Promise<void> {
-  if (request.method === 'GET' && request.url?.startsWith('/preview-frame.png')) {
-    const png = Buffer.from(
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
-      'base64'
-    )
-    response.writeHead(200, {
-      'Content-Type': 'image/png',
-      'Content-Length': String(png.length),
-      'Cache-Control': 'no-store'
-    })
-    response.end(png)
-    return
-  }
-  if (request.method === 'GET' && request.url === '/health') {
-    writeSmokeJson(response, 200, { ok: true })
-    return
-  }
-
-  if (request.method !== 'POST' || request.url !== '/command') {
-    writeSmokeJson(response, 404, { ok: false, error: 'Unknown smoke endpoint.' })
-    return
-  }
-
-  try {
-    const body = await readSmokeBody(request)
-    const command = typeof body.command === 'string' ? body.command : ''
-    const params =
-      body.params && typeof body.params === 'object' ? (body.params as Record<string, unknown>) : {}
-    const result = await runSmokePreviewMotionCommand(command, params)
-    writeSmokeJson(response, 200, { ok: true, result })
-  } catch (error) {
-    writeSmokeJson(response, 500, {
-      ok: false,
-      error: error instanceof Error ? error.message : String(error)
-    })
-  }
+  await handleSmokeCommandRequest(request, response, {
+    capability: smokeCommandCapability,
+    allowedCommands: app.isPackaged ? PACKAGED_SMOKE_COMMAND_NAMES : undefined,
+    runCommand: runSmokePreviewMotionCommand
+  })
 }
 
 async function runSmokePreviewMotionCommand(
@@ -6945,6 +7483,122 @@ async function runSmokePreviewMotionCommand(
     const prevented = smokeAppQuitGuard.shouldPreventQuit()
     app.quit()
     return { prevented }
+  }
+
+  if (command === 'authorize-smoke-resource') {
+    if (app.isPackaged || !smokeCommandServerEnabled) {
+      throw new Error('Smoke resource authorization is unavailable in this app mode.')
+    }
+    const authorization = validateSmokeResourceAuthorization(
+      params,
+      process.env.VIDEORC_SMOKE_STATE_DIR
+    )
+    return issueResourceCapability(authorization.path, authorization.kind)
+  }
+
+  if (command === 'import-smoke-background') {
+    if (app.isPackaged || !smokeCommandServerEnabled || Object.keys(params).length !== 1) {
+      throw new Error('Smoke background import is unavailable or invalid in this app mode.')
+    }
+    const authorization = validateSmokeResourceAuthorization(
+      { kind: 'input-file', path: params.path },
+      process.env.VIDEORC_SMOKE_STATE_DIR
+    )
+    const imported = await importBackgroundImageFromPath(authorization.path)
+    if (!imported) {
+      throw new Error('Smoke background import requires a supported image file.')
+    }
+    return imported
+  }
+
+  if (command === 'backend-debug-rpc') {
+    // The loopback bearer is only the first boundary. The backend also needs
+    // its private admin credential, a debug build, and the explicit runtime
+    // switch set by startBackend; packaged builds never reach this bridge.
+    if (app.isPackaged || !smokeCommandServerEnabled) {
+      throw new Error('Backend debug RPC bridge is unavailable in this app mode.')
+    }
+    const request = validateSmokeBackendRpcRequest(params)
+    if (!request) {
+      throw new Error('Invalid or unallowlisted backend debug RPC request.')
+    }
+    return requestBackendAdmin(request.method, request.params, request.timeoutMs)
+  }
+
+  if (command === 'inspect-backend-state-isolation') {
+    if (app.isPackaged || !smokeCommandServerEnabled || Object.keys(params).length !== 0) {
+      throw new Error('Backend state isolation inspection is unavailable in this app mode.')
+    }
+    const smokeStateDirectory =
+      process.env.VIDEORC_SMOKE_STATE_DIR ?? process.env.VIDEORC_SMOKE_OUTPUT_DIR
+    const configuredDatabasePath = process.env.VIDEORC_DATABASE_PATH
+    const configuredSecretsPath = process.env.VIDEORC_SECRETS_PATH
+    const configuredRecordingsPath = process.env.VIDEORC_RECORDINGS_DIR
+    if (
+      !smokeStateDirectory ||
+      !configuredDatabasePath ||
+      !configuredSecretsPath ||
+      !configuredRecordingsPath
+    ) {
+      return {
+        isolated: false,
+        databaseInsideSmokeState: false,
+        secretsInsideSmokeState: false,
+        recordingsInsideSmokeState: false,
+        backendUsesConfiguredDatabase: false
+      }
+    }
+    const expectedDatabasePath = resolve(configuredDatabasePath)
+    const expectedStateDirectory = resolve(smokeStateDirectory)
+    const databaseInsideSmokeState = isPathInsideAnyRoot(expectedDatabasePath, [
+      expectedStateDirectory
+    ])
+    const secretsInsideSmokeState = isPathInsideAnyRoot(resolve(configuredSecretsPath), [
+      expectedStateDirectory
+    ])
+    const recordingsInsideSmokeState = isPathInsideAnyRoot(resolve(configuredRecordingsPath), [
+      expectedStateDirectory
+    ])
+    const health = await requestBackendAdmin<{ databasePath?: unknown }>('health.ping')
+    const backendUsesConfiguredDatabase =
+      typeof health.databasePath === 'string' &&
+      resolve(health.databasePath) === expectedDatabasePath
+    return {
+      isolated:
+        databaseInsideSmokeState &&
+        secretsInsideSmokeState &&
+        recordingsInsideSmokeState &&
+        backendUsesConfiguredDatabase,
+      databaseInsideSmokeState,
+      secretsInsideSmokeState,
+      recordingsInsideSmokeState,
+      backendUsesConfiguredDatabase
+    }
+  }
+
+  if (command === 'inspect-packaged-bundled-background') {
+    if (!app.isPackaged || !packagedSmokeHarnessCapability || Object.keys(params).length !== 0) {
+      throw new Error('Packaged bundled-background inspection is unavailable in this app mode.')
+    }
+    const [asset] = bundledBackgroundAssetsInternal()
+    if (!asset) {
+      throw new Error('The packaged app contains no bundled background assets.')
+    }
+    await requestBackendAdmin('resource.capability.register_background', {
+      assetId: asset.id,
+      path: asset.assetPath
+    })
+    const assetUrl = managedBackgroundAssetUrl(asset.fileName)
+    const decoded = await decodeManagedBackgroundAssetInMainRenderer(assetUrl)
+    return {
+      id: asset.id,
+      name: asset.name,
+      fileName: asset.fileName,
+      managedAssetPath: asset.assetPath,
+      assetUrl,
+      decodedWidth: decoded.naturalWidth,
+      decodedHeight: decoded.naturalHeight
+    }
   }
 
   if (!mainWindow || mainWindow.webContents.isDestroyed()) {
@@ -7533,30 +8187,42 @@ async function runSmokePreviewMotionCommand(
       viewers: latestViewerSample
     }
     const invokeResults = await window.webContents.executeJavaScript(
-      `(async () => Promise.all([
-        window.videorc.pushCommentHighlightState({
-          sessionId: 'forged-comments-session',
-          messageId: 'forged-comments-message',
-          generation: 999,
-          phase: 'live'
-        }),
-        window.videorc.pushCommentsSnapshot({
-          mode: { kind: 'live' },
-          snapshot: {
+      `(async () => {
+        const attempts = [
+          ['pushCommentHighlightState', [{
             sessionId: 'forged-comments-session',
-            providers: [],
-            messages: [],
-            unreadCount: 0,
-            updatedAt: '2099-01-01T00:00:00Z'
+            messageId: 'forged-comments-message',
+            generation: 999,
+            phase: 'live'
+          }]],
+          ['pushCommentsSnapshot', [{
+            mode: { kind: 'live' },
+            snapshot: {
+              sessionId: 'forged-comments-session',
+              providers: [],
+              messages: [],
+              unreadCount: 0,
+              updatedAt: '2099-01-01T00:00:00Z'
+            }
+          }]],
+          ['pushViewerSample', [{
+            sessionClientId: 'forged-comments-session',
+            total: 999999,
+            sampledAt: '2099-01-01T00:00:00Z',
+            destinations: []
+          }]]
+        ];
+        return Promise.all(attempts.map(async ([method, args]) => {
+          const candidate = window.videorc?.[method];
+          if (typeof candidate !== 'function') return { method, exposed: false };
+          try {
+            await candidate(...args);
+            return { method, exposed: true, resolved: true };
+          } catch (error) {
+            return { method, exposed: true, resolved: false, error: String(error?.message ?? error) };
           }
-        }),
-        window.videorc.pushViewerSample({
-          sessionClientId: 'forged-comments-session',
-          total: 999999,
-          sampledAt: '2099-01-01T00:00:00Z',
-          destinations: []
-        })
-      ]))()`,
+        }));
+      })()`,
       true
     )
     await delay(50)
@@ -8218,7 +8884,7 @@ function smokePreviewSceneParams(
     sideBySideCameraSide: 'right'
   }
   const baseTransform = fullFrameTransform()
-  const backgroundAsset = bundledBackgroundAssets()[0]
+  const backgroundAsset = bundledBackgroundAssetsInternal()[0]
   return {
     revision,
     layout,
@@ -8290,9 +8956,9 @@ function smokeCompositorStatusFromSceneParams(
         deviceId: source.deviceId,
         visible: source.visible,
         transform: source.transform,
-        fit: previewLayerFit(source, params.layout),
+        fit: previewProofLayerFit(source, params.layout),
         mirror: source.kind === 'camera' ? params.layout.cameraMirror : false,
-        shape: previewLayerShape(source, params.layout)
+        shape: previewProofLayerShape(source, params.layout)
       })),
       ...(params.activeScreen
         ? [
@@ -8737,36 +9403,6 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
   `
 }
 
-function readSmokeBody(request: IncomingMessage): Promise<Record<string, unknown>> {
-  return new Promise((resolveRead, rejectRead) => {
-    let body = ''
-    request.setEncoding('utf8')
-    request.on('data', (chunk) => {
-      body += chunk
-      if (body.length > 1024 * 1024) {
-        rejectRead(new Error('Smoke request body is too large.'))
-        request.destroy()
-      }
-    })
-    request.on('end', () => {
-      try {
-        resolveRead(body ? JSON.parse(body) : {})
-      } catch (error) {
-        rejectRead(error)
-      }
-    })
-    request.on('error', rejectRead)
-  })
-}
-
-function writeSmokeJson(response: HttpResponse, statusCode: number, payload: unknown): void {
-  response.writeHead(statusCode, {
-    'Content-Type': 'application/json',
-    'Cache-Control': 'no-store'
-  })
-  response.end(JSON.stringify(payload))
-}
-
 function inferBackendLogLevel(line: string): BackendLogEvent['level'] {
   if (line.includes(' ERROR ')) {
     return 'error'
@@ -8796,6 +9432,9 @@ async function stopBackend(): Promise<void> {
     removeBackendOwnedProcesses()
     backendProcess = null
     backendConnection = null
+    backendAdminConnection = null
+    backendAuthorityReady = Promise.resolve()
+    mainResourceCapabilities.clear()
     disconnectBackendEventSocket()
   }
 }
@@ -8803,16 +9442,15 @@ async function stopBackend(): Promise<void> {
 async function openSystemPermissions(pane: SystemPermissionPane = 'privacy'): Promise<void> {
   assertPermissionShortcutSupported(process.platform)
 
-  const mediaAccessGranted = await requestMediaAccessIfNeeded(pane)
-  await shell.openExternal(permissionUrlForPane(pane))
-  if (mediaAccessGranted) {
+  const reason = `Restarting capture backend after ${pane} permission became available.`
+  // Opening Settings is side-effect-free. The watcher captures the current
+  // status first and requests a restart only after a real grant transition.
+  mediaPermissionGrantWatcher.watch(pane, reason)
+  try {
+    await shell.openExternal(permissionUrlForPane(pane))
+  } catch (error) {
     mediaPermissionGrantWatcher.stop()
-    await restartBackend(`Restarting capture backend after ${pane} permission became available.`)
-  } else {
-    mediaPermissionGrantWatcher.watch(
-      pane,
-      `Restarting capture backend after ${pane} permission became available.`
-    )
+    throw error
   }
 }
 
@@ -8833,37 +9471,12 @@ async function requestMediaAccessNative(pane: 'camera' | 'microphone'): Promise<
         process.platform === 'darwin'
           ? (target) => systemPreferences.askForMediaAccess(target)
           : async (target) => systemPreferences.getMediaAccessStatus(target) === 'granted',
-      restartBackend,
+      restartBackend: requestPermissionBackendRestart,
       stopGrantWatcher: () => mediaPermissionGrantWatcher.stop(),
       log: (level, message) => logBackend(level, message)
     },
     pane
   )
-}
-
-async function requestMediaAccessIfNeeded(pane: SystemPermissionPane): Promise<boolean> {
-  if (pane !== 'camera' && pane !== 'microphone') {
-    return false
-  }
-
-  try {
-    const status = systemPreferences.getMediaAccessStatus(pane)
-    if (status === 'granted') {
-      return true
-    }
-    if (status !== 'not-determined') {
-      return false
-    }
-    if (process.platform !== 'darwin') {
-      // askForMediaAccess is macOS-only; the Windows settings page we are
-      // about to open IS the grant flow.
-      return false
-    }
-    return systemPreferences.askForMediaAccess(pane)
-  } catch (error) {
-    logBackend('warn', `Could not request ${pane} permission: ${errorMessage(error)}`)
-    return false
-  }
 }
 
 // The OS's real camera/mic access state. getMediaAccessStatus is supported on
@@ -8904,10 +9517,83 @@ async function restartBackend(reason: string): Promise<void> {
   return backendRestartInProgress
 }
 
+async function acquireCurrentBackendInterruption(
+  reason: string,
+  action: 'permission-restart' | 'update-install' = 'permission-restart'
+): Promise<BackendInterruptionLease | null> {
+  const connection = backendAdminConnection
+  if (!connection) {
+    return null
+  }
+
+  const lease = await acquireBackendInterruptionLease(connection, { action, reason })
+  // A backend crash/restart between admission and this continuation would make
+  // the old lease irrelevant to the new process. Fail closed instead of using
+  // authority granted by a backend that no longer owns capture.
+  if (backendAdminConnection !== connection) {
+    await lease?.release().catch(() => undefined)
+    return null
+  }
+  return lease
+}
+
+function retainDeferredPermissionRestart(reason: string): void {
+  const deferred = requestPermissionRestart(deferredPermissionRestartState, 'unknown', reason)
+  deferredPermissionRestartState = deferred.state
+}
+
+async function runPermissionBackendRestart(reason: string): Promise<boolean> {
+  try {
+    const restarted = await runBackendInterruptingAction(
+      () => acquireCurrentBackendInterruption(reason),
+      () => restartBackend(reason)
+    )
+    if (!restarted) {
+      retainDeferredPermissionRestart(reason)
+      logBackend(
+        'info',
+        'Permission restart deferred because capture became active, started, or could not be confirmed idle.'
+      )
+    }
+    return restarted
+  } catch (error) {
+    retainDeferredPermissionRestart(reason)
+    throw error
+  }
+}
+
+function updateMainCaptureState(payload: unknown): void {
+  const nextState = captureStateAfterStatusPayload(payload)
+  mainCaptureState = nextState
+  const decision = flushPermissionRestart(deferredPermissionRestartState, nextState)
+  deferredPermissionRestartState = decision.state
+  if (decision.runReason) {
+    void runPermissionBackendRestart(decision.runReason).catch((error) => {
+      logBackend('warn', `Could not run the deferred permission restart: ${errorMessage(error)}`)
+    })
+  }
+}
+
+async function requestPermissionBackendRestart(reason: string): Promise<boolean> {
+  const decision = requestPermissionRestart(
+    deferredPermissionRestartState,
+    mainCaptureState,
+    reason
+  )
+  deferredPermissionRestartState = decision.state
+  if (!decision.runReason) {
+    logBackend('info', 'Permission restart deferred until the active capture is idle.')
+    return false
+  }
+  return runPermissionBackendRestart(decision.runReason)
+}
+
 const mediaPermissionGrantWatcher = createMediaPermissionGrantWatcher({
   getStatus: (permission) => systemPreferences.getMediaAccessStatus(permission),
   log: (level, message) => logBackend(level, message),
-  restartBackend
+  restartBackend: async (reason) => {
+    await requestPermissionBackendRestart(reason)
+  }
 })
 
 async function runtimeInfo(): Promise<RuntimeInfo> {
@@ -8929,16 +9615,84 @@ async function revealPermissionTarget(): Promise<void> {
   shell.showItemInFolder(resolveBackendPermissionTargetPath())
 }
 
-async function revealPath(targetPath: string): Promise<void> {
-  const trimmed = typeof targetPath === 'string' ? targetPath.trim() : ''
-  if (!trimmed) {
-    throw new Error('Reveal path is empty.')
+async function revealSelectedResource(
+  directoryHandleId: unknown,
+  kind: ResourceCapabilityKind = 'output-directory'
+): Promise<void> {
+  if (kind !== 'output-directory') {
+    throw new Error('Only output-directory handles can be revealed by this operation.')
   }
-
-  shell.showItemInFolder(resolve(trimmed))
+  const path = outputDirectoryAuthority().resolve(directoryHandleId)
+  shell.showItemInFolder(path)
 }
 
-async function pickScreenImage(): Promise<string | null> {
+async function resolveManagedSessionPath(sessionId: unknown): Promise<string> {
+  if (typeof sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)) {
+    throw new Error('Managed session id is invalid.')
+  }
+  const result = await requestBackendAdmin<{ path: string }>(
+    'resource.admin.resolve_session_path',
+    {
+      sessionId
+    }
+  )
+  if (!result || typeof result.path !== 'string' || result.path.length === 0) {
+    throw new Error('Managed session path is unavailable.')
+  }
+  return result.path
+}
+
+async function revealManagedSession(sessionId: unknown): Promise<void> {
+  shell.showItemInFolder(await resolveManagedSessionPath(sessionId))
+}
+
+async function openManagedSession(sessionId: unknown): Promise<string> {
+  return shell.openPath(await resolveManagedSessionPath(sessionId))
+}
+
+async function revealManagedBackground(assetId: unknown): Promise<void> {
+  if (typeof assetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(assetId)) {
+    throw new Error('Managed background asset id is invalid.')
+  }
+  const result = await requestBackendAdmin<{ path: string }>(
+    'resource.admin.resolve_background_path',
+    { assetId }
+  )
+  shell.showItemInFolder(result.path)
+}
+
+async function trashSessionDeletion(operationId: unknown): Promise<{
+  deleted: boolean
+  failedCount: number
+}> {
+  if (
+    typeof operationId !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(operationId)
+  ) {
+    throw new Error('Library deletion operation id is invalid.')
+  }
+  const operation = await requestBackendAdmin<{
+    operationId: string
+    sessionId: string
+    paths: string[]
+    blockedPaths?: string[]
+  }>('sessions.delete.resolve', { operationId })
+  if (operation.operationId !== operationId || !Array.isArray(operation.paths)) {
+    throw new Error('Library deletion operation response is invalid.')
+  }
+  const trash = await trashPaths(operation.paths, {
+    stat: (target) => fsPromises.stat(target),
+    trashItem: (target) => shell.trashItem(target)
+  })
+  const failedPaths = [...(operation.blockedPaths ?? []), ...trash.failures]
+  const completion = await requestBackendAdmin<{ deleted: boolean }>('sessions.delete.complete', {
+    operationId,
+    failedPaths
+  })
+  return { deleted: completion.deleted, failedCount: failedPaths.length }
+}
+
+async function pickScreenImage(): Promise<ResourceSelection | null> {
   const options: Electron.OpenDialogOptions = {
     title: 'Choose Screen image',
     properties: ['openFile'],
@@ -8957,12 +9711,13 @@ async function pickScreenImage(): Promise<string | null> {
     return null
   }
 
-  return result.filePaths[0] ?? null
+  const path = result.filePaths[0]
+  return path ? issueResourceCapability(path, 'input-file') : null
 }
 
 // Native directory picker + directory facts for the Settings output-directory
 // row (ST2): Browse, exists/writable validation, create-on-demand, free space.
-async function pickDirectoryPath(): Promise<string | null> {
+async function pickDirectoryPath(): Promise<ResourceSelection | null> {
   const options: Electron.OpenDialogOptions = {
     title: 'Choose output directory',
     properties: ['openDirectory', 'createDirectory']
@@ -8975,7 +9730,13 @@ async function pickDirectoryPath(): Promise<string | null> {
     return null
   }
 
-  return result.filePaths[0] ?? null
+  const path = result.filePaths[0]
+  if (!path) {
+    return null
+  }
+  const handle = outputDirectoryAuthority().remember(path)
+  const selection = await issueResourceCapability(path, 'output-directory')
+  return { ...selection, ...handle }
 }
 
 interface DirectoryFacts {
@@ -8984,19 +9745,15 @@ interface DirectoryFacts {
   freeBytes: number | null
 }
 
-function expandHomePath(raw: string): string {
-  const trimmed = raw.trim()
-  if (trimmed === '~') {
-    return homedir()
+async function checkDirectoryFactsForCapability(
+  directoryHandleId: unknown
+): Promise<DirectoryFacts> {
+  let path: string
+  try {
+    path = outputDirectoryAuthority().resolve(directoryHandleId)
+  } catch {
+    return { exists: false, writable: false, freeBytes: null }
   }
-  if (trimmed.startsWith('~/')) {
-    return join(homedir(), trimmed.slice(2))
-  }
-  return trimmed
-}
-
-async function checkDirectoryFacts(rawPath: string): Promise<DirectoryFacts> {
-  const path = expandHomePath(rawPath)
   if (!path) {
     return { exists: false, writable: false, freeBytes: null }
   }
@@ -9024,15 +9781,19 @@ async function checkDirectoryFacts(rawPath: string): Promise<DirectoryFacts> {
   return facts
 }
 
-async function createDirectoryAt(rawPath: string): Promise<DirectoryFacts> {
-  const path = expandHomePath(rawPath)
-  await fsPromises.mkdir(path, { recursive: true })
-  return checkDirectoryFacts(path)
+async function authorizeOutputDirectory(directoryHandleId: unknown): Promise<ResourceSelection> {
+  const path = outputDirectoryAuthority().resolve(directoryHandleId)
+  const handle = {
+    directoryHandleId: String(directoryHandleId),
+    displayName: basename(path) || path
+  }
+  const selection = await issueResourceCapability(path, 'output-directory')
+  return { ...selection, ...handle }
 }
 
 // Generic native open-file dialog returning the chosen path (e.g. "Locate
 // FFmpeg…" in Settings). No filters — the FFmpeg binary has no extension.
-async function pickFilePath(): Promise<string | null> {
+async function pickFilePath(): Promise<ResourceSelection | null> {
   const options: Electron.OpenDialogOptions = {
     title: 'Locate FFmpeg',
     properties: ['openFile']
@@ -9045,7 +9806,8 @@ async function pickFilePath(): Promise<string | null> {
     return null
   }
 
-  return result.filePaths[0] ?? null
+  const path = result.filePaths[0]
+  return path ? issueResourceCapability(path, 'input-file') : null
 }
 
 // --- Managed asset serving (videorc-asset://) ---------------------------------
@@ -9056,9 +9818,28 @@ async function pickFilePath(): Promise<string | null> {
 // managed background directories, addressed by bare basename — no arbitrary
 // filesystem reach.
 const MANAGED_ASSET_SCHEME = 'videorc-asset'
+const SMOKE_PREVIEW_FRAME_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" fill="#111827"/><rect x="4" y="4" width="24" height="24" fill="#ef4444"/><rect x="36" y="4" width="24" height="24" fill="#22c55e"/><rect x="4" y="36" width="24" height="24" fill="#3b82f6"/><rect x="36" y="36" width="24" height="24" fill="#f59e0b"/></svg>'
 
 function managedBackgroundRoots(): string[] {
   return [join(app.getPath('userData'), 'background-assets'), bundledBackgroundDirectory()]
+}
+
+function resolveRegularFileInsideRoot(root: string, fileName: string): string | null {
+  if (!fileName || fileName.includes('/') || fileName.includes('\\') || fileName.includes('..')) {
+    return null
+  }
+  try {
+    const candidate = join(root, fileName)
+    if (lstatSync(candidate).isSymbolicLink() || !statSync(candidate).isFile()) {
+      return null
+    }
+    const canonicalRoot = realpathSync(root)
+    const canonicalFile = realpathSync(candidate)
+    return isPathInsideAnyRoot(canonicalFile, [canonicalRoot]) ? canonicalFile : null
+  } catch {
+    return null
+  }
 }
 
 function resolveManagedBackgroundFile(fileName: string): string | null {
@@ -9066,8 +9847,8 @@ function resolveManagedBackgroundFile(fileName: string): string | null {
     return null
   }
   for (const root of managedBackgroundRoots()) {
-    const candidate = join(root, fileName)
-    if (existsSync(candidate)) {
+    const candidate = resolveRegularFileInsideRoot(root, fileName)
+    if (candidate) {
       return candidate
     }
   }
@@ -9144,8 +9925,7 @@ function resolveManagedAvatarFile(fileName: string): string | null {
   if (!fileName || fileName.includes('/') || fileName.includes('\\') || fileName.includes('..')) {
     return null
   }
-  const candidate = join(avatarCacheDirectory(), fileName)
-  return existsSync(candidate) ? candidate : null
+  return resolveRegularFileInsideRoot(avatarCacheDirectory(), fileName)
 }
 
 // Stream-takeover screen images live in the backend-managed Screens dir; the
@@ -9156,8 +9936,7 @@ function resolveManagedScreenFile(fileName: string): string | null {
   if (!fileName || fileName.includes('/') || fileName.includes('\\') || fileName.includes('..')) {
     return null
   }
-  const candidate = join(app.getPath('userData'), 'Screens', fileName)
-  return existsSync(candidate) ? candidate : null
+  return resolveRegularFileInsideRoot(join(app.getPath('userData'), 'Screens'), fileName)
 }
 
 function registerManagedAssetProtocol(): void {
@@ -9165,6 +9944,14 @@ function registerManagedAssetProtocol(): void {
     try {
       const url = new URL(request.url)
       const fileName = decodeURIComponent(url.pathname.replace(/^\//, ''))
+      if (smokeCommandServerEnabled && url.host === 'smoke-preview' && fileName === 'frame.svg') {
+        return new Response(SMOKE_PREVIEW_FRAME_SVG, {
+          headers: {
+            'Content-Type': 'image/svg+xml',
+            'Cache-Control': 'no-store'
+          }
+        })
+      }
       const resolved =
         url.host === 'background'
           ? resolveManagedBackgroundFile(fileName)
@@ -9186,13 +9973,22 @@ function registerManagedAssetProtocol(): void {
 // Existence oracle for the honest "Missing" badge: an image LOAD failure is
 // not proof the file is gone (decode errors, transient reads) — only a real
 // filesystem miss inside the managed roots may brand a slot missing-file.
-function backgroundAssetFileExists(assetPath: unknown): boolean {
-  if (typeof assetPath !== 'string' || assetPath.length === 0) {
+async function backgroundAssetFileExists(assetId: unknown): Promise<boolean> {
+  if (typeof assetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(assetId)) {
     return false
   }
-  const normalized = resolve(assetPath)
-  const inManagedRoot = isPathInsideAnyRoot(normalized, managedBackgroundRoots())
-  return inManagedRoot && existsSync(normalized)
+  try {
+    if (!(await ensureManagedBackgroundRegistered(assetId))) {
+      return false
+    }
+    const result = await requestBackendAdmin<{ path: string }>(
+      'resource.admin.resolve_background_path',
+      { assetId }
+    )
+    return typeof result.path === 'string' && existsSync(result.path)
+  } catch {
+    return false
+  }
 }
 
 async function importBackgroundImage(): Promise<BackgroundImportResult | null> {
@@ -9219,7 +10015,9 @@ async function importBackgroundImage(): Promise<BackgroundImportResult | null> {
 
 // Shared by the picker flow above and the OBS import (O3), which arrives with
 // a path from OBS's scene collection instead of a dialog.
-function importBackgroundImageFromPath(sourcePath: string): BackgroundImportResult | null {
+async function importBackgroundImageFromPath(
+  sourcePath: string
+): Promise<BackgroundImportResult | null> {
   if (!isSupportedBackgroundFile(sourcePath) || !existsSync(sourcePath)) {
     return null
   }
@@ -9232,13 +10030,53 @@ function importBackgroundImageFromPath(sourcePath: string): BackgroundImportResu
   const assetPath = join(directory, managedBackgroundFileName(id, sourcePath))
   copyFileSync(sourcePath, assetPath)
 
+  await requestBackendAdmin('resource.capability.register_background', {
+    assetId: id,
+    path: assetPath
+  })
   return {
     id,
     name: backgroundAssetNameFromPath(sourcePath),
-    assetPath,
-    thumbnailPath: assetPath,
+    assetPath: managedBackgroundAssetUrl(basename(assetPath)),
+    thumbnailPath: managedBackgroundAssetUrl(basename(assetPath)),
     fileName: basename(sourcePath)
   }
+}
+
+async function readObsSetupForRenderer(
+  collection: string,
+  profile: string
+): Promise<ObsSetup | null> {
+  const setup = readObsSetup(collection, profile)
+  if (!setup) {
+    return null
+  }
+
+  const recordingPath = setup.recordingPath
+  delete setup.recordingPath
+  if (recordingPath) {
+    try {
+      const handle = outputDirectoryAuthority().remember(recordingPath)
+      setup.recordingDirectory = {
+        ...(await issueResourceCapability(recordingPath, 'output-directory')),
+        ...handle
+      }
+    } catch {
+      // OBS can retain a stale folder. Report mapping without granting it.
+    }
+  }
+
+  await Promise.all(
+    setup.sources.map(async (source) => {
+      const sourcePath = source.filePath
+      delete source.filePath
+      if (source.kind !== 'image' || !sourcePath) {
+        return
+      }
+      source.managedBackground = (await importBackgroundImageFromPath(sourcePath)) ?? undefined
+    })
+  )
+  return setup
 }
 
 function bundledBackgroundDirectory(): string {
@@ -9247,7 +10085,41 @@ function bundledBackgroundDirectory(): string {
     : resolve(workspaceRoot(), 'apps/desktop/src/renderer/src/assets/backgrounds')
 }
 
-function bundledBackgroundAssets(): BackgroundImportResult[] {
+function managedBackgroundAssetUrl(fileName: string): string {
+  return `${MANAGED_ASSET_SCHEME}://background/${encodeURIComponent(fileName)}`
+}
+
+async function decodeManagedBackgroundAssetInMainRenderer(
+  assetUrl: string
+): Promise<ReturnType<typeof normalizeManagedImageDecodeResult>> {
+  const deadline = Date.now() + 12_000
+  let lastError: unknown = null
+  while (Date.now() < deadline) {
+    const window = mainWindow
+    if (
+      window &&
+      !window.isDestroyed() &&
+      !window.webContents.isDestroyed() &&
+      !window.webContents.isLoadingMainFrame()
+    ) {
+      try {
+        const decoded = await window.webContents.executeJavaScript(
+          managedImageDecodeScript(assetUrl),
+          true
+        )
+        return normalizeManagedImageDecodeResult(decoded, assetUrl)
+      } catch (error) {
+        lastError = error
+      }
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100))
+  }
+  throw new Error('Packaged managed background did not decode in the main renderer.', {
+    cause: lastError
+  })
+}
+
+function bundledBackgroundAssetsInternal(): BackgroundImportResult[] {
   const directory = bundledBackgroundDirectory()
   return BUNDLED_BACKGROUND_MANIFEST.map((asset) => {
     const assetPath = join(directory, asset.fileName)
@@ -9259,6 +10131,74 @@ function bundledBackgroundAssets(): BackgroundImportResult[] {
       fileName: asset.fileName
     }
   }).filter((asset) => existsSync(asset.assetPath))
+}
+
+async function bundledBackgroundAssets(): Promise<BackgroundImportResult[]> {
+  const assets = bundledBackgroundAssetsInternal()
+  await Promise.all(
+    assets.map((asset) =>
+      requestBackendAdmin('resource.capability.register_background', {
+        assetId: asset.id,
+        path: asset.assetPath
+      })
+    )
+  )
+  return assets.map((asset) => ({
+    ...asset,
+    assetPath: managedBackgroundAssetUrl(asset.fileName),
+    thumbnailPath: managedBackgroundAssetUrl(asset.fileName)
+  }))
+}
+
+function importedBackgroundPathForAssetId(assetId: string): string | null {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(assetId)) {
+    return null
+  }
+  const root = join(app.getPath('userData'), 'background-assets')
+  let entries: string[]
+  try {
+    entries = readdirSync(root)
+  } catch {
+    return null
+  }
+  for (const entry of entries) {
+    const dot = entry.lastIndexOf('.')
+    if (dot <= 0 || entry.slice(0, dot) !== assetId || !isSupportedBackgroundFile(entry)) {
+      continue
+    }
+    const resolved = resolveRegularFileInsideRoot(root, entry)
+    if (resolved) {
+      return resolved
+    }
+  }
+  return null
+}
+
+async function ensureManagedBackgroundRegistered(assetId: string): Promise<boolean> {
+  const bundled = bundledBackgroundAssetsInternal().find((asset) => asset.id === assetId)
+  const path = bundled?.assetPath ?? importedBackgroundPathForAssetId(assetId)
+  if (!path) {
+    return false
+  }
+  await requestBackendAdmin('resource.capability.register_background', { assetId, path })
+  return true
+}
+
+async function rehydrateManagedBackgroundAssets(): Promise<void> {
+  const ids = new Set(bundledBackgroundAssetsInternal().map((asset) => asset.id))
+  const root = join(app.getPath('userData'), 'background-assets')
+  try {
+    for (const entry of readdirSync(root)) {
+      const dot = entry.lastIndexOf('.')
+      const id = dot > 0 ? entry.slice(0, dot) : ''
+      if (/^[A-Za-z0-9_-]{1,128}$/.test(id) && isSupportedBackgroundFile(entry)) {
+        ids.add(id)
+      }
+    }
+  } catch {
+    // A fresh profile has no imported background directory yet.
+  }
+  await Promise.all([...ids].map((id) => ensureManagedBackgroundRegistered(id)))
 }
 
 async function openOAuthUrl(authUrl: string): Promise<void> {
@@ -9295,7 +10235,11 @@ if (!hasSingleInstanceLock) {
   app.on('second-instance', (_event, argv) => {
     const callbackUrl = argv.find((arg) => arg.startsWith(`${OAUTH_CALLBACK_PROTOCOL}://`))
     if (callbackUrl) {
-      dispatchOAuthCallbackUrl(callbackUrl)
+      if (app.isReady()) {
+        dispatchOAuthCallbackUrl(callbackUrl)
+      } else {
+        earlyProtocolCallbackUrls.push(callbackUrl)
+      }
     }
     if (mainWindow) {
       if (mainWindow.isMinimized()) {
@@ -9308,7 +10252,11 @@ if (!hasSingleInstanceLock) {
 
 app.on('open-url', (event, url) => {
   event.preventDefault()
-  dispatchOAuthCallbackUrl(url)
+  if (app.isReady()) {
+    dispatchOAuthCallbackUrl(url)
+  } else {
+    earlyProtocolCallbackUrls.push(url)
+  }
 })
 
 app.whenReady().then(async () => {
@@ -9321,6 +10269,8 @@ app.whenReady().then(async () => {
     return
   }
 
+  installRendererSessionPermissions(session.defaultSession)
+
   // Warm the glass-wallpaper cache while Electron/renderer boot: the underlay
   // then finds it on first mount instead of swapping the whole background in
   // a beat after the window shows. Fire-and-forget — osascript can stall on
@@ -9328,80 +10278,126 @@ app.whenReady().then(async () => {
   void refreshGlassWallpaper()
 
   registerOAuthCallbackProtocol()
+  const initialCallbackUrl = process.argv.find((argument) =>
+    argument.startsWith(`${OAUTH_CALLBACK_PROTOCOL}://`)
+  )
+  if (initialCallbackUrl) {
+    earlyProtocolCallbackUrls.push(initialCallbackUrl)
+  }
+  for (const callbackUrl of new Set(earlyProtocolCallbackUrls.splice(0))) {
+    dispatchOAuthCallbackUrl(callbackUrl)
+  }
   registerManagedAssetProtocol()
   initAutoUpdater()
-  registerUpdaterIpc(() => mainWindow)
+  registerUpdaterIpc(
+    () => mainWindow,
+    () => captureStateBlocksInterruption(mainCaptureState, backendConnection !== null),
+    acquireCurrentBackendInterruption
+  )
   registerDisplayChangeReconcile()
-  ipcMain.handle('backend:get-connection', () => backendConnection)
-  ipcMain.handle('backend:get-logs', () => backendLogs)
-  ipcMain.handle('app:get-runtime-info', () => runtimeInfo())
-  ipcMain.handle('system:open-permissions', (_event, pane?: SystemPermissionPane) =>
+  secureIpcHandle('backend:get-connection', async () => {
+    await backendAuthorityReady
+    return backendConnection
+  })
+  secureIpcHandle('backend:get-logs', () => backendLogs)
+  secureIpcHandle('account:begin-sign-in', async (_event, authorizeUrl: string) => {
+    if (typeof authorizeUrl !== 'string') {
+      throw new Error('Desktop account authorization URL is required.')
+    }
+    const intent = await requestBackendAdmin<{ intentGeneration: number }>(
+      'account.auth.begin_intent',
+      {},
+      45_000
+    )
+    await openOAuthUrl(accountSignInCoordinator().begin(authorizeUrl, intent.intentGeneration))
+  })
+  secureIpcHandle('account:sign-out', async () => {
+    const account = await requestBackendAdmin<VideorcAccountSnapshot>(
+      'account.sign_out',
+      {},
+      45_000
+    )
+    try {
+      accountSignInCoordinator().retireAll()
+    } catch (error) {
+      // Backend generation is the durable authority, so retained envelopes are
+      // already stale even when local callback-store cleanup cannot commit.
+      logBackend('warn', `Could not retire signed-out account callbacks: ${errorMessage(error)}`)
+    }
+    return account
+  })
+  secureIpcHandle('account:callbacks-list', () => accountSignInCoordinator().pending())
+  secureIpcHandle('account:callback-ack', (_event, callbackId: string) =>
+    typeof callbackId === 'string' ? accountSignInCoordinator().acknowledge(callbackId) : false
+  )
+  secureIpcHandle('oauth:callbacks-list', () => providerOAuthCallbackCoordinator().pending())
+  secureIpcHandle('oauth:callback-ack', (_event, callbackId: string) =>
+    typeof callbackId === 'string'
+      ? providerOAuthCallbackCoordinator().acknowledge(callbackId)
+      : false
+  )
+  secureIpcHandle('app:get-runtime-info', () => runtimeInfo())
+  secureIpcHandle('system:open-permissions', (_event, pane?: SystemPermissionPane) =>
     openSystemPermissions(pane)
   )
-  ipcMain.handle('system:request-media-access', (_event, pane: 'camera' | 'microphone') =>
+  secureIpcHandle('system:request-media-access', (_event, pane: 'camera' | 'microphone') =>
     requestMediaAccessNative(pane)
   )
-  ipcMain.handle('system:media-access-status', () => mediaAccessSnapshot())
-  ipcMain.handle('system:reveal-permission-target', () => revealPermissionTarget())
-  ipcMain.handle('system:reveal-path', (_event, targetPath: string) => revealPath(targetPath))
+  secureIpcHandle('system:media-access-status', () => mediaAccessSnapshot())
+  secureIpcHandle('system:reveal-permission-target', () => revealPermissionTarget())
+  secureIpcHandle('resource:reveal-selection', (_event, capabilityId: unknown) =>
+    revealSelectedResource(capabilityId)
+  )
+  secureIpcHandle('resource:authorize-output-directory', (_event, directoryHandleId: unknown) =>
+    authorizeOutputDirectory(directoryHandleId)
+  )
+  secureIpcHandle('resource:reveal-session', (_event, sessionId: unknown) =>
+    revealManagedSession(sessionId)
+  )
+  secureIpcHandle('resource:open-session', (_event, sessionId: unknown) =>
+    openManagedSession(sessionId)
+  )
+  secureIpcHandle('resource:reveal-background', (_event, assetId: unknown) =>
+    revealManagedBackground(assetId)
+  )
   // OBS setup import (O1): read-only discovery over OBS Studio's config files.
   // The stream key never rides these payloads — obs:read strips it; the apply
   // flow requests it exactly once via obs:read-stream-key.
-  ipcMain.handle('obs:discover', () => discoverObs())
-  ipcMain.handle('obs:read', (_event, collection: string, profile: string) =>
+  secureIpcHandle('obs:discover', () => discoverObs())
+  secureIpcHandle('obs:read', (_event, collection: string, profile: string) =>
     typeof collection === 'string' && typeof profile === 'string'
-      ? readObsSetup(collection, profile)
+      ? readObsSetupForRenderer(collection, profile)
       : null
   )
-  ipcMain.handle('obs:read-stream-key', (_event, profile: string) =>
+  secureIpcHandle('obs:read-stream-key', (_event, profile: string) =>
     typeof profile === 'string' ? readObsStreamKey(profile) : null
   )
   // Library Delete: recordings move to the system Trash — Trash IS the undo;
   // nothing in the app hard-deletes a user's file (Library rewrite L3).
-  ipcMain.handle('system:trash-paths', async (_event, paths: unknown) => {
-    const list = Array.isArray(paths) ? paths.filter((p) => typeof p === 'string') : []
-    const failures: string[] = []
-    for (const target of list) {
-      try {
-        if (existsSync(target)) {
-          await shell.trashItem(target)
-        }
-      } catch {
-        failures.push(target)
-      }
-    }
-    return { failures }
-  })
-  // Library Play action: open the recording in the system default player.
-  ipcMain.handle('system:open-path', async (_event, targetPath: unknown) => {
-    if (typeof targetPath !== 'string' || targetPath.length === 0) {
-      return 'Invalid path.'
-    }
-    return shell.openPath(targetPath)
-  })
-  ipcMain.handle('screens:pick-image', () => pickScreenImage())
-  ipcMain.handle('system:pick-file', () => pickFilePath())
-  ipcMain.handle('system:pick-directory', () => pickDirectoryPath())
-  ipcMain.handle('system:check-directory', (_event, path: string) => checkDirectoryFacts(path))
-  ipcMain.handle('system:create-directory', (_event, path: string) => createDirectoryAt(path))
-  ipcMain.handle('backgrounds:import-image', () => importBackgroundImage())
-  ipcMain.handle('backgrounds:import-image-path', (_event, sourcePath: string) =>
-    typeof sourcePath === 'string' ? importBackgroundImageFromPath(sourcePath) : null
+  secureIpcHandle('resource:trash-session-deletion', (_event, operationId: unknown) =>
+    trashSessionDeletion(operationId)
   )
-  ipcMain.handle('backgrounds:bundled-assets', () => bundledBackgroundAssets())
-  ipcMain.handle('backgrounds:asset-exists', (_event, assetPath: unknown) =>
-    backgroundAssetFileExists(assetPath)
+  secureIpcHandle('screens:pick-image', () => pickScreenImage())
+  secureIpcHandle('system:pick-file', () => pickFilePath())
+  secureIpcHandle('system:pick-directory', () => pickDirectoryPath())
+  secureIpcHandle('system:check-directory', (_event, capabilityId: unknown) =>
+    checkDirectoryFactsForCapability(capabilityId)
   )
-  ipcMain.handle('avatars:cache', (_event, url: unknown) => cacheChatAvatar(url))
-  ipcMain.handle('oauth:open-url', (_event, authUrl: string) => openOAuthUrl(authUrl))
-  ipcMain.handle('oauth:callback-redirect-uri', (_event, platform?: string) =>
+  secureIpcHandle('backgrounds:import-image', () => importBackgroundImage())
+  secureIpcHandle('backgrounds:bundled-assets', () => bundledBackgroundAssets())
+  secureIpcHandle('backgrounds:asset-exists', (_event, assetId: unknown) =>
+    backgroundAssetFileExists(assetId)
+  )
+  secureIpcHandle('avatars:cache', (_event, url: unknown) => cacheChatAvatar(url))
+  secureIpcHandle('oauth:open-url', (_event, authUrl: string) => openOAuthUrl(authUrl))
+  secureIpcHandle('oauth:callback-redirect-uri', (_event, platform?: string) =>
     oauthCallbackRedirectUri(platform)
   )
-  ipcMain.handle('preview-surface:mode', () => nativePreviewSurfaceProofEnabled)
-  ipcMain.handle('preview-surface:pump-mode', () => nativePreviewMainPumpActive)
+  secureIpcHandle('preview-surface:mode', () => nativePreviewSurfaceProofEnabled)
+  secureIpcHandle('preview-surface:pump-mode', () => nativePreviewMainPumpActive)
   // Vibrancy tints by OS appearance; the renderer's theme toggle drives it so
   // the blur material always matches the in-app theme (videorc-design).
-  ipcMain.handle('app:set-native-theme', (_event, theme: string) => {
+  secureIpcHandle('app:set-native-theme', (_event, theme: string) => {
     nativeTheme.themeSource = theme === 'light' ? 'light' : 'dark'
     // The solid base must follow the theme wherever a solid base is painted:
     // always off macOS, and on macOS when vibrancy is opted out.
@@ -9409,18 +10405,18 @@ app.whenReady().then(async () => {
       mainWindow?.setBackgroundColor(theme === 'light' ? '#F5F5F7' : '#1C1C1F')
     }
   })
-  ipcMain.handle('glass:wallpaper:get', () => {
+  secureIpcHandle('glass:wallpaper:get', () => {
     const geometry = glassGeometry()
     if (!glassWallpaperDataUrl || !geometry) {
       return null
     }
     return { imageDataUrl: glassWallpaperDataUrl, ...geometry }
   })
-  ipcMain.handle('preview-window:open', () => openPreviewWindow())
-  ipcMain.handle('preview-window:close', () => closePreviewWindow())
-  ipcMain.handle('preview-window:toggle', () => togglePreviewWindow())
-  ipcMain.handle('preview-window:get-state', () => previewWindowState())
-  ipcMain.handle(
+  secureIpcHandle('preview-window:open', () => openPreviewWindow())
+  secureIpcHandle('preview-window:close', () => closePreviewWindow())
+  secureIpcHandle('preview-window:toggle', () => togglePreviewWindow())
+  secureIpcHandle('preview-window:get-state', () => previewWindowState())
+  secureIpcHandle(
     'preview-window:permission-required',
     (_event, permissionStatus: unknown, message: unknown, generation: unknown) =>
       reportPreviewPermissionRequired(
@@ -9429,17 +10425,17 @@ app.whenReady().then(async () => {
         previewSurfaceGenerationFromIpc(generation)
       )
   )
-  ipcMain.handle('preview-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
+  secureIpcHandle('preview-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setPreviewWindowAlwaysOnTop(Boolean(alwaysOnTop))
   )
-  ipcMain.handle('preview-window:set-mode', (_event, mode: unknown) => setPreviewWindowMode(mode))
-  ipcMain.handle('preview-window:report-dock-slot', (_event, report: unknown) =>
+  secureIpcHandle('preview-window:set-mode', (_event, mode: unknown) => setPreviewWindowMode(mode))
+  secureIpcHandle('preview-window:report-dock-slot', (_event, report: unknown) =>
     reportPreviewDockSlot(report)
   )
-  ipcMain.handle('preview-window:set-dock-overlay', (_event, open: unknown) =>
+  secureIpcHandle('preview-window:set-dock-overlay', (_event, open: unknown) =>
     setPreviewDockOverlayOpen(open === true)
   )
-  ipcMain.handle('preview-window:set-aspect-ratio', (_event, width: number, height: number) => {
+  secureIpcHandle('preview-window:set-aspect-ratio', (_event, width: number, height: number) => {
     if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
       const changed = previewWindowAspect.width !== width || previewWindowAspect.height !== height
       previewWindowAspect = { width, height }
@@ -9451,27 +10447,31 @@ app.whenReady().then(async () => {
     }
     return previewWindowState()
   })
-  ipcMain.handle('notes-window:open', () => openNotesWindow())
-  ipcMain.handle('notes-window:close', () => closeNotesWindow())
-  ipcMain.handle('notes-window:get-state', () => notesWindowState())
-  ipcMain.handle('notes-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
+  secureIpcHandle('notes-window:open', () => openNotesWindow())
+  secureIpcHandle('notes-window:close', () => closeNotesWindow())
+  secureIpcHandle('notes-window:get-state', () => notesWindowState())
+  secureIpcHandle('notes-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setNotesWindowAlwaysOnTop(Boolean(alwaysOnTop))
   )
-  ipcMain.handle('notes-window:get-document', () => defaultNotesDocument())
-  ipcMain.handle('notes-window:save-document', (_event, patch: Partial<NotesDocument>) =>
-    saveNotesDocument(patch ?? {})
-  )
-  ipcMain.handle('comments-window:open', () => openCommentsWindow())
-  ipcMain.handle('comments-window:close', () => closeCommentsWindow())
-  ipcMain.handle('comments-window:toggle', () => toggleCommentsWindow())
-  ipcMain.handle('comments-window:get-state', () => commentsWindowState())
-  ipcMain.handle('comments-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
+  secureIpcHandle('notes-window:get-document', () => defaultNotesDocument())
+  secureIpcHandle('notes-window:save-document', (event, patch: Partial<NotesDocument>) => {
+    const document = saveNotesDocument(patch ?? {})
+    if (notesWindow && event.sender.id === notesWindow.webContents.id && notesWindowClosing) {
+      finishNotesWindowClose(notesWindow)
+    }
+    return document
+  })
+  secureIpcHandle('comments-window:open', () => openCommentsWindow())
+  secureIpcHandle('comments-window:close', () => closeCommentsWindow())
+  secureIpcHandle('comments-window:toggle', () => toggleCommentsWindow())
+  secureIpcHandle('comments-window:get-state', () => commentsWindowState())
+  secureIpcHandle('comments-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setCommentsWindowAlwaysOnTop(Boolean(alwaysOnTop))
   )
   // Relay (C3): the main renderer owns the single WS client and pushes each
   // live-chat snapshot through here to the window; the window's Clear routes
   // back to the main renderer. Last snapshot is cached for the window's first paint.
-  ipcMain.handle('comments-window:push-snapshot', (event, view: CommentsViewSnapshot) => {
+  secureIpcHandle('comments-window:push-snapshot', (event, view: CommentsViewSnapshot) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
       return undefined
     }
@@ -9489,8 +10489,8 @@ app.whenReady().then(async () => {
     }
     return view
   })
-  ipcMain.handle('comments-window:get-snapshot', () => currentCommentsView())
-  ipcMain.handle('comments-window:set-view-mode', (event, value: unknown) => {
+  secureIpcHandle('comments-window:get-snapshot', () => currentCommentsView())
+  secureIpcHandle('comments-window:set-view-mode', (event, value: unknown) => {
     const mode = parseCommentsViewMode(value)
     if (!mode) {
       throw new Error('Comments view mode must be live or a complete history selection.')
@@ -9515,7 +10515,7 @@ app.whenReady().then(async () => {
     emitCommentsView()
     return currentCommentsView()
   })
-  ipcMain.handle('comments-window:push-delta', (event, delta: CommentsSnapshotDelta) => {
+  secureIpcHandle('comments-window:push-delta', (event, delta: CommentsSnapshotDelta) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
       return currentCommentsView()
     }
@@ -9539,14 +10539,14 @@ app.whenReady().then(async () => {
       commentsWindow &&
       !commentsWindow.webContents.isDestroyed()
     ) {
-      commentsWindow.webContents.send('comments-window:delta', delta)
+      sendElectronEvent(commentsWindow.webContents, 'comments-window:delta', delta)
     }
     return currentCommentsView()
   })
   // Click-to-highlight relay (Comments upgrade S3): the window clicks, the
   // MAIN renderer owns the lifecycle + rasterization (it has the backend
   // client), and the resulting on-stream state relays back to the window.
-  ipcMain.handle('comments-window:highlight', (event, value: unknown): Promise<unknown> => {
+  secureIpcHandle('comments-window:highlight', (event, value: unknown): Promise<unknown> => {
     if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
       return Promise.reject(new Error('Only the Comments window can request a highlight.'))
     }
@@ -9562,18 +10562,18 @@ app.whenReady().then(async () => {
     return commentsCommandBroker.request(requestId, () => {
       if (dispatchSmokeCommentHighlight(command)) return true
       if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
-      mainWindow.webContents.send('comments-window:highlight-request', command)
+      sendElectronEvent(mainWindow.webContents, 'comments-window:highlight-request', command)
       return true
     })
   })
-  ipcMain.handle(
+  secureIpcHandle(
     'comments-window:highlight-result-push',
     (event, resolution: CommentsCommandResolution<unknown>) => {
       if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
       return commentsCommandBroker.resolve(resolution)
     }
   )
-  ipcMain.handle('comments-window:highlight-state-push', (event, state: unknown) => {
+  secureIpcHandle('comments-window:highlight-state-push', (event, state: unknown) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
       return undefined
     }
@@ -9583,23 +10583,23 @@ app.whenReady().then(async () => {
         : { generation: latestCommentHighlightState.generation + 1, phase: 'idle' }
     emitCommentHighlightState(next)
   })
-  ipcMain.handle('comments-window:highlight-state-get', () => latestCommentHighlightState)
+  secureIpcHandle('comments-window:highlight-state-get', () => latestCommentHighlightState)
   // Viewer-count relay (viewer rider V2): the main renderer owns the backend
   // WS and pushes the latest stream.viewers sample; the Comments window seeds
   // from the cache and follows pushes. Null clears the chip (session over).
-  ipcMain.handle('comments-window:viewers-push', (event, sample: unknown) => {
+  secureIpcHandle('comments-window:viewers-push', (event, sample: unknown) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
       return undefined
     }
-    latestViewerSample = sample && typeof sample === 'object' ? sample : null
+    latestViewerSample = sample && typeof sample === 'object' ? (sample as ViewerSample) : null
     if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
-      commentsWindow.webContents.send('comments-window:viewers', latestViewerSample)
+      sendElectronEvent(commentsWindow.webContents, 'comments-window:viewers', latestViewerSample)
     }
   })
-  ipcMain.handle('comments-window:viewers-get', () => latestViewerSample)
+  secureIpcHandle('comments-window:viewers-get', () => latestViewerSample)
   // Send relay (Comments upgrade S5): the window types, the MAIN renderer owns
   // the backend call, and the per-platform results relay back to the window.
-  ipcMain.handle(
+  secureIpcHandle(
     'comments-window:send',
     (event, value: unknown): Promise<CommentsSendOperation> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
@@ -9625,12 +10625,12 @@ app.whenReady().then(async () => {
       return commentsCommandBroker.request(requestId, () => {
         if (dispatchSmokeCommentsSend(command)) return true
         if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
-        mainWindow.webContents.send('comments-window:send-request', command)
+        sendElectronEvent(mainWindow.webContents, 'comments-window:send-request', command)
         return true
       })
     }
   )
-  ipcMain.handle(
+  secureIpcHandle(
     'comments-window:send-result-push',
     (event, resolution: CommentsCommandResolution<CommentsSendOperation>) => {
       if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
@@ -9641,7 +10641,7 @@ app.whenReady().then(async () => {
       return accepted
     }
   )
-  ipcMain.handle('comments-window:clear', (event, value: unknown): Promise<LiveChatSnapshot> => {
+  secureIpcHandle('comments-window:clear', (event, value: unknown): Promise<LiveChatSnapshot> => {
     if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
       return Promise.reject(new Error('Only the Comments window can clear Comments.'))
     }
@@ -9653,11 +10653,11 @@ app.whenReady().then(async () => {
     assertLiveCommentsCommandSession(command.sessionId)
     return commentsCommandBroker.request(requestId, () => {
       if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
-      mainWindow.webContents.send('comments-window:clear-request', command)
+      sendElectronEvent(mainWindow.webContents, 'comments-window:clear-request', command)
       return true
     })
   })
-  ipcMain.handle(
+  secureIpcHandle(
     'comments-window:clear-result-push',
     (event, resolution: CommentsCommandResolution<LiveChatSnapshot>) => {
       if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
@@ -9669,39 +10669,47 @@ app.whenReady().then(async () => {
       return accepted
     }
   )
-  ipcMain.handle('captions-window:open', () => openCaptionsWindow())
-  ipcMain.handle('captions-window:close', () => closeCaptionsWindow())
-  ipcMain.handle('captions-window:toggle', () => toggleCaptionsWindow())
-  ipcMain.handle('captions-window:get-state', () => captionsWindowState())
-  ipcMain.handle('captions-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
+  secureIpcHandle('captions-window:open', () => openCaptionsWindow())
+  secureIpcHandle('captions-window:close', () => closeCaptionsWindow())
+  secureIpcHandle('captions-window:toggle', () => toggleCaptionsWindow())
+  secureIpcHandle('captions-window:get-state', () => captionsWindowState())
+  secureIpcHandle('captions-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setCaptionsWindowAlwaysOnTop(Boolean(alwaysOnTop))
   )
   // Same relay shape as comments: the main renderer owns the backend WS and
   // pushes its caption-line buffer; main caches it for the window's first paint.
-  ipcMain.handle('captions-window:push-snapshot', (_event, snapshot: CaptionWindowSnapshot) => {
+  secureIpcHandle('captions-window:push-snapshot', (_event, snapshot: CaptionWindowSnapshot) => {
     latestCaptionSnapshot = snapshot
     latestCaptionLines = Array.isArray(snapshot.lines) ? snapshot.lines : []
     if (captionsWindow && !captionsWindow.webContents.isDestroyed()) {
-      captionsWindow.webContents.send('captions-window:snapshot', latestCaptionSnapshot)
+      sendElectronEvent(
+        captionsWindow.webContents,
+        'captions-window:snapshot',
+        latestCaptionSnapshot
+      )
     }
   })
-  ipcMain.handle('captions-window:get-snapshot', () => latestCaptionSnapshot)
-  ipcMain.handle('captions-window:push-lines', (_event, lines: CaptionsUpdate[]) => {
+  secureIpcHandle('captions-window:get-snapshot', () => latestCaptionSnapshot)
+  secureIpcHandle('captions-window:push-lines', (_event, lines: CaptionsUpdate[]) => {
     latestCaptionLines = Array.isArray(lines) ? lines : []
     latestCaptionSnapshot = { ...latestCaptionSnapshot, lines: latestCaptionLines }
     if (captionsWindow && !captionsWindow.webContents.isDestroyed()) {
-      captionsWindow.webContents.send('captions-window:lines', latestCaptionLines)
-      captionsWindow.webContents.send('captions-window:snapshot', latestCaptionSnapshot)
+      sendElectronEvent(captionsWindow.webContents, 'captions-window:lines', latestCaptionLines)
+      sendElectronEvent(
+        captionsWindow.webContents,
+        'captions-window:snapshot',
+        latestCaptionSnapshot
+      )
     }
   })
-  ipcMain.handle('captions-window:get-lines', () => latestCaptionLines)
-  ipcMain.handle('preview-surface:create', (_event, bounds: PreviewSurfaceBounds, generation) => {
+  secureIpcHandle('captions-window:get-lines', () => latestCaptionLines)
+  secureIpcHandle('preview-surface:create', (_event, bounds: PreviewSurfaceBounds, generation) => {
     const requestedGeneration = previewSurfaceGenerationFromIpc(generation)
     return runNativePreviewSurfaceMutation(() =>
       createNativePreviewSurface(bounds, requestedGeneration)
     )
   })
-  ipcMain.handle(
+  secureIpcHandle(
     'preview-surface:update-bounds',
     (_event, bounds: PreviewSurfaceBounds, generation) => {
       const requestedGeneration = previewSurfaceGenerationFromIpc(generation)
@@ -9710,7 +10718,7 @@ app.whenReady().then(async () => {
       )
     }
   )
-  ipcMain.handle(
+  secureIpcHandle(
     'preview-surface:apply-host-commands',
     (_event, commands: NativePreviewHostCommand[], generation) => {
       const requestedGeneration = previewSurfaceGenerationFromIpc(generation)
@@ -9719,10 +10727,14 @@ app.whenReady().then(async () => {
       )
     }
   )
-  ipcMain.handle('preview-surface:update-scene', (_event, scene: PreviewSurfaceSceneUpdateParams) =>
-    updateNativePreviewSurfaceScene(scene)
+  secureIpcHandle('preview-surface:drain-host-commands', (_event, generation) =>
+    drainBackendNativePreviewHostCommands(previewSurfaceGenerationFromIpc(generation))
   )
-  ipcMain.handle(
+  secureIpcHandle(
+    'preview-surface:update-scene',
+    (_event, scene: PreviewSurfaceSceneUpdateParams) => updateNativePreviewSurfaceScene(scene)
+  )
+  secureIpcHandle(
     'preview-surface:update-compositor',
     (_event, status: PreviewSurfaceCompositorUpdateParams) => {
       const ownershipTicket = nativePreviewPumpOwnership.ticket('renderer')
@@ -9735,7 +10747,7 @@ app.whenReady().then(async () => {
         : rejectedNativePreviewCompositorUpdateStatus()
     }
   )
-  ipcMain.handle(
+  secureIpcHandle(
     'preview-surface:set-frame-polling-suppressed',
     (_event, suppressed: boolean, recordingActive?: boolean) => {
       if (typeof recordingActive === 'boolean') {
@@ -9747,18 +10759,25 @@ app.whenReady().then(async () => {
       // Keep the recording state above so a preview opened mid-recording starts
       // with the contained Windows proof-polling profile.
       if (!suppressed && (!previewWindow || previewWindow.isDestroyed())) {
-        return nativePreviewSurfaceFramePollingSuppressed
+        nativePreviewSurfaceFramePollingSuppressed = true
+        nativePreviewSurfaceStatus = nativePreviewClosedWindowUnsuppressStatus(
+          nativePreviewSurfaceStatus
+        )
+        return {
+          ...nativePreviewSurfaceStatus,
+          ...nativePreviewPlacementStatusFields()
+        }
       }
       return setNativePreviewSurfaceFramePollingSuppressed(suppressed, recordingActive)
     }
   )
-  ipcMain.handle('preview-surface:destroy', (_event, generation) => {
+  secureIpcHandle('preview-surface:destroy', (_event, generation) => {
     nativePreviewPlacementQueue.cancelPending()
     return runNativePreviewSurfaceMutation(() =>
       destroyNativePreviewSurface(previewSurfaceGenerationFromIpc(generation))
     )
   })
-  ipcMain.handle('preview-surface:status', () => ({
+  secureIpcHandle('preview-surface:status', () => ({
     ...nativePreviewSurfaceStatus,
     ...nativePreviewPlacementStatusFields()
   }))
@@ -9799,6 +10818,8 @@ app.on('before-quit', (event) => {
     return
   }
   appIsQuitting = true
+  accountSignInTransactions?.dispose()
+  providerOAuthCallbacks?.dispose()
   cancelBackendRestart()
   if (backendQuitComplete || backendQuitInProgress) {
     return

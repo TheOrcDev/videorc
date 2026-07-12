@@ -1,20 +1,23 @@
 use std::path::Path;
 
 use crate::protocol::{
-    CameraAspect, CameraCorner, CameraFit, CameraShape, CameraSize, CameraTransformMode,
     LayoutPreset, Scene, SceneConfigParams, SceneOutput, SceneOutputKind, SceneSource,
     SceneSourceKind, SceneSourceOrderParams, SceneSourceParams, SceneSourceVisibilityParams,
     SceneTransform, SceneTransformPatch, SceneTransformUpdateParams, SideBySideCameraSide,
-    SideBySideSplit, SourceSelection,
+    SourceSelection,
 };
+use crate::scene_geometry::{
+    preset_camera_transform, resolved_camera_transform, side_by_side_fractions,
+};
+
+#[cfg(test)]
+use crate::scene_geometry::{camera_box_size, crop_for_zoom};
 
 const DEFAULT_SCENE_ID: &str = "scene:default";
 const BASE_SOURCE_ID: &str = "source:base";
 const CAMERA_SOURCE_ID: &str = "source:camera";
 const TEST_PATTERN_SOURCE_ID: &str = "source:test-pattern";
 const SNAP_THRESHOLD: f64 = 0.015;
-const CAMERA_REFERENCE_WIDTH: u32 = 1280;
-const CAMERA_REFERENCE_HEIGHT: u32 = 720;
 
 pub fn default_scene() -> Scene {
     Scene {
@@ -38,6 +41,8 @@ pub fn validate_scene_background(scene: &Scene) -> Result<(), String> {
     };
 
     let path = background.managed_asset_path.trim();
+    crate::resource_authority::validate_asset_id(&background.asset_id)
+        .map_err(|error| error.to_string())?;
     if path.is_empty() {
         return Err(format!(
             "Scene background {} has no managed asset path. Re-apply or replace the background before recording.",
@@ -52,6 +57,9 @@ pub fn validate_scene_background(scene: &Scene) -> Result<(), String> {
             background.asset_id, path
         ));
     }
+
+    crate::resource_authority::validate_managed_background_path(image_path)
+        .map_err(|error| error.to_string())?;
 
     image::open(image_path).map_err(|error| {
         format!(
@@ -229,17 +237,6 @@ pub fn snap_transform(mut transform: SceneTransform) -> SceneTransform {
     transform
 }
 
-pub fn crop_for_zoom(zoom: u32, offset: i32) -> (f64, f64) {
-    let zoom = zoom.clamp(100, 200);
-    if zoom == 100 {
-        return (0.0, 0.0);
-    }
-
-    let total_crop = 1.0 - (100.0 / f64::from(zoom));
-    let offset = (f64::from(offset.clamp(-100, 100)) / 200.0) * total_crop;
-    normalize_crop_pair((total_crop / 2.0) + offset, (total_crop / 2.0) - offset)
-}
-
 fn base_source(sources: &SourceSelection) -> SceneSource {
     let (id, name, kind, device_id) = if let Some(window_id) = sources.window_id.clone() {
         (
@@ -290,17 +287,10 @@ fn camera_source(
     output_width: u32,
     output_height: u32,
 ) -> SceneSource {
-    let default_transform = camera_transform(layout, output_width, output_height);
+    let default_transform = preset_camera_transform(layout, output_width, output_height);
     // A dragged camera (custom mode) overrides position only; size/crop and the
     // default_transform stay tied to the corner/size preset so Reset restores it.
-    let transform = match (layout.camera_transform_mode, layout.camera_transform) {
-        (CameraTransformMode::Custom, Some(custom)) => sanitize_transform(SceneTransform {
-            x: custom.x,
-            y: custom.y,
-            ..default_transform.clone()
-        }),
-        _ => default_transform.clone(),
-    };
+    let transform = resolved_camera_transform(layout, output_width, output_height);
     SceneSource {
         id: CAMERA_SOURCE_ID.to_string(),
         name: "Camera".to_string(),
@@ -313,104 +303,6 @@ fn camera_source(
     }
 }
 
-fn camera_transform(
-    layout: &crate::protocol::LayoutSettings,
-    output_width: u32,
-    output_height: u32,
-) -> SceneTransform {
-    let output_width = f64::from(output_width.max(1));
-    let output_height = f64::from(output_height.max(1));
-    let scale = camera_output_scale(output_width, output_height);
-    let (camera_width, camera_height) = scaled_camera_box_size(
-        &layout.camera_size,
-        &layout.camera_shape,
-        &layout.camera_aspect,
-        scale,
-    );
-    let camera_width = f64::from(camera_width);
-    let camera_height = f64::from(camera_height);
-    let margin = f64::from(scale_camera_dimension(layout.camera_margin.min(160), scale));
-    let x = match layout.camera_corner {
-        CameraCorner::TopLeft | CameraCorner::BottomLeft => margin / output_width,
-        CameraCorner::TopRight | CameraCorner::BottomRight => {
-            (output_width - camera_width - margin) / output_width
-        }
-    };
-    let y = match layout.camera_corner {
-        CameraCorner::TopLeft | CameraCorner::TopRight => margin / output_height,
-        CameraCorner::BottomLeft | CameraCorner::BottomRight => {
-            (output_height - camera_height - margin) / output_height
-        }
-    };
-    let (crop_left, crop_right) = match layout.camera_fit {
-        CameraFit::Fit if layout.camera_zoom == 100 => (0.0, 0.0),
-        CameraFit::Fit | CameraFit::Fill => {
-            crop_for_zoom(layout.camera_zoom, layout.camera_offset_x)
-        }
-    };
-    let (crop_top, crop_bottom) = match layout.camera_fit {
-        CameraFit::Fit if layout.camera_zoom == 100 => (0.0, 0.0),
-        CameraFit::Fit | CameraFit::Fill => {
-            crop_for_zoom(layout.camera_zoom, layout.camera_offset_y)
-        }
-    };
-
-    sanitize_transform_unsnapped(SceneTransform {
-        x,
-        y,
-        width: camera_width / output_width,
-        height: camera_height / output_height,
-        crop_left,
-        crop_top,
-        crop_right,
-        crop_bottom,
-    })
-}
-
-fn camera_box_size(size: &CameraSize, shape: &CameraShape, aspect: &CameraAspect) -> (u32, u32) {
-    let width = match size {
-        CameraSize::Small => 260,
-        CameraSize::Medium => 360,
-        CameraSize::Large => 480,
-    };
-    // The box aspect decides the framing; the default Fill fit center-crops
-    // the camera into it, so `portrait` produces a Theo-style vertical camera
-    // from a landscape webcam. Circle keeps its square box regardless — a
-    // circle has no aspect.
-    let height = match shape {
-        CameraShape::Circle => width,
-        CameraShape::Rectangle | CameraShape::Rounded => match aspect {
-            CameraAspect::Source => (width * 9 + 8) / 16,
-            CameraAspect::Square => width,
-            CameraAspect::Portrait => (width * 4u32).div_ceil(3),
-        },
-    };
-    (width, height)
-}
-
-fn scaled_camera_box_size(
-    size: &CameraSize,
-    shape: &CameraShape,
-    aspect: &CameraAspect,
-    scale: f64,
-) -> (u32, u32) {
-    let (width, height) = camera_box_size(size, shape, aspect);
-
-    (
-        scale_camera_dimension(width, scale),
-        scale_camera_dimension(height, scale),
-    )
-}
-
-fn camera_output_scale(output_width: f64, output_height: f64) -> f64 {
-    (output_width / f64::from(CAMERA_REFERENCE_WIDTH))
-        .min(output_height / f64::from(CAMERA_REFERENCE_HEIGHT))
-}
-
-fn scale_camera_dimension(value: u32, scale: f64) -> u32 {
-    (f64::from(value) * scale).round().max(1.0) as u32
-}
-
 fn full_frame_transform() -> SceneTransform {
     SceneTransform {
         x: 0.0,
@@ -421,14 +313,6 @@ fn full_frame_transform() -> SceneTransform {
         crop_top: 0.0,
         crop_right: 0.0,
         crop_bottom: 0.0,
-    }
-}
-
-fn side_by_side_fractions(split: SideBySideSplit) -> (f64, f64) {
-    match split {
-        SideBySideSplit::Even => (0.5, 0.5),
-        SideBySideSplit::SixtyForty => (0.6, 0.4),
-        SideBySideSplit::SeventyThirty => (0.7, 0.3),
     }
 }
 
@@ -547,8 +431,9 @@ fn find_source_mut<'a>(
 mod tests {
     use super::*;
     use crate::protocol::{
-        BackgroundFit, CameraTransform, EffectiveSceneBackground, LayoutPreset, LayoutSettings,
-        SourceSelection,
+        BackgroundFit, CameraAspect, CameraCorner, CameraFit, CameraShape, CameraSize,
+        CameraTransform, CameraTransformMode, EffectiveSceneBackground, LayoutPreset,
+        LayoutSettings, SideBySideSplit, SourceSelection,
     };
 
     // Camera shape/aspect feature (2026-07-06): the box aspect is decided HERE

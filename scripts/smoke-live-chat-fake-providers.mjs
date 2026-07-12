@@ -263,9 +263,12 @@ try {
         throw new Error('Unified feed is not chronological.')
       }
     }
-    const persistedMessages = await request(ws, timeoutMs, 'sessions.comments.list', {
-      sessionId
-    })
+    const persistedMessages = await listPersistedMessages(
+      ws,
+      sessionId,
+      expectedMessageCount,
+      timeoutMs
+    )
     if (persistedMessages.length !== status.messages.length) {
       throw new Error(
         `SQLite transcript did not match the live snapshot: ${JSON.stringify({
@@ -417,6 +420,39 @@ async function waitForAuthoritativeMessages(ws, sessionId, expectedCount, deadli
       received: latest?.messages?.length ?? 0,
       expected: expectedCount
     })}`
+  )
+}
+
+async function listPersistedMessages(ws, sessionId, expectedCount, deadlineMs) {
+  let cursor
+  let messages = []
+  const seenCursors = new Set()
+  const maxPages = Math.ceil(expectedCount / 200) + 1
+
+  for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
+    const page = await request(ws, deadlineMs, 'sessions.comments.list', {
+      sessionId,
+      cursor,
+      limit: Math.min(200, Math.max(1, expectedCount - messages.length))
+    })
+    if (!page || !Array.isArray(page.messages)) {
+      throw new Error(`Invalid persisted comments page: ${JSON.stringify(page)}`)
+    }
+    // Pages are fetched newest-to-oldest while every page is chronological.
+    // Prepending each older page reconstructs the complete chronological feed.
+    messages = [...page.messages, ...messages]
+    if (!page.nextCursor) {
+      return messages
+    }
+    if (seenCursors.has(page.nextCursor)) {
+      throw new Error('Persisted comments pagination repeated a cursor.')
+    }
+    seenCursors.add(page.nextCursor)
+    cursor = page.nextCursor
+  }
+
+  throw new Error(
+    `Persisted comments pagination exceeded ${maxPages} pages for ${expectedCount} expected messages.`
   )
 }
 

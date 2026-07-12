@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -6,15 +8,18 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
 
+use crate::storage::PlatformAccountWriteExpectation;
 use crate::streaming::{
     PlatformAccountStatus, StreamPlatform, UpsertPlatformAccount, stream_platform_id,
     stream_platform_label,
 };
 
 const OAUTH_STATE_TTL_MINUTES: i64 = 10;
+const OAUTH_PROVIDER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const OAUTH_PROVIDER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const BUNDLED_TWITCH_CLIENT_ID: Option<&str> = option_env!("VIDEORC_BUNDLED_TWITCH_CLIENT_ID");
 // The Videorc X OAuth app (public Native App client, PKCE — no secret involved).
 // Client IDs are public identifiers; build-time/runtime env still override.
@@ -31,9 +36,33 @@ pub fn provider_oauth_unavailable_message(platform: StreamPlatform) -> Option<&'
     }
 }
 
-#[derive(Debug, Default)]
+pub fn provider_http_client() -> reqwest::Client {
+    provider_http_client_with_timeout(OAUTH_PROVIDER_REQUEST_TIMEOUT)
+}
+
+fn provider_http_client_with_timeout(timeout: std::time::Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(OAUTH_PROVIDER_CONNECT_TIMEOUT.min(timeout))
+        .build()
+        .expect("static OAuth HTTP client configuration must be valid")
+}
+
+const LEGACY_OAUTH_PENDING_STORE_VERSION: u32 = 1;
+const REFERENCE_OAUTH_PENDING_STORE_VERSION: u32 = 2;
+const CANDIDATE_OAUTH_PENDING_STORE_VERSION: u32 = 3;
+const OAUTH_PENDING_STORE_VERSION: u32 = 4;
+const MAX_OAUTH_PENDING_STORE_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug)]
 pub struct OAuthSessions {
-    pending: Mutex<HashMap<String, PendingOAuthSession>>,
+    state: Mutex<OAuthSessionState>,
+    store_path: Option<PathBuf>,
+    store_load_error: Option<String>,
+    youtube_finalization: std::sync::Arc<Mutex<()>>,
+    twitch_finalization: std::sync::Arc<Mutex<()>>,
+    x_finalization: std::sync::Arc<Mutex<()>>,
+    custom_finalization: std::sync::Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,6 +141,7 @@ pub enum OAuthCallbackStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthCallbackResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<StreamPlatform>,
     pub state: String,
     pub status: OAuthCallbackStatus,
@@ -122,21 +152,71 @@ pub struct OAuthCallbackResult {
     pub message: Option<String>,
     pub token_stored: bool,
     pub account_connected: bool,
+    /// True only when the exact durable callback should be retried. Terminal
+    /// denial/expiry/unknown-state results are safe for Electron to acknowledge.
+    pub retryable: bool,
     pub received_at: String,
+}
+
+#[derive(Debug, Default)]
+struct OAuthSessionState {
+    pending: HashMap<String, PendingOAuthSession>,
+    in_flight: HashSet<String>,
+    recovery_drivers: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
 struct PendingOAuthSession {
     platform: StreamPlatform,
     expires_at: chrono::DateTime<Utc>,
-    exchange: Option<PendingOAuthExchange>,
+    work: PendingOAuthWork,
+}
+
+#[derive(Debug, Clone)]
+enum PendingOAuthWork {
+    Generic,
+    ProviderExchange(PendingOAuthExchange),
+    ProviderExchangeStarted(PendingOAuthTokenCheckpoint),
+    ProviderToken(PendingOAuthTokenCheckpoint),
+    AccountStorage {
+        account: Box<UpsertPlatformAccount>,
+        checkpoint_secret_ref: Option<String>,
+        pkce_verifier_secret_ref: Option<String>,
+        candidate_access_secret_ref: Option<String>,
+        candidate_refresh_secret_ref: Option<String>,
+        superseded_secret_refs: Vec<String>,
+        expected_account_state: Option<PlatformAccountWriteExpectation>,
+        write_generation: u64,
+    },
+}
+
+impl PendingOAuthWork {
+    fn is_code_less_resumable(&self) -> bool {
+        matches!(
+            self,
+            Self::ProviderExchangeStarted(_) | Self::ProviderToken(_) | Self::AccountStorage { .. }
+        )
+    }
+
+    fn is_unadvanced(&self) -> bool {
+        matches!(self, Self::Generic | Self::ProviderExchange(_))
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct OAuthCompleteOutcome {
     pub result: OAuthCallbackResult,
     pub exchange: Option<PendingOAuthExchange>,
+    pub token_checkpoint: Option<PendingOAuthTokenCheckpoint>,
+    pub account_to_store: Option<UpsertPlatformAccount>,
+    pub account_storage_commit: Option<PendingOAuthAccountStorageCommit>,
     pub authorization_code: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingOAuthAccountStorageCommit {
+    pub expected_account_state: Option<PlatformAccountWriteExpectation>,
+    pub write_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -148,7 +228,63 @@ pub struct PendingOAuthExchange {
     pub client_secret: Option<String>,
     pub redirect_uri: String,
     pub scopes: Vec<String>,
-    pub code_verifier: Option<String>,
+    pub code_verifier_secret_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingOAuthTokenCheckpoint {
+    platform: StreamPlatform,
+    profile_url: String,
+    client_id: String,
+    scopes: Vec<String>,
+    secret_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pkce_verifier_secret_ref: Option<String>,
+    #[serde(default)]
+    candidate_access_secret_ref: String,
+    #[serde(default)]
+    candidate_refresh_secret_ref: String,
+}
+
+impl PendingOAuthTokenCheckpoint {
+    pub fn secret_ref(&self) -> &str {
+        &self.secret_ref
+    }
+
+    pub fn candidate_access_secret_ref(&self) -> &str {
+        &self.candidate_access_secret_ref
+    }
+
+    pub fn candidate_refresh_secret_ref(&self) -> &str {
+        &self.candidate_refresh_secret_ref
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExchangedOAuthToken {
+    platform: StreamPlatform,
+    access_token: String,
+    refresh_token: Option<String>,
+    scopes: Vec<String>,
+    expires_at: Option<String>,
+}
+
+impl std::fmt::Debug for ExchangedOAuthToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExchangedOAuthToken")
+            .field("platform", &self.platform)
+            .field("access_token", &"[redacted]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field("scopes", &self.scopes)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,12 +307,614 @@ struct OAuthProviderConfig {
     pkce: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedOAuthStore {
+    version: u32,
+    sessions: Vec<PersistedOAuthSession>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedOAuthSession {
+    state: String,
+    platform: StreamPlatform,
+    expires_at: chrono::DateTime<Utc>,
+    work: PersistedOAuthWork,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum PersistedOAuthWork {
+    Generic,
+    ProviderExchange {
+        redirect_uri: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code_verifier_secret_ref: Option<String>,
+    },
+    ProviderExchangeStarted {
+        checkpoint: PendingOAuthTokenCheckpoint,
+    },
+    ProviderToken {
+        checkpoint: PendingOAuthTokenCheckpoint,
+    },
+    AccountStorage {
+        account: Box<UpsertPlatformAccount>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint_secret_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pkce_verifier_secret_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_access_secret_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_refresh_secret_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        superseded_secret_refs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_account_state: Option<PlatformAccountWriteExpectation>,
+        #[serde(default)]
+        write_generation: u64,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyPersistedOAuthStore {
+    version: u32,
+    sessions: Vec<LegacyPersistedOAuthSession>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyPersistedOAuthSession {
+    state: String,
+    platform: StreamPlatform,
+    expires_at: chrono::DateTime<Utc>,
+    work: LegacyPersistedOAuthWork,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum LegacyPersistedOAuthWork {
+    Generic,
+    ProviderExchange {
+        redirect_uri: String,
+        code_verifier: Option<String>,
+    },
+    ProviderExchangeStarted {
+        checkpoint: PendingOAuthTokenCheckpoint,
+    },
+    ProviderToken {
+        checkpoint: PendingOAuthTokenCheckpoint,
+    },
+    AccountStorage {
+        account: UpsertPlatformAccount,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint_secret_ref: Option<String>,
+    },
+}
+
+#[derive(Deserialize)]
+struct PersistedOAuthStoreVersion {
+    version: u32,
+}
+
+#[cfg(test)]
+impl Default for OAuthSessions {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl OAuthSessions {
+    #[cfg(test)]
+    pub fn new(store_path: Option<PathBuf>) -> Self {
+        Self::new_with_secret_store(store_path, |_, _| Ok(()), |_| Ok(()))
+    }
+
+    #[cfg(test)]
+    pub fn new_with_secret_cleanup<F>(store_path: Option<PathBuf>, mut delete_secret: F) -> Self
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        Self::new_with_secret_store(store_path, |_, _| Ok(()), &mut delete_secret)
+    }
+
+    pub fn new_with_secret_store<P, D>(
+        store_path: Option<PathBuf>,
+        mut put_secret: P,
+        mut delete_secret: D,
+    ) -> Self
+    where
+        P: FnMut(&str, &str) -> Result<()>,
+        D: FnMut(&str) -> Result<()>,
+    {
+        let (mut pending, store_load_error) = match store_path.as_deref() {
+            Some(path) => {
+                match load_pending_oauth_sessions(path, &mut put_secret, &mut delete_secret) {
+                    Ok(pending) => (pending, None),
+                    Err(error) => (HashMap::new(), Some(format!("{error:#}"))),
+                }
+            }
+            None => (HashMap::new(), None),
+        };
+        if store_load_error.is_none()
+            && let Some(path) = store_path.as_deref()
+        {
+            cleanup_expired_pending_sessions(path, &mut pending, &mut delete_secret);
+        }
+        Self {
+            state: Mutex::new(OAuthSessionState {
+                pending,
+                in_flight: HashSet::new(),
+                recovery_drivers: HashSet::new(),
+            }),
+            store_path,
+            store_load_error,
+            youtube_finalization: std::sync::Arc::new(Mutex::new(())),
+            twitch_finalization: std::sync::Arc::new(Mutex::new(())),
+            x_finalization: std::sync::Arc::new(Mutex::new(())),
+            custom_finalization: std::sync::Arc::new(Mutex::new(())),
+        }
+    }
+
+    fn persist(&self, state: &OAuthSessionState) -> Result<()> {
+        self.ensure_store_available()?;
+        let Some(path) = self.store_path.as_deref() else {
+            return Ok(());
+        };
+        persist_pending_oauth_sessions(path, &state.pending)
+    }
+
+    fn ensure_store_available(&self) -> Result<()> {
+        if let Some(error) = self.store_load_error.as_deref() {
+            anyhow::bail!(
+                "OAuth transaction storage is unavailable; the existing recovery file was preserved: {error}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Account-secret publication is a per-platform transaction. Different
+    /// providers may finalize concurrently, but two reconnects for the same
+    /// provider must observe and supersede credentials in database order.
+    pub async fn lock_platform_finalization(
+        &self,
+        platform: StreamPlatform,
+    ) -> OwnedMutexGuard<()> {
+        let lock = match platform {
+            StreamPlatform::Youtube => &self.youtube_finalization,
+            StreamPlatform::Twitch => &self.twitch_finalization,
+            StreamPlatform::X => &self.x_finalization,
+            StreamPlatform::Custom => &self.custom_finalization,
+        };
+        lock.clone().lock_owned().await
+    }
+}
+
+fn cleanup_expired_pending_sessions<F>(
+    path: &Path,
+    pending: &mut HashMap<String, PendingOAuthSession>,
+    delete_secret: &mut F,
+) where
+    F: FnMut(&str) -> Result<()>,
+{
+    let now = Utc::now();
+    let removable = pending
+        .iter()
+        .filter(|(_, session)| session.expires_at < now && session.work.is_unadvanced())
+        .filter_map(|(state, session)| {
+            if pending_secret_refs(&session.work)
+                .iter()
+                .any(|secret_ref| delete_secret(secret_ref).is_err())
+            {
+                return None;
+            }
+            Some(state.clone())
+        })
+        .collect::<Vec<_>>();
+    if removable.is_empty() {
+        return;
+    }
+    let removed = removable
+        .into_iter()
+        .filter_map(|state| pending.remove(&state).map(|session| (state, session)))
+        .collect::<Vec<_>>();
+    if persist_pending_oauth_sessions(path, pending).is_err() {
+        pending.extend(removed);
+    }
+}
+
+fn persisted_oauth_work(work: &PendingOAuthWork) -> PersistedOAuthWork {
+    match work {
+        PendingOAuthWork::Generic => PersistedOAuthWork::Generic,
+        PendingOAuthWork::ProviderExchange(exchange) => PersistedOAuthWork::ProviderExchange {
+            redirect_uri: exchange.redirect_uri.clone(),
+            code_verifier_secret_ref: exchange.code_verifier_secret_ref.clone(),
+        },
+        PendingOAuthWork::ProviderExchangeStarted(checkpoint) => {
+            PersistedOAuthWork::ProviderExchangeStarted {
+                checkpoint: checkpoint.clone(),
+            }
+        }
+        PendingOAuthWork::ProviderToken(checkpoint) => PersistedOAuthWork::ProviderToken {
+            checkpoint: checkpoint.clone(),
+        },
+        PendingOAuthWork::AccountStorage {
+            account,
+            checkpoint_secret_ref,
+            pkce_verifier_secret_ref,
+            candidate_access_secret_ref,
+            candidate_refresh_secret_ref,
+            superseded_secret_refs,
+            expected_account_state,
+            write_generation,
+        } => PersistedOAuthWork::AccountStorage {
+            account: account.clone(),
+            checkpoint_secret_ref: checkpoint_secret_ref.clone(),
+            pkce_verifier_secret_ref: pkce_verifier_secret_ref.clone(),
+            candidate_access_secret_ref: candidate_access_secret_ref.clone(),
+            candidate_refresh_secret_ref: candidate_refresh_secret_ref.clone(),
+            superseded_secret_refs: superseded_secret_refs.clone(),
+            expected_account_state: expected_account_state.clone(),
+            write_generation: *write_generation,
+        },
+    }
+}
+
+fn restore_oauth_work(
+    callback_state: &str,
+    platform: StreamPlatform,
+    work: PersistedOAuthWork,
+) -> Result<PendingOAuthWork> {
+    Ok(match work {
+        PersistedOAuthWork::Generic => PendingOAuthWork::Generic,
+        PersistedOAuthWork::ProviderExchange {
+            redirect_uri,
+            code_verifier_secret_ref,
+        } => {
+            let config = provider_config(platform)?;
+            validate_pkce_secret_ref(
+                callback_state,
+                platform,
+                config.pkce,
+                code_verifier_secret_ref.as_deref(),
+            )?;
+            PendingOAuthWork::ProviderExchange(PendingOAuthExchange {
+                platform,
+                token_url: config.token_url,
+                profile_url: config.profile_url,
+                client_id: config.client_id,
+                client_secret: config.client_secret,
+                redirect_uri,
+                scopes: normalized_scopes(&config.scopes),
+                code_verifier_secret_ref,
+            })
+        }
+        PersistedOAuthWork::ProviderExchangeStarted { checkpoint } => {
+            PendingOAuthWork::ProviderExchangeStarted(restore_token_checkpoint(
+                callback_state,
+                platform,
+                checkpoint,
+            )?)
+        }
+        PersistedOAuthWork::ProviderToken { checkpoint } => PendingOAuthWork::ProviderToken(
+            restore_token_checkpoint(callback_state, platform, checkpoint)?,
+        ),
+        PersistedOAuthWork::AccountStorage {
+            account,
+            checkpoint_secret_ref,
+            pkce_verifier_secret_ref,
+            candidate_access_secret_ref,
+            candidate_refresh_secret_ref,
+            superseded_secret_refs,
+            expected_account_state,
+            write_generation,
+        } => {
+            if account.platform != platform {
+                anyhow::bail!("Persisted OAuth account platform did not match its session.");
+            }
+            if checkpoint_secret_ref.as_deref().is_some_and(|secret_ref| {
+                secret_ref != pending_token_secret_ref(callback_state, platform)
+            }) {
+                anyhow::bail!("Persisted OAuth account checkpoint reference was invalid.");
+            }
+            validate_optional_pkce_secret_ref(
+                callback_state,
+                platform,
+                pkce_verifier_secret_ref.as_deref(),
+            )?;
+            validate_optional_candidate_secret_ref(
+                callback_state,
+                platform,
+                CandidateSecretKind::Access,
+                candidate_access_secret_ref.as_deref(),
+            )?;
+            validate_optional_candidate_secret_ref(
+                callback_state,
+                platform,
+                CandidateSecretKind::Refresh,
+                candidate_refresh_secret_ref.as_deref(),
+            )?;
+            for secret_ref in &superseded_secret_refs {
+                validate_platform_oauth_secret_ref(platform, secret_ref)?;
+            }
+            if let Some(expected) = expected_account_state.as_ref()
+                && write_generation <= expected.generation
+            {
+                anyhow::bail!("Persisted OAuth account write generation was invalid.");
+            }
+            PendingOAuthWork::AccountStorage {
+                account,
+                checkpoint_secret_ref,
+                pkce_verifier_secret_ref,
+                candidate_access_secret_ref,
+                candidate_refresh_secret_ref,
+                superseded_secret_refs,
+                expected_account_state,
+                write_generation,
+            }
+        }
+    })
+}
+
+fn restore_persisted_sessions(
+    sessions: Vec<PersistedOAuthSession>,
+) -> Result<HashMap<String, PendingOAuthSession>> {
+    let mut pending = HashMap::with_capacity(sessions.len());
+    for session in sessions {
+        if session.state.is_empty() || session.state.len() > 2048 {
+            anyhow::bail!("OAuth transaction recovery store contains an invalid state.");
+        }
+        let work = restore_oauth_work(&session.state, session.platform, session.work)
+            .context("OAuth transaction recovery store contains an invalid work checkpoint")?;
+        let previous = pending.insert(
+            session.state,
+            PendingOAuthSession {
+                platform: session.platform,
+                expires_at: session.expires_at,
+                work,
+            },
+        );
+        if previous.is_some() {
+            anyhow::bail!("OAuth transaction recovery store contains a duplicate state.");
+        }
+    }
+    Ok(pending)
+}
+
+fn migrate_legacy_oauth_store<P, D>(
+    path: &Path,
+    store: LegacyPersistedOAuthStore,
+    put_secret: &mut P,
+    delete_secret: &mut D,
+) -> Result<HashMap<String, PendingOAuthSession>>
+where
+    P: FnMut(&str, &str) -> Result<()>,
+    D: FnMut(&str) -> Result<()>,
+{
+    if store.version != LEGACY_OAUTH_PENDING_STORE_VERSION {
+        anyhow::bail!("OAuth transaction recovery store version is unsupported.");
+    }
+    let mut newly_protected_refs = Vec::new();
+    let migration = (|| {
+        let mut sessions = Vec::with_capacity(store.sessions.len());
+        for session in store.sessions {
+            if session.state.is_empty() || session.state.len() > 2048 {
+                anyhow::bail!("OAuth transaction recovery store contains an invalid state.");
+            }
+            let work = match session.work {
+                LegacyPersistedOAuthWork::Generic => PersistedOAuthWork::Generic,
+                LegacyPersistedOAuthWork::ProviderExchange {
+                    redirect_uri,
+                    code_verifier,
+                } => {
+                    let config = provider_config(session.platform)?;
+                    let code_verifier_secret_ref = match (config.pkce, code_verifier) {
+                        (true, Some(verifier)) => {
+                            validate_pkce_verifier(&verifier)?;
+                            let secret_ref =
+                                pending_pkce_verifier_secret_ref(&session.state, session.platform);
+                            put_secret(&secret_ref, &verifier)
+                                .context("Could not protect a migrated OAuth PKCE verifier")?;
+                            newly_protected_refs.push(secret_ref.clone());
+                            Some(secret_ref)
+                        }
+                        (true, None) => {
+                            anyhow::bail!(
+                                "Persisted OAuth provider exchange was missing its PKCE verifier."
+                            )
+                        }
+                        (false, Some(_)) => {
+                            anyhow::bail!(
+                                "Persisted OAuth provider exchange contained an unexpected PKCE verifier."
+                            )
+                        }
+                        (false, None) => None,
+                    };
+                    PersistedOAuthWork::ProviderExchange {
+                        redirect_uri,
+                        code_verifier_secret_ref,
+                    }
+                }
+                LegacyPersistedOAuthWork::ProviderExchangeStarted { checkpoint } => {
+                    PersistedOAuthWork::ProviderExchangeStarted { checkpoint }
+                }
+                LegacyPersistedOAuthWork::ProviderToken { checkpoint } => {
+                    PersistedOAuthWork::ProviderToken { checkpoint }
+                }
+                LegacyPersistedOAuthWork::AccountStorage {
+                    account,
+                    checkpoint_secret_ref,
+                } => PersistedOAuthWork::AccountStorage {
+                    account: Box::new(account),
+                    checkpoint_secret_ref,
+                    pkce_verifier_secret_ref: None,
+                    candidate_access_secret_ref: None,
+                    candidate_refresh_secret_ref: None,
+                    superseded_secret_refs: Vec::new(),
+                    expected_account_state: None,
+                    write_generation: 0,
+                },
+            };
+            sessions.push(PersistedOAuthSession {
+                state: session.state,
+                platform: session.platform,
+                expires_at: session.expires_at,
+                work,
+            });
+        }
+        let pending = restore_persisted_sessions(sessions)?;
+        persist_pending_oauth_sessions(path, &pending)
+            .context("Could not commit protected OAuth transaction migration")?;
+        Ok(pending)
+    })();
+    if migration.is_err() {
+        for secret_ref in newly_protected_refs.iter().rev() {
+            let _ = delete_secret(secret_ref);
+        }
+    }
+    migration
+}
+
+fn load_pending_oauth_sessions<P, D>(
+    path: &Path,
+    put_secret: &mut P,
+    delete_secret: &mut D,
+) -> Result<HashMap<String, PendingOAuthSession>>
+where
+    P: FnMut(&str, &str) -> Result<()>,
+    D: FnMut(&str) -> Result<()>,
+{
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => {
+            return Err(error).context("Could not read the OAuth transaction recovery store");
+        }
+    };
+    if bytes.is_empty() || bytes.len() > MAX_OAUTH_PENDING_STORE_BYTES {
+        anyhow::bail!("OAuth transaction recovery store exceeded its size bound.");
+    }
+    let version = serde_json::from_slice::<PersistedOAuthStoreVersion>(&bytes)
+        .context("OAuth transaction recovery store is malformed")?;
+    if version.version == LEGACY_OAUTH_PENDING_STORE_VERSION {
+        let legacy = serde_json::from_slice::<LegacyPersistedOAuthStore>(&bytes)
+            .context("OAuth transaction recovery store is malformed")?;
+        return migrate_legacy_oauth_store(path, legacy, put_secret, delete_secret);
+    }
+    let store = serde_json::from_slice::<PersistedOAuthStore>(&bytes)
+        .context("OAuth transaction recovery store is malformed")?;
+    if store.version != REFERENCE_OAUTH_PENDING_STORE_VERSION
+        && store.version != CANDIDATE_OAUTH_PENDING_STORE_VERSION
+        && store.version != OAUTH_PENDING_STORE_VERSION
+    {
+        anyhow::bail!("OAuth transaction recovery store version is unsupported.");
+    }
+    let pending = restore_persisted_sessions(store.sessions)?;
+    if store.version < OAUTH_PENDING_STORE_VERSION {
+        persist_pending_oauth_sessions(path, &pending)
+            .context("Could not commit OAuth candidate-reference migration")?;
+    }
+    Ok(pending)
+}
+
+fn persist_pending_oauth_sessions(
+    path: &Path,
+    pending: &HashMap<String, PendingOAuthSession>,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Could not create OAuth transaction dir {}",
+                parent.display()
+            )
+        })?;
+    }
+    let mut sessions = pending
+        .iter()
+        .map(|(state, session)| PersistedOAuthSession {
+            state: state.clone(),
+            platform: session.platform,
+            expires_at: session.expires_at,
+            work: persisted_oauth_work(&session.work),
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| left.state.cmp(&right.state));
+    let payload = serde_json::to_vec(&PersistedOAuthStore {
+        version: OAUTH_PENDING_STORE_VERSION,
+        sessions,
+    })?;
+    let temporary_path = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
+    let mut temporary = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary_path)
+        .with_context(|| format!("Could not create {}", temporary_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temporary_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.write_all(&payload)?;
+    temporary.sync_all()?;
+    drop(temporary);
+    if let Err(error) = replace_oauth_store_file(&temporary_path, path) {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(error).with_context(|| format!("Could not commit {}", path.display()));
+    }
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_oauth_store_file(source: &Path, destination: &Path) -> io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(target_os = "windows")]
+fn replace_oauth_store_file(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(io::Error::other)
+}
+
 impl OAuthSessions {
     pub async fn start(
         &self,
         params: OAuthStartParams,
         backend_port: u16,
     ) -> Result<OAuthStartResult> {
+        self.ensure_store_available()?;
         validate_start_params(&params)?;
         let state = Uuid::new_v4().to_string();
         let redirect_uri = params
@@ -186,14 +924,20 @@ impl OAuthSessions {
         let expires_at = Utc::now() + Duration::minutes(OAUTH_STATE_TTL_MINUTES);
         let auth_url = authorization_url(&params, &state, &redirect_uri);
 
-        self.pending.lock().await.insert(
+        let mut session_state = self.state.lock().await;
+        session_state.pending.insert(
             state.clone(),
             PendingOAuthSession {
                 platform: params.platform,
                 expires_at,
-                exchange: None,
+                work: PendingOAuthWork::Generic,
             },
         );
+        if let Err(error) = self.persist(&session_state) {
+            session_state.pending.remove(&state);
+            return Err(error);
+        }
+        drop(session_state);
 
         Ok(OAuthStartResult {
             platform: params.platform,
@@ -204,11 +948,28 @@ impl OAuthSessions {
         })
     }
 
+    #[cfg(test)]
     pub async fn start_provider(
         &self,
         params: OAuthStartProviderParams,
         backend_port: u16,
     ) -> Result<OAuthStartResult> {
+        self.start_provider_with_secret_store(params, backend_port, |_, _| Ok(()), |_| Ok(()))
+            .await
+    }
+
+    pub async fn start_provider_with_secret_store<P, D>(
+        &self,
+        params: OAuthStartProviderParams,
+        backend_port: u16,
+        mut put_secret: P,
+        _delete_secret: D,
+    ) -> Result<OAuthStartResult>
+    where
+        P: FnMut(&str, &str) -> Result<()>,
+        D: FnMut(&str) -> Result<()>,
+    {
+        self.ensure_store_available()?;
         if matches!(params.platform, StreamPlatform::Custom) {
             anyhow::bail!("Custom RTMP does not support OAuth.");
         }
@@ -224,11 +985,14 @@ impl OAuthSessions {
         )?;
         let expires_at = Utc::now() + Duration::minutes(OAUTH_STATE_TTL_MINUTES);
         let mut extra_params = config.extra_params.clone();
-        let code_verifier = if config.pkce {
+        let mut code_verifier = None;
+        let code_verifier_secret_ref = if config.pkce {
             let verifier = pkce_verifier();
             extra_params.insert("code_challenge".to_string(), pkce_s256_challenge(&verifier));
             extra_params.insert("code_challenge_method".to_string(), "S256".to_string());
-            Some(verifier)
+            let secret_ref = pending_pkce_verifier_secret_ref(&state, params.platform);
+            code_verifier = Some(verifier);
+            Some(secret_ref)
         } else {
             None
         };
@@ -242,12 +1006,13 @@ impl OAuthSessions {
         };
         let auth_url = authorization_url(&start_params, &state, &redirect_uri);
 
-        self.pending.lock().await.insert(
+        let mut session_state = self.state.lock().await;
+        session_state.pending.insert(
             state.clone(),
             PendingOAuthSession {
                 platform: params.platform,
                 expires_at,
-                exchange: Some(PendingOAuthExchange {
+                work: PendingOAuthWork::ProviderExchange(PendingOAuthExchange {
                     platform: params.platform,
                     token_url: config.token_url,
                     profile_url: config.profile_url,
@@ -255,10 +1020,26 @@ impl OAuthSessions {
                     client_secret: config.client_secret,
                     redirect_uri: redirect_uri.clone(),
                     scopes: normalized_scopes(&config.scopes),
-                    code_verifier,
+                    code_verifier_secret_ref: code_verifier_secret_ref.clone(),
                 }),
             },
         );
+        if let Err(error) = self.persist(&session_state) {
+            session_state.pending.remove(&state);
+            return Err(error);
+        }
+        drop(session_state);
+
+        // Persist ownership before writing the verifier. If the secret-store
+        // write partially commits and reports an error, the durable transaction
+        // still owns the exact reference and maintenance can retry its cleanup.
+        if let (Some(secret_ref), Some(verifier)) = (
+            code_verifier_secret_ref.as_deref(),
+            code_verifier.as_deref(),
+        ) {
+            put_secret(secret_ref, verifier)
+                .context("Could not protect the pending OAuth PKCE verifier")?;
+        }
 
         Ok(OAuthStartResult {
             platform: params.platform,
@@ -271,12 +1052,39 @@ impl OAuthSessions {
 
     #[cfg(test)]
     pub async fn complete(&self, params: OAuthCompleteParams) -> OAuthCallbackResult {
-        self.complete_with_pending(params).await.result
+        let state = params.state.clone();
+        let result = self.complete_with_pending(params).await.result;
+        if !result.retryable {
+            self.finish(&state).await.unwrap();
+        }
+        result
     }
 
     pub async fn complete_with_pending(&self, params: OAuthCompleteParams) -> OAuthCompleteOutcome {
         let received_at = Utc::now();
-        let Some(pending) = self.pending.lock().await.remove(&params.state) else {
+        if let Err(error) = self.ensure_store_available() {
+            return OAuthCompleteOutcome {
+                result: OAuthCallbackResult {
+                    platform: None,
+                    state: params.state,
+                    status: OAuthCallbackStatus::Failed,
+                    code_present: params.code.as_ref().is_some_and(|code| !code.is_empty()),
+                    error: None,
+                    message: Some(error.to_string()),
+                    token_stored: false,
+                    account_connected: false,
+                    retryable: true,
+                    received_at: received_at.to_rfc3339(),
+                },
+                exchange: None,
+                token_checkpoint: None,
+                account_to_store: None,
+                account_storage_commit: None,
+                authorization_code: None,
+            };
+        }
+        let mut session_state = self.state.lock().await;
+        let Some(pending) = session_state.pending.get(&params.state).cloned() else {
             return OAuthCompleteOutcome {
                 result: OAuthCallbackResult {
                     platform: None,
@@ -287,15 +1095,42 @@ impl OAuthSessions {
                     message: Some("OAuth callback state is not recognized.".to_string()),
                     token_stored: false,
                     account_connected: false,
+                    retryable: false,
                     received_at: received_at.to_rfc3339(),
                 },
                 exchange: None,
+                token_checkpoint: None,
+                account_to_store: None,
+                account_storage_commit: None,
                 authorization_code: None,
             };
         };
 
         let code_present = params.code.as_ref().is_some_and(|code| !code.is_empty());
-        if pending.expires_at < received_at {
+        if session_state.in_flight.contains(&params.state) {
+            return OAuthCompleteOutcome {
+                result: OAuthCallbackResult {
+                    platform: Some(pending.platform),
+                    state: params.state,
+                    status: OAuthCallbackStatus::Failed,
+                    code_present,
+                    error: None,
+                    message: Some("OAuth callback completion is already in progress.".to_string()),
+                    token_stored: false,
+                    account_connected: false,
+                    retryable: true,
+                    received_at: received_at.to_rfc3339(),
+                },
+                exchange: None,
+                token_checkpoint: None,
+                account_to_store: None,
+                account_storage_commit: None,
+                authorization_code: None,
+            };
+        }
+
+        if pending.expires_at < received_at && pending.work.is_unadvanced() {
+            session_state.in_flight.insert(params.state.clone());
             return OAuthCompleteOutcome {
                 result: OAuthCallbackResult {
                     platform: Some(pending.platform),
@@ -308,49 +1143,764 @@ impl OAuthSessions {
                     ),
                     token_stored: false,
                     account_connected: false,
+                    retryable: false,
                     received_at: received_at.to_rfc3339(),
                 },
                 exchange: None,
+                token_checkpoint: None,
+                account_to_store: None,
+                account_storage_commit: None,
                 authorization_code: None,
             };
         }
 
-        let failed = params.error.is_some() || !code_present;
+        let code_less_resume = pending.work.is_code_less_resumable();
+        // Once the provider code has been consumed, later callback deliveries
+        // (including stale denial/error URLs) are no longer authoritative. The
+        // durable checkpoint must reconcile code-less until it is committed.
+        let failed = !code_less_resume && (params.error.is_some() || !code_present);
+        session_state.in_flight.insert(params.state.clone());
         let status = if failed {
             OAuthCallbackStatus::Failed
         } else {
             OAuthCallbackStatus::Success
         };
-        let authorization_code = (!failed).then_some(params.code).flatten();
+        let authorization_code = (!failed
+            && matches!(&pending.work, PendingOAuthWork::ProviderExchange(_)))
+        .then_some(params.code)
+        .flatten();
+        let (exchange, token_checkpoint, account_to_store, account_storage_commit) = if failed {
+            (None, None, None, None)
+        } else {
+            match pending.work {
+                PendingOAuthWork::Generic => (None, None, None, None),
+                PendingOAuthWork::ProviderExchange(exchange) => (Some(exchange), None, None, None),
+                PendingOAuthWork::ProviderExchangeStarted(checkpoint)
+                | PendingOAuthWork::ProviderToken(checkpoint) => {
+                    (None, Some(checkpoint), None, None)
+                }
+                PendingOAuthWork::AccountStorage {
+                    account,
+                    expected_account_state,
+                    write_generation,
+                    ..
+                } => (
+                    None,
+                    None,
+                    Some(*account),
+                    Some(PendingOAuthAccountStorageCommit {
+                        expected_account_state,
+                        write_generation,
+                    }),
+                ),
+            }
+        };
         OAuthCompleteOutcome {
             result: OAuthCallbackResult {
                 platform: Some(pending.platform),
                 state: params.state,
                 status,
                 code_present,
-                error: params.error,
-                message: params.error_description.or_else(|| {
-                    (!code_present).then(|| "OAuth callback did not include a code.".to_string())
-                }),
+                error: (!code_less_resume).then_some(params.error).flatten(),
+                message: (!code_less_resume)
+                    .then_some(params.error_description)
+                    .flatten()
+                    .or_else(|| {
+                        (failed && !code_present)
+                            .then(|| "OAuth callback did not include a code.".to_string())
+                    }),
                 token_stored: false,
                 account_connected: false,
+                retryable: false,
                 received_at: received_at.to_rfc3339(),
             },
-            exchange: (!failed).then_some(pending.exchange).flatten(),
+            exchange,
+            token_checkpoint,
+            account_to_store,
+            account_storage_commit,
             authorization_code,
+        }
+    }
+
+    /// Commits the point of no return before an authorization code is posted to
+    /// the provider. A restarted backend may recover a protected token
+    /// checkpoint from this predeclared reference, but it must never post the
+    /// same single-use code again when the checkpoint is absent.
+    pub async fn stage_exchange_started(
+        &self,
+        callback_state: &str,
+    ) -> Result<PendingOAuthTokenCheckpoint> {
+        let mut session_state = self.state.lock().await;
+        let current_work = session_state
+            .pending
+            .get(callback_state)
+            .map(|pending| pending.work.clone())
+            .with_context(|| "OAuth callback state disappeared before token exchange.")?;
+        let (checkpoint, previous_work) = match current_work {
+            PendingOAuthWork::ProviderExchange(exchange) => (
+                pending_token_checkpoint(callback_state, &exchange),
+                PendingOAuthWork::ProviderExchange(exchange),
+            ),
+            PendingOAuthWork::ProviderExchangeStarted(checkpoint)
+            | PendingOAuthWork::ProviderToken(checkpoint) => return Ok(checkpoint),
+            PendingOAuthWork::Generic | PendingOAuthWork::AccountStorage { .. } => {
+                anyhow::bail!("OAuth callback is not waiting for a provider token exchange.")
+            }
+        };
+        session_state
+            .pending
+            .get_mut(callback_state)
+            .expect("pending OAuth session was just read")
+            .work = PendingOAuthWork::ProviderExchangeStarted(checkpoint.clone());
+        if let Err(error) = self.persist(&session_state) {
+            session_state
+                .pending
+                .get_mut(callback_state)
+                .expect("pending OAuth session was just read")
+                .work = previous_work;
+            return Err(error);
+        }
+        Ok(checkpoint)
+    }
+
+    /// Stores the raw token response only in the protected secret store, then
+    /// advances the transaction file to a reference-only recovery checkpoint.
+    /// If the second persistence step fails, retain the in-memory checkpoint;
+    /// the on-disk ExchangeStarted state can discover the already-written
+    /// secret through the same predeclared reference after a cold restart.
+    pub async fn stage_exchanged_token<F>(
+        &self,
+        callback_state: &str,
+        token: ExchangedOAuthToken,
+        mut put_secret: F,
+    ) -> Result<PendingOAuthTokenCheckpoint>
+    where
+        F: FnMut(&str, &str) -> Result<()>,
+    {
+        let mut session_state = self.state.lock().await;
+        let checkpoint = match session_state
+            .pending
+            .get(callback_state)
+            .map(|pending| pending.work.clone())
+            .with_context(|| "OAuth callback state disappeared after token exchange.")?
+        {
+            PendingOAuthWork::ProviderExchangeStarted(checkpoint)
+            | PendingOAuthWork::ProviderToken(checkpoint) => checkpoint,
+            PendingOAuthWork::ProviderExchange(_)
+            | PendingOAuthWork::Generic
+            | PendingOAuthWork::AccountStorage { .. } => {
+                anyhow::bail!("OAuth token exchange was not durably admitted.")
+            }
+        };
+        validate_exchanged_token(&checkpoint, &token)?;
+        let payload = serde_json::to_string(&token)
+            .context("Could not encode protected OAuth token checkpoint")?;
+        put_secret(checkpoint.secret_ref(), &payload)
+            .context("Could not store protected OAuth token checkpoint")?;
+        session_state
+            .pending
+            .get_mut(callback_state)
+            .expect("pending OAuth session was just read")
+            .work = PendingOAuthWork::ProviderToken(checkpoint.clone());
+        self.persist(&session_state)?;
+        Ok(checkpoint)
+    }
+
+    #[cfg(test)]
+    pub async fn stage_account_storage(
+        &self,
+        state: &str,
+        account: UpsertPlatformAccount,
+    ) -> Result<()> {
+        self.stage_account_storage_with_checkpoint(
+            state,
+            account,
+            None,
+            Vec::new(),
+            PlatformAccountWriteExpectation::absent(0),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn stage_account_storage_with_checkpoint(
+        &self,
+        state: &str,
+        account: UpsertPlatformAccount,
+        checkpoint: Option<&PendingOAuthTokenCheckpoint>,
+        superseded_secret_refs: Vec<String>,
+        mut expected_account_state: PlatformAccountWriteExpectation,
+    ) -> Result<PendingOAuthAccountStorageCommit> {
+        let mut session_state = self.state.lock().await;
+        for (pending_state, pending) in &session_state.pending {
+            if pending_state == state || pending.platform != account.platform {
+                continue;
+            }
+            if let PendingOAuthWork::AccountStorage {
+                account: predecessor,
+                write_generation,
+                ..
+            } = &pending.work
+                && *write_generation > expected_account_state.generation
+            {
+                expected_account_state =
+                    PlatformAccountWriteExpectation::for_account(predecessor, *write_generation);
+            }
+        }
+        let write_generation = expected_account_state.generation.saturating_add(1);
+        let pending = session_state
+            .pending
+            .get_mut(state)
+            .with_context(|| "OAuth callback state disappeared before account storage.")?;
+        let previous_work = pending.work.clone();
+        for secret_ref in &superseded_secret_refs {
+            validate_platform_oauth_secret_ref(account.platform, secret_ref)?;
+        }
+        pending.work = PendingOAuthWork::AccountStorage {
+            account: Box::new(account),
+            checkpoint_secret_ref: checkpoint.map(|checkpoint| checkpoint.secret_ref.clone()),
+            pkce_verifier_secret_ref: checkpoint
+                .and_then(|checkpoint| checkpoint.pkce_verifier_secret_ref.clone()),
+            candidate_access_secret_ref: checkpoint
+                .map(|checkpoint| checkpoint.candidate_access_secret_ref.clone()),
+            candidate_refresh_secret_ref: checkpoint
+                .map(|checkpoint| checkpoint.candidate_refresh_secret_ref.clone()),
+            superseded_secret_refs,
+            expected_account_state: Some(expected_account_state.clone()),
+            write_generation,
+        };
+        if let Err(error) = self.persist(&session_state) {
+            if let Some(pending) = session_state.pending.get_mut(state) {
+                pending.work = previous_work;
+            }
+            return Err(error);
+        }
+        Ok(PendingOAuthAccountStorageCommit {
+            expected_account_state: Some(expected_account_state),
+            write_generation,
+        })
+    }
+
+    pub async fn retry(&self, state: &str) -> Result<()> {
+        let mut session_state = self.state.lock().await;
+        session_state.in_flight.remove(state);
+        Ok(())
+    }
+
+    pub async fn can_resume_without_code(&self, state: &str) -> Result<bool> {
+        self.ensure_store_available()?;
+        let session_state = self.state.lock().await;
+        Ok(session_state.pending.get(state).is_some_and(|pending| {
+            pending.work.is_code_less_resumable() && !session_state.in_flight.contains(state)
+        }))
+    }
+
+    pub async fn pending_retry_window(&self, state: &str) -> Result<Option<std::time::Duration>> {
+        self.ensure_store_available()?;
+        let session_state = self.state.lock().await;
+        let Some(pending) = session_state.pending.get(state) else {
+            return Ok(None);
+        };
+        let remaining = pending.expires_at.signed_duration_since(Utc::now());
+        Ok(Some(if remaining <= Duration::zero() {
+            std::time::Duration::ZERO
+        } else {
+            remaining
+                .to_std()
+                .context("OAuth retry window exceeded its supported duration")?
+        }))
+    }
+
+    #[cfg(test)]
+    pub async fn resumable_provider_states(&self) -> Result<Vec<String>> {
+        self.ensure_store_available()?;
+        let session_state = self.state.lock().await;
+        let mut states = session_state
+            .pending
+            .iter()
+            .filter(|(state, pending)| {
+                pending.work.is_code_less_resumable()
+                    && !session_state.in_flight.contains(*state)
+                    && !session_state.recovery_drivers.contains(*state)
+            })
+            .map(|(state, _)| state.clone())
+            .collect::<Vec<_>>();
+        states.sort();
+        Ok(states)
+    }
+
+    /// Retries live cleanup for abandoned, unadvanced transactions and claims
+    /// every durable advanced transaction for code-less reconciliation. The
+    /// supplied clock keeps expiry behavior deterministic in regression tests.
+    pub async fn maintain_pending<F>(
+        &self,
+        now: chrono::DateTime<Utc>,
+        mut delete_secret: F,
+    ) -> Result<Vec<String>>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        self.ensure_store_available()?;
+        let mut session_state = self.state.lock().await;
+        let removable = session_state
+            .pending
+            .iter()
+            .filter(|(state, pending)| {
+                pending.expires_at < now
+                    && pending.work.is_unadvanced()
+                    && !session_state.in_flight.contains(*state)
+            })
+            .filter(|(_, pending)| {
+                pending_secret_refs(&pending.work)
+                    .iter()
+                    .all(|secret_ref| delete_secret(secret_ref).is_ok())
+            })
+            .map(|(state, _)| state.clone())
+            .collect::<Vec<_>>();
+        let removed = removable
+            .into_iter()
+            .filter_map(|state| {
+                session_state
+                    .pending
+                    .remove(&state)
+                    .map(|pending| (state, pending))
+            })
+            .collect::<Vec<_>>();
+        if !removed.is_empty()
+            && let Err(error) = self.persist(&session_state)
+        {
+            session_state.pending.extend(removed);
+            return Err(error);
+        }
+
+        let mut states = session_state
+            .pending
+            .iter()
+            .filter(|(state, pending)| {
+                pending.work.is_code_less_resumable()
+                    && !session_state.in_flight.contains(*state)
+                    && !session_state.recovery_drivers.contains(*state)
+            })
+            .map(|(state, _)| state.clone())
+            .collect::<Vec<_>>();
+        states.sort();
+        session_state
+            .recovery_drivers
+            .extend(states.iter().cloned());
+        Ok(states)
+    }
+
+    pub async fn release_recovery_driver(&self, state: &str) {
+        self.state.lock().await.recovery_drivers.remove(state);
+    }
+
+    pub async fn highest_pending_account_write_generation(&self, platform: StreamPlatform) -> u64 {
+        self.state
+            .lock()
+            .await
+            .pending
+            .values()
+            .filter(|pending| pending.platform == platform)
+            .filter_map(|pending| match &pending.work {
+                PendingOAuthWork::AccountStorage {
+                    write_generation, ..
+                } => Some(*write_generation),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub async fn finish(&self, state: &str) -> Result<()> {
+        let mut session_state = self.state.lock().await;
+        session_state.in_flight.remove(state);
+        session_state.recovery_drivers.remove(state);
+        let removed = session_state.pending.remove(state);
+        if let Err(error) = self.persist(&session_state) {
+            if let Some(pending) = removed {
+                session_state.pending.insert(state.to_string(), pending);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub async fn finish_with_secret_cleanup<F>(
+        &self,
+        state: &str,
+        mut delete_secret: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        let pending_secret_refs = {
+            let session_state = self.state.lock().await;
+            session_state
+                .pending
+                .get(state)
+                .map(|pending| pending_secret_refs(&pending.work))
+                .unwrap_or_default()
+        };
+        for secret_ref in pending_secret_refs {
+            if let Err(error) = delete_secret(&secret_ref) {
+                self.retry(state).await?;
+                return Err(error).context("Could not delete protected OAuth recovery secret");
+            }
+        }
+        self.finish(state).await
+    }
+
+    pub async fn finish_superseded_account_storage_with_secret_cleanup<F>(
+        &self,
+        state: &str,
+        current_account_state: &PlatformAccountWriteExpectation,
+        mut delete_secret: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        let protected = current_account_state.secret_refs().collect::<HashSet<_>>();
+        let secret_refs = {
+            let session_state = self.state.lock().await;
+            session_state
+                .pending
+                .get(state)
+                .map(|pending| superseded_account_storage_secret_refs(&pending.work))
+                .unwrap_or_default()
+        };
+        for secret_ref in secret_refs {
+            if protected.contains(secret_ref.as_str()) {
+                continue;
+            }
+            if let Err(error) = delete_secret(&secret_ref) {
+                self.retry(state).await?;
+                return Err(error).context("Could not delete superseded OAuth transaction secret");
+            }
+        }
+        self.finish(state).await
+    }
+}
+
+fn pending_token_checkpoint(
+    callback_state: &str,
+    exchange: &PendingOAuthExchange,
+) -> PendingOAuthTokenCheckpoint {
+    PendingOAuthTokenCheckpoint {
+        platform: exchange.platform,
+        profile_url: exchange.profile_url.clone(),
+        client_id: exchange.client_id.clone(),
+        scopes: exchange.scopes.clone(),
+        secret_ref: pending_token_secret_ref(callback_state, exchange.platform),
+        pkce_verifier_secret_ref: exchange.code_verifier_secret_ref.clone(),
+        candidate_access_secret_ref: pending_candidate_secret_ref(
+            callback_state,
+            exchange.platform,
+            CandidateSecretKind::Access,
+        ),
+        candidate_refresh_secret_ref: pending_candidate_secret_ref(
+            callback_state,
+            exchange.platform,
+            CandidateSecretKind::Refresh,
+        ),
+    }
+}
+
+fn pending_token_secret_ref(callback_state: &str, platform: StreamPlatform) -> String {
+    let state_digest = URL_SAFE_NO_PAD.encode(Sha256::digest(callback_state.as_bytes()));
+    format!(
+        "platform:{}:oauth:pending:{state_digest}",
+        stream_platform_id(platform)
+    )
+}
+
+fn pending_pkce_verifier_secret_ref(callback_state: &str, platform: StreamPlatform) -> String {
+    let state_digest = URL_SAFE_NO_PAD.encode(Sha256::digest(callback_state.as_bytes()));
+    format!(
+        "platform:{}:oauth:pending-pkce:{state_digest}",
+        stream_platform_id(platform)
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CandidateSecretKind {
+    Access,
+    Refresh,
+}
+
+impl CandidateSecretKind {
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Access => "access",
+            Self::Refresh => "refresh",
         }
     }
 }
 
-pub async fn exchange_and_store_token<F>(
+fn pending_candidate_secret_ref(
+    callback_state: &str,
+    platform: StreamPlatform,
+    kind: CandidateSecretKind,
+) -> String {
+    let state_digest = URL_SAFE_NO_PAD.encode(Sha256::digest(callback_state.as_bytes()));
+    format!(
+        "platform:{}:oauth:candidate:{state_digest}:{}",
+        stream_platform_id(platform),
+        kind.suffix()
+    )
+}
+
+fn validate_optional_candidate_secret_ref(
+    callback_state: &str,
+    platform: StreamPlatform,
+    kind: CandidateSecretKind,
+    secret_ref: Option<&str>,
+) -> Result<()> {
+    if secret_ref.is_some_and(|secret_ref| {
+        secret_ref != pending_candidate_secret_ref(callback_state, platform, kind)
+    }) {
+        anyhow::bail!("Persisted OAuth candidate secret reference was invalid.");
+    }
+    Ok(())
+}
+
+fn validate_platform_oauth_secret_ref(platform: StreamPlatform, secret_ref: &str) -> Result<()> {
+    let prefix = format!("platform:{}:oauth:", stream_platform_id(platform));
+    let Some(suffix) = secret_ref.strip_prefix(&prefix) else {
+        anyhow::bail!("Persisted OAuth superseded secret reference targeted another platform.");
+    };
+    let valid = matches!(suffix, "access" | "refresh")
+        || suffix.strip_prefix("candidate:").is_some_and(|candidate| {
+            let Some((digest, kind)) = candidate.rsplit_once(':') else {
+                return false;
+            };
+            matches!(kind, "access" | "refresh")
+                && digest.len() == 43
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        });
+    if !valid {
+        anyhow::bail!("Persisted OAuth superseded secret reference was invalid.");
+    }
+    Ok(())
+}
+
+fn validate_pkce_verifier(verifier: &str) -> Result<()> {
+    // New verifiers are RFC 7636's minimum 43 characters. Accept the previous
+    // 40-character `videorc-<uuid>` shape during recovery so an in-progress
+    // authorization can be migrated instead of stranded.
+    if !(40..=128).contains(&verifier.len())
+        || !verifier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+    {
+        anyhow::bail!("Protected OAuth PKCE verifier was invalid.");
+    }
+    Ok(())
+}
+
+fn validate_optional_pkce_secret_ref(
+    callback_state: &str,
+    platform: StreamPlatform,
+    secret_ref: Option<&str>,
+) -> Result<()> {
+    if secret_ref.is_some_and(|secret_ref| {
+        secret_ref != pending_pkce_verifier_secret_ref(callback_state, platform)
+    }) {
+        anyhow::bail!("Persisted OAuth PKCE verifier reference was invalid.");
+    }
+    Ok(())
+}
+
+fn validate_pkce_secret_ref(
+    callback_state: &str,
+    platform: StreamPlatform,
+    pkce_required: bool,
+    secret_ref: Option<&str>,
+) -> Result<()> {
+    validate_optional_pkce_secret_ref(callback_state, platform, secret_ref)?;
+    if pkce_required != secret_ref.is_some() {
+        anyhow::bail!("Persisted OAuth PKCE verifier reference did not match its provider.");
+    }
+    Ok(())
+}
+
+fn restore_token_checkpoint(
+    callback_state: &str,
+    platform: StreamPlatform,
+    mut checkpoint: PendingOAuthTokenCheckpoint,
+) -> Result<PendingOAuthTokenCheckpoint> {
+    if checkpoint.platform != platform
+        || checkpoint.secret_ref != pending_token_secret_ref(callback_state, platform)
+    {
+        anyhow::bail!("Persisted OAuth token checkpoint did not match its session.");
+    }
+    let config = provider_config(platform)?;
+    validate_optional_pkce_secret_ref(
+        callback_state,
+        platform,
+        checkpoint.pkce_verifier_secret_ref.as_deref(),
+    )?;
+    let expected_access =
+        pending_candidate_secret_ref(callback_state, platform, CandidateSecretKind::Access);
+    if checkpoint.candidate_access_secret_ref.is_empty() {
+        checkpoint.candidate_access_secret_ref = expected_access;
+    } else if checkpoint.candidate_access_secret_ref != expected_access {
+        anyhow::bail!("Persisted OAuth access candidate did not match its session.");
+    }
+    let expected_refresh =
+        pending_candidate_secret_ref(callback_state, platform, CandidateSecretKind::Refresh);
+    if checkpoint.candidate_refresh_secret_ref.is_empty() {
+        checkpoint.candidate_refresh_secret_ref = expected_refresh;
+    } else if checkpoint.candidate_refresh_secret_ref != expected_refresh {
+        anyhow::bail!("Persisted OAuth refresh candidate did not match its session.");
+    }
+    checkpoint.profile_url = config.profile_url;
+    checkpoint.client_id = config.client_id;
+    checkpoint.scopes = normalized_scopes(&config.scopes);
+    Ok(checkpoint)
+}
+
+pub fn recover_pkce_verifier<F>(
+    exchange: &PendingOAuthExchange,
+    mut get_secret: F,
+) -> Result<Option<String>>
+where
+    F: FnMut(&str) -> Result<Option<String>>,
+{
+    let Some(secret_ref) = exchange.code_verifier_secret_ref.as_deref() else {
+        return Ok(None);
+    };
+    let verifier =
+        get_secret(secret_ref)?.with_context(|| "Protected OAuth PKCE verifier is missing.")?;
+    validate_pkce_verifier(&verifier)?;
+    Ok(Some(verifier))
+}
+
+fn pending_secret_refs(work: &PendingOAuthWork) -> Vec<String> {
+    match work {
+        PendingOAuthWork::ProviderExchange(exchange) => {
+            exchange.code_verifier_secret_ref.iter().cloned().collect()
+        }
+        PendingOAuthWork::ProviderExchangeStarted(checkpoint)
+        | PendingOAuthWork::ProviderToken(checkpoint) => {
+            let mut refs = vec![
+                checkpoint.secret_ref().to_string(),
+                checkpoint.candidate_access_secret_ref().to_string(),
+                checkpoint.candidate_refresh_secret_ref().to_string(),
+            ];
+            if let Some(secret_ref) = checkpoint.pkce_verifier_secret_ref.as_ref() {
+                refs.push(secret_ref.clone());
+            }
+            refs
+        }
+        PendingOAuthWork::AccountStorage {
+            account,
+            checkpoint_secret_ref,
+            pkce_verifier_secret_ref,
+            candidate_access_secret_ref,
+            candidate_refresh_secret_ref,
+            superseded_secret_refs,
+            ..
+        } => {
+            let committed = [
+                account.token_secret_ref.as_deref(),
+                account.refresh_token_secret_ref.as_deref(),
+            ];
+            checkpoint_secret_ref
+                .iter()
+                .chain(pkce_verifier_secret_ref.iter())
+                .chain(candidate_access_secret_ref.iter())
+                .chain(candidate_refresh_secret_ref.iter())
+                .chain(superseded_secret_refs.iter())
+                .filter(|secret_ref| {
+                    !committed
+                        .iter()
+                        .flatten()
+                        .any(|committed| *committed == secret_ref.as_str())
+                })
+                .cloned()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect()
+        }
+        PendingOAuthWork::Generic => Vec::new(),
+    }
+}
+
+fn superseded_account_storage_secret_refs(work: &PendingOAuthWork) -> Vec<String> {
+    let PendingOAuthWork::AccountStorage {
+        account,
+        checkpoint_secret_ref,
+        pkce_verifier_secret_ref,
+        candidate_access_secret_ref,
+        candidate_refresh_secret_ref,
+        superseded_secret_refs,
+        ..
+    } = work
+    else {
+        return pending_secret_refs(work);
+    };
+    checkpoint_secret_ref
+        .iter()
+        .chain(pkce_verifier_secret_ref.iter())
+        .chain(candidate_access_secret_ref.iter())
+        .chain(candidate_refresh_secret_ref.iter())
+        .chain(superseded_secret_refs.iter())
+        .chain(account.token_secret_ref.iter())
+        .chain(account.refresh_token_secret_ref.iter())
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn validate_exchanged_token(
+    checkpoint: &PendingOAuthTokenCheckpoint,
+    token: &ExchangedOAuthToken,
+) -> Result<()> {
+    if token.platform != checkpoint.platform {
+        anyhow::bail!("OAuth token platform did not match its pending transaction.");
+    }
+    if token.access_token.trim().is_empty() || token.access_token.len() > 32_768 {
+        anyhow::bail!("OAuth token checkpoint had an invalid access token.");
+    }
+    if token
+        .refresh_token
+        .as_ref()
+        .is_some_and(|value| value.len() > 32_768)
+        || token.scopes.len() > 128
+        || token.scopes.iter().any(|scope| scope.len() > 512)
+    {
+        anyhow::bail!("OAuth token checkpoint exceeded its structural bounds.");
+    }
+    Ok(())
+}
+
+pub fn recover_exchanged_token<F>(
+    checkpoint: &PendingOAuthTokenCheckpoint,
+    mut get_secret: F,
+) -> Result<ExchangedOAuthToken>
+where
+    F: FnMut(&str) -> Result<Option<String>>,
+{
+    let payload = get_secret(checkpoint.secret_ref())?
+        .with_context(|| "Protected OAuth token checkpoint is missing.")?;
+    if payload.len() > 70_000 {
+        anyhow::bail!("Protected OAuth token checkpoint exceeded its size bound.");
+    }
+    let token = serde_json::from_str::<ExchangedOAuthToken>(&payload)
+        .context("Protected OAuth token checkpoint is malformed")?;
+    validate_exchanged_token(checkpoint, &token)?;
+    Ok(token)
+}
+
+pub async fn exchange_authorization_code(
     exchange: &PendingOAuthExchange,
     authorization_code: &str,
+    code_verifier: Option<&str>,
     client: &reqwest::Client,
-    mut put_secret: F,
-) -> Result<UpsertPlatformAccount>
-where
-    F: FnMut(&str, &str) -> Result<()>,
-{
+) -> Result<ExchangedOAuthToken> {
     let mut form = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", authorization_code.to_string()),
@@ -360,8 +1910,12 @@ where
     if let Some(client_secret) = exchange.client_secret.as_ref() {
         form.push(("client_secret", client_secret.clone()));
     }
-    if let Some(code_verifier) = exchange.code_verifier.as_ref() {
-        form.push(("code_verifier", code_verifier.clone()));
+    if exchange.code_verifier_secret_ref.is_some() != code_verifier.is_some() {
+        anyhow::bail!("OAuth PKCE verifier availability did not match its provider exchange.");
+    }
+    if let Some(code_verifier) = code_verifier {
+        validate_pkce_verifier(code_verifier)?;
+        form.push(("code_verifier", code_verifier.to_string()));
     }
 
     let response = client
@@ -386,28 +1940,6 @@ where
     if token.access_token.trim().is_empty() {
         anyhow::bail!("OAuth token response did not include an access token.");
     }
-    let profile = fetch_provider_profile(
-        exchange.platform,
-        &exchange.profile_url,
-        &exchange.client_id,
-        &token.access_token,
-        client,
-    )
-    .await?;
-
-    let platform_id = stream_platform_id(exchange.platform);
-    let access_ref = format!("platform:{platform_id}:oauth:access");
-    put_secret(&access_ref, &token.access_token)?;
-    let refresh_ref = token
-        .refresh_token
-        .as_deref()
-        .filter(|refresh_token| !refresh_token.trim().is_empty())
-        .map(|refresh_token| {
-            let secret_ref = format!("platform:{platform_id}:oauth:refresh");
-            put_secret(&secret_ref, refresh_token)?;
-            Ok::<_, anyhow::Error>(secret_ref)
-        })
-        .transpose()?;
     let scopes = token
         .scopes()
         .filter(|scopes| !scopes.is_empty())
@@ -416,20 +1948,78 @@ where
         .expires_in
         .and_then(|seconds| Utc::now().checked_add_signed(Duration::seconds(seconds)))
         .map(|expires_at| expires_at.to_rfc3339());
-
-    Ok(UpsertPlatformAccount {
+    Ok(ExchangedOAuthToken {
         platform: exchange.platform,
+        access_token: token.access_token,
+        refresh_token: token.refresh_token,
+        scopes,
+        expires_at,
+    })
+}
+
+pub async fn account_from_exchanged_token<F>(
+    checkpoint: &PendingOAuthTokenCheckpoint,
+    token: &ExchangedOAuthToken,
+    client: &reqwest::Client,
+    mut put_secrets: F,
+) -> Result<UpsertPlatformAccount>
+where
+    F: FnMut(&[(&str, &str)]) -> Result<()>,
+{
+    validate_exchanged_token(checkpoint, token)?;
+    let profile = fetch_provider_profile(
+        checkpoint.platform,
+        &checkpoint.profile_url,
+        &checkpoint.client_id,
+        &token.access_token,
+        client,
+    )
+    .await?;
+
+    let access_ref = checkpoint.candidate_access_secret_ref.clone();
+    let refresh_token = token
+        .refresh_token
+        .as_deref()
+        .filter(|refresh_token| !refresh_token.trim().is_empty());
+    let mut entries = vec![(access_ref.as_str(), token.access_token.as_str())];
+    if let Some(refresh_token) = refresh_token {
+        entries.push((
+            checkpoint.candidate_refresh_secret_ref.as_str(),
+            refresh_token,
+        ));
+    }
+    put_secrets(&entries).context("Could not atomically store OAuth credential candidates")?;
+    let refresh_ref = refresh_token.map(|_| checkpoint.candidate_refresh_secret_ref.clone());
+    Ok(UpsertPlatformAccount {
+        platform: checkpoint.platform,
         account_id: profile.account_id,
         account_label: profile.account_label,
         account_handle: profile.account_handle,
         avatar_url: profile.avatar_url,
-        scopes,
+        scopes: token.scopes.clone(),
         token_secret_ref: Some(access_ref),
         refresh_token_secret_ref: refresh_ref,
         stream_key_secret_ref: None,
-        expires_at,
+        expires_at: token.expires_at.clone(),
         status: PlatformAccountStatus::Connected,
     })
+}
+
+#[cfg(test)]
+pub async fn exchange_and_store_token<F>(
+    exchange: &PendingOAuthExchange,
+    authorization_code: &str,
+    code_verifier: Option<&str>,
+    client: &reqwest::Client,
+    put_secrets: F,
+) -> Result<UpsertPlatformAccount>
+where
+    F: FnMut(&[(&str, &str)]) -> Result<()>,
+{
+    let token =
+        exchange_authorization_code(exchange, authorization_code, code_verifier, client).await?;
+    let checkpoint = pending_token_checkpoint("compatibility-wrapper", exchange);
+    account_from_exchanged_token(&checkpoint, &token, client, put_secrets).await
 }
 
 pub async fn refresh_provider_token(
@@ -957,7 +2547,10 @@ fn optional_static(value: Option<&'static str>) -> Option<String> {
 }
 
 fn pkce_verifier() -> String {
-    format!("videorc-{}", Uuid::new_v4().simple())
+    let mut entropy = Vec::with_capacity(32);
+    entropy.extend_from_slice(Uuid::new_v4().as_bytes());
+    entropy.extend_from_slice(Uuid::new_v4().as_bytes());
+    URL_SAFE_NO_PAD.encode(entropy)
 }
 
 fn pkce_s256_challenge(verifier: &str) -> String {
@@ -1055,6 +2648,10 @@ mod tests {
     use axum::{Json, Router};
     use tokio::net::TcpListener;
 
+    fn pending_store_path() -> PathBuf {
+        std::env::temp_dir().join(format!("videorc-oauth-pending-{}.json", Uuid::new_v4()))
+    }
+
     fn start_params() -> OAuthStartParams {
         OAuthStartParams {
             platform: StreamPlatform::Youtube,
@@ -1071,6 +2668,1583 @@ mod tests {
                 ("state".to_string(), "malicious".to_string()),
             ]),
         }
+    }
+
+    #[tokio::test]
+    async fn malformed_oauth_store_blocks_overwrite_until_a_clean_restart() {
+        let corruptions = [
+            b"{\"version\":1,\"sessions\":[".to_vec(),
+            br#"{"version":99,"sessions":[]}"#.to_vec(),
+            br#"{"version":1,"sessions":[{"state":"","platform":"youtube","expiresAt":"2026-07-12T00:00:00Z","work":{"kind":"generic"}}]}"#.to_vec(),
+        ];
+
+        for bytes in corruptions {
+            let store_path = pending_store_path();
+            std::fs::write(&store_path, &bytes).unwrap();
+            let sessions = OAuthSessions::new(Some(store_path.clone()));
+
+            let error = sessions.start(start_params(), 61234).await.unwrap_err();
+            assert!(error.to_string().contains("storage is unavailable"));
+            assert_eq!(std::fs::read(&store_path).unwrap(), bytes);
+            drop(sessions);
+
+            std::fs::remove_file(&store_path).unwrap();
+            let restored = OAuthSessions::new(Some(store_path.clone()));
+            restored.start(start_params(), 61234).await.unwrap();
+            assert!(
+                std::fs::read(&store_path)
+                    .unwrap()
+                    .starts_with(format!("{{\"version\":{OAUTH_PENDING_STORE_VERSION}").as_bytes())
+            );
+            let _ = std::fs::remove_file(store_path);
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_oauth_store_is_not_treated_as_missing() {
+        let store_path = pending_store_path();
+        std::fs::create_dir(&store_path).unwrap();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+
+        let error = sessions.start(start_params(), 61234).await.unwrap_err();
+        assert!(error.to_string().contains("storage is unavailable"));
+        assert!(store_path.is_dir());
+        drop(sessions);
+
+        std::fs::remove_dir(&store_path).unwrap();
+        let restored = OAuthSessions::new(Some(store_path.clone()));
+        restored.start(start_params(), 61234).await.unwrap();
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn provider_pkce_state_survives_a_backend_cold_restart_until_completion() {
+        let store_path = pending_store_path();
+        let mut protected_secrets = HashMap::new();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let started = sessions
+            .start_provider_with_secret_store(
+                OAuthStartProviderParams {
+                    platform: StreamPlatform::X,
+                    redirect_uri: Some("videorc://oauth/callback".to_string()),
+                },
+                61234,
+                |secret_ref, value| {
+                    protected_secrets.insert(secret_ref.to_string(), value.to_string());
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        let challenge = reqwest::Url::parse(&started.auth_url)
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == "code_challenge")
+            .map(|(_, value)| value.into_owned())
+            .unwrap();
+        let verifier = protected_secrets
+            .values()
+            .next()
+            .expect("PKCE verifier was protected")
+            .clone();
+        assert_eq!(pkce_s256_challenge(&verifier), challenge);
+        assert!(
+            !std::fs::read_to_string(&store_path)
+                .unwrap()
+                .contains(&verifier)
+        );
+        drop(sessions);
+
+        let restored = OAuthSessions::new(Some(store_path.clone()));
+        let outcome = restored
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        let exchange = outcome.exchange.expect("provider exchange was restored");
+        let restored_verifier = recover_pkce_verifier(&exchange, |secret_ref| {
+            Ok(protected_secrets.get(secret_ref).cloned())
+        })
+        .unwrap()
+        .expect("PKCE verifier was restored");
+        assert_eq!(restored_verifier, verifier);
+        assert!(!outcome.result.retryable);
+
+        restored.retry(&started.state).await.unwrap();
+        let retried = restored
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        assert!(retried.exchange.is_some());
+        restored
+            .finish_with_secret_cleanup(&started.state, |secret_ref| {
+                protected_secrets.remove(secret_ref);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(protected_secrets.is_empty());
+        drop(restored);
+        assert!(
+            OAuthSessions::new(Some(store_path.clone()))
+                .state
+                .lock()
+                .await
+                .pending
+                .is_empty()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&store_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn legacy_plaintext_pkce_store_migrates_atomically_to_a_validated_secret_reference() {
+        let store_path = pending_store_path();
+        let state = "legacy-provider-state";
+        let verifier = format!("videorc-{}", "a".repeat(32));
+        let legacy = serde_json::json!({
+            "version": 1,
+            "sessions": [{
+                "state": state,
+                "platform": "x",
+                "expiresAt": (Utc::now() + Duration::minutes(10)).to_rfc3339(),
+                "work": {
+                    "kind": "provider-exchange",
+                    "redirect_uri": "videorc://oauth/callback",
+                    "code_verifier": verifier,
+                }
+            }]
+        });
+        std::fs::write(&store_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let mut protected_secrets = HashMap::new();
+
+        let sessions = OAuthSessions::new_with_secret_store(
+            Some(store_path.clone()),
+            |secret_ref, value| {
+                protected_secrets.insert(secret_ref.to_string(), value.to_string());
+                Ok(())
+            },
+            |_| Ok(()),
+        );
+        sessions.ensure_store_available().unwrap();
+        let migrated = std::fs::read_to_string(&store_path).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&migrated).unwrap()["version"],
+            OAUTH_PENDING_STORE_VERSION
+        );
+        assert!(migrated.contains("codeVerifierSecretRef"));
+        assert!(!migrated.contains(&verifier));
+        assert!(!migrated.contains("\"codeVerifier\":"));
+
+        let outcome = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: state.to_string(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        let exchange = outcome.exchange.expect("migrated provider exchange");
+        assert_eq!(
+            recover_pkce_verifier(&exchange, |secret_ref| {
+                Ok(protected_secrets.get(secret_ref).cloned())
+            })
+            .unwrap()
+            .as_deref(),
+            Some(verifier.as_str())
+        );
+        sessions
+            .finish_with_secret_cleanup(state, |secret_ref| {
+                protected_secrets.remove(secret_ref);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(protected_secrets.is_empty());
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn reference_store_v2_migrates_predeclared_candidate_refs_to_v3() {
+        let store_path = pending_store_path();
+        let state = "reference-store-provider-state";
+        let checkpoint_ref = pending_token_secret_ref(state, StreamPlatform::X);
+        let pkce_ref = pending_pkce_verifier_secret_ref(state, StreamPlatform::X);
+        let reference_store = serde_json::json!({
+            "version": REFERENCE_OAUTH_PENDING_STORE_VERSION,
+            "sessions": [{
+                "state": state,
+                "platform": "x",
+                "expiresAt": (Utc::now() + Duration::minutes(10)).to_rfc3339(),
+                "work": {
+                    "kind": "provider-exchange-started",
+                    "checkpoint": {
+                        "platform": "x",
+                        "profileUrl": "https://stale.example/profile",
+                        "clientId": "stale-client",
+                        "scopes": ["stale.scope"],
+                        "secretRef": checkpoint_ref,
+                        "pkceVerifierSecretRef": pkce_ref,
+                    }
+                }
+            }]
+        });
+        std::fs::write(&store_path, serde_json::to_vec(&reference_store).unwrap()).unwrap();
+
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        sessions.ensure_store_available().unwrap();
+        let migrated = std::fs::read_to_string(&store_path).unwrap();
+        let migrated_json = serde_json::from_str::<serde_json::Value>(&migrated).unwrap();
+        assert_eq!(migrated_json["version"], OAUTH_PENDING_STORE_VERSION);
+        assert!(migrated.contains(&pending_candidate_secret_ref(
+            state,
+            StreamPlatform::X,
+            CandidateSecretKind::Access,
+        )));
+        assert!(migrated.contains(&pending_candidate_secret_ref(
+            state,
+            StreamPlatform::X,
+            CandidateSecretKind::Refresh,
+        )));
+        assert_eq!(
+            sessions.resumable_provider_states().await.unwrap(),
+            vec![state.to_string()]
+        );
+        sessions
+            .finish_with_secret_cleanup(state, |_| Ok(()))
+            .await
+            .unwrap();
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn legacy_pkce_migration_failure_preserves_the_original_recovery_file() {
+        let store_path = pending_store_path();
+        let verifier = format!("videorc-{}", "a".repeat(32));
+        let legacy = serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "sessions": [{
+                "state": "legacy-provider-state",
+                "platform": "x",
+                "expiresAt": (Utc::now() + Duration::minutes(10)).to_rfc3339(),
+                "work": {
+                    "kind": "provider-exchange",
+                    "redirect_uri": "videorc://oauth/callback",
+                    "code_verifier": verifier,
+                }
+            }]
+        }))
+        .unwrap();
+        std::fs::write(&store_path, &legacy).unwrap();
+
+        let sessions = OAuthSessions::new_with_secret_store(
+            Some(store_path.clone()),
+            |_, _| anyhow::bail!("injected protected-store failure"),
+            |_| Ok(()),
+        );
+
+        assert!(sessions.ensure_store_available().is_err());
+        assert_eq!(std::fs::read(&store_path).unwrap(), legacy);
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn denial_and_corrupt_pkce_recovery_can_delete_the_protected_verifier() {
+        for corrupt_before_completion in [false, true] {
+            let store_path = pending_store_path();
+            let mut protected_secrets = HashMap::new();
+            let sessions = OAuthSessions::new(Some(store_path.clone()));
+            let started = sessions
+                .start_provider_with_secret_store(
+                    OAuthStartProviderParams {
+                        platform: StreamPlatform::X,
+                        redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    },
+                    61234,
+                    |secret_ref, value| {
+                        protected_secrets.insert(secret_ref.to_string(), value.to_string());
+                        Ok(())
+                    },
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(protected_secrets.len(), 1);
+
+            if corrupt_before_completion {
+                protected_secrets
+                    .values_mut()
+                    .for_each(|value| *value = "corrupt".to_string());
+                let outcome = sessions
+                    .complete_with_pending(OAuthCompleteParams {
+                        state: started.state.clone(),
+                        code: Some("single-use-code".to_string()),
+                        error: None,
+                        error_description: None,
+                    })
+                    .await;
+                assert!(
+                    recover_pkce_verifier(
+                        &outcome.exchange.expect("provider exchange"),
+                        |secret_ref| Ok(protected_secrets.get(secret_ref).cloned())
+                    )
+                    .is_err()
+                );
+            } else {
+                let denied = sessions
+                    .complete_with_pending(OAuthCompleteParams {
+                        state: started.state.clone(),
+                        code: None,
+                        error: Some("access_denied".to_string()),
+                        error_description: None,
+                    })
+                    .await;
+                assert_eq!(denied.result.status, OAuthCallbackStatus::Failed);
+            }
+
+            sessions
+                .finish_with_secret_cleanup(&started.state, |secret_ref| {
+                    protected_secrets.remove(secret_ref);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            assert!(protected_secrets.is_empty());
+            let _ = std::fs::remove_file(store_path);
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_start_persists_pkce_ownership_before_a_failing_secret_write() {
+        let store_path = pending_store_path();
+        let protected_secrets = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let written = protected_secrets.clone();
+        let observed_durable_ref = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = observed_durable_ref.clone();
+        let path_at_write = store_path.clone();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+
+        let error = sessions
+            .start_provider_with_secret_store(
+                OAuthStartProviderParams {
+                    platform: StreamPlatform::X,
+                    redirect_uri: Some("videorc://oauth/callback".to_string()),
+                },
+                61234,
+                |secret_ref, value| {
+                    let pending_json = std::fs::read_to_string(&path_at_write).unwrap();
+                    observed.store(
+                        pending_json.contains(secret_ref)
+                            && pending_json.contains("codeVerifierSecretRef"),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    written
+                        .lock()
+                        .unwrap()
+                        .insert(secret_ref.to_string(), value.to_string());
+                    anyhow::bail!("injected post-write failure")
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("protect the pending OAuth PKCE verifier")
+        );
+        assert!(observed_durable_ref.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(protected_secrets.lock().unwrap().len(), 1);
+        let callback_state = sessions
+            .state
+            .lock()
+            .await
+            .pending
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        {
+            let mut state = sessions.state.lock().await;
+            state.pending.get_mut(&callback_state).unwrap().expires_at = Utc::now();
+        }
+        sessions
+            .maintain_pending(Utc::now() + Duration::seconds(1), |secret_ref| {
+                protected_secrets.lock().unwrap().remove(secret_ref);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(protected_secrets.lock().unwrap().is_empty());
+        assert!(sessions.state.lock().await.pending.is_empty());
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn live_maintenance_retries_expired_cleanup_after_delete_and_persist_failures() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-oauth-live-maintenance-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store_path = directory.join("pending.json");
+        let backup_directory = directory.with_extension("backup");
+        let mut protected_secrets = HashMap::new();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let started = sessions
+            .start_provider_with_secret_store(
+                OAuthStartProviderParams {
+                    platform: StreamPlatform::X,
+                    redirect_uri: Some("videorc://oauth/callback".to_string()),
+                },
+                61234,
+                |secret_ref, value| {
+                    protected_secrets.insert(secret_ref.to_string(), value.to_string());
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        {
+            let mut state = sessions.state.lock().await;
+            state.pending.get_mut(&started.state).unwrap().expires_at = Utc::now();
+        }
+        let maintenance_now = Utc::now() + Duration::seconds(1);
+
+        sessions
+            .maintain_pending(maintenance_now, |_| {
+                anyhow::bail!("injected delete failure")
+            })
+            .await
+            .unwrap();
+        assert!(
+            sessions
+                .state
+                .lock()
+                .await
+                .pending
+                .contains_key(&started.state)
+        );
+        assert_eq!(protected_secrets.len(), 1);
+
+        std::fs::rename(&directory, &backup_directory).unwrap();
+        std::fs::write(&directory, b"blocks pending-store directory recreation").unwrap();
+        let persist_error = sessions
+            .maintain_pending(maintenance_now, |secret_ref| {
+                protected_secrets.remove(secret_ref);
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(persist_error.to_string().contains("OAuth transaction dir"));
+        assert!(
+            sessions
+                .state
+                .lock()
+                .await
+                .pending
+                .contains_key(&started.state)
+        );
+        assert!(protected_secrets.is_empty());
+
+        std::fs::remove_file(&directory).unwrap();
+        std::fs::rename(&backup_directory, &directory).unwrap();
+        sessions
+            .maintain_pending(maintenance_now, |_| Ok(()))
+            .await
+            .unwrap();
+        assert!(sessions.state.lock().await.pending.is_empty());
+        assert!(
+            !std::fs::read_to_string(&store_path)
+                .unwrap()
+                .contains(&started.state)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_platform_finalization_is_serialized_without_blocking_other_platforms() {
+        let sessions = std::sync::Arc::new(OAuthSessions::new(None));
+        let first_x = sessions.lock_platform_finalization(StreamPlatform::X).await;
+        let competing = sessions.clone();
+        let blocked_x = tokio::spawn(async move {
+            competing
+                .lock_platform_finalization(StreamPlatform::X)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), async {
+                while !blocked_x.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "a second X reconnect must wait for the first commit edge"
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            sessions.lock_platform_finalization(StreamPlatform::Twitch),
+        )
+        .await
+        .expect("another platform finalizes independently");
+        drop(first_x);
+        tokio::time::timeout(std::time::Duration::from_millis(100), blocked_x)
+            .await
+            .expect("same-platform waiter resumes after commit")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_profile_times_out_and_releases_recovery_and_platform_ownership() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _connection = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let sessions = OAuthSessions::new(None);
+        let started = sessions
+            .start_provider(
+                OAuthStartProviderParams {
+                    platform: StreamPlatform::X,
+                    redirect_uri: Some("videorc://oauth/callback".to_string()),
+                },
+                61234,
+            )
+            .await
+            .unwrap();
+        let _ = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        let mut checkpoint = sessions
+            .stage_exchange_started(&started.state)
+            .await
+            .unwrap();
+        sessions
+            .stage_exchanged_token(
+                &started.state,
+                ExchangedOAuthToken {
+                    platform: StreamPlatform::X,
+                    access_token: "access-token".to_string(),
+                    refresh_token: None,
+                    scopes: vec!["users.read".to_string()],
+                    expires_at: None,
+                },
+                |_, _| Ok(()),
+            )
+            .await
+            .unwrap();
+        checkpoint.profile_url = format!("http://{address}/stalled-profile");
+        let guard = sessions.lock_platform_finalization(StreamPlatform::X).await;
+        let error = account_from_exchanged_token(
+            &checkpoint,
+            &ExchangedOAuthToken {
+                platform: StreamPlatform::X,
+                access_token: "access-token".to_string(),
+                refresh_token: None,
+                scopes: vec!["users.read".to_string()],
+                expires_at: None,
+            },
+            &provider_http_client_with_timeout(std::time::Duration::from_millis(40)),
+            |_| panic!("timed-out profile must not publish credentials"),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Could not fetch"));
+
+        sessions.retry(&started.state).await.unwrap();
+        drop(guard);
+        assert_eq!(
+            sessions
+                .maintain_pending(Utc::now(), |_| Ok(()))
+                .await
+                .unwrap(),
+            vec![started.state.clone()]
+        );
+        sessions.release_recovery_driver(&started.state).await;
+        assert!(
+            sessions
+                .can_resume_without_code(&started.state)
+                .await
+                .unwrap()
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            sessions.lock_platform_finalization(StreamPlatform::X),
+        )
+        .await
+        .expect("timed-out owner must release the platform lock");
+        sessions
+            .finish_with_secret_cleanup(&started.state, |_| Ok(()))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cold_start_never_resumes_an_unconsumed_provider_exchange_without_its_code() {
+        let store_path = pending_store_path();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let started = sessions
+            .start_provider(
+                OAuthStartProviderParams {
+                    platform: StreamPlatform::X,
+                    redirect_uri: Some("videorc://oauth/callback".to_string()),
+                },
+                61234,
+            )
+            .await
+            .unwrap();
+        drop(sessions);
+
+        let restored = OAuthSessions::new(Some(store_path.clone()));
+        assert!(
+            restored
+                .resumable_provider_states()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let outcome = restored
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: None,
+                error: None,
+                error_description: None,
+            })
+            .await;
+        assert_eq!(outcome.result.status, OAuthCallbackStatus::Failed);
+        assert!(outcome.exchange.is_none());
+        assert!(outcome.authorization_code.is_none());
+        restored.finish(&started.state).await.unwrap();
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn consumed_provider_code_recovers_from_protected_token_checkpoint_without_reexchange() {
+        let store_path = pending_store_path();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let started = sessions
+            .start_provider(
+                OAuthStartProviderParams {
+                    platform: StreamPlatform::X,
+                    redirect_uri: Some("videorc://oauth/callback".to_string()),
+                },
+                61234,
+            )
+            .await
+            .unwrap();
+        let initial = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        assert!(initial.exchange.is_some());
+        sessions
+            .stage_exchange_started(&started.state)
+            .await
+            .unwrap();
+
+        let token = ExchangedOAuthToken {
+            platform: StreamPlatform::X,
+            access_token: "protected-access-token".to_string(),
+            refresh_token: Some("protected-refresh-token".to_string()),
+            scopes: vec!["users.read".to_string()],
+            expires_at: Some("2026-07-12T01:00:00Z".to_string()),
+        };
+        let mut protected_secrets = HashMap::new();
+        sessions
+            .stage_exchanged_token(&started.state, token.clone(), |secret_ref, value| {
+                protected_secrets.insert(secret_ref.to_string(), value.to_string());
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let pending_json = std::fs::read_to_string(&store_path).unwrap();
+        for forbidden in [
+            "single-use-code",
+            "protected-access-token",
+            "protected-refresh-token",
+        ] {
+            assert!(!pending_json.contains(forbidden));
+        }
+        drop(sessions);
+
+        let restored = OAuthSessions::new(Some(store_path.clone()));
+        assert_eq!(
+            restored
+                .maintain_pending(Utc::now(), |_| {
+                    panic!("expired advanced secrets must not be pruned")
+                })
+                .await
+                .unwrap(),
+            vec![started.state.clone()]
+        );
+        assert!(
+            restored
+                .maintain_pending(Utc::now(), |_| Ok(()))
+                .await
+                .unwrap()
+                .is_empty(),
+            "live maintenance must not start a duplicate recovery driver"
+        );
+        let resumed = restored
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: None,
+                error: None,
+                error_description: None,
+            })
+            .await;
+        assert!(resumed.exchange.is_none());
+        let checkpoint = resumed
+            .token_checkpoint
+            .expect("protected token checkpoint survives restart");
+        let recovered = recover_exchanged_token(&checkpoint, |secret_ref| {
+            Ok(protected_secrets.get(secret_ref).cloned())
+        })
+        .unwrap();
+        assert_eq!(recovered, token);
+
+        restored
+            .finish_with_secret_cleanup(&started.state, |secret_ref| {
+                protected_secrets.remove(secret_ref);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(protected_secrets.is_empty());
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn interrupted_exchange_without_checkpoint_never_reposts_single_use_code() {
+        let store_path = pending_store_path();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let started = sessions
+            .start_provider(
+                OAuthStartProviderParams {
+                    platform: StreamPlatform::X,
+                    redirect_uri: Some("videorc://oauth/callback".to_string()),
+                },
+                61234,
+            )
+            .await
+            .unwrap();
+        let initial = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        assert!(initial.exchange.is_some());
+        sessions
+            .stage_exchange_started(&started.state)
+            .await
+            .unwrap();
+        drop(sessions);
+
+        let restored = OAuthSessions::new(Some(store_path.clone()));
+        assert_eq!(
+            restored.resumable_provider_states().await.unwrap(),
+            vec![started.state.clone()]
+        );
+        let resumed = restored
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: None,
+                error: None,
+                error_description: None,
+            })
+            .await;
+        assert!(resumed.exchange.is_none());
+        assert!(resumed.authorization_code.is_none());
+        assert!(resumed.token_checkpoint.is_some());
+        restored
+            .finish_with_secret_cleanup(&started.state, |_| Ok(()))
+            .await
+            .unwrap();
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn provider_transactions_predeclare_distinct_candidate_refs_before_secret_writes() {
+        let store_path = pending_store_path();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let mut checkpoints = Vec::new();
+        for _ in 0..2 {
+            let started = sessions
+                .start_provider(
+                    OAuthStartProviderParams {
+                        platform: StreamPlatform::X,
+                        redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    },
+                    61234,
+                )
+                .await
+                .unwrap();
+            let outcome = sessions
+                .complete_with_pending(OAuthCompleteParams {
+                    state: started.state.clone(),
+                    code: Some("single-use-code".to_string()),
+                    error: None,
+                    error_description: None,
+                })
+                .await;
+            assert!(outcome.exchange.is_some());
+            checkpoints.push((
+                started.state,
+                sessions
+                    .stage_exchange_started(&outcome.result.state)
+                    .await
+                    .unwrap(),
+            ));
+        }
+
+        assert_ne!(
+            checkpoints[0].1.candidate_access_secret_ref(),
+            checkpoints[1].1.candidate_access_secret_ref()
+        );
+        assert_ne!(
+            checkpoints[0].1.candidate_refresh_secret_ref(),
+            checkpoints[1].1.candidate_refresh_secret_ref()
+        );
+        let pending_json = std::fs::read_to_string(&store_path).unwrap();
+        for (_, checkpoint) in &checkpoints {
+            assert!(pending_json.contains(checkpoint.candidate_access_secret_ref()));
+            assert!(pending_json.contains(checkpoint.candidate_refresh_secret_ref()));
+        }
+        for (state, _) in checkpoints {
+            sessions
+                .finish_with_secret_cleanup(&state, |_| Ok(()))
+                .await
+                .unwrap();
+        }
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn crash_after_candidate_write_keeps_every_secret_owned_by_provider_token_checkpoint() {
+        let store_path = pending_store_path();
+        let mut protected_secrets = HashMap::new();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let started = sessions
+            .start_provider_with_secret_store(
+                OAuthStartProviderParams {
+                    platform: StreamPlatform::X,
+                    redirect_uri: Some("videorc://oauth/callback".to_string()),
+                },
+                61234,
+                |secret_ref, value| {
+                    protected_secrets.insert(secret_ref.to_string(), value.to_string());
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        let _ = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        let checkpoint = sessions
+            .stage_exchange_started(&started.state)
+            .await
+            .unwrap();
+        sessions
+            .stage_exchanged_token(
+                &started.state,
+                ExchangedOAuthToken {
+                    platform: StreamPlatform::X,
+                    access_token: "transient-access".to_string(),
+                    refresh_token: Some("transient-refresh".to_string()),
+                    scopes: vec!["users.read".to_string()],
+                    expires_at: None,
+                },
+                |secret_ref, value| {
+                    protected_secrets.insert(secret_ref.to_string(), value.to_string());
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        protected_secrets.insert(
+            checkpoint.candidate_access_secret_ref().to_string(),
+            "candidate-access".to_string(),
+        );
+        protected_secrets.insert(
+            checkpoint.candidate_refresh_secret_ref().to_string(),
+            "candidate-refresh".to_string(),
+        );
+        drop(sessions);
+
+        let restored = OAuthSessions::new(Some(store_path.clone()));
+        restored
+            .finish_with_secret_cleanup(&started.state, |secret_ref| {
+                protected_secrets.remove(secret_ref);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            protected_secrets.is_empty(),
+            "a crash before AccountStorage must not orphan candidate credentials"
+        );
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn crash_after_database_commit_preserves_candidates_and_retries_superseded_cleanup() {
+        let store_path = pending_store_path();
+        let mut protected_secrets = HashMap::new();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let started = sessions
+            .start_provider_with_secret_store(
+                OAuthStartProviderParams {
+                    platform: StreamPlatform::X,
+                    redirect_uri: Some("videorc://oauth/callback".to_string()),
+                },
+                61234,
+                |secret_ref, value| {
+                    protected_secrets.insert(secret_ref.to_string(), value.to_string());
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        let _ = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        let checkpoint = sessions
+            .stage_exchange_started(&started.state)
+            .await
+            .unwrap();
+        sessions
+            .stage_exchanged_token(
+                &started.state,
+                ExchangedOAuthToken {
+                    platform: StreamPlatform::X,
+                    access_token: "transient-access".to_string(),
+                    refresh_token: Some("transient-refresh".to_string()),
+                    scopes: vec!["users.read".to_string()],
+                    expires_at: None,
+                },
+                |secret_ref, value| {
+                    protected_secrets.insert(secret_ref.to_string(), value.to_string());
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        let old_access = "platform:x:oauth:access".to_string();
+        let old_refresh = "platform:x:oauth:refresh".to_string();
+        protected_secrets.insert(old_access.clone(), "old-access".to_string());
+        protected_secrets.insert(old_refresh.clone(), "old-refresh".to_string());
+        protected_secrets.insert(
+            checkpoint.candidate_access_secret_ref().to_string(),
+            "candidate-access".to_string(),
+        );
+        protected_secrets.insert(
+            checkpoint.candidate_refresh_secret_ref().to_string(),
+            "candidate-refresh".to_string(),
+        );
+        let account = UpsertPlatformAccount {
+            platform: StreamPlatform::X,
+            account_id: "x-user-1".to_string(),
+            account_label: "X User".to_string(),
+            account_handle: Some("@x-user".to_string()),
+            avatar_url: None,
+            scopes: vec!["users.read".to_string()],
+            token_secret_ref: Some(checkpoint.candidate_access_secret_ref().to_string()),
+            refresh_token_secret_ref: Some(checkpoint.candidate_refresh_secret_ref().to_string()),
+            stream_key_secret_ref: None,
+            expires_at: None,
+            status: PlatformAccountStatus::Connected,
+        };
+        sessions
+            .stage_account_storage_with_checkpoint(
+                &started.state,
+                account.clone(),
+                Some(&checkpoint),
+                vec![old_access.clone(), old_refresh.clone()],
+                PlatformAccountWriteExpectation::absent(0),
+            )
+            .await
+            .unwrap();
+        let database = crate::storage::Database::open_in_memory_for_tests();
+        database.upsert_platform_account(account.clone()).unwrap();
+        drop(sessions); // crash after SQLite commit, before transient cleanup
+
+        let restored = OAuthSessions::new(Some(store_path.clone()));
+        let outcome = restored
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: None,
+                error: None,
+                error_description: None,
+            })
+            .await;
+        assert_eq!(outcome.account_to_store, Some(account.clone()));
+        assert!(
+            restored
+                .finish_with_secret_cleanup(&started.state, |_| {
+                    anyhow::bail!("injected cleanup interruption")
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            restored
+                .state
+                .lock()
+                .await
+                .pending
+                .contains_key(&started.state)
+        );
+        restored
+            .finish_with_secret_cleanup(&started.state, |secret_ref| {
+                protected_secrets.remove(secret_ref);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            protected_secrets,
+            HashMap::from([
+                (
+                    checkpoint.candidate_access_secret_ref().to_string(),
+                    "candidate-access".to_string(),
+                ),
+                (
+                    checkpoint.candidate_refresh_secret_ref().to_string(),
+                    "candidate-refresh".to_string(),
+                ),
+            ]),
+            "cleanup must preserve the candidates now referenced by SQLite"
+        );
+        let stored = database.list_platform_account_credentials().unwrap();
+        assert_eq!(stored[0].token_secret_ref, account.token_secret_ref);
+        assert_eq!(
+            stored[0].refresh_token_secret_ref,
+            account.refresh_token_secret_ref
+        );
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn stale_account_storage_retry_cannot_roll_back_a_newer_connection() {
+        let store_path = pending_store_path();
+        let database = crate::storage::Database::open_in_memory_for_tests();
+        let mut protected_secrets = HashMap::new();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let started_a = sessions.start(start_params(), 61234).await.unwrap();
+        let _ = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: started_a.state.clone(),
+                code: Some("code-a".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        let a_access = pending_candidate_secret_ref(
+            &started_a.state,
+            StreamPlatform::Youtube,
+            CandidateSecretKind::Access,
+        );
+        let a_refresh = pending_candidate_secret_ref(
+            &started_a.state,
+            StreamPlatform::Youtube,
+            CandidateSecretKind::Refresh,
+        );
+        protected_secrets.insert(a_access.clone(), "access-a".to_string());
+        protected_secrets.insert(a_refresh.clone(), "refresh-a".to_string());
+        let pre_a_access = "platform:youtube:oauth:access".to_string();
+        protected_secrets.insert(pre_a_access.clone(), "pre-a-access".to_string());
+        let account_a = UpsertPlatformAccount {
+            platform: StreamPlatform::Youtube,
+            account_id: "account-a".to_string(),
+            account_label: "Account A".to_string(),
+            account_handle: None,
+            avatar_url: None,
+            scopes: Vec::new(),
+            token_secret_ref: Some(a_access.clone()),
+            refresh_token_secret_ref: Some(a_refresh.clone()),
+            stream_key_secret_ref: None,
+            expires_at: None,
+            status: PlatformAccountStatus::Connected,
+        };
+        let commit_a = sessions
+            .stage_account_storage_with_checkpoint(
+                &started_a.state,
+                account_a.clone(),
+                None,
+                vec![pre_a_access],
+                database
+                    .platform_account_write_expectation(StreamPlatform::Youtube)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            database
+                .compare_and_upsert_platform_account(
+                    account_a.clone(),
+                    commit_a.expected_account_state.as_ref(),
+                    commit_a.write_generation,
+                    true,
+                    true,
+                    || Ok(()),
+                )
+                .unwrap(),
+            crate::storage::PlatformAccountCasOutcome::Applied(_)
+        ));
+        assert!(
+            sessions
+                .finish_with_secret_cleanup(&started_a.state, |_| {
+                    anyhow::bail!("injected cleanup failure")
+                })
+                .await
+                .is_err()
+        );
+        drop(sessions);
+
+        let restored = OAuthSessions::new(Some(store_path.clone()));
+        let started_b = restored.start(start_params(), 61234).await.unwrap();
+        let _ = restored
+            .complete_with_pending(OAuthCompleteParams {
+                state: started_b.state.clone(),
+                code: Some("code-b".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        let b_access = pending_candidate_secret_ref(
+            &started_b.state,
+            StreamPlatform::Youtube,
+            CandidateSecretKind::Access,
+        );
+        let b_refresh = pending_candidate_secret_ref(
+            &started_b.state,
+            StreamPlatform::Youtube,
+            CandidateSecretKind::Refresh,
+        );
+        protected_secrets.insert(b_access.clone(), "access-b".to_string());
+        protected_secrets.insert(b_refresh.clone(), "refresh-b".to_string());
+        let account_b = UpsertPlatformAccount {
+            token_secret_ref: Some(b_access.clone()),
+            refresh_token_secret_ref: Some(b_refresh.clone()),
+            account_id: "account-b".to_string(),
+            account_label: "Account B".to_string(),
+            ..account_a.clone()
+        };
+        let commit_b = restored
+            .stage_account_storage_with_checkpoint(
+                &started_b.state,
+                account_b.clone(),
+                None,
+                vec![a_access.clone(), a_refresh.clone()],
+                database
+                    .platform_account_write_expectation(StreamPlatform::Youtube)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            database
+                .compare_and_upsert_platform_account(
+                    account_b.clone(),
+                    commit_b.expected_account_state.as_ref(),
+                    commit_b.write_generation,
+                    true,
+                    true,
+                    || Ok(()),
+                )
+                .unwrap(),
+            crate::storage::PlatformAccountCasOutcome::Applied(_)
+        ));
+        restored
+            .finish_with_secret_cleanup(&started_b.state, |secret_ref| {
+                protected_secrets.remove(secret_ref);
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let retry_a = restored
+            .complete_with_pending(OAuthCompleteParams {
+                state: started_a.state.clone(),
+                code: None,
+                error: None,
+                error_description: None,
+            })
+            .await;
+        let stale = database
+            .compare_and_upsert_platform_account(
+                retry_a.account_to_store.unwrap(),
+                retry_a
+                    .account_storage_commit
+                    .as_ref()
+                    .and_then(|commit| commit.expected_account_state.as_ref()),
+                retry_a
+                    .account_storage_commit
+                    .as_ref()
+                    .unwrap()
+                    .write_generation,
+                true,
+                true,
+                || Ok(()),
+            )
+            .unwrap();
+        let crate::storage::PlatformAccountCasOutcome::Stale(current) = stale else {
+            panic!("older AccountStorage recovery must be stale");
+        };
+        restored
+            .finish_superseded_account_storage_with_secret_cleanup(
+                &started_a.state,
+                &current,
+                |secret_ref| {
+                    protected_secrets.remove(secret_ref);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        let stored = database.list_platform_account_credentials().unwrap();
+        assert_eq!(stored[0].account.account_id, "account-b");
+        assert_eq!(
+            stored[0].token_secret_ref.as_deref(),
+            Some(b_access.as_str())
+        );
+        assert_eq!(
+            protected_secrets,
+            HashMap::from([
+                (b_access, "access-b".to_string()),
+                (b_refresh, "refresh-b".to_string()),
+            ])
+        );
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn expired_advanced_checkpoint_survives_restart_and_resumes_code_less() {
+        let store_path = pending_store_path();
+        let mut protected_secrets = HashMap::new();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let started = sessions
+            .start_provider_with_secret_store(
+                OAuthStartProviderParams {
+                    platform: StreamPlatform::X,
+                    redirect_uri: Some("videorc://oauth/callback".to_string()),
+                },
+                61234,
+                |secret_ref, value| {
+                    protected_secrets.insert(secret_ref.to_string(), value.to_string());
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        let _ = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        sessions
+            .stage_exchange_started(&started.state)
+            .await
+            .unwrap();
+        let token = ExchangedOAuthToken {
+            platform: StreamPlatform::X,
+            access_token: "expired-access-token".to_string(),
+            refresh_token: Some("expired-refresh-token".to_string()),
+            scopes: vec!["users.read".to_string()],
+            expires_at: None,
+        };
+        sessions
+            .stage_exchanged_token(&started.state, token, |secret_ref, value| {
+                protected_secrets.insert(secret_ref.to_string(), value.to_string());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        {
+            let mut state = sessions.state.lock().await;
+            state.pending.get_mut(&started.state).unwrap().expires_at =
+                Utc::now() - Duration::seconds(1);
+            sessions.persist(&state).unwrap();
+        }
+        drop(sessions);
+
+        let restored = OAuthSessions::new_with_secret_cleanup(Some(store_path.clone()), |_| {
+            panic!("advanced work must not be pruned at transaction expiry")
+        });
+        assert!(
+            restored
+                .state
+                .lock()
+                .await
+                .pending
+                .contains_key(&started.state)
+        );
+        assert_eq!(
+            restored
+                .maintain_pending(Utc::now(), |_| {
+                    panic!("expired advanced secrets must not be pruned")
+                })
+                .await
+                .unwrap(),
+            vec![started.state.clone()]
+        );
+        assert!(
+            restored
+                .maintain_pending(Utc::now(), |_| Ok(()))
+                .await
+                .unwrap()
+                .is_empty(),
+            "maintenance claims an advanced checkpoint only once"
+        );
+        let resumed = restored
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: None,
+                error: None,
+                error_description: None,
+            })
+            .await;
+        assert_eq!(resumed.result.status, OAuthCallbackStatus::Success);
+        assert!(resumed.token_checkpoint.is_some());
+        restored
+            .finish_with_secret_cleanup(&started.state, |secret_ref| {
+                protected_secrets.remove(secret_ref);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(protected_secrets.is_empty());
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn protected_checkpoint_cleanup_failure_keeps_transaction_for_retry() {
+        let store_path = pending_store_path();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let started = sessions
+            .start_provider(
+                OAuthStartProviderParams {
+                    platform: StreamPlatform::X,
+                    redirect_uri: Some("videorc://oauth/callback".to_string()),
+                },
+                61234,
+            )
+            .await
+            .unwrap();
+        let _ = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        sessions
+            .stage_exchange_started(&started.state)
+            .await
+            .unwrap();
+        sessions
+            .stage_exchanged_token(
+                &started.state,
+                ExchangedOAuthToken {
+                    platform: StreamPlatform::X,
+                    access_token: "protected-access-token".to_string(),
+                    refresh_token: None,
+                    scopes: vec!["users.read".to_string()],
+                    expires_at: None,
+                },
+                |_, _| Ok(()),
+            )
+            .await
+            .unwrap();
+        sessions.retry(&started.state).await.unwrap();
+        let denied = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: None,
+                error: Some("access_denied".to_string()),
+                error_description: Some("User cancelled.".to_string()),
+            })
+            .await;
+        assert_eq!(denied.result.status, OAuthCallbackStatus::Success);
+        assert!(denied.token_checkpoint.is_some());
+
+        assert!(
+            sessions
+                .finish_with_secret_cleanup(&started.state, |_| {
+                    anyhow::bail!("injected protected-store cleanup failure")
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            sessions
+                .state
+                .lock()
+                .await
+                .pending
+                .contains_key(&started.state)
+        );
+        sessions
+            .finish_with_secret_cleanup(&started.state, |_| Ok(()))
+            .await
+            .unwrap();
+        assert!(sessions.state.lock().await.pending.is_empty());
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn exchanged_account_storage_stage_survives_restart_without_reusing_code() {
+        let store_path = pending_store_path();
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let started = sessions.start(start_params(), 61234).await.unwrap();
+        let _ = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await;
+        let account = UpsertPlatformAccount {
+            platform: StreamPlatform::Youtube,
+            account_id: "channel-1".to_string(),
+            account_label: "Channel".to_string(),
+            account_handle: None,
+            avatar_url: None,
+            scopes: vec!["videos.write".to_string()],
+            token_secret_ref: Some("platform:youtube:oauth:access".to_string()),
+            refresh_token_secret_ref: None,
+            stream_key_secret_ref: None,
+            expires_at: None,
+            status: PlatformAccountStatus::Connected,
+        };
+        sessions
+            .stage_account_storage(&started.state, account.clone())
+            .await
+            .unwrap();
+        drop(sessions);
+
+        let restored = OAuthSessions::new(Some(store_path.clone()));
+        assert_eq!(
+            restored.resumable_provider_states().await.unwrap(),
+            vec![started.state.clone()]
+        );
+        let outcome = restored
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: None,
+                error: None,
+                error_description: None,
+            })
+            .await;
+        assert_eq!(outcome.account_to_store, Some(account));
+        assert!(outcome.exchange.is_none());
+        restored.finish(&started.state).await.unwrap();
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn denied_callback_cannot_be_acknowledged_until_pending_state_removal_is_durable() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-oauth-terminal-removal-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store_path = directory.join("pending.json");
+        let sessions = OAuthSessions::new(Some(store_path.clone()));
+        let started = sessions.start(start_params(), 61234).await.unwrap();
+
+        let backup_directory = directory.with_extension("backup");
+        std::fs::rename(&directory, &backup_directory).unwrap();
+        std::fs::write(&directory, b"blocks pending-store directory recreation").unwrap();
+
+        let first = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state.clone(),
+                code: None,
+                error: Some("access_denied".to_string()),
+                error_description: Some("User cancelled.".to_string()),
+            })
+            .await;
+        assert_eq!(first.result.status, OAuthCallbackStatus::Failed);
+        assert!(
+            sessions
+                .finish_with_secret_cleanup(&started.state, |_| Ok(()))
+                .await
+                .is_err()
+        );
+
+        std::fs::remove_file(&directory).unwrap();
+        std::fs::rename(&backup_directory, &directory).unwrap();
+        let second = sessions
+            .complete_with_pending(OAuthCompleteParams {
+                state: started.state,
+                code: None,
+                error: Some("access_denied".to_string()),
+                error_description: Some("User cancelled.".to_string()),
+            })
+            .await;
+        assert!(!second.result.retryable);
+        sessions
+            .finish_with_secret_cleanup(&second.result.state, |_| Ok(()))
+            .await
+            .unwrap();
+        drop(sessions);
+        assert!(
+            OAuthSessions::new(Some(store_path))
+                .state
+                .lock()
+                .await
+                .pending
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[tokio::test]
@@ -1133,6 +4307,24 @@ mod tests {
             sessions.complete(params).await.status,
             OAuthCallbackStatus::UnknownState
         );
+    }
+
+    #[tokio::test]
+    async fn unknown_state_omits_absent_platform_from_the_wire_result() {
+        let result = OAuthSessions::default()
+            .complete_with_pending(OAuthCompleteParams {
+                state: "unknown-provider-state".to_string(),
+                code: Some("single-use-code".to_string()),
+                error: None,
+                error_description: None,
+            })
+            .await
+            .result;
+        let wire = serde_json::to_value(result).unwrap();
+
+        assert_eq!(wire["status"], "unknown-state");
+        assert!(wire.get("platform").is_none());
+        assert_eq!(wire["retryable"], false);
     }
 
     #[tokio::test]
@@ -1223,10 +4415,11 @@ mod tests {
     #[tokio::test]
     async fn token_exchange_stores_secrets_and_returns_public_account_record() {
         async fn token_endpoint(Form(form): Form<HashMap<String, String>>) -> impl IntoResponse {
+            let expected_verifier = "v".repeat(43);
             if form.get("code").map(String::as_str) != Some("auth-code")
                 || form.get("client_id").map(String::as_str) != Some("client-id")
                 || form.get("client_secret").map(String::as_str) != Some("client-secret")
-                || form.get("code_verifier").map(String::as_str) != Some("verifier")
+                || form.get("code_verifier").map(String::as_str) != Some(expected_verifier.as_str())
             {
                 return (StatusCode::BAD_REQUEST, "bad form").into_response();
             }
@@ -1274,6 +4467,7 @@ mod tests {
             .unwrap();
         });
 
+        let verifier = "v".repeat(43);
         let exchange = PendingOAuthExchange {
             platform: StreamPlatform::Twitch,
             token_url: format!("http://{address}/token"),
@@ -1282,15 +4476,23 @@ mod tests {
             client_secret: Some("client-secret".to_string()),
             redirect_uri: "http://127.0.0.1:61234/oauth/callback".to_string(),
             scopes: vec!["fallback".to_string()],
-            code_verifier: Some("verifier".to_string()),
+            code_verifier_secret_ref: Some("fixture-pkce-ref".to_string()),
         };
-        let mut secrets = Vec::new();
+        let mut batches = Vec::new();
         let account = exchange_and_store_token(
             &exchange,
             "auth-code",
+            Some(&verifier),
             &reqwest::Client::new(),
-            |secret_ref, value| {
-                secrets.push((secret_ref.to_string(), value.to_string()));
+            |entries| {
+                batches.push(
+                    entries
+                        .iter()
+                        .map(|(secret_ref, value)| {
+                            ((*secret_ref).to_string(), (*value).to_string())
+                        })
+                        .collect::<Vec<_>>(),
+                );
                 Ok(())
             },
         )
@@ -1312,25 +4514,34 @@ mod tests {
                 "channel:read:stream_key".to_string()
             ]
         );
+        let access_ref = pending_candidate_secret_ref(
+            "compatibility-wrapper",
+            StreamPlatform::Twitch,
+            CandidateSecretKind::Access,
+        );
+        let refresh_ref = pending_candidate_secret_ref(
+            "compatibility-wrapper",
+            StreamPlatform::Twitch,
+            CandidateSecretKind::Refresh,
+        );
         assert_eq!(
             account.token_secret_ref.as_deref(),
-            Some("platform:twitch:oauth:access")
+            Some(access_ref.as_str())
         );
         assert_eq!(
             account.refresh_token_secret_ref.as_deref(),
-            Some("platform:twitch:oauth:refresh")
+            Some(refresh_ref.as_str())
         );
         assert_eq!(
-            secrets,
+            batches.len(),
+            1,
+            "credential candidates commit as one batch"
+        );
+        assert_eq!(
+            batches[0],
             vec![
-                (
-                    "platform:twitch:oauth:access".to_string(),
-                    "access-token-value".to_string()
-                ),
-                (
-                    "platform:twitch:oauth:refresh".to_string(),
-                    "refresh-token-value".to_string()
-                )
+                (access_ref, "access-token-value".to_string()),
+                (refresh_ref, "refresh-token-value".to_string())
             ]
         );
     }

@@ -2,13 +2,10 @@ import {
   ArrowClockwise,
   Broadcast,
   Keyboard,
-  Eye,
-  FolderPlus,
   Bug,
   CaretDown,
   CheckCircle,
   CircleNotch,
-  Database,
   DownloadSimple,
   FilmSlate,
   FolderOpen,
@@ -30,7 +27,6 @@ import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioAudio, useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
@@ -71,27 +67,20 @@ export function SettingsTab({
   const { openStudioPanel } = useWorkspaceNav()
   const { theme, setTheme } = useTheme()
 
-  const locateFfmpeg = async (): Promise<void> => {
-    const path = await window.videorc?.pickFile?.()
-    if (path) {
-      setSettings((current) => ({ ...current, ffmpegPath: path }))
-      await refreshBackend(path)
-    }
-  }
-
   // ST2: validate the output directory as it changes — a typo here used to
   // fail silently at record time. Blank means the platform default.
   const [directoryFacts, setDirectoryFacts] = useState<DirectoryFacts | null>(null)
   const [obsImportOpen, setObsImportOpen] = useState(false)
   const outputDirectory = settings.outputDirectory.trim()
+  const outputDirectoryHandle = settings.outputDirectoryHandle
   useEffect(() => {
-    if (!outputDirectory || !window.videorc?.checkDirectory) {
+    if (!outputDirectoryHandle || !window.videorc?.checkDirectory) {
       setDirectoryFacts(null)
       return
     }
     let cancelled = false
     const timer = setTimeout(() => {
-      void window.videorc?.checkDirectory?.(outputDirectory).then((facts) => {
+      void window.videorc?.checkDirectory?.(outputDirectoryHandle).then((facts) => {
         if (!cancelled) {
           setDirectoryFacts(facts)
         }
@@ -101,12 +90,16 @@ export function SettingsTab({
       cancelled = true
       clearTimeout(timer)
     }
-  }, [outputDirectory])
+  }, [outputDirectoryHandle])
 
   const browseOutputDirectory = async (): Promise<void> => {
-    const path = await window.videorc?.pickDirectory?.()
-    if (path) {
-      setSettings((current) => ({ ...current, outputDirectory: path }))
+    const selection = await window.videorc?.pickDirectory?.()
+    if (selection) {
+      setSettings((current) => ({
+        ...current,
+        outputDirectory: selection.displayName,
+        outputDirectoryHandle: selection.directoryHandleId
+      }))
     }
   }
 
@@ -125,16 +118,6 @@ export function SettingsTab({
     mediaAccess
   })
 
-  const createOutputDirectory = async (): Promise<void> => {
-    if (!outputDirectory) {
-      return
-    }
-    const facts = await window.videorc?.createDirectory?.(outputDirectory)
-    if (facts) {
-      setDirectoryFacts(facts)
-    }
-  }
-
   return (
     <div className="flex flex-col gap-5">
       <ConfigGrid>
@@ -147,15 +130,12 @@ export function SettingsTab({
             <Field>
               <FieldLabel htmlFor="output-directory">Output directory</FieldLabel>
               <div className="flex gap-2">
-                <Input
+                <div
                   id="output-directory"
-                  className="min-w-0 flex-1"
-                  placeholder="~/Movies/Videorc/Recordings"
-                  value={settings.outputDirectory}
-                  onChange={(event) =>
-                    setSettings((current) => ({ ...current, outputDirectory: event.target.value }))
-                  }
-                />
+                  className="min-w-0 flex-1 truncate rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
+                >
+                  {outputDirectory || 'Videorc default recordings folder'}
+                </div>
                 <Button size="sm" variant="outline" onClick={() => void browseOutputDirectory()}>
                   <FolderOpen data-icon="inline-start" />
                   Browse
@@ -165,12 +145,12 @@ export function SettingsTab({
                   size="sm"
                   variant="outline"
                   onClick={() => {
-                    if (outputDirectory) {
-                      void window.videorc?.revealPath?.(outputDirectory)
+                    if (outputDirectoryHandle) {
+                      void window.videorc?.revealSelectedResource?.(outputDirectoryHandle)
                     }
                   }}
                 >
-                  <Eye data-icon="inline-start" />
+                  <FolderOpen data-icon="inline-start" />
                   Reveal
                 </Button>
               </div>
@@ -181,11 +161,7 @@ export function SettingsTab({
               ) : directoryFacts && !directoryFacts.exists ? (
                 <div className="flex flex-wrap items-center gap-2 text-xs text-warning">
                   <Warning className="size-3.5 shrink-0" weight="fill" />
-                  <span>This folder does not exist yet.</span>
-                  <Button size="xs" variant="outline" onClick={() => void createOutputDirectory()}>
-                    <FolderPlus data-icon="inline-start" />
-                    Create folder
-                  </Button>
+                  <span>This folder authorization expired — choose it again.</span>
                 </div>
               ) : directoryFacts && !directoryFacts.writable ? (
                 <p className="flex items-center gap-1.5 text-xs text-warning">
@@ -237,18 +213,9 @@ export function SettingsTab({
               </div>
               <p className="text-xs text-muted-foreground">
                 {import.meta.env.DEV
-                  ? 'For local development, install it with \u201cbrew install ffmpeg\u201d \u2014 or locate an existing binary.'
-                  : 'FFmpeg ships with Videorc, so this usually means the install is damaged. Reinstall Videorc, or locate the binary manually.'}
+                  ? 'For local development, install it with \u201cbrew install ffmpeg\u201d.'
+                  : 'FFmpeg ships with Videorc, so this usually means the install is damaged. Reinstall Videorc.'}
               </p>
-              <Button
-                className="w-fit"
-                size="sm"
-                variant="outline"
-                onClick={() => void locateFfmpeg()}
-              >
-                <FolderOpen data-icon="inline-start" />
-                Locate FFmpeg\u2026
-              </Button>
             </div>
           ) : (
             <p className="text-xs text-muted-foreground">Checking for FFmpeg\u2026</p>
@@ -260,51 +227,11 @@ export function SettingsTab({
               <span>Advanced</span>
             </CollapsibleTrigger>
             <CollapsibleContent className="flex flex-col gap-3 pt-2">
-              <Field>
-                <FieldLabel htmlFor="ffmpeg-path">FFmpeg path override</FieldLabel>
-                <Input
-                  id="ffmpeg-path"
-                  placeholder="ffmpeg (bundled)"
-                  value={settings.ffmpegPath}
-                  onChange={(event) =>
-                    setSettings((current) => ({ ...current, ffmpegPath: event.target.value }))
-                  }
-                  onBlur={(event) => void refreshBackend(event.currentTarget.value)}
-                />
-              </Field>
               <div className="flex items-center gap-2 rounded-row border bg-muted/40 px-3 py-2 text-xs">
-                <Database className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
                 <span className="shrink-0 font-medium">Session database</span>
-                <span
-                  className="min-w-0 flex-1 truncate text-muted-foreground"
-                  title={health?.databasePath ?? undefined}
-                >
-                  {health?.databasePath ?? 'Waiting for SQLite path.'}
+                <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                  Managed privately in Videorc app data
                 </span>
-                <Button
-                  disabled={!health?.databasePath}
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => {
-                    if (health?.databasePath) {
-                      void navigator.clipboard.writeText(health.databasePath)
-                    }
-                  }}
-                >
-                  Copy
-                </Button>
-                <Button
-                  disabled={!health?.databasePath}
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => {
-                    if (health?.databasePath) {
-                      void window.videorc?.revealPath?.(health.databasePath)
-                    }
-                  }}
-                >
-                  Reveal
-                </Button>
               </div>
             </CollapsibleContent>
           </Collapsible>

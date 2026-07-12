@@ -16,6 +16,7 @@ use crate::diagnostics::{
 };
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats};
+use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
 use crate::protocol::{
     PreviewScreenSourceKind, PreviewScreenStartParams, PreviewScreenState, PreviewScreenStatus,
     VideoSettings,
@@ -836,6 +837,43 @@ pub async fn latest_preview_screen_png(
         .await
         .ok()
         .flatten()
+}
+
+/// Latest-wins, uncompressed proof-surface transport for Windows. The BMP
+/// wrapper carries the capture store's newest BGRA frame without PNG encode
+/// work and exposes its sequence so clients can skip duplicate frames.
+pub async fn latest_preview_screen_bmp(
+    state: &AppState,
+    requested_max_width: Option<u32>,
+    cursor: Option<PreviewBmpCursor>,
+) -> Option<LatestPreviewBmpPoll> {
+    let (generation, frame) = {
+        let slot = state.preview_screen.lock().await;
+        let active = slot.active.as_ref()?;
+        let generation = slot.run_id.clone()?;
+        let shared = Arc::clone(&active.shared);
+        drop(slot);
+        let guard = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (generation, guard.frame_store.latest()?)
+    };
+
+    let max_width = preview_screen_png_max_width(requested_max_width);
+    tokio::task::spawn_blocking(move || {
+        encode_latest_bgra_bmp(
+            cursor.as_ref(),
+            generation,
+            frame.sequence,
+            frame.width,
+            frame.height,
+            &frame.bytes,
+            max_width,
+        )
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 fn encode_preview_screen_png(

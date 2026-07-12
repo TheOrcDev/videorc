@@ -64,6 +64,9 @@ jobs:
         # compile. ffmpeg-spawning tests are #[ignore]d, same as macOS CI.
         run: cargo test -p videorc-backend
 
+      - name: Tracked text integrity
+        run: pnpm check:text-files
+
       - name: Desktop tests
         run: pnpm --filter @videorc/desktop test
 
@@ -117,6 +120,20 @@ jobs:
           VIDEORC_SMOKE_VIDEO_HEIGHT: '1080'
           VIDEORC_SMOKE_VIDEO_FPS: '30'
           VIDEORC_SMOKE_VIDEO_BITRATE_KBPS: '6000'
+
+      - name: Verify native DXGI/GDI ScreenOnly recording and BMP preview
+        run: pnpm smoke:windows-native-screen
+        env:
+          VIDEORC_PERF_APP_EXECUTABLE: apps/desktop/release/win-unpacked/Videorc.exe
+          VIDEORC_SMOKE_OUTPUT_DIR: ${{ runner.temp }}/videorc-windows-native-screen-smoke
+          VIDEORC_SMOKE_FFMPEG_PATH: ${{ github.workspace }}\apps\desktop\release\win-unpacked\resources\ffmpeg\bin\ffmpeg.exe
+          VIDEORC_SMOKE_FFPROBE_PATH: ${{ github.workspace }}\apps\desktop\release\win-unpacked\resources\ffmpeg\bin\ffprobe.exe
+          VIDEORC_SMOKE_TIMEOUT_MS: '180000'
+          VIDEORC_WINDOWS_NATIVE_SCREEN_RECORDING_MS: '6000'
+          VIDEORC_SMOKE_VIDEO_WIDTH: '1280'
+          VIDEORC_SMOKE_VIDEO_HEIGHT: '720'
+          VIDEORC_SMOKE_VIDEO_FPS: '30'
+          VIDEORC_SMOKE_VIDEO_BITRATE_KBPS: '4000'
 
       - name: Verify Windows preview stays live while recording
         run: pnpm smoke:recording-native-preview

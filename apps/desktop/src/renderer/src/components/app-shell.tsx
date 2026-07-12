@@ -24,6 +24,7 @@ import { useStudioAudio, useStudioCore, useStudioShell } from '@/hooks/use-studi
 import { useWhatsNew } from '@/hooks/use-whats-new'
 import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from '@/lib/capture'
 import { displayKeyGlyph } from '@/lib/platform'
+import { isActiveRecordingState } from '@/lib/format'
 import { shouldShowPermissionsOnboarding, systemAccessRows } from '@/lib/system-access'
 import { cn } from '@/lib/utils'
 
@@ -260,7 +261,7 @@ export function AppShell(): ReactElement {
     return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
   }, [])
 
-  const live = recordingState === 'recording' || recordingState === 'streaming'
+  const live = isActiveRecordingState(recordingState)
   const statusTone: StatusDotTone = live
     ? 'error'
     : backendConnected

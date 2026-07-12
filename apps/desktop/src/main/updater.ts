@@ -1,10 +1,13 @@
-import { app, ipcMain, Notification } from 'electron'
+import { app, Notification } from 'electron'
 import type { BrowserWindow } from 'electron'
 import electronUpdater from 'electron-updater'
 import type { ProgressInfo, UpdateInfo } from 'electron-updater'
 
 import type { UpdateStatus } from '../shared/backend'
+import type { AcquireBackendInterruption } from './interruption-actions'
 import { safeConsole } from './safe-console'
+import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
+import { installUpdateWithInterruptionLease } from './updater-install'
 import {
   BACKGROUND_RECHECK_INTERVAL_MS,
   isMissingUpdateFeedError,
@@ -28,6 +31,7 @@ const { autoUpdater } = electronUpdater
 // it, checks resolve to `error`/`not-available` and the UI degrades gracefully.
 
 type MainWindowGetter = () => BrowserWindow | null
+type CaptureInstallBlockedGetter = () => boolean
 
 let currentStatus: UpdateStatus = { phase: 'idle' }
 let getMainWindow: MainWindowGetter = () => null
@@ -52,7 +56,7 @@ function setStatus(next: UpdateStatus): void {
   currentStatus = next
   const window = getMainWindow()
   if (window && !window.webContents.isDestroyed()) {
-    window.webContents.send('app:update-status', next)
+    sendElectronEvent(window.webContents, 'app:update-status', next)
   }
 }
 
@@ -149,13 +153,20 @@ export function initAutoUpdater(): void {
 // Wire the manual update controls (Settings → About & updates). A manual check
 // works whenever the app is packaged (explicit user intent) and does NOT require
 // VIDEORC_ENABLE_AUTO_UPDATE — that flag only gates the silent background check.
-export function registerUpdaterIpc(mainWindowGetter: MainWindowGetter): void {
+export function registerUpdaterIpc(
+  mainWindowGetter: MainWindowGetter,
+  captureInstallBlocked: CaptureInstallBlockedGetter,
+  acquireInterruption: (
+    reason: string,
+    action: 'update-install'
+  ) => ReturnType<AcquireBackendInterruption>
+): void {
   getMainWindow = mainWindowGetter
   attachUpdaterListeners()
 
-  ipcMain.handle('updates:get-status', () => currentStatus)
+  secureIpcHandle('updates:get-status', () => currentStatus)
 
-  ipcMain.handle('updates:check', async (): Promise<UpdateStatus> => {
+  secureIpcHandle('updates:check', async (): Promise<UpdateStatus> => {
     if (!app.isPackaged) {
       setStatus(updateStatusFromEvent({ type: 'unsupported' }))
       return currentStatus
@@ -180,7 +191,7 @@ export function registerUpdaterIpc(mainWindowGetter: MainWindowGetter): void {
     }
   })
 
-  ipcMain.handle('updates:download', async (): Promise<UpdateStatus> => {
+  secureIpcHandle('updates:download', async (): Promise<UpdateStatus> => {
     if (!app.isPackaged) {
       setStatus(updateStatusFromEvent({ type: 'unsupported' }))
       return currentStatus
@@ -197,10 +208,24 @@ export function registerUpdaterIpc(mainWindowGetter: MainWindowGetter): void {
 
   // Quit, install, and relaunch. The renderer MUST block this while a capture is
   // live — never interrupt a recording.
-  ipcMain.handle('updates:install', () => {
+  secureIpcHandle('updates:install', async () => {
     if (!app.isPackaged) {
       return
     }
-    autoUpdater.quitAndInstall()
+    try {
+      const admission = await installUpdateWithInterruptionLease(
+        captureInstallBlocked,
+        () => acquireInterruption('Installing a downloaded Videorc update.', 'update-install'),
+        () => autoUpdater.quitAndInstall()
+      )
+      if (admission !== 'installing') {
+        safeConsole.warn(
+          '[auto-update] install deferred because capture is active, starting, or unconfirmed.'
+        )
+      }
+    } catch (error) {
+      // Admission transport failures are fail-closed: never quit on a guess.
+      safeConsole.warn(`[auto-update] install admission failed: ${errorMessage(error)}`)
+    }
   })
 }

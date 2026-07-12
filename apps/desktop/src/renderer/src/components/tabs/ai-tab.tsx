@@ -522,7 +522,7 @@ function ArtifactView({
               <Button
                 size="xs"
                 variant="outline"
-                onClick={() => void window.videorc?.revealPath?.(audioExtract.filePath ?? '')}
+                onClick={() => void window.videorc?.revealSession?.(session.id)}
               >
                 Reveal in Finder
               </Button>

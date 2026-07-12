@@ -1,0 +1,6 @@
+export const ACCOUNT_SIGN_IN_CALLBACK_TTL_MS = 2 * 60 * 1000
+export const ACCOUNT_SIGN_IN_CODE_TTL_MS = 3 * 60 * 1000
+export const ACCOUNT_SIGN_IN_CODE_CLOCK_SKEW_MS = 5 * 1000
+export const ACCOUNT_SIGN_IN_CODE_VERSION = 'v3'
+export const ACCOUNT_SIGN_IN_CODE_EXPIRY_PARAM = 'code_expires_at_ms'
+export const PROVIDER_OAUTH_CALLBACK_TTL_MS = 10 * 60 * 1000

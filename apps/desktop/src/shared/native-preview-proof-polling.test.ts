@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  nativePreviewProofFrameUrl,
   nativePreviewProofPollingProfile,
   nativePreviewProofPollingProfileKey
 } from './native-preview-proof-polling'
@@ -13,7 +14,7 @@ describe('nativePreviewProofPollingProfile', () => {
     })
   })
 
-  it('contains proof-PNG work while recording without blanking the Windows preview', () => {
+  it('contains proof-BMP work while recording without blanking the Windows preview', () => {
     expect(nativePreviewProofPollingProfile(true)).toEqual({
       intervalMs: 125,
       maxWidth: 960
@@ -26,5 +27,16 @@ describe('nativePreviewProofPollingProfile', () => {
     expect(nativePreviewProofPollingProfileKey(41, profile)).not.toBe(
       nativePreviewProofPollingProfileKey(42, profile)
     )
+  })
+
+  it('uses the backend camelCase maxWidth query contract', () => {
+    const url = nativePreviewProofFrameUrl(
+      'http://127.0.0.1:4312/preview/screen/latest.bmp?token=test',
+      959.6
+    )
+    const parsed = new URL(url)
+
+    expect(parsed.searchParams.get('maxWidth')).toBe('960')
+    expect(parsed.searchParams.has('max_width')).toBe(false)
   })
 })

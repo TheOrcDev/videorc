@@ -104,7 +104,7 @@ describe('videorc web links', () => {
     expect(VIDEORC_WEB_LINKS).toEqual({
       account: 'https://www.videorc.com/account',
       login: 'https://www.videorc.com/login',
-      desktopAuthorize: 'https://www.videorc.com/desktop/authorize',
+      desktopAuthorize: 'https://www.videorc.com/desktop/authorize/v2',
       premium: 'https://www.videorc.com/premium',
       billing: 'https://www.videorc.com/account/billing',
       changelogApi: 'https://www.videorc.com/api/changelog',

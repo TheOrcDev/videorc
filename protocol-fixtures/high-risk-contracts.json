@@ -1,0 +1,232 @@
+{
+  "schemaVersion": 2,
+  "previewSurfaceBounds": {
+    "wire": {
+      "screenX": 120.5,
+      "screenY": 48.25,
+      "width": 960.5,
+      "height": 540.25,
+      "scaleFactor": 1.5,
+      "screenHeight": 1440.0,
+      "clipX": 140.5,
+      "clipY": 60.25,
+      "clipWidth": 900.0,
+      "clipHeight": 500.0,
+      "visible": true,
+      "orderAboveWindowId": 4242,
+      "elevated": false
+    },
+    "normalized": {
+      "screenX": 120.5,
+      "screenY": 48.25,
+      "width": 960.5,
+      "height": 540.25,
+      "scaleFactor": 1.5,
+      "screenHeight": 1440.0,
+      "clipX": 140.5,
+      "clipY": 60.25,
+      "clipWidth": 900.0,
+      "clipHeight": 500.0,
+      "visible": true,
+      "orderAboveWindowId": 4242,
+      "elevated": false
+    },
+    "legacyWire": {
+      "screenX": 0.0,
+      "screenY": 0.0,
+      "width": 640.0,
+      "height": 360.0,
+      "scaleFactor": 1.0
+    },
+    "legacyNormalized": {
+      "screenX": 0.0,
+      "screenY": 0.0,
+      "width": 640.0,
+      "height": 360.0,
+      "scaleFactor": 1.0
+    }
+  },
+  "layout": {
+    "legacyWire": {
+      "cameraCorner": "bottom-right",
+      "cameraSize": "medium",
+      "cameraShape": "rectangle",
+      "cameraMargin": 32
+    },
+    "normalized": {
+      "layoutPreset": "screen-camera",
+      "cameraTransformMode": "preset",
+      "cameraTransform": null,
+      "cameraCorner": "bottom-right",
+      "cameraSize": "medium",
+      "cameraShape": "rectangle",
+      "cameraCornerRadiusPct": 12,
+      "cameraAspect": "source",
+      "cameraMargin": 32,
+      "cameraFit": "fill",
+      "cameraMirror": false,
+      "cameraZoom": 100,
+      "cameraOffsetX": 0,
+      "cameraOffsetY": 0,
+      "sideBySideSplit": "70-30",
+      "sideBySideCameraSide": "right"
+    }
+  },
+  "scene": {
+    "wire": {
+      "id": "scene-fixture",
+      "name": "Shared protocol fixture",
+      "sources": [
+        {
+          "id": "screen-fixture",
+          "name": "Fixture screen",
+          "kind": "screen",
+          "deviceId": "screen:fixture",
+          "transform": {
+            "x": 0.0,
+            "y": 0.0,
+            "width": 1.0,
+            "height": 1.0,
+            "cropLeft": 0.0,
+            "cropTop": 0.0,
+            "cropRight": 0.0,
+            "cropBottom": 0.0
+          },
+          "defaultTransform": {
+            "x": 0.0,
+            "y": 0.0,
+            "width": 1.0,
+            "height": 1.0,
+            "cropLeft": 0.0,
+            "cropTop": 0.0,
+            "cropRight": 0.0,
+            "cropBottom": 0.0
+          },
+          "visible": true,
+          "locked": false
+        }
+      ],
+      "outputs": [
+        {
+          "id": "recording-fixture",
+          "kind": "recording",
+          "width": 1920,
+          "height": 1080,
+          "fps": 30
+        }
+      ]
+    }
+  },
+  "recordingStatus": {
+    "wire": {
+      "state": "recording",
+      "sessionId": "session-fixture",
+      "outputPath": "recordings/session-fixture.mkv",
+      "startedAt": "2026-07-12T10:00:00Z",
+      "audioTracks": [
+        {
+          "id": "microphone-fixture",
+          "label": "Fixture microphone",
+          "source": "microphone"
+        }
+      ],
+      "pipeline": {
+        "container": "mkv",
+        "finalization": "none",
+        "stages": [
+          {
+            "stage": "capture",
+            "state": "running"
+          },
+          {
+            "stage": "muxer",
+            "state": "running"
+          }
+        ]
+      },
+      "durationMs": 12345
+    },
+    "minimalWire": {
+      "state": "idle"
+    },
+    "minimalNormalized": {
+      "state": "idle"
+    }
+  },
+  "compositorStatus": {
+    "stoppedWire": {
+      "state": "stopped",
+      "targetFps": 0,
+      "width": 0,
+      "height": 0,
+      "sceneSources": [],
+      "sources": [],
+      "framesRendered": 0,
+      "repeatedFrames": 0,
+      "droppedFrames": 0,
+      "imageCache": {
+        "budgetBytes": 268435456,
+        "entryBudget": 64,
+        "entries": 0,
+        "decodedBytes": 0,
+        "preconvertedBgraBytes": 0,
+        "residentBytes": 0,
+        "pinnedEntries": 0,
+        "pinnedBytes": 0,
+        "hits": 0,
+        "misses": 0,
+        "evictions": 0
+      },
+      "framePipeline": {
+        "gpuReadbacks": 0,
+        "bgraBytesCopied": 0,
+        "yuvFramesConverted": 0,
+        "immutableTextureUploads": 0,
+        "immutableTextureReuses": 0
+      },
+      "updatedAt": "2026-07-12T10:00:00Z",
+      "message": "Compositor is not running."
+    }
+  },
+  "account": {
+    "callbackEnvelope": {
+      "id": "callback-fixture-0123456789abcdef",
+      "url": "videorc://account/callback?code=v3.1783843380000.bm5ubm5ubm5ubm5u.Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYw.dHR0dHR0dHR0dHR0dHR0dA&code_expires_at_ms=1783843380000&state=fixture-state-0123456789abcdef0123&verifier=fixture-verifier-0123456789abcdefghijklmnopqrstuvwxyzABCDE",
+      "state": "fixture-state-0123456789abcdef0123",
+      "intentGeneration": 7,
+      "receivedAtMs": 1783843200000,
+      "expiresAtMs": 1783843320000
+    },
+    "completeSignInParams": {
+      "code": "v3.1783843380000.bm5ubm5ubm5ubm5u.Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYw.dHR0dHR0dHR0dHR0dHR0dA",
+      "state": "fixture-state-0123456789abcdef0123",
+      "verifier": "fixture-verifier-0123456789abcdefghijklmnopqrstuvwxyzABCDE",
+      "intentGeneration": 7
+    }
+  },
+  "comments": {
+    "listParamsWire": {
+      "sessionId": "session-fixture"
+    },
+    "listParamsNormalized": {
+      "sessionId": "session-fixture",
+      "limit": 200
+    },
+    "page": {
+      "messages": [],
+      "nextCursor": "2026-07-12T10:00:00Z\nmessage-fixture"
+    },
+    "terminalPage": {
+      "messages": []
+    },
+    "deleteParams": {
+      "sessionIds": ["session-fixture"]
+    },
+    "deletionOperation": {
+      "operationId": "delete-fixture-0123456789abcdef",
+      "sessionId": "session-fixture",
+      "pathCount": 2,
+      "blockedPathCount": 0
+    }
+  }
+}

@@ -610,7 +610,10 @@ async function waitFor(fetchState, predicate, timeoutMsLocal) {
 async function smokeCommand(command, params = {}) {
   const response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${smoke.capability}`
+    },
     body: JSON.stringify({ command, params })
   })
   const payload = await response.json()

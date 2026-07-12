@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Dev smoke for the desktop auth token bridge: exchange a one-time token for a
+// Legacy compatibility smoke for pre-PKCE desktop releases: exchange a one-time token for a
 // session token, then validate it with a Bearer-authed get-session against a
 // local (or configured) videorc-web. This needs a live server + a real OTT, so
 // it is a manual dev tool, not a CI gate (it exits 0 / "skipped" without a token).
 //
 // Usage:
 //   1. Run videorc-web locally (pnpm dev -> http://localhost:3000) and sign in.
-//   2. Open <base>/desktop/authorize, click Authorize, and copy the token from
+//   2. Open <base>/desktop/authorize, click Authorize, and copy the legacy token from
 //      the videorc://account/callback?token=... deep-link.
 //   3. VIDEORC_TEST_OTT=<token> pnpm smoke:account-auth
 //
@@ -18,7 +18,7 @@ const oneTimeToken = process.env.VIDEORC_TEST_OTT ?? process.argv[2]
 if (!oneTimeToken) {
   console.log(
     [
-      'smoke:account-auth: skipped — no one-time token.',
+      'smoke:account-auth: skipped — no legacy one-time token.',
       `  1. Run videorc-web locally and sign in at ${baseUrl}/desktop/authorize.`,
       '  2. Click Authorize and copy the token from the',
       '     videorc://account/callback?token=... deep-link.',
@@ -53,7 +53,9 @@ const sessionToken = verified?.session?.token
 if (!sessionToken) {
   fail('verify response did not include session.token')
 }
-console.log(`[ok] exchanged one-time token -> session token (user: ${verified?.user?.email ?? '?'})`)
+console.log(
+  `[ok] exchanged one-time token -> session token (user: ${verified?.user?.email ?? '?'})`
+)
 
 let sessionResponse
 try {

@@ -22,7 +22,7 @@ use tokio::time::sleep;
 
 use crate::live_chat::{
     LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState, ProviderSendReceipt,
-    deliver_message, live_chat_message_id, set_provider_and_emit,
+    live_chat_message_id, set_provider_and_emit, try_deliver_messages,
 };
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
@@ -714,8 +714,25 @@ pub async fn run_youtube_chat_connector(
                     )
                     .await;
                 }
-                for message in page.messages {
-                    deliver_message(&state, message).await;
+                if let Err(error) = try_deliver_messages(&state, page.messages).await {
+                    if error.is_terminal() {
+                        set_provider_and_emit(
+                            &state,
+                            StreamPlatform::Youtube,
+                            target_id.as_deref(),
+                            LiveChatProviderConnectionState::Failed,
+                            &format!(
+                                "YouTube live chat stopped because comments storage failed: {error}"
+                            ),
+                        )
+                        .await;
+                        return;
+                    }
+                    // Do not advance the provider cursor past a page that was
+                    // rejected by durable persistence. The next poll requests
+                    // the same page and the restored de-dup state accepts it.
+                    sleep(Duration::from_millis(page.polling_interval_ms)).await;
+                    continue;
                 }
                 page_token = page.next_page_token;
                 backoff_ms = MIN_POLLING_INTERVAL_MS;

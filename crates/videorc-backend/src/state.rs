@@ -6,10 +6,12 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use tokio::sync::{Notify, broadcast};
 
+use crate::capture_interruption::CaptureInterruptionCoordinator;
 use crate::compositor::{CompositorSlot, initial_compositor_state};
 use crate::diagnostics::idle_diagnostics;
 use crate::ffmpeg_work::FfmpegWorkCoordinator;
 use crate::live_chat::{LiveChatCoordinator, LiveChatSlot};
+use crate::live_chat_persistence::LiveChatPersistence;
 use crate::oauth::OAuthSessions;
 use crate::preview_camera::{PreviewCameraSlot, initial_preview_camera_state};
 use crate::preview_screen::{PreviewScreenSlot, initial_preview_screen_state};
@@ -19,6 +21,7 @@ use crate::protocol::{
     VideorcAccountSnapshot, WebSocketQueueDiagnosticStats, WebSocketTransportDiagnosticStats,
 };
 use crate::recording::{LivePreviewSlot, RecordingSlot, initial_live_preview_state};
+use crate::resource_authority::ResourceAuthority;
 use crate::scene::default_scene;
 use crate::source_registry::SourceRegistry;
 use crate::storage::Database;
@@ -346,7 +349,13 @@ impl WebSocketTransportMetrics {
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Least-privilege renderer transport credential.
     pub token: String,
+    /// Electron-main/admin transport credential. Never serialize this through
+    /// `BackendConnection` or renderer-facing events.
+    pub admin_token: String,
+    /// Test RPCs require both a debug build and this explicit runtime switch.
+    pub smoke_rpc_enabled: bool,
     pub port: u16,
     /// Fixed-port loopback listener for OAuth callbacks. Providers like X match
     /// redirect URIs EXACTLY (port included), so callbacks cannot ride the
@@ -355,6 +364,9 @@ pub struct AppState {
     pub oauth_callback_port: Option<u16>,
     pub events: broadcast::Sender<ServerEvent>,
     pub recording: RecordingSlot,
+    /// Atomic admission edge shared by session startup and privileged process
+    /// interruptions. Main-process status events are UX hints, not authority.
+    pub capture_interruption: Arc<CaptureInterruptionCoordinator>,
     pub live_preview: LivePreviewSlot,
     pub preview_frames: broadcast::Sender<Vec<u8>>,
     pub preview_latest_frame: Arc<tokio::sync::RwLock<Option<PreviewFrame>>>,
@@ -362,6 +374,11 @@ pub struct AppState {
     pub preview_camera: PreviewCameraSlot,
     pub preview_screen: PreviewScreenSlot,
     pub preview_surface: PreviewSurfaceSlot,
+    /// Serializes preview-surface create/update/destroy transactions. The
+    /// compositor lifecycle lock only protects worker ownership; it does not
+    /// make the surface status, native-host commands, and owned run id one
+    /// atomic transition.
+    pub preview_surface_lifecycle: Arc<tokio::sync::Mutex<()>>,
     pub compositor: CompositorSlot,
     /// Serializes compositor worker stop/start handoffs so concurrent preview and
     /// recording ownership changes cannot orphan a `spawn_blocking` render worker.
@@ -380,15 +397,21 @@ pub struct AppState {
     pub last_audio_meter: Arc<tokio::sync::Mutex<Option<AudioMeterSampleSnapshot>>>,
     pub logs: Arc<StdMutex<Vec<BackendLogEvent>>>,
     pub database: Database,
+    pub resource_authority: ResourceAuthority,
     pub oauth: Arc<OAuthSessions>,
     /// Pending 3-legged OAuth 1.0a authorizations for X Live (keyed by
     /// request token — OAuth 1.0a callbacks carry no `state` param).
     pub x_oauth1: Arc<crate::x_oauth1::XOauth1Sessions>,
     pub ffmpeg_work: Arc<FfmpegWorkCoordinator>,
     pub live_chat: LiveChatSlot,
+    pub live_chat_persistence: LiveChatPersistence,
     /// In-memory product-account session override (deep-link sign-in / Sign out).
     /// None falls back to the dev env mock; persistent token storage replaces it.
     pub account_session: Arc<tokio::sync::Mutex<Option<VideorcAccountSnapshot>>>,
+    /// Serializes product-account intent generation, remote code exchange,
+    /// refresh, and sign-out so a stale completion cannot publish after a newer
+    /// sign-in intent or explicit sign-out.
+    pub account_auth_transition: Arc<tokio::sync::Mutex<()>>,
     pub captions: crate::captions::CaptionsSlot,
     /// Per-output burn-in caption bars (std mutex: read from the synchronous
     /// compositor render thread). Primary and auxiliary may use different
@@ -410,12 +433,18 @@ impl AppState {
         events: broadcast::Sender<ServerEvent>,
         database: Database,
     ) -> Self {
+        let oauth_store_path = (database.path().to_string_lossy() != ":memory:")
+            .then(|| database.path().with_extension("oauth-pending.json"));
         Self {
             token,
+            admin_token: uuid::Uuid::new_v4().to_string(),
+            smoke_rpc_enabled: cfg!(debug_assertions)
+                && std::env::var("VIDEORC_ENABLE_SMOKE_RPC").as_deref() == Ok("1"),
             port,
             oauth_callback_port: None,
             events,
             recording: Arc::new(tokio::sync::Mutex::new(None)),
+            capture_interruption: Arc::new(CaptureInterruptionCoordinator::default()),
             live_preview: Arc::new(tokio::sync::Mutex::new(initial_live_preview_state())),
             preview_frames: broadcast::channel(PREVIEW_FRAME_CHANNEL_CAPACITY).0,
             preview_latest_frame: Arc::new(tokio::sync::RwLock::new(None)),
@@ -423,6 +452,7 @@ impl AppState {
             preview_camera: Arc::new(tokio::sync::Mutex::new(initial_preview_camera_state())),
             preview_screen: Arc::new(tokio::sync::Mutex::new(initial_preview_screen_state())),
             preview_surface: Arc::new(tokio::sync::Mutex::new(initial_preview_surface_state())),
+            preview_surface_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             compositor: Arc::new(tokio::sync::Mutex::new(initial_compositor_state())),
             compositor_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             scene: Arc::new(tokio::sync::Mutex::new(default_scene())),
@@ -433,14 +463,21 @@ impl AppState {
             websocket_transport_metrics: Arc::new(WebSocketTransportMetrics::default()),
             last_audio_meter: Arc::new(tokio::sync::Mutex::new(None)),
             logs: Arc::new(StdMutex::new(Vec::new())),
+            live_chat_persistence: LiveChatPersistence::new(database.clone()),
             database,
-            oauth: Arc::new(OAuthSessions::default()),
+            resource_authority: ResourceAuthority::default(),
+            oauth: Arc::new(OAuthSessions::new_with_secret_store(
+                oauth_store_path,
+                crate::secrets::put_secret,
+                crate::secrets::delete_secret,
+            )),
             x_oauth1: Arc::new(crate::x_oauth1::XOauth1Sessions::default()),
             ffmpeg_work: Arc::new(FfmpegWorkCoordinator::new()),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             account_session: Arc::new(tokio::sync::Mutex::new(
                 crate::account::restore_persisted_account(),
             )),
+            account_auth_transition: Arc::new(tokio::sync::Mutex::new(())),
             captions: crate::captions::new_captions_slot(),
             caption_overlay: crate::captions::new_caption_overlay_slots(),
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
@@ -457,6 +494,7 @@ impl AppState {
 
     pub fn emit_event<T: serde::Serialize>(&self, event: impl Into<String>, payload: T) {
         let mut event = ServerEvent::new(event, payload);
+        crate::resource_authority::redact_managed_background_paths(&mut event.payload);
         if event.event == "diagnostics.stats"
             && let Some(payload) = event.payload.as_object_mut()
         {

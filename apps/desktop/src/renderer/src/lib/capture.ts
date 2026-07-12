@@ -20,8 +20,9 @@ import type {
 } from '../../../shared/backend'
 
 export type SettingsState = {
+  /** Human-readable picker label only; never a filesystem path. */
   outputDirectory: string
-  ffmpegPath: string
+  outputDirectoryHandle?: string
 }
 
 export type CaptionBurnTarget = 'off' | 'stream' | 'recording' | 'both'
@@ -129,7 +130,7 @@ export const MICROPHONE_SYNC_OFFSET_MAX_MS = 1000
 
 export const defaultSettings: SettingsState = {
   outputDirectory: '',
-  ffmpegPath: ''
+  outputDirectoryHandle: undefined
 }
 
 export const rtmpDefaults: Record<RtmpPreset, string> = {

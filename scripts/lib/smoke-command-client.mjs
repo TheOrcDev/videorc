@@ -1,5 +1,26 @@
 import { request as httpRequest } from 'node:http'
 
+const SMOKE_CAPABILITY_PATTERN = /^[A-Za-z0-9_-]{43}$/
+
+export function assertSmokeCommandConnection(smoke) {
+  if (!smoke || typeof smoke !== 'object') {
+    throw new Error('Smoke command connection is missing.')
+  }
+  if (smoke.host !== '127.0.0.1') {
+    throw new Error('Smoke command connection must use the IPv4 loopback host.')
+  }
+  if (!Number.isInteger(smoke.port) || smoke.port < 1 || smoke.port > 65_535) {
+    throw new Error('Smoke command connection has an invalid port.')
+  }
+  if (
+    typeof smoke.capability !== 'string' ||
+    !SMOKE_CAPABILITY_PATTERN.test(smoke.capability)
+  ) {
+    throw new Error('Smoke command connection is missing its per-run capability.')
+  }
+  return smoke
+}
+
 /**
  * Send one smoke command over a dedicated HTTP connection.
  *
@@ -8,6 +29,7 @@ import { request as httpRequest } from 'node:http'
  * connections while preserving exactly-once request semantics at the client.
  */
 export function requestSmokeCommand(smoke, command, params = {}, { timeoutMs = 5000 } = {}) {
+  assertSmokeCommandConnection(smoke)
   const body = JSON.stringify({ command, params })
 
   return new Promise((resolveCommand, rejectCommand) => {
@@ -21,6 +43,7 @@ export function requestSmokeCommand(smoke, command, params = {}, { timeoutMs = 5
         headers: {
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(body),
+          authorization: `Bearer ${smoke.capability}`,
           connection: 'close'
         },
         timeout: timeoutMs

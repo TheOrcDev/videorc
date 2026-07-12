@@ -92,6 +92,8 @@ export function analyzeNativeStatusSamples(
 
   let previous = samples[0]
   let currentFrame = presentedFrame(previous.status)
+  let currentRunId = compositorRunId(previous.status)
+  let compositorRunTransitions = 0
   let frameUnchangedSince = previous.at
   let maxFrameStallObservedMs = 0
   let maxSampleGapObservedMs = 0
@@ -139,7 +141,16 @@ export function analyzeNativeStatusSamples(
     const gapMs = sample.at - previous.at
     maxSampleGapObservedMs = Math.max(maxSampleGapObservedMs, gapMs)
     const frame = presentedFrame(status)
-    if (frame < currentFrame) {
+    const runId = compositorRunId(status)
+    if (runId !== null && currentRunId !== null && runId !== currentRunId) {
+      // Frame ids are local to a compositor run. Layout/drawable changes may
+      // replace that run without interrupting the native surface, so a new
+      // run starting at frame 1 is forward progress rather than regression.
+      compositorRunTransitions += 1
+      currentRunId = runId
+      currentFrame = frame
+      frameUnchangedSince = sample.at
+    } else if (frame < currentFrame) {
       failures.push(`${prefix} presented frame moved backwards from ${currentFrame} to ${frame}`)
       currentFrame = frame
       frameUnchangedSince = sample.at
@@ -178,9 +189,17 @@ export function analyzeNativeStatusSamples(
     droppedFrameDelta,
     maxCompositorFrameLag: maxLagObserved,
     maxHelperRequestDepth: maxDepthObserved,
+    compositorRunTransitions,
     firstPresentedFrame: presentedFrame(samples[0].status),
     lastPresentedFrame: presentedFrame(samples.at(-1).status)
   }
+}
+
+function compositorRunId(status) {
+  return typeof status?.nativePreviewCompositorRunId === 'string' &&
+    status.nativePreviewCompositorRunId.trim()
+    ? status.nativePreviewCompositorRunId
+    : null
 }
 
 export function analyzeCgWindowObservations(
@@ -252,9 +271,7 @@ export function analyzeCgWindowObservations(
         if ((finiteNumber(observation.pixel?.nonDarkFraction) ?? 0) < 0.01) {
           darkPixelSamples += 1
         }
-        if (
-          (finiteNumber(observation.pixel?.blankBaseFraction) ?? 0) >= maxBlankBaseFraction
-        ) {
+        if ((finiteNumber(observation.pixel?.blankBaseFraction) ?? 0) >= maxBlankBaseFraction) {
           blankBasePixelSamples += 1
         }
       }

@@ -186,6 +186,11 @@ async function main() {
 
   const authority = await smokeCommand('comments-window-authority-probe')
   assertProbe(
+    authority.invokeResults?.every((attempt) => attempt.exposed === false),
+    'authority: detached preload omits all main-renderer mutation methods',
+    JSON.stringify(authority)
+  )
+  assertProbe(
     authority.after?.highlight?.generation !== 999 &&
       authority.after?.view?.snapshot?.sessionId !== 'forged-comments-session' &&
       authority.after?.viewers?.total !== 999999,
@@ -527,7 +532,10 @@ async function waitFor(fetchState, predicate, timeoutMsLocal) {
 async function smokeCommand(command, params = {}) {
   const response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${smoke.capability}`
+    },
     body: JSON.stringify({ command, params })
   })
   const payload = await response.json()

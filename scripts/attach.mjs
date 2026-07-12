@@ -1,19 +1,20 @@
 // Attach to an ALREADY-RUNNING camera-permitted app (do not launch one).
-// Args via env: H=backendHost P=backendPort T=token  CH=cmdHost CP=cmdPort
+// Args via env: H=backendHost P=backendPort T=token  CH=cmdHost CP=cmdPort C=cmdCapability
 import { request as httpRequest } from 'node:http'
 import { createWriteStream } from 'node:fs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const H = process.env.H, P = Number(process.env.P), T = process.env.T
-const CH = process.env.CH, CP = Number(process.env.CP)
+const CH = process.env.CH, CP = Number(process.env.CP), C = process.env.C
 const timeoutMs = 30000
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 function cmd(command, params = {}) {
+  if (!C) throw new Error('C=cmdCapability is required when using the smoke command server.')
   const body = JSON.stringify({ command, params })
   return new Promise((res) => {
     const req = httpRequest(
-      { hostname: CH, port: CP, path: '/command', method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
+      { hostname: CH, port: CP, path: '/command', method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${C}` } },
       (r) => { r.setEncoding('utf8'); let t = ''; r.on('data', (c) => (t += c)); r.on('end', () => { try { res(JSON.parse(t).result ?? JSON.parse(t)) } catch { res({ raw: t.slice(0, 150) }) } }) }
     )
     req.on('error', (e) => res({ err: String(e?.message ?? e) })); req.write(body); req.end()

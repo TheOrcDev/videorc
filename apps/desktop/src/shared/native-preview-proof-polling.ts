@@ -16,6 +16,19 @@ const RECORDING_PROOF_POLLING_PROFILE: NativePreviewProofPollingProfile = {
   maxWidth: 960
 }
 
+export function nativePreviewProofFrameUrl(url: string, maxWidth?: number): string {
+  if (typeof maxWidth !== 'number' || !Number.isFinite(maxWidth) || maxWidth <= 0) {
+    return url
+  }
+  try {
+    const parsed = new URL(url)
+    parsed.searchParams.set('maxWidth', String(Math.max(1, Math.round(maxWidth))))
+    return parsed.toString()
+  } catch {
+    return url
+  }
+}
+
 export function nativePreviewProofPollingProfile(
   recordingActive: boolean
 ): NativePreviewProofPollingProfile {

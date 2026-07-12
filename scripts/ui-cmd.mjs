@@ -11,6 +11,8 @@ import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { assertSmokeCommandConnection } from './lib/smoke-command-client.mjs'
+
 const connectionFile = join(tmpdir(), 'videorc-ui-driver-connection.json')
 
 let conn
@@ -27,6 +29,7 @@ if (!command) {
   process.exit(2)
 }
 const params = process.argv[3] ? JSON.parse(process.argv[3]) : {}
+assertSmokeCommandConnection(conn.smoke)
 
 const body = JSON.stringify({ command, params })
 const result = await new Promise((resolvePromise, reject) => {
@@ -36,7 +39,11 @@ const result = await new Promise((resolvePromise, reject) => {
       port: conn.smoke.port,
       path: '/command',
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        Authorization: `Bearer ${conn.smoke.capability}`
+      }
     },
     (res) => {
       let text = ''

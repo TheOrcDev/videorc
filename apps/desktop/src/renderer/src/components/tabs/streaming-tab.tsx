@@ -1061,6 +1061,10 @@ function OAuthAccountPanel({
               <a
                 className="text-primary underline-offset-4 hover:underline"
                 href={xNativeCapability.docsUrl}
+                onClick={(event) => {
+                  event.preventDefault()
+                  openExternalUrl(xNativeCapability.docsUrl)
+                }}
                 rel="noreferrer"
                 target="_blank"
               >
@@ -1069,6 +1073,10 @@ function OAuthAccountPanel({
               <a
                 className="text-primary underline-offset-4 hover:underline"
                 href={xNativeCapability.apiOverviewUrl}
+                onClick={(event) => {
+                  event.preventDefault()
+                  openExternalUrl(xNativeCapability.apiOverviewUrl)
+                }}
                 rel="noreferrer"
                 target="_blank"
               >

@@ -34,7 +34,6 @@ import {
   defaultBackgroundStyle,
   importIntoSlot,
   backgroundAssetDisplayUrl,
-  checkableBackgroundAssetPath,
   markSlotMissingIfAssetMatches,
   markSlotStatus,
   removeSlotAsset,
@@ -96,13 +95,18 @@ export function AssetsTab(): ReactElement {
   const markMissing = (slotId: string): void => {
     const slot = registry.slots.find((entry) => entry.id === slotId)
     const asset = slot ? slotAsset(slot, registry) : null
-    const checkablePath = checkableBackgroundAssetPath(asset)
     const checkedAssetId = asset?.id
-    if (checkablePath && checkedAssetId && window.videorc?.backgroundAssetExists) {
-      void window.videorc.backgroundAssetExists(checkablePath).then((exists) => {
+    const expectedAssetReference = asset?.assetPath
+    if (
+      asset?.kind === 'imported' &&
+      expectedAssetReference &&
+      checkedAssetId &&
+      window.videorc?.backgroundAssetExists
+    ) {
+      void window.videorc.backgroundAssetExists(checkedAssetId).then((exists) => {
         if (!exists) {
           setRegistry((current) =>
-            markSlotMissingIfAssetMatches(current, slotId, checkedAssetId, checkablePath)
+            markSlotMissingIfAssetMatches(current, slotId, checkedAssetId, expectedAssetReference)
           )
         }
       })
@@ -312,9 +316,7 @@ function PresetTile({
                 icon: Eye,
                 disabled: asset.kind !== 'imported' || !asset.assetPath,
                 onSelect: () => {
-                  if (asset.assetPath) {
-                    void window.videorc?.revealPath?.(asset.assetPath)
-                  }
+                  void window.videorc?.revealBackgroundAsset?.(asset.id)
                 }
               },
               {

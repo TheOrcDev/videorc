@@ -1,10 +1,13 @@
 import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { assertEncoderBridgeVideoOutputHealthy } from './lib/encoder-bridge-output-gates.mjs'
+import { resolveExistingSiblingFfprobe } from './lib/ffmpeg-sibling-paths.mjs'
 import { performanceAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { assertSmokeCommandConnection } from './lib/smoke-command-client.mjs'
 import { assertSourceCompleteCompositorHealthy } from './lib/native-preview-source-gates.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import {
@@ -13,6 +16,7 @@ import {
 } from './lib/native-preview-diagnostics.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
+import { nativeWindowsScreenCandidates } from './lib/windows-native-screen-gates.mjs'
 import {
   analyzeStartupResolution,
   writeStartupReports
@@ -24,12 +28,13 @@ const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
     join(tmpdir(), `videorc-recording-native-preview-${Date.now()}`)
 )
+const packagedSpawnSpec = performanceAppSpawnSpec()
 const userDataDir =
   process.env.VIDEORC_USER_DATA_DIR ??
   mkdtempSync(join(tmpdir(), 'videorc-native-preview-smoke-user-data-'))
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath =
-  process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? resolveSiblingFfprobe(ffmpegPath) ?? 'ffprobe'
+  process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? resolveExistingSiblingFfprobe(ffmpegPath) ?? 'ffprobe'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const launchAttempts = Number(process.env.VIDEORC_NATIVE_PREVIEW_LAUNCH_ATTEMPTS ?? 2)
 const recordingMs = Number(process.env.VIDEORC_NATIVE_PREVIEW_RECORDING_MS ?? 15000)
@@ -71,6 +76,8 @@ const expectedSurfaceBacking = expectNativeMetalPreview
   ? 'cametal-layer'
   : 'electron-browser-window'
 const exerciseProofFramePolling = process.env.VIDEORC_NATIVE_PREVIEW_EXERCISE_PROOF_POLLING === '1'
+const usePackagedWindowsScreen =
+  Boolean(packagedSpawnSpec) && process.platform === 'win32' && exerciseProofFramePolling
 const previewLatencyBudgets = resolveNativePreviewLatencyBudgets({
   configuredP95Ms: maxPreviewInputToPresentLatencyP95Ms,
   configuredP99Ms: maxPreviewInputToPresentLatencyP99Ms,
@@ -103,6 +110,7 @@ const scenarios = [
 
 let appProcess
 let stopping = false
+let packagedWindowsScreen = null
 const outputGuard = createPreviewSurfaceOutputGuard()
 
 mkdirSync(outputDirectory, { recursive: true })
@@ -116,6 +124,7 @@ try {
 }
 
 async function runNativePreviewRecordingSmoke(connection, smoke) {
+  assertSmokeCommandConnection(smoke)
   const ws = await connectBackend(connection, timeoutMs)
   const samples = []
   const previewSurfaceSamples = []
@@ -149,6 +158,13 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
       `Native-preview recording smoke bridge VT probe: ${bridgeVideoToolboxProbe ? 'enabled' : 'disabled'}; report-only gates: ${reportOnly ? 'enabled' : 'disabled'}`
     )
     console.log(`Native-preview recording smoke bridge video output: ${bridgeVideoOutput}`)
+
+    if (usePackagedWindowsScreen) {
+      packagedWindowsScreen = await startPackagedWindowsScreenPreview(ws)
+      console.log(
+        `Native-preview recording smoke selected real Windows source ${packagedWindowsScreen.id}.`
+      )
+    }
 
     await smokeCommand(smoke, 'open-tab', {
       tab: 'studio',
@@ -184,8 +200,45 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
       )
     }
   } finally {
+    if (packagedWindowsScreen) {
+      try {
+        await request(ws, timeoutMs, 'preview.screen.stop')
+      } catch {
+        // App teardown is authoritative if the source already stopped.
+      }
+      packagedWindowsScreen = null
+    }
     ws.close()
   }
+}
+
+async function startPackagedWindowsScreenPreview(ws) {
+  const devices = await request(ws, timeoutMs, 'devices.list', { ffmpegPath })
+  const candidates = nativeWindowsScreenCandidates(devices?.devices ?? [])
+  const failures = []
+  const scenario = visibleScenarios[0]
+  for (const candidate of candidates) {
+    const status = await request(ws, timeoutMs, 'preview.screen.start', {
+      sources: { screenId: candidate.id, testPattern: false },
+      video: {
+        preset: 'custom',
+        width: scenario.width,
+        height: scenario.height,
+        fps: scenario.fps,
+        bitrateKbps: scenario.bitrateKbps
+      },
+      protectedOverlayWindowIds: [],
+      ffmpegPath
+    })
+    if (status?.state === 'live') {
+      return candidate
+    }
+    failures.push(`${candidate.id}: ${status?.state} ${status?.message ?? ''}`)
+    await request(ws, timeoutMs, 'preview.screen.stop')
+  }
+  throw new Error(
+    `No real Windows screen source could feed packaged preview polling: ${failures.join('; ') || 'no candidates'}`
+  )
 }
 
 async function runNativePreviewRecordingScenario(
@@ -200,27 +253,35 @@ async function runNativePreviewRecordingScenario(
   previewSurfaceSamples.length = 0
   const expectsPreview = scenario.previewVisible !== false
   const scenarioStartedAt = Date.now()
-  const started = await request(ws, timeoutMs, 'session.start', sessionParams(scenario))
+  const started = await request(
+    ws,
+    timeoutMs,
+    'session.start',
+    await sessionParamsForStart(smoke, scenario)
+  )
   if (started.state !== 'recording') {
     throw new Error(
       `[${scenario.label}] Expected recording state after start, got ${started.state}.`
     )
   }
   const recordingStartedAt = Date.now()
-  const activeSceneRevision = Date.now()
-  const compositorStatus = await request(
-    ws,
-    timeoutMs,
-    'compositor.scene.update',
-    compositorSceneUpdateParams(activeSceneRevision, 0.58)
-  )
-  if (compositorStatus.sceneRevision !== activeSceneRevision) {
-    throw new Error(
-      `[${scenario.label}] Compositor scene update returned revision ${compositorStatus.sceneRevision}, expected ${activeSceneRevision}.`
-    )
+  if (packagedSpawnSpec) {
+    await waitForPackagedActiveSceneDiagnostics(ws, packagedWindowsScreen?.id)
+  } else {
+    const activeSceneRevision = Date.now()
+    const compositorStatus = await smokeCommand(smoke, 'backend-debug-rpc', {
+      method: 'compositor.scene.update',
+      params: compositorSceneUpdateParams(activeSceneRevision, 0.58),
+      timeoutMs
+    })
+    if (compositorStatus.sceneRevision !== activeSceneRevision) {
+      throw new Error(
+        `[${scenario.label}] Compositor scene update returned revision ${compositorStatus.sceneRevision}, expected ${activeSceneRevision}.`
+      )
+    }
+    await waitForActiveSceneDiagnostics(ws, activeSceneRevision, 'record')
   }
   await assertSameRunningSession(ws, started.sessionId)
-  await waitForActiveSceneDiagnostics(ws, activeSceneRevision, 'record')
   if (expectsPreview && expectNativeMetalPreview) {
     const pumpReconnect = await smokeCommand(smoke, 'exercise-main-present-pump-reconnect')
     assertMainPumpReconnectDuringRecording(scenario, pumpReconnect)
@@ -231,7 +292,12 @@ async function runNativePreviewRecordingScenario(
         durationMs: previewMeasurementMs
       })
     : Promise.resolve(null)
-  const stressPromise = stressLayoutDuringRecording(ws, started.sessionId, layoutStressUpdates)
+  const stressPromise = stressLayoutDuringRecording(
+    ws,
+    smoke,
+    started.sessionId,
+    layoutStressUpdates
+  )
   await sleep(recordingMs)
   await stressPromise
   const measurement = await measurementPromise
@@ -266,13 +332,15 @@ async function runNativePreviewRecordingScenario(
       ffprobePath,
       expectedWidth: scenario.width,
       expectedHeight: scenario.height,
-      intendedFps: scenario.fps
+      intendedFps: scenario.fps,
+      gates: { requireMotion: !usePackagedWindowsScreen }
     }),
     analyzeRecording(outputPath, {
       ffmpegPath,
       ffprobePath,
       intendedFps: scenario.fps,
-      expectAudio: true
+      expectAudio: !usePackagedWindowsScreen,
+      gates: { requireMotion: !usePackagedWindowsScreen }
     })
   ])
   const [startupReportPaths, recordingReportPaths] = await Promise.all([
@@ -320,8 +388,8 @@ async function runNativePreviewRecordingScenario(
     assertHiddenNativeSurfaceStatus(scenario, surfaceDuring)
   }
 
-  const skew = await audioVideoSkewMs(outputPath)
-  if (skew > maxSkewMs) {
+  const skew = usePackagedWindowsScreen ? null : await audioVideoSkewMs(outputPath)
+  if (skew != null && skew > maxSkewMs) {
     failOrWarn(
       `[${scenario.label}] Audio/video duration skew ${skew.toFixed(1)}ms exceeded ${maxSkewMs}ms.`
     )
@@ -336,7 +404,7 @@ async function runNativePreviewRecordingScenario(
     : ''
 
   console.log(
-    `Native-preview recording [${scenario.label}] OK: ${outputPath} (${size} bytes), ${previewSummary}${handoffSummary}, startup repeat ${format(startupReport.metrics.maxRepeatedFrameRun, 0)}, final repeat ${format(recordingReport.metrics.maxRepeatedFrameRun, 0)}, ${bridgeSummary}, A/V skew ${skew.toFixed(1)}ms, layout stress ${layoutStressUpdates} update(s), maintenance samples ${stats.maintenanceSamples}, duplicate samples ${stats.duplicateCaptureSamples}, max RSS ${formatBytes(stats.maxBackendRssBytes)}, max FFmpeg procs ${stats.maxActiveFfmpegProcesses}, max FFprobe procs ${stats.maxActiveFfprobeProcesses}, startup report ${startupReportPaths.mdPath}, quality report ${recordingReportPaths.mdPath}`
+    `Native-preview recording [${scenario.label}] OK: ${outputPath} (${size} bytes), ${previewSummary}${handoffSummary}, startup repeat ${format(startupReport.metrics.maxRepeatedFrameRun, 0)}, final repeat ${format(recordingReport.metrics.maxRepeatedFrameRun, 0)}, ${bridgeSummary}, A/V skew ${skew == null ? 'not expected' : `${skew.toFixed(1)}ms`}, layout stress ${layoutStressUpdates} update(s), maintenance samples ${stats.maintenanceSamples}, duplicate samples ${stats.duplicateCaptureSamples}, max RSS ${formatBytes(stats.maxBackendRssBytes)}, max FFmpeg procs ${stats.maxActiveFfmpegProcesses}, max FFprobe procs ${stats.maxActiveFfprobeProcesses}, startup report ${startupReportPaths.mdPath}, quality report ${recordingReportPaths.mdPath}`
   )
   return surfaceDuring
 }
@@ -411,17 +479,34 @@ async function waitForActiveSceneDiagnostics(ws, sceneRevision, outputMode) {
   )
 }
 
-async function stressLayoutDuringRecording(ws, sessionId, count) {
+async function waitForPackagedActiveSceneDiagnostics(ws, screenId) {
+  const deadline = Date.now() + timeoutMs
+  let lastDiagnostics = null
+  while (Date.now() < deadline) {
+    lastDiagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
+    if (
+      lastDiagnostics.activeOutputMode === 'record' &&
+      (!screenId || lastDiagnostics.activeScreenId === screenId)
+    ) {
+      return lastDiagnostics
+    }
+    await sleep(150)
+  }
+  throw new Error(
+    `Packaged recording diagnostics did not report the active scene/source. Last diagnostics: ${JSON.stringify(lastDiagnostics)}`
+  )
+}
+
+async function stressLayoutDuringRecording(ws, smoke, sessionId, count) {
   for (let index = 0; index < count; index += 1) {
     await sleep(layoutStressIntervalMs)
     const revision = Date.now() + index
     const cameraX = index % 2 === 0 ? 0.18 : 0.62
-    const compositorStatus = await request(
-      ws,
-      timeoutMs,
-      'compositor.scene.update',
-      compositorSceneUpdateParams(revision, cameraX)
-    )
+    const compositorStatus = await smokeCommand(smoke, 'backend-debug-rpc', {
+      method: 'compositor.scene.update',
+      params: compositorSceneUpdateParams(revision, cameraX),
+      timeoutMs
+    })
     if (compositorStatus.sceneRevision !== revision) {
       throw new Error(
         `Layout stress update ${index + 1}/${count} returned revision ${compositorStatus.sceneRevision}, expected ${revision}.`
@@ -432,11 +517,27 @@ async function stressLayoutDuringRecording(ws, sessionId, count) {
   }
 }
 
-function sessionParams(scenario) {
+async function sessionParamsForStart(smoke, scenario) {
+  if (packagedSpawnSpec) {
+    return sessionParams(scenario)
+  }
+  const selection = await smokeCommand(smoke, 'authorize-smoke-resource', {
+    kind: 'output-directory',
+    path: outputDirectory
+  })
+  if (typeof selection?.capabilityId !== 'string') {
+    throw new Error('Smoke output-directory authorization returned no capability.')
+  }
+  return sessionParams(scenario, selection.capabilityId)
+}
+
+function sessionParams(scenario, outputDirectoryCapability) {
   return {
-    sources: { testPattern: true },
+    sources: packagedWindowsScreen
+      ? { screenId: packagedWindowsScreen.id, testPattern: false }
+      : { testPattern: true },
     layout: {
-      layoutPreset: 'screen-camera',
+      layoutPreset: packagedWindowsScreen ? 'screen-only' : 'screen-camera',
       cameraTransformMode: 'preset',
       cameraTransform: null,
       cameraCorner: 'bottom-right',
@@ -454,8 +555,7 @@ function sessionParams(scenario) {
     output: {
       recordEnabled: true,
       streamEnabled: false,
-      outputDirectory,
-      ffmpegPath,
+      ...(outputDirectoryCapability ? { outputDirectoryCapability } : {}),
       video: {
         preset: 'custom',
         width: scenario.width,
@@ -471,7 +571,7 @@ function sessionParams(scenario) {
     },
     audio: {
       microphoneGainDb: 0,
-      microphoneMuted: false,
+      microphoneMuted: usePackagedWindowsScreen,
       microphoneSyncOffsetMs: 0
     }
   }
@@ -1051,7 +1151,10 @@ async function sendSmokeCommand(smoke, command, params = {}) {
   try {
     response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${smoke.capability}`
+      },
       body: JSON.stringify({ command, params }),
       signal: controller.signal
     })
@@ -1104,7 +1207,7 @@ function launchAndReadConnections() {
       rejectConnections(new Error(`Timed out waiting for smoke connections after ${timeoutMs}ms.`))
     }, timeoutMs)
     const connections = { backend: null, smoke: null }
-    const packagedSpawnSpec = performanceAppSpawnSpec()
+    const packagedSmokeCapability = packagedSpawnSpec ? randomBytes(32).toString('base64url') : null
     const spawnCommand = packagedSpawnSpec?.command ?? 'pnpm'
     const spawnArgs = packagedSpawnSpec?.args ?? ['dev']
 
@@ -1120,11 +1223,21 @@ function launchAndReadConnections() {
       env: smokeAppEnv({
         VIDEORC_USER_DATA_DIR: userDataDir,
         VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
+        VIDEORC_SMOKE_STATE_DIR: outputDirectory,
         VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
         VIDEORC_SMOKE_COMMAND_SERVER: '1',
-        ...(exerciseProofFramePolling
+        ...(usePackagedWindowsScreen ? { VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1' } : {}),
+        ...(packagedSmokeCapability
+          ? {
+              VIDEORC_PACKAGED_SMOKE_TEST: '1',
+              VIDEORC_SMOKE_COMMAND_CAPABILITY: packagedSmokeCapability
+            }
+          : {}),
+        ...(exerciseProofFramePolling && !packagedSpawnSpec
           ? { VIDEORC_SMOKE_PREVIEW_FRAME_POLLING: '1' }
-          : { VIDEORC_SMOKE_PREVIEW_MOTION: '1' }),
+          : exerciseProofFramePolling
+            ? {}
+            : { VIDEORC_SMOKE_PREVIEW_MOTION: '1' }),
         VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
       }),
       stdio: ['ignore', 'pipe', 'pipe']
@@ -1136,7 +1249,8 @@ function launchAndReadConnections() {
         resolveConnections(connections)
       }
     }
-    const handleOutput = (text) => handleAppOutput(text, connections, maybeResolve)
+    const handleOutput = (text) =>
+      handleAppOutput(text, connections, maybeResolve, packagedSmokeCapability)
 
     appProcess.stdout.setEncoding('utf8')
     appProcess.stderr.setEncoding('utf8')
@@ -1179,7 +1293,7 @@ async function launchAndReadConnectionsWithRetry() {
   throw lastError ?? new Error('Native-preview smoke failed before launch.')
 }
 
-function handleAppOutput(text, connections, maybeResolve) {
+function handleAppOutput(text, connections, maybeResolve, packagedSmokeCapability = null) {
   for (const line of text.split(/\r?\n/)) {
     outputGuard.inspectLine(line)
     if (line.trim() && !stopping) {
@@ -1198,6 +1312,9 @@ function handleAppOutput(text, connections, maybeResolve) {
     const smokeIndex = line.indexOf(smokeMarker)
     if (smokeIndex !== -1) {
       connections.smoke = JSON.parse(line.slice(smokeIndex + smokeMarker.length))
+      if (packagedSmokeCapability) {
+        connections.smoke.capability = packagedSmokeCapability
+      }
       maybeResolve()
     }
   }
@@ -1212,14 +1329,6 @@ async function stopApp() {
   await stopProcess(appProcess)
   appProcess = null
   stopping = false
-}
-
-function resolveSiblingFfprobe(path) {
-  if (!path.includes('/')) {
-    return null
-  }
-  const candidate = join(dirname(path), 'ffprobe')
-  return existsSync(candidate) ? candidate : null
 }
 
 function sleep(ms) {

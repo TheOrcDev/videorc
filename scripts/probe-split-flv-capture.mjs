@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 const outputDirectory =
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? mkdtempSync(join(tmpdir(), 'videorc-split-flv-'))
@@ -73,8 +74,6 @@ const sessionParams = {
   output: {
     recordEnabled: true,
     streamEnabled: true,
-    outputDirectory,
-    ffmpegPath,
     // Split profile: 4K record + 1080p stream — two VideoToolbox encoders,
     // the stream FLV leg copies the SECOND encoder's transport stream.
     video: { preset: 'custom', width: 3840, height: 2160, fps: 30, bitrateKbps: 8000 },
@@ -107,10 +106,11 @@ const sessionParams = {
 let ws = null
 let listener = null
 const launched = await launchDevApp({
-  requiredMarkers: ['backend-ready'],
+  requiredMarkers: ['backend-ready', 'preview-motion-ready'],
   timeoutMs,
   env: {
-    VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
+    VIDEORC_SMOKE_COMMAND_SERVER: '1',
+    VIDEORC_SMOKE_STATE_DIR: outputDirectory
   }
 })
 try {
@@ -118,7 +118,19 @@ try {
   listener = spawnListener()
   await sleep(1200)
 
-  const started = await request(ws, timeoutMs, 'session.start', sessionParams)
+  const recordingDirectory = await requestSmokeCommand(
+    launched.connections['preview-motion-ready'],
+    'authorize-smoke-resource',
+    { kind: 'output-directory', path: outputDirectory },
+    { timeoutMs }
+  )
+  const started = await request(ws, timeoutMs, 'session.start', {
+    ...sessionParams,
+    output: {
+      ...sessionParams.output,
+      outputDirectoryCapability: recordingDirectory.capabilityId
+    }
+  })
   if (!started?.sessionId) {
     throw new Error(`session.start did not return a sessionId: ${JSON.stringify(started)}`)
   }

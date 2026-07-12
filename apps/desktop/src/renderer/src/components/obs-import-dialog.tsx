@@ -1,5 +1,5 @@
 import { ArrowRight, CheckCircle, DownloadSimple, Warning, XCircle } from '@phosphor-icons/react'
-import { useEffect, useMemo, useState, type ReactElement } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
@@ -8,6 +8,7 @@ import type { ObsDiscovery, ObsSetup } from '@/lib/backend'
 import { createImportedAsset, firstEmptySlotId, importIntoSlot } from '@/lib/background-assets'
 import { mergeObsImportIntoConfig } from '@/lib/obs-import-apply'
 import { mapObsSetup, type ObsImportPlanResult, type ObsImportVerdict } from '@/lib/obs-import-map'
+import { ObsImportReadAuthority, type ObsImportReadTicket } from '@/lib/obs-import-read-authority'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -52,7 +53,10 @@ export function ObsImportDialog({
   const [collection, setCollection] = useState<string | undefined>()
   const [profile, setProfile] = useState<string | undefined>()
   const [setup, setSetup] = useState<ObsSetup | null>(null)
+  const [setupTicket, setSetupTicket] = useState<ObsImportReadTicket | null>(null)
+  const [reading, setReading] = useState(false)
   const [applying, setApplying] = useState(false)
+  const readAuthority = useRef(new ObsImportReadAuthority())
 
   useEffect(() => {
     if (!open) {
@@ -74,26 +78,67 @@ export function ObsImportDialog({
 
   useEffect(() => {
     if (!open || !collection || !profile) {
+      readAuthority.current.invalidate()
+      setSetup(null)
+      setSetupTicket(null)
+      setReading(false)
       return
     }
+    const ticket = readAuthority.current.begin(collection, profile)
+    setSetup(null)
+    setSetupTicket(null)
+    setReading(true)
     let cancelled = false
-    void window.videorc?.obsRead?.(collection, profile).then((read) => {
-      if (!cancelled) {
-        setSetup(read)
-      }
-    })
+    const pendingRead = window.videorc?.obsRead?.(collection, profile)
+    if (!pendingRead) {
+      setReading(false)
+      return
+    }
+    void pendingRead
+      .then((read) => {
+        if (!cancelled && readAuthority.current.accepts(ticket)) {
+          setSetup(read)
+          setSetupTicket(read ? ticket : null)
+        }
+      })
+      .catch(() => {
+        if (!cancelled && readAuthority.current.accepts(ticket)) {
+          setSetup(null)
+          setSetupTicket(null)
+        }
+      })
+      .finally(() => {
+        if (!cancelled && readAuthority.current.accepts(ticket)) {
+          setReading(false)
+        }
+      })
     return () => {
       cancelled = true
     }
   }, [open, collection, profile])
 
   const plan: ObsImportPlanResult | null = useMemo(
-    () => (setup ? mapObsSetup(setup, deviceList.devices) : null),
-    [setup, deviceList.devices]
+    () =>
+      setup &&
+      setupTicket &&
+      readAuthority.current.accepts(setupTicket) &&
+      setupTicket.collection === collection &&
+      setupTicket.profile === profile
+        ? mapObsSetup(setup, deviceList.devices)
+        : null,
+    [collection, profile, setup, setupTicket, deviceList.devices]
   )
 
+  const invalidateSetup = (): void => {
+    readAuthority.current.invalidate()
+    setSetup(null)
+    setSetupTicket(null)
+    setReading(true)
+  }
+
   const apply = async (): Promise<void> => {
-    if (!plan || !profile) {
+    const ticket = setupTicket
+    if (!plan || !profile || !ticket || reading || !readAuthority.current.accepts(ticket)) {
       return
     }
     setApplying(true)
@@ -105,14 +150,21 @@ export function ObsImportDialog({
         plan.stream?.kind === 'rtmp-custom' && plan.stream.hasKey
           ? ((await window.videorc?.obsReadStreamKey?.(profile)) ?? null)
           : null
+      if (!readAuthority.current.accepts(ticket)) {
+        return
+      }
       setCaptureConfig((current) => mergeObsImportIntoConfig(current, plan, rawKey))
       if (plan.outputDirectory) {
         const directory = plan.outputDirectory
-        setSettings((current) => ({ ...current, outputDirectory: directory }))
+        setSettings((current) => ({
+          ...current,
+          outputDirectory: directory.displayName,
+          outputDirectoryHandle: directory.directoryHandleId
+        }))
       }
-      if (plan.backgroundImagePath && window.videorc?.importBackgroundImagePath) {
+      if (plan.backgroundAsset) {
         const slot = firstEmptySlotId(registry)
-        const imported = await window.videorc.importBackgroundImagePath(plan.backgroundImagePath)
+        const imported = plan.backgroundAsset
         if (imported && slot) {
           const now = new Date().toISOString()
           const asset = createImportedAsset({
@@ -148,7 +200,7 @@ export function ObsImportDialog({
   }, [plan])
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(nextOpen) => !applying && onOpenChange(nextOpen)}>
       <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle>Import from OBS</DialogTitle>
@@ -160,7 +212,14 @@ export function ObsImportDialog({
         {discovery?.available ? (
           <div className="flex flex-col gap-3">
             <div className="grid gap-3 sm:grid-cols-2">
-              <Select value={collection} onValueChange={setCollection}>
+              <Select
+                disabled={applying}
+                value={collection}
+                onValueChange={(value) => {
+                  invalidateSetup()
+                  setCollection(value)
+                }}
+              >
                 <SelectTrigger aria-label="OBS scene collection">
                   <SelectValue placeholder="Scene collection" />
                 </SelectTrigger>
@@ -172,7 +231,14 @@ export function ObsImportDialog({
                   ))}
                 </SelectContent>
               </Select>
-              <Select value={profile} onValueChange={setProfile}>
+              <Select
+                disabled={applying}
+                value={profile}
+                onValueChange={(value) => {
+                  invalidateSetup()
+                  setProfile(value)
+                }}
+              >
                 <SelectTrigger aria-label="OBS profile">
                   <SelectValue placeholder="Profile" />
                 </SelectTrigger>
@@ -187,7 +253,7 @@ export function ObsImportDialog({
             </div>
 
             <div className="flex max-h-80 flex-col gap-4 overflow-y-auto rounded-row border p-3">
-              {groups.length === 0 ? (
+              {reading || groups.length === 0 ? (
                 <p className="text-sm text-muted-foreground">Reading your OBS setup…</p>
               ) : (
                 groups.map(({ verdict, lines }) => {
@@ -223,10 +289,10 @@ export function ObsImportDialog({
         )}
 
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button disabled={applying} variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button disabled={!plan || applying} onClick={() => void apply()}>
+          <Button disabled={!plan || reading || applying} onClick={() => void apply()}>
             <DownloadSimple data-icon="inline-start" />
             {applying ? 'Importing…' : 'Import setup'}
             <ArrowRight data-icon="inline-end" />

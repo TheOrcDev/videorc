@@ -28,7 +28,7 @@ function smokeCommand(smoke, command, params = {}) {
         port: smoke.port,
         path: '/command',
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${smoke.capability}` }
       },
       (res) => {
         res.setEncoding('utf8')

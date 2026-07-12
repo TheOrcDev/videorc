@@ -66,10 +66,13 @@ extraction works without any account. Hosted AI is what funds the project.
 
 ## Build from source
 
-Prerequisites: Node.js 24+, pnpm 11+, Rust stable (rustup), FFmpeg on `PATH`
-for development.
+Prerequisites: Node.js 24.x, Rust stable (rustup), and FFmpeg on `PATH` for
+development. The checked-in `.node-version`, `engines`, and `packageManager`
+fields keep local tools aligned with CI; Corepack installs the pinned pnpm 11.
 
 ```sh
+corepack enable
+corepack install
 pnpm install
 pnpm dev
 ```
@@ -114,7 +117,10 @@ pnpm smoke:local-gates
 Notable smokes: `pnpm smoke:multistream` proves simulcast fan-out end to end
 against local RTMP listeners (including the offline-destination failure
 guarantee), and `pnpm smoke:packaged` exercises a packaged build. None of the
-default smokes require camera, microphone, or screen permissions.
+default cross-platform smokes require camera, microphone, or screen permissions.
+The Windows installer lane additionally runs `pnpm smoke:windows-native-screen`
+against DXGI (gdigrab fallback) and keeps the packaged proof preview live during
+a real ScreenOnly recording.
 
 ## Contributing
 

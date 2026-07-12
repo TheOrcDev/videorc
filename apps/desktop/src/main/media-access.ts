@@ -12,7 +12,7 @@ export interface MediaAccessResult {
 export interface MediaAccessDeps {
   getStatus: (pane: MediaAccessPane) => string
   askForAccess: (pane: MediaAccessPane) => Promise<boolean>
-  restartBackend: (reason: string) => Promise<void>
+  restartBackend: (reason: string) => Promise<boolean | void>
   stopGrantWatcher: () => void
   log: (level: 'info' | 'warn', message: string) => void
 }
@@ -53,6 +53,9 @@ export async function requestMediaAccessWithRestart(
   }
 
   deps.stopGrantWatcher()
-  await deps.restartBackend(`Restarting capture backend after ${pane} permission became available.`)
-  return { granted: true, restarted: true }
+  const restarted =
+    (await deps.restartBackend(
+      `Restarting capture backend after ${pane} permission became available.`
+    )) !== false
+  return { granted: true, restarted }
 }

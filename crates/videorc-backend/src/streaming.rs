@@ -334,7 +334,8 @@ pub struct PlatformAccount {
     pub status: PlatformAccountStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct UpsertPlatformAccount {
     pub platform: StreamPlatform,
     pub account_id: String,
