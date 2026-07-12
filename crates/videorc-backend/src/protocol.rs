@@ -446,6 +446,7 @@ pub enum LayoutPreset {
     ScreenOnly,
     CameraOnly,
     SideBySide,
+    Vertical,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -3086,6 +3087,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(LayoutPreset::SideBySide).unwrap(),
             serde_json::json!("side-by-side")
+        );
+        assert_eq!(
+            serde_json::to_value(LayoutPreset::Vertical).unwrap(),
+            serde_json::json!("vertical")
         );
     }
 

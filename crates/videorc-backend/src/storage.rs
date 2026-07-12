@@ -1787,6 +1787,7 @@ pub fn session_scene_label(
             crate::protocol::LayoutPreset::ScreenOnly => "Screen only",
             crate::protocol::LayoutPreset::CameraOnly => "Camera only",
             crate::protocol::LayoutPreset::SideBySide => "Side by side",
+            crate::protocol::LayoutPreset::Vertical => "Vertical",
         }
         .to_string(),
     )

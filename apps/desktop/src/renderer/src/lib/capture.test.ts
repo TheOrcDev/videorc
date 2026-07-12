@@ -720,6 +720,7 @@ describe('layout preset source requirements', () => {
     expect(layoutPresetNeedsScreen('screen-camera')).toBe(true)
     expect(layoutPresetNeedsScreen('screen-only')).toBe(true)
     expect(layoutPresetNeedsScreen('side-by-side')).toBe(true)
+    expect(layoutPresetNeedsScreen('vertical')).toBe(true)
     expect(layoutPresetNeedsScreen('camera-only')).toBe(false)
   })
 
@@ -727,6 +728,7 @@ describe('layout preset source requirements', () => {
     expect(layoutPresetNeedsCamera('camera-only')).toBe(true)
     expect(layoutPresetNeedsCamera('side-by-side')).toBe(true)
     expect(layoutPresetNeedsCamera('screen-camera')).toBe(true)
+    expect(layoutPresetNeedsCamera('vertical')).toBe(true)
     expect(layoutPresetNeedsCamera('screen-only')).toBe(false)
   })
 

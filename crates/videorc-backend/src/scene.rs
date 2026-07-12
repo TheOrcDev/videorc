@@ -136,7 +136,12 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
                 scene.sources.push(camera);
             }
         }
-        _ => {
+        // Explicit arms (no wildcard): a new preset must state its composition
+        // here or fail to compile — the old `_ =>` silently composited unknown
+        // presets as screen-camera.
+        LayoutPreset::ScreenCamera | LayoutPreset::Vertical => {
+            // Vertical's stacked portrait arrangement lands with the vertical
+            // layout slice; until then it composites like screen-camera.
             scene.sources.push(base_source(&params.sources));
             if let Some(camera_id) = params.sources.camera_id.clone() {
                 scene.sources.push(camera_source(

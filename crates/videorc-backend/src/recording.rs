@@ -808,7 +808,7 @@ pub async fn start_session(
     if !use_encoder_bridge
         && matches!(
             params.layout.layout_preset,
-            LayoutPreset::ScreenCamera | LayoutPreset::SideBySide
+            LayoutPreset::ScreenCamera | LayoutPreset::SideBySide | LayoutPreset::Vertical
         )
         && params.sources.camera_id.is_some()
         && capture.camera_index.is_none()

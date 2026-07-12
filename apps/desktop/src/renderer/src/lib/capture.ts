@@ -58,11 +58,21 @@ export type LegacyStreamKeyMigrationCandidate = {
 }
 
 export function layoutPresetNeedsCamera(preset: LayoutPreset): boolean {
-  return preset === 'screen-camera' || preset === 'camera-only' || preset === 'side-by-side'
+  return (
+    preset === 'screen-camera' ||
+    preset === 'camera-only' ||
+    preset === 'side-by-side' ||
+    preset === 'vertical'
+  )
 }
 
 export function layoutPresetNeedsScreen(preset: LayoutPreset): boolean {
-  return preset === 'screen-camera' || preset === 'screen-only' || preset === 'side-by-side'
+  return (
+    preset === 'screen-camera' ||
+    preset === 'screen-only' ||
+    preset === 'side-by-side' ||
+    preset === 'vertical'
+  )
 }
 
 export function hasSelectedCameraSource(sources: SourceSelection): boolean {
@@ -794,7 +804,8 @@ const LAYOUT_PRESET_VALUES: readonly LayoutPreset[] = [
   'screen-camera',
   'screen-only',
   'camera-only',
-  'side-by-side'
+  'side-by-side',
+  'vertical'
 ]
 
 function isLayoutPreset(value: unknown): value is LayoutPreset {

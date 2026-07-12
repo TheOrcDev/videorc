@@ -230,10 +230,16 @@ fn target_screen_is_live(
 /// exactly what is missing instead of degrading silently.
 pub fn preset_selection_blocker(params: &SceneConfigParams) -> Option<String> {
     let preset = &params.layout.layout_preset;
-    let needs_camera = matches!(preset, LayoutPreset::CameraOnly | LayoutPreset::SideBySide);
+    let needs_camera = matches!(
+        preset,
+        LayoutPreset::CameraOnly | LayoutPreset::SideBySide | LayoutPreset::Vertical
+    );
     let needs_screen = matches!(
         preset,
-        LayoutPreset::ScreenOnly | LayoutPreset::ScreenCamera | LayoutPreset::SideBySide
+        LayoutPreset::ScreenOnly
+            | LayoutPreset::ScreenCamera
+            | LayoutPreset::SideBySide
+            | LayoutPreset::Vertical
     );
     let camera_selected = params.sources.camera_id.is_some();
     let screen_selected = params.sources.test_pattern
