@@ -93,7 +93,7 @@
     "smoke:obs-import": "node scripts/smoke-obs-import.mjs",
     "smoke:process-lifecycle": "node scripts/smoke-process-lifecycle.mjs",
     "smoke:process-memory": "node scripts/smoke-process-memory.mjs --gate",
-    "smoke:process-memory:sentinel": "node scripts/run-with-env.mjs VIDEORC_PROCESS_MEMORY_WARMUP_MS=1000 VIDEORC_PROCESS_MEMORY_SAMPLE_MS=4000 VIDEORC_PROCESS_MEMORY_INTERVAL_MS=500 -- node scripts/smoke-process-memory.mjs --gate",
+    "smoke:process-memory:sentinel": "node scripts/run-with-env.mjs VIDEORC_PROCESS_MEMORY_WARMUP_MS=1000 VIDEORC_PROCESS_MEMORY_SAMPLE_MS=8000 VIDEORC_PROCESS_MEMORY_INTERVAL_MS=1000 -- node scripts/smoke-process-memory.mjs --gate",
     "smoke:account-auth": "node scripts/smoke-account-auth.mjs",
     "smoke:sources": "node scripts/smoke-source-reconciliation.mjs",
     "smoke:session-ops": "node scripts/smoke-session-ops.mjs",

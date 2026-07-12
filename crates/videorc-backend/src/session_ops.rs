@@ -214,8 +214,13 @@ fn publish_identity_bound_session_file(
 ) -> Result<()> {
     rename_session_file_no_replace(staging, destination)?;
     sync_session_file_parent(destination)?;
-    if crate::storage::capture_session_file_bound_identity(destination)?.as_ref() == Some(expected)
-    {
+    if crate::storage::capture_session_file_bound_identity(destination)?.is_some_and(|actual| {
+        crate::storage::session_file_bound_identity_matches(
+            &actual,
+            &expected.content_identity,
+            Some(&expected.object_identity),
+        )
+    }) {
         return Ok(());
     }
     if rename_session_file_no_replace(destination, staging).is_ok() {
@@ -735,6 +740,46 @@ mod tests {
                 .unwrap()
                 .object_identity,
             replacement_ownership.object_identity
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn identity_bound_publish_accepts_mtime_drift_for_the_same_object() {
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-identity-bound-mtime-publish-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let staging = directory.join("staging.partial");
+        let destination = directory.join("recording.mp4");
+        std::fs::write(&staging, b"owned recording bytes").unwrap();
+        let expected = crate::storage::capture_session_file_bound_identity(&staging)
+            .unwrap()
+            .unwrap();
+        let changed_modified =
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_234_567_890);
+        std::fs::File::options()
+            .write(true)
+            .open(&staging)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(changed_modified))
+            .unwrap();
+        let timestamp_drift = crate::storage::capture_session_file_bound_identity(&staging)
+            .unwrap()
+            .unwrap();
+        assert_ne!(timestamp_drift.content_identity, expected.content_identity);
+        assert_eq!(timestamp_drift.object_identity, expected.object_identity);
+
+        publish_identity_bound_session_file(&staging, &destination, &expected).unwrap();
+
+        let published = crate::storage::capture_session_file_bound_identity(&destination)
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.object_identity, expected.object_identity);
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"owned recording bytes"
         );
         std::fs::remove_dir_all(&directory).unwrap();
     }

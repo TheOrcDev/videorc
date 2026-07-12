@@ -360,6 +360,15 @@ pub struct SessionFileIdentity {
     sample_sha256: String,
 }
 
+impl SessionFileIdentity {
+    /// Compare the durable byte evidence that survives a same-object rename.
+    /// Timestamps remain part of strict identity equality for legacy records
+    /// that do not carry an exact filesystem object identity.
+    pub(crate) fn same_sampled_bytes(&self, other: &Self) -> bool {
+        self.len == other.len && self.sample_sha256 == other.sample_sha256
+    }
+}
+
 /// Identity of one filesystem object, independent of its length, timestamps,
 /// or contents. It is recorded while the creating handle is still open and is
 /// stable across writes and same-filesystem renames.
@@ -593,13 +602,20 @@ pub(crate) fn capture_session_file_bound_identity(
     }))
 }
 
-fn session_file_bound_identity_matches(
+pub(crate) fn session_file_bound_identity_matches(
     actual: &SessionFileBoundIdentity,
     expected_content_identity: &SessionFileIdentity,
     expected_object_identity: Option<&SessionFileObjectIdentity>,
 ) -> bool {
-    &actual.content_identity == expected_content_identity
-        && expected_object_identity.is_none_or(|expected| &actual.object_identity == expected)
+    match expected_object_identity {
+        Some(expected_object_identity) => {
+            &actual.object_identity == expected_object_identity
+                && actual
+                    .content_identity
+                    .same_sampled_bytes(expected_content_identity)
+        }
+        None => &actual.content_identity == expected_content_identity,
+    }
 }
 
 pub(crate) fn capture_session_directory_object_identity(
@@ -760,15 +776,25 @@ fn cleanup_identity_bound_session_file(
         return Ok(false);
     }
 
-    let object_matches = match expected_object_identity {
-        Some(expected) => capture_session_file_object_identity(cleanup)?.as_ref() == Some(expected),
-        None => true,
+    let identity_matches = match (expected_object_identity, expected_content_identity) {
+        (Some(expected_object), Some(expected_content)) => {
+            capture_session_file_bound_identity(cleanup)?.is_some_and(|actual| {
+                session_file_bound_identity_matches(
+                    &actual,
+                    expected_content,
+                    Some(expected_object),
+                )
+            })
+        }
+        (Some(expected), None) => {
+            capture_session_file_object_identity(cleanup)?.as_ref() == Some(expected)
+        }
+        (None, Some(expected)) => {
+            capture_session_file_identity(cleanup)?.as_ref() == Some(expected)
+        }
+        (None, None) => unreachable!("identity authority was checked before cleanup"),
     };
-    let content_matches = match expected_content_identity {
-        Some(expected) => capture_session_file_identity(cleanup)?.as_ref() == Some(expected),
-        None => true,
-    };
-    if !object_matches || !content_matches {
+    if !identity_matches {
         restore_session_file_from_cleanup(source, cleanup)?;
         bail!(
             "Session staging {} changed before cleanup; the replacement was retained.",
@@ -969,8 +995,11 @@ fn deletion_path_state(record: &SessionDeletionPathRecord) -> Result<DeletionPat
 
     match capture_session_file_bound_identity(quarantine_path)? {
         Some(actual)
-            if &actual.content_identity == expected
-                && &actual.object_identity == expected_object_identity =>
+            if session_file_bound_identity_matches(
+                &actual,
+                expected,
+                Some(expected_object_identity),
+            ) =>
         {
             return Ok(DeletionPathState::Ready(
                 quarantine_path.display().to_string(),
@@ -1000,8 +1029,11 @@ fn deletion_path_state(record: &SessionDeletionPathRecord) -> Result<DeletionPat
             crate::session_ops::sync_session_file_parent(quarantine_path)?;
             match capture_session_file_bound_identity(quarantine_path)? {
                 Some(actual)
-                    if &actual.content_identity == expected
-                        && &actual.object_identity == expected_object_identity =>
+                    if session_file_bound_identity_matches(
+                        &actual,
+                        expected,
+                        Some(expected_object_identity),
+                    ) =>
                 {
                     Ok(DeletionPathState::Ready(
                         quarantine_path.display().to_string(),
@@ -1033,8 +1065,11 @@ fn deletion_path_state(record: &SessionDeletionPathRecord) -> Result<DeletionPat
         {
             match capture_session_file_bound_identity(quarantine_path)? {
                 Some(actual)
-                    if &actual.content_identity == expected
-                        && &actual.object_identity == expected_object_identity =>
+                    if session_file_bound_identity_matches(
+                        &actual,
+                        expected,
+                        Some(expected_object_identity),
+                    ) =>
                 {
                     Ok(DeletionPathState::Ready(
                         quarantine_path.display().to_string(),
@@ -1812,8 +1847,11 @@ impl Database {
 
         match capture_session_file_bound_identity(cleanup_path)? {
             Some(actual)
-                if &actual.content_identity == expected_identity
-                    && &actual.object_identity == expected_object_identity =>
+                if session_file_bound_identity_matches(
+                    &actual,
+                    expected_identity,
+                    Some(expected_object_identity),
+                ) =>
             {
                 std::fs::remove_file(cleanup_path).with_context(|| {
                     format!(
@@ -4868,6 +4906,63 @@ mod tests {
         bytes
     }
 
+    #[test]
+    fn object_bound_identity_accepts_only_timestamp_drift_for_the_same_sampled_bytes() {
+        let expected_content = SessionFileIdentity {
+            len: 42,
+            modified_unix_nanos: Some(100),
+            sample_sha256: "sample-a".to_string(),
+        };
+        let expected_object = SessionFileObjectIdentity {
+            volume_id: 7,
+            file_id: 11,
+        };
+        let timestamp_drift = SessionFileBoundIdentity {
+            content_identity: SessionFileIdentity {
+                modified_unix_nanos: Some(200),
+                ..expected_content.clone()
+            },
+            object_identity: expected_object.clone(),
+        };
+
+        assert!(session_file_bound_identity_matches(
+            &timestamp_drift,
+            &expected_content,
+            Some(&expected_object),
+        ));
+        assert!(!session_file_bound_identity_matches(
+            &timestamp_drift,
+            &expected_content,
+            None,
+        ));
+
+        let different_object = SessionFileBoundIdentity {
+            object_identity: SessionFileObjectIdentity {
+                volume_id: 7,
+                file_id: 12,
+            },
+            ..timestamp_drift.clone()
+        };
+        assert!(!session_file_bound_identity_matches(
+            &different_object,
+            &expected_content,
+            Some(&expected_object),
+        ));
+
+        let different_sample = SessionFileBoundIdentity {
+            content_identity: SessionFileIdentity {
+                sample_sha256: "sample-b".to_string(),
+                ..timestamp_drift.content_identity
+            },
+            object_identity: expected_object.clone(),
+        };
+        assert!(!session_file_bound_identity_matches(
+            &different_sample,
+            &expected_content,
+            Some(&expected_object),
+        ));
+    }
+
     fn oauth_account(account_id: &str, token_ref: &str) -> UpsertPlatformAccount {
         UpsertPlatformAccount {
             platform: StreamPlatform::X,
@@ -7075,6 +7170,55 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn startup_publishes_object_bound_library_bytes_after_mtime_drift() {
+        let (database, database_path) = file_database();
+        let directory = database_path.parent().unwrap();
+        let staging = directory.join(".owned-mtime.partial");
+        let final_path = directory.join("owned-mtime.mp4");
+        database
+            .create_session(&sample_session("owned-mtime-row"))
+            .unwrap();
+        let operation = database
+            .begin_session_file_operation("duplicate", "owned-mtime-row", &staging, &final_path)
+            .unwrap();
+        std::fs::write(&staging, b"owned timestamp-drift bytes").unwrap();
+        let expected = capture_session_file_bound_identity(&staging)
+            .unwrap()
+            .unwrap();
+        database
+            .bind_session_file_operation_object_identity(&operation.id, &expected.object_identity)
+            .unwrap();
+        database
+            .bind_session_file_operation_content_identity(&operation.id, &expected.content_identity)
+            .unwrap();
+        let changed_modified =
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_234_567_890);
+        std::fs::File::options()
+            .write(true)
+            .open(&staging)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(changed_modified))
+            .unwrap();
+        let timestamp_drift = capture_session_file_bound_identity(&staging)
+            .unwrap()
+            .unwrap();
+        assert_ne!(timestamp_drift.content_identity, expected.content_identity);
+        assert_eq!(timestamp_drift.object_identity, expected.object_identity);
+
+        let summary = database.reconcile_session_file_operations().unwrap();
+
+        assert_eq!(summary.published, 1);
+        assert_eq!(summary.pending, 0);
+        assert_eq!(
+            std::fs::read(&final_path).unwrap(),
+            b"owned timestamp-drift bytes"
+        );
+        assert!(!staging.exists());
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();
     }

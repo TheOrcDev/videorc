@@ -4637,10 +4637,13 @@ where
             ) {
                 Ok(()) => {
                     crate::session_ops::sync_session_file_parent(&candidate)?;
-                    if capture_session_file_identity(&candidate)?.as_ref() == Some(&identity)
-                        && capture_session_file_object_identity(&candidate)?.as_ref()
-                            == Some(&object_identity)
-                    {
+                    if capture_session_file_bound_identity(&candidate)?.is_some_and(|actual| {
+                        crate::storage::session_file_bound_identity_matches(
+                            &actual,
+                            &identity,
+                            Some(&object_identity),
+                        )
+                    }) {
                         published = Some(candidate);
                         break;
                     }
@@ -9911,11 +9914,14 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "health persistence failure must surface");
+        let error = result.expect_err("health persistence failure must surface");
         let recovery = recovery_path
             .clone()
             .expect("publication remains journaled");
-        assert!(recovery.exists());
+        assert!(
+            recovery.exists(),
+            "publication failed before it could remain journaled: {error:#}"
+        );
         let published = directory.join("recording.mp4");
         assert_eq!(
             std::fs::read(&published).unwrap(),
@@ -9987,7 +9993,13 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "the injected crash must interrupt remux");
+        let error = result.expect_err("the injected crash must interrupt remux");
+        assert!(
+            error
+                .to_string()
+                .contains("injected crash after MP4 publication"),
+            "remux failed before the expected publication crash: {error:#}"
+        );
         let published = directory.join("recording.mp4");
         assert_eq!(
             std::fs::read(&published).unwrap(),
@@ -10168,7 +10180,13 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "the injected crash must interrupt cleanup");
+        let error = result.expect_err("the injected crash must interrupt cleanup");
+        assert!(
+            error
+                .to_string()
+                .contains("injected crash after session database commit"),
+            "remux failed before the expected database-commit crash: {error:#}"
+        );
         let published = directory.join("recording.mp4");
         assert_eq!(
             state.database.list_sessions(200).unwrap()[0]

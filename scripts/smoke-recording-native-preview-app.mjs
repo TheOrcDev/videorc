@@ -15,6 +15,7 @@ import {
   summarizeNativePreviewRecordingDiagnostics
 } from './lib/native-preview-diagnostics.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
+import { previewWindowSurfaceReady } from './lib/native-preview-window-gates.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 import { nativeWindowsScreenCandidates } from './lib/windows-native-screen-gates.mjs'
 import {
@@ -173,6 +174,7 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
     const bootstrap = await smokeCommand(smoke, 'inspect-native-preview-bootstrap')
     assertNativeBootstrap(bootstrap)
     await smokeCommand(smoke, 'preview-window-open')
+    await waitForPreviewWindowSurface(smoke)
     const surfaceBefore = await waitForNativeSurface(ws)
     const nativeStage = await smokeCommand(smoke, 'inspect-native-preview-bootstrap', {
       requireNativePlaceholder: true
@@ -433,6 +435,7 @@ async function showNativePreviewSurface(ws, smoke, samples) {
     waitFor: '[data-videorc-preview-card]'
   })
   await smokeCommand(smoke, 'preview-window-open')
+  await waitForPreviewWindowSurface(smoke)
   const nativeStage = await smokeCommand(smoke, 'inspect-native-preview-bootstrap', {
     requireNativePlaceholder: true
   })
@@ -666,7 +669,7 @@ function fullFrameTransform() {
   }
 }
 
-async function waitForNativeSurface(ws, previousFrames = -1) {
+async function waitForNativeSurface(ws, previousFrames = 0) {
   const deadline = Date.now() + timeoutMs
   let lastStatus = null
   while (Date.now() < deadline) {
@@ -684,6 +687,31 @@ async function waitForNativeSurface(ws, previousFrames = -1) {
   }
   throw new Error(
     `Native preview surface did not become live. Last status: ${JSON.stringify(lastStatus)}`
+  )
+}
+
+async function waitForPreviewWindowSurface(smoke) {
+  const deadline = Date.now() + timeoutMs
+  let lastEvidence = null
+  while (Date.now() < deadline) {
+    const [windowState, surfaceStatus] = await Promise.all([
+      smokeCommand(smoke, 'preview-window-state'),
+      smokeCommand(smoke, 'native-preview-surface-status')
+    ])
+    lastEvidence = { windowState, surfaceStatus }
+    if (
+      previewWindowSurfaceReady(lastEvidence, {
+        expectedTransport: expectedSurfaceTransport,
+        expectedBacking: expectedSurfaceBacking,
+        expectNativeMetalPreview
+      })
+    ) {
+      return lastEvidence
+    }
+    await sleep(150)
+  }
+  throw new Error(
+    `Preview window surface did not open as ${expectedSurfaceTransport}/${expectedSurfaceBacking}. Last evidence: ${JSON.stringify(lastEvidence)}`
   )
 }
 
@@ -758,9 +786,17 @@ function assertNativeBootstrap(result, options = {}) {
     throw new Error(`Native preview bridge is incomplete: ${JSON.stringify(result)}`)
   }
   if (options.requireNativePreview) {
-    if (!result.hasNativePlaceholder) {
+    if (!result.previewWindowOpen || !result.previewWindowVisible) {
       throw new Error(
-        `Preview stage did not render the native surface placeholder: ${JSON.stringify(result)}`
+        `Detached preview window did not stay open and visible: ${JSON.stringify(result)}`
+      )
+    }
+    if (
+      result.surfaceTransport !== expectedSurfaceTransport ||
+      result.surfaceBacking !== expectedSurfaceBacking
+    ) {
+      throw new Error(
+        `Preview stage reported ${result.surfaceTransport}/${result.surfaceBacking}, expected ${expectedSurfaceTransport}/${expectedSurfaceBacking}: ${JSON.stringify(result)}`
       )
     }
     if ((result.previewImageCount ?? 0) !== 0 || result.hasJpegPollingPreviewImage) {
