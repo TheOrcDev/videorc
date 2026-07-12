@@ -45,11 +45,18 @@ export type CaptureConfig = {
   audio: AudioSettings
   video: VideoSettings
   /**
-   * Landscape canvas remembered while the Vertical scene holds the output in
+   * Landscape canvas remembered while a vertical scene holds the output in
    * portrait — restored when the user switches back to a landscape scene
-   * (verticalOrientationVideoPatch). Null outside the vertical scene.
+   * (verticalOrientationVideoPatch). Null outside vertical mode.
    */
   verticalRestoreVideo: VideoSettings | null
+  /**
+   * Last-used scene per Studio mode: the orientation toggle re-enters a mode
+   * on the scene the user left it in. Kept fresh at the layout-transaction
+   * commit point via layoutPresetMemoryPatch.
+   */
+  lastHorizontalPreset: LayoutPreset
+  lastVerticalPreset: LayoutPreset
   recordEnabled: boolean
   streamEnabled: boolean
   rtmpPreset: RtmpPreset
@@ -162,6 +169,34 @@ export function verticalOrientationVideoPatch(
     video: verticalRestoreVideo ?? defaultCaptureConfig.video,
     verticalRestoreVideo: null
   }
+}
+
+/** Config patch remembering `preset` as its mode's last-used scene. */
+export function layoutPresetMemoryPatch(
+  preset: LayoutPreset
+): Partial<Pick<CaptureConfig, 'lastHorizontalPreset' | 'lastVerticalPreset'>> {
+  return layoutPresetOrientation(preset) === 'vertical'
+    ? { lastVerticalPreset: preset }
+    : { lastHorizontalPreset: preset }
+}
+
+/**
+ * The scene the Studio mode toggle applies when switching to `target`: the
+ * mode's remembered scene, guarded back to its default if the remembered
+ * value is somehow cross-class (the mode is derived from the preset, so a
+ * wrong-class memory would strand the toggle in the mode it tried to leave).
+ */
+export function studioModeTogglePreset(
+  target: LayoutOrientation,
+  config: Pick<CaptureConfig, 'lastHorizontalPreset' | 'lastVerticalPreset'>
+): LayoutPreset {
+  const remembered = target === 'vertical' ? config.lastVerticalPreset : config.lastHorizontalPreset
+  if (layoutPresetOrientation(remembered) !== target) {
+    return target === 'vertical'
+      ? defaultCaptureConfig.lastVerticalPreset
+      : defaultCaptureConfig.lastHorizontalPreset
+  }
+  return remembered
 }
 
 export function hasSelectedScreenSource(sources: SourceSelection): boolean {
@@ -556,6 +591,8 @@ export function auxiliaryStreamOutputVideoSettings(
 export const defaultCaptureConfig: CaptureConfig = {
   sources: {},
   verticalRestoreVideo: null,
+  lastHorizontalPreset: 'screen-camera',
+  lastVerticalPreset: 'vertical-camera-top',
   layout: {
     layoutPreset: 'screen-camera',
     cameraTransformMode: 'preset',
@@ -679,6 +716,8 @@ export function loadCaptureConfig(): CaptureConfig {
       loaded.verticalRestoreVideo != null
         ? normalizeVideoSettings(loaded.verticalRestoreVideo)
         : null,
+    lastHorizontalPreset: normalizeRememberedPreset(loaded.lastHorizontalPreset, 'horizontal'),
+    lastVerticalPreset: normalizeRememberedPreset(loaded.lastVerticalPreset, 'vertical'),
     recordEnabled:
       typeof loaded.recordEnabled === 'boolean'
         ? loaded.recordEnabled
@@ -916,6 +955,16 @@ function isLayoutPreset(value: unknown): value is LayoutPreset {
  */
 const LEGACY_LAYOUT_PRESET_ALIASES: Record<string, LayoutPreset> = {
   vertical: 'vertical-camera-top'
+}
+
+/** A persisted per-mode scene memory must belong to its mode's class. */
+function normalizeRememberedPreset(value: unknown, orientation: LayoutOrientation): LayoutPreset {
+  if (isLayoutPreset(value) && layoutPresetOrientation(value) === orientation) {
+    return value
+  }
+  return orientation === 'vertical'
+    ? defaultCaptureConfig.lastVerticalPreset
+    : defaultCaptureConfig.lastHorizontalPreset
 }
 
 const SIDE_BY_SIDE_SPLITS: readonly SideBySideSplit[] = ['50-50', '60-40', '70-30']

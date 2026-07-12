@@ -51,6 +51,7 @@ import {
   rtmpDefaults,
   smokePreviewCompositorCaptureConfig,
   sourceSelectionChangeEvents,
+  layoutPresetMemoryPatch,
   STORAGE_KEYS,
   streamOutputVideosForTargets,
   streamOutputVideoSettings,
@@ -4686,7 +4687,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applyScene(snapshot.scene)
       skipNextConfigSceneReloadRef.current = true
       setCaptureConfig((current) => {
-        const next = { ...current, layout: snapshot.layout }
+        // The committed preset becomes its mode's remembered scene — the
+        // orientation toggle re-enters each mode where the user left it.
+        const next = {
+          ...current,
+          ...layoutPresetMemoryPatch(snapshot.layout.layoutPreset),
+          layout: snapshot.layout
+        }
         captureConfigRef.current = next
         return next
       })

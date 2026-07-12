@@ -23,8 +23,10 @@ import {
   isSelectableCaptureDevice,
   HORIZONTAL_LAYOUT_PRESETS,
   VERTICAL_LAYOUT_PRESETS,
+  layoutPresetMemoryPatch,
   layoutPresetNeedsCamera,
   layoutPresetOrientation,
+  studioModeTogglePreset,
   verticalOrientationVideoPatch,
   layoutPresetNeedsScreen,
   loadCaptureConfig,
@@ -1268,6 +1270,66 @@ describe('legacy stream key migration', () => {
       screenName: 'Display 1',
       testPattern: false
     })
+  })
+
+  it('keeps per-mode scene memory across reloads and heals cross-class values', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () =>
+        JSON.stringify({
+          lastHorizontalPreset: 'side-by-side',
+          lastVerticalPreset: 'vertical-split'
+        }),
+      setItem: vi.fn(),
+      removeItem: vi.fn()
+    })
+    expect(loadCaptureConfig()).toMatchObject({
+      lastHorizontalPreset: 'side-by-side',
+      lastVerticalPreset: 'vertical-split'
+    })
+
+    // A cross-class or junk memory would strand the mode toggle — reset it.
+    vi.stubGlobal('localStorage', {
+      getItem: () =>
+        JSON.stringify({
+          lastHorizontalPreset: 'vertical-split',
+          lastVerticalPreset: 'diagonal'
+        }),
+      setItem: vi.fn(),
+      removeItem: vi.fn()
+    })
+    expect(loadCaptureConfig()).toMatchObject({
+      lastHorizontalPreset: 'screen-camera',
+      lastVerticalPreset: 'vertical-camera-top'
+    })
+  })
+})
+
+describe('per-mode scene memory and the mode toggle', () => {
+  it('remembers a committed preset in its own mode slot only', () => {
+    expect(layoutPresetMemoryPatch('side-by-side')).toEqual({
+      lastHorizontalPreset: 'side-by-side'
+    })
+    expect(layoutPresetMemoryPatch('vertical-screen-camera')).toEqual({
+      lastVerticalPreset: 'vertical-screen-camera'
+    })
+  })
+
+  it('the toggle re-enters each mode on its remembered scene', () => {
+    const memory = {
+      lastHorizontalPreset: 'camera-only' as const,
+      lastVerticalPreset: 'vertical-split' as const
+    }
+    expect(studioModeTogglePreset('horizontal', memory)).toBe('camera-only')
+    expect(studioModeTogglePreset('vertical', memory)).toBe('vertical-split')
+  })
+
+  it('falls back to the mode default when the memory is cross-class', () => {
+    const swapped = {
+      lastHorizontalPreset: 'vertical-camera-top' as const,
+      lastVerticalPreset: 'screen-camera' as const
+    }
+    expect(studioModeTogglePreset('horizontal', swapped)).toBe('screen-camera')
+    expect(studioModeTogglePreset('vertical', swapped)).toBe('vertical-camera-top')
   })
 })
 
