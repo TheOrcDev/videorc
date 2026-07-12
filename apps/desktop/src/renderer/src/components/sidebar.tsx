@@ -152,7 +152,7 @@ export function Sidebar({
   const modKey = displayKeyGlyph('⌘', platform)
 
   return (
-    <aside className="flex w-56 shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground">
+    <aside className="-mt-9 flex w-56 shrink-0 flex-col border-r bg-sidebar pt-9 text-sidebar-foreground backdrop-blur-2xl">
       <div className="flex select-none items-center gap-3 px-4 py-4">
         {/* The PNG bakes a ~4% transparent margin around the tile; the scaled
             overflow-hidden wrapper crops it so the hairline ring hugs the art. */}
@@ -263,7 +263,7 @@ export function Sidebar({
 
       <SidebarUpdateChip captureActive={live} onOpenSettings={() => onSelect('settings')} />
 
-      <div className="flex items-center justify-between gap-2 border-t px-3 py-2.5">
+      <div className="flex min-h-11 items-center justify-between gap-2 border-t px-3 py-1.5">
         {/* Videorc product-account control. Backend status is secondary (a small
             dot on the trigger + the Health row); Health stays reachable here. */}
         <AccountMenu

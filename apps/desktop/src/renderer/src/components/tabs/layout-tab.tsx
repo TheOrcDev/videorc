@@ -162,7 +162,10 @@ export function LayoutTab(): ReactElement {
               stay in the detached preview window. */}
           <SceneStage
             cameraCornerRadiusPct={layout.cameraCornerRadiusPct}
-            cameraShape={layout.cameraShape}
+            // WYSIWYG: only the inset scenes mask the camera bubble (backend
+            // camera_mask policy) — side-by-side and the vertical bands render
+            // a plain rectangle, so the schematic must too.
+            cameraShape={showOverlayControls ? layout.cameraShape : 'rectangle'}
             dragEnabled={showOverlayControls && !isSessionActive}
             hasBackground={Boolean(scene?.background)}
             outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}

@@ -22,7 +22,6 @@ import { useEffect, useMemo, useState, type ReactElement } from 'react'
 
 import { ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
-import { CaptionsControls } from '@/components/captions/captions-controls'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -265,7 +264,6 @@ export function StreamingTab(): ReactElement {
           streamVideo={streamVideo}
           targets={streaming.targets}
         />
-        <CaptionsControls />
       </div>
     </div>
   )

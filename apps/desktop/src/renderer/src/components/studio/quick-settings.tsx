@@ -361,7 +361,6 @@ export function QuickSettings(): ReactElement {
             }
           />
         </div>
-        <ManageLink onClick={() => openStudioPanel('captions')}>Manage captions</ManageLink>
       </QuickCard>
     </div>
   )

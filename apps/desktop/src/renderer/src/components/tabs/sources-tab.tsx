@@ -22,12 +22,7 @@ import { Badge } from '@/components/ui/badge'
 import { PowerSlider } from '@/components/power-slider'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
-import {
-  useStudioAudio,
-  useStudioCore,
-  useStudioDiagnostics,
-  useStudioPreview
-} from '@/hooks/use-studio'
+import { useStudioCore, useStudioDiagnostics, useStudioPreview } from '@/hooks/use-studio'
 import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camera-format-shortfall'
 import {
   MICROPHONE_SYNC_OFFSET_MAX_MS,
@@ -45,8 +40,6 @@ import {
   type AudioSyncRecommendationReport
 } from '@/lib/capture'
 import type { SourceSelection } from '@/lib/backend'
-import { formatDb } from '@/lib/format'
-import { cn } from '@/lib/utils'
 
 // Live chip for a capture source (UI rewrite V3): what the preview pipeline says
 // about the source RIGHT NOW. A live source whose newest frame is old is reported
@@ -111,8 +104,6 @@ export function SourcesTab(): ReactElement {
     captureConfig,
     setCaptureConfig,
     refreshBackend,
-    sampleAudioMeter,
-    canSampleAudio,
     selectedMicrophone,
     isSessionActive,
     layoutSwitchPending,
@@ -125,7 +116,6 @@ export function SourcesTab(): ReactElement {
     wsStatus
   } = useStudioCore()
   const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
-  const { audioMeter, audioMeterLoading, meterLevel } = useStudioAudio()
   const { diagnosticStats } = useStudioDiagnostics()
   // Q6 (plan 022): explicit select states while device discovery is pending.
   const discoveryPending = wsStatus !== 'connected'
@@ -153,14 +143,6 @@ export function SourcesTab(): ReactElement {
   const syncMeasurementInputRef = useRef<HTMLInputElement | null>(null)
   const syncCalibration = audioSyncCalibrationState(syncRecommendation, captureConfig.audio)
 
-  const meterTone =
-    audioMeter?.status === 'ready'
-      ? 'bg-success'
-      : audioMeter?.status === 'silent' ||
-          audioMeter?.status === 'no-frames' ||
-          audioMeter?.status === 'permission-required'
-        ? 'bg-warning'
-        : 'bg-muted-foreground/40'
   const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
   const liveDeviceSwitchDisabled = Boolean(sourceDeviceSwitchPending || layoutSwitchPending)
 
@@ -410,43 +392,13 @@ export function SourcesTab(): ReactElement {
         {/* See-before-you-pick: live waveform of the selected mic (shared with
             the Quick Settings popover). */}
         <MicPickerPreview deviceName={selectedMicrophone?.name} />
-        <div className="flex items-center justify-between text-sm">
-          <span className="flex items-center gap-2 text-muted-foreground">
-            {captureConfig.audio.microphoneMuted ? (
-              <SpeakerSlash className="size-4" weight="duotone" />
-            ) : (
-              <SpeakerHigh className="size-4" weight="duotone" />
-            )}
-            {selectedMicrophone ? selectedMicrophone.name : 'No microphone selected'}
-            <RuntimeChip
-              chip={
-                audioMeter?.status === 'ready'
-                  ? { label: 'Live', tone: 'good' }
-                  : audioMeter?.status === 'silent'
-                    ? {
-                        label: 'Silent',
-                        tone: 'warn',
-                        hint: 'The mic delivered only silence on the last check.'
-                      }
-                    : audioMeter?.status === 'permission-required'
-                      ? { label: 'Permission needed', tone: 'warn' }
-                      : audioMeter?.status === 'no-frames'
-                        ? {
-                            label: 'No frames',
-                            tone: 'warn',
-                            hint: 'The mic opened but did not send audio frames.'
-                          }
-                        : audioMeter?.status === 'unavailable'
-                          ? {
-                              label: 'Meter unavailable',
-                              tone: 'neutral',
-                              hint: 'The live level meter is not available on this platform yet. Recording audio is unaffected.'
-                            }
-                          : null
-              }
-            />
-          </span>
-          <span className="font-semibold tabular-nums">{formatDb(audioMeter?.peakDb)}</span>
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          {captureConfig.audio.microphoneMuted ? (
+            <SpeakerSlash className="size-4" weight="duotone" />
+          ) : (
+            <SpeakerHigh className="size-4" weight="duotone" />
+          )}
+          {selectedMicrophone ? selectedMicrophone.name : 'No microphone selected'}
         </div>
         <div className="grid gap-2 rounded-row border bg-muted/30 px-3 py-2">
           <div className="flex items-center justify-between gap-3">
@@ -570,31 +522,6 @@ export function SourcesTab(): ReactElement {
             </div>
           </div>
         </div>
-        <div
-          aria-label="Microphone input level"
-          aria-valuemax={100}
-          aria-valuemin={0}
-          aria-valuenow={Math.round(Math.min(100, Math.max(0, meterLevel)))}
-          className="h-2.5 w-full overflow-hidden rounded-full bg-muted"
-          role="meter"
-        >
-          <div
-            className={cn('h-full rounded-full transition-all', meterTone)}
-            style={{ width: `${Math.min(100, Math.max(0, meterLevel))}%` }}
-          />
-        </div>
-        <p className="text-xs text-muted-foreground">
-          {audioMeter?.message ?? 'Run a check to confirm the mic is live before recording.'}
-        </p>
-        <Button
-          className="self-start"
-          disabled={!canSampleAudio || audioMeterLoading}
-          size="sm"
-          variant="outline"
-          onClick={sampleAudioMeter}
-        >
-          {audioMeterLoading ? 'Checking...' : 'Check mic'}
-        </Button>
       </PanelSection>
     </ConfigGrid>
   )

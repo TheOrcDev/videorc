@@ -1872,7 +1872,10 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     minWidth: 360,
     minHeight: 240,
     title: 'Videorc Notes',
-    ...(isMac ? { titleBarStyle: 'hiddenInset' as const } : {}),
+    // Center the traffic lights in the 34px drag bar so they align with the title.
+    ...(isMac
+      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 11 } }
+      : {}),
     backgroundColor: DARK_WINDOW_PALETTE.base,
     show: false,
     ...appWindowIconOptions(),
@@ -2375,7 +2378,10 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     minWidth: 320,
     minHeight: 360,
     title: 'Videorc Comments',
-    ...(isMac ? { titleBarStyle: 'hiddenInset' as const } : {}),
+    // Center the traffic lights in the 40px header so they align with the title.
+    ...(isMac
+      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 14 } }
+      : {}),
     backgroundColor: DARK_WINDOW_PALETTE.base,
     show: false,
     ...appWindowIconOptions(),
@@ -2593,7 +2599,10 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     minWidth: 360,
     minHeight: 200,
     title: 'Videorc Captions',
-    ...(isMac ? { titleBarStyle: 'hiddenInset' as const } : {}),
+    // Center the traffic lights in the 40px header so they align with the title.
+    ...(isMac
+      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 14 } }
+      : {}),
     backgroundColor: DARK_WINDOW_PALETTE.base,
     show: false,
     ...appWindowIconOptions(),
@@ -3015,8 +3024,10 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     title: 'Videorc Preview',
     // hiddenInset is macOS-only; off macOS the standard frame keeps the
     // preview window draggable without renderer drag regions (Phase 4 owns
-    // the frameless Windows chrome).
-    ...(isMac ? { titleBarStyle: 'hiddenInset' as const } : {}),
+    // the frameless Windows chrome). Traffic lights center in the 28px bar.
+    ...(isMac
+      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 8 } }
+      : {}),
     backgroundColor: DARK_WINDOW_PALETTE.base,
     // A docked window stays hidden until the renderer answers the dock epoch
     // with a slot rect; showing it at the remembered FLOATING frame first would

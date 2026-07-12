@@ -1,5 +1,4 @@
 import {
-  Aperture,
   Broadcast,
   CaretRight,
   FrameCorners,
@@ -16,7 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
-import { outputSummary, recordingQuality, streamingSummary } from '@/lib/studio-session-view'
+import { outputSummary, streamingSummary } from '@/lib/studio-session-view'
 
 // The session's primary actions rendered as a matched pair of glassy hero
 // controls: taller, translucent, specular-shined (videorc-design glass tokens).
@@ -68,12 +67,6 @@ export function SessionPanel({
   return (
     <PanelSection>
       <div className="flex flex-col gap-0.5">
-        <SessionRow
-          icon={Aperture}
-          label="Output profile"
-          value={recordingQuality(video)}
-          onNavigate={() => openStudioPanel('recording')}
-        />
         <SessionRow
           icon={Broadcast}
           label="Streaming"

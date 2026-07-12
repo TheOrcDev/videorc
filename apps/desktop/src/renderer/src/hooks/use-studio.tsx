@@ -706,7 +706,7 @@ export type StudioContextValue = {
   importScreenImage: () => Promise<void>
   renameScreen: (screenId: string, name: string) => Promise<void>
   deleteScreen: (screenId: string) => Promise<void>
-  moveScreen: (screenId: string, direction: -1 | 1) => Promise<void>
+  reorderScreen: (screenId: string, targetIndex: number) => Promise<void>
   activateScreen: (screenId: string) => Promise<void>
   clearActiveScreen: () => Promise<void>
   refreshPreview: () => Promise<void>
@@ -6463,8 +6463,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [client, isSessionActive, reportError]
   )
 
-  const moveScreen = useCallback(
-    async (screenId: string, direction: -1 | 1) => {
+  const reorderScreen = useCallback(
+    async (screenId: string, targetIndex: number) => {
       if (!client || isSessionActive) {
         toast.error(
           isSessionActive
@@ -6475,8 +6475,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
 
       const currentIndex = screens.findIndex((screen) => screen.id === screenId)
-      const nextIndex = currentIndex + direction
-      if (currentIndex === -1 || nextIndex < 0 || nextIndex >= screens.length) {
+      const nextIndex = Math.max(0, Math.min(screens.length - 1, targetIndex))
+      if (currentIndex === -1 || nextIndex === currentIndex) {
         return
       }
 
@@ -8689,7 +8689,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       importScreenImage,
       renameScreen,
       deleteScreen,
-      moveScreen,
+      reorderScreen,
       activateScreen,
       clearActiveScreen,
       refreshPreview,
@@ -8857,7 +8857,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       importScreenImage,
       renameScreen,
       deleteScreen,
-      moveScreen,
+      reorderScreen,
       activateScreen,
       clearActiveScreen,
       refreshPreview,

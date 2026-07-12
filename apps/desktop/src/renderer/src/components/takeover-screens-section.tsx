@@ -1,13 +1,5 @@
-import {
-  ArrowDown,
-  ArrowUp,
-  FloppyDisk,
-  ImageBroken,
-  ImageSquare,
-  Trash,
-  UploadSimple
-} from '@phosphor-icons/react'
-import { useEffect, useState, type ReactElement } from 'react'
+import { FloppyDisk, ImageBroken, ImageSquare, Trash, UploadSimple } from '@phosphor-icons/react'
+import { useEffect, useState, type DragEvent, type ReactElement } from 'react'
 
 import { Gallery } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
@@ -18,18 +10,21 @@ import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { StreamScreen } from '@/lib/backend'
+import { cn } from '@/lib/utils'
 
 // Takeover-image manager (upload/rename/reorder/delete). Lives on the Assets
 // page: the active takeover is global session state, not scene content — it
 // replaces the output regardless of scene, so the old Scene-page home was wrong
-// on its own terms.
+// on its own terms. Ordering is drag-and-drop (owner request 2026-07-13): drag
+// a tile onto another to take its position — the backend applies the full
+// order atomically via screens.reorder.
 export function TakeoverScreensSection(): ReactElement {
   const {
     activeScreen,
     deleteScreen,
     importScreenImage,
     isSessionActive,
-    moveScreen,
+    reorderScreen,
     renameScreen,
     screenImportPending,
     screens,
@@ -37,6 +32,8 @@ export function TakeoverScreensSection(): ReactElement {
   } = useStudioCore()
   const managementDisabled = isSessionActive || wsStatus !== 'connected'
   const uploadDisabled = managementDisabled || screenImportPending
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [dropIndex, setDropIndex] = useState<number | null>(null)
 
   return (
     <PanelSection
@@ -46,7 +43,7 @@ export function TakeoverScreensSection(): ReactElement {
           {screenImportPending ? 'Importing' : 'Upload'}
         </Button>
       }
-      description="Full-frame images that cover the output — flip them on from the Studio session panel. Management is locked while a session is live."
+      description="Full-frame images that cover the output — flip them on from the Studio session panel. Drag tiles to reorder. Management is locked while a session is live."
       icon={ImageSquare}
       title="Takeover screens"
     >
@@ -68,12 +65,28 @@ export function TakeoverScreensSection(): ReactElement {
               <ScreenTile
                 active={activeScreen?.id === screen.id}
                 disabled={managementDisabled}
-                index={index}
+                dragging={draggingId === screen.id}
+                dropTarget={dropIndex === index && draggingId !== screen.id}
                 key={screen.id}
                 screen={screen}
-                total={screens.length}
                 onDelete={() => void deleteScreen(screen.id)}
-                onMove={(direction) => void moveScreen(screen.id, direction)}
+                onDragEnd={() => {
+                  setDraggingId(null)
+                  setDropIndex(null)
+                }}
+                onDragEnter={() => {
+                  if (draggingId && draggingId !== screen.id) {
+                    setDropIndex(index)
+                  }
+                }}
+                onDragStart={() => setDraggingId(screen.id)}
+                onDrop={() => {
+                  if (draggingId && draggingId !== screen.id) {
+                    void reorderScreen(draggingId, index)
+                  }
+                  setDraggingId(null)
+                  setDropIndex(null)
+                }}
                 onRename={(name) => void renameScreen(screen.id, name)}
               />
             ))}
@@ -88,19 +101,25 @@ function ScreenTile({
   screen,
   active,
   disabled,
-  index,
-  total,
+  dragging,
+  dropTarget,
   onDelete,
-  onMove,
+  onDragEnd,
+  onDragEnter,
+  onDragStart,
+  onDrop,
   onRename
 }: {
   screen: StreamScreen
   active: boolean
   disabled: boolean
-  index: number
-  total: number
+  dragging: boolean
+  dropTarget: boolean
   onDelete: () => void
-  onMove: (direction: -1 | 1) => void
+  onDragEnd: () => void
+  onDragEnter: () => void
+  onDragStart: () => void
+  onDrop: () => void
   onRename: (name: string) => void
 }): ReactElement {
   const [imageFailed, setImageFailed] = useState(false)
@@ -122,12 +141,35 @@ function ScreenTile({
   }
 
   return (
-    <div className="flex min-w-0 flex-col overflow-hidden rounded-row border bg-background">
+    <div
+      className={cn(
+        'flex min-w-0 flex-col overflow-hidden rounded-row border bg-background transition-opacity',
+        !disabled && 'cursor-grab active:cursor-grabbing',
+        dragging && 'opacity-40',
+        dropTarget && 'ring-2 ring-ring'
+      )}
+      draggable={!disabled}
+      onDragEnd={onDragEnd}
+      onDragEnter={onDragEnter}
+      onDragOver={(event: DragEvent<HTMLDivElement>) => {
+        // Allow this tile to be a drop target.
+        event.preventDefault()
+      }}
+      onDragStart={(event: DragEvent<HTMLDivElement>) => {
+        event.dataTransfer.effectAllowed = 'move'
+        onDragStart()
+      }}
+      onDrop={(event: DragEvent<HTMLDivElement>) => {
+        event.preventDefault()
+        onDrop()
+      }}
+    >
       <div className="relative aspect-[4/3] bg-muted">
         {!missing ? (
           <img
             alt=""
             className="size-full object-cover"
+            draggable={false}
             src={managedScreenAssetUrl(screen.imagePath)}
             onError={() => setImageFailed(true)}
           />
@@ -172,30 +214,9 @@ function ScreenTile({
         </div>
         <span className="truncate text-xs text-muted-foreground">{screen.imagePath}</span>
         {/* Activation lives in the Studio session panel (one home per control);
-            tiles are management only — the Active badge still reports state. */}
-        <div className="flex min-w-0 items-center gap-1.5">
-          <Button
-            aria-label="Move takeover up"
-            disabled={disabled || index === 0}
-            size="icon-sm"
-            title="Move takeover up"
-            type="button"
-            variant="outline"
-            onClick={() => onMove(-1)}
-          >
-            <ArrowUp />
-          </Button>
-          <Button
-            aria-label="Move takeover down"
-            disabled={disabled || index === total - 1}
-            size="icon-sm"
-            title="Move takeover down"
-            type="button"
-            variant="outline"
-            onClick={() => onMove(1)}
-          >
-            <ArrowDown />
-          </Button>
+            tiles are management only — the Active badge still reports state.
+            Ordering is drag-and-drop on the tile itself. */}
+        <div className="flex min-w-0 items-center">
           <Button
             aria-label="Delete takeover"
             className="ml-auto"

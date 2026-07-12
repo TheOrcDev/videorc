@@ -85,8 +85,9 @@
   --input: oklch(0 0 0 / 12%);
   --ring: oklch(0 0 0 / 25%);
 
-  /* Sidebar sits on the same glass; selection is the monochrome block. */
-  --sidebar: oklch(0 0 0 / 3%);
+  /* Sidebar is a frosted pane on the glass (backdrop-blur in the aside);
+     selection is the monochrome block. */
+  --sidebar: oklch(0 0 0 / 4%);
   --sidebar-foreground: oklch(0.17 0.004 286);
   --sidebar-primary: oklch(0.17 0.004 286);
   --sidebar-primary-foreground: oklch(0.985 0 0);
@@ -171,7 +172,7 @@
   --input: oklch(1 0 0 / 10%);
   --ring: oklch(1 0 0 / 28%);
 
-  --sidebar: oklch(1 0 0 / 3%);
+  --sidebar: oklch(1 0 0 / 5%);
   --sidebar-foreground: oklch(0.97 0.001 286);
   --sidebar-primary: oklch(0.97 0.001 286);
   --sidebar-primary-foreground: oklch(0.13 0.003 286);
