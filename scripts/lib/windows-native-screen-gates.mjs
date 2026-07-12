@@ -25,6 +25,21 @@ export function nativeWindowsScreenCandidates(devices) {
   ]
 }
 
+export function nativeWindowsScreenRecordingActive(evidence, sourceId) {
+  const { diagnostics, compositor, recording } = evidence ?? {}
+  const sourceEntry = diagnostics?.sourceRegistry?.entries?.find(
+    (entry) => entry?.key?.kind === 'screen' && entry?.key?.id === sourceId
+  )
+  return (
+    diagnostics?.activeOutputMode === 'record' &&
+    recording?.state === 'recording' &&
+    compositor?.state === 'live' &&
+    compositor?.activeScreenId === sourceId &&
+    compositor?.sceneLayout?.layoutPreset === 'screen-only' &&
+    sourceEntry?.status === 'live'
+  )
+}
+
 export function assertBmpHeaders(headers, status) {
   if (
     headers['x-videorc-frame-transport'] !== 'latest-bgra-bmp' ||

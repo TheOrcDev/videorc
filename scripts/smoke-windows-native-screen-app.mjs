@@ -9,7 +9,8 @@ import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs
 import {
   assertBmpHeaders,
   assertNonblankBmp,
-  nativeWindowsScreenCandidates
+  nativeWindowsScreenCandidates,
+  nativeWindowsScreenRecordingActive
 } from './lib/windows-native-screen-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -80,10 +81,10 @@ try {
     throw new Error(`Expected ScreenOnly recording, got ${started?.state ?? 'no state'}.`)
   }
   const recordingStartedAt = Date.now()
-  const diagnostics = await waitForActiveNativeScreenRecording(ws, screen.id)
-  if (diagnostics.activeScreenId !== screen.id) {
+  const activeRecording = await waitForActiveNativeScreenRecording(ws, screen.id)
+  if (activeRecording.compositor.activeScreenId !== screen.id) {
     throw new Error(
-      `Recording diagnostics did not retain selected native screen ${screen.id}: ${JSON.stringify(diagnostics)}`
+      `Recording compositor did not retain selected native screen ${screen.id}: ${JSON.stringify(activeRecording)}`
     )
   }
 
@@ -195,14 +196,19 @@ async function waitForActiveNativeScreenRecording(ws, sourceId) {
   const deadline = Date.now() + timeoutMs
   let last
   while (Date.now() < deadline) {
-    last = await request(ws, timeoutMs, 'diagnostics.stats')
-    if (last?.activeOutputMode === 'record' && last?.activeScreenId === sourceId) {
+    const [diagnostics, compositor, recording] = await Promise.all([
+      request(ws, timeoutMs, 'diagnostics.stats'),
+      request(ws, timeoutMs, 'compositor.status'),
+      request(ws, timeoutMs, 'recording.status')
+    ])
+    last = { diagnostics, compositor, recording }
+    if (nativeWindowsScreenRecordingActive(last, sourceId)) {
       return last
     }
     await sleep(100)
   }
   throw new Error(
-    `Timed out waiting for ScreenOnly diagnostics for ${sourceId}: ${JSON.stringify(last)}`
+    `Timed out waiting for ScreenOnly recording/source authority for ${sourceId}: ${JSON.stringify(last)}`
   )
 }
 

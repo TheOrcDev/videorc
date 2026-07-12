@@ -5,6 +5,7 @@ import {
   assertBmpHeaders,
   assertNonblankBmp,
   nativeWindowsScreenCandidates,
+  nativeWindowsScreenRecordingActive,
   selectNativeWindowsScreen
 } from './windows-native-screen-gates.mjs'
 
@@ -27,6 +28,50 @@ test('native Windows screen selection prefers DXGI and falls back to gdigrab', (
     [dxgi.id, 'screen:gdigrab:desktop']
   )
   assert.deepEqual(nativeWindowsScreenCandidates([gdigrab]), [gdigrab])
+})
+
+test('native ScreenOnly recording proof joins recording, compositor, and source authority', () => {
+  const sourceId = 'screen:gdigrab:desktop'
+  const evidence = {
+    diagnostics: {
+      activeOutputMode: 'record',
+      sourceRegistry: {
+        entries: [{ key: { kind: 'screen', id: sourceId }, status: 'live', consumers: ['preview'] }]
+      }
+    },
+    compositor: {
+      state: 'live',
+      activeScreenId: sourceId,
+      sceneLayout: { layoutPreset: 'screen-only' }
+    },
+    recording: { state: 'recording' }
+  }
+
+  assert.equal(nativeWindowsScreenRecordingActive(evidence, sourceId), true)
+  assert.equal(
+    nativeWindowsScreenRecordingActive(
+      { ...evidence, compositor: { ...evidence.compositor, activeScreenId: 'screen:other' } },
+      sourceId
+    ),
+    false
+  )
+  assert.equal(
+    nativeWindowsScreenRecordingActive(
+      {
+        ...evidence,
+        diagnostics: {
+          ...evidence.diagnostics,
+          sourceRegistry: { entries: [] }
+        }
+      },
+      sourceId
+    ),
+    false
+  )
+  assert.equal(
+    nativeWindowsScreenRecordingActive({ ...evidence, recording: { state: 'idle' } }, sourceId),
+    false
+  )
 })
 
 test('BMP gate accepts generation-aware BGRA headers and visible decoded pixels', () => {
