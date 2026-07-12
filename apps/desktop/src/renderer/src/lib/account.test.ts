@@ -106,6 +106,8 @@ describe('videorc web links', () => {
       login: 'https://www.videorc.com/login',
       desktopAuthorize: 'https://www.videorc.com/desktop/authorize/v2',
       premium: 'https://www.videorc.com/premium',
+      privacy: 'https://www.videorc.com/privacy',
+      terms: 'https://www.videorc.com/terms',
       billing: 'https://www.videorc.com/account/billing',
       changelogApi: 'https://www.videorc.com/api/changelog',
       changelog: 'https://www.videorc.com/changelog'

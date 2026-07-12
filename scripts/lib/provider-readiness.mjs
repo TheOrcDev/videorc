@@ -19,6 +19,7 @@ export const PROVIDERS = [
     label: 'YouTube',
     paused: true,
     pauseReason: YOUTUBE_OAUTH_PAUSED_REASON,
+    enableVars: ['VIDEORC_ENABLE_YOUTUBE_OAUTH', 'VIDEORC_BUNDLED_YOUTUBE_OAUTH_ENABLED'],
     clientIdVars: ['VIDEORC_YOUTUBE_CLIENT_ID', 'VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID'],
     secretVars: ['VIDEORC_YOUTUBE_CLIENT_SECRET'],
     secretRequired: false,
@@ -258,7 +259,8 @@ export function detectRunContext(env = {}) {
 }
 
 function readinessForProvider(provider, env, callbackCoverage) {
-  if (provider.paused) {
+  const explicitlyEnabled = provider.enableVars?.some((name) => env[name] === '1') ?? false
+  if (provider.paused && !explicitlyEnabled) {
     return {
       label: provider.label,
       ready: true,

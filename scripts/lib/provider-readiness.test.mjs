@@ -11,6 +11,7 @@ import {
 
 function completeEnv(overrides = {}) {
   return {
+    VIDEORC_ENABLE_YOUTUBE_OAUTH: '1',
     VIDEORC_YOUTUBE_CLIENT_ID: 'youtube-client-secret-value',
     VIDEORC_SMOKE_YOUTUBE_CHANNEL_READY: '1',
     VIDEORC_BUNDLED_TWITCH_CLIENT_ID: 'twitch-bundled-client-value',
@@ -37,9 +38,9 @@ describe('provider readiness evidence', () => {
     assert.deepEqual(result.failures, [])
     assert.equal(
       result.providers.find((provider) => provider.label === 'YouTube').clientId.source,
-      'paused'
+      'environment'
     )
-    assert.equal(result.providers.find((provider) => provider.label === 'YouTube').paused, true)
+    assert.equal(result.providers.find((provider) => provider.label === 'YouTube').paused, false)
     assert.equal(
       result.providers.find((provider) => provider.label === 'Twitch').clientId.source,
       'bundled'

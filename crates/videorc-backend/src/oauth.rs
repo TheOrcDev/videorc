@@ -21,6 +21,7 @@ const OAUTH_STATE_TTL_MINUTES: i64 = 10;
 const OAUTH_PROVIDER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const OAUTH_PROVIDER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const BUNDLED_TWITCH_CLIENT_ID: Option<&str> = option_env!("VIDEORC_BUNDLED_TWITCH_CLIENT_ID");
+const BUNDLED_YOUTUBE_CLIENT_ID: Option<&str> = option_env!("VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID");
 // The Videorc X OAuth app (public Native App client, PKCE — no secret involved).
 // Client IDs are public identifiers; build-time/runtime env still override.
 const BUNDLED_X_CLIENT_ID: Option<&str> = match option_env!("VIDEORC_BUNDLED_X_CLIENT_ID") {
@@ -31,9 +32,26 @@ pub const YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE: &str = "YouTube OAuth is temporaril
 
 pub fn provider_oauth_unavailable_message(platform: StreamPlatform) -> Option<&'static str> {
     match platform {
-        StreamPlatform::Youtube => Some(YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE),
+        StreamPlatform::Youtube if !youtube_oauth_enabled() => {
+            Some(YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE)
+        }
         StreamPlatform::Twitch | StreamPlatform::X | StreamPlatform::Custom => None,
+        StreamPlatform::Youtube => None,
     }
+}
+
+fn youtube_oauth_enabled() -> bool {
+    optional_env("VIDEORC_ENABLE_YOUTUBE_OAUTH")
+        .as_deref()
+        .is_some_and(env_flag_enabled)
+        || option_env!("VIDEORC_BUNDLED_YOUTUBE_OAUTH_ENABLED").is_some_and(env_flag_enabled)
+}
+
+fn env_flag_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 pub fn provider_http_client() -> reqwest::Client {
@@ -2302,7 +2320,15 @@ impl OAuthTokenResponse {
 
 fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
     match platform {
-        StreamPlatform::Youtube => anyhow::bail!("{YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE}"),
+        StreamPlatform::Youtube => {
+            if let Some(message) = provider_oauth_unavailable_message(platform) {
+                anyhow::bail!("{message}");
+            }
+            Ok(youtube_provider_config(required_credential(
+                "VIDEORC_YOUTUBE_CLIENT_ID",
+                BUNDLED_YOUTUBE_CLIENT_ID,
+            )?))
+        }
         StreamPlatform::Twitch => Ok(OAuthProviderConfig {
             authorization_url: "https://id.twitch.tv/oauth2/authorize".to_string(),
             token_url: "https://id.twitch.tv/oauth2/token".to_string(),
@@ -2336,6 +2362,23 @@ fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
             pkce: true,
         }),
         StreamPlatform::Custom => anyhow::bail!("Custom RTMP does not support OAuth."),
+    }
+}
+
+fn youtube_provider_config(client_id: String) -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+        token_url: "https://oauth2.googleapis.com/token".to_string(),
+        profile_url: "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true"
+            .to_string(),
+        client_id,
+        client_secret: None,
+        scopes: vec!["https://www.googleapis.com/auth/youtube.force-ssl".to_string()],
+        extra_params: HashMap::from([
+            ("access_type".to_string(), "offline".to_string()),
+            ("prompt".to_string(), "consent".to_string()),
+        ]),
+        pkce: true,
     }
 }
 
@@ -2391,12 +2434,25 @@ pub fn provider_client_id(platform: StreamPlatform) -> Result<String> {
 }
 
 pub fn provider_credential_statuses() -> Vec<OAuthProviderCredentialStatus> {
-    vec![
+    let youtube = if youtube_oauth_enabled() {
+        provider_credential_status(
+            StreamPlatform::Youtube,
+            "VIDEORC_YOUTUBE_CLIENT_ID",
+            "VIDEORC_YOUTUBE_CLIENT_SECRET",
+            BUNDLED_YOUTUBE_CLIENT_ID,
+            None,
+            true,
+            true,
+        )
+    } else {
         disabled_provider_credential_status(
             StreamPlatform::Youtube,
             YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE,
             true,
-        ),
+        )
+    };
+    vec![
+        youtube,
         // Twitch ships as a PUBLIC client type (dev console setting): no
         // client secret exists, token exchange + refresh use the client id
         // alone. VIDEORC_TWITCH_CLIENT_SECRET stays honoured for confidential
@@ -2420,6 +2476,35 @@ pub fn provider_credential_statuses() -> Vec<OAuthProviderCredentialStatus> {
             false,
         ),
     ]
+}
+
+pub async fn revoke_youtube_token(token: &str, client: &reqwest::Client) -> Result<()> {
+    revoke_youtube_token_at(token, client, "https://oauth2.googleapis.com/revoke").await
+}
+
+async fn revoke_youtube_token_at(
+    token: &str,
+    client: &reqwest::Client,
+    revocation_url: &str,
+) -> Result<()> {
+    if token.trim().is_empty() {
+        anyhow::bail!("YouTube OAuth token is empty.");
+    }
+    let response = client
+        .post(revocation_url)
+        .form(&[("token", token)])
+        .send()
+        .await
+        .context("Could not contact Google to revoke YouTube access")?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if status == reqwest::StatusCode::BAD_REQUEST && body.contains("invalid_token") {
+        return Ok(());
+    }
+    anyhow::bail!("Google rejected YouTube access revocation with HTTP {status}.")
 }
 
 fn disabled_provider_credential_status(
@@ -4592,6 +4677,66 @@ mod tests {
                 .iter()
                 .all(|status| !status.message.contains("CLIENT_SECRET"))
         );
+    }
+
+    #[test]
+    fn youtube_verification_config_uses_pkce_and_the_minimum_scope() {
+        let config = youtube_provider_config("public-client-id".to_string());
+
+        assert!(config.pkce);
+        assert_eq!(config.client_secret, None);
+        assert_eq!(
+            config.scopes,
+            vec!["https://www.googleapis.com/auth/youtube.force-ssl"]
+        );
+        assert_eq!(
+            config.extra_params.get("access_type").map(String::as_str),
+            Some("offline")
+        );
+        assert_eq!(
+            config.extra_params.get("prompt").map(String::as_str),
+            Some("consent")
+        );
+        assert!(env_flag_enabled("TRUE"));
+        assert!(!env_flag_enabled("0"));
+    }
+
+    #[tokio::test]
+    async fn youtube_revocation_posts_the_token_without_exposing_it_in_errors() {
+        async fn revoke(Form(form): Form<HashMap<String, String>>) -> impl IntoResponse {
+            if form.get("token").map(String::as_str) == Some("refresh-token-value") {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/revoke", post(revoke)))
+                .await
+                .unwrap();
+        });
+
+        revoke_youtube_token_at(
+            "refresh-token-value",
+            &reqwest::Client::new(),
+            &format!("http://{address}/revoke"),
+        )
+        .await
+        .unwrap();
+
+        let error = revoke_youtube_token_at(
+            "wrong-secret-token",
+            &reqwest::Client::new(),
+            &format!("http://{address}/revoke"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("HTTP 400"));
+        assert!(!error.contains("wrong-secret-token"));
     }
 
     #[test]

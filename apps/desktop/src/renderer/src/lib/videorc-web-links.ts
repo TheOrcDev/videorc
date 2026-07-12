@@ -25,6 +25,8 @@ export const VIDEORC_WEB_LINKS = {
   // exchanges it server-to-server; browser and deep-link never carry a session.
   desktopAuthorize: `${VIDEORC_WEB_ORIGIN}/desktop/authorize/v2`,
   premium: `${VIDEORC_WEB_ORIGIN}/premium`,
+  privacy: `${VIDEORC_WEB_ORIGIN}/privacy`,
+  terms: `${VIDEORC_WEB_ORIGIN}/terms`,
   billing: `${VIDEORC_WEB_ORIGIN}/account/billing`,
   // Published changelog (compiled from videorc changelog/ on each release):
   // JSON for the in-app What's New, pages for humans.

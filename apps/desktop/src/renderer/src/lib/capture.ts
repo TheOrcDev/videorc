@@ -272,11 +272,8 @@ const STREAM_PLATFORM_LABELS: Record<StreamPlatform, string> = {
   custom: 'Custom RTMP'
 }
 
-export const YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE =
-  'YouTube OAuth is temporarily unavailable while Videorc awaits Google approval. Use Manual RTMP for YouTube for now.'
-
 export function oauthUnavailableReason(platform: StreamPlatform): string | null {
-  return platform === 'youtube' ? YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE : null
+  return platform === 'custom' ? 'Custom RTMP does not support OAuth.' : null
 }
 
 export function isPlatformOAuthAvailable(platform: StreamPlatform): boolean {

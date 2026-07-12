@@ -5719,6 +5719,57 @@ async fn handle_text_message_with_role(
                         .oauth
                         .highest_pending_account_write_generation(params.platform)
                         .await;
+                    if params.platform == StreamPlatform::Youtube {
+                        let credentials = match state.database.list_platform_account_credentials() {
+                            Ok(accounts) => accounts.into_iter().find(|account| {
+                                account.account.platform == StreamPlatform::Youtube
+                            }),
+                            Err(error) => {
+                                return ServerResponse::error(
+                                    command.id,
+                                    "platform-account-revocation-failed",
+                                    format!(
+                                        "Could not load the saved YouTube authorization before revoking it: {error}"
+                                    ),
+                                );
+                            }
+                        };
+                        if let Some(credentials) = credentials {
+                            let token_ref = credentials
+                                .refresh_token_secret_ref
+                                .as_deref()
+                                .or(credentials.token_secret_ref.as_deref());
+                            if let Some(token_ref) = token_ref {
+                                match secrets::get_secret(token_ref) {
+                                    Ok(token) => {
+                                        if let Err(error) = oauth::revoke_youtube_token(
+                                            &token,
+                                            &oauth::provider_http_client(),
+                                        )
+                                        .await
+                                        {
+                                            return ServerResponse::error(
+                                                command.id,
+                                                "platform-account-revocation-failed",
+                                                format!(
+                                                    "Could not revoke YouTube access. Check your connection and try Disconnect again. {error}"
+                                                ),
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        return ServerResponse::error(
+                                            command.id,
+                                            "platform-account-revocation-failed",
+                                            format!(
+                                                "Could not read the saved YouTube authorization before revoking it: {error}"
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     match state.database.disconnect_platform_account_after_generation(
                         params.platform,
                         pending_generation,

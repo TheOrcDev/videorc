@@ -319,15 +319,18 @@ own feed/backend).
 
 Production builds should inject Videorc-owned OAuth client IDs at backend compile time. Development and self-hosted builds can override those IDs at runtime.
 
-YouTube OAuth is paused until Google approval completes. Keep YouTube available
-through Manual RTMP and do not require or bundle Google OAuth credentials for
-release candidates while this pause is active.
+YouTube OAuth is paused in public builds until Google approval completes. Keep
+YouTube available through Manual RTMP. Only reviewer candidates (or approved
+releases) should set the two guarded YouTube build variables below.
 
 Bundled production defaults:
 
 ```sh
 VIDEORC_BUNDLED_TWITCH_CLIENT_ID=...
 VIDEORC_BUNDLED_X_CLIENT_ID=...
+# Reviewer candidate or approved release only:
+VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID=...
+VIDEORC_BUNDLED_YOUTUBE_OAUTH_ENABLED=1
 pnpm package:backend
 ```
 
@@ -336,6 +339,9 @@ Runtime/self-host overrides:
 ```sh
 VIDEORC_TWITCH_CLIENT_ID=...
 VIDEORC_X_CLIENT_ID=...
+# Local Google verification only:
+VIDEORC_ENABLE_YOUTUBE_OAUTH=1
+VIDEORC_YOUTUBE_CLIENT_ID=...
 ```
 
 Runtime values take precedence over bundled defaults. Client secrets, when used for provider flows, remain runtime-only:
@@ -408,7 +414,7 @@ Twitch release blocker:
 - Verify the app requests the scopes used by the backend:
   `channel:manage:broadcast`, `channel:read:stream_key`, and `user:read:chat`.
 
-The backend exposes credential source status to the renderer as `environment`, `bundled`, or `missing`; it never exposes actual client ID or secret values. Before release, open the packaged app's Streaming tab and confirm YouTube shows Manual RTMP with the Google approval pause message, while Twitch and X OAuth rows report either `Bundled default` or the intended runtime override.
+The backend exposes credential source status to the renderer as `environment`, `bundled`, or `missing`; it never exposes actual client ID or secret values. Before a public pre-approval release, confirm YouTube shows Manual RTMP with the Google approval pause message. In reviewer candidates, confirm the YouTube row reports the intended credential source and opens the consent disclosure before Google OAuth.
 
 Before a release candidate, run the redacted provider readiness check:
 

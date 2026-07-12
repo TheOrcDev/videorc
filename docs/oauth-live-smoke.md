@@ -6,10 +6,10 @@ This runbook is the release acceptance path for first-class OAuth/native livestr
 
 ## Provider Assumptions Checked 2026-07-07
 
-- **YouTube:** OAuth/native Live Streaming API support is paused while Videorc
-  awaits Google app approval. The product must expose YouTube as Manual RTMP
-  only, block stale YouTube OAuth settings with the approval message, and defer
-  native broadcast/channel acceptance until Google approval completes.
+- **YouTube:** Public builds keep OAuth/native Live Streaming API support paused
+  until Google approves the app. A verification candidate can explicitly enable
+  the complete flow so reviewers can exercise consent, channel selection,
+  broadcast management, chat, and revocation before approval.
 - **Twitch:** The developer app must register the OAuth redirect URL(s), and
   broadcaster actions use user access tokens with scoped permissions. The
   existing Videorc scopes still map to the current docs:
@@ -122,9 +122,27 @@ without a user gesture and browsers block gestureless custom-scheme navigation,
 leaving x.com's consent page on an infinite spinner while the app never receives the
 callback.
 
-YouTube OAuth is intentionally disabled until Google approval completes. Do not
-set Google OAuth readiness flags for release acceptance. Use Manual RTMP with a
-YouTube stream key for YouTube smoke coverage.
+YouTube public releases remain paused until Google approval completes. To build
+or run a reviewer candidate, enable the guarded path and provide the public
+installed-app client ID (PKCE is used; no client secret is bundled):
+
+```sh
+VIDEORC_ENABLE_YOUTUBE_OAUTH=1
+VIDEORC_YOUTUBE_CLIENT_ID=...
+VIDEORC_SMOKE_YOUTUBE_CHANNEL_READY=1
+```
+
+For a packaged reviewer or approved release, compile with:
+
+```sh
+VIDEORC_BUNDLED_YOUTUBE_OAUTH_ENABLED=1
+VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID=...
+```
+
+The Google app must register the three `127.0.0.1` callback URLs above. The
+authorization requests only `youtube.force-ssl`, requests offline access with
+PKCE, and Disconnect revokes the Google token before deleting local account
+data. Leave both enable flags unset in public builds until approval.
 
 Twitch:
 

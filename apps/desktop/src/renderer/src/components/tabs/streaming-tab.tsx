@@ -25,6 +25,7 @@ import { PanelSection } from '@/components/panel-section'
 import { CaptionsControls } from '@/components/captions/captions-controls'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog,
   DialogContent,
@@ -75,6 +76,7 @@ import { streamingDestinationEnableGate, type EntitlementUiGate } from '@/lib/en
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { streamKeyPlatformMismatch, streamKeyTailHint } from '@/lib/stream-key-format'
 import { cn } from '@/lib/utils'
+import { VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 
 type BadgeTone = 'success' | 'warning' | 'destructive' | 'outline'
 
@@ -390,7 +392,9 @@ function DestinationCard({
   const ready = isStreamTargetReady(target)
   const fullUrl = target.urlMode === 'full-url'
   const nativeDestination = target.platform !== 'custom'
-  const oauthUnavailableMessage = oauthUnavailableReason(target.platform)
+  const oauthUnavailableMessage =
+    oauthUnavailableReason(target.platform) ??
+    (credentials?.ready === false ? credentials.message : null)
   const oauthMode = nativeDestination && target.authMode === 'oauth' && !oauthUnavailableMessage
   // While a session is live the runtime status (on air / stopped / skipped) takes
   // over the badge; otherwise it reflects the saved-credential readiness.
@@ -908,31 +912,113 @@ function OAuthAccountPanel({
   onSelectYouTubeChannel: (channelId: string, accountId?: string) => Promise<void>
   onUseManualRtmp: () => void
 }): ReactElement {
+  const [youtubeConsentOpen, setYoutubeConsentOpen] = useState(false)
+  const [youtubeConsentAccepted, setYoutubeConsentAccepted] = useState(false)
+
   if (!account) {
     const connectDisabled = disabled || credentials?.ready === false
     return (
-      <div className="flex flex-col gap-2 rounded-row border bg-muted/30 p-3">
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-sm font-medium">No account connected</span>
-          <Button
-            disabled={connectDisabled}
-            size="sm"
-            variant="secondary"
-            onClick={() => onConnect(platform)}
-          >
-            <LinkSimple data-icon="inline-start" weight="bold" />
-            Connect
-          </Button>
+      <>
+        <div className="flex flex-col gap-2 rounded-row border bg-muted/30 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium">No account connected</span>
+            <Button
+              disabled={connectDisabled}
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                if (platform === 'youtube') {
+                  setYoutubeConsentAccepted(false)
+                  setYoutubeConsentOpen(true)
+                } else {
+                  onConnect(platform)
+                }
+              }}
+            >
+              <LinkSimple data-icon="inline-start" weight="bold" />
+              Connect
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {credentials?.message ?? 'Uses backend provider credentials.'}
+          </p>
+          {credentials ? (
+            <Badge className="w-fit" variant={credentials.ready ? 'outline' : 'warning'}>
+              {credentialSourceLabel(credentials)}
+            </Badge>
+          ) : null}
         </div>
-        <p className="text-xs text-muted-foreground">
-          {credentials?.message ?? 'Uses backend provider credentials.'}
-        </p>
-        {credentials ? (
-          <Badge className="w-fit" variant={credentials.ready ? 'outline' : 'warning'}>
-            {credentialSourceLabel(credentials)}
-          </Badge>
+
+        {platform === 'youtube' ? (
+          <Dialog open={youtubeConsentOpen} onOpenChange={setYoutubeConsentOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Connect YouTube to Videorc</DialogTitle>
+                <DialogDescription>
+                  Videorc uses YouTube API Services to identify your channel and manage your live
+                  broadcasts and chat. The requested YouTube permission is stored locally on this
+                  computer and can be revoked with Disconnect at any time.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-3 text-sm">
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => openExternalUrl(VIDEORC_WEB_LINKS.privacy)}
+                  >
+                    Privacy Policy
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => openExternalUrl(VIDEORC_WEB_LINKS.terms)}
+                  >
+                    Videorc Terms
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => openExternalUrl('https://www.youtube.com/t/terms')}
+                  >
+                    YouTube Terms
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => openExternalUrl('https://policies.google.com/privacy')}
+                  >
+                    Google Privacy
+                  </Button>
+                </div>
+                <label className="flex items-start gap-3 rounded-row border bg-muted/30 p-3">
+                  <Checkbox
+                    checked={youtubeConsentAccepted}
+                    onCheckedChange={(checked) => setYoutubeConsentAccepted(checked === true)}
+                  />
+                  <span>
+                    I agree to the Videorc and YouTube terms and want to connect my YouTube account.
+                  </span>
+                </label>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setYoutubeConsentOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  disabled={!youtubeConsentAccepted}
+                  onClick={() => {
+                    setYoutubeConsentOpen(false)
+                    onConnect('youtube')
+                  }}
+                >
+                  Continue to Google
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         ) : null}
-      </div>
+      </>
     )
   }
 
