@@ -1,20 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum FallbackPolicy {
+    #[default]
     SafeAuto,
     AskFirst,
     Strict,
     HardwareOnly,
     SoftwareOnly,
     Custom,
-}
-
-impl Default for FallbackPolicy {
-    fn default() -> Self {
-        Self::SafeAuto
-    }
 }
 
 pub fn select_benchmark_recommendation(allowed: bool, requested: bool) -> FallbackPolicy {

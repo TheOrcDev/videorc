@@ -35,6 +35,7 @@ const PREVIEW_SCREEN_MAX_PRODUCTION_CAPTURE_WIDTH: u32 = 3840;
 const PREVIEW_SCREEN_MAX_PRODUCTION_CAPTURE_HEIGHT: u32 = 2160;
 const PREVIEW_SCREEN_CAPTURE_QUEUE_DEPTH: u32 = 3;
 const PREVIEW_SCREEN_TIMING_WINDOW: usize = 180;
+#[allow(dead_code)]
 const SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 const SCREEN_CAPTUREKIT_DISCOVERY_ATTEMPTS: u32 = 2;
 const SCREEN_CAPTUREKIT_STREAM_START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1034,6 +1035,7 @@ fn normalized_protected_overlay_window_ids(mut window_ids: Vec<u32>) -> Vec<u32>
     window_ids
 }
 
+#[allow(dead_code)]
 fn should_exclude_protected_overlay_window(window_id: u32, protected_ids: &[u32]) -> bool {
     protected_ids.binary_search(&window_id).is_ok()
 }
@@ -1569,6 +1571,7 @@ fn downscale_rgba_for_preview(
     (next.into_raw(), next_width, next_height)
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 struct NativeScreenPreviewConfig {
     source_id: String,
@@ -1582,6 +1585,7 @@ struct NativeScreenPreviewConfig {
     protected_overlay_window_ids: Vec<u32>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum NativeScreenStartup {
     Live {

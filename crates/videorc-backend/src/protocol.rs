@@ -232,6 +232,7 @@ pub struct Device {
     pub height: Option<u32>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum DeviceKind {
@@ -242,6 +243,7 @@ pub enum DeviceKind {
     SystemAudio,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum DeviceStatus {
