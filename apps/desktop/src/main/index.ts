@@ -9152,13 +9152,40 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
       if (${JSON.stringify(command)} === 'select-layout-preset') {
         const preset = String(params.preset ?? 'screen-only');
         await openTab('layout', '[data-videorc-layout-preset]');
-        const deadline = Date.now() + 5000;
         let button = null;
+        let deadline = Date.now() + 5000;
         while (Date.now() < deadline) {
           button = Array.from(document.querySelectorAll('[data-videorc-layout-preset]'))
             .find((candidate) => candidate.getAttribute('data-videorc-layout-preset') === preset);
           if (button && !button.disabled) break;
           await sleep(50);
+        }
+        // Layout controls are mode-scoped: landscape and portrait presets are
+        // intentionally never mounted together. The QA command owns the mode
+        // transition so maintained smokes exercise the same orientation toggle
+        // users click before selecting a scene in the target vocabulary.
+        if (!button) {
+          await openTab('studio', '[aria-label="Studio orientation"]');
+          const orientationLabel = preset.startsWith('vertical-')
+            ? 'Vertical studio (9:16)'
+            : 'Horizontal studio (16:9)';
+          const orientationButton = document.querySelector(
+            'button[aria-label="' + orientationLabel + '"]'
+          );
+          if (!orientationButton || orientationButton.disabled) {
+            throw new Error('Could not switch Studio orientation for layout preset ' + preset);
+          }
+          if (orientationButton.getAttribute('aria-pressed') !== 'true') {
+            orientationButton.click();
+          }
+          await openTab('layout', '[data-videorc-layout-preset]');
+          deadline = Date.now() + 10000;
+          while (Date.now() < deadline) {
+            button = Array.from(document.querySelectorAll('[data-videorc-layout-preset]'))
+              .find((candidate) => candidate.getAttribute('data-videorc-layout-preset') === preset);
+            if (button && !button.disabled) break;
+            await sleep(50);
+          }
         }
         if (!button) {
           throw new Error('Could not find layout preset ' + preset);

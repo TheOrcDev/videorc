@@ -530,6 +530,7 @@ type LayoutTransactionSnapshot = {
   scene: Scene
   layout: LayoutSettings
   compositorStatus: CompositorStatus
+  captureConfigPatch?: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'>
 }
 
 async function waitForPreviewLayoutProof(
@@ -4689,10 +4690,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applyScene(snapshot.scene)
       skipNextConfigSceneReloadRef.current = true
       setCaptureConfig((current) => {
+        // Orientation and canvas are one committed program state. Derive the
+        // patch for backend-truth recovery when the response carrying the
+        // original patch was lost; ordinary successful transactions carry it.
+        const recoveredOrientationPatch = verticalOrientationVideoPatch(
+          current.layout.layoutPreset,
+          snapshot.layout.layoutPreset,
+          current.video,
+          current.verticalRestoreVideo
+        )
+        const captureConfigPatch =
+          snapshot.captureConfigPatch ??
+          (recoveredOrientationPatch
+            ? {
+                video: recoveredOrientationPatch.video,
+                verticalRestoreVideo: recoveredOrientationPatch.verticalRestoreVideo
+              }
+            : undefined)
         // The committed preset becomes its mode's remembered scene — the
         // orientation toggle re-enters each mode where the user left it.
         const next = {
           ...current,
+          ...captureConfigPatch,
           ...layoutPresetMemoryPatch(snapshot.layout.layoutPreset),
           layout: snapshot.layout
         }
@@ -4737,7 +4756,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const requestLayoutTransaction = useCallback(
     (
       layout: LayoutSettings,
-      options?: { pendingIndicator?: boolean; videoOverride?: VideoSettings }
+      options?: {
+        pendingIndicator?: boolean
+        videoOverride?: VideoSettings
+        captureConfigPatch?: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'>
+      }
     ) => {
       const sessionActive = isActiveRecordingState(recordingRef.current.state)
       if (!client || wsStatus !== 'connected') {
@@ -4775,9 +4798,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             intentId,
             sources: requestedSources,
             layout,
-            // The vertical orientation coupling patches React state and the
-            // transaction in the same tick; the ref may not have caught up,
-            // so the caller passes the canvas it just applied.
+            // Orientation and canvas commit to React only after backend proof.
+            // Until then the ref intentionally remains on the previous program
+            // state, so the transaction carries its target canvas explicitly.
             video: options?.videoOverride ?? requestedConfig.video,
             background: activeSceneBackground,
             protectedOverlayWindowIds
@@ -4786,7 +4809,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sceneRevision: status.sceneRevision,
             scene: status.scene,
             layout: status.compositorStatus.sceneLayout ?? layout,
-            compositorStatus: status.compositorStatus
+            compositorStatus: status.compositorStatus,
+            captureConfigPatch: options?.captureConfigPatch
           }
           // Intent freshness and backend commit freshness are separate. A may be
           // superseded by B after A commits; remember A before waiting for proof
@@ -4933,6 +4957,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // profile; leaving restores it. Mid-session the canvas is fixed (the
       // vertical card is disabled and the backend refuses the switch).
       let videoOverride: VideoSettings | undefined
+      let captureConfigPatch: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'> | undefined
       if (!isActiveRecordingState(recordingRef.current.state)) {
         const coupling = verticalOrientationVideoPatch(
           current.layout.layoutPreset,
@@ -4942,11 +4967,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         )
         if (coupling) {
           videoOverride = coupling.video
-          setCaptureConfig((config) => ({
-            ...config,
+          captureConfigPatch = {
             video: coupling.video,
             verticalRestoreVideo: coupling.verticalRestoreVideo
-          }))
+          }
         }
       }
 
@@ -4957,10 +4981,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           cameraTransformMode: 'preset',
           cameraTransform: null
         },
-        videoOverride ? { videoOverride } : undefined
+        videoOverride ? { videoOverride, captureConfigPatch } : undefined
       )
     },
-    [requestLayoutTransaction, setCaptureConfig]
+    [requestLayoutTransaction]
   )
 
   const switchSourceDeviceLive = useCallback(

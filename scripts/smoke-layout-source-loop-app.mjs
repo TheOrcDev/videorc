@@ -46,6 +46,12 @@ const LAYOUTS = [
   {
     preset: 'vertical-camera-only',
     expectedKinds: ['camera']
+  },
+  // Close the loop in the reverse direction too: portrait -> landscape must
+  // restore the remembered horizontal canvas and preview bounds.
+  {
+    preset: 'screen-camera',
+    expectedKinds: ['camera', 'test-pattern']
   }
 ]
 
@@ -79,11 +85,23 @@ try {
       preset: layout.preset,
       settleMs
     })
-    const surface = await smokeCommand(smoke, 'preview-surface-scene-state')
+    const [surface, previewWindow, captureState] = await Promise.all([
+      smokeCommand(smoke, 'preview-surface-scene-state'),
+      smokeCommand(smoke, 'preview-window-state'),
+      smokeCommand(smoke, 'eval-js', {
+        code: `
+          const stored = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}');
+          return {
+            layoutPreset: stored.layout?.layoutPreset ?? null,
+            video: stored.video ?? null
+          };
+        `
+      })
+    ])
     const scene = await request(ws, timeoutMs, 'scene.get')
-    assertLayoutLoop(layout, selected, surface, scene)
+    assertLayoutLoop(layout, selected, surface, scene, previewWindow, captureState.result)
     console.log(
-      `Layout source loop [${layout.preset}] OK - scene ${sourceKinds(scene).join(' + ') || 'empty'}, surface revision ${surface.sceneRevision}.`
+      `Layout source loop [${layout.preset}] OK - scene ${sourceKinds(scene).join(' + ') || 'empty'}, ${captureState.result.video.width}x${captureState.result.video.height} preview, surface revision ${surface.sceneRevision}.`
     )
   }
 
@@ -99,7 +117,7 @@ try {
   await launched.stop()
 }
 
-function assertLayoutLoop(layout, selected, surface, scene) {
+function assertLayoutLoop(layout, selected, surface, scene, previewWindow, captureState) {
   if (selected?.preset !== layout.preset || selected?.pressed !== true) {
     throw new Error(
       `Layout ${layout.preset} did not become active in the UI: ${JSON.stringify(selected)}`
@@ -109,6 +127,34 @@ function assertLayoutLoop(layout, selected, surface, scene) {
   if (surface.layoutPreset !== layout.preset) {
     throw new Error(
       `Detached preview surface stayed on ${surface.layoutPreset}, expected ${layout.preset}: ${JSON.stringify(surface)}`
+    )
+  }
+
+  const expectsPortrait = layout.preset.startsWith('vertical-')
+  if (captureState?.layoutPreset !== layout.preset) {
+    throw new Error(
+      `Stored capture config stayed on ${captureState?.layoutPreset}, expected ${layout.preset}.`
+    )
+  }
+  if (!captureState?.video) {
+    throw new Error(`Stored capture config has no video settings for ${layout.preset}.`)
+  }
+  const canvasIsPortrait = captureState.video.height > captureState.video.width
+  if (canvasIsPortrait !== expectsPortrait) {
+    throw new Error(
+      `${layout.preset} kept a ${captureState.video.width}x${captureState.video.height} ${canvasIsPortrait ? 'portrait' : 'landscape'} canvas.`
+    )
+  }
+  const bounds = previewWindow?.contentBounds
+  if (!previewWindow?.open || !previewWindow.visible || !bounds) {
+    throw new Error(
+      `Preview window was not visibly presenting ${layout.preset}: ${JSON.stringify(previewWindow)}`
+    )
+  }
+  const previewIsPortrait = bounds.height > bounds.width
+  if (previewIsPortrait !== expectsPortrait) {
+    throw new Error(
+      `${layout.preset} kept ${bounds.width}x${bounds.height} ${previewIsPortrait ? 'portrait' : 'landscape'} preview bounds.`
     )
   }
 
