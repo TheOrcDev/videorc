@@ -120,15 +120,3 @@ export async function runAcceptanceGate(argv = process.argv) {
 
   return 0
 }
-
-if (
-  (process.argv[1] || '').endsWith('scripts/lib/linux-acceptance-gate.mjs') ||
-  (process.argv[1] || '').endsWith('/linux-acceptance-gate.mjs') ||
-  import.meta.url.endsWith(process.argv[1] || '')
-) {
-  await runAcceptanceGate(process.argv).then((code) => {
-    if (code !== 0 && code !== undefined) {
-      process.exit(code)
-    }
-  })
-}

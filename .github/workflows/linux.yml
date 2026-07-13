@@ -39,7 +39,7 @@ jobs:
       - name: Validate Slice-0 acceptance contract
         run: |
           node --test scripts/lib/linux-acceptance-gate.test.mjs
-          if node scripts/lib/linux-acceptance-gate.mjs; then
+          if node scripts/lib/linux-acceptance-gate-cli.mjs; then
             echo "expected acceptance gate with missing manifest to fail"
             exit 1
           fi
@@ -60,7 +60,7 @@ jobs:
           JSON
           pnpm acceptance:linux:verify /tmp/videorc-linux-acceptance/manifest.json
           echo '{"portal": {"ok": true, "evidence": ["session-created"]}}' > /tmp/videorc-linux-acceptance/manifest.json
-          if node scripts/lib/linux-acceptance-gate.mjs /tmp/videorc-linux-acceptance/manifest.json >/tmp/videorc-linux-acceptance/failed.log 2>&1; then
+          if node scripts/lib/linux-acceptance-gate-cli.mjs /tmp/videorc-linux-acceptance/manifest.json >/tmp/videorc-linux-acceptance/failed.log 2>&1; then
             echo "expected incomplete manifest to fail"
             exit 1
           fi
