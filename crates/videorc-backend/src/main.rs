@@ -53,6 +53,7 @@ mod source_registry;
 mod source_status;
 mod state;
 mod storage;
+mod media_policy;
 mod streaming;
 mod support_bundle;
 mod synthetic_diagnostic;

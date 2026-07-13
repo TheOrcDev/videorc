@@ -59,7 +59,7 @@ package can actually do on the target laptop.
 - Modify: `.gitignore`
 - Modify: `package.json`
 
-- [ ] RED: add a Node test that rejects an acceptance manifest missing GNOME
+- [x] RED: add a Node test that rejects an acceptance manifest missing GNOME
   Wayland, portal, PipeWire, capture, preview, encoder, final-artifact, A/V,
   process-cleanup, and redaction evidence.
 - [ ] Verify RED:
@@ -68,16 +68,18 @@ package can actually do on the target laptop.
   node --test scripts/lib/linux-acceptance-gate.test.mjs
   ```
 
-  Expected: fail because `linux-acceptance-gate.mjs` does not exist.
-- [ ] GREEN: implement the pure manifest validator and format its failures as
+  Expected: fail while missing files exist. If `node` is unavailable locally,
+  run the equivalent check through `.github/workflows/linux.yml` and confirm the
+  red-step failure in workflow logs before implementing the validator.
+- [x] GREEN: implement the pure manifest validator and format its failures as
   one actionable line per missing proof.
-- [ ] Add the dated template with exact commands, artifact paths, manual checks,
+- [x] Add the dated template with exact commands, artifact paths, manual checks,
   and rollback recording fields.
-- [ ] Ignore `docs/acceptance/artifacts/linux/` explicitly even though its parent
+- [x] Ignore `docs/acceptance/artifacts/linux/` explicitly even though its parent
   is already ignored, documenting the intended evidence location.
-- [ ] Add
+- [x] Add
   `pnpm acceptance:linux:verify -- /tmp/videorc-linux-acceptance/manifest.json`.
-- [ ] Verify GREEN and task gate:
+- [x] Verify GREEN and task gate:
 
   ```bash
   node --test scripts/lib/linux-acceptance-gate.test.mjs

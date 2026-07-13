@@ -21,6 +21,7 @@ import type {
   SceneConfigParams,
   ServerEvent,
   ServerResponse,
+  MediaPolicySelection,
   SessionCommentsListParams,
   SessionCommentsPage,
   SessionDeletionOperation,
@@ -154,6 +155,180 @@ const nonNegativeInteger = numberSchema({
   min: 0,
   max: Number.MAX_SAFE_INTEGER
 })
+const mediaPolicyPresetValues = [
+  'automatic',
+  'performance',
+  'balanced',
+  'quality',
+  'compatibility',
+  'custom'
+] as const
+const mediaCaptureBackendValues = [
+  'pipewire-portal',
+  'electron-portal',
+  'ffmpeg-x11',
+  'test-pattern'
+] as const
+const mediaAudioBackendValues = ['pipewire', 'pulse-compat', 'alsa-compat', 'test-tone'] as const
+const mediaCompositorBackendValues = ['automatic', 'cpu', 'wgpu', 'ffmpeg-compat'] as const
+const mediaPreviewBackendValues = [
+  'automatic',
+  'native-wgpu',
+  'electron-webgl',
+  'mjpeg-debug'
+] as const
+const mediaEncoderBackendValues = [
+  'automatic',
+  'h264-vaapi',
+  'h264-qsv',
+  'libx264',
+  'libopenh264'
+] as const
+const mediaPolicyBenchmarkValues = ['performance', 'balanced', 'quality'] as const
+const mediaFallbackModeValues = [
+  'safe-auto',
+  'ask-first',
+  'strict',
+  'hardware-only',
+  'software-only'
+] as const
+const mediaCapabilityVerdictValues = ['supported', 'degraded', 'unavailable', 'unknown'] as const
+
+function normalizeEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  fallback: T,
+  path: string
+): { value: T; fallbackReason?: string } {
+  if (typeof value !== 'string') {
+    throw new Error(`${path} must be one of: ${allowed.join(', ')}`)
+  }
+  if ((allowed as readonly string[]).includes(value)) {
+    return { value: value as T }
+  }
+  return {
+    value: fallback,
+    fallbackReason: `${path} was not recognized, so defaulted to ${fallback}.`
+  }
+}
+
+const mediaBackendPolicySchema = runtimeSchema<MediaPolicySelection['requested']>(
+  'a linux media backend policy',
+  (value, path) => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new Error(`${path} must be an object.`)
+    }
+    const record = value as Record<string, unknown>
+    const capture = normalizeEnum<(typeof mediaCaptureBackendValues)[number]>(
+      record.capture,
+      mediaCaptureBackendValues,
+      'pipewire-portal',
+      `${path}.capture`
+    )
+    const audio = normalizeEnum<(typeof mediaAudioBackendValues)[number]>(
+      record.audio,
+      mediaAudioBackendValues,
+      'pipewire',
+      `${path}.audio`
+    )
+    const compositor = normalizeEnum<string>(
+      record.compositor,
+      mediaCompositorBackendValues,
+      'automatic',
+      `${path}.compositor`
+    )
+    const preview = normalizeEnum<string>(
+      record.preview,
+      mediaPreviewBackendValues,
+      'automatic',
+      `${path}.preview`
+    )
+    const recordingEncoder = normalizeEnum<string>(
+      record.recordingEncoder,
+      mediaEncoderBackendValues,
+      'automatic',
+      `${path}.recordingEncoder`
+    )
+    const streamingEncoder = normalizeEnum<string>(
+      record.streamingEncoder,
+      mediaEncoderBackendValues,
+      'automatic',
+      `${path}.streamingEncoder`
+    )
+
+    const normalized = {
+      capture: capture.value,
+      audio: audio.value,
+      compositor: compositor.value,
+      preview: preview.value,
+      recordingEncoder: recordingEncoder.value,
+      streamingEncoder: streamingEncoder.value,
+      benchmarkRecommendation: record.benchmarkRecommendation
+    }
+
+    return objectSchema(
+      {
+        capture: literalSchema(normalized.capture),
+        audio: literalSchema(normalized.audio),
+        compositor: literalSchema(normalized.compositor),
+        preview: literalSchema(normalized.preview),
+        recordingEncoder: literalSchema(normalized.recordingEncoder),
+        streamingEncoder: literalSchema(normalized.streamingEncoder),
+        benchmarkRecommendation: optionalSchema(enumSchema(mediaPolicyBenchmarkValues))
+      },
+      { allowUnknown: false }
+    ).parse(normalized, path) as MediaPolicySelection['selected']
+  }
+) as RuntimeSchema<MediaPolicySelection['selected']>
+
+const mediaPolicyRequestSchema = runtimeSchema<MediaPolicySelection['requested']>(
+  'a linux media policy request',
+  (value, path) => {
+    const record = objectSchema(
+      {
+        intent: stringSchema({ minLength: 1 }),
+        requested: mediaBackendPolicySchema
+      },
+      { allowUnknown: false }
+    ).parse(value, path) as MediaPolicySelection['requested']
+
+    const normalizedIntent = normalizeEnum<string>(
+      record.intent,
+      mediaPolicyPresetValues,
+      'automatic',
+      `${path}.intent`
+    )
+    return {
+      ...record,
+      intent: normalizedIntent.value
+    }
+  }
+)
+
+const mediaPolicySelectionSchema = runtimeSchema<MediaPolicySelection>(
+  'a linux media policy selection',
+  (value, path) => {
+    const record = objectSchema(
+      {
+        requested: mediaPolicyRequestSchema,
+        selected: mediaBackendPolicySchema,
+        fallbackMode: enumSchema(mediaFallbackModeValues),
+        fallbackReason: optionalText,
+        capabilityVerdict: enumSchema(mediaCapabilityVerdictValues),
+        observedRuntimePath: optionalText,
+        hardwareFingerprint: optionalText,
+        benchmarkRecommendation: optionalSchema(enumSchema(mediaPolicyBenchmarkValues))
+      },
+      { allowUnknown: false }
+    ).parse(value, path) as MediaPolicySelection
+
+    return {
+      ...record,
+      requested: record.requested,
+      selected: record.selected
+    }
+  }
+)
 
 function boundedSemanticValue(
   description: string,
@@ -636,7 +811,8 @@ const sessionStartParamsSchema = objectSchema(
     ),
     audio: optionalSchema(boundedBackendParamValueSchema),
     streaming: optionalSchema(boundedBackendParamValueSchema),
-    captions: optionalSchema(boundedBackendParamValueSchema)
+    captions: optionalSchema(boundedBackendParamValueSchema),
+    mediaPolicy: optionalSchema(mediaPolicySelectionSchema)
   },
   { allowUnknown: false }
 )

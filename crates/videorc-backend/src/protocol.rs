@@ -835,6 +835,8 @@ pub struct StartSessionParams {
     pub streaming: Option<StreamingSettings>,
     #[serde(default)]
     pub captions: Option<CaptionsSessionParams>,
+    #[serde(default)]
+    pub media_policy: crate::media_policy::MediaPolicySelection,
 }
 
 /// Live-caption output intent for this session. Stream selection shapes the
@@ -3533,6 +3535,43 @@ mod tests {
             .pointer(pointer)
             .unwrap_or_else(|| panic!("shared protocol fixture is missing {pointer}"))
             .clone()
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_includes_media_policy_contract() {
+        let media_policy_wire =
+            shared_high_risk_contract_fixture_value("/mediaPolicyProfile/wire");
+        let media_policy: crate::media_policy::MediaPolicySelection =
+            serde_json::from_value(media_policy_wire).expect("media policy should deserialize");
+        let media_policy_normalized: serde_json::Value =
+            serde_json::json!(media_policy);
+        let expected =
+            shared_high_risk_contract_fixture_value("/mediaPolicyProfile/normalized");
+        assert_eq!(media_policy_normalized, expected);
+
+        let mut media_policy_missing = media_policy_wire.clone();
+        let object = media_policy_missing
+            .as_object_mut()
+            .expect("media policy fixture should be object");
+        assert!(object.remove("requested").is_some());
+        object.insert("capabilityVerdict".to_string(), serde_json::json!("unsupported"));
+        assert!(serde_json::from_value::<crate::media_policy::MediaPolicySelection>(
+            media_policy_missing
+        )
+        .is_err());
+
+        let mut media_policy_unknown = expected.clone();
+        let unknown_object = media_policy_unknown
+            .as_object_mut()
+            .expect("media policy fixture should be object");
+        unknown_object.insert(
+            "unexpected".to_string(),
+            serde_json::json!("not-allowed-on-wire"),
+        );
+        assert!(serde_json::from_value::<crate::media_policy::MediaPolicySelection>(
+            media_policy_unknown
+        )
+        .is_err());
     }
 
     #[test]
