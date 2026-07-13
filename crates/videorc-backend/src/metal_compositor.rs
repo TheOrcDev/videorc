@@ -30,7 +30,7 @@ use objc2_core_video::{
 use objc2_foundation::NSString;
 use objc2_io_surface::IOSurfaceRef;
 use objc2_metal::{
-    MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
+    MTLBlendFactor, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
     MTLCreateSystemDefaultDevice, MTLDevice, MTLDrawable, MTLLibrary, MTLLoadAction, MTLOrigin,
     MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor,
@@ -150,6 +150,12 @@ pub struct GpuSource<'a> {
     /// radius of `radius_pct`% of the shorter side. Every render path (CPU, Metal,
     /// FFmpeg) derives its geometry from the same rule.
     pub mask: SourceMask,
+    /// Source-over blend this quad using its straight (non-premultiplied) alpha —
+    /// required for the caption/comment overlay bitmaps, whose transparent pixels
+    /// must show the frame beneath instead of writing opaque black. Capture
+    /// sources keep the default opaque overwrite: their alpha channels are not
+    /// trustworthy (screen frames can arrive with alpha 0).
+    pub blend: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,6 +423,9 @@ pub struct MetalSceneCompositor {
     device: Retained<MetalDevice>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Same shader with straight-alpha source-over blending, selected per quad
+    /// for `GpuSource::blend` overlays (caption bar, comment highlight).
+    blend_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
     targets: Vec<CachedTargetTexture>,
     // Index of the LAST-RENDERED slot; advanced at the start of each compose.
@@ -589,13 +598,15 @@ impl MetalSceneCompositor {
     pub fn new() -> Option<Self> {
         let device = MTLCreateSystemDefaultDevice()?;
         let queue = device.newCommandQueue()?;
-        let pipeline = build_pipeline(&device)?;
+        let pipeline = build_pipeline(&device, false)?;
+        let blend_pipeline = build_pipeline(&device, true)?;
         let sampler = build_sampler(&device)?;
         let source_texture_cache = make_texture_cache(&device).map(MetalSourceTextureCache::new);
         Some(Self {
             device,
             queue,
             pipeline,
+            blend_pipeline,
             sampler,
             targets: Vec::new(),
             target_cursor: 0,
@@ -674,7 +685,16 @@ impl MetalSceneCompositor {
         let mut source_import_stats = MetalSourceImportStats::default();
         let mut command_encode_ms = 0.0;
         let mut encode_segment_started_at = Instant::now();
+        let mut encoder_blend = false;
         for (source_index, source) in sources.iter().enumerate() {
+            if source.blend != encoder_blend {
+                encoder.setRenderPipelineState(if source.blend {
+                    &self.blend_pipeline
+                } else {
+                    &self.pipeline
+                });
+                encoder_blend = source.blend;
+            }
             let vertices = quad_vertices(source.dest);
             let buffer = unsafe {
                 self.device.newBufferWithBytes_length_options(
@@ -1030,7 +1050,7 @@ pub struct MetalPreviewPresenter {
 impl MetalPreviewPresenter {
     pub fn new(device: Retained<MetalDevice>) -> Option<Self> {
         let queue = device.newCommandQueue()?;
-        let pipeline = build_pipeline(&device)?;
+        let pipeline = build_pipeline(&device, false)?;
         let sampler = build_preview_sampler(&device)?;
         Some(Self {
             device,
@@ -1167,7 +1187,7 @@ pub fn present_texture_to_layer(
     texture: &MetalTexture,
 ) -> bool {
     let device = queue.device();
-    let Some(pipeline) = build_pipeline(&device) else {
+    let Some(pipeline) = build_pipeline(&device, false) else {
         return false;
     };
     let Some(sampler) = build_preview_sampler(&device) else {
@@ -1416,6 +1436,7 @@ fn clear_pass(texture: &MetalTexture, rgba: [f64; 4]) -> Retained<MTLRenderPassD
 
 fn build_pipeline(
     device: &MetalDevice,
+    blending: bool,
 ) -> Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>> {
     let source = NSString::from_str(SHADER_SOURCE);
     let library = device
@@ -1429,6 +1450,15 @@ fn build_pipeline(
     descriptor.setFragmentFunction(Some(&fragment));
     let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
     attachment.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+    if blending {
+        // Straight-alpha source-over: overlay bitmaps are PNG-decoded and NOT
+        // premultiplied, so the RGB factors scale by source alpha here.
+        attachment.setBlendingEnabled(true);
+        attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+        attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+        attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    }
 
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
@@ -1714,11 +1744,71 @@ mod tests {
             crop: [0.0; 4],
             mirror: false,
             mask: SourceMask::None,
+            blend: false,
         }];
         let yuv = compositor.compose_yuv420p(4, 4, &sources).unwrap();
         assert_eq!(yuv.len(), 16 + 2 * 4);
         assert!(yuv[..16].iter().all(|&y| y == 76), "Y plane red");
         assert!(yuv[16..20].iter().all(|&u| u == 85), "U plane red");
+    }
+
+    #[test]
+    fn blend_source_composites_straight_alpha_over_the_frame_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        // The caption-bar regression: the overlay PNG is straight-alpha, mostly
+        // transparent. A blend quad must show the frame through alpha-0 texels
+        // (they used to overwrite the stream as an opaque black box), land
+        // opaque texels verbatim, and mix half-alpha texels.
+        let overlay = [
+            0u8, 0, 0, 0, // transparent
+            0, 0, 255, 255, // opaque red
+            0, 0, 255, 128, // half-alpha red
+            0, 0, 0, 0, // transparent
+        ];
+        let mut source = full_frame(&overlay, 4, 1, false, SourceMask::None, [0.0; 4]);
+        source.blend = true;
+        let px = compositor
+            .compose_bgra(4, 1, [0.0, 1.0, 0.0, 1.0], &[source])
+            .unwrap();
+        assert_eq!(
+            pixel(&px, 4, 0, 0)[..3],
+            [0, 255, 0],
+            "alpha-0 texel keeps the green frame"
+        );
+        assert_eq!(
+            pixel(&px, 4, 1, 0)[..3],
+            [0, 0, 255],
+            "opaque texel lands verbatim"
+        );
+        let mixed = pixel(&px, 4, 2, 0);
+        assert!(
+            mixed[2] >= 126 && mixed[2] <= 130 && mixed[1] >= 125 && mixed[1] <= 129,
+            "half-alpha texel blends red over green, got {mixed:?}"
+        );
+        assert_eq!(
+            pixel(&px, 4, 3, 0)[..3],
+            [0, 255, 0],
+            "alpha-0 texel keeps the green frame"
+        );
+    }
+
+    #[test]
+    fn non_blend_source_keeps_the_opaque_overwrite_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        // Capture sources keep the historical overwrite: their alpha channels
+        // are not trustworthy, so an alpha-0 texel still replaces the frame.
+        let overlay = [0u8, 0, 0, 0];
+        let source = full_frame(&overlay, 1, 1, false, SourceMask::None, [0.0; 4]);
+        let px = compositor
+            .compose_bgra(1, 1, [0.0, 1.0, 0.0, 1.0], &[source])
+            .unwrap();
+        assert_eq!(pixel(&px, 1, 0, 0)[..3], [0, 0, 0]);
     }
 
     #[test]
@@ -1953,6 +2043,7 @@ mod tests {
             crop,
             mirror,
             mask,
+            blend: false,
         }
     }
 
@@ -2131,6 +2222,7 @@ mod tests {
                 crop: [0.0; 4],
                 mirror: false,
                 mask: SourceMask::None,
+                blend: false,
             },
             GpuSource {
                 kind: GpuSourceKind::Camera,
@@ -2144,6 +2236,7 @@ mod tests {
                 crop: [0.0; 4],
                 mirror: true,
                 mask: SourceMask::None,
+                blend: false,
             },
         ];
         let yuv = compositor.compose_yuv420p(1920, 1080, &sources).unwrap();
@@ -2170,6 +2263,7 @@ mod tests {
                 crop: [0.0; 4],
                 mirror: false,
                 mask: SourceMask::None,
+                blend: false,
             },
             GpuSource {
                 kind: GpuSourceKind::Camera,
@@ -2183,6 +2277,7 @@ mod tests {
                 crop: [0.0; 4],
                 mirror: true,
                 mask: SourceMask::None,
+                blend: false,
             },
         ];
 
@@ -2258,6 +2353,7 @@ mod tests {
             crop: [0.0; 4],
             mirror: false,
             mask: SourceMask::None,
+            blend: false,
         }];
 
         let output = compositor
@@ -2303,6 +2399,7 @@ mod tests {
             crop: [0.0; 4],
             mirror: false,
             mask: SourceMask::None,
+            blend: false,
         }];
 
         let output = compositor
@@ -2486,6 +2583,7 @@ mod tests {
             crop: [0.0; 4],
             mirror: false,
             mask: SourceMask::None,
+            blend: false,
         }];
         let pixels = composite_sources(out, out, [0.0, 0.0, 1.0, 1.0], &sources).unwrap();
         assert_eq!(pixels.len(), out * out * 4);

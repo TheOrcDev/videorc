@@ -2106,6 +2106,9 @@ struct PreparedGpuSource<'a> {
     crop: [f32; 4],
     mirror: bool,
     mask: SceneMask,
+    /// Straight-alpha source-over blend (overlay bitmaps only — capture sources
+    /// must keep the opaque overwrite; see `GpuSource::blend`).
+    blend: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -2134,6 +2137,7 @@ impl<'a> PreparedGpuSource<'a> {
             crop: self.crop,
             mirror: self.mirror,
             mask: scene_mask_into_metal(self.mask),
+            blend: self.blend,
         }
     }
 }
@@ -2275,6 +2279,9 @@ fn push_caption_overlay_gpu_source<'a>(
         crop,
         mirror: false,
         mask: SceneMask::None,
+        // The bar/card is rasterized on a transparent canvas; without blending
+        // its alpha-0 pixels overwrite the frame as an opaque black box.
+        blend: true,
     });
 }
 
@@ -2343,6 +2350,7 @@ fn try_gpu_compose(
                     crop,
                     mirror: false,
                     mask: SceneMask::None,
+                    blend: false,
                 });
                 true
             } else {
@@ -2400,6 +2408,7 @@ fn try_gpu_compose(
             crop,
             mirror: false,
             mask: SceneMask::None,
+            blend: false,
         });
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
@@ -2469,6 +2478,7 @@ fn try_gpu_compose(
             crop,
             mirror: false,
             mask: SceneMask::None,
+            blend: false,
         });
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
@@ -2549,6 +2559,7 @@ fn try_gpu_compose(
                         crop,
                         mirror: layout.camera_mirror,
                         mask: camera_mask(layout),
+                        blend: false,
                     });
                 } else {
                     let placeholder =
@@ -2578,6 +2589,7 @@ fn try_gpu_compose(
                         crop,
                         mirror: layout.camera_mirror,
                         mask: camera_mask(layout),
+                        blend: false,
                     });
                 }
             }
@@ -2625,6 +2637,7 @@ fn try_gpu_compose(
                         crop,
                         mirror: false,
                         mask: SceneMask::None,
+                        blend: false,
                     });
                 } else {
                     let placeholder =
@@ -2651,6 +2664,7 @@ fn try_gpu_compose(
                         crop,
                         mirror: false,
                         mask: SceneMask::None,
+                        blend: false,
                     });
                 }
             }
@@ -2678,6 +2692,7 @@ fn try_gpu_compose(
                     crop,
                     mirror: false,
                     mask: SceneMask::None,
+                    blend: false,
                 });
             }
         }
@@ -7126,6 +7141,25 @@ mod tests {
             position,
             revision: 1,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn caption_overlay_gpu_quad_requests_alpha_blending() {
+        // The bar/card bitmap is straight-alpha and mostly transparent; the
+        // Metal quad must blend or the transparent pixels burn into the stream
+        // as an opaque black box (the "black background captions" bug).
+        let overlay = test_caption_overlay(
+            8,
+            4,
+            [255, 255, 255, 255],
+            crate::captions::CaptionOverlayPosition::Bottom,
+        );
+        let mut prepared = Vec::new();
+        push_caption_overlay_gpu_source(&mut prepared, &overlay, 32, 16, 2, 0);
+        assert_eq!(prepared.len(), 1);
+        assert!(prepared[0].blend, "caption overlay quad must alpha-blend");
+        assert!(prepared[0].as_gpu_source().blend);
     }
 
     #[test]

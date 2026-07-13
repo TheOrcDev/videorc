@@ -4875,6 +4875,7 @@ mod tests {
             crop: [0.0; 4],
             mirror: false,
             mask: crate::metal_compositor::SourceMask::None,
+            blend: false,
         }];
         compositor
             .compose_bgra(

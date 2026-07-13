@@ -1111,6 +1111,7 @@ mod tests {
             crop: [0.0; 4],
             mirror: false,
             mask: crate::metal_compositor::SourceMask::None,
+            blend: false,
         }];
         compositor
             .compose_bgra(64, 64, [0.0, 0.0, 0.0, 1.0], &sources)
@@ -1210,6 +1211,7 @@ mod tests {
                 crop: [0.0; 4],
                 mirror: false,
                 mask: crate::metal_compositor::SourceMask::None,
+                blend: false,
             }];
             compositor
                 .compose_bgra(64, 64, [0.0, 0.0, 0.0, 1.0], &sources)
@@ -1309,6 +1311,7 @@ mod tests {
             crop: [0.0; 4],
             mirror: false,
             mask: crate::metal_compositor::SourceMask::None,
+            blend: false,
         }];
         compositor
             .compose_bgra(64, 64, [0.0, 0.0, 0.0, 1.0], &sources)
