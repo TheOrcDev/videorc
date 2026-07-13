@@ -7594,6 +7594,15 @@ fn video_filter(
         return camera_only_video_filter(params, preview);
     }
 
+    if matches!(params.layout.layout_preset, LayoutPreset::VerticalCameraOnly) {
+        // Same full-frame camera as CameraOnly, but the portrait canvas is
+        // always FILLED (vertical fill law) — the user's Fit choice must not
+        // letterbox the canvas; zoom/pan still frame the crop.
+        let mut cover_params = params.clone();
+        cover_params.layout.camera_fit = CameraFit::Fill;
+        return camera_only_video_filter(&cover_params, preview);
+    }
+
     if matches!(params.layout.layout_preset, LayoutPreset::SideBySide) {
         return side_by_side_video_filter(camera_input_index, params, preview);
     }
@@ -7717,7 +7726,8 @@ fn vertical_stack_filter_bands(preset: &LayoutPreset) -> Option<VerticalStackFil
         | LayoutPreset::CameraOnly
         | LayoutPreset::SideBySide
         | LayoutPreset::VerticalScreenCamera
-        | LayoutPreset::VerticalScreenOnly => None,
+        | LayoutPreset::VerticalScreenOnly
+        | LayoutPreset::VerticalCameraOnly => None,
     }
 }
 
@@ -11559,6 +11569,26 @@ mod tests {
                 "scale=w=1080:h=1920:force_original_aspect_ratio=increase,crop=1080:1920"
             ),
             "portrait cover: {filter}"
+        );
+    }
+
+    #[test]
+    fn vertical_camera_only_filter_covers_the_portrait_canvas() {
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalCameraOnly;
+        params.layout.camera_fit = CameraFit::Fit;
+        params.output.video.width = 1080;
+        params.output.video.height = 1920;
+
+        // The camera rides the camera-only path (input 0), but the portrait
+        // canvas is always FILLED — Fit must not pad the frame.
+        let filter = video_filter(None, &params, false);
+        assert!(!filter.contains("overlay"), "no overlay: {filter}");
+        assert!(!filter.contains("vstack"), "no stacking: {filter}");
+        assert!(!filter.contains("pad="), "no letterbox pad: {filter}");
+        assert!(
+            filter.contains("crop=w=1080:h=1920"),
+            "camera covers the portrait canvas: {filter}"
         );
     }
 

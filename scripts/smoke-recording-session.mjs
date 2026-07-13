@@ -25,9 +25,9 @@ export const LAYOUT_PRESET_SCENARIOS = [
   // The vertical scenes record a true PORTRAIT canvas and the artifact's
   // probed dimensions are asserted below — a vertical scene that silently
   // produced landscape pixels must fail here. 720x1280 is the smallest exact
-  // 9:16 canvas inside the backend's resolution bounds (width >= 640). One
-  // stacked and one inset scenario record real artifacts; the remaining
-  // vertical arrangements (camera-bottom, split, screen-only) are covered at
+  // 9:16 canvas inside the backend's resolution bounds. One stacked and one
+  // inset scenario record real artifacts; the remaining vertical arrangements
+  // (camera-bottom, split, screen-only, camera-only) are covered at
   // scene-fixture and FFmpeg-filter level plus the layout-source-loop smoke.
   {
     preset: 'vertical-camera-top',

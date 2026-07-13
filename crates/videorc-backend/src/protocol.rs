@@ -469,6 +469,7 @@ pub enum LayoutPreset {
     VerticalSplit,
     VerticalScreenCamera,
     VerticalScreenOnly,
+    VerticalCameraOnly,
 }
 
 impl LayoutPreset {
@@ -483,6 +484,7 @@ impl LayoutPreset {
                 | LayoutPreset::VerticalSplit
                 | LayoutPreset::VerticalScreenCamera
                 | LayoutPreset::VerticalScreenOnly
+                | LayoutPreset::VerticalCameraOnly
         )
     }
 }
@@ -3214,6 +3216,18 @@ mod tests {
             serde_json::to_value(LayoutPreset::VerticalScreenOnly).unwrap(),
             serde_json::json!("vertical-screen-only")
         );
+        // Explicit wire pin: smokes ride preset custom, so this test is the
+        // only CI coverage that the TS list and the Rust enum agree (the
+        // 0.9.32 lesson — a preset name missing on one side broke the wire).
+        assert_eq!(
+            serde_json::to_value(LayoutPreset::VerticalCameraOnly).unwrap(),
+            serde_json::json!("vertical-camera-only")
+        );
+        assert_eq!(
+            serde_json::from_value::<LayoutPreset>(serde_json::json!("vertical-camera-only"))
+                .unwrap(),
+            LayoutPreset::VerticalCameraOnly
+        );
     }
 
     #[test]
@@ -3229,6 +3243,7 @@ mod tests {
         assert!(LayoutPreset::VerticalSplit.is_vertical());
         assert!(LayoutPreset::VerticalScreenCamera.is_vertical());
         assert!(LayoutPreset::VerticalScreenOnly.is_vertical());
+        assert!(LayoutPreset::VerticalCameraOnly.is_vertical());
     }
 
     #[test]

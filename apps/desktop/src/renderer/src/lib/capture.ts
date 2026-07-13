@@ -101,7 +101,8 @@ export function layoutPresetNeedsCamera(preset: LayoutPreset): boolean {
     preset === 'vertical-camera-top' ||
     preset === 'vertical-camera-bottom' ||
     preset === 'vertical-split' ||
-    preset === 'vertical-screen-camera'
+    preset === 'vertical-screen-camera' ||
+    preset === 'vertical-camera-only'
   )
 }
 

@@ -296,6 +296,7 @@ export type LayoutPreset =
   | 'vertical-split'
   | 'vertical-screen-camera'
   | 'vertical-screen-only'
+  | 'vertical-camera-only'
 
 /**
  * The Studio scene vocabularies by orientation mode, in gallery order. The
@@ -315,7 +316,8 @@ export const VERTICAL_LAYOUT_PRESETS = [
   'vertical-camera-bottom',
   'vertical-split',
   'vertical-screen-camera',
-  'vertical-screen-only'
+  'vertical-screen-only',
+  'vertical-camera-only'
 ] as const satisfies readonly LayoutPreset[]
 
 export const LAYOUT_PRESET_VALUES = [

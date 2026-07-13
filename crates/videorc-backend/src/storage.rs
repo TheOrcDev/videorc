@@ -4635,6 +4635,7 @@ pub fn session_scene_label(
             crate::protocol::LayoutPreset::VerticalSplit => "Vertical · Split",
             crate::protocol::LayoutPreset::VerticalScreenCamera => "Vertical · Screen + Camera",
             crate::protocol::LayoutPreset::VerticalScreenOnly => "Vertical · Screen only",
+            crate::protocol::LayoutPreset::VerticalCameraOnly => "Vertical · Camera only",
         }
         .to_string(),
     )

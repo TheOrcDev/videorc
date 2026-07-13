@@ -62,7 +62,8 @@ const VERTICAL_QUICK_PRESETS: { id: LayoutPreset; label: string }[] = [
   { id: 'vertical-camera-bottom', label: 'Camera bottom' },
   { id: 'vertical-split', label: 'Split' },
   { id: 'vertical-screen-camera', label: 'Screen + Cam' },
-  { id: 'vertical-screen-only', label: 'Screen' }
+  { id: 'vertical-screen-only', label: 'Screen' },
+  { id: 'vertical-camera-only', label: 'Camera' }
 ]
 
 function presetLabel(preset: LayoutPreset): string {

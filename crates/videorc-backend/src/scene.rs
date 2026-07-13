@@ -124,8 +124,10 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
     };
 
     match params.layout.layout_preset {
-        LayoutPreset::CameraOnly => {
+        LayoutPreset::CameraOnly | LayoutPreset::VerticalCameraOnly => {
             // The camera is the full-frame source: no screen base, no overlay.
+            // The vertical variant is the identical arrangement on the
+            // portrait canvas (covering, per the vertical fill law).
             if let Some(camera_id) = params.sources.camera_id.clone() {
                 let mut camera =
                     camera_source(camera_id, &params.layout, output_width, output_height);
@@ -687,6 +689,17 @@ mod tests {
         let scene = scene_from_capture_config(params);
 
         assert_eq!(scene.sources.len(), 1);
+        assert_eq!(scene.sources[0].transform, full_frame_transform());
+    }
+
+    #[test]
+    fn vertical_camera_only_composes_exactly_like_camera_only() {
+        let mut params = base_params();
+        params.layout.layout_preset = LayoutPreset::VerticalCameraOnly;
+        let scene = scene_from_capture_config(params);
+
+        assert_eq!(scene.sources.len(), 1);
+        assert_eq!(scene.sources[0].kind, SceneSourceKind::Camera);
         assert_eq!(scene.sources[0].transform, full_frame_transform());
     }
 

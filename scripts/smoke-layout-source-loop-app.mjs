@@ -42,6 +42,10 @@ const LAYOUTS = [
   {
     preset: 'vertical-screen-only',
     expectedKinds: ['test-pattern']
+  },
+  {
+    preset: 'vertical-camera-only',
+    expectedKinds: ['camera']
   }
 ]
 

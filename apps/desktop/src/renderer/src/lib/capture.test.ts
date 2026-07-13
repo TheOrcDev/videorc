@@ -734,6 +734,9 @@ describe('layout preset source requirements', () => {
     expect(layoutPresetNeedsScreen('vertical-screen-camera')).toBe(true)
     expect(layoutPresetNeedsScreen('vertical-screen-only')).toBe(true)
     expect(layoutPresetNeedsScreen('camera-only')).toBe(false)
+    // The camera-only scenes are what makes each mode usable without a
+    // screen — a camera-only creator must never see zero enabled scenes.
+    expect(layoutPresetNeedsScreen('vertical-camera-only')).toBe(false)
   })
 
   it('matches the backend blockers for camera-required presets', () => {
@@ -744,6 +747,7 @@ describe('layout preset source requirements', () => {
     expect(layoutPresetNeedsCamera('vertical-camera-bottom')).toBe(true)
     expect(layoutPresetNeedsCamera('vertical-split')).toBe(true)
     expect(layoutPresetNeedsCamera('vertical-screen-camera')).toBe(true)
+    expect(layoutPresetNeedsCamera('vertical-camera-only')).toBe(true)
     expect(layoutPresetNeedsCamera('screen-only')).toBe(false)
     expect(layoutPresetNeedsCamera('vertical-screen-only')).toBe(false)
   })

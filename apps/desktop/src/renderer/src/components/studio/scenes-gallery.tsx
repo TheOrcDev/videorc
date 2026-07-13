@@ -35,7 +35,8 @@ const VERTICAL_SCENES: { id: LayoutPreset; label: string }[] = [
   { id: 'vertical-camera-bottom', label: 'Camera bottom' },
   { id: 'vertical-split', label: 'Split' },
   { id: 'vertical-screen-camera', label: 'Screen + Cam' },
-  { id: 'vertical-screen-only', label: 'Screen' }
+  { id: 'vertical-screen-only', label: 'Screen' },
+  { id: 'vertical-camera-only', label: 'Camera' }
 ]
 
 export function ScenesGallery(): ReactElement {
@@ -184,6 +185,9 @@ function LayoutThumb({ preset }: { preset: LayoutPreset }): ReactElement {
         ) : null}
         {preset === 'vertical-screen-only' ? (
           <div className="absolute inset-1 rounded-[2px] bg-foreground/10" />
+        ) : null}
+        {preset === 'vertical-camera-only' ? (
+          <div className="absolute inset-1 rounded-[2px] bg-foreground/30" />
         ) : null}
       </div>
     )

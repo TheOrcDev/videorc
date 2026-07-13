@@ -174,6 +174,7 @@ fn vertical_fill_preset(preset: &LayoutPreset) -> bool {
             | LayoutPreset::VerticalSplit
             | LayoutPreset::VerticalScreenCamera
             | LayoutPreset::VerticalScreenOnly
+            | LayoutPreset::VerticalCameraOnly
     )
 }
 
@@ -188,13 +189,18 @@ fn vertical_fill_preset(preset: &LayoutPreset) -> bool {
 pub fn scene_source_fit(kind: &SceneSourceKind, layout: &LayoutSettings) -> SceneFit {
     match kind {
         SceneSourceKind::Camera => {
-            let band_camera = matches!(
+            // Band cameras and the full-canvas vertical camera always cover:
+            // a contained camera letterboxes its region, which is exactly the
+            // vertical fill law's bug. Only the vertical screen+camera inset
+            // bubble keeps the user's Fit choice (like its horizontal twin).
+            let vertical_filled_camera = matches!(
                 layout.layout_preset,
                 LayoutPreset::VerticalCameraTop
                     | LayoutPreset::VerticalCameraBottom
                     | LayoutPreset::VerticalSplit
+                    | LayoutPreset::VerticalCameraOnly
             );
-            if band_camera {
+            if vertical_filled_camera {
                 return SceneFit::Cover;
             }
             if matches!(layout.camera_fit, CameraFit::Fit) && layout.camera_zoom <= 100 {
@@ -527,6 +533,14 @@ mod tests {
                 LayoutPreset::VerticalScreenOnly,
                 SceneFit::Cover,
                 SceneFit::Contain,
+                SceneMask::None,
+            ),
+            // The full-canvas vertical camera ignores Fit like the bands do
+            // (the portrait canvas is always filled) and stays maskless.
+            (
+                LayoutPreset::VerticalCameraOnly,
+                SceneFit::Cover,
+                SceneFit::Cover,
                 SceneMask::None,
             ),
         ];
