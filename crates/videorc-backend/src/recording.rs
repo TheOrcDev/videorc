@@ -6291,8 +6291,18 @@ fn bridge_compositor_split_output_ffmpeg_args(
     stream_output: CompositorAuxiliaryOutput,
 ) -> Result<Vec<String>> {
     validate_stream_targets_for_ffmpeg(stream_targets)?;
-    let output_path =
-        output_path.context("Split output encoder bridge requires a local recording path")?;
+    let simulcast_mode = stream_output.composes_simulcast_scene;
+    // The caption/profile split exists to protect a local recording, so it
+    // requires one; a dual-orientation session may be stream-only.
+    let output_path = match output_path {
+        Some(path) => Some(path),
+        None if simulcast_mode => None,
+        None => {
+            return Err(anyhow::anyhow!(
+                "Split output encoder bridge requires a local recording path"
+            ));
+        }
+    };
     if stream_targets.is_empty() {
         bail!("Split output encoder bridge requires at least one stream target");
     }
@@ -6336,20 +6346,22 @@ fn bridge_compositor_split_output_ffmpeg_args(
         microphone_graph_gain: microphone_needs_graph_gain(capture.microphone.as_ref()),
     };
 
-    args.extend([
-        "-map".to_string(),
-        format!("{recording_video_input_index}:v"),
-    ]);
-    append_audio_output_args(&mut args, &input_layout);
-    args.extend([
-        "-c:v".to_string(),
-        "copy".to_string(),
-        "-tag:v".to_string(),
-        "0".to_string(),
-    ]);
-    append_audio_encoding_args(&mut args, &input_layout, &params.audio, true);
-    args.push("-shortest".to_string());
-    args.push(output_path.display().to_string());
+    if let Some(output_path) = output_path {
+        args.extend([
+            "-map".to_string(),
+            format!("{recording_video_input_index}:v"),
+        ]);
+        append_audio_output_args(&mut args, &input_layout);
+        args.extend([
+            "-c:v".to_string(),
+            "copy".to_string(),
+            "-tag:v".to_string(),
+            "0".to_string(),
+        ]);
+        append_audio_encoding_args(&mut args, &input_layout, &params.audio, true);
+        args.push("-shortest".to_string());
+        args.push(output_path.display().to_string());
+    }
 
     let stream_input_layout = InputLayout {
         video_input_index: stream_video_input_index,
@@ -6362,25 +6374,42 @@ fn bridge_compositor_split_output_ffmpeg_args(
     let mut uses_recording_stream_input = false;
     let mut uses_companion_stream_input = false;
     for target in stream_targets {
-        let target_video = target.output_video.as_ref().unwrap_or(&stream_video);
-        // Prefer the auxiliary stream input on a profile tie. A tie only exists
-        // for the forced same-profile caption split; routing primary first would
-        // silently send the clean recording pixels to RTMP.
-        let video_input_index = if same_video_profile(target_video, &stream_video) {
-            uses_companion_stream_input = true;
-            stream_video_input_index
-        } else if same_video_profile(target_video, &params.output.video) {
-            uses_recording_stream_input = true;
-            recording_video_input_index
+        // Dual-orientation: the EXPLICIT leg binding routes the target —
+        // vertical destinations consume the simulcast encode, horizontal ones
+        // the primary. Profile equality is a trap here (a 1080×1920 recording
+        // and an identical vertical stream profile would tie).
+        let video_input_index = if simulcast_mode {
+            match target.output_orientation {
+                crate::streaming::StreamOutputOrientation::Vertical => {
+                    uses_companion_stream_input = true;
+                    stream_video_input_index
+                }
+                crate::streaming::StreamOutputOrientation::Horizontal => {
+                    uses_recording_stream_input = true;
+                    recording_video_input_index
+                }
+            }
         } else {
-            bail!(
-                "Target {} resolves to unsupported mixed stream profile {}x{}@{} {}kbps",
-                target.label,
-                target_video.width,
-                target_video.height,
-                target_video.fps,
-                target_video.bitrate_kbps
-            );
+            let target_video = target.output_video.as_ref().unwrap_or(&stream_video);
+            // Prefer the auxiliary stream input on a profile tie. A tie only
+            // exists for the forced same-profile caption split; routing primary
+            // first would silently send the clean recording pixels to RTMP.
+            if same_video_profile(target_video, &stream_video) {
+                uses_companion_stream_input = true;
+                stream_video_input_index
+            } else if same_video_profile(target_video, &params.output.video) {
+                uses_recording_stream_input = true;
+                recording_video_input_index
+            } else {
+                bail!(
+                    "Target {} resolves to unsupported mixed stream profile {}x{}@{} {}kbps",
+                    target.label,
+                    target_video.width,
+                    target_video.height,
+                    target_video.fps,
+                    target_video.bitrate_kbps
+                );
+            }
         };
         stream_routes.push((target, video_input_index));
     }
@@ -8140,6 +8169,14 @@ fn validate_caption_output_policy(params: &StartSessionParams) -> Result<()> {
     if !captions.effective_burn_target().burns_stream() || !params.output.stream_enabled {
         return Ok(());
     }
+    // The simulcast leg claims the ONE auxiliary output, and stream-burned
+    // captions need it for the clean-recording split — the two are mutually
+    // exclusive in Phase 1 (documented engine-plan fallback).
+    if params.simulcast.is_some() {
+        bail!(
+            "Live caption burn-in and dual-orientation streaming cannot run together yet. Set captions to Off or Recording, or disable the vertical destinations."
+        );
+    }
     let plan = caption_leg_plan(params);
     let live_caption_profiles = resolved_enabled_stream_output_videos(params)?;
 
@@ -8341,14 +8378,44 @@ fn recording_compositor_stream_output(
     params: &StartSessionParams,
     video_output: EncoderBridgeVideoOutput,
 ) -> Result<Option<CompositorAuxiliaryOutput>> {
-    if !params.output.record_enabled || !params.output.stream_enabled {
-        return Ok(None);
-    }
     if !matches!(
         video_output,
         EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
     ) {
+        return Ok(None);
+    }
+    // Dual-orientation simulcast claims the auxiliary output: the vertical
+    // leg composes its own scene and encodes at the simulcast profile. Works
+    // for stream-only sessions too (unlike the caption/profile split, which
+    // exists to keep a local recording clean). Horizontal targets must share
+    // ONE encode with the primary — a third encoded leg is unsupported, and
+    // the caption×simulcast exclusivity is enforced at validation.
+    if let Some(simulcast) = params.simulcast.as_ref() {
+        if params.output.stream_enabled {
+            let horizontal_companions =
+                companion_stream_outputs_for_recording(params, &params.output.video)?;
+            if let Some(profile) = horizontal_companions.first() {
+                bail!(
+                    "Dual-orientation streaming shares one horizontal encode: make every horizontal destination use the session profile {}x{}@{} (found {}x{}@{}).",
+                    params.output.video.width,
+                    params.output.video.height,
+                    params.output.video.fps,
+                    profile.width,
+                    profile.height,
+                    profile.fps
+                );
+            }
+            return Ok(Some(CompositorAuxiliaryOutput {
+                width: simulcast.video.width,
+                height: simulcast.video.height,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                composes_simulcast_scene: true,
+            }));
+        }
+        return Ok(None);
+    }
+    if !params.output.record_enabled || !params.output.stream_enabled {
         return Ok(None);
     }
     let recording = &params.output.video;
@@ -8414,6 +8481,11 @@ fn resolved_enabled_stream_output_videos(
     {
         return Ok(enabled_streaming_targets(params)
             .into_iter()
+            .filter(|target| {
+                params.simulcast.is_none()
+                    || target.effective_output_orientation()
+                        == crate::streaming::StreamOutputOrientation::Horizontal
+            })
             .map(|target| stream_target_output_video(streaming, target))
             .collect());
     }
@@ -8431,6 +8503,24 @@ fn resolve_auxiliary_stream_output_video(
     params: &StartSessionParams,
     stream_output: &CompositorAuxiliaryOutput,
 ) -> Result<VideoSettings> {
+    if stream_output.composes_simulcast_scene {
+        let simulcast = params
+            .simulcast
+            .as_ref()
+            .context("Simulcast-bound auxiliary output without simulcast params")?;
+        if simulcast.video.width != stream_output.width
+            || simulcast.video.height != stream_output.height
+        {
+            bail!(
+                "Simulcast compositor target {}x{} does not match the vertical profile {}x{}",
+                stream_output.width,
+                stream_output.height,
+                simulcast.video.width,
+                simulcast.video.height
+            );
+        }
+        return Ok(simulcast.video.clone());
+    }
     let companion_outputs = companion_stream_outputs_for_recording(params, &params.output.video)?;
     companion_outputs
         .into_iter()
@@ -14799,6 +14889,8 @@ mod tests {
                 target.id = format!("target-{index}");
                 target.enabled = true;
                 target.output_orientation = Some(*orientation);
+                // Unique keys so per-leg routing tests can tell URLs apart.
+                target.stream_key = format!("key{index}");
                 target
             })
             .collect();
@@ -14897,6 +14989,164 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("horizontal"), "{error}");
+    }
+
+    /// The nearest `-map N:v` above a URL names the encoded input its FLV leg
+    /// consumes.
+    fn video_input_for_url(args: &[String], url: &str) -> String {
+        let url_index = args
+            .iter()
+            .position(|arg| arg == url)
+            .unwrap_or_else(|| panic!("url {url} not in args: {args:?}"));
+        args[..url_index]
+            .windows(2)
+            .rev()
+            .find(|pair| pair[0] == "-map" && pair[1].ends_with(":v"))
+            .map(|pair| pair[1].clone())
+            .unwrap_or_else(|| panic!("no video map before {url}: {args:?}"))
+    }
+
+    fn simulcast_split_params(record_enabled: bool) -> (StartSessionParams, Vec<StreamTarget>) {
+        use crate::streaming::StreamOutputOrientation as Orientation;
+        let mut params = base_params(record_enabled, true);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6000,
+        };
+        let mut streaming =
+            streaming_with_orientations(&[Orientation::Horizontal, Orientation::Vertical]);
+        streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+        streaming.default_bitrate_kbps = 6000;
+        params.streaming = Some(streaming.clone());
+        params.simulcast = Some(simulcast_leg());
+        let targets = stream_targets_from_streaming(&streaming).unwrap();
+        (params, targets)
+    }
+
+    #[test]
+    fn simulcast_split_routes_targets_by_orientation_binding() {
+        let (params, targets) = simulcast_split_params(true);
+        let stream_output = recording_compositor_stream_output(
+            &params,
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+        )
+        .unwrap()
+        .expect("simulcast auxiliary output");
+        assert!(stream_output.composes_simulcast_scene);
+        assert_eq!((stream_output.width, stream_output.height), (1080, 1920));
+
+        let args = bridge_compositor_split_output_ffmpeg_args(
+            &CaptureInputs {
+                video: VideoInput::TestPattern,
+                camera_index: None,
+                microphone: None,
+            },
+            &params,
+            Some(Path::new("/tmp/videorc-simulcast-split.mkv")),
+            &targets,
+            Path::new("/tmp/videorc-simulcast-recording.h264"),
+            Path::new("/tmp/videorc-simulcast-stream.h264"),
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            stream_output,
+        )
+        .unwrap();
+
+        // The horizontal destination consumes the PRIMARY encode (input 1) and
+        // the vertical destination the simulcast encode (input 2) — routed by
+        // the explicit binding, not profile equality.
+        assert_eq!(
+            video_input_for_url(&args, "rtmp://a.rtmp.youtube.com/live2/key0"),
+            "1:v"
+        );
+        assert_eq!(
+            video_input_for_url(&args, "rtmp://a.rtmp.youtube.com/live2/key1"),
+            "2:v"
+        );
+        assert!(args.contains(&"/tmp/videorc-simulcast-split.mkv".to_string()));
+        assert!(!args.contains(&"tee".to_string()));
+        assert_eq!(
+            args.windows(2)
+                .filter(|window| window[0] == "-f" && window[1] == "fifo")
+                .count(),
+            2,
+            "every target stays an isolated fifo-muxer leg: {args:?}"
+        );
+    }
+
+    #[test]
+    fn simulcast_split_supports_stream_only_sessions() {
+        let (params, targets) = simulcast_split_params(false);
+        let stream_output = recording_compositor_stream_output(
+            &params,
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+        )
+        .unwrap()
+        .expect("stream-only simulcast auxiliary output");
+
+        let args = bridge_compositor_split_output_ffmpeg_args(
+            &CaptureInputs {
+                video: VideoInput::TestPattern,
+                camera_index: None,
+                microphone: None,
+            },
+            &params,
+            None,
+            &targets,
+            Path::new("/tmp/videorc-simulcast-recording.h264"),
+            Path::new("/tmp/videorc-simulcast-stream.h264"),
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            stream_output,
+        )
+        .unwrap();
+
+        assert!(
+            !args.iter().any(|arg| arg.ends_with(".mkv")),
+            "stream-only dual session must not write a file: {args:?}"
+        );
+        assert_eq!(
+            video_input_for_url(&args, "rtmp://a.rtmp.youtube.com/live2/key0"),
+            "1:v"
+        );
+        assert_eq!(
+            video_input_for_url(&args, "rtmp://a.rtmp.youtube.com/live2/key1"),
+            "2:v"
+        );
+    }
+
+    #[test]
+    fn simulcast_refuses_mixed_horizontal_profiles_and_stream_burned_captions() {
+        use crate::streaming::StreamOutputOrientation as Orientation;
+        // A horizontal target with a DIFFERENT profile would need a third
+        // encode — refuse with the profile-matching copy.
+        let (mut params, _) = simulcast_split_params(true);
+        if let Some(streaming) = params.streaming.as_mut() {
+            streaming.targets[0].output_preset = Some(VideoPreset::StreamSafe1080p60);
+        }
+        let error = recording_compositor_stream_output(
+            &params,
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("one horizontal encode"), "{error}");
+
+        // Captions burning the stream leg conflict with the simulcast aux.
+        let (mut params, _) = simulcast_split_params(true);
+        params.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: true,
+            burn_target: crate::captions::CaptionBurnTarget::Stream,
+            ..Default::default()
+        });
+        let error = validate_outputs(&params).unwrap_err().to_string();
+        assert!(error.contains("dual-orientation"), "{error}");
+
+        // Sanity: the untouched dual shape still validates.
+        let (params, _) = simulcast_split_params(true);
+        let _ = streaming_with_orientations(&[Orientation::Horizontal]);
+        validate_outputs(&params).unwrap();
     }
 
     #[test]
