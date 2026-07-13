@@ -23,6 +23,8 @@ import {
   isSelectableCaptureDevice,
   HORIZONTAL_LAYOUT_PRESETS,
   VERTICAL_LAYOUT_PRESETS,
+  coerceVideoToOrientation,
+  resolutionOptionsForOrientation,
   layoutPresetMemoryPatch,
   layoutPresetNeedsCamera,
   layoutPresetOrientation,
@@ -1579,5 +1581,95 @@ describe('vertical orientation video coupling', () => {
         landscape
       )
     ).toBeNull()
+  })
+})
+
+describe('canvas orientation lock (the Studio mode owns the orientation)', () => {
+  const landscape2k = { ...videoPresets['tutorial-1440p30'] }
+
+  it('transposes a landscape canvas entering a vertical scene and marks it Custom', () => {
+    expect(coerceVideoToOrientation(landscape2k, 'vertical')).toEqual({
+      ...landscape2k,
+      preset: 'custom',
+      width: 1440,
+      height: 2560
+    })
+  })
+
+  it('transposes a portrait canvas under a horizontal scene', () => {
+    const portrait = { ...videoPresets['vertical-1080x1920'] }
+    expect(coerceVideoToOrientation(portrait, 'horizontal')).toEqual({
+      ...portrait,
+      preset: 'custom',
+      width: 1920,
+      height: 1080
+    })
+  })
+
+  it('keeps a matching canvas untouched, preset included', () => {
+    expect(coerceVideoToOrientation(landscape2k, 'horizontal')).toBe(landscape2k)
+    const portrait = videoPresets['vertical-1080x1920']
+    expect(coerceVideoToOrientation(portrait, 'vertical')).toBe(portrait)
+    // Square canvases belong to neither orientation — never touched.
+    const square = { ...landscape2k, preset: 'custom' as const, width: 1080, height: 1080 }
+    expect(coerceVideoToOrientation(square, 'vertical')).toBe(square)
+    expect(coerceVideoToOrientation(square, 'horizontal')).toBe(square)
+  })
+
+  it('offers only same-orientation one-click resolutions per mode', () => {
+    for (const option of resolutionOptionsForOrientation('vertical')) {
+      expect(option.height).toBeGreaterThan(option.width)
+    }
+    for (const option of resolutionOptionsForOrientation('horizontal')) {
+      expect(option.width).toBeGreaterThan(option.height)
+    }
+    // The vertical list is the transposed twin of the landscape list, so the
+    // quality ladder is identical in both modes.
+    expect(
+      resolutionOptionsForOrientation('vertical').map(({ width, height }) => [height, width])
+    ).toEqual(
+      resolutionOptionsForOrientation('horizontal').map(({ width, height }) => [width, height])
+    )
+  })
+
+  it('normalizes a persisted landscape canvas under a vertical scene on load', () => {
+    // A pre-lock build could persist exactly the owner-screenshot state:
+    // vertical-split scene with a landscape 2K canvas.
+    vi.stubGlobal('localStorage', {
+      getItem: () =>
+        JSON.stringify({
+          layout: { layoutPreset: 'vertical-split' },
+          video: { preset: 'custom', width: 2560, height: 1440, fps: 30, bitrateKbps: 8000 }
+        }),
+      setItem: vi.fn(),
+      removeItem: vi.fn()
+    })
+    expect(loadCaptureConfig().video).toMatchObject({
+      preset: 'custom',
+      width: 1440,
+      height: 2560
+    })
+
+    // And the remembered landscape profile can never be portrait.
+    vi.stubGlobal('localStorage', {
+      getItem: () =>
+        JSON.stringify({
+          layout: { layoutPreset: 'vertical-split' },
+          video: { preset: 'custom', width: 1080, height: 1920, fps: 30, bitrateKbps: 9000 },
+          verticalRestoreVideo: {
+            preset: 'custom',
+            width: 1080,
+            height: 1920,
+            fps: 30,
+            bitrateKbps: 9000
+          }
+        }),
+      setItem: vi.fn(),
+      removeItem: vi.fn()
+    })
+    expect(loadCaptureConfig().verticalRestoreVideo).toMatchObject({
+      width: 1920,
+      height: 1080
+    })
   })
 })

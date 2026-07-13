@@ -11,20 +11,13 @@ import { Switch } from '@/components/ui/switch'
 import { VideoPresetSelectItems } from '@/components/video-preset-select-items'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { VideoPreset } from '@/lib/backend'
-import { videoProfileCompatibility } from '@/lib/capture'
+import {
+  layoutPresetOrientation,
+  resolutionOptionsForOrientation,
+  videoProfileCompatibility
+} from '@/lib/capture'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
-
-// One-click resolutions so nobody has to remember pixel counts; picking one patches
-// width/height (switching the preset to Custom), and the number fields below stay
-// available for anything else.
-const RESOLUTION_PRESETS = [
-  { label: '4K', detail: '3840 × 2160', width: 3840, height: 2160 },
-  { label: '2K', detail: '2560 × 1440', width: 2560, height: 1440 },
-  { label: '1080p', detail: '1920 × 1080', width: 1920, height: 1080 },
-  { label: '720p', detail: '1280 × 720', width: 1280, height: 720 },
-  { label: 'Vertical', detail: '1080 × 1920', width: 1080, height: 1920 }
-] as const
 
 export function RecordingTab(): ReactElement {
   const {
@@ -36,6 +29,12 @@ export function RecordingTab(): ReactElement {
     entitlements
   } = useStudioCore()
   const { video } = captureConfig
+  // One-click resolutions so nobody has to remember pixel counts; picking one
+  // patches width/height (switching the preset to Custom). The list follows
+  // the Studio mode — vertical mode offers only portrait canvases, so the
+  // canvas can never contradict the scene's orientation.
+  const orientation = layoutPresetOrientation(captureConfig.layout.layoutPreset)
+  const resolutionPresets = resolutionOptionsForOrientation(orientation)
   const compatibility = videoProfileCompatibility(captureConfig)
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
   const profileGate = videoProfileEntitlementGate({ entitlements, kind: 'recording', video })
@@ -77,7 +76,11 @@ export function RecordingTab(): ReactElement {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <VideoPresetSelectItems entitlements={entitlements} kind="recording" />
+                <VideoPresetSelectItems
+                  entitlements={entitlements}
+                  kind="recording"
+                  orientation={orientation}
+                />
               </SelectContent>
             </Select>
             <FieldDescription>
@@ -111,7 +114,7 @@ export function RecordingTab(): ReactElement {
           <Field>
             <FieldLabel>Resolution</FieldLabel>
             <div className="flex flex-wrap gap-2">
-              {RESOLUTION_PRESETS.map((preset) => (
+              {resolutionPresets.map((preset) => (
                 <button
                   aria-pressed={video.width === preset.width && video.height === preset.height}
                   className="cursor-pointer rounded-row border border-border px-3 py-2 text-left text-sm font-medium transition-colors duration-100 hover:bg-accent aria-pressed:border-ring aria-pressed:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
@@ -128,18 +131,21 @@ export function RecordingTab(): ReactElement {
           </Field>
 
           <div className="grid grid-cols-2 gap-4">
+            {/* Bounds are orientation-symmetric (a portrait canvas is the
+                transposed landscape one); patchVideo transposes any entry
+                that would contradict the Studio mode's orientation. */}
             <NumberField
               disabled={isSessionActive}
               label="Width"
               max={3840}
-              min={640}
+              min={360}
               value={video.width}
               onChange={(width) => patchVideo({ width })}
             />
             <NumberField
               disabled={isSessionActive}
               label="Height"
-              max={2160}
+              max={3840}
               min={360}
               value={video.height}
               onChange={(height) => patchVideo({ height })}

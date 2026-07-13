@@ -7956,8 +7956,26 @@ fn validate_outputs(params: &StartSessionParams) -> Result<()> {
     }
 
     validate_video_settings(&params.output.video)?;
+    validate_canvas_orientation(params)?;
     validate_caption_output_policy(params)?;
     validate_video_profile_policy(params)?;
+
+    Ok(())
+}
+
+/// The Studio mode owns the canvas orientation: vertical scenes compose a
+/// portrait canvas. The renderer transposes every canvas write to match the
+/// active scene (capture.ts::coerceVideoToOrientation); this refusal is the
+/// defense in depth so a mismatched config can never record vertical bands
+/// tiled across a landscape canvas (owner screenshot, 2026-07-13).
+fn validate_canvas_orientation(params: &StartSessionParams) -> Result<()> {
+    if params.layout.layout_preset.is_vertical()
+        && params.output.video.width > params.output.video.height
+    {
+        bail!(
+            "Vertical scenes record a portrait canvas — pick a portrait resolution or switch to horizontal mode."
+        );
+    }
 
     Ok(())
 }
@@ -8007,8 +8025,12 @@ fn validate_caption_output_policy(params: &StartSessionParams) -> Result<()> {
 }
 
 fn validate_video_settings(video: &VideoSettings) -> Result<()> {
-    if !(640..=3840).contains(&video.width) || !(360..=2160).contains(&video.height) {
-        bail!("Video resolution must be between 640x360 and 3840x2160");
+    // Bounds are orientation-symmetric: a portrait canvas is the transposed
+    // landscape one (vertical Studio mode records 1080×1920 up to 2160×3840).
+    let long_side = video.width.max(video.height);
+    let short_side = video.width.min(video.height);
+    if !(640..=3840).contains(&long_side) || !(360..=2160).contains(&short_side) {
+        bail!("Video resolution must be between 640x360 and 3840x2160 in either orientation");
     }
 
     if !(24..=60).contains(&video.fps) {
@@ -8540,7 +8562,9 @@ fn require_video_profile(
 }
 
 fn is_4k_video(video: &VideoSettings) -> bool {
-    video.width >= 3840 || video.height >= 2160
+    // Orientation-symmetric: a portrait 2160×3840 canvas is 4K, but the
+    // portrait 2K twin (1440×2560) is not just because its height crosses 2160.
+    video.width.max(video.height) >= 3840 || video.width.min(video.height) >= 2160
 }
 
 fn build_stream_url(settings: &RtmpSettings) -> Result<StreamTarget> {
@@ -14528,6 +14552,60 @@ mod tests {
         let mut params = base_params(true, false);
         params.output.video.fps = 120;
 
+        assert!(validate_outputs(&params).is_err());
+    }
+
+    #[test]
+    fn vertical_scene_requires_portrait_canvas() {
+        // The owner-screenshot state (2026-07-13): a vertical scene over a
+        // landscape 2K canvas records band stacks letterboxed on a phone.
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalSplit;
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 2560,
+            height: 1440,
+            fps: 30,
+            bitrate_kbps: 8000,
+        };
+        let error = validate_outputs(&params).unwrap_err().to_string();
+        assert!(error.contains("portrait canvas"), "{error}");
+
+        params.output.video.width = 1440;
+        params.output.video.height = 2560;
+        validate_outputs(&params).unwrap();
+    }
+
+    #[test]
+    fn canvas_bounds_are_orientation_symmetric() {
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalCameraTop;
+
+        // Portrait 4K is a legal canvas (the transposed landscape twin)…
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 2160,
+            height: 3840,
+            fps: 30,
+            bitrate_kbps: 30_000,
+        };
+        validate_outputs(&params).unwrap();
+
+        // …and the portrait 2K twin is NOT classified 4K just because its
+        // height crosses 2160 (it may run above 30 fps like landscape 2K).
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 1440,
+            height: 2560,
+            fps: 60,
+            bitrate_kbps: 8000,
+        };
+        validate_outputs(&params).unwrap();
+
+        // The short-side cap still holds in every orientation.
+        params.output.video.width = 2560;
+        params.output.video.height = 2560;
+        params.output.video.fps = 30;
         assert!(validate_outputs(&params).is_err());
     }
 

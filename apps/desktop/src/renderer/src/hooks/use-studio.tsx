@@ -29,6 +29,7 @@ import {
   bridgeStreamingToLegacy,
   buildCameraSources,
   areEnabledStreamTargetsStartReady,
+  coerceVideoToOrientation,
   defaultSettings,
   isPlatformOAuthAvailable,
   legacyStreamKeyMigrationCandidates,
@@ -52,6 +53,7 @@ import {
   smokePreviewCompositorCaptureConfig,
   sourceSelectionChangeEvents,
   layoutPresetMemoryPatch,
+  layoutPresetOrientation,
   STORAGE_KEYS,
   streamOutputVideosForTargets,
   streamOutputVideoSettings,
@@ -8183,7 +8185,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const patchVideo = useCallback((patch: Partial<VideoSettings>) => {
     setCaptureConfig((current) => ({
       ...current,
-      video: { ...current.video, ...patch, preset: 'custom' }
+      // The Studio mode owns the canvas orientation — a patch that would
+      // contradict the active scene's orientation transposes width/height.
+      video: coerceVideoToOrientation(
+        { ...current.video, ...patch, preset: 'custom' },
+        layoutPresetOrientation(current.layout.layoutPreset)
+      )
     }))
   }, [])
 
@@ -8203,7 +8210,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
 
-      setCaptureConfig((current) => ({ ...current, video }))
+      setCaptureConfig((current) => ({
+        ...current,
+        video: coerceVideoToOrientation(
+          video,
+          layoutPresetOrientation(current.layout.layoutPreset)
+        )
+      }))
     },
     [entitlements]
   )

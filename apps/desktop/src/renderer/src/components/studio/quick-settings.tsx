@@ -36,7 +36,8 @@ import {
   microphonePickerDevices,
   layoutPresetNeedsCamera,
   layoutPresetNeedsScreen,
-  layoutPresetOrientation
+  layoutPresetOrientation,
+  resolutionOptionsForOrientation
 } from '@/lib/capture'
 
 // Lazy like the tab chunks (app-shell): the preview (and the live-waveform it
@@ -70,16 +71,6 @@ function presetLabel(preset: LayoutPreset): string {
       ?.label ?? preset
   )
 }
-
-// Resolution options mirroring the Output tab (recording-tab.tsx); picking one
-// patches width/height (the preset becomes Custom), exactly like that tab.
-const RESOLUTIONS = [
-  { label: '4K', detail: '3840 × 2160', width: 3840, height: 2160 },
-  { label: '2K', detail: '2560 × 1440', width: 2560, height: 1440 },
-  { label: '1080p', detail: '1920 × 1080', width: 1920, height: 1080 },
-  { label: '720p', detail: '1280 × 720', width: 1280, height: 720 },
-  { label: 'Vertical', detail: '1080 × 1920', width: 1080, height: 1920 }
-]
 
 function resolutionKey(width: number, height: number): string {
   return `${width}x${height}`
@@ -155,8 +146,14 @@ export function QuickSettings(): ReactElement {
   const hasScreen = Boolean(selectedCaptureId)
   const muted = captureConfig.audio.microphoneMuted
   const MuteIcon = muted ? SpeakerSlash : SpeakerHigh
+  // Resolution options mirror the Output tab (recording-tab.tsx) and follow
+  // the Studio mode — vertical mode offers only portrait canvases (the mode
+  // toggle is the one home for orientation).
+  const resolutions = resolutionOptionsForOrientation(
+    layoutPresetOrientation(captureConfig.layout.layoutPreset)
+  )
   const currentResolution = resolutionKey(captureConfig.video.width, captureConfig.video.height)
-  const knownResolution = RESOLUTIONS.some(
+  const knownResolution = resolutions.some(
     (resolution) => resolutionKey(resolution.width, resolution.height) === currentResolution
   )
 
@@ -311,7 +308,7 @@ export function QuickSettings(): ReactElement {
           disabled={isSessionActive}
           value={knownResolution ? currentResolution : ''}
           onValueChange={(value) => {
-            const match = RESOLUTIONS.find(
+            const match = resolutions.find(
               (resolution) => resolutionKey(resolution.width, resolution.height) === value
             )
             if (match) {
@@ -325,7 +322,7 @@ export function QuickSettings(): ReactElement {
             <SelectValue placeholder="Custom">{recordingQuality(captureConfig.video)}</SelectValue>
           </SelectTrigger>
           <SelectContent>
-            {RESOLUTIONS.map((resolution) => (
+            {resolutions.map((resolution) => (
               <SelectItem
                 key={resolution.label}
                 value={resolutionKey(resolution.width, resolution.height)}

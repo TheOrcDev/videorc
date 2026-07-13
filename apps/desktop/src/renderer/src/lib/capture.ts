@@ -128,6 +128,57 @@ export type VerticalOrientationVideoPatch = {
 }
 
 /**
+ * The Studio mode owns the canvas orientation: vertical mode records a
+ * portrait canvas, horizontal a landscape one. Any video change that would
+ * contradict the active scene's orientation transposes width/height — the
+ * quality choice survives, the preset honestly becomes Custom. Every canvas
+ * write flows through this (patchVideo, applyVideoPreset, config load), and
+ * the backend refuses a mismatched session start as defense in depth.
+ */
+export function coerceVideoToOrientation(
+  video: VideoSettings,
+  orientation: LayoutOrientation
+): VideoSettings {
+  const transpose =
+    orientation === 'vertical' ? video.width > video.height : video.height > video.width
+  if (!transpose) {
+    return video
+  }
+  return { ...video, preset: 'custom', width: video.height, height: video.width }
+}
+
+export type ResolutionOption = {
+  label: string
+  detail: string
+  width: number
+  height: number
+}
+
+// One-click canvas sizes offered by Quick Settings and the Output tab. Each
+// Studio mode gets its own list — the vertical options are the transposed
+// twins of the landscape ones, so orientation can never contradict the mode
+// (the mode toggle is the one home for orientation).
+const HORIZONTAL_RESOLUTION_OPTIONS: ResolutionOption[] = [
+  { label: '4K', detail: '3840 × 2160', width: 3840, height: 2160 },
+  { label: '2K', detail: '2560 × 1440', width: 2560, height: 1440 },
+  { label: '1080p', detail: '1920 × 1080', width: 1920, height: 1080 },
+  { label: '720p', detail: '1280 × 720', width: 1280, height: 720 }
+]
+
+const VERTICAL_RESOLUTION_OPTIONS: ResolutionOption[] = [
+  { label: '4K', detail: '2160 × 3840', width: 2160, height: 3840 },
+  { label: '2K', detail: '1440 × 2560', width: 1440, height: 2560 },
+  { label: '1080p', detail: '1080 × 1920', width: 1080, height: 1920 },
+  { label: '720p', detail: '720 × 1280', width: 720, height: 1280 }
+]
+
+export function resolutionOptionsForOrientation(
+  orientation: LayoutOrientation
+): ResolutionOption[] {
+  return orientation === 'vertical' ? VERTICAL_RESOLUTION_OPTIONS : HORIZONTAL_RESOLUTION_OPTIONS
+}
+
+/**
  * Off-air orientation coupling for the Studio modes: entering a vertical
  * scene flips the canvas to the portrait profile and remembers the landscape
  * settings; leaving restores exactly what was there. Returns null when no
@@ -694,17 +745,24 @@ export function loadCaptureConfig(): CaptureConfig {
     defaultCaptureConfig
   ) as Partial<CaptureConfig>
   const { testPattern: _loadedTestPattern, ...loadedSources } = loaded.sources ?? {}
+  const layout = normalizeLayoutSettings(loaded.layout)
 
   return {
     ...defaultCaptureConfig,
     ...loaded,
     sources: { ...defaultCaptureConfig.sources, ...loadedSources, testPattern: false },
-    layout: normalizeLayoutSettings(loaded.layout),
+    layout,
     audio: normalizeAudioSettings(loaded.audio),
-    video: normalizeVideoSettings(loaded.video),
+    // A persisted canvas that contradicts the persisted scene's orientation
+    // (e.g. a landscape 2K under a vertical scene, saved by a pre-lock build)
+    // normalizes to the mode's orientation on load.
+    video: coerceVideoToOrientation(
+      normalizeVideoSettings(loaded.video),
+      layoutPresetOrientation(layout.layoutPreset)
+    ),
     verticalRestoreVideo:
       loaded.verticalRestoreVideo != null
-        ? normalizeVideoSettings(loaded.verticalRestoreVideo)
+        ? coerceVideoToOrientation(normalizeVideoSettings(loaded.verticalRestoreVideo), 'horizontal')
         : null,
     lastHorizontalPreset: normalizeRememberedPreset(loaded.lastHorizontalPreset, 'horizontal'),
     lastVerticalPreset: normalizeRememberedPreset(loaded.lastVerticalPreset, 'vertical'),
