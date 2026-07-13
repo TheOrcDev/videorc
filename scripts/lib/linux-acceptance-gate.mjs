@@ -87,7 +87,6 @@ export async function runAcceptanceGate(argv = process.argv) {
   const manifestPath = argv[2]
   if (!manifestPath) {
     console.error('Usage: node scripts/lib/linux-acceptance-gate.mjs <manifest.json>')
-    process.exitCode = 1
     return 1
   }
 
@@ -96,7 +95,6 @@ export async function runAcceptanceGate(argv = process.argv) {
     raw = await readFile(manifestPath, 'utf8')
   } catch (error) {
     console.error(String(error.message || error))
-    process.exitCode = 1
     return 1
   }
 
@@ -105,7 +103,6 @@ export async function runAcceptanceGate(argv = process.argv) {
     manifest = JSON.parse(raw)
   } catch (error) {
     console.error(`failed to parse manifest JSON: ${error.message}`)
-    process.exitCode = 1
     return 1
   }
 
@@ -114,7 +111,6 @@ export async function runAcceptanceGate(argv = process.argv) {
     for (const failure of failures) {
       console.error(failure)
     }
-    process.exitCode = 1
     return 1
   }
 
