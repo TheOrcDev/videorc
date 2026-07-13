@@ -42,7 +42,8 @@ export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
       maxHeight: 1080,
       maxFps: 30,
       maxBitrateKbps: 6000,
-      maxDestinations: 1
+      maxDestinations: 1,
+      maxDestinationsPerOrientation: 1
     }
   }
 }

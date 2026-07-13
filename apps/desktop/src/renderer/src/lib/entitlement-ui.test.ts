@@ -51,7 +51,8 @@ const premiumEntitlements: EntitlementsSnapshot = {
       maxHeight: 2160,
       maxFps: 30,
       maxBitrateKbps: 30000,
-      maxDestinations: 3
+      maxDestinations: 6,
+      maxDestinationsPerOrientation: 3
     }
   }
 }
@@ -67,6 +68,13 @@ const developerEntitlements: EntitlementsSnapshot = {
   }))
 }
 
+function gateSettings(enabledTargetIds: string[]) {
+  return {
+    enabledTargetIds,
+    targets: ['youtube', 'twitch', 'x', 'custom'].map((id) => ({ id }))
+  }
+}
+
 function destinationGate(
   enabledTargetIds: string[],
   targetId: string,
@@ -74,7 +82,7 @@ function destinationGate(
 ) {
   return streamingDestinationEnableGate({
     entitlements,
-    streaming: { enabledTargetIds },
+    streaming: gateSettings(enabledTargetIds),
     targetId
   })
 }
@@ -121,7 +129,7 @@ describe('entitlement UI gates', () => {
     expect(
       goLiveEntitlementGate({
         entitlements: basicEntitlements,
-        streaming: { enabledTargetIds: ['youtube', 'twitch'] }
+        streaming: gateSettings(['youtube', 'twitch'])
       })
     ).toEqual({
       allowed: false,
@@ -139,7 +147,7 @@ describe('entitlement UI gates', () => {
     expect(destinationGate(['youtube', 'twitch', 'x'], 'custom', premiumEntitlements)).toEqual({
       allowed: false,
       featureId: 'multistreaming',
-      reason: 'Your current plan allows up to 3 streaming destinations.'
+      reason: 'Your current plan allows up to 3 horizontal streaming destinations.'
     })
   })
 
@@ -155,14 +163,14 @@ describe('entitlement UI gates', () => {
     expect(
       goLiveEntitlementGate({
         entitlements: basicEntitlements,
-        streaming: { enabledTargetIds: ['youtube'] }
+        streaming: gateSettings(['youtube'])
       })
     ).toEqual({ allowed: true })
 
     expect(
       goLiveEntitlementGate({
         entitlements: premiumEntitlements,
-        streaming: { enabledTargetIds: ['youtube', 'twitch', 'x'] }
+        streaming: gateSettings(['youtube', 'twitch', 'x'])
       })
     ).toEqual({ allowed: true })
   })
@@ -271,7 +279,7 @@ describe('entitlement UI gates', () => {
       destinationGate(['youtube'], 'twitch'),
       goLiveEntitlementGate({
         entitlements: basicEntitlements,
-        streaming: { enabledTargetIds: ['youtube', 'twitch'] }
+        streaming: gateSettings(['youtube', 'twitch'])
       }),
       cloudAiUploadGate(basicEntitlements),
       noiseCleanupGate(basicEntitlements),

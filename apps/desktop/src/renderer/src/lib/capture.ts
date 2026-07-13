@@ -10,6 +10,7 @@ import type {
   LayoutSettings,
   RtmpPreset,
   SideBySideSplit,
+  SimulcastParams,
   SourceSelection,
   StreamingSettings,
   StreamPlatform,
@@ -146,6 +147,50 @@ export function coerceVideoToOrientation(
     return video
   }
   return { ...video, preset: 'custom', width: video.height, height: video.width }
+}
+
+/**
+ * Whether this config arms the dual-orientation simulcast leg: streaming is
+ * on, at least one enabled destination is vertical-bound, and the Studio is
+ * editing a horizontal scene (the vertical leg composes from vertical-mode
+ * memory). In vertical Studio mode the single canvas IS portrait — no second
+ * leg exists to arm.
+ */
+export function simulcastArmed(
+  config: Pick<CaptureConfig, 'streamEnabled' | 'streaming' | 'layout'>
+): boolean {
+  return (
+    config.streamEnabled &&
+    config.streaming.enabled &&
+    layoutPresetOrientation(config.layout.layoutPreset) === 'horizontal' &&
+    config.streaming.targets.some(
+      (target) =>
+        target.enabled &&
+        target.outputOrientation === 'vertical' &&
+        config.streaming.enabledTargetIds.includes(target.id)
+    )
+  )
+}
+
+/**
+ * The vertical leg's session params, built from vertical-mode memory: the
+ * remembered vertical scene preset on the transposed (portrait) canvas.
+ * Camera transform memory stays preset-mode — vertical scenes are band/full
+ * layouts, and a landscape custom drag must never leak into the portrait leg.
+ */
+export function buildSimulcastParams(config: CaptureConfig): SimulcastParams | undefined {
+  if (!simulcastArmed(config)) {
+    return undefined
+  }
+  return {
+    layout: {
+      ...config.layout,
+      layoutPreset: config.lastVerticalPreset,
+      cameraTransformMode: 'preset',
+      cameraTransform: null
+    },
+    video: coerceVideoToOrientation(config.video, 'vertical')
+  }
 }
 
 export type ResolutionOption = {
@@ -1179,6 +1224,12 @@ function normalizeStreamTarget(
       typeof saved.outputBitrateKbps === 'number'
         ? clampNumber(saved.outputBitrateKbps, 6000, 1000, 50000)
         : undefined,
+    // Leg binding survives reloads; anything unexpected (and every legacy
+    // config) falls back to the platform default's orientation.
+    outputOrientation:
+      saved.outputOrientation === 'horizontal' || saved.outputOrientation === 'vertical'
+        ? saved.outputOrientation
+        : base.outputOrientation,
     createdAt: typeof saved.createdAt === 'string' ? saved.createdAt : base.createdAt,
     updatedAt: typeof saved.updatedAt === 'string' ? saved.updatedAt : base.updatedAt
   }

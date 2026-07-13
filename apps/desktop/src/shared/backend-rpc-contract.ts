@@ -244,7 +244,8 @@ const entitlementsSchema = objectSchema(
             maxHeight: numberSchema({ integer: true, min: 1, max: 65_536 }),
             maxFps: numberSchema({ integer: true, min: 1, max: 1000 }),
             maxBitrateKbps: nonNegativeInteger,
-            maxDestinations: numberSchema({ integer: true, min: 1, max: 1000 })
+            maxDestinations: numberSchema({ integer: true, min: 1, max: 1000 }),
+            maxDestinationsPerOrientation: numberSchema({ integer: true, min: 1, max: 1000 })
           },
           { allowUnknown: false }
         )
@@ -636,7 +637,19 @@ const sessionStartParamsSchema = objectSchema(
     ),
     audio: optionalSchema(boundedBackendParamValueSchema),
     streaming: optionalSchema(boundedBackendParamValueSchema),
-    captions: optionalSchema(boundedBackendParamValueSchema)
+    captions: optionalSchema(boundedBackendParamValueSchema),
+    // Dual-orientation simulcast: the vertical leg's layout is validated with
+    // the same strict layout schema as the primary.
+    simulcast: optionalSchema(
+      objectSchema(
+        {
+          layout: layoutSchema,
+          scene: optionalSchema(sceneSchema),
+          video: boundedBackendParamValueSchema
+        },
+        { allowUnknown: false }
+      )
+    )
   },
   { allowUnknown: false }
 )

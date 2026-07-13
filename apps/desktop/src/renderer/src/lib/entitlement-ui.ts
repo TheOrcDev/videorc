@@ -1,4 +1,10 @@
-import type { EntitlementsSnapshot, FeatureId, StreamingSettings, VideoSettings } from './backend'
+import type {
+  EntitlementsSnapshot,
+  FeatureId,
+  StreamOutputOrientation,
+  StreamTargetSettings,
+  VideoSettings
+} from './backend'
 import {
   DEFAULT_BASIC_ENTITLEMENTS,
   entitlementDisabledReason,
@@ -16,15 +22,22 @@ export type EntitlementUiGate =
       allowFixAction?: boolean
     }
 
+/** The slice of streaming settings the destination gates read: enabled ids
+ *  plus each target's leg binding (absent = horizontal). */
+export interface StreamingGateSettings {
+  enabledTargetIds: string[]
+  targets: ReadonlyArray<Pick<StreamTargetSettings, 'id' | 'outputOrientation'>>
+}
+
 export interface StreamingDestinationEnableGateInput {
   entitlements: EntitlementsSnapshot | null
-  streaming: Pick<StreamingSettings, 'enabledTargetIds'>
+  streaming: StreamingGateSettings
   targetId: string
 }
 
 export interface GoLiveEntitlementGateInput {
   entitlements: EntitlementsSnapshot | null
-  streaming: Pick<StreamingSettings, 'enabledTargetIds'>
+  streaming: StreamingGateSettings
 }
 
 export interface VideoProfileEntitlementGateInput {
@@ -48,11 +61,19 @@ export function streamingDestinationEnableGate({
   }
 
   const maxDestinations = streamingMaxDestinations(entitlements)
-  if (streaming.enabledTargetIds.length < maxDestinations) {
-    return { allowed: true }
+  if (streaming.enabledTargetIds.length >= maxDestinations) {
+    return destinationsLimitGate(entitlements, maxDestinations)
   }
 
-  return destinationsLimitGate(entitlements, maxDestinations)
+  // Per-orientation cap: each composed leg fans out ONE encode; 3 targets per
+  // leg is the tested shape, so enabling counts against the target's leg.
+  const orientation = targetOrientation(streaming, targetId)
+  const perOrientationCap = streamingMaxDestinationsPerOrientation(entitlements)
+  if (enabledCountForOrientation(streaming, orientation) >= perOrientationCap) {
+    return destinationsLimitGate(entitlements, perOrientationCap, orientation)
+  }
+
+  return { allowed: true }
 }
 
 export function goLiveEntitlementGate({
@@ -65,11 +86,17 @@ export function goLiveEntitlementGate({
   }
 
   const maxDestinations = streamingMaxDestinations(entitlements)
-  if (streaming.enabledTargetIds.length <= maxDestinations) {
+  const perOrientationCap = streamingMaxDestinationsPerOrientation(entitlements)
+  const overOrientation = (['horizontal', 'vertical'] as const).find(
+    (orientation) => enabledCountForOrientation(streaming, orientation) > perOrientationCap
+  )
+  if (streaming.enabledTargetIds.length <= maxDestinations && !overOrientation) {
     return { allowed: true }
   }
 
-  const limitGate = destinationsLimitGate(entitlements, maxDestinations)
+  const limitGate = overOrientation
+    ? destinationsLimitGate(entitlements, perOrientationCap, overOrientation)
+    : destinationsLimitGate(entitlements, maxDestinations)
   if (limitGate.allowed) {
     return limitGate
   }
@@ -139,14 +166,34 @@ function featureGate(
 
 function destinationsLimitGate(
   entitlements: EntitlementsSnapshot | null,
-  maxDestinations: number
+  maxDestinations: number,
+  orientation?: StreamOutputOrientation
 ): EntitlementUiGate {
+  const scope = orientation ? `${orientation} streaming destinations` : 'streaming destinations'
   const reason = !isFeatureEntitled(entitlements, 'multistreaming')
     ? (entitlementDisabledReason(entitlements, 'multistreaming') ??
       'Multistreaming requires Videorc Premium.')
-    : `Your current plan allows up to ${maxDestinations} streaming destinations.`
+    : `Your current plan allows up to ${maxDestinations} ${scope}.`
 
   return lockedGate('multistreaming', reason)
+}
+
+function targetOrientation(
+  streaming: Pick<StreamingGateSettings, 'targets'>,
+  targetId: string
+): StreamOutputOrientation {
+  return (
+    streaming.targets.find((target) => target.id === targetId)?.outputOrientation ?? 'horizontal'
+  )
+}
+
+function enabledCountForOrientation(
+  streaming: StreamingGateSettings,
+  orientation: StreamOutputOrientation
+): number {
+  return streaming.enabledTargetIds.filter(
+    (id) => targetOrientation(streaming, id) === orientation
+  ).length
 }
 
 function lockedGate(
@@ -167,6 +214,15 @@ function streamingMaxDestinations(entitlements: EntitlementsSnapshot | null): nu
   return (
     entitlements?.limits.streaming.maxDestinations ??
     DEFAULT_BASIC_ENTITLEMENTS.limits.streaming.maxDestinations
+  )
+}
+
+function streamingMaxDestinationsPerOrientation(
+  entitlements: EntitlementsSnapshot | null
+): number {
+  return (
+    entitlements?.limits.streaming.maxDestinationsPerOrientation ??
+    DEFAULT_BASIC_ENTITLEMENTS.limits.streaming.maxDestinationsPerOrientation
   )
 }
 

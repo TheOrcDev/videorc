@@ -22,6 +22,18 @@ pub enum StreamPlatform {
     Custom,
 }
 
+/// Which composed leg a destination consumes in a dual-orientation session.
+/// EXPLICIT per-target property (one home) — never inferred from resolution
+/// equality, which ties when recording and vertical stream share 1080×1920.
+/// Absent (legacy configs) means horizontal.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamOutputOrientation {
+    #[default]
+    Horizontal,
+    Vertical,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum StreamUrlMode {
@@ -100,10 +112,19 @@ pub struct StreamTargetSettings {
     pub output_preset: Option<VideoPreset>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_bitrate_kbps: Option<u32>,
+    /// Dual-orientation leg binding; absent = horizontal (legacy migration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_orientation: Option<StreamOutputOrientation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<StreamTargetStatus>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl StreamTargetSettings {
+    pub fn effective_output_orientation(&self) -> StreamOutputOrientation {
+        self.output_orientation.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -540,6 +561,7 @@ fn default_stream_target(
         // The renderer owns timestamps; the backend default leaves them blank.
         created_at: String::new(),
         updated_at: String::new(),
+        output_orientation: None,
     }
 }
 
