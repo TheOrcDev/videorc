@@ -14,6 +14,58 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  acceptance-contract-gate:
+    name: Linux Slice-0 acceptance contract checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate Slice-0 acceptance contract
+        run: |
+          node --test scripts/lib/linux-acceptance-gate.test.mjs
+          if node scripts/lib/linux-acceptance-gate.mjs; then
+            echo "expected acceptance gate with missing manifest to fail"
+            exit 1
+          fi
+          mkdir -p /tmp/videorc-linux-acceptance
+          cat > /tmp/videorc-linux-acceptance/manifest.json <<'JSON'
+          {
+            "gnome-wayland": {"ok": true, "evidence": ["session-type", "wayland-socket"]},
+            "portal": {"ok": true, "evidence": ["session-created", "source-selected"]},
+            "pipewire": {"ok": true, "evidence": ["stream-opened", "node-connected"]},
+            "screen-capture": {"ok": true, "evidence": ["screen-source"]},
+            "preview": {"ok": true, "evidence": ["preview-alive"]},
+            "encoder": {"ok": true, "evidence": ["encoder-path"]},
+            "final-artifact": {"ok": true, "evidence": ["ffprobe-check"]},
+            "av-sync": {"ok": true, "evidence": ["av-offset"]},
+            "process-cleanup": {"ok": true, "evidence": ["no-stale-process"]},
+            "redaction": {"ok": true, "evidence": ["paths-redacted", "tokens-removed"]}
+          }
+          JSON
+          pnpm acceptance:linux:verify /tmp/videorc-linux-acceptance/manifest.json
+          echo '{"portal": {"ok": true, "evidence": ["session-created"]}}' > /tmp/videorc-linux-acceptance/manifest.json
+          if node scripts/lib/linux-acceptance-gate.mjs /tmp/videorc-linux-acceptance/manifest.json >/tmp/videorc-linux-acceptance/failed.log 2>&1; then
+            echo "expected incomplete manifest to fail"
+            exit 1
+          fi
+          cat /tmp/videorc-linux-acceptance/failed.log
+
   gates:
     name: Linux gates (Rust + JS)
     runs-on: ubuntu-latest
