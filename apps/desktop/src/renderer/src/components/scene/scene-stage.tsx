@@ -306,19 +306,35 @@ function StageSourceRect({
         x={x}
         y={y}
       />
-      {/* Label only when the rect is big enough to hold it. */}
+      {/* Label only when the rect is big enough to hold it. Shaped camera
+          bubbles (circle / strongly rounded) cut the rect's corners away, so
+          the bottom-left anchor would float OUTSIDE the visible shape —
+          center the label in those. Rectangles keep bottom-left: the HTML
+          legend chips overlay the stage's top-left, so a rect touching the
+          top edge (side-by-side's screen box) had its label buried under the
+          chips (plan 021 F4). */}
       {width > 24 && height > 10 ? (
-        <text
-          className={cn('select-none', camera ? 'fill-primary' : 'fill-muted-foreground')}
-          fontSize={4.2}
-          x={x + 2.5}
-          // Bottom-left of the rect: the HTML legend chips overlay the stage's
-          // top-left, so a rect touching the top edge (side-by-side's screen
-          // box) had its label buried under the chips (plan 021 F4).
-          y={y + height - 2.5}
-        >
-          {source.name}
-        </text>
+        cornerRadius >= Math.min(width, height) / 4 ? (
+          <text
+            className={cn('select-none', camera ? 'fill-primary' : 'fill-muted-foreground')}
+            dominantBaseline="central"
+            fontSize={4.2}
+            textAnchor="middle"
+            x={x + width / 2}
+            y={y + height / 2}
+          >
+            {source.name}
+          </text>
+        ) : (
+          <text
+            className={cn('select-none', camera ? 'fill-primary' : 'fill-muted-foreground')}
+            fontSize={4.2}
+            x={x + 2.5}
+            y={y + height - 2.5}
+          >
+            {source.name}
+          </text>
+        )
       ) : null}
     </g>
   )

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { LayoutSettings, SceneSource } from './backend'
 import {
+  effectiveCameraMaskShape,
   previewProofBackgroundStageMargin,
   previewProofLayerFit,
   previewProofLayerShape
@@ -95,5 +96,9 @@ describe('Windows proof-surface geometry', () => {
       'rectangle'
     )
     expect(previewProofLayerShape(screen, layout())).toBeUndefined()
+    // The scene-editing stage depicts the same policy through this helper —
+    // a circle in the editor that records as a rectangle is a WYSIWYG lie.
+    expect(effectiveCameraMaskShape(layout({ cameraShape: 'circle' }))).toBe('circle')
+    expect(effectiveCameraMaskShape(layout({ layoutPreset: 'side-by-side' }))).toBe('rectangle')
   })
 })
