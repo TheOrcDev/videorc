@@ -35,6 +35,7 @@ import {
   layoutPresetNeedsScreen,
   layoutPresetOrientation
 } from '@/lib/capture'
+import { effectiveCameraMaskShape } from '../../../../shared/native-preview-proof-geometry'
 
 // Mode-scoped like the Scenes gallery: the tab edits the current
 // orientation's scenes; the gallery's header toggle switches modes.
@@ -167,7 +168,7 @@ export function LayoutTab(): ReactElement {
             // WYSIWYG: only the inset scenes mask the camera bubble (backend
             // camera_mask policy) — side-by-side and the vertical bands render
             // a plain rectangle, so the schematic must too.
-            cameraShape={showOverlayControls ? layout.cameraShape : 'rectangle'}
+            cameraShape={effectiveCameraMaskShape(layout)}
             dragEnabled={showOverlayControls && !isSessionActive}
             hasBackground={Boolean(scene?.background)}
             outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}

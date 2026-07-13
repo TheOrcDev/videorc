@@ -575,7 +575,7 @@ fn unavailable_status(message: Option<String>) -> PreviewSurfaceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compositor::{compositor_status, stop_compositor};
+    use crate::compositor::{compositor_latest_frame_evidence, compositor_status, stop_compositor};
     use crate::native_preview_host::{NativePreviewHostActivation, NativePreviewHostCommandKind};
     use crate::protocol::{CompositorState, PreviewSurfaceBounds};
     use crate::storage::Database;
@@ -900,6 +900,59 @@ mod tests {
         assert_eq!(status.run_id, recording_status.run_id);
         assert_eq!(status.width, 640);
         assert_eq!(status.height, 360);
+    }
+
+    async fn wait_for_frame_dimensions(state: &AppState, width: u32, height: u32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(evidence) = compositor_latest_frame_evidence(state).await
+                && evidence.width == width
+                && evidence.height == height
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "compositor never published a {width}x{height} frame (latest: {:?})",
+                compositor_latest_frame_evidence(state).await
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn bounds_update_reshapes_the_live_preview_compositor() {
+        // The stale-orientation preview bug: the render loop latched its
+        // spawn-time dimensions, so an off-air canvas flip (orientation
+        // toggle) resized the surface bounds and the compositor STATUS while
+        // frames kept publishing at the OLD size until the next recording
+        // start rebuilt the pipeline. The loop must reshape mid-stream.
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(960.0, 540.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await;
+        wait_for_frame_dimensions(&state, 960, 540).await;
+
+        update_preview_surface_bounds(
+            &state,
+            PreviewSurfaceBoundsParams {
+                bounds: bounds(540.0, 960.0),
+            },
+        )
+        .await;
+
+        wait_for_frame_dimensions(&state, 540, 960).await;
+        let status = compositor_status(&state).await;
+        destroy_preview_surface(&state).await;
+
+        assert_eq!(status.width, 540);
+        assert_eq!(status.height, 960);
     }
 
     #[tokio::test]

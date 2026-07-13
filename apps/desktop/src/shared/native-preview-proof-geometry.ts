@@ -57,6 +57,19 @@ export function previewProofLayerFit(
     : 'contain'
 }
 
+/**
+ * The camera mask the render paths actually draw: only the inset scenes
+ * (screen-camera and its vertical twin) shape the bubble; band, region, and
+ * full-frame scenes keep the camera rectangular. Mirrors Rust `camera_mask` —
+ * every surface that DEPICTS the camera (proof surface, scene-editing stage)
+ * must use this, or the editor shows a circle the recording won't have.
+ */
+export function effectiveCameraMaskShape(layout: LayoutSettings): CameraShape {
+  return layout.layoutPreset === 'screen-camera' || layout.layoutPreset === 'vertical-screen-camera'
+    ? layout.cameraShape
+    : 'rectangle'
+}
+
 export function previewProofLayerShape(
   source: SceneSource,
   layout: LayoutSettings
@@ -64,8 +77,5 @@ export function previewProofLayerShape(
   if (source.kind !== 'camera') {
     return undefined
   }
-  // Only the inset scenes shape the camera bubble — mirrors Rust camera_mask.
-  return layout.layoutPreset === 'screen-camera' || layout.layoutPreset === 'vertical-screen-camera'
-    ? layout.cameraShape
-    : 'rectangle'
+  return effectiveCameraMaskShape(layout)
 }
