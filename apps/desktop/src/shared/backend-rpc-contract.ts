@@ -212,7 +212,7 @@ function normalizeEnum<T extends string>(
   }
 }
 
-const mediaBackendPolicySchema = runtimeSchema<MediaPolicySelection['requested']>(
+const mediaBackendPolicySchema = runtimeSchema<MediaBackendPolicyContract>(
   'a linux media backend policy',
   (value, path) => {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -231,25 +231,25 @@ const mediaBackendPolicySchema = runtimeSchema<MediaPolicySelection['requested']
       'pipewire',
       `${path}.audio`
     )
-    const compositor = normalizeEnum<string>(
+    const compositor = normalizeEnum<(typeof mediaCompositorBackendValues)[number]>(
       record.compositor,
       mediaCompositorBackendValues,
       'automatic',
       `${path}.compositor`
     )
-    const preview = normalizeEnum<string>(
+    const preview = normalizeEnum<(typeof mediaPreviewBackendValues)[number]>(
       record.preview,
       mediaPreviewBackendValues,
       'automatic',
       `${path}.preview`
     )
-    const recordingEncoder = normalizeEnum<string>(
+    const recordingEncoder = normalizeEnum<(typeof mediaEncoderBackendValues)[number]>(
       record.recordingEncoder,
       mediaEncoderBackendValues,
       'automatic',
       `${path}.recordingEncoder`
     )
-    const streamingEncoder = normalizeEnum<string>(
+    const streamingEncoder = normalizeEnum<(typeof mediaEncoderBackendValues)[number]>(
       record.streamingEncoder,
       mediaEncoderBackendValues,
       'automatic',
@@ -277,11 +277,11 @@ const mediaBackendPolicySchema = runtimeSchema<MediaPolicySelection['requested']
         benchmarkRecommendation: optionalSchema(enumSchema(mediaPolicyBenchmarkValues))
       },
       { allowUnknown: false }
-    ).parse(normalized, path) as MediaPolicySelection['selected']
+    ).parse(normalized, path) as MediaBackendPolicyContract
   }
-) as RuntimeSchema<MediaPolicySelection['selected']>
+) as RuntimeSchema<MediaBackendPolicyContract>
 
-const mediaPolicyRequestSchema = runtimeSchema<MediaPolicySelection['requested']>(
+const mediaPolicyRequestSchema = runtimeSchema<MediaPolicyRequest>(
   'a linux media policy request',
   (value, path) => {
     const record = objectSchema(
@@ -292,7 +292,7 @@ const mediaPolicyRequestSchema = runtimeSchema<MediaPolicySelection['requested']
       { allowUnknown: false }
     ).parse(value, path) as MediaPolicySelection['requested']
 
-    const normalizedIntent = normalizeEnum<string>(
+    const normalizedIntent = normalizeEnum<MediaPolicyRequest['intent']>(
       record.intent,
       mediaPolicyPresetValues,
       'automatic',
