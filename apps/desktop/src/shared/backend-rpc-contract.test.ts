@@ -330,9 +330,7 @@ describe('backend RPC contract', () => {
       }
     } as const
 
-    expect(
-      validateBackendRpcParams('session.start', validSessionStartParams)
-    ).toMatchObject({
+    expect(validateBackendRpcParams('session.start', validSessionStartParams)).toMatchObject({
       mediaPolicy: {
         requested: {
           intent: 'automatic'
@@ -340,8 +338,11 @@ describe('backend RPC contract', () => {
       }
     })
     expect(
-      (validateBackendRpcParams('session.start', validSessionStartParams) as { mediaPolicy?: { selected?: { capture?: string } } })
-        .mediaPolicy?.selected?.capture
+      (
+        validateBackendRpcParams('session.start', validSessionStartParams) as {
+          mediaPolicy?: { selected?: { capture?: string } }
+        }
+      ).mediaPolicy?.selected?.capture
     ).toBe('pipewire-portal')
   })
 

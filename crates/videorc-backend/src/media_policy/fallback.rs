@@ -17,10 +17,7 @@ impl Default for FallbackPolicy {
     }
 }
 
-pub fn select_benchmark_recommendation(
-    allowed: bool,
-    requested: bool,
-) -> FallbackPolicy {
+pub fn select_benchmark_recommendation(allowed: bool, requested: bool) -> FallbackPolicy {
     if !allowed && requested {
         FallbackPolicy::AskFirst
     } else if allowed {

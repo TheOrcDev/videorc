@@ -2196,6 +2196,7 @@ pub async fn create_preview_snapshot(
             },
         },
         audio: Default::default(),
+        media_policy: Default::default(),
         streaming: None,
     };
     let mut capture = resolve_capture_inputs(&ffmpeg_path, &session_params).await;
@@ -2486,6 +2487,7 @@ fn live_preview_session_params(
             },
         },
         audio: Default::default(),
+        media_policy: Default::default(),
         streaming: None,
     }
 }

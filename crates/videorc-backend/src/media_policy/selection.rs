@@ -46,7 +46,7 @@ pub fn normalize_media_policy_preset(raw: &str) -> MediaPolicyNormalizeResult {
 
 pub fn normalized_selection_from_wire(raw_preset: &str) -> (MediaPolicySelection, Option<String>) {
     let result = normalize_media_policy_preset(raw_preset);
-    let mut reason = result.selected_fallback_reason;
+    let reason = result.selected_fallback_reason.clone();
     let policy = MediaPolicySelection {
         requested: crate::media_policy::MediaPolicyRequest {
             intent: result.selected_preset,
@@ -60,11 +60,6 @@ pub fn normalized_selection_from_wire(raw_preset: &str) -> (MediaPolicySelection
         hardware_fingerprint: None,
         benchmark_recommendation: Some(BenchmarkPreset::Balanced),
     };
-    if reason.is_none() {
-        reason = None;
-    } else {
-        reason = Some(result.selected_fallback_reason.clone().unwrap_or_default());
-    }
     (policy, reason)
 }
 

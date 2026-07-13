@@ -47,20 +47,11 @@ export interface SupportBundleExportParams {
 }
 
 export type FeatureId =
-  | 'local-recording'
-  | 'livestreaming'
-  | 'multistreaming'
-  | 'cloud-ai'
-  | 'noise-cleanup'
+  'local-recording' | 'livestreaming' | 'multistreaming' | 'cloud-ai' | 'noise-cleanup'
 export type EntitlementState = 'enabled' | 'disabled' | 'developer-override'
 export type EntitlementTier = 'basic' | 'premium' | 'developer'
 export type EntitlementSource =
-  | 'local-default'
-  | 'env-override'
-  | 'creem'
-  | 'manual'
-  | 'signed-cache'
-  | 'future-license'
+  'local-default' | 'env-override' | 'creem' | 'manual' | 'signed-cache' | 'future-license'
 
 export interface EntitlementCapability {
   featureId: FeatureId
@@ -99,12 +90,7 @@ export interface EntitlementsSnapshot {
 }
 
 export type NoiseCleanupJobStatus =
-  | 'queued'
-  | 'processing'
-  | 'validating'
-  | 'completed'
-  | 'failed'
-  | 'cancelled'
+  'queued' | 'processing' | 'validating' | 'completed' | 'failed' | 'cancelled'
 export type NoiseCleanupPreset = 'speech-v1'
 
 /** Durable backend-owned cleanup state. The renderer never infers completion
@@ -171,9 +157,7 @@ export interface RecordingStatus {
 
 export type AutomaticSourceFallbackSourceKind = 'capture' | 'camera' | 'microphone'
 export type AutomaticSourceFallbackReason =
-  | 'unavailable-selected'
-  | 'unavailable-cleared'
-  | 'restored-by-name'
+  'unavailable-selected' | 'unavailable-cleared' | 'restored-by-name'
 
 export interface AutomaticSourceFallbackEvent {
   kind: 'automatic-source-fallback'
@@ -197,19 +181,9 @@ export type AudioTrackSource = 'microphone' | 'test-tone'
 export type RecordingContainer = 'none' | 'mkv' | 'flv' | 'tee'
 export type RecordingFinalizationState = 'none' | 'finalizing' | 'finalized' | 'failed'
 export type RecordingPipelineStage =
-  | 'capture'
-  | 'render'
-  | 'video-encoder'
-  | 'audio-encoder'
-  | 'muxer'
+  'capture' | 'render' | 'video-encoder' | 'audio-encoder' | 'muxer'
 export type RecordingPipelineStageState =
-  | 'pending'
-  | 'starting'
-  | 'running'
-  | 'finalizing'
-  | 'finished'
-  | 'failed'
-  | 'skipped'
+  'pending' | 'starting' | 'running' | 'finalizing' | 'finished' | 'failed' | 'skipped'
 
 export interface RecordingPipelineStatus {
   container: RecordingContainer
@@ -535,12 +509,7 @@ export type MutationKind =
 export type LiveEditStatus = 'started' | 'applied' | 'failed' | 'reverted'
 
 export type SourceRuntimePhase =
-  | 'idle'
-  | 'starting'
-  | 'live'
-  | 'reconnecting'
-  | 'failed'
-  | 'permission-needed'
+  'idle' | 'starting' | 'live' | 'reconnecting' | 'failed' | 'permission-needed'
 
 export type SessionMode = 'idle' | 'recording' | 'streaming' | 'recording-streaming'
 
@@ -622,13 +591,7 @@ export type StreamPrivacy = 'public' | 'unlisted' | 'private'
 export type PlatformAccountStatus = 'connected' | 'needs-reconnect' | 'disconnected'
 export type PlatformAccountValidationState = 'valid' | 'refreshed' | 'needs-reconnect' | 'missing'
 export type StreamTargetState =
-  | 'not-configured'
-  | 'ready'
-  | 'connecting'
-  | 'live'
-  | 'warning'
-  | 'failed'
-  | 'stopped'
+  'not-configured' | 'ready' | 'connecting' | 'live' | 'warning' | 'failed' | 'stopped'
 
 export interface StreamTargetStatus {
   state: StreamTargetState
@@ -882,11 +845,7 @@ export interface PreparedTwitchBroadcast {
 }
 
 export type XNativeLiveCapabilityState =
-  | 'missing-credentials'
-  | 'needs-authorization'
-  | 'ready'
-  | 'account-mismatch'
-  | 'api-error'
+  'missing-credentials' | 'needs-authorization' | 'ready' | 'account-mismatch' | 'api-error'
 
 /** Result of `streamTargets.x.startLiveAuthorization` — the 3-legged OAuth 1.0a browser flow. */
 export interface XLiveAuthorizationStart {
@@ -1123,22 +1082,17 @@ export interface OutputSettings {
   rtmp: RtmpSettings
 }
 
-export type MediaPolicyPreset = 'automatic' | 'performance' | 'balanced' | 'quality' | 'compatibility' | 'custom'
+export type MediaPolicyPreset =
+  'automatic' | 'performance' | 'balanced' | 'quality' | 'compatibility' | 'custom'
 export type MediaCaptureBackendId =
-  | 'pipewire-portal'
-  | 'electron-portal'
-  | 'ffmpeg-x11'
-  | 'test-pattern'
+  'pipewire-portal' | 'electron-portal' | 'ffmpeg-x11' | 'test-pattern'
 export type MediaAudioBackendId = 'pipewire' | 'pulse-compat' | 'alsa-compat' | 'test-tone'
 export type MediaCompositorBackendId = 'automatic' | 'cpu' | 'wgpu' | 'ffmpeg-compat'
 export type MediaPreviewBackendId = 'automatic' | 'native-wgpu' | 'electron-webgl' | 'mjpeg-debug'
 export type MediaEncoderBackendId =
-  | 'h264-vaapi'
-  | 'h264-qsv'
-  | 'libx264'
-  | 'libopenh264'
-  | 'automatic'
-export type MediaPolicyFallbackMode = 'safe-auto' | 'ask-first' | 'strict' | 'hardware-only' | 'software-only'
+  'h264-vaapi' | 'h264-qsv' | 'libx264' | 'libopenh264' | 'automatic'
+export type MediaPolicyFallbackMode =
+  'safe-auto' | 'ask-first' | 'strict' | 'hardware-only' | 'software-only'
 export type MediaPolicyCapabilityVerdict = 'supported' | 'degraded' | 'unavailable' | 'unknown'
 export type MediaPolicyBenchmarkRecommendation = 'performance' | 'balanced' | 'quality'
 
@@ -1590,11 +1544,7 @@ export interface PreviewSurfaceBoundsParams {
 }
 
 export type PreviewCameraState =
-  | 'starting'
-  | 'live'
-  | 'permission-needed'
-  | 'device-missing'
-  | 'failed'
+  'starting' | 'live' | 'permission-needed' | 'device-missing' | 'failed'
 
 export interface PreviewCameraStartParams {
   sources: SourceSelection
@@ -1635,11 +1585,7 @@ export interface CameraCapabilityFormat {
 }
 
 export type PreviewScreenState =
-  | 'starting'
-  | 'live'
-  | 'permission-needed'
-  | 'source-missing'
-  | 'failed'
+  'starting' | 'live' | 'permission-needed' | 'source-missing' | 'failed'
 export type PreviewScreenSourceKind = 'screen' | 'window'
 
 export interface PreviewScreenStartParams {
@@ -1689,11 +1635,7 @@ export interface AudioMeterParams {
 }
 
 export type AudioMeterStatus =
-  | 'ready'
-  | 'silent'
-  | 'no-frames'
-  | 'unavailable'
-  | 'permission-required'
+  'ready' | 'silent' | 'no-frames' | 'unavailable' | 'permission-required'
 
 export interface AudioMeterResult {
   status: AudioMeterStatus
@@ -1734,23 +1676,11 @@ export interface StreamHealth {
 }
 
 export type DiagnosticBottleneck =
-  | 'none'
-  | 'capture'
-  | 'render'
-  | 'encoder'
-  | 'preview'
-  | 'audio'
-  | 'device'
-  | 'unknown'
+  'none' | 'capture' | 'render' | 'encoder' | 'preview' | 'audio' | 'device' | 'unknown'
 
 export type SourceRegistrySourceKind = 'camera' | 'screen' | 'window' | 'image' | 'synthetic'
 export type SourceRegistryLifecycleStatus =
-  | 'stopped'
-  | 'starting'
-  | 'live'
-  | 'permission-needed'
-  | 'source-missing'
-  | 'failed'
+  'stopped' | 'starting' | 'live' | 'permission-needed' | 'source-missing' | 'failed'
 export type SourceRegistryConsumerReason = 'preview' | 'recording' | 'streaming' | 'diagnostics'
 export type SourceRegistryIdentityConfidence = 'exact' | 'name-rematch' | 'fallback' | 'unknown'
 
@@ -2581,19 +2511,10 @@ export interface DockSlotReport {
 }
 
 export type CommentsSendOperationPhase =
-  | 'sending'
-  | 'sent'
-  | 'partial'
-  | 'failed'
-  | 'delivery-unknown'
+  'sending' | 'sent' | 'partial' | 'failed' | 'delivery-unknown'
 
 export type DestinationDeliveryPhase =
-  | 'pending'
-  | 'sent'
-  | 'failed'
-  | 'read-only'
-  | 'unavailable'
-  | 'timed-out-unknown'
+  'pending' | 'sent' | 'failed' | 'read-only' | 'unavailable' | 'timed-out-unknown'
 
 export interface DestinationDelivery {
   destinationId: string
@@ -2658,8 +2579,7 @@ export interface CommentsCommandResolution<T> {
 }
 
 export type CommentsViewMode =
-  | { kind: 'live' }
-  | { kind: 'history'; sessionId: string; title: string; startedAt: string }
+  { kind: 'live' } | { kind: 'history'; sessionId: string; title: string; startedAt: string }
 
 export interface CommentsViewSnapshot {
   mode: CommentsViewMode
@@ -2698,10 +2618,7 @@ export type PreviewLifecycleState =
   | 'failed'
 
 export type PreviewPermissionStatus =
-  | 'ok'
-  | 'screen-recording-required'
-  | 'camera-required'
-  | 'unknown'
+  'ok' | 'screen-recording-required' | 'camera-required' | 'unknown'
 
 export type PreviewLifecycleTransport = PreviewTransport | 'none' | 'unknown'
 export type PreviewLifecycleBacking = PreviewSurfaceBacking | 'unknown'
@@ -3065,23 +2982,13 @@ export type LiveChatProviderConnectionState =
   | 'ended'
 
 export type CommentsReadState =
-  | 'connecting'
-  | 'ready'
-  | 'waiting-for-broadcast-context'
-  | 'ended'
-  | 'failed'
-  | 'unavailable'
+  'connecting' | 'ready' | 'waiting-for-broadcast-context' | 'ended' | 'failed' | 'unavailable'
 
 export type CommentsWriteState = 'ready' | 'missing-scope' | 'read-only' | 'failed' | 'unavailable'
 
 /** What kind of chat row a message is — drives styling for monetized/system events. */
 export type LiveChatEventType =
-  | 'message'
-  | 'paid'
-  | 'membership'
-  | 'system'
-  | 'deleted'
-  | 'moderation'
+  'message' | 'paid' | 'membership' | 'system' | 'deleted' | 'moderation'
 
 /** Live connector state for one platform within a session. */
 export interface LiveChatProviderState {
