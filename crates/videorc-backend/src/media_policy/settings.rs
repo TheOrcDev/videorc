@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 
 /// Canonical media policy presets shared by Linux-aware Linux and future desktop
 /// adapters.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum MediaPolicyPreset {
+    #[default]
     Automatic,
     Performance,
     Balanced,
@@ -13,15 +14,10 @@ pub enum MediaPolicyPreset {
     Custom,
 }
 
-impl Default for MediaPolicyPreset {
-    fn default() -> Self {
-        Self::Automatic
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum MediaPolicyFallbackMode {
+    #[default]
     SafeAuto,
     AskFirst,
     Strict,
@@ -29,25 +25,14 @@ pub enum MediaPolicyFallbackMode {
     SoftwareOnly,
 }
 
-impl Default for MediaPolicyFallbackMode {
-    fn default() -> Self {
-        Self::SafeAuto
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum MediaPolicyCapabilityVerdict {
     Supported,
     Degraded,
     Unavailable,
+    #[default]
     Unknown,
-}
-
-impl Default for MediaPolicyCapabilityVerdict {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,9 +54,10 @@ pub enum MediaAudioBackendId {
     TestTone,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum MediaCompositorBackendId {
+    #[default]
     Automatic,
     Cpu,
     Wgpu,
@@ -79,15 +65,10 @@ pub enum MediaCompositorBackendId {
     FfmpegCompat,
 }
 
-impl Default for MediaCompositorBackendId {
-    fn default() -> Self {
-        Self::Automatic
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum MediaPreviewBackendId {
+    #[default]
     Automatic,
     #[serde(rename = "native-wgpu")]
     NativeWgpu,
@@ -96,40 +77,24 @@ pub enum MediaPreviewBackendId {
     MjpegDebug,
 }
 
-impl Default for MediaPreviewBackendId {
-    fn default() -> Self {
-        Self::Automatic
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum MediaEncoderBackendId {
     H264Vaapi,
     H264Qsv,
     Libx264,
     Libopenh264,
+    #[default]
     Automatic,
 }
 
-impl Default for MediaEncoderBackendId {
-    fn default() -> Self {
-        Self::Automatic
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum BenchmarkPreset {
     Performance,
+    #[default]
     Balanced,
     Quality,
-}
-
-impl Default for BenchmarkPreset {
-    fn default() -> Self {
-        Self::Balanced
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
