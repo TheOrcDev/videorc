@@ -123,3 +123,235 @@ jobs:
 
       - name: Node logic tests
         run: pnpm test:scripts
+
+  linux-gates:
+    name: Linux gates (Rust + JS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Rust fmt + clippy + tests
+        run: |
+          cargo fmt --check --all
+          cargo clippy -p videorc-backend -- -D warnings
+          cargo test -p videorc-backend
+
+      - name: JS checks
+        run: |
+          pnpm audit:js
+          pnpm format:check
+          pnpm lint
+          pnpm typecheck
+          pnpm test:scripts
+          pnpm --filter @videorc/desktop test
+
+  linux-preview:
+    name: Linux PR preview artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs: linux-gates
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Linux package
+        env:
+          VIDEORC_BUNDLED_FFMPEG_PATH: vendor/ffmpeg/current/bin/ffmpeg
+          VIDEORC_BUNDLED_FFPROBE_PATH: vendor/ffmpeg/current/bin/ffprobe
+          VIDEORC_BUNDLED_LICENSE_PATH: vendor/ffmpeg/current/LICENSE.txt
+        run: pnpm dist:desktop:linux
+
+      - name: Generate Linux build metadata and checksums
+        shell: bash
+        run: |
+          DEB_PATH=$(ls apps/desktop/release/*.deb | head -n 1)
+          node scripts/build-linux-build-info.mjs "$DEB_PATH" apps/desktop/release/build-info.json
+
+      - name: Validate packaged Linux artifact health
+        env:
+          VIDEORC_PACKAGED_APP_EXECUTABLE: apps/desktop/release/linux-unpacked/videorc
+          VIDEORC_SMOKE_FFPROBE_PATH: vendor/ffmpeg/current/bin/ffprobe
+        run: pnpm smoke:packaged:linux:health
+
+      - name: Generate Linux artifact metadata for preview
+        run: |
+          DEB_PATH=$(ls apps/desktop/release/*.deb | head -n 1)
+          node scripts/build-linux-capabilities.mjs "$DEB_PATH"
+          node scripts/build-linux-notices.mjs
+
+      - name: Upload PR Linux preview artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: videorc-linux-preview-${{ github.run_id }}
+          path: |
+            apps/desktop/release/*.deb
+            apps/desktop/release/*.sha256
+            apps/desktop/release/build-info.json
+            apps/desktop/release/linux-capabilities.json
+            apps/desktop/release/THIRD-PARTY-NOTICES.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  linux-main-prerelease:
+    name: Linux main prerelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs: linux-gates
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Linux package
+        env:
+          VIDEORC_BUNDLED_FFMPEG_PATH: vendor/ffmpeg/current/bin/ffmpeg
+          VIDEORC_BUNDLED_FFPROBE_PATH: vendor/ffmpeg/current/bin/ffprobe
+          VIDEORC_BUNDLED_LICENSE_PATH: vendor/ffmpeg/current/LICENSE.txt
+        run: pnpm dist:desktop:linux
+
+      - name: Generate Linux artifact metadata
+        run: |
+          DEB_PATH=$(ls apps/desktop/release/*.deb | head -n 1)
+          node scripts/build-linux-build-info.mjs "$DEB_PATH" apps/desktop/release/build-info.json
+          node scripts/build-linux-capabilities.mjs "$DEB_PATH" apps/desktop/release/linux-capabilities.json
+          node scripts/build-linux-notices.mjs apps/desktop/release/THIRD-PARTY-NOTICES.txt
+
+      - name: Validate packaged Linux artifact health
+        env:
+          VIDEORC_PACKAGED_APP_EXECUTABLE: apps/desktop/release/linux-unpacked/videorc
+          VIDEORC_SMOKE_FFPROBE_PATH: vendor/ffmpeg/current/bin/ffprobe
+        run: pnpm smoke:packaged:linux:health
+
+      - name: Upload Linux main prerelease artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: videorc-linux-main-${{ github.run_id }}
+          path: |
+            apps/desktop/release/*.deb
+            apps/desktop/release/*.sha256
+            apps/desktop/release/build-info.json
+            apps/desktop/release/linux-capabilities.json
+            apps/desktop/release/THIRD-PARTY-NOTICES.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Compose linux-main prerelease notes
+        id: release-notes
+        run: |
+          mkdir -p /tmp/videorc-linux-release
+          NOTES=/tmp/videorc-linux-release/notes.md
+          {
+            echo "# Linux main prerelease"
+            echo
+            echo "- Commit: ${{ github.sha }}"
+            echo "- Branch: refs/heads/main"
+            echo "- Actor: ${{ github.actor }}"
+            echo "- Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "## Commit summary"
+            git log --no-merges --pretty=format:'- %h %s' -n 12 "${{ github.sha }}"
+            echo
+            echo "## Built artifacts"
+            ls -1 apps/desktop/release/*.deb apps/desktop/release/*.sha256 apps/desktop/release/*.json apps/desktop/release/THIRD-PARTY-NOTICES.txt
+          } > "$NOTES"
+          echo "notes_path=$NOTES" >> "$GITHUB_OUTPUT"
+
+      - name: Publish/refresh rolling Linux prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE_TAG=linux-main
+          NOTES_PATH="${{ steps.release-notes.outputs.notes_path }}"
+          if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "${{ github.repository }}" \
+              --prerelease \
+              --title "Linux main prerelease (${{ github.sha }})" \
+              --notes-file "$NOTES_PATH"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "${{ github.repository }}" \
+              --prerelease \
+              --title "Linux main prerelease (${{ github.sha }})" \
+              --target "${{ github.sha }}" \
+              --notes-file "$NOTES_PATH"
+          fi
+          gh release upload "$RELEASE_TAG" \
+            apps/desktop/release/*.deb \
+            apps/desktop/release/*.sha256 \
+            apps/desktop/release/build-info.json \
+            apps/desktop/release/linux-capabilities.json \
+            apps/desktop/release/THIRD-PARTY-NOTICES.txt \
+            --clobber \
+            --repo "${{ github.repository }}"
