@@ -37,6 +37,11 @@ import {
 } from '@/lib/capture'
 import { effectiveCameraMaskShape } from '../../../../shared/native-preview-proof-geometry'
 
+// The two real-world screen colors; the protocol takes any #RRGGBB so a
+// custom picker later needs no wire change.
+const CHROMA_KEY_GREEN = '#00FF00'
+const CHROMA_KEY_BLUE = '#0000FF'
+
 // Mode-scoped like the Scenes gallery: the tab edits the current
 // orientation's scenes; the gallery's header toggle switches modes.
 const HORIZONTAL_LAYOUT_TAB_PRESETS = [
@@ -492,6 +497,97 @@ export function LayoutTab(): ReactElement {
                 value={layout.cameraOffsetY}
                 onChange={(cameraOffsetY) => patchLayout({ cameraOffsetY })}
               />
+
+              <span className="pt-2 text-[12.5px] leading-none font-medium text-subtle">
+                Green screen
+              </span>
+              <Field orientation="horizontal">
+                <FieldContent>
+                  <FieldLabel htmlFor="camera-chroma-key">Key out background</FieldLabel>
+                  <p className="text-xs text-muted-foreground">
+                    Needs an evenly lit green or blue screen behind you.
+                  </p>
+                </FieldContent>
+                <Switch
+                  checked={layout.cameraChromaKeyEnabled}
+                  id="camera-chroma-key"
+                  onCheckedChange={(cameraChromaKeyEnabled) =>
+                    applyLayoutPatch({ cameraChromaKeyEnabled })
+                  }
+                />
+              </Field>
+              {layout.cameraChromaKeyEnabled ? (
+                <>
+                  <Field>
+                    <FieldLabel>Key color</FieldLabel>
+                    <ToggleGroup
+                      className="w-full"
+                      spacing={0}
+                      type="single"
+                      value={layout.cameraChromaKeyColor === CHROMA_KEY_BLUE ? 'blue' : 'green'}
+                      variant="outline"
+                      onValueChange={(value) =>
+                        value &&
+                        applyLayoutPatch({
+                          cameraChromaKeyColor:
+                            value === 'blue' ? CHROMA_KEY_BLUE : CHROMA_KEY_GREEN
+                        })
+                      }
+                    >
+                      <ToggleGroupItem className="flex-1" value="green">
+                        Green
+                      </ToggleGroupItem>
+                      <ToggleGroupItem className="flex-1" value="blue">
+                        Blue
+                      </ToggleGroupItem>
+                    </ToggleGroup>
+                  </Field>
+                  <PowerSlider
+                    label="Similarity"
+                    max={100}
+                    min={0}
+                    numericInput
+                    step={1}
+                    suffix="%"
+                    value={layout.cameraChromaKeySimilarityPct}
+                    onChange={(cameraChromaKeySimilarityPct) =>
+                      patchLayout({ cameraChromaKeySimilarityPct })
+                    }
+                    onCommit={(cameraChromaKeySimilarityPct) =>
+                      applyLayoutPatch({ cameraChromaKeySimilarityPct })
+                    }
+                  />
+                  <PowerSlider
+                    label="Smoothness"
+                    max={100}
+                    min={0}
+                    numericInput
+                    step={1}
+                    suffix="%"
+                    value={layout.cameraChromaKeySmoothnessPct}
+                    onChange={(cameraChromaKeySmoothnessPct) =>
+                      patchLayout({ cameraChromaKeySmoothnessPct })
+                    }
+                    onCommit={(cameraChromaKeySmoothnessPct) =>
+                      applyLayoutPatch({ cameraChromaKeySmoothnessPct })
+                    }
+                  />
+                  <PowerSlider
+                    label="Spill removal"
+                    max={100}
+                    min={0}
+                    numericInput
+                    step={1}
+                    suffix="%"
+                    value={layout.cameraChromaKeySpillPct}
+                    onChange={(cameraChromaKeySpillPct) => patchLayout({ cameraChromaKeySpillPct })}
+                    onCommit={(cameraChromaKeySpillPct) =>
+                      applyLayoutPatch({ cameraChromaKeySpillPct })
+                    }
+                  />
+                </>
+              ) : null}
+
               <SourceVisibilityField
                 disabled={isSessionActive}
                 source={selectedSource}
