@@ -239,6 +239,7 @@ class StudioBackend {
   entitlements = DEFAULT_BASIC_ENTITLEMENTS
   noiseCleanupJobs: NoiseCleanupJob[] = []
   sourceMutationRevision = 4
+  layoutResponseDelayMs = 0
 
   invalidateCompletedNoiseCleanup(message: string): void {
     this.sourceMutationRevision += 1
@@ -569,7 +570,7 @@ class TestWebSocket {
 
   send(raw: string): void {
     const command = JSON.parse(raw) as BackendCommand
-    queueMicrotask(() => {
+    const respond = (): void => {
       try {
         this.onmessage?.({
           data: JSON.stringify({
@@ -596,7 +597,15 @@ class TestWebSocket {
           })
         })
       }
-    })
+    }
+    if (
+      command.method.startsWith('scene.layout.apply_') &&
+      TestWebSocket.backend.layoutResponseDelayMs > 0
+    ) {
+      setTimeout(respond, TestWebSocket.backend.layoutResponseDelayMs)
+    } else {
+      queueMicrotask(respond)
+    }
   }
 
   close(): void {
@@ -1012,6 +1021,148 @@ describe('real StudioProvider lifecycle', () => {
     ).toBeGreaterThanOrEqual(4)
   })
 
+  it('commits an orientation change atomically before preview and recording consume it', async () => {
+    const backend = new StudioBackend()
+    // Windows proof presentation can take longer than the generic idle-scene
+    // reload debounce. A mode switch must not expose its portrait canvas until
+    // the matching vertical scene transaction is committed.
+    backend.layoutResponseDelayMs = 400
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const previewAspectCalls: Array<[number, number]> = []
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      setPreviewAspectRatio: async (width, height) => {
+        previewAspectCalls.push([width, height])
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.screenId != null &&
+        latest()?.core.captureConfig.sources.cameraId != null
+    )
+
+    const commandStart = backend.commands.length
+    await act(async () => {
+      latest()?.core.applyCameraPreset({ layoutPreset: 'vertical-screen-camera' })
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 325))
+    })
+
+    const mixedReloads = backend.commands.slice(commandStart).filter((command) => {
+      if (command.method !== 'scene.load_from_capture_config') return false
+      const params = command.params as {
+        layout?: { layoutPreset?: string }
+        video?: { width?: number; height?: number }
+      }
+      return (
+        params.layout?.layoutPreset === 'screen-camera' &&
+        params.video?.width === 1080 &&
+        params.video?.height === 1920
+      )
+    })
+    expect(mixedReloads).toEqual([])
+
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.layout.layoutPreset === 'vertical-screen-camera' &&
+        latest()?.core.captureConfig.video.width === 1080 &&
+        latest()?.core.captureConfig.video.height === 1920
+    )
+    expect(previewAspectCalls.at(-1)).toEqual([1080, 1920])
+    expect(
+      backend.commands.find((command) => command.method === 'scene.layout.apply_preview')?.params
+    ).toMatchObject({
+      layout: { layoutPreset: 'vertical-screen-camera' },
+      video: { width: 1080, height: 1920 }
+    })
+
+    await act(async () => {
+      await latest()?.core.startSession()
+    })
+    expect(
+      backend.commands.find((command) => command.method === 'session.start')?.params
+    ).toMatchObject({
+      layout: { layoutPreset: 'vertical-screen-camera' },
+      output: { video: { width: 1080, height: 1920 } }
+    })
+    await act(async () => {
+      await latest()?.core.stopSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+
+    const reverseCommandStart = backend.commands.length
+    await act(async () => {
+      latest()?.core.applyCameraPreset({ layoutPreset: 'screen-camera' })
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 325))
+    })
+    const reverseMixedReloads = backend.commands.slice(reverseCommandStart).filter((command) => {
+      if (command.method !== 'scene.load_from_capture_config') return false
+      const params = command.params as {
+        layout?: { layoutPreset?: string }
+        video?: { width?: number; height?: number }
+      }
+      return (
+        params.layout?.layoutPreset === 'vertical-screen-camera' &&
+        params.video?.width === 2560 &&
+        params.video?.height === 1440
+      )
+    })
+    expect(reverseMixedReloads).toEqual([])
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.layout.layoutPreset === 'screen-camera' &&
+        latest()?.core.captureConfig.video.width === 2560 &&
+        latest()?.core.captureConfig.video.height === 1440
+    )
+    expect(previewAspectCalls.at(-1)).toEqual([2560, 1440])
+
+    await act(async () => {
+      await latest()?.core.startSession()
+    })
+    expect(
+      backend.commands.filter((command) => command.method === 'session.start').at(-1)?.params
+    ).toMatchObject({
+      layout: { layoutPreset: 'screen-camera' },
+      output: { video: { width: 2560, height: 1440 } }
+    })
+    await act(async () => {
+      await latest()?.core.stopSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+  })
+
   it('recovers in cooldown on the same healthy websocket and ACKs exactly once', async () => {
     vi.useFakeTimers()
     const receivedAtMs = 1_000_000
@@ -1384,6 +1535,7 @@ function createVideorcApi(options: {
   acknowledgeProvider: (id: string) => Promise<boolean>
   openSession?: (sessionId: string) => Promise<string>
   revealSession?: (sessionId: string) => Promise<void>
+  setPreviewAspectRatio?: (width: number, height: number) => Promise<void>
   nativePreview?: {
     getWindowState: () => PreviewWindowState
     drainHostCommands: (generation?: number) => Promise<PreviewSurfaceStatus>
@@ -1453,6 +1605,7 @@ function createVideorcApi(options: {
       setNativePreviewSurfaceFramePollingSuppressed: async () => nativePreviewStatus(),
       getPreviewWindowState: async () =>
         options.nativePreview?.getWindowState() ?? previewWindowClosed,
+      setPreviewWindowAspectRatio: options.setPreviewAspectRatio ?? (async () => undefined),
       getNotesWindowState: async () => idleNotes,
       getCommentsWindowState: async () => idleComments,
       getCaptionsWindowState: async () => idleCaptions,

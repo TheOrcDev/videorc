@@ -9162,7 +9162,8 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         }
         // Layout controls are mode-scoped: landscape and portrait presets are
         // intentionally never mounted together. The QA command owns the mode
-        // transition so maintained smokes can exercise both vocabularies.
+        // transition so maintained smokes exercise the same orientation toggle
+        // users click before selecting a scene in the target vocabulary.
         if (!button) {
           await openTab('studio', '[aria-label="Studio orientation"]');
           const orientationLabel = preset.startsWith('vertical-')
@@ -9178,7 +9179,7 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
             orientationButton.click();
           }
           await openTab('layout', '[data-videorc-layout-preset]');
-          deadline = Date.now() + 5000;
+          deadline = Date.now() + 10000;
           while (Date.now() < deadline) {
             button = Array.from(document.querySelectorAll('[data-videorc-layout-preset]'))
               .find((candidate) => candidate.getAttribute('data-videorc-layout-preset') === preset);

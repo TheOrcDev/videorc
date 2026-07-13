@@ -2397,6 +2397,17 @@ fn twitch_chat_config(
 /// Start live chat for a freshly-started session: spawn a connector per enabled OAuth
 /// destination whose token resolves. Chat failures are logged, never propagated — a chat
 /// problem must not fail the stream (slice 8). One destination's failure leaves others alone.
+/// Live comments only exist for sessions with a live audience: chat providers
+/// attach when the session actually STREAMS, never for local recordings. The
+/// renderer sends its streaming settings with every session start, so the
+/// mere presence of `streaming` is not a streaming session — gating on it
+/// warned "Twitch comments are not connected" on every plain recording
+/// whenever a disconnected stream target was configured (owner report,
+/// 2026-07-13).
+fn session_attaches_live_chat(params: &protocol::StartSessionParams) -> bool {
+    params.output.stream_enabled && params.streaming.is_some()
+}
+
 async fn spawn_session_live_chat(
     state: &AppState,
     session_id: &str,
@@ -5300,10 +5311,12 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<protocol::StartSessionParams>(params_value) {
                 Ok(params) => {
                     let streaming = params.streaming.clone();
+                    let attach_live_chat = session_attaches_live_chat(&params);
                     match validate_start_session_oauth_availability(&params) {
                         Ok(()) => match start_session(state.clone(), params).await {
                             Ok(status) => {
-                                if let Some(streaming) = streaming.as_ref()
+                                if attach_live_chat
+                                    && let Some(streaming) = streaming.as_ref()
                                     && let Some(session_id) = status.session_id.as_deref()
                                 {
                                     spawn_session_live_chat(state, session_id, streaming).await;
@@ -9218,6 +9231,54 @@ mod tests {
         assert_eq!(twitch.read, live_chat::CommentsReadState::Unavailable);
         assert_eq!(twitch.write, live_chat::CommentsWriteState::MissingScope);
         assert!(twitch.message.contains("Reconnect Twitch"));
+    }
+
+    #[test]
+    fn live_chat_attaches_only_to_streaming_sessions() {
+        let params = |stream_enabled: bool| -> protocol::StartSessionParams {
+            serde_json::from_value(serde_json::json!({
+                "sources": { "testPattern": true },
+                "layout": {
+                    "cameraCorner": "bottom-right",
+                    "cameraSize": "medium",
+                    "cameraShape": "rectangle",
+                    "cameraMargin": 32
+                },
+                "output": {
+                    "recordEnabled": true,
+                    "streamEnabled": stream_enabled,
+                    "video": {
+                        "preset": "custom",
+                        "width": 1280,
+                        "height": 720,
+                        "fps": 30,
+                        "bitrateKbps": 2000
+                    },
+                    "rtmp": { "preset": "youtube", "serverUrl": "", "streamKey": "" }
+                }
+            }))
+            .expect("minimal session params")
+        };
+        let streaming = streaming_with_enabled_target(
+            StreamPlatform::Twitch,
+            crate::streaming::StreamAuthMode::ManualRtmp,
+        );
+
+        // A recording with configured stream targets must NOT attach chat —
+        // this exact shape toasted "Twitch comments are not connected" on
+        // every plain recording.
+        let mut recording = params(false);
+        recording.streaming = Some(streaming.clone());
+        assert!(!session_attaches_live_chat(&recording));
+
+        // A real go-live with the same targets keeps the 2026-07-10 guarantee:
+        // broken chat setup at go-live must surface, never fail silently.
+        let mut live = params(true);
+        live.streaming = Some(streaming);
+        assert!(session_attaches_live_chat(&live));
+
+        // No streaming settings at all → nothing to attach either way.
+        assert!(!session_attaches_live_chat(&params(true)));
     }
 
     #[test]
