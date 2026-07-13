@@ -2677,6 +2677,11 @@ mod tests {
             camera_offset_y: 0,
             side_by_side_split: SideBySideSplit::Even,
             side_by_side_camera_side: SideBySideCameraSide::Right,
+            camera_chroma_key_enabled: false,
+            camera_chroma_key_color: "#00FF00".to_string(),
+            camera_chroma_key_similarity_pct: 40,
+            camera_chroma_key_smoothness_pct: 8,
+            camera_chroma_key_spill_pct: 10,
         }
     }
 

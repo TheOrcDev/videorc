@@ -376,6 +376,16 @@ export interface LayoutSettings {
   cameraCornerRadiusPct: number
   /** Camera box aspect: source (per-shape default), square, or portrait 3:4. */
   cameraAspect: CameraAspect
+  /** Green-screen chroma key for the camera layer (off by default). */
+  cameraChromaKeyEnabled: boolean
+  /** Key color as #RRGGBB; the UI offers green/blue presets. */
+  cameraChromaKeyColor: string
+  /** CbCr distance (as % of the calibrated range) that keys fully out. */
+  cameraChromaKeySimilarityPct: number
+  /** Ramp band above similarity over which alpha rises (%; 0 = hard edge). */
+  cameraChromaKeySmoothnessPct: number
+  /** Spill suppression strength (%): kills the green/blue fringe. */
+  cameraChromaKeySpillPct: number
   cameraMargin: number
   cameraFit: CameraFit
   cameraMirror: boolean

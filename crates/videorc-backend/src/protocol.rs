@@ -390,6 +390,28 @@ pub struct LayoutSettings {
     /// camera like a vertical framing. Circle keeps its square box always.
     #[serde(default = "default_camera_aspect")]
     pub camera_aspect: CameraAspect,
+    /// Green-screen chroma key for the camera layer. Off by default; when on,
+    /// all three render paths (CPU, Metal, FFmpeg) key with the ONE spec from
+    /// `scene_geometry::camera_chroma_key` — never re-derive thresholds per path.
+    #[serde(default)]
+    pub camera_chroma_key_enabled: bool,
+    /// Key color as `#RRGGBB`. The UI currently offers green/blue presets; the
+    /// protocol takes any hex so a custom picker needs no wire change. An
+    /// unparseable value keys against green (with a warning), never fails.
+    #[serde(default = "default_camera_chroma_key_color")]
+    pub camera_chroma_key_color: String,
+    /// CbCr distance below which a pixel is fully transparent, as a percent of
+    /// the calibrated range (0-100 → 0-180 distance units).
+    #[serde(default = "default_camera_chroma_key_similarity_pct")]
+    pub camera_chroma_key_similarity_pct: u32,
+    /// Ramp band above the similarity threshold over which alpha rises 0→255
+    /// (percent, same scale as similarity; 0 = hard edge).
+    #[serde(default = "default_camera_chroma_key_smoothness_pct")]
+    pub camera_chroma_key_smoothness_pct: u32,
+    /// Spill suppression strength (percent): clamps the key channel toward the
+    /// other channels' maximum on kept pixels, killing the green/blue fringe.
+    #[serde(default = "default_camera_chroma_key_spill_pct")]
+    pub camera_chroma_key_spill_pct: u32,
     pub camera_margin: u32,
     #[serde(default = "default_camera_fit")]
     pub camera_fit: CameraFit,
@@ -442,6 +464,22 @@ pub enum CameraAspect {
 
 fn default_camera_corner_radius_pct() -> u32 {
     12
+}
+
+fn default_camera_chroma_key_color() -> String {
+    "#00FF00".to_string()
+}
+
+fn default_camera_chroma_key_similarity_pct() -> u32 {
+    40
+}
+
+fn default_camera_chroma_key_smoothness_pct() -> u32 {
+    8
+}
+
+fn default_camera_chroma_key_spill_pct() -> u32 {
+    10
 }
 
 fn default_camera_aspect() -> CameraAspect {
@@ -747,6 +785,11 @@ pub(crate) fn default_layout_settings() -> LayoutSettings {
         camera_shape: CameraShape::Rectangle,
         camera_corner_radius_pct: default_camera_corner_radius_pct(),
         camera_aspect: default_camera_aspect(),
+        camera_chroma_key_enabled: false,
+        camera_chroma_key_color: default_camera_chroma_key_color(),
+        camera_chroma_key_similarity_pct: default_camera_chroma_key_similarity_pct(),
+        camera_chroma_key_smoothness_pct: default_camera_chroma_key_smoothness_pct(),
+        camera_chroma_key_spill_pct: default_camera_chroma_key_spill_pct(),
         camera_margin: 32,
         camera_fit: default_camera_fit(),
         camera_mirror: false,
@@ -3393,6 +3436,11 @@ mod tests {
             camera_offset_y: 0,
             side_by_side_split: SideBySideSplit::SixtyForty,
             side_by_side_camera_side: SideBySideCameraSide::Left,
+            camera_chroma_key_enabled: false,
+            camera_chroma_key_color: "#00FF00".to_string(),
+            camera_chroma_key_similarity_pct: 40,
+            camera_chroma_key_smoothness_pct: 8,
+            camera_chroma_key_spill_pct: 10,
         };
         let json = serde_json::to_string(&layout).unwrap();
         assert!(json.contains("\"layoutPreset\":\"side-by-side\""));

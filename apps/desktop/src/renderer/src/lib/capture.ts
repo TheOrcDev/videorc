@@ -644,6 +644,11 @@ export const defaultCaptureConfig: CaptureConfig = {
     cameraShape: 'rectangle',
     cameraCornerRadiusPct: 12,
     cameraAspect: 'source',
+    cameraChromaKeyEnabled: false,
+    cameraChromaKeyColor: '#00FF00',
+    cameraChromaKeySimilarityPct: 40,
+    cameraChromaKeySmoothnessPct: 8,
+    cameraChromaKeySpillPct: 10,
     cameraMargin: 32,
     cameraFit: 'fill',
     cameraMirror: false,
@@ -1106,6 +1111,33 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
       candidate.cameraAspect === 'portrait'
         ? candidate.cameraAspect
         : defaultCaptureConfig.layout.cameraAspect,
+    cameraChromaKeyEnabled:
+      typeof candidate.cameraChromaKeyEnabled === 'boolean'
+        ? candidate.cameraChromaKeyEnabled
+        : defaultCaptureConfig.layout.cameraChromaKeyEnabled,
+    cameraChromaKeyColor:
+      typeof candidate.cameraChromaKeyColor === 'string' &&
+      /^#[0-9a-fA-F]{6}$/.test(candidate.cameraChromaKeyColor)
+        ? candidate.cameraChromaKeyColor
+        : defaultCaptureConfig.layout.cameraChromaKeyColor,
+    cameraChromaKeySimilarityPct: clampNumber(
+      candidate.cameraChromaKeySimilarityPct,
+      defaultCaptureConfig.layout.cameraChromaKeySimilarityPct,
+      0,
+      100
+    ),
+    cameraChromaKeySmoothnessPct: clampNumber(
+      candidate.cameraChromaKeySmoothnessPct,
+      defaultCaptureConfig.layout.cameraChromaKeySmoothnessPct,
+      0,
+      100
+    ),
+    cameraChromaKeySpillPct: clampNumber(
+      candidate.cameraChromaKeySpillPct,
+      defaultCaptureConfig.layout.cameraChromaKeySpillPct,
+      0,
+      100
+    ),
     sideBySideSplit: isSideBySideSplit(candidate.sideBySideSplit)
       ? candidate.sideBySideSplit
       : defaultCaptureConfig.layout.sideBySideSplit,
