@@ -39,9 +39,10 @@ use crate::protocol::{
     PreviewTransport, Scene, SceneSourceKind, SceneTransform, StreamScreen,
 };
 use crate::scene_geometry::{
-    PixelRect, SceneCrop, SceneFit, SceneMask, background_stage_margin, background_zoom_crop,
-    camera_mask, scene_crop_from_transform, scene_mask_allows, scene_source_fit,
-    scene_source_rect_pixels, scene_source_render_transform,
+    ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask, background_stage_margin,
+    background_zoom_crop, camera_chroma_key, camera_mask, chroma_key_alpha, chroma_key_despill,
+    scene_crop_from_transform, scene_mask_allows, scene_source_fit, scene_source_rect_pixels,
+    scene_source_render_transform,
 };
 use crate::state::AppState;
 
@@ -2109,6 +2110,9 @@ struct PreparedGpuSource<'a> {
     /// Straight-alpha source-over blend (overlay bitmaps only — capture sources
     /// must keep the opaque overwrite; see `GpuSource::blend`).
     blend: bool,
+    /// Camera chroma key; forces `blend` semantics via the shader's computed
+    /// alpha, so keyed camera quads set both.
+    chroma_key: Option<crate::metal_compositor::GpuChromaKey>,
 }
 
 #[cfg(target_os = "macos")]
@@ -2119,6 +2123,22 @@ fn scene_mask_into_metal(mask: SceneMask) -> crate::metal_compositor::SourceMask
         SceneMask::Rounded { radius_pct } => {
             crate::metal_compositor::SourceMask::Rounded { radius_pct }
         }
+    }
+}
+
+/// f32 projection of the shared keyer spec for the shader. The spec from
+/// `camera_chroma_key` stays the single source of truth.
+#[cfg(target_os = "macos")]
+fn scene_chroma_key_into_metal(
+    spec: &crate::scene_geometry::ChromaKeySpec,
+) -> crate::metal_compositor::GpuChromaKey {
+    crate::metal_compositor::GpuChromaKey {
+        key_cb: spec.key_cb() as f32,
+        key_cr: spec.key_cr() as f32,
+        threshold: spec.threshold as f32,
+        band: spec.band as f32,
+        spill: spec.spill as f32,
+        spill_is_blue: spec.spill_is_blue(),
     }
 }
 
@@ -2138,6 +2158,7 @@ impl<'a> PreparedGpuSource<'a> {
             mirror: self.mirror,
             mask: scene_mask_into_metal(self.mask),
             blend: self.blend,
+            chroma_key: self.chroma_key,
         }
     }
 }
@@ -2282,6 +2303,7 @@ fn push_caption_overlay_gpu_source<'a>(
         // The bar/card is rasterized on a transparent canvas; without blending
         // its alpha-0 pixels overwrite the frame as an opaque black box.
         blend: true,
+        chroma_key: None,
     });
 }
 
@@ -2351,6 +2373,7 @@ fn try_gpu_compose(
                     mirror: false,
                     mask: SceneMask::None,
                     blend: false,
+                    chroma_key: None,
                 });
                 true
             } else {
@@ -2409,6 +2432,7 @@ fn try_gpu_compose(
             mirror: false,
             mask: SceneMask::None,
             blend: false,
+            chroma_key: None,
         });
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
@@ -2479,6 +2503,7 @@ fn try_gpu_compose(
             mirror: false,
             mask: SceneMask::None,
             blend: false,
+            chroma_key: None,
         });
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
@@ -2559,7 +2584,13 @@ fn try_gpu_compose(
                         crop,
                         mirror: layout.camera_mirror,
                         mask: camera_mask(layout),
-                        blend: false,
+                        // The keyed camera is the one capture source that
+                        // blends: its alpha comes from the shader's keyer,
+                        // not the (untrustworthy) capture alpha channel.
+                        blend: camera_chroma_key(layout).is_some(),
+                        chroma_key: camera_chroma_key(layout)
+                            .as_ref()
+                            .map(scene_chroma_key_into_metal),
                     });
                 } else {
                     let placeholder =
@@ -2590,6 +2621,7 @@ fn try_gpu_compose(
                         mirror: layout.camera_mirror,
                         mask: camera_mask(layout),
                         blend: false,
+                        chroma_key: None,
                     });
                 }
             }
@@ -2638,6 +2670,7 @@ fn try_gpu_compose(
                         mirror: false,
                         mask: SceneMask::None,
                         blend: false,
+                        chroma_key: None,
                     });
                 } else {
                     let placeholder =
@@ -2665,6 +2698,7 @@ fn try_gpu_compose(
                         mirror: false,
                         mask: SceneMask::None,
                         blend: false,
+                        chroma_key: None,
                     });
                 }
             }
@@ -2693,6 +2727,7 @@ fn try_gpu_compose(
                     mirror: false,
                     mask: SceneMask::None,
                     blend: false,
+                    chroma_key: None,
                 });
             }
         }
@@ -3438,6 +3473,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                 ),
                 mirror_x: false,
                 mask: SceneMask::None,
+                chroma_key: None,
             },
         )
     {
@@ -3482,6 +3518,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             contain: screen_contain,
                             mirror_x: false,
                             mask: SceneMask::None,
+                            chroma_key: None,
                         },
                     )
                 } else if let Some(frame) = screen_frame {
@@ -3501,6 +3538,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             contain: screen_contain,
                             mirror_x: false,
                             mask: SceneMask::None,
+                            chroma_key: None,
                         },
                     )
                 } else {
@@ -3527,6 +3565,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                         ),
                         mirror_x: snapshot.layout.camera_mirror,
                         mask: camera_mask(&snapshot.layout),
+                        chroma_key: camera_chroma_key(&snapshot.layout),
                     },
                 )
             }),
@@ -3736,6 +3775,9 @@ struct SourceRenderOptions {
     contain: bool,
     mirror_x: bool,
     mask: SceneMask,
+    /// Camera chroma key from the shared spec; keyed pixels blend fractionally
+    /// into the frame instead of overwriting (mirrors the Metal shader keyer).
+    chroma_key: Option<ChromaKeySpec>,
 }
 
 struct RgbaSource<'a> {
@@ -3794,6 +3836,7 @@ fn render_scene_background(
             contain: matches!(background.fit, BackgroundFit::Fit),
             mirror_x: false,
             mask: SceneMask::None,
+            chroma_key: None,
         },
     )
 }
@@ -3904,6 +3947,7 @@ fn render_synthetic_source_rect(
             contain: false,
             mirror_x: false,
             mask: SceneMask::None,
+            chroma_key: None,
         },
     );
 }
@@ -3983,6 +4027,12 @@ fn caption_overlay_layout_with_inset(
     (source_left, dest_left, dest_top, draw_width.max(1))
 }
 
+/// Straight-alpha source-over for one plane sample, shared by the caption
+/// overlay blit and the chroma-keyed camera blit.
+fn alpha_blend_channel(src: u8, dst: u8, alpha: u16) -> u8 {
+    ((u16::from(src) * alpha + u16::from(dst) * (255 - alpha)) / 255) as u8
+}
+
 fn composite_caption_overlay(
     overlay: &crate::captions::CaptionOverlay,
     canvas_width: u32,
@@ -4026,9 +4076,7 @@ fn composite_caption_overlay(
             overlay.rgba[index + 3],
         )
     };
-    let blend = |src: u8, dst: u8, alpha: u16| -> u8 {
-        ((u16::from(src) * alpha + u16::from(dst) * (255 - alpha)) / 255) as u8
-    };
+    let blend = alpha_blend_channel;
 
     for row in 0..draw_height {
         let dest_y = dest_top + row;
@@ -4099,6 +4147,21 @@ fn blit_rgba_to_yuv420p(
     let draw_right = fit.x.saturating_add(fit.width).min(canvas_width as u32) as usize;
     let draw_bottom = fit.y.saturating_add(fit.height).min(canvas_height as u32) as usize;
 
+    // Chroma key: resolve the source pixel to (rgb after despill, key alpha).
+    // None means the pixel keys fully out. Without a spec every pixel is the
+    // historical opaque overwrite (alpha 255) — byte-identical to before.
+    let keyed_pixel = |r: u8, g: u8, b: u8| -> Option<(u8, u8, u8, u8)> {
+        let Some(spec) = options.chroma_key.as_ref() else {
+            return Some((r, g, b, 255));
+        };
+        let key_alpha = chroma_key_alpha(spec, r, g, b);
+        if key_alpha == 0 {
+            return None;
+        }
+        let (r, g, b) = chroma_key_despill(spec, r, g, b);
+        Some((r, g, b, key_alpha))
+    };
+
     for dest_y in draw_top..draw_bottom {
         for dest_x in draw_left..draw_right {
             if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
@@ -4113,8 +4176,16 @@ fn blit_rgba_to_yuv420p(
             if a < 16 {
                 continue;
             }
+            let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
+                continue;
+            };
             let (y_value, _u_value, _v_value) = rgb_to_yuv(r, g, b);
-            dest[dest_y * canvas_width + dest_x] = y_value;
+            let index = dest_y * canvas_width + dest_x;
+            dest[index] = if key_alpha == 255 {
+                y_value
+            } else {
+                alpha_blend_channel(y_value, dest[index], u16::from(key_alpha))
+            };
         }
     }
 
@@ -4138,10 +4209,20 @@ fn blit_rgba_to_yuv420p(
             if a < 16 {
                 continue;
             }
+            let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
+                continue;
+            };
             let (_y_value, u_value, v_value) = rgb_to_yuv(r, g, b);
             let uv_index = uv_y * uv_width + uv_x;
-            dest[u_start + uv_index] = u_value;
-            dest[v_start + uv_index] = v_value;
+            if key_alpha == 255 {
+                dest[u_start + uv_index] = u_value;
+                dest[v_start + uv_index] = v_value;
+            } else {
+                dest[u_start + uv_index] =
+                    alpha_blend_channel(u_value, dest[u_start + uv_index], u16::from(key_alpha));
+                dest[v_start + uv_index] =
+                    alpha_blend_channel(v_value, dest[v_start + uv_index], u16::from(key_alpha));
+            }
         }
     }
     true
@@ -4953,11 +5034,176 @@ mod tests {
                 contain: false,
                 mirror_x: false,
                 mask: SceneMask::None,
+                chroma_key: None,
             },
         ));
 
         let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
         assert!(bytes[..8].iter().all(|&value| value == blue_y));
+    }
+
+    /// A 2×2 blue YUV canvas the chroma-key blit tests composite onto.
+    fn blue_yuv_canvas_2x2() -> Vec<u8> {
+        let (y, u, v) = rgb_to_yuv(0, 0, 255);
+        let mut bytes = vec![0; raw_yuv420p_len(2, 2)];
+        bytes[..4].fill(y);
+        bytes[4] = u;
+        bytes[5] = v;
+        bytes
+    }
+
+    fn chroma_key_test_spec() -> crate::scene_geometry::ChromaKeySpec {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.camera_chroma_key_enabled = true;
+        camera_chroma_key(&layout).expect("keying enabled")
+    }
+
+    #[test]
+    fn yuv_blit_keys_out_green_and_keeps_foreground() {
+        // Top row: key green (keys out) + red (survives). Bottom row mirrors
+        // it so the 2×2 UV block's top-left sample is the KEYED pixel — the
+        // block must keep the background chroma, like the binary mask does.
+        let source: Vec<u8> = [
+            [0u8, 255, 0, 255],
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [255, 0, 0, 255],
+        ]
+        .concat();
+        let mut bytes = blue_yuv_canvas_2x2();
+        assert!(blit_rgba_to_yuv420p(
+            &RgbaSource {
+                bytes: &source,
+                width: 2,
+                height: 2,
+                format: SourcePixelFormat::Rgba,
+            },
+            &mut bytes,
+            2,
+            2,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            SourceRenderOptions {
+                crop: SceneCrop::none(),
+                contain: false,
+                mirror_x: false,
+                mask: SceneMask::None,
+                chroma_key: Some(chroma_key_test_spec()),
+            },
+        ));
+        let (blue_y, blue_u, blue_v) = rgb_to_yuv(0, 0, 255);
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
+        assert_eq!(bytes[0], blue_y, "keyed pixel keeps the background");
+        assert_eq!(bytes[1], red_y, "red foreground lands");
+        assert_eq!(bytes[2], blue_y);
+        assert_eq!(bytes[3], red_y);
+        assert_eq!(
+            (bytes[4], bytes[5]),
+            (blue_u, blue_v),
+            "UV block sampled on the keyed pixel keeps background chroma"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_chroma_keyers_agree_on_the_same_fixture_or_skips() {
+        use crate::metal_compositor::{GpuSource, GpuSourceKind, MetalSceneCompositor, SourceMask};
+        let Some(mut gpu) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        // Key green (out), red (kept), a mid green-grey (partial alpha), and
+        // grey (kept + despill-neutral), over a blue background. RGBA order.
+        let pixels: [[u8; 4]; 4] = [
+            [0, 255, 0, 255],
+            [255, 0, 0, 255],
+            [74, 181, 74, 255],
+            [128, 128, 128, 255],
+        ];
+        let spec = chroma_key_test_spec();
+
+        let mut cpu = blue_yuv_canvas_2x2();
+        assert!(blit_rgba_to_yuv420p(
+            &RgbaSource {
+                bytes: &pixels.concat(),
+                width: 2,
+                height: 2,
+                format: SourcePixelFormat::Rgba,
+            },
+            &mut cpu,
+            2,
+            2,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            SourceRenderOptions {
+                crop: SceneCrop::none(),
+                contain: false,
+                mirror_x: false,
+                mask: SceneMask::None,
+                chroma_key: Some(spec),
+            },
+        ));
+
+        let bgra: Vec<u8> = pixels
+            .iter()
+            .flat_map(|[r, g, b, a]| [*b, *g, *r, *a])
+            .collect();
+        let gpu_pixels = gpu
+            .compose_bgra(
+                2,
+                2,
+                [0.0, 0.0, 1.0, 1.0],
+                &[GpuSource {
+                    kind: GpuSourceKind::Camera,
+                    bgra: &bgra,
+                    content_key: None,
+                    iosurface: None,
+                    pixel_buffer: None,
+                    width: 2,
+                    height: 2,
+                    dest: [0.0, 0.0, 1.0, 1.0],
+                    crop: [0.0; 4],
+                    mirror: false,
+                    mask: SourceMask::None,
+                    blend: true,
+                    chroma_key: Some(scene_chroma_key_into_metal(&spec)),
+                }],
+            )
+            .expect("metal compose");
+
+        // Same Y for every pixel within rounding: the CPU keys in YUV space,
+        // the GPU keys in RGB then converts — linear ops that must agree.
+        for pixel in 0..4 {
+            let b = gpu_pixels[pixel * 4];
+            let g = gpu_pixels[pixel * 4 + 1];
+            let r = gpu_pixels[pixel * 4 + 2];
+            let (gpu_y, _, _) = rgb_to_yuv(r, g, b);
+            let cpu_y = cpu[pixel];
+            assert!(
+                (i16::from(gpu_y) - i16::from(cpu_y)).abs() <= 4,
+                "pixel {pixel}: cpu Y {cpu_y} vs gpu Y {gpu_y}"
+            );
+        }
+        // The keyed pixel is exactly the background on both paths.
+        let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        assert_eq!(cpu[0], blue_y);
+        assert_eq!(gpu_pixels[0], 255, "gpu keyed pixel keeps blue");
+        assert!(gpu_pixels[1] <= 2 && gpu_pixels[2] <= 2);
+        // The partial pixel genuinely blended on both paths (neither the
+        // background nor the despilled source survives verbatim).
+        let partial_alpha = chroma_key_alpha(&spec, 74, 181, 74);
+        assert!(
+            partial_alpha > 0 && partial_alpha < 255,
+            "fixture pixel must ramp, got {partial_alpha}"
+        );
     }
 
     #[cfg(target_os = "macos")]

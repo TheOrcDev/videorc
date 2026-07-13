@@ -48,7 +48,20 @@ const SHADER_SOURCE: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 struct VOut { float4 pos [[position]]; float2 uv; };
-struct FragParams { float4 crop; float mirror; float circle; float aspect; float radius; };
+struct FragParams {
+    float4 crop;
+    float mirror;
+    float circle;
+    float aspect;
+    float radius;
+    // Chroma key, mirroring scene_geometry's f64 reference keyer:
+    // chroma_key = (enabled, key_cb, key_cr, threshold); chroma_key2 =
+    // (band, spill, spill_is_blue, reserved). CbCr and distances are in
+    // 0..255 units with the SAME -43/-85/128 and 128/-107/-21 coefficient
+    // family as color.rs — if these drift, the CPU and GPU keyers disagree.
+    float4 chroma_key;
+    float4 chroma_key2;
+};
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
     VOut out;
     float4 v = verts[vid];
@@ -102,7 +115,35 @@ fragment float4 f_main(VOut in [[stage_in]],
     // Crop: sample only the visible region [cl, 1-cr] x [ct, 1-cb] of the source.
     float cl = params.crop.x, ct = params.crop.y, cr = params.crop.z, cb = params.crop.w;
     float2 src = float2(cl + u * (1.0 - cl - cr), ct + uv.y * (1.0 - ct - cb));
-    return tex.sample(samp, src);
+    float4 color = tex.sample(samp, src);
+    // Chroma key (scene_geometry::chroma_key_alpha / chroma_key_despill in
+    // f32): CbCr distance from the key ramps alpha 0->1 across the band, and
+    // spill pulls the dominant key channel down toward the other channels'
+    // max. The quad must be drawn on the blending pipeline for the computed
+    // alpha to matter.
+    if (params.chroma_key.x > 0.5) {
+        float r = color.r * 255.0, g = color.g * 255.0, b = color.b * 255.0;
+        float dcb = 128.0 + (-43.0 * r - 85.0 * g + 128.0 * b) / 256.0 - params.chroma_key.y;
+        float dcr = 128.0 + (128.0 * r - 107.0 * g - 21.0 * b) / 256.0 - params.chroma_key.z;
+        float dist = sqrt(dcb * dcb + dcr * dcr);
+        float threshold = params.chroma_key.w;
+        float band = params.chroma_key2.x;
+        float alpha = (band > 0.0)
+            ? clamp((dist - threshold) / band, 0.0, 1.0)
+            : (dist <= threshold ? 0.0 : 1.0);
+        float spill = params.chroma_key2.y;
+        if (spill > 0.0) {
+            if (params.chroma_key2.z > 0.5) {
+                float limit = max(color.r, color.g);
+                color.b = (color.b > limit) ? color.b - spill * (color.b - limit) : color.b;
+            } else {
+                float limit = max(color.r, color.b);
+                color.g = (color.g > limit) ? color.g - spill * (color.g - limit) : color.g;
+            }
+        }
+        color.a *= alpha;
+    }
+    return color;
 }
 "#;
 
@@ -118,6 +159,41 @@ struct FragParams {
     /// Rounded-rect corner radius in shorter-side-half units (2 * pct / 100);
     /// 0 disables the rounded mask.
     radius: f32,
+    /// (enabled, key_cb, key_cr, threshold) — see the MSL FragParams comment.
+    /// The float4 pair keeps the struct layout 16-byte aligned on both sides.
+    chroma_key: [f32; 4],
+    /// (band, spill, spill_is_blue, reserved).
+    chroma_key2: [f32; 4],
+}
+
+/// Per-quad chroma key in shader units, converted once from
+/// `scene_geometry::ChromaKeySpec` at the compositor bridge (the spec stays
+/// the single source; this is just its f32 projection).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpuChromaKey {
+    pub key_cb: f32,
+    pub key_cr: f32,
+    pub threshold: f32,
+    pub band: f32,
+    pub spill: f32,
+    pub spill_is_blue: bool,
+}
+
+impl GpuChromaKey {
+    fn frag_params(source: Option<&GpuChromaKey>) -> ([f32; 4], [f32; 4]) {
+        match source {
+            Some(key) => (
+                [1.0, key.key_cb, key.key_cr, key.threshold],
+                [
+                    key.band,
+                    key.spill,
+                    if key.spill_is_blue { 1.0 } else { 0.0 },
+                    0.0,
+                ],
+            ),
+            None => ([0.0; 4], [0.0; 4]),
+        }
+    }
 }
 
 /// One source layer to composite: BGRA8 pixels at `width`×`height`, drawn into the
@@ -156,6 +232,9 @@ pub struct GpuSource<'a> {
     /// sources keep the default opaque overwrite: their alpha channels are not
     /// trustworthy (screen frames can arrive with alpha 0).
     pub blend: bool,
+    /// Chroma key applied in the fragment shader (camera green screen). The
+    /// caller must also set `blend` or the computed alpha is ignored.
+    pub chroma_key: Option<GpuChromaKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -712,12 +791,15 @@ impl MetalSceneCompositor {
             } else {
                 1.0
             };
+            let (chroma_key, chroma_key2) = GpuChromaKey::frag_params(source.chroma_key.as_ref());
             let params = FragParams {
                 crop: source.crop,
                 mirror: f32::from(u8::from(source.mirror)),
                 circle: source.mask.circle_flag(),
                 aspect,
                 radius: source.mask.shader_radius(),
+                chroma_key,
+                chroma_key2,
             };
             command_encode_ms += encode_segment_started_at.elapsed().as_secs_f64() * 1000.0;
             let source_texture_started_at = Instant::now();
@@ -1519,6 +1601,8 @@ fn encode_texture_present(
         circle: 0.0,
         aspect: 1.0,
         radius: 0.0,
+        chroma_key: [0.0; 4],
+        chroma_key2: [0.0; 4],
     };
     unsafe {
         encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
@@ -1745,6 +1829,7 @@ mod tests {
             mirror: false,
             mask: SourceMask::None,
             blend: false,
+            chroma_key: None,
         }];
         let yuv = compositor.compose_yuv420p(4, 4, &sources).unwrap();
         assert_eq!(yuv.len(), 16 + 2 * 4);
@@ -1809,6 +1894,105 @@ mod tests {
             .compose_bgra(1, 1, [0.0, 1.0, 0.0, 1.0], &[source])
             .unwrap();
         assert_eq!(pixel(&px, 1, 0, 0)[..3], [0, 0, 0]);
+    }
+
+    /// Green key in the shader's CbCr units — the same -85/-107 coefficient
+    /// family the Rust reference keyer uses.
+    fn green_key(threshold: f32, band: f32, spill: f32) -> GpuChromaKey {
+        GpuChromaKey {
+            key_cb: 128.0 + (-85.0 * 255.0) / 256.0,
+            key_cr: 128.0 + (-107.0 * 255.0) / 256.0,
+            threshold,
+            band,
+            spill,
+            spill_is_blue: false,
+        }
+    }
+
+    #[test]
+    fn chroma_key_quad_keys_green_and_keeps_foreground_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        // BGRA texels: key green (keys out), red (kept), a green-grey mix
+        // (partial alpha), grey (kept). Composed over a BLUE background.
+        let camera = [
+            0u8, 255, 0, 255, // green
+            0, 0, 255, 255, // red
+            74, 181, 74, 255, // partial
+            128, 128, 128, 255, // grey
+        ];
+        let mut source = full_frame(&camera, 4, 1, false, SourceMask::None, [0.0; 4]);
+        source.blend = true;
+        source.chroma_key = Some(green_key(72.0, 14.4, 0.0));
+        let px = compositor
+            .compose_bgra(4, 1, [0.0, 0.0, 1.0, 1.0], &[source])
+            .unwrap();
+        assert_eq!(
+            pixel(&px, 4, 0, 0)[..3],
+            [255, 0, 0],
+            "key green shows the blue frame"
+        );
+        assert_eq!(pixel(&px, 4, 1, 0)[..3], [0, 0, 255], "red survives");
+        let partial = pixel(&px, 4, 2, 0);
+        assert!(
+            partial[1] > 30 && partial[1] < 165 && partial[0] > 60 && partial[0] < 220,
+            "green-grey mix blends fractionally over blue, got {partial:?}"
+        );
+        assert_eq!(
+            pixel(&px, 4, 3, 0)[..3],
+            [128, 128, 128],
+            "grey survives untouched"
+        );
+    }
+
+    #[test]
+    fn chroma_key_spill_clamps_the_green_fringe_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        // A green-contaminated foreground pixel far from the key: kept, but
+        // full spill suppression clamps G down to max(R, B) = 100.
+        let camera = [80u8, 200, 100, 255]; // BGRA: r=100 g=200 b=80
+        let mut source = full_frame(&camera, 1, 1, false, SourceMask::None, [0.0; 4]);
+        source.blend = true;
+        source.chroma_key = Some(green_key(40.0, 0.0, 1.0));
+        let px = compositor
+            .compose_bgra(1, 1, [0.0, 0.0, 0.0, 1.0], &[source])
+            .unwrap();
+        let out = pixel(&px, 1, 0, 0);
+        assert!(
+            out[1] >= 98 && out[1] <= 102,
+            "spill clamps green toward max(r, b), got {out:?}"
+        );
+        assert_eq!(out[0], 80, "blue untouched");
+        assert_eq!(out[2], 100, "red untouched");
+    }
+
+    #[test]
+    fn chroma_key_composes_with_the_circle_mask_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        // A red quad with circle mask + keying: corners are discarded by the
+        // mask, the center survives the key — both treatments in one pass.
+        let out = 8usize;
+        let red = [0u8, 0, 255, 255].repeat(2 * 2);
+        let mut source = full_frame(&red, 2, 2, false, SourceMask::Circle, [0.0; 4]);
+        source.blend = true;
+        source.chroma_key = Some(green_key(72.0, 14.4, 0.1));
+        let px = compositor
+            .compose_bgra(out, out, [0.0, 0.0, 1.0, 1.0], &[source])
+            .unwrap();
+        assert_eq!(pixel(&px, out, 4, 4)[..3], [0, 0, 255], "center red kept");
+        assert_eq!(
+            pixel(&px, out, 0, 0)[..3],
+            [255, 0, 0],
+            "corner masked to the blue frame"
+        );
     }
 
     #[test]
@@ -2044,6 +2228,7 @@ mod tests {
             mirror,
             mask,
             blend: false,
+            chroma_key: None,
         }
     }
 
@@ -2223,6 +2408,7 @@ mod tests {
                 mirror: false,
                 mask: SourceMask::None,
                 blend: false,
+                chroma_key: None,
             },
             GpuSource {
                 kind: GpuSourceKind::Camera,
@@ -2237,6 +2423,7 @@ mod tests {
                 mirror: true,
                 mask: SourceMask::None,
                 blend: false,
+                chroma_key: None,
             },
         ];
         let yuv = compositor.compose_yuv420p(1920, 1080, &sources).unwrap();
@@ -2264,6 +2451,7 @@ mod tests {
                 mirror: false,
                 mask: SourceMask::None,
                 blend: false,
+                chroma_key: None,
             },
             GpuSource {
                 kind: GpuSourceKind::Camera,
@@ -2278,6 +2466,7 @@ mod tests {
                 mirror: true,
                 mask: SourceMask::None,
                 blend: false,
+                chroma_key: None,
             },
         ];
 
@@ -2354,6 +2543,7 @@ mod tests {
             mirror: false,
             mask: SourceMask::None,
             blend: false,
+            chroma_key: None,
         }];
 
         let output = compositor
@@ -2400,6 +2590,7 @@ mod tests {
             mirror: false,
             mask: SourceMask::None,
             blend: false,
+            chroma_key: None,
         }];
 
         let output = compositor
@@ -2584,6 +2775,7 @@ mod tests {
             mirror: false,
             mask: SourceMask::None,
             blend: false,
+            chroma_key: None,
         }];
         let pixels = composite_sources(out, out, [0.0, 0.0, 1.0, 1.0], &sources).unwrap();
         assert_eq!(pixels.len(), out * out * 4);
