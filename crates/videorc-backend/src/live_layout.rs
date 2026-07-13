@@ -415,6 +415,43 @@ async fn apply_scene_transaction(
                 .is_some_and(|layout| layout.layout_preset.is_vertical())
         };
         if running_vertical != requested_vertical {
+            // Dual-orientation session: a vertical-scene transaction lands on
+            // the SIMULCAST leg's snapshot without touching the primary; the
+            // bail fires only when no leg matches the requested orientation.
+            if requested_vertical && crate::compositor::has_compositor_simulcast_scene(state).await
+            {
+                let revision = {
+                    let compositor = state.compositor.lock().await;
+                    compositor.status.scene_revision
+                };
+                let revision = next_scene_revision(
+                    revision,
+                    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+                );
+                crate::compositor::update_compositor_simulcast_scene(
+                    state,
+                    crate::protocol::CompositorSceneUpdateParams {
+                        revision,
+                        scene: Some(scene.clone()),
+                        layout: params.layout.clone(),
+                        active_screen: None,
+                    },
+                )
+                .await;
+                let compositor_status = {
+                    let compositor = state.compositor.lock().await;
+                    compositor.status.clone()
+                };
+                let status = SceneCommitStatus {
+                    applied: true,
+                    mode: "hot".to_string(),
+                    scene_revision: revision,
+                    scene: scene.clone(),
+                    compositor_status,
+                    message: None,
+                };
+                return Ok(layout_apply_status(intent_id, "hot", scene, status, None));
+            }
             bail!(
                 "Switching between horizontal and vertical scenes changes the canvas orientation — stop the session first."
             );

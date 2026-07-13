@@ -1078,6 +1078,32 @@ pub async fn start_session(
             u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
         )
         .await;
+        // Dual-orientation: seed the vertical leg's scene from the simulcast
+        // params (same sources, its own vertical geometry). Non-dual sessions
+        // clear any stale leftover so the aux can never compose a dead scene.
+        if let Some(simulcast) = params.simulcast.as_ref() {
+            let simulcast_scene = simulcast.scene.clone().unwrap_or_else(|| {
+                crate::scene::scene_from_capture_config(crate::protocol::SceneConfigParams {
+                    sources: params.sources.clone(),
+                    layout: simulcast.layout.clone(),
+                    video: Some(simulcast.video.clone()),
+                    background: None,
+                    protected_overlay_window_ids: Vec::new(),
+                })
+            });
+            crate::compositor::update_compositor_simulcast_scene(
+                &state,
+                crate::protocol::CompositorSceneUpdateParams {
+                    revision: startup_scene.scene_revision,
+                    scene: Some(simulcast_scene),
+                    layout: simulcast.layout.clone(),
+                    active_screen: None,
+                },
+            )
+            .await;
+        } else {
+            crate::compositor::clear_compositor_simulcast_scene(&state).await;
+        }
         let startup_scene_revision = startup_scene.scene_revision;
         recording_startup_scene = Some(startup_scene);
         match await_recording_startup_barrier(
@@ -8337,6 +8363,7 @@ fn recording_compositor_stream_output(
                 width: recording.width,
                 height: recording.height,
                 frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                composes_simulcast_scene: false,
             }));
         }
         return Ok(None);
@@ -8351,6 +8378,7 @@ fn recording_compositor_stream_output(
         width: stream.width,
         height: stream.height,
         frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+        composes_simulcast_scene: false,
     }))
 }
 
@@ -12514,6 +12542,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
                 frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                composes_simulcast_scene: false,
             }
         );
 
@@ -12576,6 +12605,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            composes_simulcast_scene: false,
         };
 
         let error = bridge_compositor_split_output_ffmpeg_args(
@@ -15000,6 +15030,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
                 frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                composes_simulcast_scene: false,
             })
         );
     }
@@ -15053,6 +15084,7 @@ mod tests {
                 width: params.output.video.width,
                 height: params.output.video.height,
                 frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                composes_simulcast_scene: false,
             })
         );
         let stream_plan = caption_leg_plan(&params);
@@ -15575,6 +15607,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
                 frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                composes_simulcast_scene: false,
             })
         );
         validate_outputs(&params).unwrap();
