@@ -1,4 +1,10 @@
-import type { CameraShape, EffectiveSceneBackground, LayoutSettings, SceneSource } from './backend'
+import type {
+  CameraShape,
+  EffectiveSceneBackground,
+  LayoutPreset,
+  LayoutSettings,
+  SceneSource
+} from './backend'
 
 /** Keep the proof surface's background stage identical to Rust scene geometry. */
 export function previewProofBackgroundStageMargin(
@@ -7,6 +13,28 @@ export function previewProofBackgroundStageMargin(
   if (!background) return 0
   return Math.min(0.2, Math.max(0, background.visibilityPercent / 200))
 }
+
+// Mirrors Rust `scene_geometry::vertical_fill_preset`: every vertical scene's
+// regions are short-form bands that are always FILLED (cover), never
+// letterboxed.
+const VERTICAL_FILL_PRESETS: readonly LayoutPreset[] = [
+  'vertical-camera-top',
+  'vertical-camera-bottom',
+  'vertical-split',
+  'vertical-screen-camera',
+  'vertical-screen-only',
+  'vertical-camera-only'
+]
+
+// Band cameras and the full-canvas vertical camera ignore the user's Fit —
+// a contained camera letterboxes its region. Only the vertical screen+camera
+// inset bubble keeps the Fit choice (like its horizontal twin).
+const VERTICAL_FILLED_CAMERA_PRESETS: readonly LayoutPreset[] = [
+  'vertical-camera-top',
+  'vertical-camera-bottom',
+  'vertical-split',
+  'vertical-camera-only'
+]
 
 /**
  * Geometry policy used before the backend compositor has published its
@@ -18,9 +46,15 @@ export function previewProofLayerFit(
   layout: LayoutSettings
 ): 'contain' | 'cover' {
   if (source.kind === 'camera') {
+    if (VERTICAL_FILLED_CAMERA_PRESETS.includes(layout.layoutPreset)) {
+      return 'cover'
+    }
     return layout.cameraFit === 'fit' && layout.cameraZoom <= 100 ? 'contain' : 'cover'
   }
-  return layout.layoutPreset === 'side-by-side' ? 'cover' : 'contain'
+  return layout.layoutPreset === 'side-by-side' ||
+    VERTICAL_FILL_PRESETS.includes(layout.layoutPreset)
+    ? 'cover'
+    : 'contain'
 }
 
 export function previewProofLayerShape(

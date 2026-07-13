@@ -140,7 +140,8 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
         }
         LayoutPreset::ScreenOnly | LayoutPreset::VerticalScreenOnly => {
             // Screen-only never composites the camera; the vertical variant is
-            // the same full-frame contain on the portrait canvas.
+            // the same full-frame arrangement on the portrait canvas (covering,
+            // per the vertical fill law — horizontal keeps contain).
             scene.sources.push(base_source(&params.sources));
         }
         LayoutPreset::SideBySide => {
@@ -604,7 +605,7 @@ mod tests {
     };
 
     #[test]
-    fn vertical_camera_top_stacks_camera_band_over_contained_screen() {
+    fn vertical_camera_top_stacks_camera_band_over_covered_screen() {
         let mut params = base_params();
         params.layout.layout_preset = LayoutPreset::VerticalCameraTop;
         let scene = scene_from_capture_config(params);

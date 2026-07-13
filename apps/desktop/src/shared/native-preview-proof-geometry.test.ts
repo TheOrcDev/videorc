@@ -47,13 +47,39 @@ describe('Windows proof-surface geometry', () => {
     expect(previewProofLayerFit(camera, layout({ cameraFit: 'fill' }))).toBe('cover')
   })
 
-  it('covers only side-by-side screen regions', () => {
-    expect(previewProofLayerFit(screen, layout({ layoutPreset: 'screen-only' }))).toBe('contain')
-    expect(previewProofLayerFit(screen, layout({ layoutPreset: 'side-by-side' }))).toBe('cover')
-    // Vertical screen bands CONTAIN — nothing on the user's screen is cropped.
-    expect(previewProofLayerFit(screen, layout({ layoutPreset: 'vertical-camera-top' }))).toBe(
+  it('ignores camera Fit for band and full-canvas vertical cameras like Rust', () => {
+    // Vertical filled cameras COVER even with Fit set — a contained camera
+    // letterboxes its region (the vertical fill law). The inset bubble keeps
+    // the user's Fit like its horizontal twin.
+    for (const layoutPreset of [
+      'vertical-camera-top',
+      'vertical-camera-bottom',
+      'vertical-split',
+      'vertical-camera-only'
+    ] as const) {
+      expect(previewProofLayerFit(camera, layout({ layoutPreset }))).toBe('cover')
+    }
+    expect(previewProofLayerFit(camera, layout({ layoutPreset: 'vertical-screen-camera' }))).toBe(
       'contain'
     )
+  })
+
+  it('covers side-by-side and every vertical screen region', () => {
+    expect(previewProofLayerFit(screen, layout({ layoutPreset: 'screen-only' }))).toBe('contain')
+    expect(previewProofLayerFit(screen, layout({ layoutPreset: 'side-by-side' }))).toBe('cover')
+    // Vertical regions are always FILLED (cover) — the fill-crop law shipped
+    // in #97; a containing proof layer would flash letterboxed before the
+    // compositor publishes its authoritative fit.
+    for (const layoutPreset of [
+      'vertical-camera-top',
+      'vertical-camera-bottom',
+      'vertical-split',
+      'vertical-screen-camera',
+      'vertical-screen-only',
+      'vertical-camera-only'
+    ] as const) {
+      expect(previewProofLayerFit(screen, layout({ layoutPreset }))).toBe('cover')
+    }
   })
 
   it('preserves rounded and circle masks only for the inset scene overlays', () => {
