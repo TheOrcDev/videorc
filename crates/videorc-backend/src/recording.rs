@@ -81,9 +81,9 @@ use crate::repair::{
 };
 use crate::scene::{scene_from_capture_config, validate_scene_background};
 use crate::scene_geometry::{
-    PixelRect, SceneFit, SceneMask, background_stage_margin, camera_mask, circle_geometry,
-    resolved_camera_transform, rounded_rect_geometry, scaled_camera_box_size, scaled_camera_margin,
-    scene_crop_from_transform, scene_source_fit, scene_source_rect_pixels,
+    PixelRect, SceneFit, SceneMask, background_stage_margin, camera_chroma_key, camera_mask,
+    circle_geometry, resolved_camera_transform, rounded_rect_geometry, scaled_camera_box_size,
+    scaled_camera_margin, scene_crop_from_transform, scene_source_fit, scene_source_rect_pixels,
     scene_source_render_transform, side_by_side_widths,
 };
 use crate::screen_capture::{
@@ -7475,6 +7475,13 @@ fn scene_source_layer_filter(
     } else {
         ""
     };
+    // Chroma key runs at the camera's native resolution, before crop/scale
+    // smear the key color across edge pixels.
+    let chroma = if matches!(kind, SceneSourceKind::Camera) {
+        camera_chroma_key_filter(&params.layout)
+    } else {
+        String::new()
+    };
     let crop = normalized_crop_filter(transform);
     let fit = scene_source_fit_filter(kind, width, height, params);
     let shape = if matches!(kind, SceneSourceKind::Camera) {
@@ -7488,7 +7495,39 @@ fn scene_source_layer_filter(
     } else {
         String::new()
     };
-    format!("[{input_index}:v]setpts=PTS-STARTPTS,{mirror}{crop}{fit}{shape}[{layer_label}]")
+    format!(
+        "[{input_index}:v]setpts=PTS-STARTPTS,{mirror}{chroma}{crop}{fit}{shape}[{layer_label}]"
+    )
+}
+
+/// FFmpeg mirror of the shared keyer (`scene_geometry::camera_chroma_key`):
+/// `chromakey` computes the same CbCr-plane distance normalized to the plane's
+/// diagonal (255·√2), so `similarity`/`blend` are exactly the spec's
+/// threshold/band divided by that constant, and `despill`'s `mix` is the spill
+/// strength. Empty when keying is off. Trailing comma composes into chains.
+fn camera_chroma_key_filter(layout: &LayoutSettings) -> String {
+    let Some(spec) = camera_chroma_key(layout) else {
+        return String::new();
+    };
+    let [r, g, b] = spec.key_rgb;
+    let normalize = 255.0 * std::f64::consts::SQRT_2;
+    // chromakey rejects similarity 0; the floor keeps a zero threshold keying
+    // only exact key pixels, matching the reference's hard edge.
+    let similarity = (spec.threshold / normalize).clamp(0.0001, 1.0);
+    let blend = (spec.band / normalize).clamp(0.0, 1.0);
+    let despill = if spec.spill > 0.0 {
+        let kind = if spec.spill_is_blue() {
+            "blue"
+        } else {
+            "green"
+        };
+        format!(",despill=type={kind}:mix={:.4}", spec.spill)
+    } else {
+        String::new()
+    };
+    format!(
+        "chromakey=color=0x{r:02X}{g:02X}{b:02X}:similarity={similarity:.4}:blend={blend:.4}{despill},"
+    )
 }
 
 fn normalized_crop_filter(transform: &crate::protocol::SceneTransform) -> String {
@@ -7527,8 +7566,11 @@ fn circle_alpha_mask_filter(width: u32, height: u32) -> String {
     let center_x = geometry.center_x;
     let center_y = geometry.center_y;
     let radius = geometry.radius;
+    // `alpha(X,Y)` (not 255) keeps whatever alpha the chain already carries —
+    // the chroma keyer's ramp must survive the shape mask. Unkeyed cameras
+    // arrive opaque, so this is byte-identical to the old constant for them.
     format!(
-        ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte((X-{center_x:.3})*(X-{center_x:.3})+(Y-{center_y:.3})*(Y-{center_y:.3}),{radius:.3}*{radius:.3}),255,0)'"
+        ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte((X-{center_x:.3})*(X-{center_x:.3})+(Y-{center_y:.3})*(Y-{center_y:.3}),{radius:.3}*{radius:.3}),alpha(X,Y),0)'"
     )
 }
 
@@ -7553,8 +7595,10 @@ fn rounded_alpha_mask_filter(width: u32, height: u32, radius_pct: u32) -> String
     let inner_half_w = geometry.inner_half_width;
     let inner_half_h = geometry.inner_half_height;
     let radius_sq = radius * radius;
+    // `alpha(X,Y)` (not 255): the chroma keyer's ramp must survive the shape
+    // mask; unkeyed cameras arrive opaque so nothing changes for them.
     format!(
-        ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(st(0,max(abs(X-{center_x:.3})-{inner_half_w:.3},0))*ld(0)+st(1,max(abs(Y-{center_y:.3})-{inner_half_h:.3},0))*ld(1),{radius_sq:.3}),255,0)'"
+        ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(st(0,max(abs(X-{center_x:.3})-{inner_half_w:.3},0))*ld(0)+st(1,max(abs(Y-{center_y:.3})-{inner_half_h:.3},0))*ld(1),{radius_sq:.3}),alpha(X,Y),0)'"
     )
 }
 
@@ -7841,10 +7885,13 @@ fn camera_chain_filter(camera_input_index: usize, params: &StartSessionParams) -
         params.output.video.width,
         params.output.video.height,
     );
+    // Key at native camera resolution (before the frame scale/crop), same
+    // ordering as scene_source_layer_filter.
+    let chroma = camera_chroma_key_filter(&params.layout);
     let prefix = if params.layout.camera_mirror {
-        format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,hflip,")
+        format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,hflip,{chroma}")
     } else {
-        format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,")
+        format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,{chroma}")
     };
     let frame = camera_frame_filter(width, height, &params.layout);
 
@@ -7858,7 +7905,7 @@ fn camera_chain_filter(camera_input_index: usize, params: &StartSessionParams) -
         CameraShape::Circle => {
             let radius = width / 2;
             format!(
-                "{prefix}{frame},format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte((X-{radius})*(X-{radius})+(Y-{radius})*(Y-{radius}),{radius}*{radius}),255,0)'[cam]"
+                "{prefix}{frame},format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte((X-{radius})*(X-{radius})+(Y-{radius})*(Y-{radius}),{radius}*{radius}),alpha(X,Y),0)'[cam]"
             )
         }
     }
@@ -12643,10 +12690,90 @@ mod tests {
         assert!(filter.contains("abs(X-100.000)-80.000"), "{filter}");
         assert!(filter.contains("abs(Y-50.000)-30.000"), "{filter}");
         assert!(filter.contains("400.000"), "radius² term: {filter}");
+        // Inside the shape the mask PRESERVES incoming alpha (the chroma
+        // keyer's ramp), never forces 255.
+        assert!(filter.contains("alpha(X,Y),0"), "{filter}");
 
         // Radius clamps at 50% (a pill) even if the pct is out of range.
         let clamped = rounded_alpha_mask_filter(100, 100, 400);
         assert!(clamped.contains("2500.000"), "{clamped}");
+    }
+
+    // Chroma key (2026-07-13 plan): the FFmpeg leg maps the ONE keyer spec to
+    // chromakey/despill — similarity and blend are the spec's threshold/band
+    // normalized to the CbCr diagonal (255·√2). Pin the string so the mapping
+    // cannot silently drift from the CPU/Metal keyers.
+    #[test]
+    fn camera_chroma_key_filter_pins_the_chromakey_despill_mapping() {
+        let mut layout = crate::protocol::default_layout_settings();
+        assert_eq!(camera_chroma_key_filter(&layout), "", "off by default");
+
+        layout.camera_chroma_key_enabled = true;
+        assert_eq!(
+            camera_chroma_key_filter(&layout),
+            "chromakey=color=0x00FF00:similarity=0.1997:blend=0.0399,despill=type=green:mix=0.1000,"
+        );
+
+        layout.camera_chroma_key_color = "#0000FF".to_string();
+        layout.camera_chroma_key_smoothness_pct = 0;
+        layout.camera_chroma_key_spill_pct = 0;
+        assert_eq!(
+            camera_chroma_key_filter(&layout),
+            "chromakey=color=0x0000FF:similarity=0.1997:blend=0.0000,",
+            "zero band is a hard cut and zero spill drops despill"
+        );
+
+        // A zero similarity floors at chromakey's minimum instead of erroring.
+        layout.camera_chroma_key_similarity_pct = 0;
+        assert!(
+            camera_chroma_key_filter(&layout).contains("similarity=0.0001"),
+            "{}",
+            camera_chroma_key_filter(&layout)
+        );
+    }
+
+    #[test]
+    fn camera_layer_filters_key_before_scaling_on_both_ffmpeg_paths() {
+        let mut params = base_params(true, false);
+        params.layout.camera_chroma_key_enabled = true;
+        params.layout.camera_shape = CameraShape::Circle;
+        params.layout.layout_preset = LayoutPreset::ScreenCamera;
+        let transform = SceneTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+
+        let layer = scene_source_layer_filter(
+            1,
+            "cam",
+            &SceneSourceKind::Camera,
+            &transform,
+            320,
+            180,
+            &params,
+        );
+        let key_at = layer.find("chromakey=").expect("scene layer keys");
+        let scale_at = layer.find("scale=").expect("scene layer scales");
+        assert!(key_at < scale_at, "key must run before scaling: {layer}");
+        assert!(
+            layer.contains("alpha(X,Y)"),
+            "shape mask preserves key alpha: {layer}"
+        );
+
+        let chain = camera_chain_filter(1, &params);
+        let key_at = chain.find("chromakey=").expect("camera chain keys");
+        let scale_at = chain.find("scale=").expect("camera chain scales");
+        assert!(key_at < scale_at, "key must run before scaling: {chain}");
+        assert!(
+            chain.contains("alpha(X,Y)"),
+            "circle geq preserves key alpha: {chain}"
+        );
     }
 
     #[test]
