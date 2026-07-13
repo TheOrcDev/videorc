@@ -428,9 +428,7 @@ fn push_vertical_stack(
     output_height: u32,
     bands: VerticalStackBands,
 ) {
-    if let Some(source) =
-        collapsed_vertical_single_source(params, output_width, output_height)
-    {
+    if let Some(source) = collapsed_vertical_single_source(params, output_width, output_height) {
         scene.sources.push(source);
         return;
     }
@@ -474,8 +472,7 @@ fn collapsed_vertical_single_source(
     match (has_screen, camera_id) {
         (true, Some(_)) => None,
         (false, Some(camera_id)) => {
-            let mut camera =
-                camera_source(camera_id, &params.layout, output_width, output_height);
+            let mut camera = camera_source(camera_id, &params.layout, output_width, output_height);
             camera.transform = full_frame_transform();
             camera.default_transform = full_frame_transform();
             Some(camera)

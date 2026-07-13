@@ -7594,7 +7594,10 @@ fn video_filter(
         return camera_only_video_filter(params, preview);
     }
 
-    if matches!(params.layout.layout_preset, LayoutPreset::VerticalCameraOnly) {
+    if matches!(
+        params.layout.layout_preset,
+        LayoutPreset::VerticalCameraOnly
+    ) {
         // Same full-frame camera as CameraOnly, but the portrait canvas is
         // always FILLED (vertical fill law) — the user's Fit choice must not
         // letterbox the canvas; zoom/pan still frame the crop.

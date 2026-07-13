@@ -8212,10 +8212,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
       setCaptureConfig((current) => ({
         ...current,
-        video: coerceVideoToOrientation(
-          video,
-          layoutPresetOrientation(current.layout.layoutPreset)
-        )
+        video: coerceVideoToOrientation(video, layoutPresetOrientation(current.layout.layoutPreset))
       }))
     },
     [entitlements]

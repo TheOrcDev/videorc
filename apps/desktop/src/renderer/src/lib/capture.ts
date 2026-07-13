@@ -763,7 +763,10 @@ export function loadCaptureConfig(): CaptureConfig {
     ),
     verticalRestoreVideo:
       loaded.verticalRestoreVideo != null
-        ? coerceVideoToOrientation(normalizeVideoSettings(loaded.verticalRestoreVideo), 'horizontal')
+        ? coerceVideoToOrientation(
+            normalizeVideoSettings(loaded.verticalRestoreVideo),
+            'horizontal'
+          )
         : null,
     lastHorizontalPreset: normalizeRememberedPreset(loaded.lastHorizontalPreset, 'horizontal'),
     lastVerticalPreset: normalizeRememberedPreset(loaded.lastVerticalPreset, 'vertical'),
