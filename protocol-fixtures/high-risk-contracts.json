@@ -62,6 +62,11 @@
       "cameraShape": "rectangle",
       "cameraCornerRadiusPct": 12,
       "cameraAspect": "source",
+      "cameraChromaKeyEnabled": false,
+      "cameraChromaKeyColor": "#00FF00",
+      "cameraChromaKeySimilarityPct": 40,
+      "cameraChromaKeySmoothnessPct": 8,
+      "cameraChromaKeySpillPct": 10,
       "cameraMargin": 32,
       "cameraFit": "fill",
       "cameraMirror": false,
@@ -220,7 +225,9 @@
       "messages": []
     },
     "deleteParams": {
-      "sessionIds": ["session-fixture"]
+      "sessionIds": [
+        "session-fixture"
+      ]
     },
     "deletionOperation": {
       "operationId": "delete-fixture-0123456789abcdef",
