@@ -1439,9 +1439,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const chatSetupWarnedRef = useRef<{ sessionId?: string; warned: Set<string> }>({
     warned: new Set()
   })
+  const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(loadCaptureConfig)
   useEffect(() => {
     const sessionId = liveChatSnapshot.sessionId
     if (!sessionId) {
+      return
+    }
+    // Chat setup warnings are a GO-LIVE concern. The backend no longer
+    // attaches chat providers to record-only sessions, and this gate keeps a
+    // future backend regression from nagging every recording about comments
+    // (owner report 2026-07-13: "Twitch comments are not connected" toast on
+    // every record with a disconnected Twitch target configured).
+    if (!captureConfig.streamEnabled) {
       return
     }
     if (chatSetupWarnedRef.current.sessionId !== sessionId) {
@@ -1463,8 +1472,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       })
     }
-  }, [liveChatSnapshot])
-  const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(loadCaptureConfig)
+  }, [liveChatSnapshot, captureConfig.streamEnabled])
   // Live captions: status + transcript driven by captions.* events; the mic
   // audio itself never reaches the renderer (the Rust backend uploads chunks).
   const [captionsStatus, setCaptionsStatus] = useState<CaptionsStatus>({ state: 'idle' })
