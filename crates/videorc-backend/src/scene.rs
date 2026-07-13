@@ -194,17 +194,34 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
         // Explicit arm (no wildcard): a new preset must state its composition
         // here or fail to compile — the old `_ =>` silently composited unknown
         // presets as screen-camera. The vertical variant is the identical
-        // arrangement on the portrait canvas: screen full-frame contain,
-        // camera as the user's corner/size/shape inset bubble.
+        // arrangement on the portrait canvas: screen full-frame (covering, per
+        // the vertical fill law), camera as the user's corner/size/shape inset
+        // bubble. Vertical only: with no screen-side source the camera covers
+        // the whole canvas instead of floating over a dead placeholder (the
+        // horizontal twin keeps the placeholder — landscape mode has no fill
+        // law and Camera is the camera-only home there).
         LayoutPreset::ScreenCamera | LayoutPreset::VerticalScreenCamera => {
-            scene.sources.push(base_source(&params.sources));
-            if let Some(camera_id) = params.sources.camera_id.clone() {
-                scene.sources.push(camera_source(
-                    camera_id,
-                    &params.layout,
-                    output_width,
-                    output_height,
-                ));
+            if matches!(
+                params.layout.layout_preset,
+                LayoutPreset::VerticalScreenCamera
+            ) && !has_screen_source(&params.sources)
+                && let Some(camera_id) = params.sources.camera_id.clone()
+            {
+                let mut camera =
+                    camera_source(camera_id, &params.layout, output_width, output_height);
+                camera.transform = full_frame_transform();
+                camera.default_transform = full_frame_transform();
+                scene.sources.push(camera);
+            } else {
+                scene.sources.push(base_source(&params.sources));
+                if let Some(camera_id) = params.sources.camera_id.clone() {
+                    scene.sources.push(camera_source(
+                        camera_id,
+                        &params.layout,
+                        output_width,
+                        output_height,
+                    ));
+                }
             }
         }
     }
@@ -395,9 +412,12 @@ struct VerticalStackBands {
 }
 
 /// Push the stacked vertical arrangement: camera band at the given geometry,
-/// screen in the complementary band. Like side-by-side regions, the camera
-/// band keeps no bubble mask and the screen band CONTAINS (nothing on the
-/// user's screen may be cropped away); the camera honors the user's Fit/Fill.
+/// screen in the complementary band. Both bands COVER their regions (scale to
+/// fill + center crop — scene_geometry's vertical fill law), and like
+/// side-by-side regions the camera band keeps no bubble mask. With exactly
+/// one active source the bands collapse: the present source covers the WHOLE
+/// canvas — a black band where the other source would sit is never lawful
+/// short-form output (full-canvas fill plan, 2026-07-13).
 fn push_vertical_stack(
     scene: &mut Scene,
     params: &SceneConfigParams,
@@ -405,6 +425,13 @@ fn push_vertical_stack(
     output_height: u32,
     bands: VerticalStackBands,
 ) {
+    if let Some(source) =
+        collapsed_vertical_single_source(params, output_width, output_height)
+    {
+        scene.sources.push(source);
+        return;
+    }
+
     let (screen_y, screen_height) = if bands.camera_y == 0.0 {
         (bands.camera_height, 1.0 - bands.camera_height)
     } else {
@@ -421,6 +448,36 @@ fn push_vertical_stack(
         camera.transform = vertical_band_transform(bands.camera_y, bands.camera_height);
         camera.default_transform = camera.transform.clone();
         scene.sources.push(camera);
+    }
+}
+
+/// A screen-side source is selected: a window, a screen, or the test pattern
+/// (the same precedence base_source composites).
+fn has_screen_source(sources: &SourceSelection) -> bool {
+    sources.window_id.is_some() || sources.screen_id.is_some() || sources.test_pattern
+}
+
+/// The single full-canvas source a two-role vertical preset collapses to when
+/// only one source is active, or None when both roles are filled and the
+/// preset's own arrangement applies. With neither source active this yields
+/// the full-frame placeholder base (never a dead band).
+fn collapsed_vertical_single_source(
+    params: &SceneConfigParams,
+    output_width: u32,
+    output_height: u32,
+) -> Option<SceneSource> {
+    let has_screen = has_screen_source(&params.sources);
+    let camera_id = params.sources.camera_id.clone();
+    match (has_screen, camera_id) {
+        (true, Some(_)) => None,
+        (false, Some(camera_id)) => {
+            let mut camera =
+                camera_source(camera_id, &params.layout, output_width, output_height);
+            camera.transform = full_frame_transform();
+            camera.default_transform = full_frame_transform();
+            Some(camera)
+        }
+        (_, None) => Some(base_source(&params.sources)),
     }
 }
 
@@ -634,16 +691,55 @@ mod tests {
     }
 
     #[test]
-    fn vertical_stack_without_camera_keeps_the_screen_band() {
-        // Transient state only — the selection blocker refuses these presets
-        // without a camera; the band stays consistent with side-by-side.
+    fn vertical_stack_without_camera_expands_the_screen_full_canvas() {
+        // One active source covers the whole canvas — a black band where the
+        // camera would sit is never lawful short-form output.
         let mut params = base_params();
         params.layout.layout_preset = LayoutPreset::VerticalCameraTop;
         params.sources.camera_id = None;
         let scene = scene_from_capture_config(params);
 
         assert_eq!(scene.sources.len(), 1);
-        assert_eq!(scene.sources[0].transform.y, VERTICAL_CAMERA_BAND);
+        assert_eq!(scene.sources[0].transform, full_frame_transform());
+    }
+
+    #[test]
+    fn vertical_stack_without_screen_expands_the_camera_full_canvas() {
+        let mut params = base_params();
+        params.layout.layout_preset = LayoutPreset::VerticalSplit;
+        params.sources.screen_id = None;
+        params.sources.window_id = None;
+        params.sources.test_pattern = false;
+        let scene = scene_from_capture_config(params);
+
+        assert_eq!(scene.sources.len(), 1);
+        assert_eq!(scene.sources[0].kind, SceneSourceKind::Camera);
+        assert_eq!(scene.sources[0].transform, full_frame_transform());
+    }
+
+    #[test]
+    fn vertical_screen_camera_without_screen_expands_the_camera_full_canvas() {
+        // Vertical only: the bubble collapses to a full-canvas camera instead
+        // of floating over a dead placeholder. The horizontal twin keeps the
+        // placeholder (landscape mode has no fill law).
+        let mut params = base_params();
+        params.layout.layout_preset = LayoutPreset::VerticalScreenCamera;
+        params.sources.screen_id = None;
+        params.sources.window_id = None;
+        params.sources.test_pattern = false;
+        let scene = scene_from_capture_config(params);
+
+        assert_eq!(scene.sources.len(), 1);
+        assert_eq!(scene.sources[0].kind, SceneSourceKind::Camera);
+        assert_eq!(scene.sources[0].transform, full_frame_transform());
+
+        let mut horizontal = base_params();
+        horizontal.layout.layout_preset = LayoutPreset::ScreenCamera;
+        horizontal.sources.screen_id = None;
+        horizontal.sources.window_id = None;
+        horizontal.sources.test_pattern = false;
+        let horizontal_scene = scene_from_capture_config(horizontal);
+        assert_eq!(horizontal_scene.sources.len(), 2);
     }
 
     #[test]

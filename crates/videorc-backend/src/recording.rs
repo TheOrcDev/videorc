@@ -7737,8 +7737,19 @@ fn vertical_video_filter(
 ) -> String {
     let video = &params.output.video;
     let width = video.width;
-    let (camera_height, screen_height) = vertical_band_heights(video.height, bands.camera_fraction);
     let fps = video.fps;
+    let final_scale = if preview { ",scale=w=960:h=-2" } else { "" };
+
+    // One active source covers the WHOLE canvas (full-canvas fill plan,
+    // 2026-07-13): without a camera the bands collapse — a black camera band
+    // is never lawful short-form output. (The no-screen collapse rides the
+    // scene path; app sessions always attach a scene.)
+    let Some(camera_index) = camera_input_index else {
+        let base_scale = cover_scale_filter(video);
+        return format!("[0:v]setpts=PTS-STARTPTS,{base_scale},fps={fps}{final_scale}[v]");
+    };
+
+    let (camera_height, screen_height) = vertical_band_heights(video.height, bands.camera_fraction);
 
     // Short-form bands are FILLED (2026-07-13 fill-crop plan): the screen
     // covers its band (scale to fill + center crop, mirroring the compositor's
@@ -7747,25 +7758,17 @@ fn vertical_video_filter(
     let screen = format!(
         "[0:v]setpts=PTS-STARTPTS,scale={width}:{screen_height}:force_original_aspect_ratio=increase,crop={width}:{screen_height},fps={fps},format=yuv420p[vt_screen]"
     );
-    let camera = match camera_input_index {
-        Some(index) => {
-            let mirror = if params.layout.camera_mirror {
-                "hflip,"
-            } else {
-                ""
-            };
-            let mut band_layout = params.layout.clone();
-            band_layout.camera_fit = CameraFit::Fill;
-            let frame = camera_frame_filter(width, camera_height, &band_layout);
-            format!(
-                "[{index}:v]setpts=PTS-STARTPTS,{mirror}{frame},fps={fps},format=yuv420p[vt_camera]"
-            )
-        }
-        None => {
-            format!("color=c=black:s={width}x{camera_height}:r={fps},format=yuv420p[vt_camera]")
-        }
+    let mirror = if params.layout.camera_mirror {
+        "hflip,"
+    } else {
+        ""
     };
-    let final_scale = if preview { ",scale=w=960:h=-2" } else { "" };
+    let mut band_layout = params.layout.clone();
+    band_layout.camera_fit = CameraFit::Fill;
+    let frame = camera_frame_filter(width, camera_height, &band_layout);
+    let camera = format!(
+        "[{camera_index}:v]setpts=PTS-STARTPTS,{mirror}{frame},fps={fps},format=yuv420p[vt_camera]"
+    );
     let stack_order = if bands.camera_on_top {
         "[vt_camera][vt_screen]"
     } else {
@@ -11477,11 +11480,16 @@ mod tests {
         assert!(!filter.contains("pad="), "no letterbox pad: {filter}");
         assert!(!filter.contains("overlay"));
 
-        // Without a camera input the band renders black instead of collapsing.
+        // Without a camera input the bands collapse: the screen covers the
+        // whole canvas — never a black camera band (full-canvas fill plan).
         let no_camera = video_filter(None, &params, false);
+        assert!(!no_camera.contains("color=c=black"), "{no_camera}");
+        assert!(!no_camera.contains("vstack"), "{no_camera}");
         assert!(
-            no_camera.contains("color=c=black:s=1080x768"),
-            "{no_camera}"
+            no_camera.contains(
+                "scale=w=1080:h=1920:force_original_aspect_ratio=increase,crop=1080:1920"
+            ),
+            "screen covers the full canvas: {no_camera}"
         );
     }
 
@@ -11522,10 +11530,14 @@ mod tests {
             filter.contains("scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960"),
             "screen covers: {filter}"
         );
+        // Camera-less split collapses to a full-canvas covered screen.
         let no_camera = video_filter(None, &params, false);
+        assert!(!no_camera.contains("vstack"), "{no_camera}");
         assert!(
-            no_camera.contains("color=c=black:s=1080x960"),
-            "{no_camera}"
+            no_camera.contains(
+                "scale=w=1080:h=1920:force_original_aspect_ratio=increase,crop=1080:1920"
+            ),
+            "screen covers the full canvas: {no_camera}"
         );
     }
 
