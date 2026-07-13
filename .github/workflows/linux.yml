@@ -58,6 +58,22 @@ jobs:
           pnpm lint
           pnpm typecheck
           pnpm test:scripts
+          mkdir -p /tmp/videorc-linux-acceptance
+          cat > /tmp/videorc-linux-acceptance/manifest.json <<'JSON'
+          {
+            "gnome-wayland": {"ok": true, "evidence": ["session-type", "wayland-socket"]},
+            "portal": {"ok": true, "evidence": ["session-created", "source-selected"]},
+            "pipewire": {"ok": true, "evidence": ["stream-opened", "node-connected"]},
+            "screen-capture": {"ok": true, "evidence": ["screen-source"]},
+            "preview": {"ok": true, "evidence": ["preview-alive"]},
+            "encoder": {"ok": true, "evidence": ["encoder-path"]},
+            "final-artifact": {"ok": true, "evidence": ["ffprobe-check"]},
+            "av-sync": {"ok": true, "evidence": ["av-offset"]},
+            "process-cleanup": {"ok": true, "evidence": ["no-stale-process"]},
+            "redaction": {"ok": true, "evidence": ["paths-redacted", "tokens-removed"]}
+          }
+          JSON
+          pnpm acceptance:linux:verify /tmp/videorc-linux-acceptance/manifest.json
           pnpm --filter @videorc/desktop test
 
   preview-packaging:
