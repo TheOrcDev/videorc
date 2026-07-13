@@ -16,6 +16,10 @@ export function buildRecordingStudioGateSteps({
         'background-assets.test.ts',
         'session-params.test.ts',
         'studio-health.test.ts',
+        'noise-cleanup-view.test.ts',
+        'library-noise-cleanup.test.ts',
+        'studio-provider.integration.test.ts',
+        'backend-rpc-contract.test.ts',
         'native-preview-present-policy.test.ts',
         'native-preview-first-frame.test.ts',
         'backend-isolation.test.ts'
@@ -45,6 +49,11 @@ export function buildRecordingStudioGateSteps({
       label: 'backend audio pipeline tests',
       command: 'cargo',
       args: ['test', '-p', 'videorc-backend', 'audio::tests::']
+    },
+    {
+      label: 'backend noise cleanup tests',
+      command: 'cargo',
+      args: ['test', '-p', 'videorc-backend', 'noise_cleanup::tests::']
     }
   ]
 
@@ -59,6 +68,11 @@ export function buildRecordingStudioGateSteps({
         label: 'live captions mute/gain and record+stream artifact smoke',
         command: 'pnpm',
         args: ['smoke:captions-live']
+      },
+      {
+        label: 'noise cleanup final-artifact smoke',
+        command: 'pnpm',
+        args: ['smoke:noise-cleanup']
       },
       {
         label: 'dev app all-layout recording artifact smoke',

@@ -22,6 +22,11 @@ export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
       featureId: 'cloud-ai',
       state: 'disabled',
       reason: 'Cloud AI is a Videorc Premium feature.'
+    },
+    {
+      featureId: 'noise-cleanup',
+      state: 'disabled',
+      reason: 'Noise Cleanup requires Videorc Premium.'
     }
   ],
   limits: {

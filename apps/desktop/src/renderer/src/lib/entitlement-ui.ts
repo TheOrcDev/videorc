@@ -84,6 +84,10 @@ export function cloudAiUploadGate(entitlements: EntitlementsSnapshot | null): En
   return featureGate(entitlements, 'cloud-ai')
 }
 
+export function noiseCleanupGate(entitlements: EntitlementsSnapshot | null): EntitlementUiGate {
+  return featureGate(entitlements, 'noise-cleanup')
+}
+
 export function videoProfileEntitlementGate({
   entitlements,
   kind,

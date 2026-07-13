@@ -84,13 +84,41 @@ if (process.platform === 'win32') {
   if (!capabilities.ok) {
     console.error(
       `preflight-windows-package: bundled ffmpeg is missing required capabilities: ${capabilities.missing.join(', ')}.\n` +
-        'Refusing to package — an ffmpeg without rtmps/tls stalls livestreams silently (the 0.9.23 class of failure). Re-pin a build that carries them.'
+        'Refusing to package — an ffmpeg without rtmps/tls stalls livestreams silently, and one without afftdn/aac/pcm_s16le cannot run Noise Cleanup for every supported container. Re-pin a build that carries them.'
     )
     process.exit(1)
   }
   console.log(
-    'preflight-windows-package: bundled ffmpeg capability probe passed (rtmp/rtmps/tls, h264_mf, aac).'
+    'preflight-windows-package: bundled ffmpeg capability probe passed (rtmp/rtmps/tls, h264_mf, aac, pcm_s16le, afftdn).'
   )
+  try {
+    execFileSync(
+      process.execPath,
+      [join(repoRoot, 'scripts', 'smoke-noise-cleanup.mjs'), '--require-bundled'],
+      {
+        env: {
+          ...process.env,
+          VIDEORC_SMOKE_FFMPEG_PATH: ffmpegExe,
+          VIDEORC_SMOKE_FFPROBE_PATH: join(
+            repoRoot,
+            'vendor',
+            'ffmpeg',
+            'windows-x64',
+            'bin',
+            'ffprobe.exe'
+          )
+        },
+        stdio: 'inherit'
+      }
+    )
+  } catch (error) {
+    console.error(
+      `preflight-windows-package: bundled ffmpeg failed the MP4/MKV Noise Cleanup artifact proof: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    )
+    process.exit(1)
+  }
 } else {
   console.log(
     'preflight-windows-package: skipping the ffmpeg capability probe (ffmpeg.exe cannot run on this host); it runs on the Windows box.'

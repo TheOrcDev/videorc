@@ -17,6 +17,8 @@ use serde::de::DeserializeOwned;
 
 pub(crate) const CAPTION_CHUNK_UPLOAD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10);
+pub(crate) const AI_CAPABILITIES_REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(8);
 const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 use crate::protocol::{
@@ -281,8 +283,28 @@ impl VideorcApiClient {
 
     /// Fetch safe client-facing AI capability metadata for the signed-in user.
     pub async fn get_ai_capabilities(&self, bearer_token: &str) -> Result<AiCapabilities> {
-        self.get_bearer_json("/api/ai/capabilities", bearer_token)
+        let path = "/api/ai/capabilities";
+        let response = self
+            .http
+            .get(self.endpoint(path))
+            .bearer_auth(bearer_token)
+            .timeout(AI_CAPABILITIES_REQUEST_TIMEOUT)
+            .send()
             .await
+            .with_context(|| format!("Could not reach Videorc API path {path}."))?;
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            bail!("Sign in to use cloud AI.");
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let message = read_safe_error_message(response).await;
+            bail!("Videorc API request failed ({status}): {message}");
+        }
+        response
+            .json()
+            .await
+            .with_context(|| format!("Could not read Videorc API response for {path}."))
     }
 
     /// Fetch safe client-facing AI quota metadata for the signed-in user.
@@ -679,6 +701,12 @@ mod tests {
         );
         assert_eq!(resolve_api_base_url(true, Some("   ")), DEV_API_BASE_URL);
         assert_eq!(resolve_api_base_url(true, None), DEV_API_BASE_URL);
+    }
+
+    #[test]
+    fn entitlement_capability_request_finishes_before_the_rpc_deadline() {
+        assert!(!AI_CAPABILITIES_REQUEST_TIMEOUT.is_zero());
+        assert!(AI_CAPABILITIES_REQUEST_TIMEOUT < std::time::Duration::from_secs(10));
     }
 
     #[test]

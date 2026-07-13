@@ -75,12 +75,35 @@ if (!capabilities.ok) {
   console.error(
     `preflight-macos-package: bundled ffmpeg is missing required capabilities: ${capabilities.missing.join(', ')}.\n` +
       'Refusing to package — an ffmpeg without rtmps/tls stalls livestreams silently, and one ' +
-      'without h264_videotoolbox cannot run transcode repairs. Rebuild with: pnpm ffmpeg:build:macos'
+      'without h264_videotoolbox cannot run transcode repairs, and one without afftdn/aac/' +
+      'pcm_s16le cannot run Noise Cleanup for every supported container. Rebuild with: pnpm ffmpeg:build:macos'
   )
   process.exit(1)
 }
 console.log(
-  'preflight-macos-package: bundled ffmpeg capability probe passed (rtmp/rtmps/tls, h264_videotoolbox, aac).'
+  'preflight-macos-package: bundled ffmpeg capability probe passed (rtmp/rtmps/tls, h264_videotoolbox, aac, pcm_s16le, afftdn).'
 )
+
+try {
+  execFileSync(
+    process.execPath,
+    [join(repoRoot, 'scripts', 'smoke-noise-cleanup.mjs'), '--require-bundled'],
+    {
+      env: {
+        ...process.env,
+        VIDEORC_SMOKE_FFMPEG_PATH: ffmpegBin,
+        VIDEORC_SMOKE_FFPROBE_PATH: join(repoRoot, 'vendor', 'ffmpeg', 'current', 'bin', 'ffprobe')
+      },
+      stdio: 'inherit'
+    }
+  )
+} catch (error) {
+  console.error(
+    `preflight-macos-package: bundled ffmpeg failed the MP4/MKV Noise Cleanup artifact proof: ${
+      error instanceof Error ? error.message : String(error)
+    }`
+  )
+  process.exit(1)
+}
 
 console.log('preflight-macos-package: all macOS packaging inputs present.')

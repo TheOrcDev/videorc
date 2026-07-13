@@ -2,15 +2,26 @@ import { act, createElement, useEffect } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+const toastSpies = vi.hoisted(() => ({
+  dismiss: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  success: vi.fn(),
+  warning: vi.fn()
+}))
+vi.mock('sonner', () => ({ toast: toastSpies }))
+
 import type {
   AccountCallbackEnvelope,
   CompositorStatus,
   LayoutSettings,
+  NoiseCleanupJob,
   OAuthCallbackEnvelope,
   PreviewSurfaceBounds,
   PreviewSurfaceStatus,
   PreviewWindowState,
   Scene,
+  SessionSummary,
   VideorcApi
 } from '../../../shared/backend'
 import { BackgroundAssetsProvider } from './use-background-assets'
@@ -23,6 +34,7 @@ import {
 } from './use-studio'
 import { DEFAULT_BASIC_ENTITLEMENTS } from '../lib/entitlements'
 import { defaultCaptureConfig } from '../lib/capture'
+import { deriveNoiseCleanupView } from '../lib/noise-cleanup-view'
 
 type BackendCommand = { id: string; method: string; params?: unknown }
 
@@ -32,6 +44,30 @@ const signedInAccount = {
   username: 'provider-test',
   displayName: 'Provider Test',
   email: 'provider@example.test'
+}
+
+const premiumEntitlements = {
+  ...DEFAULT_BASIC_ENTITLEMENTS,
+  tier: 'premium' as const,
+  source: 'creem' as const,
+  capabilities: DEFAULT_BASIC_ENTITLEMENTS.capabilities.map((capability) => ({
+    ...capability,
+    state: 'enabled' as const,
+    reason: undefined
+  }))
+}
+
+function cleanupJob(overrides: Partial<NoiseCleanupJob> = {}): NoiseCleanupJob {
+  return {
+    id: 'cleanup-1',
+    sourceSessionId: 'session-1',
+    status: 'queued',
+    progressPercent: 0,
+    preset: 'speech-v1',
+    createdAt: now,
+    updatedAt: now,
+    ...overrides
+  }
 }
 
 const callbackEnvelope: AccountCallbackEnvelope = {
@@ -200,6 +236,27 @@ class StudioBackend {
   oauthTransportFailuresRemaining = 1
   oauthRetryFailuresRemaining = 1
   oauthCompletedStates = new Set<string>()
+  entitlements = DEFAULT_BASIC_ENTITLEMENTS
+  noiseCleanupJobs: NoiseCleanupJob[] = []
+  sourceMutationRevision = 4
+
+  invalidateCompletedNoiseCleanup(message: string): void {
+    this.sourceMutationRevision += 1
+    this.noiseCleanupJobs = this.noiseCleanupJobs.map((job) =>
+      job.status === 'completed'
+        ? cleanupJob({
+            ...job,
+            status: 'failed',
+            progressPercent: 0,
+            outputSessionId: undefined,
+            outputPath: undefined,
+            errorCode: 'source-changed',
+            errorMessage: message,
+            updatedAt: `2026-07-12T00:00:${this.sourceMutationRevision.toString().padStart(2, '0')}.000Z`
+          })
+        : job
+    )
+  }
 
   response(command: BackendCommand): unknown {
     this.commands.push(command)
@@ -215,7 +272,8 @@ class StudioBackend {
           secretStoreBackend: 'test'
         }
       case 'entitlements.get':
-        return DEFAULT_BASIC_ENTITLEMENTS
+      case 'entitlements.refresh':
+        return this.entitlements
       case 'account.get':
         return { status: 'signed-out' }
       case 'account.complete_sign_in':
@@ -360,10 +418,60 @@ class StudioBackend {
         return { valid: true, issues: [] }
       case 'sessions.list':
         return []
+      case 'sessions.delete': {
+        const deletedSessionIds = new Set(params.sessionIds as string[])
+        this.noiseCleanupJobs = this.noiseCleanupJobs.map((job) =>
+          job.status === 'completed' &&
+          job.outputSessionId &&
+          deletedSessionIds.has(job.outputSessionId)
+            ? cleanupJob({
+                ...job,
+                status: 'failed',
+                progressPercent: 0,
+                outputSessionId: undefined,
+                outputPath: undefined,
+                errorCode: 'file-missing',
+                errorMessage: 'The cleaned recording was deleted.',
+                updatedAt: '2026-07-12T00:00:04.000Z'
+              })
+            : job
+        )
+        return []
+      }
       case 'sessions.delete.pending':
         return []
       case 'sessions.storage':
         return { count: 0, totalBytes: 0 }
+      case 'session.remux_mp4':
+        this.invalidateCompletedNoiseCleanup('The source recording changed after remux.')
+        return null
+      case 'repair.repair_file':
+        this.invalidateCompletedNoiseCleanup('The source recording changed after repair.')
+        return {
+          status: 'repaired',
+          path: 'C:\\recordings\\session-1.mkv',
+          interpolated: false
+        }
+      case 'repair.restore_file':
+        this.invalidateCompletedNoiseCleanup('The source recording changed after restore.')
+        return { restored: true }
+      case 'noiseCleanup.list':
+        return this.noiseCleanupJobs
+      case 'noiseCleanup.start': {
+        const job = cleanupJob({ sourceSessionId: String(params.sessionId) })
+        this.noiseCleanupJobs = [job]
+        return job
+      }
+      case 'noiseCleanup.cancel': {
+        const current = this.noiseCleanupJobs.find((job) => job.id === params.jobId) ?? cleanupJob()
+        const job = cleanupJob({
+          ...current,
+          status: 'cancelled',
+          updatedAt: '2026-07-12T00:00:01.000Z'
+        })
+        this.noiseCleanupJobs = [job]
+        return job
+      }
       case 'platformAccounts.list':
       case 'platformAccounts.validate':
       case 'platformAccounts.oauth.providerCredentials':
@@ -522,6 +630,7 @@ describe('real StudioProvider lifecycle', () => {
     restoreEnvironment?.()
     restoreEnvironment = undefined
     vi.unstubAllGlobals()
+    vi.clearAllMocks()
     vi.useRealTimers()
   })
 
@@ -652,6 +761,255 @@ describe('real StudioProvider lifecycle', () => {
       sessionId: 'session-1',
       durationMs: 1_000
     })
+  })
+
+  it('refreshes entitlements on focus and keeps cleanup jobs durable across row lifetimes', async () => {
+    const backend = new StudioBackend()
+    backend.noiseCleanupJobs = [cleanupJob()]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const openedSessions: string[] = []
+    const revealedSessions: string[] = []
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      openSession: async (sessionId) => {
+        openedSessions.push(sessionId)
+        return ''
+      },
+      revealSession: async (sessionId) => {
+        revealedSessions.push(sessionId)
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(() => observations.at(-1)?.core.noiseCleanupJobs.length === 1)
+    expect(observations.at(-1)?.core.noiseCleanupJobs[0]?.status).toBe('queued')
+    await act(async () => {
+      await observations.at(-1)?.core.startNoiseCleanup('session-1')
+    })
+    expect(backend.commands.at(-1)).toMatchObject({
+      method: 'noiseCleanup.start',
+      params: { sessionId: 'session-1' }
+    })
+
+    const initialRefreshes = backend.commands.filter(
+      (command) => command.method === 'entitlements.refresh'
+    ).length
+    backend.entitlements = premiumEntitlements
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'))
+    })
+    await waitForObservation(() => observations.at(-1)?.core.entitlements?.tier === 'premium')
+    expect(
+      backend.commands.filter((command) => command.method === 'entitlements.refresh').length
+    ).toBeGreaterThan(initialRefreshes)
+
+    const processing = cleanupJob({
+      status: 'processing',
+      progressPercent: 42,
+      updatedAt: '2026-07-12T00:00:02.000Z'
+    })
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'noiseCleanup.status', payload: processing })
+      })
+    })
+    await waitForObservation(
+      () => observations.at(-1)?.core.noiseCleanupJobs[0]?.status === 'processing'
+    )
+    expect(observations.at(-1)?.core.noiseCleanupJobs[0]?.progressPercent).toBe(42)
+
+    const completed = cleanupJob({
+      status: 'completed',
+      progressPercent: 100,
+      outputSessionId: 'cleaned-session',
+      outputPath: 'C:\\recordings\\cleaned-session.mkv',
+      updatedAt: '2026-07-12T00:00:03.000Z'
+    })
+    await act(async () => {
+      for (let duplicate = 0; duplicate < 2; duplicate += 1) {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({ event: 'noiseCleanup.status', payload: completed })
+        })
+      }
+    })
+    await waitForObservation(
+      () => observations.at(-1)?.core.noiseCleanupJobs[0]?.status === 'completed'
+    )
+    const completionToasts = toastSpies.success.mock.calls.filter(
+      ([message]) => message === 'Noise cleanup complete'
+    )
+    expect(completionToasts).toHaveLength(1)
+    const completionToast = completionToasts[0]?.[1] as
+      | {
+          action?: { label: string; onClick: () => void }
+          cancel?: { label: string; onClick: () => void }
+        }
+      | undefined
+    expect(completionToast?.action?.label).toBe('Play')
+    expect(completionToast?.cancel?.label).toBe('Show in Finder')
+    completionToast?.action?.onClick()
+    completionToast?.cancel?.onClick()
+    await act(async () => Promise.resolve())
+    expect(openedSessions).toEqual(['cleaned-session'])
+    expect(revealedSessions).toEqual(['cleaned-session'])
+
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'entitlements.updated',
+          payload: DEFAULT_BASIC_ENTITLEMENTS
+        })
+      })
+    })
+    await waitForObservation(() => observations.at(-1)?.core.entitlements?.tier === 'basic')
+  })
+
+  it('reconciles completed jobs after deletion, remux, and repair mutations', async () => {
+    const backend = new StudioBackend()
+    backend.entitlements = premiumEntitlements
+    backend.noiseCleanupJobs = [
+      cleanupJob({
+        status: 'completed',
+        progressPercent: 100,
+        outputSessionId: 'cleaned-session',
+        outputPath: 'C:\\recordings\\cleaned-session.mkv'
+      })
+    ]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () => observations.at(-1)?.core.noiseCleanupJobs[0]?.status === 'completed'
+    )
+
+    expect(
+      toastSpies.success.mock.calls.filter(([message]) => message === 'Noise cleanup complete')
+    ).toEqual([])
+
+    await act(async () => {
+      await observations.at(-1)?.core.deleteSessions([{ id: 'cleaned-session' } as SessionSummary])
+    })
+    await waitForObservation(
+      () => observations.at(-1)?.core.noiseCleanupJobs[0]?.status === 'failed'
+    )
+    const nextCore = observations.at(-1)?.core
+    const failedJob = nextCore?.noiseCleanupJobs[0] ?? null
+    expect(failedJob).toMatchObject({
+      status: 'failed',
+      errorCode: 'file-missing',
+      errorMessage: 'The cleaned recording was deleted.'
+    })
+    expect(
+      deriveNoiseCleanupView({
+        session: {
+          id: 'session-1',
+          status: 'completed',
+          mode: 'record',
+          outputPath: 'C:\\recordings\\session-1.mkv'
+        },
+        entitlements: nextCore?.entitlements ?? null,
+        job: failedJob,
+        captureActive: false
+      }).directLabel
+    ).toBe('Retry cleanup')
+
+    for (const mutation of ['remux', 'repair'] as const) {
+      const completed = cleanupJob({
+        id: `cleanup-${mutation}`,
+        status: 'completed',
+        progressPercent: 100,
+        outputSessionId: `cleaned-${mutation}`,
+        outputPath: `C:\\recordings\\cleaned-${mutation}.mkv`,
+        updatedAt: `2026-07-12T00:00:${mutation === 'remux' ? '10' : '20'}.000Z`
+      })
+      backend.noiseCleanupJobs = [completed]
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({ event: 'noiseCleanup.status', payload: completed })
+        })
+      })
+      await waitForObservation(
+        () =>
+          observations
+            .at(-1)
+            ?.core.noiseCleanupJobs.some(
+              (job) => job.id === completed.id && job.status === 'completed'
+            ) === true
+      )
+
+      if (mutation === 'remux') {
+        await act(async () => {
+          await observations.at(-1)?.core.remuxSession('session-1')
+        })
+      } else {
+        await act(async () => {
+          await observations.at(-1)?.core.repairRecording('session-1')
+        })
+      }
+      await waitForObservation(
+        () => observations.at(-1)?.core.noiseCleanupJobs[0]?.status === 'failed'
+      )
+      expect(observations.at(-1)?.core.noiseCleanupJobs[0]).toMatchObject({
+        status: 'failed',
+        errorCode: 'source-changed',
+        errorMessage: `The source recording changed after ${mutation}.`
+      })
+    }
+
+    expect(
+      backend.commands.filter((command) => command.method === 'noiseCleanup.list').length
+    ).toBeGreaterThanOrEqual(4)
   })
 
   it('recovers in cooldown on the same healthy websocket and ACKs exactly once', async () => {
@@ -1024,6 +1382,8 @@ function createVideorcApi(options: {
   acknowledge: (id: string) => Promise<boolean>
   pendingProvider: () => Promise<OAuthCallbackEnvelope[]>
   acknowledgeProvider: (id: string) => Promise<boolean>
+  openSession?: (sessionId: string) => Promise<string>
+  revealSession?: (sessionId: string) => Promise<void>
   nativePreview?: {
     getWindowState: () => PreviewWindowState
     drainHostCommands: (generation?: number) => Promise<PreviewSurfaceStatus>
@@ -1103,6 +1463,8 @@ function createVideorcApi(options: {
       getCaptionSnapshot: async () => null,
       getCaptionLines: async () => null,
       getGlassWallpaper: async () => null,
+      openSession: options.openSession ?? (async () => ''),
+      revealSession: options.revealSession ?? (async () => {}),
       getUpdateStatus: async () => ({ phase: 'unsupported' }),
       onBackendConnection: (callback: (value: unknown) => void) =>
         subscribe('backend:connection', callback),

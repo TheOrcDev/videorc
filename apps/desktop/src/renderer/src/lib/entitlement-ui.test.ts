@@ -4,6 +4,7 @@ import type { EntitlementsSnapshot, VideoSettings } from './backend'
 import {
   cloudAiUploadGate,
   goLiveEntitlementGate,
+  noiseCleanupGate,
   streamingDestinationEnableGate,
   videoProfileEntitlementGate
 } from './entitlement-ui'
@@ -31,6 +32,10 @@ const premiumEntitlements: EntitlementsSnapshot = {
     },
     {
       featureId: 'cloud-ai',
+      state: 'enabled'
+    },
+    {
+      featureId: 'noise-cleanup',
       state: 'enabled'
     }
   ],
@@ -143,6 +148,7 @@ describe('entitlement UI gates', () => {
       allowed: true
     })
     expect(cloudAiUploadGate(developerEntitlements)).toEqual({ allowed: true })
+    expect(noiseCleanupGate(developerEntitlements)).toEqual({ allowed: true })
   })
 
   it('allows Basic Go Live with one destination and blocks over-limit configs before preflight', () => {
@@ -197,6 +203,17 @@ describe('entitlement UI gates', () => {
         video: youtube4k
       })
     ).toEqual({ allowed: true })
+  })
+
+  it('fails closed for Noise Cleanup and links Basic users to Premium', () => {
+    expect(noiseCleanupGate(null)).toEqual({
+      allowed: false,
+      featureId: 'noise-cleanup',
+      reason: 'Noise Cleanup requires Videorc Premium.',
+      upgradeUrl: VIDEORC_PREMIUM_URL
+    })
+    expect(noiseCleanupGate(basicEntitlements)).toEqual(noiseCleanupGate(null))
+    expect(noiseCleanupGate(premiumEntitlements)).toEqual({ allowed: true })
   })
 
   it('allows every recording preset on Basic — recording is not premium-gated', () => {
@@ -257,6 +274,7 @@ describe('entitlement UI gates', () => {
         streaming: { enabledTargetIds: ['youtube', 'twitch'] }
       }),
       cloudAiUploadGate(basicEntitlements),
+      noiseCleanupGate(basicEntitlements),
       videoProfileEntitlementGate({
         entitlements: basicEntitlements,
         kind: 'streaming',

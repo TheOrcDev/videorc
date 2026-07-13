@@ -120,6 +120,7 @@ import type {
   Device,
   DeviceList,
   EntitlementsSnapshot,
+  NoiseCleanupJob,
   MediaAccessSnapshot,
   ExportPublishPackResult,
   FileAssessment,
@@ -223,6 +224,7 @@ import {
 } from '@/lib/captions-preflight'
 import { goLiveEntitlementGate, videoProfileEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
+import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-view'
 import {
   applyLiveChatMessages,
   applyLiveChatProviderStatus,
@@ -345,6 +347,7 @@ function openLibraryFromQualityToast(sessionId?: string): void {
 // cadence that alone kept the renderer permanently busy. State-machine flips
 // still commit immediately via the significant-change fast path.
 const TELEMETRY_UI_COMMIT_INTERVAL_MS = 1000
+const SIGNED_IN_ENTITLEMENT_REFRESH_INTERVAL_MS = 5 * 60_000
 const LIVE_CHAT_RECOVERY_RETRY_DELAY_MS = 250
 
 async function requestLiveChatSendOperations(
@@ -559,6 +562,7 @@ export type StudioContextValue = {
   wsStatus: WsStatus
   health: BackendHealth | null
   entitlements: EntitlementsSnapshot | null
+  noiseCleanupJobs: NoiseCleanupJob[]
   account: VideorcAccountSnapshot | null
   aiCapabilities: AiCapabilities | null
   aiQuota: AiQuotaStatus | null
@@ -690,6 +694,7 @@ export type StudioContextValue = {
   runtimeInfo: RuntimeInfo | null
   // actions
   refreshBackend: () => Promise<void>
+  refreshEntitlements: () => Promise<void>
   refreshPlatformAccounts: () => Promise<void>
   validatePlatformAccounts: () => Promise<PlatformAccountValidation[]>
   connectPlatformAccount: (platform: PlatformAccount['platform']) => Promise<void>
@@ -745,6 +750,8 @@ export type StudioContextValue = {
   deleteSessions: (targets: SessionSummary[]) => Promise<void>
   duplicateSession: (sessionId: string) => Promise<void>
   importRecording: () => Promise<void>
+  startNoiseCleanup: (sessionId: string) => Promise<NoiseCleanupJob>
+  cancelNoiseCleanup: (jobId: string) => Promise<NoiseCleanupJob>
   sessionStorageTotals: SessionStorageTotals | null
   runAiWorkflow: (
     sessionId: string,
@@ -1312,6 +1319,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   wsStatusRef.current = wsStatus
   const [health, setHealth] = useState<BackendHealth | null>(null)
   const [entitlements, setEntitlements] = useState<EntitlementsSnapshot | null>(null)
+  const [noiseCleanupJobs, setNoiseCleanupJobs] = useState<NoiseCleanupJob[]>([])
+  const announcedNoiseCleanupCompletionsRef = useRef(new Set<string>())
+  const entitlementRefreshInFlightRef = useRef<Promise<EntitlementsSnapshot> | null>(null)
   const [account, setAccount] = useState<VideorcAccountSnapshot | null>(null)
   const [aiCapabilities, setAiCapabilities] = useState<AiCapabilities | null>(null)
   const [aiQuota, setAiQuota] = useState<AiQuotaStatus | null>(null)
@@ -1351,6 +1361,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [twitchCategorySearchPending, setTwitchCategorySearchPending] = useState(false)
   const [xNativeCapability, setXNativeCapability] = useState<XNativeLiveCapability | null>(null)
   const [xNativeCapabilityLoading, setXNativeCapabilityLoading] = useState(false)
+  const refreshEntitlementsForClient = useCallback(
+    async (activeClient: BackendClient): Promise<EntitlementsSnapshot> => {
+      if (entitlementRefreshInFlightRef.current) {
+        return entitlementRefreshInFlightRef.current
+      }
+      const refresh = activeClient
+        .requestTyped('entitlements.refresh', undefined)
+        .then((snapshot) => {
+          // The backend returns the current fail-closed snapshot even when its
+          // server revalidation fails. Never merge it with stale local state.
+          if (clientRef.current === activeClient) {
+            setEntitlements(snapshot)
+          }
+          return snapshot
+        })
+      entitlementRefreshInFlightRef.current = refresh
+      try {
+        return await refresh
+      } finally {
+        if (entitlementRefreshInFlightRef.current === refresh) {
+          entitlementRefreshInFlightRef.current = null
+        }
+      }
+    },
+    []
+  )
   // Read-only live chat store: persisted by the backend when available, live-updated by
   // liveChat.* websocket events, and mirrored to the detached Comments window cache.
   const [liveChatSnapshot, setLiveChatSnapshot] = useState<LiveChatSnapshot>(() =>
@@ -2836,6 +2872,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [resumePendingSessionDeletions]
   )
 
+  const refreshNoiseCleanupJobs = useCallback(async (activeClient: BackendClient | null) => {
+    if (!activeClient) {
+      return
+    }
+    const nextJobs = await activeClient.requestTyped('noiseCleanup.list', undefined)
+    // Source mutations can invalidate completed derivatives without emitting a
+    // cleanup status event. This list replaces local state authoritatively.
+    setNoiseCleanupJobs(nextJobs)
+  }, [])
+
   const refreshScreensForClient = useCallback(async (activeClient: BackendClient | null) => {
     if (!activeClient) {
       return
@@ -3534,6 +3580,39 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bootstrapGuard.mark('devices')
         setDeviceList(payload as DeviceList)
       }),
+      nextClient.on('entitlements.updated', (payload) => {
+        setEntitlements(payload)
+      }),
+      nextClient.on('noiseCleanup.status', (payload) => {
+        const job = payload
+        setNoiseCleanupJobs((current) => upsertNoiseCleanupJob(current, job))
+        if (job.status === 'completed') {
+          void refreshSessions(nextClient)
+          const outputSessionId = job.outputSessionId
+          if (outputSessionId && !announcedNoiseCleanupCompletionsRef.current.has(job.id)) {
+            announcedNoiseCleanupCompletionsRef.current.add(job.id)
+            toast.success('Noise cleanup complete', {
+              id: `noise-cleanup-completed-${job.id}`,
+              description: 'A separate cleaned copy is ready. The original was not changed.',
+              duration: 15_000,
+              action: {
+                label: 'Play',
+                onClick: () => {
+                  const openSession = window.videorc?.openSession
+                  if (!openSession) return
+                  void openSession(outputSessionId).then((problem) => {
+                    if (problem) toast.error(problem)
+                  })
+                }
+              },
+              cancel: {
+                label: 'Show in Finder',
+                onClick: () => void window.videorc?.revealSession?.(outputSessionId)
+              }
+            })
+          }
+        }
+      }),
       nextClient.on('recording.status', (payload) => {
         bootstrapGuard.mark('recording')
         bootstrapGuard.mark('sessions')
@@ -3960,10 +4039,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           nextActiveScreen,
           nextStreamMetadataDraft,
           nextSessions,
-          nextSessionStorage
+          nextSessionStorage,
+          nextNoiseCleanupJobs
         ] = await Promise.all([
           bootstrapRequest<BackendHealth>('health.ping'),
-          bootstrapRequest<EntitlementsSnapshot>('entitlements.get'),
+          bootstrapRequest<EntitlementsSnapshot>('entitlements.refresh'),
           bootstrapRequest<VideorcAccountSnapshot>('account.get'),
           bootstrapRequest<DeviceList>('devices.list'),
           bootstrapRequest<RecordingStatus>('recording.status'),
@@ -3980,7 +4060,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           bootstrapRequest<StreamScreen | null>('screens.active'),
           bootstrapRequest<StreamMetadataDraft>('streamTargets.metadata.get'),
           bootstrapRequest<SessionSummary[]>('sessions.list', { limit: 200 }),
-          bootstrapRequest<SessionStorageTotals>('sessions.storage')
+          bootstrapRequest<SessionStorageTotals>('sessions.storage'),
+          bootstrapRequest<NoiseCleanupJob[]>('noiseCleanup.list')
         ])
         if (!generationIsCurrent()) {
           return
@@ -4032,6 +4113,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         } else {
           void refreshSessions(nextClient)
         }
+        setNoiseCleanupJobs((current) =>
+          nextNoiseCleanupJobs.reduce((jobs, job) => upsertNoiseCleanupJob(jobs, job), current)
+        )
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'scene') && nextScene.sources.length) {
           applyScene(nextScene)
         }
@@ -4202,6 +4286,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.close()
       setClient(null)
       setEntitlements(null)
+      setNoiseCleanupJobs([])
+      entitlementRefreshInFlightRef.current = null
       setAccount(null)
       setAiCapabilities(null)
       setAiQuota(null)
@@ -4319,10 +4405,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         nextPlatformAccounts,
         nextOauthProviderCredentials,
         nextPlatformAccountValidations,
-        nextStreamMetadataDraft
+        nextStreamMetadataDraft,
+        nextNoiseCleanupJobs
       ] = await Promise.all([
         client.request<BackendHealth>('health.ping'),
-        client.request<EntitlementsSnapshot>('entitlements.get'),
+        refreshEntitlementsForClient(client),
         client.request<VideorcAccountSnapshot>('account.get'),
         client.request<DeviceList>('devices.list'),
         client.request<SessionSummary[]>('sessions.list', { limit: 200 }),
@@ -4335,7 +4422,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           'platformAccounts.oauth.providerCredentials'
         ),
         client.request<PlatformAccountValidation[]>('platformAccounts.validate'),
-        client.request<StreamMetadataDraft>('streamTargets.metadata.get')
+        client.request<StreamMetadataDraft>('streamTargets.metadata.get'),
+        client.requestTyped('noiseCleanup.list', undefined)
       ])
       setAccount(nextAccount)
       await refreshAiReadinessForClient(client, nextAccount)
@@ -4356,10 +4444,44 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setPlatformAccountValidations(nextPlatformAccountValidations)
       setStreamMetadataDraft(nextStreamMetadataDraft)
       setStreamMetadataValidation(nextStreamMetadataValidation)
+      setNoiseCleanupJobs((current) =>
+        nextNoiseCleanupJobs.reduce((jobs, job) => upsertNoiseCleanupJob(jobs, job), current)
+      )
     } catch (error) {
       reportError(error)
     }
-  }, [client, refreshAiReadinessForClient, reportError])
+  }, [client, refreshAiReadinessForClient, refreshEntitlementsForClient, reportError])
+
+  const refreshEntitlements = useCallback(async (): Promise<void> => {
+    if (!client || wsStatusRef.current !== 'connected') {
+      return
+    }
+    await refreshEntitlementsForClient(client)
+  }, [client, refreshEntitlementsForClient])
+
+  // Purchases and token expiry must not remain stale. Focus covers return from
+  // the Premium browser; the bounded signed-in timer covers an app left open.
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') {
+      return
+    }
+    const refreshOnFocus = (): void => {
+      void refreshEntitlementsForClient(client).catch(() => {
+        // Preserve the current fail-closed snapshot on transport failure.
+      })
+    }
+    window.addEventListener('focus', refreshOnFocus)
+    const timer =
+      account?.status === 'signed-in'
+        ? window.setInterval(refreshOnFocus, SIGNED_IN_ENTITLEMENT_REFRESH_INTERVAL_MS)
+        : null
+    return () => {
+      window.removeEventListener('focus', refreshOnFocus)
+      if (timer !== null) {
+        window.clearInterval(timer)
+      }
+    }
+  }, [account?.status, client, refreshEntitlementsForClient, wsStatus])
 
   // Real OS camera/mic access status (Electron getMediaAccessStatus, over IPC —
   // independent of the backend socket). Refresh on mount and whenever the window
@@ -6615,12 +6737,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const nextAccount = await signOut()
       setAccount(nextAccount)
       if (client && wsStatus === 'connected') {
-        await refreshAiReadinessForClient(client, nextAccount)
+        await Promise.all([
+          refreshAiReadinessForClient(client, nextAccount),
+          refreshEntitlementsForClient(client)
+        ])
       }
     } catch (error) {
       reportError(error)
     }
-  }, [client, refreshAiReadinessForClient, reportError, wsStatus])
+  }, [client, refreshAiReadinessForClient, refreshEntitlementsForClient, reportError, wsStatus])
 
   const completeAccountSignIn = useCallback(
     async (envelope: AccountCallbackEnvelope): Promise<'complete' | 'retry'> => {
@@ -6668,13 +6793,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       accountCallbacksCompletedRef.current.add(envelope.id)
       setAccount(nextAccount)
       try {
-        await refreshAiReadinessForClient(client, nextAccount)
+        await Promise.all([
+          refreshAiReadinessForClient(client, nextAccount),
+          refreshEntitlementsForClient(client)
+        ])
       } catch (error) {
         reportError(error)
       }
       return 'complete'
     },
-    [client, refreshAiReadinessForClient, reportError, wsStatus]
+    [client, refreshAiReadinessForClient, refreshEntitlementsForClient, reportError, wsStatus]
   )
 
   useEffect(() => {
@@ -7935,14 +8063,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const result = await window.videorc?.trashSessionDeletion?.(operation.operationId)
         failedCount += result?.failedCount ?? operation.pathCount + operation.blockedPathCount
       }
-      await refreshSessions(client)
+      await Promise.all([refreshSessions(client), refreshNoiseCleanupJobs(client)])
       if (failedCount > 0) {
         throw new Error(
           `${failedCount} file(s) could not be moved to Trash; their sessions were kept.`
         )
       }
     },
-    [client, refreshSessions]
+    [client, refreshNoiseCleanupJobs, refreshSessions]
   )
 
   const duplicateSession = useCallback(
@@ -7979,6 +8107,30 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await refreshSessions(client)
   }, [client, refreshSessions, settings.outputDirectoryHandle])
 
+  const startNoiseCleanup = useCallback(
+    async (sessionId: string): Promise<NoiseCleanupJob> => {
+      if (!client) {
+        throw new Error('Backend is not connected.')
+      }
+      const job = await client.requestTyped('noiseCleanup.start', { sessionId })
+      setNoiseCleanupJobs((current) => upsertNoiseCleanupJob(current, job))
+      return job
+    },
+    [client]
+  )
+
+  const cancelNoiseCleanup = useCallback(
+    async (jobId: string): Promise<NoiseCleanupJob> => {
+      if (!client) {
+        throw new Error('Backend is not connected.')
+      }
+      const job = await client.requestTyped('noiseCleanup.cancel', { jobId })
+      setNoiseCleanupJobs((current) => upsertNoiseCleanupJob(current, job))
+      return job
+    },
+    [client]
+  )
+
   const ensureSessionPoster = useCallback(
     async (sessionId: string): Promise<boolean> => {
       if (!client) {
@@ -8007,13 +8159,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         await client.request('session.remux_mp4', {
           sessionId
         })
-        await refreshSessions(client)
+        await Promise.all([refreshSessions(client), refreshNoiseCleanupJobs(client)])
         toast.success('Remuxed recording to MP4.')
       } catch (error) {
         reportError(error)
       }
     },
-    [client, refreshSessions, reportError]
+    [client, refreshNoiseCleanupJobs, refreshSessions, reportError]
   )
 
   const runAiWorkflow = useCallback(
@@ -8166,9 +8318,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!client) {
         throw new Error('Backend is not connected.')
       }
-      return client.requestTyped('repair.repair_file', { sessionId })
+      const result = await client.requestTyped('repair.repair_file', { sessionId })
+      await Promise.all([refreshSessions(client), refreshNoiseCleanupJobs(client)])
+      return result
     },
-    [client]
+    [client, refreshNoiseCleanupJobs, refreshSessions]
   )
 
   const restoreRecording = useCallback(
@@ -8177,9 +8331,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         throw new Error('Backend is not connected.')
       }
       const result = await client.requestTyped('repair.restore_file', { sessionId })
+      if (result.restored) {
+        await Promise.all([refreshSessions(client), refreshNoiseCleanupJobs(client)])
+      }
       return result.restored
     },
-    [client]
+    [client, refreshNoiseCleanupJobs, refreshSessions]
   )
 
   const patchVideo = useCallback((patch: Partial<VideoSettings>) => {
@@ -8586,6 +8743,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       wsStatus,
       health,
       entitlements,
+      noiseCleanupJobs,
       account,
       aiCapabilities,
       aiQuota,
@@ -8681,6 +8839,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       lastError,
       runtimeInfo,
       refreshBackend,
+      refreshEntitlements,
       refreshPlatformAccounts,
       validatePlatformAccounts,
       connectPlatformAccount,
@@ -8729,6 +8888,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       deleteSessions,
       duplicateSession,
       importRecording,
+      startNoiseCleanup,
+      cancelNoiseCleanup,
       sessionStorageTotals,
       runAiWorkflow,
       exportPublishPack,
@@ -8754,6 +8915,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       wsStatus,
       health,
       entitlements,
+      noiseCleanupJobs,
       account,
       aiCapabilities,
       aiQuota,
@@ -8849,6 +9011,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       lastError,
       runtimeInfo,
       refreshBackend,
+      refreshEntitlements,
       refreshPlatformAccounts,
       validatePlatformAccounts,
       connectPlatformAccount,
@@ -8897,6 +9060,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       deleteSessions,
       duplicateSession,
       importRecording,
+      startNoiseCleanup,
+      cancelNoiseCleanup,
       sessionStorageTotals,
       runAiWorkflow,
       exportPublishPack,

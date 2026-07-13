@@ -90,6 +90,8 @@
     "smoke:captions-live": "node scripts/smoke-captions-live-app.mjs",
     "captions:contact-sheet": "node scripts/caption-style-contact-sheet.mjs",
     "smoke:repair-encoder": "node scripts/smoke-repair-encoder.mjs",
+    "smoke:noise-cleanup": "node scripts/smoke-noise-cleanup.mjs",
+    "smoke:noise-cleanup:bundled": "node scripts/smoke-noise-cleanup.mjs --require-bundled",
     "smoke:obs-import": "node scripts/smoke-obs-import.mjs",
     "smoke:process-lifecycle": "node scripts/smoke-process-lifecycle.mjs",
     "smoke:process-memory": "node scripts/smoke-process-memory.mjs --gate",

@@ -96,6 +96,7 @@ pub enum FeatureId {
     Livestreaming,
     Multistreaming,
     CloudAi,
+    NoiseCleanup,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2420,6 +2421,88 @@ pub struct SessionSummary {
     pub session_logs: Vec<SessionLogEntry>,
     pub ai_artifacts: Vec<AiArtifact>,
     pub comment_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_from_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processing_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoiseCleanupJobStatus {
+    Queued,
+    Processing,
+    Validating,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl NoiseCleanupJobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Processing => "processing",
+            Self::Validating => "validating",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Queued | Self::Processing | Self::Validating)
+    }
+}
+
+impl std::str::FromStr for NoiseCleanupJobStatus {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "processing" => Ok(Self::Processing),
+            "validating" => Ok(Self::Validating),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(format!("Unknown Noise Cleanup job status: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NoiseCleanupJob {
+    pub id: String,
+    pub source_session_id: String,
+    pub status: NoiseCleanupJobStatus,
+    pub progress_percent: u8,
+    pub preset: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NoiseCleanupStartParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NoiseCleanupCancelParams {
+    pub job_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

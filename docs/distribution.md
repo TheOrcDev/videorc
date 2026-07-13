@@ -274,20 +274,22 @@ needed, failures, and final PASS/FAIL/BLOCKED verdict in a dated note under
 
 ## Open-Core Capability Boundary
 
-Videorc's product boundary is open core: the local recording studio remains a
-first-class free product, while distribution and cloud-assisted workflows are
-premium capabilities. This repository enforces the capability boundary; pricing
-and purchase flows belong to the product/website layer.
+Videorc's product boundary is open core: the local recording studio and its
+technical file-management tools remain a first-class free product, while
+distribution, cloud-assisted workflows, and optional local creative transforms
+are premium capabilities. This repository enforces the capability boundary;
+pricing and purchase flows belong to the product/website layer.
 
-| Capability                 | Free/core                                                                              | Premium                                                                                  |
-| -------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| Local recording            | Included: local MKV/MP4 recording remains first-class.                                 | Included.                                                                                |
-| Native preview             | Included: production preview uses the detached CAMetalLayer path when available.       | Included.                                                                                |
-| Source and layout controls | Included: source selection, camera placement, presets, and local layout controls.      | Included.                                                                                |
-| Local library              | Included: session metadata, local files, remux, repair, and export helpers stay local. | Included.                                                                                |
-| Local audio extraction     | Included when no cloud upload is requested.                                            | Included.                                                                                |
-| Livestreaming destinations | Not included in free/core.                                                             | Included: manual RTMP, provider destinations, and multistreaming.                        |
-| Cloud AI workflow          | Not included in free/core.                                                             | Included when the user grants cloud AI consent and required API credentials are present. |
+| Capability                 | Free/core                                                                                        | Premium                                                                                  |
+| -------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| Local recording            | Included: local MKV/MP4 recording remains first-class.                                           | Included.                                                                                |
+| Native preview             | Included: production preview uses the detached CAMetalLayer path when available.                 | Included.                                                                                |
+| Source and layout controls | Included: source selection, camera placement, presets, and local layout controls.                | Included.                                                                                |
+| Local library              | Included: session metadata, local files, remux, repair, and export helpers stay local.           | Included.                                                                                |
+| Local audio extraction     | Included when no cloud upload is requested.                                                      | Included.                                                                                |
+| Local creative transforms  | Not included: optional content-enhancement transforms are separate from technical repair/export. | Included: one-click on-device Noise Cleanup for finished recordings.                     |
+| Livestreaming destinations | Included: one destination at the Basic HD limits.                                                | Included: higher streaming limits and multistreaming.                                    |
+| Cloud AI workflow          | Not included in free/core.                                                                       | Included when the user grants cloud AI consent and required API credentials are present. |
 
 How the boundary is enforced (since 2026-07-05 there is no runtime unlock):
 
@@ -310,10 +312,12 @@ How the boundary is enforced (since 2026-07-05 there is no runtime unlock):
   patched client cannot reach them.
 
 Local recording, native preview, source/layout controls, the library, local
-repair/remux, and local audio extraction without upload must not require
-premium entitlement. Anyone distributing a modified build must also follow
-[TRADEMARK.md](../TRADEMARK.md) (rebrand, own bundle id, own OAuth clients,
-own feed/backend).
+repair/remux/export, and local audio extraction without upload must not require
+premium entitlement. Optional creative transforms that change recording content,
+such as Noise Cleanup, may require Premium even when their media processing stays
+on-device. Anyone distributing a modified build must also follow
+[TRADEMARK.md](../TRADEMARK.md) (rebrand, own bundle id, own OAuth clients, own
+feed/backend).
 
 ## OAuth Client IDs
 

@@ -28,6 +28,7 @@ mod live_scene;
 mod metal_compositor;
 mod mpeg_ts;
 mod native_preview_host;
+mod noise_cleanup;
 mod oauth;
 mod pipeline;
 mod posters;
@@ -121,6 +122,8 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+const ENTITLEMENT_REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::backend_authority::{
     BackendBootstrap, BackendRole, authenticate_backend_token, authorize_backend_method,
@@ -328,6 +331,7 @@ async fn main() -> Result<()> {
     tokio::spawn(resume_pending_oauth_completions(state.clone()));
     // Resume interrupted repair jobs through the idle-only maintenance queue.
     tokio::spawn(resume_pending_repair_jobs(state.clone()));
+    noise_cleanup::resume_interrupted(&state);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state.clone()))
         .await?;
@@ -377,6 +381,7 @@ async fn shutdown_signal(state: AppState) {
         "Backend shutdown requested; stopping caption, capture, and artifact processes.",
     );
     captions::shutdown_caption_runtime(&state).await;
+    state.noise_cleanup.interrupt_all_for_shutdown();
     shutdown_capture_processes(state.clone()).await;
     captions::shutdown_caption_artifacts(&state).await;
 }
@@ -4321,6 +4326,10 @@ fn resolve_renderer_managed_backgrounds(
     Ok(())
 }
 
+fn rpc_params_are_empty(params: &serde_json::Value) -> bool {
+    params.is_null() || params.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
 async fn handle_text_message_with_role(
     state: &AppState,
     text: &str,
@@ -4571,6 +4580,25 @@ async fn handle_text_message_with_role(
             ServerResponse::ok(command.id, resolved)
         }
         "entitlements.get" => ServerResponse::ok(command.id, entitlements::current_entitlements()),
+        "entitlements.refresh" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "entitlements.refresh does not accept parameters.",
+                )
+            } else {
+                // Revalidation is best-effort and fail-closed. The refresh helper
+                // retains only a still-valid verified snapshot on network failure;
+                // callers always receive the effective current snapshot.
+                let _ = tokio::time::timeout(
+                    ENTITLEMENT_REFRESH_TIMEOUT,
+                    refresh_account_entitlements(state),
+                )
+                .await;
+                ServerResponse::ok(command.id, entitlements::current_entitlements())
+            }
+        }
         "captions.start" => {
             let language = command
                 .params
@@ -5398,6 +5426,17 @@ async fn handle_text_message_with_role(
                     "session-delete-invalid",
                     "No sessions given.",
                 ),
+                Ok(params)
+                    if params.session_ids.iter().any(|session_id| {
+                        noise_cleanup::session_mutation_blocked(state, session_id).unwrap_or(true)
+                    }) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "noise-cleanup-mutation-blocked",
+                        "This recording cannot be deleted while Noise Cleanup is active.",
+                    )
+                }
                 Ok(params) => match state
                     .database
                     .prepare_session_deletions(&params.session_ids)
@@ -5501,6 +5540,13 @@ async fn handle_text_message_with_role(
                 .get("sessionId")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
+            if noise_cleanup::session_mutation_blocked(state, session_id).unwrap_or(true) {
+                return ServerResponse::error(
+                    command.id,
+                    "noise-cleanup-mutation-blocked",
+                    "This recording cannot be duplicated while Noise Cleanup is active.",
+                );
+            }
             match session_ops::duplicate_session(state, session_id).await {
                 Ok(new_id) => {
                     ServerResponse::ok(command.id, serde_json::json!({ "sessionId": new_id }))
@@ -6278,6 +6324,16 @@ async fn handle_text_message_with_role(
         },
         "session.remux_mp4" => {
             match serde_json::from_value::<protocol::RemuxSessionParams>(command.params) {
+                Ok(params)
+                    if noise_cleanup::session_mutation_blocked(state, &params.session_id)
+                        .unwrap_or(true) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "noise-cleanup-mutation-blocked",
+                        "This recording cannot be remuxed while Noise Cleanup is active.",
+                    )
+                }
                 Ok(params) => match remux_session(state.clone(), params).await {
                     Ok(mp4_path) => {
                         ServerResponse::ok(command.id, serde_json::json!({ "mp4Path": mp4_path }))
@@ -6299,6 +6355,22 @@ async fn handle_text_message_with_role(
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
         "repair.repair_file" => match resolve_repair_file_params(state, command.params, role) {
+            Ok(params)
+                if state
+                    .database
+                    .session_id_for_media_path(&params.path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|session_id| {
+                        noise_cleanup::session_mutation_blocked(state, &session_id).unwrap_or(true)
+                    }) =>
+            {
+                ServerResponse::error(
+                    command.id,
+                    "noise-cleanup-mutation-blocked",
+                    "This recording cannot be repaired while Noise Cleanup is active.",
+                )
+            }
             Ok(params) => match repair_service::repair_file(state.clone(), params).await {
                 Ok(status) => ServerResponse::ok(command.id, status),
                 Err(error) => ServerResponse::error(command.id, "repair-failed", error),
@@ -6306,6 +6378,22 @@ async fn handle_text_message_with_role(
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
         "repair.restore_file" => match resolve_repair_restore_params(state, command.params, role) {
+            Ok(params)
+                if state
+                    .database
+                    .session_id_for_media_path(&params.path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|session_id| {
+                        noise_cleanup::session_mutation_blocked(state, &session_id).unwrap_or(true)
+                    }) =>
+            {
+                ServerResponse::error(
+                    command.id,
+                    "noise-cleanup-mutation-blocked",
+                    "This recording cannot be restored while Noise Cleanup is active.",
+                )
+            }
             Ok(params) => match repair_service::restore_file(params).await {
                 Ok(restored) => {
                     ServerResponse::ok(command.id, serde_json::json!({ "restored": restored }))
@@ -6314,6 +6402,56 @@ async fn handle_text_message_with_role(
             },
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
+        "noiseCleanup.start" => {
+            match serde_json::from_value::<protocol::NoiseCleanupStartParams>(command.params) {
+                Ok(params) => match noise_cleanup::start(state.clone(), params).await {
+                    Ok(job) => ServerResponse::ok(command.id, job),
+                    Err(error) => {
+                        let code = if error.contains("Premium") {
+                            "noise-cleanup-premium-required"
+                        } else if error.contains("live session") {
+                            "noise-cleanup-live"
+                        } else {
+                            "noise-cleanup-start-failed"
+                        };
+                        ServerResponse::error(command.id, code, error)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "noiseCleanup.cancel" => {
+            match serde_json::from_value::<protocol::NoiseCleanupCancelParams>(command.params) {
+                Ok(params) => match noise_cleanup::cancel(state.clone(), params).await {
+                    Ok(job) => ServerResponse::ok(command.id, job),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "noise-cleanup-cancel-failed", error)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "noiseCleanup.list" => {
+            let valid = rpc_params_are_empty(&command.params);
+            if !valid {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "noiseCleanup.list does not accept parameters.",
+                )
+            } else {
+                match noise_cleanup::list(state).await {
+                    Ok(jobs) => ServerResponse::ok(command.id, jobs),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "noise-cleanup-list-failed", error)
+                    }
+                }
+            }
+        }
         "ai.run_post_recording" => {
             match serde_json::from_value::<protocol::RunAiWorkflowParams>(command.params) {
                 Ok(params) => match ai::run_ai_workflow(state.clone(), params).await {
@@ -6658,6 +6796,20 @@ mod tests {
     use tokio::sync::broadcast;
 
     static CAPTION_LIFECYCLE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn no_param_rpc_accepts_omitted_or_empty_params_only() {
+        assert!(rpc_params_are_empty(&serde_json::Value::Null));
+        assert!(rpc_params_are_empty(&json!({})));
+        assert!(!rpc_params_are_empty(&json!({ "unexpected": true })));
+        assert!(!rpc_params_are_empty(&json!([])));
+    }
+
+    #[test]
+    fn entitlement_refresh_is_bounded_below_the_rpc_deadline() {
+        assert_eq!(ENTITLEMENT_REFRESH_TIMEOUT, Duration::from_secs(10));
+        assert!(ENTITLEMENT_REFRESH_TIMEOUT < Duration::from_secs(30));
+    }
 
     async fn receive_tracked_json(
         receiver: &mut mpsc::Receiver<Message>,

@@ -30,6 +30,7 @@ const MULTISTREAMING_DISABLED_REASON: &str =
     "Multistreaming requires Videorc Premium. Basic can stream to one destination at HD.";
 const CLOUD_AI_DISABLED_REASON: &str =
     "Cloud AI is a Videorc Premium feature. Sign in with a Premium account to enable it.";
+const NOISE_CLEANUP_DISABLED_REASON: &str = "Noise Cleanup requires Videorc Premium.";
 const DEV_BUILD_OVERRIDE_REASON: &str = "Enabled by Videorc debug/dev backend build.";
 
 // --- Account-hydrated entitlement (multistream premium gate) ------------------
@@ -203,6 +204,11 @@ pub fn basic_entitlements() -> EntitlementsSnapshot {
                 state: EntitlementState::Disabled,
                 reason: Some(CLOUD_AI_DISABLED_REASON.to_string()),
             },
+            EntitlementCapability {
+                feature_id: FeatureId::NoiseCleanup,
+                state: EntitlementState::Disabled,
+                reason: Some(NOISE_CLEANUP_DISABLED_REASON.to_string()),
+            },
         ],
         limits: basic_limits(),
         checked_at: None,
@@ -242,6 +248,7 @@ fn enabled_capabilities(
         FeatureId::Livestreaming,
         FeatureId::Multistreaming,
         FeatureId::CloudAi,
+        FeatureId::NoiseCleanup,
     ]
     .into_iter()
     .map(|feature_id| EntitlementCapability {
@@ -749,5 +756,31 @@ mod tests {
             .expect_err("cloud AI should be gated in Basic mode");
 
         assert!(error.to_string().contains("Premium"));
+    }
+
+    #[test]
+    fn noise_cleanup_is_explicitly_gated_by_tier() {
+        let basic = basic_entitlements();
+        let capability = capability(&basic, FeatureId::NoiseCleanup).expect("cleanup capability");
+        assert_eq!(capability.state, EntitlementState::Disabled);
+        assert_eq!(
+            capability.reason.as_deref(),
+            Some(NOISE_CLEANUP_DISABLED_REASON)
+        );
+        assert!(require_feature(&basic, FeatureId::NoiseCleanup).is_err());
+
+        for snapshot in [
+            premium_entitlements(EntitlementSource::Creem),
+            developer_test_entitlements(),
+        ] {
+            assert!(require_feature(&snapshot, FeatureId::NoiseCleanup).is_ok());
+        }
+    }
+
+    #[test]
+    fn release_env_cannot_unlock_noise_cleanup() {
+        let snapshot = current_entitlements_resolved(Some("noise-cleanup"), false, false);
+        assert_eq!(snapshot.tier, EntitlementTier::Basic);
+        assert!(require_feature(&snapshot, FeatureId::NoiseCleanup).is_err());
     }
 }

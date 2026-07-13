@@ -403,6 +403,7 @@ pub struct AppState {
     /// request token — OAuth 1.0a callbacks carry no `state` param).
     pub x_oauth1: Arc<crate::x_oauth1::XOauth1Sessions>,
     pub ffmpeg_work: Arc<FfmpegWorkCoordinator>,
+    pub noise_cleanup: Arc<crate::noise_cleanup::NoiseCleanupRegistry>,
     pub live_chat: LiveChatSlot,
     pub live_chat_persistence: LiveChatPersistence,
     /// In-memory product-account session override (deep-link sign-in / Sign out).
@@ -473,6 +474,7 @@ impl AppState {
             )),
             x_oauth1: Arc::new(crate::x_oauth1::XOauth1Sessions::default()),
             ffmpeg_work: Arc::new(FfmpegWorkCoordinator::new()),
+            noise_cleanup: Arc::new(crate::noise_cleanup::NoiseCleanupRegistry::default()),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             account_session: Arc::new(tokio::sync::Mutex::new(
                 crate::account::restore_persisted_account(),

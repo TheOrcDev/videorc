@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -22,8 +22,8 @@ use crate::live_chat::{
 use crate::process_job::output_owned_std;
 use crate::protocol::{
     AiArtifact, AiArtifactKind, AiArtifactStatus, DiagnosticStats, HealthEvent, HealthLevel,
-    LayoutSettings, OutputSettings, SessionLogEntry, SessionStorageTotals, SessionSummary,
-    SourceSelection, StreamScreen, StreamScreenStatus,
+    LayoutSettings, NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings, SessionLogEntry,
+    SessionStorageTotals, SessionSummary, SourceSelection, StreamScreen, StreamScreenStatus,
 };
 use crate::repair::{GateStatus, RepairJob, RepairJobStatus};
 use crate::streaming::{
@@ -31,6 +31,8 @@ use crate::streaming::{
     UpsertPlatformAccount, default_stream_metadata_draft, stream_platform_from_id,
     stream_platform_id,
 };
+
+const MAX_NOISE_CLEANUP_JOB_LIST: usize = 1_000;
 
 #[derive(Clone)]
 pub struct Database {
@@ -57,6 +59,26 @@ pub struct NewSession {
     pub sources: SourceSelection,
     pub layout: LayoutSettings,
     pub output: OutputSettings,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NoiseCleanupSource {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub mode: String,
+    pub media_path: Option<String>,
+    pub container: Option<String>,
+    pub sources: SourceSelection,
+    pub derived_from_session_id: Option<String>,
+    pub processing_kind: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PersistedNoiseCleanupJob {
+    pub job: NoiseCleanupJob,
+    pub source_identity: SessionFileBoundIdentity,
+    pub source_full_sha256: String,
 }
 
 #[derive(Debug, Clone)]
@@ -385,6 +407,13 @@ pub(crate) struct SessionFileBoundIdentity {
     pub object_identity: SessionFileObjectIdentity,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionMediaPathState {
+    Present,
+    Missing,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DeletionPathState {
     Missing,
@@ -615,6 +644,47 @@ pub(crate) fn session_file_bound_identity_matches(
                     .same_sampled_bytes(expected_content_identity)
         }
         None => &actual.content_identity == expected_content_identity,
+    }
+}
+
+/// Cheap list/bootstrap staleness check: exact filesystem object plus length
+/// and modification time, without sampling media bytes. Full/sample hashing is
+/// reserved for the capture-aware background worker.
+pub(crate) fn session_file_quick_identity_matches(
+    path: &Path,
+    expected: &SessionFileBoundIdentity,
+) -> Result<bool> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = file.metadata()?;
+    let modified_unix_nanos = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX));
+    let object_identity = capture_session_file_object_identity_from_file(&file, path)?;
+    Ok(object_identity == expected.object_identity
+        && metadata.len() == expected.content_identity.len
+        && modified_unix_nanos == expected.content_identity.modified_unix_nanos)
+}
+
+/// Classify a managed media path without treating every I/O error as deletion.
+/// In particular, permission failures and unavailable volumes must not cause
+/// Library metadata to be retired.
+pub(crate) fn session_media_path_state(path: &Path) -> SessionMediaPathState {
+    match File::open(path) {
+        Ok(file) => match file.metadata() {
+            Ok(metadata) if metadata.is_file() => SessionMediaPathState::Present,
+            Ok(_) => SessionMediaPathState::Missing,
+            Err(_) => SessionMediaPathState::Unavailable,
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            SessionMediaPathState::Missing
+        }
+        Err(_) => SessionMediaPathState::Unavailable,
     }
 }
 
@@ -2045,6 +2115,488 @@ impl Database {
         Ok(candidates)
     }
 
+    pub(crate) fn noise_cleanup_source(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<NoiseCleanupSource>> {
+        let conn = self.lock()?;
+        let row = conn
+            .query_row(
+                "SELECT id, title, status, mode, mp4_path, output_path, container,
+                    sources_json, derived_from_session_id, processing_kind
+             FROM sessions WHERE id = ?1 AND library_hidden = 0",
+                params![session_id],
+                |row| {
+                    let sources_json: String = row.get(7)?;
+                    let sources = serde_json::from_str(&sources_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            7,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        sources,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.map(
+            |(
+                id,
+                title,
+                status,
+                mode,
+                mp4_path,
+                output_path,
+                container,
+                sources,
+                derived_from_session_id,
+                processing_kind,
+            )| {
+                let media_path = [mp4_path, output_path]
+                    .into_iter()
+                    .flatten()
+                    .find(|path| Path::new(path).is_file());
+                NoiseCleanupSource {
+                    id,
+                    title,
+                    status,
+                    mode,
+                    media_path,
+                    container,
+                    sources,
+                    derived_from_session_id,
+                    processing_kind,
+                }
+            },
+        ))
+    }
+
+    /// Return active work or create a queued job immediately using only the fast
+    /// bound identity. The worker computes the full-file fingerprint off Tokio,
+    /// then resolves completed-result idempotency before FFmpeg starts.
+    pub(crate) fn create_or_get_noise_cleanup_job(
+        &self,
+        source_session_id: &str,
+        source_identity: &SessionFileBoundIdentity,
+        preset: &str,
+    ) -> Result<PersistedNoiseCleanupJob> {
+        let source_identity_json = serde_json::to_string(&source_identity.content_identity)?;
+        let source_object_identity_json = serde_json::to_string(&source_identity.object_identity)?;
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        if let Some(existing) = query_one_noise_cleanup_job(
+            &transaction,
+            "WHERE source_session_id = ?1 AND status IN ('queued', 'processing', 'validating') ORDER BY created_at ASC LIMIT 1",
+            params![source_session_id],
+        )? {
+            transaction.commit()?;
+            return Ok(existing);
+        }
+        if let Some(completed) = query_one_noise_cleanup_job(
+            &transaction,
+            "WHERE source_session_id = ?1 AND source_identity_json = ?2
+                    AND source_object_identity_json = ?3 AND preset = ?4
+                    AND status = 'completed'
+             ORDER BY updated_at DESC, id DESC LIMIT 1",
+            params![
+                source_session_id,
+                source_identity_json,
+                source_object_identity_json,
+                preset
+            ],
+        )? {
+            let output_state = completed
+                .job
+                .output_path
+                .as_deref()
+                .map(|path| session_media_path_state(Path::new(path)))
+                .unwrap_or(SessionMediaPathState::Missing);
+            let session_exists =
+                completed
+                    .job
+                    .output_session_id
+                    .as_deref()
+                    .is_some_and(|session_id| {
+                        transaction
+                            .query_row(
+                                "SELECT 1 FROM sessions WHERE id = ?1",
+                                params![session_id],
+                                |_| Ok(()),
+                            )
+                            .optional()
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    });
+            if session_exists
+                && matches!(
+                    output_state,
+                    SessionMediaPathState::Present | SessionMediaPathState::Unavailable
+                )
+            {
+                transaction.commit()?;
+                return Ok(completed);
+            }
+            transaction.execute(
+                "UPDATE noise_cleanup_jobs
+                 SET status = 'failed', progress_percent = 0, error_code = 'file-missing',
+                     error_message = 'The cleaned recording is missing or unregistered.',
+                     updated_at = ?2
+                 WHERE id = ?1",
+                params![completed.job.id, now],
+            )?;
+        }
+        let id = Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO noise_cleanup_jobs
+                (id, source_session_id, source_identity_json, source_object_identity_json,
+                 source_full_sha256, status, progress_percent, preset,
+                 created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'pending', 'queued', 0, ?5, ?6, ?6)",
+            params![
+                id,
+                source_session_id,
+                source_identity_json,
+                source_object_identity_json,
+                preset,
+                now
+            ],
+        )?;
+        let job = query_one_noise_cleanup_job(&transaction, "WHERE id = ?1", params![id])?
+            .context("New Noise Cleanup job disappeared")?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// Bind the slow full-file fingerprint, returning an existing validated
+    /// result for the exact content + filesystem object + preset when present.
+    pub(crate) fn bind_noise_cleanup_source_fingerprint(
+        &self,
+        job_id: &str,
+        source_full_sha256: &str,
+    ) -> Result<Option<NoiseCleanupJob>> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let updated = transaction.execute(
+            "UPDATE noise_cleanup_jobs SET source_full_sha256 = ?2, updated_at = ?3
+             WHERE id = ?1 AND status = 'queued'",
+            params![job_id, source_full_sha256, Utc::now().to_rfc3339()],
+        )?;
+        if updated != 1 {
+            bail!("Noise Cleanup job {job_id} was no longer queued for fingerprinting.");
+        }
+        let current = query_one_noise_cleanup_job(&transaction, "WHERE id = ?1", params![job_id])?
+            .context("Fingerprint-bound Noise Cleanup job disappeared")?;
+        let completed = query_one_noise_cleanup_job(
+            &transaction,
+            "WHERE id <> ?1 AND source_session_id = ?2 AND source_identity_json = ?3
+                    AND source_object_identity_json = ?4 AND source_full_sha256 = ?5
+                    AND preset = ?6 AND status = 'completed'
+             ORDER BY updated_at DESC LIMIT 1",
+            params![
+                job_id,
+                current.job.source_session_id,
+                serde_json::to_string(&current.source_identity.content_identity)?,
+                serde_json::to_string(&current.source_identity.object_identity)?,
+                source_full_sha256,
+                current.job.preset,
+            ],
+        )?
+        .map(|job| job.job);
+        transaction.commit()?;
+        Ok(completed)
+    }
+
+    pub(crate) fn noise_cleanup_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<PersistedNoiseCleanupJob>> {
+        let conn = self.lock()?;
+        query_one_noise_cleanup_job(&conn, "WHERE id = ?1", params![job_id])
+    }
+
+    pub(crate) fn list_noise_cleanup_jobs(&self) -> Result<Vec<NoiseCleanupJob>> {
+        let conn = self.lock()?;
+        let mut jobs = query_noise_cleanup_jobs(
+            &conn,
+            "WHERE status IN ('queued', 'processing', 'validating')
+             ORDER BY updated_at DESC, id DESC LIMIT ?1",
+            params![MAX_NOISE_CLEANUP_JOB_LIST as i64],
+        )?;
+        let remaining = MAX_NOISE_CLEANUP_JOB_LIST.saturating_sub(jobs.len());
+        if remaining > 0 {
+            jobs.extend(query_noise_cleanup_jobs(
+                &conn,
+                "WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY source_session_id
+                            ORDER BY updated_at DESC, id DESC
+                        ) AS source_rank
+                        FROM noise_cleanup_jobs
+                        WHERE status NOT IN ('queued', 'processing', 'validating')
+                    ) WHERE source_rank = 1
+                 ) ORDER BY updated_at DESC, id DESC LIMIT ?1",
+                params![remaining as i64],
+            )?);
+        }
+        let mut source_paths_cache: HashMap<String, Vec<String>> = HashMap::new();
+        for persisted in &jobs {
+            if persisted.job.status != NoiseCleanupJobStatus::Completed
+                || source_paths_cache.contains_key(&persisted.job.source_session_id)
+            {
+                continue;
+            }
+            let source_paths: Option<(Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT mp4_path, output_path FROM sessions WHERE id = ?1",
+                    params![persisted.job.source_session_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            source_paths_cache.insert(
+                persisted.job.source_session_id.clone(),
+                source_paths
+                    .into_iter()
+                    .flat_map(|(mp4, output)| [mp4, output])
+                    .flatten()
+                    .collect(),
+            );
+        }
+        drop(conn);
+
+        let now = Utc::now().to_rfc3339();
+        for persisted in &mut jobs {
+            if persisted.job.status != NoiseCleanupJobStatus::Completed {
+                continue;
+            }
+            let output_state = persisted
+                .job
+                .output_path
+                .as_deref()
+                .map(|path| session_media_path_state(Path::new(path)))
+                .unwrap_or(SessionMediaPathState::Missing);
+            if output_state == SessionMediaPathState::Unavailable {
+                continue;
+            }
+            let output_missing = output_state == SessionMediaPathState::Missing;
+            // Metadata/object checks deliberately happen outside the DB mutex
+            // and never sample large media bodies during bootstrap.
+            let mut source_matches = false;
+            let mut source_unavailable = false;
+            if let Some(paths) = source_paths_cache.get(&persisted.job.source_session_id) {
+                for path in paths {
+                    match session_file_quick_identity_matches(
+                        Path::new(path),
+                        &persisted.source_identity,
+                    ) {
+                        Ok(true) => source_matches = true,
+                        Ok(false) => {}
+                        Err(_) => source_unavailable = true,
+                    }
+                }
+            }
+            if !output_missing && !source_matches && source_unavailable {
+                continue;
+            }
+            let source_changed = !source_matches;
+            if output_missing || source_changed {
+                let code = if output_missing {
+                    "file-missing"
+                } else {
+                    "source-changed"
+                };
+                let message = if output_missing {
+                    "The cleaned recording is missing on disk."
+                } else {
+                    "The source recording changed after this cleanup completed."
+                };
+                let mut conn = self.lock()?;
+                let transaction = conn.transaction()?;
+                transaction.execute(
+                    "UPDATE noise_cleanup_jobs
+                     SET status = 'failed', progress_percent = 0,
+                         error_code = ?2, error_message = ?3,
+                         updated_at = ?4
+                     WHERE id = ?1 AND status = 'completed'",
+                    params![persisted.job.id, code, message, now],
+                )?;
+                transaction.commit()?;
+                persisted.job.status = NoiseCleanupJobStatus::Failed;
+                persisted.job.progress_percent = 0;
+                persisted.job.error_code = Some(code.to_string());
+                persisted.job.error_message = Some(message.to_string());
+                persisted.job.updated_at = now.clone();
+            }
+        }
+        Ok(jobs.into_iter().map(|job| job.job).collect())
+    }
+
+    pub(crate) fn active_noise_cleanup_job_for_source(
+        &self,
+        source_session_id: &str,
+    ) -> Result<Option<NoiseCleanupJob>> {
+        let conn = self.lock()?;
+        Ok(query_one_noise_cleanup_job(
+            &conn,
+            "WHERE source_session_id = ?1 AND status IN ('queued', 'processing', 'validating') ORDER BY created_at ASC LIMIT 1",
+            params![source_session_id],
+        )?
+        .map(|job| job.job))
+    }
+
+    pub(crate) fn session_id_for_media_path(&self, path: &str) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id FROM sessions WHERE output_path = ?1 OR mp4_path = ?1 LIMIT 1",
+            params![path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub(crate) fn session_media_path_registered(&self, path: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM sessions
+                 WHERE output_path = ?1 OR mp4_path = ?1
+                 LIMIT 1",
+                params![path],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    pub(crate) fn save_noise_cleanup_job(&self, job: &NoiseCleanupJob) -> Result<()> {
+        let conn = self.lock()?;
+        let updated = conn.execute(
+            "UPDATE noise_cleanup_jobs
+             SET status = ?2, progress_percent = ?3, output_session_id = ?4,
+                 output_path = ?5, error_code = ?6, error_message = ?7, updated_at = ?8
+             WHERE id = ?1",
+            params![
+                job.id,
+                job.status.as_str(),
+                i64::from(job.progress_percent.min(100)),
+                job.output_session_id,
+                job.output_path,
+                job.error_code,
+                job.error_message,
+                job.updated_at,
+            ],
+        )?;
+        if updated != 1 {
+            bail!("Noise Cleanup job {} was not found.", job.id);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reconcile_interrupted_noise_cleanup_jobs(&self) -> Result<Vec<NoiseCleanupJob>> {
+        let now = Utc::now().to_rfc3339();
+        self.lock()?.execute(
+            "UPDATE noise_cleanup_jobs
+             SET status = 'queued', progress_percent = 0, output_session_id = NULL,
+                 output_path = NULL, error_code = NULL, error_message = NULL, updated_at = ?1
+             WHERE status IN ('processing', 'validating')",
+            params![now],
+        )?;
+        let conn = self.lock()?;
+        query_noise_cleanup_jobs(
+            &conn,
+            "WHERE status = 'queued' ORDER BY created_at ASC, id ASC",
+            [],
+        )
+        .map(|jobs| jobs.into_iter().map(|job| job.job).collect())
+    }
+
+    /// Commit the managed derivative row and its completed job state in one
+    /// SQLite transaction. The file-operation journal is intentionally removed
+    /// after this commit: a crash before commit rolls the exact owned file back;
+    /// a crash after commit retains the row/file pair and startup only retires
+    /// the still-present journal.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn complete_noise_cleanup_derivative(
+        &self,
+        job_id: &str,
+        source_session_id: &str,
+        output_session_id: &str,
+        title: &str,
+        source_title: &str,
+        output_path: &str,
+        container: &str,
+        duration_ms: Option<i64>,
+        file_size_bytes: i64,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let is_mp4 = container == "mp4";
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let inserted = transaction.execute(
+            "INSERT INTO sessions
+                (id, title, started_at, ended_at, status, mode, output_path, mp4_path,
+                 stream_preset, container, duration_ms, sources_json, layout_json, output_json,
+                 diagnostics_json, file_size_bytes, derived_from_session_id, source_title,
+                 processing_kind)
+             SELECT ?3, ?4, ?6, ?6, 'completed', mode,
+                    CASE WHEN ?9 = 0 THEN ?7 ELSE NULL END,
+                    CASE WHEN ?9 = 1 THEN ?7 ELSE NULL END,
+                    stream_preset, ?8, COALESCE(?10, duration_ms), sources_json, layout_json,
+                    output_json, NULL, ?11, ?2, ?5, 'noise-cleanup'
+             FROM sessions WHERE id = ?2",
+            params![
+                job_id,
+                source_session_id,
+                output_session_id,
+                title,
+                source_title,
+                now,
+                output_path,
+                container,
+                is_mp4 as i64,
+                duration_ms,
+                file_size_bytes,
+            ],
+        )?;
+        if inserted != 1 {
+            return Ok(false);
+        }
+        let completed = transaction.execute(
+            "UPDATE noise_cleanup_jobs
+             SET status = 'completed', progress_percent = 100, output_session_id = ?2,
+                 output_path = ?3, error_code = NULL, error_message = NULL, updated_at = ?4
+             WHERE id = ?1 AND source_session_id = ?5
+               AND source_full_sha256 <> 'pending'
+               AND status IN ('queued', 'processing', 'validating')",
+            params![
+                job_id,
+                output_session_id,
+                output_path,
+                now,
+                source_session_id
+            ],
+        )?;
+        if completed != 1 {
+            bail!("Noise Cleanup job {job_id} was no longer active at derivative commit.");
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
     #[cfg(test)]
     pub fn save_live_chat_message(&self, message: &LiveChatMessage) -> Result<()> {
         self.save_live_chat_messages(std::slice::from_ref(message))
@@ -2415,7 +2967,8 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
                     stream_preset, container, duration_ms, sources_json, layout_json,
-                    diagnostics_json, file_size_bytes
+                    diagnostics_json, file_size_bytes, derived_from_session_id, source_title,
+                    processing_kind
              FROM sessions
              WHERE library_hidden = 0
              ORDER BY started_at DESC
@@ -2442,6 +2995,9 @@ impl Database {
                 layout_json,
                 diagnostics_json,
                 row.get::<_, Option<i64>>(14)?,
+                row.get::<_, Option<String>>(15)?,
+                row.get::<_, Option<String>>(16)?,
+                row.get::<_, Option<String>>(17)?,
             ))
         })?;
 
@@ -2463,6 +3019,9 @@ impl Database {
                 layout_json,
                 diagnostics_json,
                 stored_file_size,
+                derived_from_session_id,
+                source_title,
+                processing_kind,
             ) = row?;
 
             // Size truth (Library rewrite L1): stat the VISIBLE file live while
@@ -2491,6 +3050,9 @@ impl Database {
                 session_logs: self.session_logs_for_session_locked(&conn, &id)?,
                 ai_artifacts: self.ai_artifacts_for_session_locked(&conn, &id)?,
                 comment_count: self.live_chat_message_count_for_session_locked(&conn, &id)?,
+                derived_from_session_id,
+                source_title,
+                processing_kind,
                 quality_status: self.latest_quality_status_for_session_locked(
                     &conn,
                     output_path.as_deref(),
@@ -2538,7 +3100,7 @@ impl Database {
         staging_path: &Path,
         final_path: &Path,
     ) -> Result<SessionFileOperation> {
-        if !matches!(kind, "import" | "duplicate") {
+        if !matches!(kind, "import" | "duplicate" | "noise-cleanup") {
             bail!("Unsupported session file operation kind: {kind}");
         }
         if staging_path == final_path {
@@ -3170,9 +3732,11 @@ impl Database {
         let inserted = conn.execute(
             "INSERT INTO sessions (id, title, started_at, ended_at, status, mode, output_path,
                                    mp4_path, stream_preset, container, duration_ms, sources_json,
-                                   layout_json, output_json, diagnostics_json, file_size_bytes)
+                                   layout_json, output_json, diagnostics_json, file_size_bytes,
+                                   derived_from_session_id, source_title, processing_kind)
              SELECT ?2, ?3, ?6, ?6, 'completed', mode, ?4, ?5, stream_preset, container,
-                    duration_ms, sources_json, layout_json, output_json, NULL, ?7
+                    duration_ms, sources_json, layout_json, output_json, NULL, ?7,
+                    derived_from_session_id, source_title, processing_kind
              FROM sessions WHERE id = ?1",
             params![
                 source_id,
@@ -3992,7 +4556,10 @@ impl Database {
                 sources_json TEXT NOT NULL,
                 layout_json TEXT NOT NULL,
                 output_json TEXT NOT NULL,
-                diagnostics_json TEXT
+                diagnostics_json TEXT,
+                derived_from_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+                source_title TEXT,
+                processing_kind TEXT
             );
 
             CREATE TABLE IF NOT EXISTS health_events (
@@ -4131,6 +4698,40 @@ impl Database {
                 published_identity_json TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS noise_cleanup_jobs (
+                id TEXT PRIMARY KEY,
+                source_session_id TEXT NOT NULL,
+                source_identity_json TEXT NOT NULL,
+                source_object_identity_json TEXT NOT NULL,
+                source_full_sha256 TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress_percent INTEGER NOT NULL DEFAULT 0,
+                preset TEXT NOT NULL,
+                output_session_id TEXT,
+                output_path TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(source_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY(output_session_id) REFERENCES sessions(id) ON DELETE SET NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_noise_cleanup_one_active_per_source
+                ON noise_cleanup_jobs(source_session_id)
+                WHERE status IN ('queued', 'processing', 'validating');
+            CREATE TRIGGER IF NOT EXISTS trg_noise_cleanup_derivative_deleted
+            BEFORE DELETE ON sessions
+            FOR EACH ROW
+            BEGIN
+                UPDATE noise_cleanup_jobs
+                SET status = 'failed', progress_percent = 0, output_session_id = NULL,
+                    output_path = NULL, error_code = 'file-missing',
+                    error_message = 'The cleaned recording was deleted.',
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE output_session_id = OLD.id AND status = 'completed';
+            END;
+
             CREATE TABLE IF NOT EXISTS session_delete_operations (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL UNIQUE,
@@ -4179,6 +4780,47 @@ impl Database {
             "sessions",
             "library_hidden",
             "library_hidden INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(
+            &conn,
+            "sessions",
+            "derived_from_session_id",
+            "derived_from_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL",
+        )?;
+        ensure_column(&conn, "sessions", "source_title", "source_title TEXT")?;
+        ensure_column(&conn, "sessions", "processing_kind", "processing_kind TEXT")?;
+        ensure_column(
+            &conn,
+            "noise_cleanup_jobs",
+            "source_object_identity_json",
+            "source_object_identity_json TEXT",
+        )?;
+        ensure_column(
+            &conn,
+            "noise_cleanup_jobs",
+            "source_full_sha256",
+            "source_full_sha256 TEXT",
+        )?;
+        conn.execute(
+            "UPDATE noise_cleanup_jobs
+             SET status = 'failed', progress_percent = 0,
+                 source_object_identity_json = COALESCE(
+                    source_object_identity_json, '{\"volumeId\":0,\"fileId\":0}'
+                 ),
+                 source_full_sha256 = COALESCE(source_full_sha256, 'legacy-unverified'),
+                 output_session_id = NULL, output_path = NULL,
+                 error_code = 'source-changed',
+                 error_message = 'Noise Cleanup must be retried after the safety upgrade.',
+                 updated_at = ?1
+             WHERE source_object_identity_json IS NULL OR source_full_sha256 IS NULL",
+            params![Utc::now().to_rfc3339()],
+        )?;
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_noise_cleanup_completed_identity_preset;
+             CREATE INDEX idx_noise_cleanup_completed_identity_preset
+                ON noise_cleanup_jobs(source_session_id, source_identity_json,
+                                      source_object_identity_json, source_full_sha256, preset)
+                WHERE status = 'completed';",
         )?;
         ensure_column(
             &conn,
@@ -4534,6 +5176,79 @@ fn chat_send_operation_from_row(
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
     })
+}
+
+fn noise_cleanup_job_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<PersistedNoiseCleanupJob> {
+    let status_text: String = row.get(5)?;
+    let status = status_text.parse().map_err(|error: String| {
+        rusqlite::Error::FromSqlConversionFailure(
+            5,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        )
+    })?;
+    let progress: i64 = row.get(6)?;
+    let source_identity_json: String = row.get(2)?;
+    let source_content_identity = serde_json::from_str(&source_identity_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let source_object_identity_json: String = row.get(3)?;
+    let source_object_identity =
+        serde_json::from_str(&source_object_identity_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    Ok(PersistedNoiseCleanupJob {
+        job: NoiseCleanupJob {
+            id: row.get(0)?,
+            source_session_id: row.get(1)?,
+            status,
+            progress_percent: u8::try_from(progress.clamp(0, 100)).unwrap_or(0),
+            preset: row.get(7)?,
+            output_session_id: row.get(8)?,
+            output_path: row.get(9)?,
+            error_code: row.get(10)?,
+            error_message: row.get(11)?,
+            created_at: row.get(12)?,
+            updated_at: row.get(13)?,
+        },
+        source_identity: SessionFileBoundIdentity {
+            content_identity: source_content_identity,
+            object_identity: source_object_identity,
+        },
+        source_full_sha256: row.get(4)?,
+    })
+}
+
+fn query_noise_cleanup_jobs<P: rusqlite::Params>(
+    conn: &Connection,
+    filter: &str,
+    params: P,
+) -> Result<Vec<PersistedNoiseCleanupJob>> {
+    let sql = format!(
+        "SELECT id, source_session_id, source_identity_json, source_object_identity_json,
+                source_full_sha256, status, progress_percent, preset,
+                output_session_id, output_path, error_code, error_message, created_at, updated_at
+         FROM noise_cleanup_jobs {filter}"
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map(params, noise_cleanup_job_from_row)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn query_one_noise_cleanup_job<P: rusqlite::Params>(
+    conn: &Connection,
+    filter: &str,
+    params: P,
+) -> Result<Option<PersistedNoiseCleanupJob>> {
+    let mut jobs = query_noise_cleanup_jobs(conn, filter, params)?;
+    Ok(jobs.pop())
 }
 
 fn query_repair_jobs(conn: &Connection, filter: &str) -> Result<Vec<RepairJob>> {

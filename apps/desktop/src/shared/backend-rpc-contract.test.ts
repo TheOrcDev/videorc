@@ -3,6 +3,7 @@ import { describe, expect, expectTypeOf, it } from 'vitest'
 import type {
   OAuthCallbackResult,
   OAuthCompleteParams,
+  NoiseCleanupJob,
   SessionCommentsPage,
   SessionDeletionOperation
 } from './backend'
@@ -18,6 +19,90 @@ import {
 } from './backend-rpc-contract'
 
 describe('backend RPC contract', () => {
+  it('types and strictly validates Noise Cleanup commands and status events', () => {
+    expectTypeOf<BackendRpcParams<'noiseCleanup.start'>>().toEqualTypeOf<{ sessionId: string }>()
+    expectTypeOf<BackendRpcParams<'noiseCleanup.cancel'>>().toEqualTypeOf<{ jobId: string }>()
+    expectTypeOf<BackendRpcResult<'noiseCleanup.list'>>().toEqualTypeOf<NoiseCleanupJob[]>()
+    expectTypeOf<BackendEventMap['noiseCleanup.status']>().toEqualTypeOf<NoiseCleanupJob>()
+
+    const job: NoiseCleanupJob = {
+      id: 'cleanup-1',
+      sourceSessionId: 'session-1',
+      status: 'processing',
+      progressPercent: 42,
+      preset: 'speech-v1',
+      createdAt: '2026-07-13T10:00:00.000Z',
+      updatedAt: '2026-07-13T10:00:01.000Z'
+    }
+
+    expect(validateBackendRpcParams('noiseCleanup.start', { sessionId: 'session-1' })).toEqual({
+      sessionId: 'session-1'
+    })
+    expect(validateBackendRpcResult('noiseCleanup.start', job)).toEqual(job)
+    expect(validateBackendRpcResult('noiseCleanup.list', [job])).toEqual([job])
+    expect(validateBackendEventPayload('noiseCleanup.status', job)).toEqual(job)
+
+    expect(() =>
+      validateBackendRpcParams('noiseCleanup.start', {
+        sessionId: 'session-1',
+        path: '/renderer-must-not-send-path.mp4'
+      })
+    ).toThrow('path must be a known field')
+    for (const malformed of [
+      { ...job, status: 'running' },
+      { ...job, progressPercent: 42.5 },
+      { ...job, progressPercent: 101 },
+      { ...job, preset: 'speech-v2' },
+      { ...job, status: 'completed', progressPercent: 100 },
+      { ...job, status: 'failed', errorCode: undefined, errorMessage: undefined },
+      { ...job, unexpected: true }
+    ]) {
+      expect(() => validateBackendEventPayload('noiseCleanup.status', malformed)).toThrow()
+    }
+  })
+
+  it('strictly validates entitlement refresh results and update events', () => {
+    const snapshot = {
+      schemaVersion: 1,
+      tier: 'premium',
+      source: 'creem',
+      capabilities: [
+        { featureId: 'noise-cleanup', state: 'enabled' },
+        { featureId: 'cloud-ai', state: 'enabled' }
+      ],
+      limits: {
+        recording: { maxWidth: 3840, maxHeight: 2160, maxFps: 60 },
+        streaming: {
+          maxWidth: 3840,
+          maxHeight: 2160,
+          maxFps: 30,
+          maxBitrateKbps: 30_000,
+          maxDestinations: 3
+        }
+      },
+      checkedAt: '2026-07-13T10:00:00.000Z'
+    }
+
+    expect(validateBackendRpcParams('entitlements.refresh', undefined)).toBeUndefined()
+    expect(validateBackendRpcResult('entitlements.refresh', snapshot)).toEqual(snapshot)
+    expect(validateBackendEventPayload('entitlements.updated', snapshot)).toEqual(snapshot)
+    expect(() =>
+      validateBackendEventPayload('entitlements.updated', {
+        ...snapshot,
+        capabilities: [{ featureId: 'noise-cleanup', state: 'maybe' }]
+      })
+    ).toThrow('state')
+    expect(() =>
+      validateBackendEventPayload('entitlements.updated', { ...snapshot, unexpected: true })
+    ).toThrow('unexpected must be a known field')
+    expect(() =>
+      validateBackendEventPayload('entitlements.updated', {
+        ...snapshot,
+        limits: { ...snapshot.limits, recording: { maxWidth: 3840 } }
+      })
+    ).toThrow('maxHeight')
+  })
+
   it('types and exactly validates provider OAuth callback completion', () => {
     expectTypeOf<
       BackendRpcParams<'platformAccounts.oauth.complete'>

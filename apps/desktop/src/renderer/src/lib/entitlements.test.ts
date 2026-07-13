@@ -31,6 +31,11 @@ const developerEntitlements: EntitlementsSnapshot = {
       featureId: 'cloud-ai',
       state: 'developer-override',
       reason: 'Enabled by Videorc debug/dev backend build.'
+    },
+    {
+      featureId: 'noise-cleanup',
+      state: 'developer-override',
+      reason: 'Enabled by Videorc debug/dev backend build.'
     }
   ],
   limits: {
@@ -62,6 +67,10 @@ describe('entitlements', () => {
     expect(entitlementDisabledReason(null, 'multistreaming')).toContain('Premium')
     expect(isFeatureEntitled(null, 'cloud-ai')).toBe(false)
     expect(entitlementDisabledReason(null, 'cloud-ai')).toContain('Premium')
+    expect(isFeatureEntitled(null, 'noise-cleanup')).toBe(false)
+    expect(entitlementDisabledReason(null, 'noise-cleanup')).toBe(
+      'Noise Cleanup requires Videorc Premium.'
+    )
     // Recording is free at full quality — the website promises free 4K
     // local recording; only streaming is tiered.
     expect(DEFAULT_BASIC_ENTITLEMENTS.limits.recording).toMatchObject({
@@ -82,6 +91,7 @@ describe('entitlements', () => {
     expect(isFeatureEntitled(developerEntitlements, 'livestreaming')).toBe(true)
     expect(isFeatureEntitled(developerEntitlements, 'multistreaming')).toBe(true)
     expect(isFeatureEntitled(developerEntitlements, 'cloud-ai')).toBe(true)
+    expect(isFeatureEntitled(developerEntitlements, 'noise-cleanup')).toBe(true)
     expect(entitlementDisabledReason(developerEntitlements, 'cloud-ai')).toBeNull()
   })
 

@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import {
   REPAIR_ENCODER_ARGS,
   REPAIR_ENCODER_PREFERENCE,
+  REQUIRED_MACOS_FFMPEG_FILTERS,
   assessMacosFfmpegCapabilities,
   parseEncoderNames,
   selectRepairEncoder
@@ -16,7 +17,8 @@ const ENCODERS_LGPL_MACOS = [
   ' ------',
   ' V....D h264_videotoolbox    VideoToolbox H.264 Encoder (codec h264)',
   ' V....D hevc_videotoolbox    VideoToolbox H.265 Encoder (codec hevc)',
-  ' A....D aac                  AAC (Advanced Audio Coding)'
+  ' A....D aac                  AAC (Advanced Audio Coding)',
+  ' A....D pcm_s16le            PCM signed 16-bit little-endian'
 ].join('\n')
 
 const ENCODERS_FULL_GPL = [
@@ -24,10 +26,12 @@ const ENCODERS_FULL_GPL = [
   ' ------',
   ' V..... libx264              libx264 H.264 / AVC / MPEG-4 AVC (codec h264)',
   ' V....D h264_videotoolbox    VideoToolbox H.264 Encoder (codec h264)',
-  ' A....D aac                  AAC (Advanced Audio Coding)'
+  ' A....D aac                  AAC (Advanced Audio Coding)',
+  ' A....D pcm_s16le            PCM signed 16-bit little-endian'
 ].join('\n')
 
 const PROTOCOLS_WITH_TLS = ['Input:', '  file', '  rtmp', '  rtmps', '  tls'].join('\n')
+const FILTERS_WITH_NOISE_CLEANUP = 'Filters:\n TS afftdn A->A Denoise audio samples using FFT.'
 
 test('parses encoder names out of -encoders output', () => {
   const names = parseEncoderNames(ENCODERS_LGPL_MACOS)
@@ -64,7 +68,8 @@ test('-crf stays exclusive to libx264 (the toast-noise regression)', () => {
 test('an LGPL macOS bundle with videotoolbox and TLS passes', () => {
   const result = assessMacosFfmpegCapabilities({
     protocolsOutput: PROTOCOLS_WITH_TLS,
-    encodersOutput: ENCODERS_LGPL_MACOS
+    encodersOutput: ENCODERS_LGPL_MACOS,
+    filtersOutput: FILTERS_WITH_NOISE_CLEANUP
   })
   assert.equal(result.ok, true)
   assert.deepEqual(result.missing, [])
@@ -73,12 +78,34 @@ test('an LGPL macOS bundle with videotoolbox and TLS passes', () => {
 test('a bundle without videotoolbox or TLS fails closed with named gaps', () => {
   const result = assessMacosFfmpegCapabilities({
     protocolsOutput: 'Input:\n  file\n  rtmp',
-    encodersOutput: 'Encoders:\n A....D aac  AAC'
+    encodersOutput: 'Encoders:\n A....D aac  AAC',
+    filtersOutput: ''
   })
   assert.equal(result.ok, false)
   assert.deepEqual(result.missing, [
     'protocol:rtmps',
     'protocol:tls',
-    'encoder:h264_videotoolbox'
+    'encoder:h264_videotoolbox',
+    'encoder:pcm_s16le',
+    'filter:afftdn'
   ])
+})
+
+test('the macOS bundle requires PCM for MKV Noise Cleanup outputs', () => {
+  const result = assessMacosFfmpegCapabilities({
+    protocolsOutput: PROTOCOLS_WITH_TLS,
+    encodersOutput: ENCODERS_LGPL_MACOS.replace(/\n A\.\.\.\.D pcm_s16le.*$/, ''),
+    filtersOutput: FILTERS_WITH_NOISE_CLEANUP
+  })
+  assert.deepEqual(result.missing, ['encoder:pcm_s16le'])
+})
+
+test('the macOS bundle requires the model-free noise cleanup filter', () => {
+  assert.deepEqual(REQUIRED_MACOS_FFMPEG_FILTERS, ['afftdn'])
+  const result = assessMacosFfmpegCapabilities({
+    protocolsOutput: PROTOCOLS_WITH_TLS,
+    encodersOutput: ENCODERS_LGPL_MACOS,
+    filtersOutput: 'Filters:\n T. loudnorm A->A EBU R128 loudness normalization'
+  })
+  assert.deepEqual(result.missing, ['filter:afftdn'])
 })

@@ -8,6 +8,7 @@ import type {
   FileAssessment,
   GateStatus,
   LiveLayoutApplyStatus,
+  NoiseCleanupJob,
   OAuthCallbackResult,
   OAuthCompleteParams,
   PreviewCameraStatus,
@@ -66,6 +67,7 @@ type LayoutTransactionResult = LiveLayoutApplyStatus & {
 export interface BackendRpcMethodMap {
   'health.ping': BackendRpcDefinition<{ ffmpegPath?: string } | undefined, BackendHealth>
   'entitlements.get': BackendRpcDefinition<undefined, EntitlementsSnapshot>
+  'entitlements.refresh': BackendRpcDefinition<undefined, EntitlementsSnapshot>
   'account.get': BackendRpcDefinition<undefined, VideorcAccountSnapshot>
   'account.complete_sign_in': BackendRpcDefinition<
     { code: string; state: string; verifier: string; intentGeneration: number },
@@ -98,6 +100,9 @@ export interface BackendRpcMethodMap {
   'sessions.comments.list': BackendRpcDefinition<SessionCommentsListParams, SessionCommentsPage>
   'sessions.delete': BackendRpcDefinition<{ sessionIds: string[] }, SessionDeletionOperation[]>
   'sessions.delete.pending': BackendRpcDefinition<undefined, SessionDeletionOperation[]>
+  'noiseCleanup.start': BackendRpcDefinition<{ sessionId: string }, NoiseCleanupJob>
+  'noiseCleanup.cancel': BackendRpcDefinition<{ jobId: string }, NoiseCleanupJob>
+  'noiseCleanup.list': BackendRpcDefinition<undefined, NoiseCleanupJob[]>
   'repair.assess_file': BackendRpcDefinition<{ sessionId: string }, FileAssessment>
   'repair.repair_file': BackendRpcDefinition<
     { sessionId: string; expectAudio?: boolean; intendedFps?: number },
@@ -114,6 +119,8 @@ export type BackendRpcResult<TMethod extends BackendRpcMethod> =
 
 export interface BackendEventMap {
   'devices.changed': DeviceList
+  'entitlements.updated': EntitlementsSnapshot
+  'noiseCleanup.status': NoiseCleanupJob
   'platformAccounts.oauth.callback': OAuthCallbackResult
   'recording.status': RecordingStatus
   'scene.changed': Scene
@@ -194,7 +201,13 @@ const backendHealthSchema = objectSchema(
 
 const entitlementCapabilitySchema = objectSchema(
   {
-    featureId: enumSchema(['local-recording', 'livestreaming', 'multistreaming', 'cloud-ai']),
+    featureId: enumSchema([
+      'local-recording',
+      'livestreaming',
+      'multistreaming',
+      'cloud-ai',
+      'noise-cleanup'
+    ]),
     state: enumSchema(['enabled', 'disabled', 'developer-override']),
     reason: optionalText
   },
@@ -216,8 +229,25 @@ const entitlementsSchema = objectSchema(
     capabilities: arraySchema(entitlementCapabilitySchema, { maxLength: 32 }),
     limits: objectSchema(
       {
-        recording: boundedBackendPayloadSchema,
-        streaming: boundedBackendPayloadSchema
+        recording: objectSchema(
+          {
+            maxWidth: numberSchema({ integer: true, min: 1, max: 65_536 }),
+            maxHeight: numberSchema({ integer: true, min: 1, max: 65_536 }),
+            maxFps: numberSchema({ integer: true, min: 1, max: 1000 }),
+            maxBitrateKbps: optionalSchema(nonNegativeInteger)
+          },
+          { allowUnknown: false }
+        ),
+        streaming: objectSchema(
+          {
+            maxWidth: numberSchema({ integer: true, min: 1, max: 65_536 }),
+            maxHeight: numberSchema({ integer: true, min: 1, max: 65_536 }),
+            maxFps: numberSchema({ integer: true, min: 1, max: 1000 }),
+            maxBitrateKbps: nonNegativeInteger,
+            maxDestinations: numberSchema({ integer: true, min: 1, max: 1000 })
+          },
+          { allowUnknown: false }
+        )
       },
       { allowUnknown: false }
     ),
@@ -519,10 +549,43 @@ const sessionSummarySchema = boundedSemanticValue(
       startedAt: timestamp,
       status: boundedString,
       mode: boundedString,
-      commentCount: nonNegativeInteger
+      commentCount: nonNegativeInteger,
+      derivedFromSessionId: optionalSchema(boundedString),
+      sourceTitle: optionalSchema(stringSchema({ maxLength: 16_384 })),
+      processingKind: optionalSchema(literalSchema('noise-cleanup'))
     },
     { allowUnknown: true }
   )
+)
+
+const noiseCleanupJobFieldsSchema = objectSchema(
+  {
+    id: boundedString,
+    sourceSessionId: boundedString,
+    status: enumSchema(['queued', 'processing', 'validating', 'completed', 'failed', 'cancelled']),
+    progressPercent: numberSchema({ integer: true, min: 0, max: 100 }),
+    preset: literalSchema('speech-v1'),
+    outputSessionId: optionalSchema(boundedString),
+    outputPath: optionalSchema(boundedPath),
+    errorCode: optionalText,
+    errorMessage: optionalText,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  },
+  { allowUnknown: false }
+)
+const noiseCleanupJobSchema = runtimeSchema<NoiseCleanupJob>(
+  'a Noise Cleanup job',
+  (value, path) => {
+    const job = noiseCleanupJobFieldsSchema.parse(value, path) as NoiseCleanupJob
+    if (job.status === 'completed' && (!job.outputSessionId || !job.outputPath)) {
+      throw new Error(`${path} must identify the completed output session and path.`)
+    }
+    if (job.status === 'failed' && (!job.errorCode || !job.errorMessage)) {
+      throw new Error(`${path} must include a stable failure code and message.`)
+    }
+    return job
+  }
 )
 
 const fileAssessmentSchema = boundedSemanticValue(
@@ -639,6 +702,7 @@ const oauthCallbackResultSchema = runtimeSchema<OAuthCallbackResult>(
 const runtimeContracts = {
   'health.ping': { params: undefinedOrFfmpegPathSchema, result: backendHealthSchema },
   'entitlements.get': { params: undefinedSchema, result: entitlementsSchema },
+  'entitlements.refresh': { params: undefinedSchema, result: entitlementsSchema },
   'account.get': { params: undefinedSchema, result: accountSchema },
   'account.complete_sign_in': {
     params: objectSchema(
@@ -752,6 +816,18 @@ const runtimeContracts = {
       { maxLength: 500 }
     )
   },
+  'noiseCleanup.start': {
+    params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
+    result: noiseCleanupJobSchema
+  },
+  'noiseCleanup.cancel': {
+    params: objectSchema({ jobId: boundedString }, { allowUnknown: false }),
+    result: noiseCleanupJobSchema
+  },
+  'noiseCleanup.list': {
+    params: undefinedSchema,
+    result: arraySchema(noiseCleanupJobSchema, { maxLength: 1000 })
+  },
   'repair.assess_file': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: fileAssessmentSchema
@@ -798,6 +874,8 @@ export const runtimeValidatedBackendRpcMethods = Object.freeze(
 
 const runtimeEventSchemas = {
   'devices.changed': deviceListSchema,
+  'entitlements.updated': entitlementsSchema,
+  'noiseCleanup.status': noiseCleanupJobSchema,
   'platformAccounts.oauth.callback': oauthCallbackResultSchema,
   'recording.status': recordingStatusSchema,
   'scene.changed': sceneSchema,

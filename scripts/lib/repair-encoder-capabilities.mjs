@@ -25,8 +25,12 @@ export const REPAIR_ENCODER_ARGS = {
 }
 
 /** Encoders every shipped macOS ffmpeg must expose: the repair/record H.264
- * path (VideoToolbox in the LGPL bundle) and aac for every audio leg. */
-export const REQUIRED_MACOS_FFMPEG_ENCODERS = ['h264_videotoolbox', 'aac']
+ * path, AAC for MP4 audio, and PCM for Noise Cleanup's MKV output policy. */
+export const REQUIRED_MACOS_FFMPEG_ENCODERS = ['h264_videotoolbox', 'aac', 'pcm_s16le']
+
+/** Audio filters required by Premium local creative transforms. `afftdn` is
+ * built into the LGPL FFmpeg bundle and needs no separately licensed model. */
+export const REQUIRED_MACOS_FFMPEG_FILTERS = ['afftdn']
 
 /** Protocols every shipped macOS ffmpeg must expose. rtmps implies a TLS
  * backend was linked (static OpenSSL since 0.9.23); tls is listed separately
@@ -68,7 +72,11 @@ function hasWord(output, word) {
  * bundle's required capability set (streaming TLS + repair/record encoders).
  * Returns `{ ok, missing }` with `protocol:<name>` / `encoder:<name>` entries.
  */
-export function assessMacosFfmpegCapabilities({ protocolsOutput = '', encodersOutput = '' }) {
+export function assessMacosFfmpegCapabilities({
+  protocolsOutput = '',
+  encodersOutput = '',
+  filtersOutput = ''
+}) {
   const missing = []
   for (const protocol of REQUIRED_MACOS_FFMPEG_PROTOCOLS) {
     if (!hasWord(protocolsOutput, protocol)) {
@@ -78,6 +86,11 @@ export function assessMacosFfmpegCapabilities({ protocolsOutput = '', encodersOu
   for (const encoder of REQUIRED_MACOS_FFMPEG_ENCODERS) {
     if (!hasWord(encodersOutput, encoder)) {
       missing.push(`encoder:${encoder}`)
+    }
+  }
+  for (const filter of REQUIRED_MACOS_FFMPEG_FILTERS) {
+    if (!hasWord(filtersOutput, filter)) {
+      missing.push(`filter:${filter}`)
     }
   }
   return { ok: missing.length === 0, missing }
@@ -95,6 +108,7 @@ export function probeMacosFfmpegCapabilities(ffmpegPath, { execFileSync }) {
     })
   return assessMacosFfmpegCapabilities({
     protocolsOutput: run('-protocols'),
-    encodersOutput: run('-encoders')
+    encodersOutput: run('-encoders'),
+    filtersOutput: run('-filters')
   })
 }

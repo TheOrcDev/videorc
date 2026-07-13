@@ -15,10 +15,10 @@
  * separately so a partial TLS wiring still fails loudly. */
 export const REQUIRED_WINDOWS_FFMPEG_PROTOCOLS = ['rtmp', 'rtmps', 'tls']
 
-/** Encoders the Windows recording/stream path selects (MediaFoundation is
- * the platform H.264 encoder in the LGPL build; aac carries every audio
- * leg). */
-export const REQUIRED_WINDOWS_FFMPEG_ENCODERS = ['h264_mf', 'aac']
+/** Encoders the Windows recording/stream path selects: MediaFoundation H.264,
+ * AAC for MP4 audio, and PCM for Noise Cleanup's MKV output policy. */
+export const REQUIRED_WINDOWS_FFMPEG_ENCODERS = ['h264_mf', 'aac', 'pcm_s16le']
+export const REQUIRED_WINDOWS_FFMPEG_FILTERS = ['afftdn']
 
 function hasWord(output, word) {
   return new RegExp(`(^|[^A-Za-z0-9_])${word}([^A-Za-z0-9_]|$)`, 'm').test(output)
@@ -29,7 +29,11 @@ function hasWord(output, word) {
  * required capability set. Returns `{ ok, missing }` where `missing` entries
  * are `protocol:<name>` / `encoder:<name>` strings suitable for error copy.
  */
-export function assessWindowsFfmpegCapabilities({ protocolsOutput = '', encodersOutput = '' }) {
+export function assessWindowsFfmpegCapabilities({
+  protocolsOutput = '',
+  encodersOutput = '',
+  filtersOutput = ''
+}) {
   const missing = []
   for (const protocol of REQUIRED_WINDOWS_FFMPEG_PROTOCOLS) {
     if (!hasWord(protocolsOutput, protocol)) {
@@ -39,6 +43,11 @@ export function assessWindowsFfmpegCapabilities({ protocolsOutput = '', encoders
   for (const encoder of REQUIRED_WINDOWS_FFMPEG_ENCODERS) {
     if (!hasWord(encodersOutput, encoder)) {
       missing.push(`encoder:${encoder}`)
+    }
+  }
+  for (const filter of REQUIRED_WINDOWS_FFMPEG_FILTERS) {
+    if (!hasWord(filtersOutput, filter)) {
+      missing.push(`filter:${filter}`)
     }
   }
   return { ok: missing.length === 0, missing }
@@ -57,6 +66,7 @@ export function probeWindowsFfmpegCapabilities(ffmpegPath, { execFileSync }) {
     })
   return assessWindowsFfmpegCapabilities({
     protocolsOutput: run('-protocols'),
-    encodersOutput: run('-encoders')
+    encodersOutput: run('-encoders'),
+    filtersOutput: run('-filters')
   })
 }
