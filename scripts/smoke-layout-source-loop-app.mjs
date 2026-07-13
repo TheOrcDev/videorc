@@ -100,6 +100,12 @@ try {
     ])
     const scene = await request(ws, timeoutMs, 'scene.get')
     assertLayoutLoop(layout, selected, surface, scene, previewWindow, captureState.result)
+    // The SEEING layer: window bounds and persisted config can both flip while
+    // the compositor keeps rendering frames at its old spawn-time dimensions
+    // (the 0.9.37 stale-orientation preview bug). Assert the pipeline itself —
+    // the render dimensions and, when Metal presents, the actual target — has
+    // adopted the expected orientation.
+    await assertPresentedOrientation(ws, layout)
     console.log(
       `Layout source loop [${layout.preset}] OK - scene ${sourceKinds(scene).join(' + ') || 'empty'}, ${captureState.result.video.width}x${captureState.result.video.height} preview, surface revision ${surface.sceneRevision}.`
     )
@@ -179,6 +185,31 @@ function assertLayoutLoop(layout, selected, surface, scene, previewWindow, captu
 
 function sourceKinds(scene) {
   return scene.sources.map((source) => source.kind).sort()
+}
+
+// The compositor resizes on the NEXT tick after the surface bounds land, and
+// the bounds themselves follow the renderer's post-proof config commit — poll
+// briefly instead of asserting one instantaneous read.
+async function assertPresentedOrientation(ws, layout) {
+  const expectsPortrait = layout.preset.startsWith('vertical-')
+  const deadline = Date.now() + 10000
+  let status = null
+  while (Date.now() < deadline) {
+    status = await request(ws, timeoutMs, 'compositor.status')
+    const renderIsPortrait = status.height > status.width
+    const target =
+      typeof status.metalTargetWidth === 'number' && typeof status.metalTargetHeight === 'number'
+        ? { width: status.metalTargetWidth, height: status.metalTargetHeight }
+        : null
+    const targetMatches = !target || target.height > target.width === expectsPortrait
+    if (renderIsPortrait === expectsPortrait && targetMatches) {
+      return
+    }
+    await sleep(200)
+  }
+  throw new Error(
+    `Compositor kept rendering ${status?.width}x${status?.height} (metal target ${status?.metalTargetWidth ?? '-'}x${status?.metalTargetHeight ?? '-'}) for ${layout.preset}, expected ${expectsPortrait ? 'portrait' : 'landscape'} — the preview pipeline did not adopt the new canvas.`
+  )
 }
 
 function smokeCommand(smoke, command, params = {}) {
