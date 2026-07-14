@@ -1,4 +1,11 @@
-import type { AudioMeterResult, Device, DeviceList, MediaAccessStatus } from '@/lib/backend'
+import type {
+  AudioMeterResult,
+  Device,
+  DeviceList,
+  MediaAccessSnapshot,
+  MediaAccessStatus,
+  SystemPermissionPane
+} from '@/lib/backend'
 import { appPlatform, osSettingsName, type AppPlatform } from '@/lib/platform'
 
 // ST3 (Settings rework): live permission states for the System access rows.
@@ -7,10 +14,11 @@ import { appPlatform, osSettingsName, type AppPlatform } from '@/lib/platform'
 // the OS genuinely won't tell us until first use, we say so instead of faking
 // a green chip.
 //
-// Platform matters here: macOS TCC reports denied camera/mic as
-// permission-required, so "enumerated" implies "granted"; Windows exposes no
-// such per-device denial in the device list and has NO per-app screen
-// permission at all, so the derivation and the row set differ by platform.
+// Platform matters here: the macOS backend collapses never-asked, denied, and
+// restricted into permission-required, so Electron's exact TCC snapshot owns
+// permission truth there. Backend enumeration/meter results refine device
+// health after a grant. Windows has no per-app screen permission, so its row
+// set and recovery path differ.
 
 export type SystemAccessState = 'granted' | 'not-granted' | 'first-use' | 'device-issue'
 
@@ -21,6 +29,19 @@ export interface SystemAccessRow {
   purpose: string
   state: SystemAccessState
   detail: string
+}
+
+export type SystemAccessAction = 'request-media-access' | 'open-settings' | null
+
+export function isMediaAccessSnapshotReady(
+  mediaAccess: MediaAccessSnapshot | null | undefined
+): mediaAccess is MediaAccessSnapshot {
+  return (
+    mediaAccess !== null &&
+    mediaAccess !== undefined &&
+    mediaAccess.camera !== 'unknown' &&
+    mediaAccess.microphone !== 'unknown'
+  )
 }
 
 function screenDevices(devices: Device[]): Device[] {
@@ -92,6 +113,65 @@ export function mediaAccessToState(status: MediaAccessStatus | undefined): Syste
   }
 }
 
+function windowsMediaAccessState(
+  status: MediaAccessStatus | undefined,
+  backendState: SystemAccessState
+): SystemAccessState {
+  return status === undefined || status === 'unknown' ? backendState : mediaAccessToState(status)
+}
+
+// macOS exposes the permission decision separately from capture health. The
+// exact TCC value must decide never-asked vs denied; after a grant, backend
+// evidence still has to prove that the device can actually be used.
+export function macosMediaAccessState(
+  status: MediaAccessStatus | undefined,
+  backendState: SystemAccessState
+): SystemAccessState {
+  switch (status) {
+    case 'not-determined':
+      return 'first-use'
+    case 'denied':
+    case 'restricted':
+      return 'not-granted'
+    case 'granted':
+      return backendState === 'granted' ? 'granted' : 'device-issue'
+    case 'unknown':
+    default:
+      return backendState
+  }
+}
+
+export function systemAccessAction({
+  pane,
+  state,
+  platform,
+  mediaAccessStatus
+}: {
+  pane: SystemPermissionPane
+  state?: SystemAccessState
+  platform?: string
+  mediaAccessStatus?: MediaAccessStatus
+}): SystemAccessAction {
+  if (pane === 'privacy') {
+    return 'open-settings'
+  }
+  if ((pane === 'camera' || pane === 'microphone') && mediaAccessStatus === 'granted') {
+    return null
+  }
+  if (state === 'granted' || state === 'device-issue') {
+    return null
+  }
+  if (
+    appPlatform(platform) === 'darwin' &&
+    (pane === 'camera' || pane === 'microphone') &&
+    state === 'first-use' &&
+    mediaAccessStatus === 'not-determined'
+  ) {
+    return 'request-media-access'
+  }
+  return 'open-settings'
+}
+
 export function systemAccessRows({
   deviceList,
   audioMeter,
@@ -104,17 +184,28 @@ export function systemAccessRows({
   mediaAccess?: { camera: MediaAccessStatus; microphone: MediaAccessStatus } | null
 }): SystemAccessRow[] {
   const os = appPlatform(platform)
-  // On Windows the OS access status is the honest signal (see mediaAccessToState);
-  // macOS keeps its TCC-aware enumeration/meter derivation, which already
-  // distinguishes denied from first-use.
+  const backendCamera = cameraAccessState(deviceList)
+  const backendMicrophone = microphoneAccessState(audioMeter)
+  const macosMicrophoneHealth =
+    audioMeter === null &&
+    backendMicrophone === 'first-use' &&
+    deviceList.devices.some(
+      (device) => device.kind === 'microphone' && device.status === 'available'
+    )
+      ? 'granted'
+      : backendMicrophone
   const camera =
-    os === 'win32' && mediaAccess
-      ? mediaAccessToState(mediaAccess.camera)
-      : cameraAccessState(deviceList)
+    os === 'win32'
+      ? windowsMediaAccessState(mediaAccess?.camera, backendCamera)
+      : os === 'darwin'
+        ? macosMediaAccessState(mediaAccess?.camera, backendCamera)
+        : backendCamera
   const microphone =
-    os === 'win32' && mediaAccess
-      ? mediaAccessToState(mediaAccess.microphone)
-      : microphoneAccessState(audioMeter)
+    os === 'win32'
+      ? windowsMediaAccessState(mediaAccess?.microphone, backendMicrophone)
+      : os === 'darwin'
+        ? macosMediaAccessState(mediaAccess?.microphone, macosMicrophoneHealth)
+        : backendMicrophone
 
   const rows: SystemAccessRow[] = []
 
@@ -136,7 +227,12 @@ export function systemAccessRows({
     label: 'Camera',
     purpose: 'Camera overlay in your scenes.',
     state: camera,
-    detail: accessDetail(camera, 'the camera', os)
+    detail:
+      os === 'darwin' && mediaAccess?.camera === 'restricted'
+        ? 'Camera access is restricted by macOS policy and may not be changeable here.'
+        : camera === 'device-issue'
+          ? 'Camera permission is granted, but no usable camera is currently available.'
+          : accessDetail(camera, 'the camera', os)
   })
 
   rows.push({
@@ -145,12 +241,14 @@ export function systemAccessRows({
     purpose: 'Voice audio and live captions.',
     state: microphone,
     detail:
-      microphone === 'device-issue'
-        ? (audioMeter?.message ??
-          'The microphone opened but did not send frames. Try the fallback input or another mic.')
-        : microphone === 'first-use'
-          ? 'Checked when you run a mic check or start a session.'
-          : accessDetail(microphone, 'the microphone', os)
+      os === 'darwin' && mediaAccess?.microphone === 'restricted'
+        ? 'Microphone access is restricted by macOS policy and may not be changeable here.'
+        : microphone === 'device-issue'
+          ? ((audioMeter?.status === 'permission-required' ? undefined : audioMeter?.message) ??
+            'Microphone permission is granted, but no usable input is currently available.')
+          : microphone === 'first-use'
+            ? 'Checked when you run a mic check or start a session.'
+            : accessDetail(microphone, 'the microphone', os)
   })
 
   return rows
@@ -162,17 +260,19 @@ export function systemAccessRows({
 // is a snooze, not the trigger: once the user continues or skips, gaps go back
 // to the Sources alerts and Settings chips. `backendReady` guards the boot
 // window where device enumeration hasn't arrived and every state would read
-// first-use — unknown must never flash the dialog.
+// first-use — unknown backend or exact media state must never flash the dialog.
 export function shouldShowPermissionsOnboarding({
   rows,
   dismissed,
-  backendReady
+  backendReady,
+  mediaAccessReady = true
 }: {
   rows: SystemAccessRow[]
   dismissed: boolean
   backendReady: boolean
+  mediaAccessReady?: boolean
 }): boolean {
-  if (dismissed || !backendReady) {
+  if (dismissed || !backendReady || !mediaAccessReady) {
     return false
   }
   return rows.some((row) => row.state !== 'granted' && row.state !== 'device-issue')

@@ -130,6 +130,7 @@ export function QuickSettings(): ReactElement {
     entitlements,
     captionsStatus,
     captionsCommandPending,
+    mediaAccess,
     wsStatus
   } = useStudioCore()
   // Q6 (plan 022): before the backend reports devices, selects say "Finding
@@ -243,7 +244,10 @@ export function QuickSettings(): ReactElement {
                 popover is open. Mounted only with the popover, so the preview
                 stream releases the device on close. */}
             <Suspense fallback={<div className="h-[38px] rounded-row border bg-muted/20" />}>
-              <MicPickerPreview deviceName={selectedMicrophone?.name} />
+              <MicPickerPreview
+                deviceName={selectedMicrophone?.name}
+                permissionStatus={mediaAccess?.microphone}
+              />
             </Suspense>
             {selectedMicrophone ? (
               <Button

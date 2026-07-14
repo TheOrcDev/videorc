@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
-import { createMicStreamController } from '@/lib/mic-stream'
+import type { MediaAccessStatus } from '@/lib/backend'
+import { createMicStreamController, microphoneStreamAcquisitionEnabled } from '@/lib/mic-stream'
 
 export type MicStreamStatus = 'idle' | 'acquiring' | 'active' | 'unavailable'
 
@@ -23,14 +24,17 @@ export type MicStream = {
 export function useMicStream(input: {
   /** Backend name of the selected microphone; matched to WebAudio by label. */
   deviceName: string | undefined
+  /** Exact OS access status; only `granted` may start a Chromium stream. */
+  permissionStatus: MediaAccessStatus | undefined
   enabled: boolean
 }): MicStream {
-  const { deviceName, enabled } = input
+  const { deviceName, enabled, permissionStatus } = input
+  const acquisitionEnabled = microphoneStreamAcquisitionEnabled(enabled, permissionStatus)
   const [stream, setStream] = useState<MediaStream | null>(null)
   const [status, setStatus] = useState<MicStreamStatus>('idle')
 
   useEffect(() => {
-    if (!enabled) {
+    if (!acquisitionEnabled) {
       setStream(null)
       setStatus('idle')
       return
@@ -50,7 +54,7 @@ export function useMicStream(input: {
       controller.close()
       setStream(null)
     }
-  }, [deviceName, enabled])
+  }, [acquisitionEnabled, deviceName])
 
   return { stream, active: stream !== null, status }
 }

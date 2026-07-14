@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
+  useStudioAudio,
   useStudioCore,
   useStudioDiagnostics,
   useStudioPreview,
@@ -37,17 +38,22 @@ import type {
   WebSocketQueueDiagnosticStats
 } from '@/lib/backend'
 import { compactTime, formatDroppedFrames, formatMetric } from '@/lib/format'
+import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 
 export function DiagnosticsTab(): ReactElement {
   const {
-    openSystemPermission,
+    handleSystemPermission,
     sessions,
     streamTargets,
     nativePreviewSurfaceEnabled,
     captureConfig,
+    deviceList,
+    mediaAccess,
+    runtimeInfo,
     exportSupportBundle,
     supportBundleExportPending
   } = useStudioCore()
+  const { audioMeter } = useStudioAudio()
   const { recording } = useStudioRecording()
   const { previewLiveStatus, previewCameraStatus, previewScreenStatus } = useStudioPreview()
   const { diagnosticStats, healthEvents, logs, previewSurfaceStatus, streamHealth } =
@@ -55,8 +61,27 @@ export function DiagnosticsTab(): ReactElement {
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
   const activeSession =
     sessions.find((session) => session.id === recording.sessionId) ?? sessions[0] ?? null
+  const accessRows = systemAccessRows({
+    deviceList,
+    audioMeter,
+    platform: runtimeInfo?.platform,
+    mediaAccess
+  })
+  const permissionAction = (pane: SystemPermissionPane) => {
+    const row = accessRows.find((candidate) => candidate.id === pane)
+    return systemAccessAction({
+      pane,
+      state: row?.state,
+      platform: runtimeInfo?.platform,
+      mediaAccessStatus:
+        pane === 'camera' || pane === 'microphone' ? mediaAccess?.[pane] : undefined
+    })
+  }
   const actionableEvents = healthEvents.filter(
-    (event) => event.permissionPane && !dismissed.has(event.id)
+    (event) =>
+      event.permissionPane &&
+      !dismissed.has(event.id) &&
+      permissionAction(event.permissionPane) !== null
   )
   const sessionLogs = activeSession?.sessionLogs ?? []
 
@@ -579,7 +604,7 @@ export function DiagnosticsTab(): ReactElement {
                       return next
                     })
                   }
-                  onOpenPermission={openSystemPermission}
+                  onHandlePermission={handleSystemPermission}
                 />
               ))}
             </div>
@@ -649,11 +674,11 @@ function MetricGroup({ title, children }: { title: string; children: ReactNode }
 function ActionableWarning({
   event,
   onDismiss,
-  onOpenPermission
+  onHandlePermission
 }: {
   event: HealthEvent
   onDismiss: () => void
-  onOpenPermission: (pane: SystemPermissionPane) => Promise<void>
+  onHandlePermission: (pane: SystemPermissionPane) => Promise<void>
 }): ReactElement {
   return (
     <div className="flex items-start justify-between gap-3 rounded-row border bg-warning/10 px-3 py-2">
@@ -667,11 +692,11 @@ function ActionableWarning({
       <div className="flex shrink-0 items-center gap-1">
         {event.permissionPane ? (
           <Button
-            aria-label="Open permission settings"
+            aria-label="Resolve permission"
             size="icon"
-            title="Open permission settings"
+            title="Resolve permission"
             variant="ghost"
-            onClick={() => void onOpenPermission(event.permissionPane!)}
+            onClick={() => void onHandlePermission(event.permissionPane!)}
           >
             <ArrowSquareOut />
           </Button>
