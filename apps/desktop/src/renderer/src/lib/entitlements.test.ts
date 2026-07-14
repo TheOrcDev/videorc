@@ -115,7 +115,7 @@ describe('entitlements', () => {
           maxFps: 30,
           maxBitrateKbps: 6000,
           maxDestinations: 1,
-      maxDestinationsPerOrientation: 1
+          maxDestinationsPerOrientation: 1
         }
       }
     }

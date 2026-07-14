@@ -7701,7 +7701,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             'streamTargets.youtube.prepare',
             {
               accountId: target.accountId,
-              video: captureConfig.video
+              // The vertical-bound broadcast advertises the PORTRAIT profile —
+              // the same transposition the simulcast leg composes at.
+              video:
+                target.outputOrientation === 'vertical'
+                  ? coerceVideoToOrientation(captureConfig.video, 'vertical')
+                  : captureConfig.video
             }
           )
           nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {

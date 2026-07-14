@@ -11,6 +11,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { AudioMixer } from '@/components/studio/audio-mixer'
 import { QuickSettings } from '@/components/studio/quick-settings'
 import { ScenesGallery } from '@/components/studio/scenes-gallery'
+import { VerticalLegMonitor } from '@/components/studio/vertical-leg-monitor'
 import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
 import { SessionPanel } from '@/components/studio/session-panel'
 import { Button } from '@/components/ui/button'
@@ -185,6 +186,7 @@ export function StudioTab(): ReactElement {
               single column below lg. */}
           <div className="grid gap-5 lg:grid-cols-2">
             <ScenesGallery />
+            <VerticalLegMonitor />
             <AudioMixer />
           </div>
         </PageStack>

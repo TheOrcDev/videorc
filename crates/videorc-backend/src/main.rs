@@ -2503,7 +2503,7 @@ async fn spawn_session_live_chat(
                     params.platforms.push(StreamPlatform::X);
                 }
             }
-            StreamPlatform::Custom => {}
+            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => {}
         }
     }
     if !params.destinations.is_empty() {

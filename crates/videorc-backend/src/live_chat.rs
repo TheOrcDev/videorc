@@ -332,6 +332,20 @@ pub fn chat_capability(
                 message: crate::x_chat::x_chat_message(x_live_ready).to_string(),
             }
         }
+        StreamPlatform::Tiktok | StreamPlatform::Instagram => ChatCapability {
+            platform,
+            state: ChatCapabilityState::Unsupported,
+            read: CommentsReadState::Unavailable,
+            write: CommentsWriteState::Unavailable,
+            chat_read_available: false,
+            required_scope: None,
+            account_id: None,
+            account_label: None,
+            message: format!(
+                "{} has no public comments API — watch chat in their app while you stream.",
+                crate::streaming::stream_platform_label(platform)
+            ),
+        },
         StreamPlatform::Custom => ChatCapability {
             platform,
             state: ChatCapabilityState::Unsupported,
@@ -1212,7 +1226,7 @@ pub async fn start_live_chat(state: &AppState, params: LiveChatStartParams) -> L
                 .x
                 .as_ref()
                 .and_then(|config| config.target_id.clone()),
-            StreamPlatform::Custom => None,
+            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => None,
         };
         let configured_target_id = configured_target_id.or_else(|| {
             params

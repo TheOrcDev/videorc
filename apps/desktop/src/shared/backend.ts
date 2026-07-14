@@ -618,7 +618,7 @@ export interface RtmpSettings {
 // Multi-platform streaming (per-target) model. Session start consumes it
 // (recording.rs reads params.streaming for the per-target fan-out); the legacy
 // single-RTMP fields remain only as the no-settings fallback.
-export type StreamPlatform = 'youtube' | 'twitch' | 'x' | 'custom'
+export type StreamPlatform = 'youtube' | 'twitch' | 'x' | 'tiktok' | 'instagram' | 'custom'
 /**
  * Which composed leg a destination consumes in a dual-orientation session.
  * Explicit per-target property — never inferred from resolution equality.

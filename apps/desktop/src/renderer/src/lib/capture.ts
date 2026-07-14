@@ -11,6 +11,7 @@ import type {
   RtmpPreset,
   SideBySideSplit,
   SimulcastParams,
+  StreamOutputOrientation,
   SourceSelection,
   StreamingSettings,
   StreamPlatform,
@@ -360,39 +361,97 @@ export const rtmpDefaults: Record<RtmpPreset, string> = {
 }
 
 // Fixed destination order for the Streaming tab (YouTube, Twitch, X, Custom).
-export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = ['youtube', 'twitch', 'x', 'custom']
+export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = [
+  'youtube',
+  'twitch',
+  'x',
+  'tiktok',
+  'instagram',
+  'custom'
+]
 
 const STREAM_PLATFORM_LABELS: Record<StreamPlatform, string> = {
   youtube: 'YouTube',
   twitch: 'Twitch',
   x: 'X / Twitter',
+  tiktok: 'TikTok',
+  instagram: 'Instagram',
   custom: 'Custom RTMP'
 }
 
+/**
+ * The built-in destination cards, ID-keyed (two YouTube cards share one
+ * platform): the horizontal trio, the vertical trio (YouTube Vertical is a
+ * SECOND broadcast on the same channel; TikTok and Instagram are manual-key
+ * only), then Custom RTMP.
+ */
+export const STREAM_TARGET_DEFS: ReadonlyArray<{
+  id: string
+  platform: StreamPlatform
+  label: string
+  serverUrl: string
+  outputOrientation?: StreamOutputOrientation
+}> = [
+  { id: 'youtube', platform: 'youtube', label: 'YouTube', serverUrl: rtmpDefaults.youtube },
+  { id: 'twitch', platform: 'twitch', label: 'Twitch', serverUrl: rtmpDefaults.twitch },
+  { id: 'x', platform: 'x', label: 'X / Twitter', serverUrl: '' },
+  {
+    id: 'youtube-vertical',
+    platform: 'youtube',
+    label: 'YouTube Vertical',
+    serverUrl: rtmpDefaults.youtube,
+    outputOrientation: 'vertical'
+  },
+  {
+    id: 'tiktok',
+    platform: 'tiktok',
+    label: 'TikTok',
+    serverUrl: '',
+    outputOrientation: 'vertical'
+  },
+  {
+    id: 'instagram',
+    platform: 'instagram',
+    label: 'Instagram',
+    serverUrl: 'rtmps://live-upload.instagram.com:443/rtmp/',
+    outputOrientation: 'vertical'
+  },
+  { id: 'custom', platform: 'custom', label: 'Custom RTMP', serverUrl: '' }
+]
+
 export function oauthUnavailableReason(platform: StreamPlatform): string | null {
-  return platform === 'custom' ? 'Custom RTMP does not support OAuth.' : null
+  if (platform === 'custom') {
+    return 'Custom RTMP does not support OAuth.'
+  }
+  if (platform === 'tiktok' || platform === 'instagram') {
+    return `${STREAM_PLATFORM_LABELS[platform]} livestreams use a manual stream key — there is no OAuth to connect.`
+  }
+  return null
 }
 
 export function isPlatformOAuthAvailable(platform: StreamPlatform): boolean {
-  return platform !== 'custom' && !oauthUnavailableReason(platform)
+  return !oauthUnavailableReason(platform)
 }
 
 function isStreamPlatform(value: unknown): value is StreamPlatform {
   return typeof value === 'string' && (STREAM_PLATFORM_ORDER as readonly string[]).includes(value)
 }
 
-function makeStreamTarget(platform: StreamPlatform, now: string): StreamTargetSettings {
+function makeStreamTarget(
+  def: (typeof STREAM_TARGET_DEFS)[number],
+  now: string
+): StreamTargetSettings {
   return {
-    // One built-in target per platform in v1, so the platform name is a stable id.
-    id: platform,
-    platform,
-    label: STREAM_PLATFORM_LABELS[platform],
+    id: def.id,
+    platform: def.platform,
+    label: def.label,
     enabled: false,
-    serverUrl: rtmpDefaults[platform],
+    serverUrl: def.serverUrl,
     urlMode: 'server-and-key',
     streamKey: '',
     streamKeyPresent: false,
     authMode: 'manual-rtmp',
+    ...(def.outputOrientation ? { outputOrientation: def.outputOrientation } : {}),
     status: { state: 'not-configured' },
     createdAt: now,
     updatedAt: now
@@ -400,7 +459,7 @@ function makeStreamTarget(platform: StreamPlatform, now: string): StreamTargetSe
 }
 
 function defaultStreamTargets(now: string = new Date().toISOString()): StreamTargetSettings[] {
-  return STREAM_PLATFORM_ORDER.map((platform) => makeStreamTarget(platform, now))
+  return STREAM_TARGET_DEFS.map((def) => makeStreamTarget(def, now))
 }
 
 export function defaultStreamingSettings(): StreamingSettings {
@@ -547,6 +606,20 @@ export const streamPlatformOutputCapabilities: Record<
     true4k: false
   },
   x: {
+    maxWidth: 1920,
+    maxHeight: 1080,
+    maxFps: 30,
+    maxBitrateKbps: 6000,
+    true4k: false
+  },
+  tiktok: {
+    maxWidth: 1920,
+    maxHeight: 1080,
+    maxFps: 30,
+    maxBitrateKbps: 6000,
+    true4k: false
+  },
+  instagram: {
     maxWidth: 1920,
     maxHeight: 1080,
     maxFps: 30,
@@ -1239,13 +1312,17 @@ export function normalizeStreamingSettings(value: unknown): StreamingSettings {
   const candidate = (value && typeof value === 'object' ? value : {}) as Partial<StreamingSettings>
   const now = new Date().toISOString()
   const persisted = Array.isArray(candidate.targets) ? candidate.targets : []
-  const targets = STREAM_PLATFORM_ORDER.map((platform) => {
-    const base = makeStreamTarget(platform, now)
+  const targets = STREAM_TARGET_DEFS.map((def) => {
+    const base = makeStreamTarget(def, now)
     const saved = persisted.find(
       (target) =>
         target &&
         typeof target === 'object' &&
-        (target.id === platform || target.platform === platform)
+        (target.id === def.id ||
+          // Legacy configs stored one target per platform with id == platform;
+          // only the original horizontal cards may match by platform so a saved
+          // "youtube" can never hydrate the vertical card's credentials.
+          (def.id === def.platform && target.id == null && target.platform === def.platform))
     )
     return saved ? normalizeStreamTarget(base, saved) : base
   })
@@ -1354,10 +1431,14 @@ export function bridgeStreamingToLegacy(config: CaptureConfig): CaptureConfig {
     : undefined
 
   if (primary) {
+    const legacyPreset: RtmpPreset =
+      primary.platform === 'tiktok' || primary.platform === 'instagram'
+        ? 'custom'
+        : primary.platform
     return {
       ...config,
       streamEnabled: true,
-      rtmpPreset: primary.platform,
+      rtmpPreset: legacyPreset,
       rtmpServerUrl: primary.serverUrl,
       streamKey: primary.streamKey
     }

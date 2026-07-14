@@ -191,9 +191,8 @@ function enabledCountForOrientation(
   streaming: StreamingGateSettings,
   orientation: StreamOutputOrientation
 ): number {
-  return streaming.enabledTargetIds.filter(
-    (id) => targetOrientation(streaming, id) === orientation
-  ).length
+  return streaming.enabledTargetIds.filter((id) => targetOrientation(streaming, id) === orientation)
+    .length
 }
 
 function lockedGate(
@@ -217,9 +216,7 @@ function streamingMaxDestinations(entitlements: EntitlementsSnapshot | null): nu
   )
 }
 
-function streamingMaxDestinationsPerOrientation(
-  entitlements: EntitlementsSnapshot | null
-): number {
+function streamingMaxDestinationsPerOrientation(entitlements: EntitlementsSnapshot | null): number {
   return (
     entitlements?.limits.streaming.maxDestinationsPerOrientation ??
     DEFAULT_BASIC_ENTITLEMENTS.limits.streaming.maxDestinationsPerOrientation

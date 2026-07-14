@@ -23,6 +23,7 @@ import {
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { useStudioCore } from '@/hooks/use-studio'
+import { simulcastArmed } from '@/lib/capture'
 import type {
   CommentsReadState,
   CommentsWriteState,
@@ -182,6 +183,8 @@ export function GoLiveConfirmationDialog({
                 )}
               </div>
             </div>
+
+            <GoLiveSimulcastAdvisory />
 
             {entitlementBlocker ? (
               <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
@@ -512,7 +515,47 @@ function platformLabel(platform: StreamPlatform): string {
       return 'Twitch'
     case 'x':
       return 'X'
+    case 'tiktok':
+      return 'TikTok'
+    case 'instagram':
+      return 'Instagram'
     case 'custom':
       return 'Custom RTMP'
   }
+}
+
+// Dual-orientation sessions double the encode count and the upstream
+// bandwidth — an ADVISORY, never a block (per-target dropped-frame status is
+// the honest live signal). Instagram's manual publish step lives here because
+// it happens AT Go Live time, not while configuring the card.
+function GoLiveSimulcastAdvisory(): ReactElement | null {
+  const { captureConfig } = useStudioCore()
+  if (!simulcastArmed(captureConfig)) {
+    return null
+  }
+  const { streaming } = captureConfig
+  const enabled = streaming.targets.filter(
+    (target) => target.enabled && streaming.enabledTargetIds.includes(target.id)
+  )
+  const totalKbps = enabled.reduce(
+    (sum, target) => sum + (target.outputBitrateKbps ?? streaming.defaultBitrateKbps),
+    0
+  )
+  const mbps = Math.max(1, Math.round(totalKbps / 1000))
+  const hasInstagram = enabled.some((target) => target.platform === 'instagram')
+  return (
+    <div className="flex flex-col gap-1 rounded-row border border-border bg-muted/20 p-3">
+      <span className="text-sm font-medium">Streaming both orientations</span>
+      <span className="text-xs text-muted-foreground">
+        The horizontal scene streams to your landscape destinations while the saved vertical scene
+        streams to the vertical ones — about {mbps} Mbps upstream across all legs.
+      </span>
+      {hasInstagram ? (
+        <span className="text-xs text-muted-foreground">
+          Instagram: once Videorc starts sending, press “Go live” in Instagram Live Producer to
+          publish the stream to your profile.
+        </span>
+      ) : null}
+    </div>
+  )
 }
