@@ -15150,6 +15150,81 @@ mod tests {
     }
 
     #[test]
+    fn simulcast_six_destinations_fan_out_two_encodes() {
+        use crate::streaming::StreamOutputOrientation as Orientation;
+        // The full Premium shape: 3 horizontal + 3 vertical destinations in
+        // ONE command line — six isolated FLV legs consuming exactly TWO
+        // encoded inputs (bandwidth is the budget, not encodes).
+        let mut params = base_params(false, true);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6000,
+        };
+        let mut streaming = streaming_with_orientations(&[
+            Orientation::Horizontal,
+            Orientation::Horizontal,
+            Orientation::Horizontal,
+            Orientation::Vertical,
+            Orientation::Vertical,
+            Orientation::Vertical,
+        ]);
+        streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+        streaming.default_bitrate_kbps = 6000;
+        params.streaming = Some(streaming.clone());
+        params.simulcast = Some(simulcast_leg());
+        let targets = stream_targets_from_streaming(&streaming).unwrap();
+        let stream_output = recording_compositor_stream_output(
+            &params,
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+        )
+        .unwrap()
+        .expect("simulcast auxiliary output");
+
+        let args = bridge_compositor_split_output_ffmpeg_args(
+            &CaptureInputs {
+                video: VideoInput::TestPattern,
+                camera_index: None,
+                microphone: None,
+            },
+            &params,
+            None,
+            &targets,
+            Path::new("/tmp/videorc-six-recording.h264"),
+            Path::new("/tmp/videorc-six-stream.h264"),
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            stream_output,
+        )
+        .unwrap();
+
+        // Six isolated fifo-muxer legs; a dead platform is a dead LEG.
+        assert_eq!(
+            args.windows(2)
+                .filter(|window| window[0] == "-f" && window[1] == "fifo")
+                .count(),
+            6,
+            "{args:?}"
+        );
+        for (index, expected_input) in [
+            (0, "1:v"),
+            (1, "1:v"),
+            (2, "1:v"),
+            (3, "2:v"),
+            (4, "2:v"),
+            (5, "2:v"),
+        ] {
+            let url = format!("rtmp://a.rtmp.youtube.com/live2/key{index}");
+            assert_eq!(
+                video_input_for_url(&args, &url),
+                expected_input,
+                "target {index} routed wrong"
+            );
+        }
+    }
+
+    #[test]
     fn canvas_bounds_are_orientation_symmetric() {
         let mut params = base_params(true, false);
         params.layout.layout_preset = LayoutPreset::VerticalCameraTop;
