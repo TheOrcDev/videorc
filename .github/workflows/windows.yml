@@ -109,6 +109,11 @@ jobs:
         # testers will see a SmartScreen warning until signing lands.
         run: pnpm dist:desktop:windows
 
+      - name: Verify bundled FFmpeg live microphone controls
+        run: pnpm probe:live-audio-controls
+        env:
+          VIDEORC_SMOKE_FFMPEG_PATH: ${{ github.workspace }}\apps\desktop\release\win-unpacked\resources\ffmpeg\bin\ffmpeg.exe
+
       - name: Verify packaged 1080p recording duration and A/V
         run: pnpm smoke:packaged:bundled
         env:

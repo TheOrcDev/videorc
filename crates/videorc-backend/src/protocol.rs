@@ -942,6 +942,10 @@ pub struct AudioProcessingUpdateResult {
     pub microphone_muted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_microphone_gain_db: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_microphone_muted: Option<bool>,
 }
 
 fn default_microphone_sync_offset_ms() -> i32 {

@@ -15,6 +15,7 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.deepEqual(labels, [
       'desktop recording studio unit tests',
       'script artifact analyzer and A/V sync tests',
+      'FFmpeg live microphone control probe',
       'backend live layout tests',
       'backend scene layout tests',
       'backend recording pipeline tests',
@@ -58,6 +59,7 @@ describe('buildRecordingStudioGateSteps', () => {
       'backend-isolation.test.ts'
     ])
     assert.deepEqual(steps[1].args, ['test:scripts'])
+    assert.deepEqual(steps[2].args, ['probe:live-audio-controls'])
     assert.deepEqual(steps.at(-18).args, ['smoke:captions-contract'])
     assert.deepEqual(steps.at(-17).args, ['smoke:captions-live'])
     assert.deepEqual(steps.at(-16).args, ['smoke:noise-cleanup'])
@@ -113,6 +115,7 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(report, /recording-studio-gates: plan/)
     assert.match(report, /capture\.test\.ts/)
     assert.match(report, /test:scripts/)
+    assert.match(report, /probe:live-audio-controls/)
     assert.match(report, /live_layout::tests::/)
     assert.match(report, /smoke:captions-contract/)
     assert.match(report, /smoke:captions-live/)
@@ -156,6 +159,10 @@ describe('buildRecordingStudioGateSteps', () => {
     )
     assert.equal(packageJson.scripts['smoke:noise-cleanup'], 'node scripts/smoke-noise-cleanup.mjs')
     assert.equal(
+      packageJson.scripts['probe:live-audio-controls'],
+      'node scripts/probe-live-audio-controls.mjs'
+    )
+    assert.equal(
       packageJson.scripts['smoke:noise-cleanup:bundled'],
       'node scripts/smoke-noise-cleanup.mjs --require-bundled'
     )
@@ -169,6 +176,33 @@ describe('buildRecordingStudioGateSteps', () => {
       assert.match(source, /--require-bundled/)
       assert.match(source, /pcm_s16le/)
     }
+  })
+
+  it('runs the live audio control probe against bundled FFmpeg on hosted Windows', () => {
+    const workflow = readFileSync(
+      new URL('../../.github/workflows/windows.yml', import.meta.url),
+      'utf8'
+    )
+    const buildStep = workflow.indexOf('run: pnpm dist:desktop:windows')
+    const probeStep = workflow.indexOf('run: pnpm probe:live-audio-controls')
+
+    assert.notEqual(buildStep, -1)
+    assert.ok(probeStep > buildStep)
+    assert.match(
+      workflow,
+      /VIDEORC_SMOKE_FFMPEG_PATH: \$\{\{ github\.workspace \}\}\\apps\\desktop\\release\\win-unpacked\\resources\\ffmpeg\\bin\\ffmpeg\.exe/
+    )
+
+    const probe = readFileSync(new URL('../probe-live-audio-controls.mjs', import.meta.url), 'utf8')
+    assert.match(probe, /const productionStatsPeriodSeconds = 2/)
+    assert.match(probe, /const productionReplyTimeoutMs = 5000/)
+    assert.match(probe, /'-stats',\s*'-stats_period',\s*String\(productionStatsPeriodSeconds\)/)
+    assert.match(probe, /line\.trim\(\) === 'progress=continue'/)
+    assert.match(probe, /latencyMs < productionReplyTimeoutMs/)
+    assert.match(
+      probe,
+      /latencyMs >= productionStatsPeriodSeconds \* 1000 - acknowledgementCadenceJitterMs/
+    )
   })
 
   it('waits for the finalized MP4 before analyzing the device interaction recording', () => {

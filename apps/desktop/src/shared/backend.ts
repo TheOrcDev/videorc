@@ -1162,7 +1162,16 @@ export interface AudioProcessingUpdateParams {
 
 export interface AudioProcessingUpdateResult extends AudioProcessingUpdateParams {
   applied: boolean
-  reasonCode?: 'no-active-session' | 'stale-session' | 'native-audio-unavailable'
+  reasonCode?:
+    | 'no-active-session'
+    | 'stale-session'
+    | 'native-audio-unavailable'
+    | 'live-audio-control-unavailable'
+    | 'live-audio-control-state-unknown'
+  /** Present when the backend can conclusively report settings remaining after rejection. */
+  confirmedMicrophoneGainDb?: number
+  /** Present when the backend can conclusively report settings remaining after rejection. */
+  confirmedMicrophoneMuted?: boolean
 }
 
 export interface RemuxSessionParams {

@@ -114,6 +114,7 @@
     "probe:comments-window": "node scripts/comments-window-probe.mjs",
     "probe:preview-lifecycle": "node scripts/preview-lifecycle-probe.mjs --gate",
     "probe:split-flv": "node scripts/probe-split-flv-capture.mjs",
+    "probe:live-audio-controls": "node scripts/probe-live-audio-controls.mjs",
     "smoke:preview-surface": "node scripts/smoke-preview-surface-app.mjs",
     "smoke:preview-endurance": "node scripts/run-with-env.mjs VIDEORC_SMOKE_TIMEOUT_MS=720000 VIDEORC_PREVIEW_SURFACE_SAMPLE_MS=600000 -- node scripts/smoke-preview-surface-app.mjs",
     "smoke:preview-performance": "node scripts/perf-idle-probe.mjs --gate",

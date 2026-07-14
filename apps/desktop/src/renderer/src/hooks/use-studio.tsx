@@ -266,6 +266,7 @@ import { buildStartSessionParams } from '@/lib/session-params'
 import { findDevice, isActiveRecordingState, mergeStreamHealth } from '@/lib/format'
 import {
   activeAudioProcessingUpdateParams,
+  LatestWinsLiveAudioProcessingQueue,
   rejectedLiveAudioProcessingUpdate,
   type LiveAudioProcessingValues
 } from '@/lib/live-audio-processing'
@@ -2066,10 +2067,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const qualityToastSessionsRef = useRef<Set<string>>(new Set())
   const captureConfigRef = useRef(captureConfig)
   const liveAudioProcessingSyncRef = useRef<{
+    token: object
     sessionId: string
     lastApplied: LiveAudioProcessingValues
     disabled: boolean
-    requestRevision: number
+    queue: LatestWinsLiveAudioProcessingQueue
   } | null>(null)
   const layoutIntentIdRef = useRef(Date.now())
   const layoutIntentAwaitingProofRef = useRef<number | null>(null)
@@ -2078,6 +2080,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     captureConfigRef.current = captureConfig
   }, [captureConfig])
+  useEffect(
+    () => () => {
+      liveAudioProcessingSyncRef.current?.queue.stop()
+    },
+    []
+  )
   useEffect(() => {
     latestLayoutTransactionCommitRef.current = null
   }, [client])
@@ -6134,24 +6142,93 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         microphoneMuted: captureConfig.audio.microphoneMuted
       }
     )
-    if (!params) {
+    if (!params || !client || wsStatus !== 'connected' || stopRequestPending) {
+      liveAudioProcessingSyncRef.current?.queue.stop()
       liveAudioProcessingSyncRef.current = null
       return
     }
-    if (!client || wsStatus !== 'connected') return
 
     let sync = liveAudioProcessingSyncRef.current
+    let created = false
     if (!sync || sync.sessionId !== params.sessionId) {
-      sync = {
+      sync?.queue.stop()
+      const token = {}
+      const queue = new LatestWinsLiveAudioProcessingQueue(
+        params.sessionId,
+        (requested) =>
+          client.request<AudioProcessingUpdateResult>('audio.processing.update', requested),
+        ({ requested, result, error }) => {
+          const latest = liveAudioProcessingSyncRef.current
+          if (
+            latest?.token !== token ||
+            recordingRef.current.sessionId !== requested.sessionId ||
+            !['recording', 'streaming'].includes(recordingRef.current.state)
+          ) {
+            return false
+          }
+
+          const validResult = result?.sessionId === requested.sessionId ? result : undefined
+          const protocolError =
+            result && !validResult
+              ? new Error('Backend returned live microphone state for a different session.')
+              : undefined
+          if (validResult?.applied) {
+            latest.lastApplied = {
+              microphoneGainDb: validResult.microphoneGainDb,
+              microphoneMuted: validResult.microphoneMuted
+            }
+            return true
+          }
+
+          const rejection = rejectedLiveAudioProcessingUpdate({
+            recording: recordingRef.current,
+            current: captureConfigRef.current.audio,
+            requested,
+            result: validResult,
+            lastApplied: latest.lastApplied
+          })
+          if (!rejection) return true
+
+          latest.disabled = rejection.disableForSession
+          setCaptureConfig((current) => {
+            const currentRejection = rejectedLiveAudioProcessingUpdate({
+              recording: recordingRef.current,
+              current: current.audio,
+              requested,
+              result: validResult,
+              lastApplied: latest.lastApplied
+            })
+            if (!currentRejection) return current
+            return {
+              ...current,
+              audio: { ...current.audio, ...currentRejection.rollback }
+            }
+          })
+
+          const requestError = protocolError ?? error
+          const detail =
+            requestError instanceof Error
+              ? ` ${requestError.message}`
+              : requestError
+                ? ` ${String(requestError)}`
+                : ''
+          reportError(new Error(`${rejection.message}${detail}`))
+          return !rejection.disableForSession
+        }
+      )
+      const nextSync = {
+        token,
         sessionId: params.sessionId,
         lastApplied: {
           microphoneGainDb: params.microphoneGainDb,
           microphoneMuted: params.microphoneMuted
         },
         disabled: false,
-        requestRevision: 0
+        queue
       }
-      liveAudioProcessingSyncRef.current = sync
+      sync = nextSync
+      liveAudioProcessingSyncRef.current = nextSync
+      created = true
     }
 
     // Once this session proves it has no native post-controls path, keep every
@@ -6171,80 +6248,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
 
-    sync.requestRevision += 1
-    const requestRevision = sync.requestRevision
-    const lastApplied = sync.lastApplied
+    const desiredMatchesLastApplied =
+      params.microphoneGainDb === sync.lastApplied.microphoneGainDb &&
+      params.microphoneMuted === sync.lastApplied.microphoneMuted
+    if (!created && !sync.queue.hasOutstandingWork && desiredMatchesLastApplied) return
 
-    const rejectCurrentRequest = (
-      result?: AudioProcessingUpdateResult
-    ): ReturnType<typeof rejectedLiveAudioProcessingUpdate> => {
-      const latest = liveAudioProcessingSyncRef.current
-      if (
-        !latest ||
-        latest.sessionId !== params.sessionId ||
-        latest.requestRevision !== requestRevision
-      ) {
-        return null
-      }
-      const rejection = rejectedLiveAudioProcessingUpdate({
-        recording: recordingRef.current,
-        current: captureConfigRef.current.audio,
-        requested: params,
-        result,
-        lastApplied
-      })
-      if (!rejection) return null
-
-      latest.disabled = rejection.disableForSession
-      setCaptureConfig((current) => {
-        const currentRejection = rejectedLiveAudioProcessingUpdate({
-          recording: recordingRef.current,
-          current: current.audio,
-          requested: params,
-          result,
-          lastApplied
-        })
-        if (!currentRejection) return current
-        return {
-          ...current,
-          audio: { ...current.audio, ...currentRejection.rollback }
-        }
-      })
-      return rejection
-    }
-
-    void client
-      .request<AudioProcessingUpdateResult>('audio.processing.update', params)
-      .then((result) => {
-        const latest = liveAudioProcessingSyncRef.current
-        if (
-          !latest ||
-          latest.sessionId !== params.sessionId ||
-          latest.requestRevision !== requestRevision ||
-          result.sessionId !== params.sessionId ||
-          recordingRef.current.sessionId !== params.sessionId ||
-          !['recording', 'streaming'].includes(recordingRef.current.state)
-        ) {
-          return
-        }
-        if (result.applied) {
-          latest.lastApplied = {
-            microphoneGainDb: result.microphoneGainDb,
-            microphoneMuted: result.microphoneMuted
-          }
-          return
-        }
-
-        const rejection = rejectCurrentRequest(result)
-        if (!rejection) return
-        reportError(new Error(rejection.message))
-      })
-      .catch((error) => {
-        const rejection = rejectCurrentRequest()
-        if (!rejection) return
-        const detail = error instanceof Error ? error.message : String(error)
-        reportError(new Error(`${rejection.message} ${detail}`))
-      })
+    sync.queue.enqueue(params)
   }, [
     client,
     recording.sessionId,
@@ -6252,6 +6261,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.audio.microphoneGainDb,
     captureConfig.audio.microphoneMuted,
     reportError,
+    stopRequestPending,
     wsStatus
   ])
 
@@ -8040,6 +8050,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setLastError(null)
       platformLifecycleRun.current += 1
       setStopRequestPending(true)
+      liveAudioProcessingSyncRef.current?.queue.stop()
       // Docs order: END the X broadcast while the feed is still up, THEN stop
       // the encoder. Bounded so a slow END can never hold the stop hostage.
       const cleaned = await endPreparedXBroadcasts(

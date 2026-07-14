@@ -4,7 +4,7 @@ Goal: ship a Windows version of Videorc that hits the project's real bar — a
 smooth preview and a correct recording (docs/, memory: OBS parity is dropped).
 Dark-glass UI carries over; macOS-only niceties degrade gracefully.
 
-## Current status (reconciled 2026-07-12)
+## Current status (reconciled 2026-07-14)
 
 Windows has crossed the tracer-bullet milestone: the tester build compiles,
 launches, discovers working audio, and records real media. The 0.9.30 timing
@@ -14,6 +14,13 @@ follow-up removes production PNG compression from the Windows proof surface in
 favor of a latest-wins uncompressed BMP transport; PNG source routes are now
 explicit debug endpoints and diagnostics count any production request as a
 transport bug.
+
+Windows microphone gain and mute are no longer start-time-only controls. The
+DirectShow/FFmpeg path keeps a stable named `volume` filter in every output
+graph and applies live edits through FFmpeg's command protocol. Updates are
+single-flight/latest-wins in the renderer, acknowledged by every matching
+output graph, and fail closed for the rest of the capture if FFmpeg cannot
+confirm either the requested state or a rollback.
 
 What remains is release acceptance, not first implementation: rerun the full
 packaged Windows 11 device matrix, retain analyzer/support-bundle evidence, and
@@ -99,10 +106,12 @@ release acceptance is complete:
   than killing 4K overlays when one frame exceeds the 16 MiB pipe buffer.
   Compile-checked by `pnpm check:windows`; end-to-end write→ffmpeg-read proof
   needs the Windows box. The same slice made the dshow microphone honour
-  gain/mute through a `volume=` filter leg (the in-process CoreAudio path is
-  unchanged), bundled `ffprobe.exe` next to the Windows ffmpeg, and gave the
-  package preflight a fail-closed on-box capability probe (rtmp/rtmps/tls +
-  h264_mf/aac — the 0.9.23 TLS-less-ffmpeg lesson applied to Windows).
+  initial gain/mute through a `volume=` filter leg; the current implementation
+  retains that named filter for acknowledged live gain/mute updates as well
+  (the in-process CoreAudio path is unchanged). It also bundled `ffprobe.exe`
+  next to the Windows ffmpeg and gave the package preflight a fail-closed
+  on-box capability probe (rtmp/rtmps/tls + h264_mf/aac — the 0.9.23
+  TLS-less-ffmpeg lesson applied to Windows).
 - **Crash-orphan ownership is closed in code (2026-07-08).** The backend now
   waits on a `VIDEORC_SUPERVISOR_PID` process handle on Windows and exits when
   Electron dies (including crash/force-kill), which drops the backend-owned
@@ -302,12 +311,12 @@ verify before any Windows code lands.
   format matrix behind `camera_capture.rs` stub; ID = MF symbolic link
   (stable across renames/duplicates; dshow accepts it as
   `video=@device_pnp_…`); capture via `-f dshow`.
-- **Mic:** `-f dshow` audio input + `-af volume=<gain>dB` (mute → drop the
-  input). Verified: gain/mute are start-time params with no live-update
-  command (`protocol.rs:592-594`, no Set/Update handler), so the filter
-  gives FULL functional parity with the mac native path — no feature loss
-  in the MVP. The native WASAPI port is Phase 3 and motivated by epoch
-  alignment + future system audio, not by missing knobs.
+- **Mic:** `-f dshow` audio input + a stable named `volume` filter. The original
+  Phase 2 baseline only applied gain/mute at startup; that historical limitation
+  is now superseded by session-scoped FFmpeg commands with per-output
+  acknowledgements, rollback, and latest-wins renderer scheduling. The native
+  WASAPI port remains motivated by epoch alignment + future system audio, not
+  by missing gain/mute controls.
 - **Encoder:** default `h264_mf` (MediaFoundation = the VideoToolbox analog
   in LGPL ffmpeg). The recording argument builders now choose the platform
   H.264 encoder instead of hardcoding `h264_videotoolbox` on every OS. The
@@ -334,8 +343,8 @@ Outcome: Windows quality matches macOS daily-driver quality.
 - **WASAPI mic capture** ported into `audio.rs`'s ring-buffer design, with
   the FIFO replaced by a named pipe (`\\.\pipe\videorc-audio-…`) or stdin
   pipe; restores mono→stereo handling and video-epoch alignment (gain/mute
-  already have parity via the Phase 2 volume filter). Design the module
-  WASAPI-loopback-ready: system audio is plan-only on macOS today
+  already have parity via the commandable Phase 2 volume filter). Design the
+  module WASAPI-loopback-ready: system audio is plan-only on macOS today
   (docs/system-audio-capture-plan.md, `DeviceKind::SystemAudio` always
   Unavailable), and when SA lands, Windows loopback capture is the _easy_
   platform — don't paint it out.
@@ -447,7 +456,7 @@ assumed.
 | #   | Question                                                                              | Resolution (evidence)                                                                                                                                                                                                                                                                                                                                                 |
 | --- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | Is streaming in Windows v1 or recording-only?                                         | **In v1, nearly free.** RTMP chain is flv/tee + fifo isolation, fully portable (`recording.rs:3872-3892`); only mac-ism is the `h264_videotoolbox` codec literal (`recording.rs:3816`) which the encoder probe replaces.                                                                                                                                              |
-| 2   | Does the dshow-direct mic MVP lose user-facing features vs the native CoreAudio path? | **No.** Native path's gain/mute are start-time params (`protocol.rs:592-594`) with no live-update command; an `-af volume` filter at spawn matches them. The avfoundation _fallback_ on mac loses gain/mute today — the Windows MVP with the filter is actually closer to parity than mac's own fallback.                                                             |
+| 2   | Does the dshow-direct mic MVP lose user-facing features vs the native CoreAudio path? | **No.** The named FFmpeg `volume` filter applies initial settings and accepts acknowledged live gain/mute commands for every output graph. The renderer coalesces continuous slider edits to one in-flight command plus the newest desired state, while an unconfirmed command disables further edits for that capture.                                               |
 | 3   | Will preview + recording fight over the same device (dshow opens are exclusive)?      | **No contention in the default path.** Encoder-bridge recording composites from the preview pipelines' frame stores (`recording.rs:532-615`, `compositor.rs:314-316`) — one open per device. Implication: port the _preview_ capture first; recording follows. The legacy direct path (fps > 30) is the only second-open risk and shares the same input-builder seam. |
 | 4   | Must Windows v1 capture individual windows?                                           | **No.** Window selection is metadata-only on macOS too — recording warns `window-capture-fallback` and records the display (`recording.rs:5268-5271`). Display-only is parity.                                                                                                                                                                                        |
 | 5   | System audio in scope?                                                                | **No — plan-only on macOS** (docs/system-audio-capture-plan.md; `DeviceKind::SystemAudio` always Unavailable). Phase 3's WASAPI module just keeps loopback reachable for when SA lands.                                                                                                                                                                               |

@@ -3316,6 +3316,11 @@ const WEBSOCKET_RELIABLE_QUEUE_CAPACITY: usize = 128;
 const WEBSOCKET_COMMAND_QUEUE_CAPACITY: usize = 64;
 const WEBSOCKET_TELEMETRY_KIND_CAPACITY: usize = 32;
 const WEBSOCKET_LAYOUT_CONCURRENCY: usize = 8;
+// The renderer already sends live audio updates single-flight/latest-wins.
+// Keep the transport path independently bounded so a malformed/raw client
+// cannot build a task backlog, while session.stop remains dispatchable during
+// FFmpeg's acknowledgement wait.
+const WEBSOCKET_AUDIO_PROCESSING_CONCURRENCY: usize = 1;
 const WEBSOCKET_RELIABLE_BURST_LIMIT: usize = 8;
 // The desktop clients are loopback peers. Five seconds is deliberately far
 // above normal socket jitter while still bounding the lifetime of queued
@@ -3816,10 +3821,38 @@ fn websocket_command_may_overlap(text: &str) -> bool {
     })
 }
 
+fn websocket_audio_processing_command_id(text: &str) -> Option<String> {
+    serde_json::from_str::<ClientCommand>(text)
+        .ok()
+        .filter(|command| command.method == "audio.processing.update")
+        .map(|command| command.id)
+}
+
+fn websocket_command_is_session_stop(text: &str) -> bool {
+    serde_json::from_str::<ClientCommand>(text)
+        .is_ok_and(|command| command.method == "session.stop")
+}
+
 async fn drain_websocket_layout_commands(tasks: &mut tokio::task::JoinSet<()>) {
     while let Some(completed) = tasks.join_next().await {
         if let Err(error) = completed {
             tracing::warn!("WebSocket layout command task failed: {error}");
+        }
+    }
+}
+
+async fn drain_websocket_audio_processing_commands(tasks: &mut tokio::task::JoinSet<()>) {
+    while let Some(completed) = tasks.join_next().await {
+        if let Err(error) = completed {
+            tracing::warn!("WebSocket audio processing command task failed: {error}");
+        }
+    }
+}
+
+fn reap_websocket_audio_processing_commands(tasks: &mut tokio::task::JoinSet<()>) {
+    while let Some(completed) = tasks.try_join_next() {
+        if let Err(error) = completed {
+            tracing::warn!("WebSocket audio processing command task failed: {error}");
         }
     }
 }
@@ -3834,9 +3867,11 @@ async fn run_websocket_command_dispatcher(
     command_handler: WebSocketCommandHandler,
 ) {
     let mut layout_tasks = tokio::task::JoinSet::new();
+    let mut audio_processing_tasks = tokio::task::JoinSet::new();
 
     while let Some(text) = commands.recv().await {
         command_metrics.record_dequeue_oldest();
+        reap_websocket_audio_processing_commands(&mut audio_processing_tasks);
         if websocket_command_may_overlap(text.as_str()) {
             if layout_tasks.len() >= WEBSOCKET_LAYOUT_CONCURRENCY
                 && let Some(completed) = layout_tasks.join_next().await
@@ -3862,10 +3897,51 @@ async fn run_websocket_command_dispatcher(
             continue;
         }
 
+        if let Some(command_id) = websocket_audio_processing_command_id(text.as_str()) {
+            // Audio gain/mute is independent from scene layout. Do not hold the
+            // dispatcher during FFmpeg's acknowledgement cadence; a following
+            // session.stop must be able to publish its stopping marker.
+            if audio_processing_tasks.len() >= WEBSOCKET_AUDIO_PROCESSING_CONCURRENCY {
+                let response = ServerResponse::error(
+                    command_id,
+                    "audio-processing-busy",
+                    "A live microphone update is already awaiting acknowledgement.",
+                );
+                if !queue_websocket_response(&outgoing, &reliable_metrics, &slow_pressure, response)
+                    .await
+                {
+                    break;
+                }
+                continue;
+            }
+
+            let command_state = state.clone();
+            let response_tx = outgoing.clone();
+            let response_metrics = reliable_metrics.clone();
+            let response_pressure = slow_pressure.clone();
+            let handler = command_handler.clone();
+            audio_processing_tasks.spawn(async move {
+                let response = handler(command_state, text).await;
+                let _ = queue_websocket_response(
+                    &response_tx,
+                    &response_metrics,
+                    &response_pressure,
+                    response,
+                )
+                .await;
+            });
+            continue;
+        }
+
         // A stateful non-layout command is an ordering barrier. All layouts
         // accepted before it finish first, and later commands remain queued
-        // until this mutation completes.
+        // until this mutation completes. session.stop is the deliberate narrow
+        // exception for an in-flight live audio acknowledgement: the backend's
+        // session mutex and stop marker preserve native ordering.
         drain_websocket_layout_commands(&mut layout_tasks).await;
+        if !websocket_command_is_session_stop(text.as_str()) {
+            drain_websocket_audio_processing_commands(&mut audio_processing_tasks).await;
+        }
         let response = command_handler(state.clone(), text).await;
         if !queue_websocket_response(&outgoing, &reliable_metrics, &slow_pressure, response).await {
             break;
@@ -3873,6 +3949,7 @@ async fn run_websocket_command_dispatcher(
     }
 
     drain_websocket_layout_commands(&mut layout_tasks).await;
+    drain_websocket_audio_processing_commands(&mut audio_processing_tasks).await;
 }
 
 async fn ws_handler(
@@ -8478,6 +8555,193 @@ mod tests {
             .unwrap()
             .forget();
         assert_eq!(*order.lock().await, ["start", "stop"]);
+
+        let _ = socket.close(None).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_session_stop_bypasses_bounded_live_audio_acknowledgement() {
+        let order = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<&'static str>::new()));
+        let audio_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let stop_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_audio = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let order = order.clone();
+            let audio_entered = audio_entered.clone();
+            let stop_entered = stop_entered.clone();
+            let release_audio = release_audio.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let order = order.clone();
+                let audio_entered = audio_entered.clone();
+                let stop_entered = stop_entered.clone();
+                let release_audio = release_audio.clone();
+                Box::pin(async move {
+                    let command: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let id = command["id"].as_str().unwrap().to_string();
+                    match command["method"].as_str().unwrap() {
+                        "audio.processing.update" => {
+                            audio_entered.add_permits(1);
+                            release_audio.acquire().await.unwrap().forget();
+                            order.lock().await.push("audio-ack");
+                        }
+                        "session.stop" => {
+                            stop_entered.add_permits(1);
+                            order.lock().await.push("stop");
+                        }
+                        method => panic!("unexpected test command: {method}"),
+                    }
+                    ServerResponse::ok(id, json!({}))
+                })
+            })
+        };
+        let (mut socket, server, _) = connect_test_websocket(handler).await;
+
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({
+                    "id": "audio-first",
+                    "method": "audio.processing.update",
+                    "params": {}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), audio_entered.acquire())
+            .await
+            .expect("first audio update should run off the dispatcher")
+            .unwrap()
+            .forget();
+
+        for (id, method) in [
+            ("audio-excess", "audio.processing.update"),
+            ("stop", "session.stop"),
+        ] {
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({ "id": id, "method": method, "params": {} })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        timeout(Duration::from_secs(1), stop_entered.acquire())
+            .await
+            .expect("session.stop must dispatch before the delayed audio acknowledgement")
+            .unwrap()
+            .forget();
+        assert_eq!(*order.lock().await, ["stop"]);
+
+        let early_responses = timeout(Duration::from_secs(1), async {
+            let mut responses = std::collections::HashMap::new();
+            while responses.len() < 2 {
+                let message = socket.next().await.unwrap().unwrap();
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    continue;
+                };
+                let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if let Some(id) = response["id"].as_str() {
+                    responses.insert(id.to_string(), response);
+                }
+            }
+            responses
+        })
+        .await
+        .expect("busy and stop responses must not wait for the audio acknowledgement");
+        assert_eq!(early_responses["audio-excess"]["ok"], false);
+        assert_eq!(
+            early_responses["audio-excess"]["error"]["code"],
+            "audio-processing-busy"
+        );
+        assert_eq!(early_responses["stop"]["ok"], true);
+
+        release_audio.add_permits(1);
+        let audio_response = timeout(Duration::from_secs(1), async {
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    continue;
+                };
+                let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if response["id"] == "audio-first" {
+                    break response;
+                }
+            }
+        })
+        .await
+        .expect("the accepted audio update still owes its response after stop");
+        assert_eq!(audio_response["ok"], true);
+        assert_eq!(*order.lock().await, ["stop", "audio-ack"]);
+
+        let _ = socket.close(None).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_ordinary_barrier_waits_for_live_audio_acknowledgement() {
+        let audio_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let barrier_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_audio = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let audio_entered = audio_entered.clone();
+            let barrier_entered = barrier_entered.clone();
+            let release_audio = release_audio.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let audio_entered = audio_entered.clone();
+                let barrier_entered = barrier_entered.clone();
+                let release_audio = release_audio.clone();
+                Box::pin(async move {
+                    let command: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let id = command["id"].as_str().unwrap().to_string();
+                    match command["method"].as_str().unwrap() {
+                        "audio.processing.update" => {
+                            audio_entered.add_permits(1);
+                            release_audio.acquire().await.unwrap().forget();
+                        }
+                        "test.mutation.ordered" => barrier_entered.add_permits(1),
+                        method => panic!("unexpected test command: {method}"),
+                    }
+                    ServerResponse::ok(id, json!({}))
+                })
+            })
+        };
+        let (mut socket, server, _) = connect_test_websocket(handler).await;
+
+        for (id, method) in [
+            ("audio", "audio.processing.update"),
+            ("barrier", "test.mutation.ordered"),
+        ] {
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({ "id": id, "method": method, "params": {} })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        timeout(Duration::from_secs(1), audio_entered.acquire())
+            .await
+            .expect("audio update should start")
+            .unwrap()
+            .forget();
+        assert!(
+            timeout(Duration::from_millis(100), barrier_entered.acquire())
+                .await
+                .is_err(),
+            "ordinary ordered commands must retain the live audio barrier"
+        );
+        release_audio.add_permits(1);
+        timeout(Duration::from_secs(1), barrier_entered.acquire())
+            .await
+            .expect("ordinary barrier should run after audio acknowledgement")
+            .unwrap()
+            .forget();
 
         let _ = socket.close(None).await;
         server.abort();

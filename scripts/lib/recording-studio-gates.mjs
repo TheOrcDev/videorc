@@ -31,6 +31,11 @@ export function buildRecordingStudioGateSteps({
       args: ['test:scripts']
     },
     {
+      label: 'FFmpeg live microphone control probe',
+      command: 'pnpm',
+      args: ['probe:live-audio-controls']
+    },
+    {
       label: 'backend live layout tests',
       command: 'cargo',
       args: ['test', '-p', 'videorc-backend', 'live_layout::tests::']
