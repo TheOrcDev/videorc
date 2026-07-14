@@ -746,8 +746,8 @@ export type StudioContextValue = {
   commitCameraTransform: (sourceId: string, x: number, y: number) => Promise<void>
   setSceneSourceVisible: (sourceId: string, visible: boolean) => Promise<void>
   moveSceneSource: (sourceId: string, direction: -1 | 1) => Promise<void>
-  openSystemPermission: (pane: SystemPermissionPane) => Promise<void>
-  openPreviewPermissions: () => Promise<void>
+  handleSystemPermission: (pane: SystemPermissionPane) => Promise<void>
+  openSystemPermissionSettings: (pane: SystemPermissionPane) => Promise<void>
   revealPermissionTarget: () => Promise<void>
   exportSupportBundle: () => Promise<void>
   registerPreviewSurfaceResize: () => void
@@ -755,7 +755,7 @@ export type StudioContextValue = {
     bounds: PreviewSurfaceBounds,
     generation?: number
   ) => Promise<void>
-  sampleAudioMeter: () => Promise<void>
+  sampleAudioMeter: () => Promise<boolean>
   startSession: () => Promise<void>
   stopSession: () => Promise<void>
   remuxSession: (sessionId: string) => Promise<void>
@@ -2044,11 +2044,37 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [sceneEditMode, setSceneEditMode] = useState(false)
   const [selectedSceneSourceId, setSelectedSceneSourceId] = useState<string | null>(null)
   const [audioMeter, setAudioMeter] = useState<AudioMeterResult | null>(null)
+  const audioMeterRef = useRef<AudioMeterResult | null>(null)
+  const audioMeterSampleGenerationRef = useRef(0)
+  // A fresh mic grant can defer its backend restart until capture becomes idle.
+  // Remember the pre-grant client so proof can run only on the replacement.
+  const [pendingMicrophonePermissionProof, setPendingMicrophonePermissionProof] = useState<
+    | (import('@/lib/system-permission-orchestration').MicrophonePermissionProof & {
+        retry: number
+      })
+    | null
+  >(null)
+  audioMeterRef.current = audioMeter
   const [audioMeterLoading, setAudioMeterLoading] = useState(false)
-  // The OS's real camera/mic access state (Electron getMediaAccessStatus).
-  // On Windows this is what makes the permission chips truthful — the audio
-  // meter has no capture backend there, so it can't report mic permission.
+  // The OS's exact camera/mic access state (Electron getMediaAccessStatus).
+  // This distinguishes never-asked from denied on macOS and is the only
+  // truthful privacy-toggle signal on Windows.
   const [mediaAccess, setMediaAccess] = useState<MediaAccessSnapshot | null>(null)
+  const refreshMediaAccess = useCallback(async (): Promise<MediaAccessSnapshot | null> => {
+    const bridge = window.videorc?.getMediaAccessStatus
+    if (!bridge) {
+      return null
+    }
+    try {
+      const snapshot = await bridge()
+      setMediaAccess(snapshot)
+      return snapshot
+    } catch {
+      // Non-fatal: callers retain the last exact snapshot and the rows fall
+      // back to backend device/meter evidence when none has ever loaded.
+      return null
+    }
+  }, [])
   // Cloud-AI consent is a durable preference, not a per-launch answer: it
   // silently resetting to off every launch was the top reason publish runs
   // "did nothing but extract audio" (2026-07-11 report).
@@ -3275,6 +3301,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [recording.state])
 
   useEffect(() => {
+    audioMeterSampleGenerationRef.current += 1
+    setAudioMeterLoading(false)
     setAudioMeter(null)
   }, [captureConfig.sources.microphoneId])
 
@@ -4420,6 +4448,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const refreshBackend = useCallback(async () => {
+    await refreshMediaAccess()
     // S1 (plan 024): the two window `focus` listeners fire refreshBackend on
     // TCC-prompt focus-return, and at grant/restart time `client` is still the
     // OLD object (setClient(null) is deferred to effect cleanup), so a bare
@@ -4490,7 +4519,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } catch (error) {
       reportError(error)
     }
-  }, [client, refreshAiReadinessForClient, refreshEntitlementsForClient, reportError])
+  }, [
+    client,
+    refreshAiReadinessForClient,
+    refreshEntitlementsForClient,
+    refreshMediaAccess,
+    reportError
+  ])
 
   const refreshEntitlements = useCallback(async (): Promise<void> => {
     if (!client || wsStatusRef.current !== 'connected') {
@@ -4525,32 +4560,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   // Real OS camera/mic access status (Electron getMediaAccessStatus, over IPC —
   // independent of the backend socket). Refresh on mount and whenever the window
-  // regains focus, since grants flip in the OS Settings while we're backgrounded
-  // — the same trigger the Settings/onboarding chips already use.
+  // regains focus, since grants flip in the OS Settings while we're backgrounded.
   useEffect(() => {
-    const bridge = window.videorc?.getMediaAccessStatus
-    if (!bridge) {
-      return
-    }
-    let cancelled = false
     const refresh = (): void => {
-      void bridge()
-        .then((snapshot) => {
-          if (!cancelled) {
-            setMediaAccess(snapshot)
-          }
-        })
-        .catch(() => {
-          // Non-fatal: the chips fall back to the meter/enumeration derivation.
-        })
+      void refreshMediaAccess()
     }
     refresh()
     window.addEventListener('focus', refresh)
     return () => {
-      cancelled = true
       window.removeEventListener('focus', refresh)
     }
-  }, [])
+  }, [refreshMediaAccess])
 
   useEffect(() => {
     if (
@@ -6022,7 +6042,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [client, refreshScreensForClient, reportError, wsStatus])
 
-  const openSystemPermission = useCallback(
+  const openSystemPermissionSettings = useCallback(
     async (pane: SystemPermissionPane) => {
       if (!window.videorc?.openSystemPermissions) {
         toast.error('Permission shortcut is unavailable outside Electron.')
@@ -6037,10 +6057,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [reportError]
   )
-
-  const openPreviewPermissions = useCallback(async () => {
-    await openSystemPermission('screen-recording')
-  }, [openSystemPermission])
 
   const revealPermissionTarget = useCallback(async () => {
     if (!window.videorc?.revealPermissionTarget) {
@@ -6097,9 +6113,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       toast.error('Microphone check', {
         description: 'Backend is not connected — try again in a moment.'
       })
-      return
+      return false
     }
 
+    const sampleGeneration = audioMeterSampleGenerationRef.current + 1
+    audioMeterSampleGenerationRef.current = sampleGeneration
     try {
       setLastError(null)
       setAudioMeterLoading(true)
@@ -6108,11 +6126,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         microphoneGainDb: captureConfig.audio.microphoneGainDb,
         microphoneMuted: captureConfig.audio.microphoneMuted
       })
-      setAudioMeter(result)
+      if (
+        audioMeterSampleGenerationRef.current === sampleGeneration &&
+        clientRef.current === client
+      ) {
+        setAudioMeter(result)
+        return true
+      }
+      return false
     } catch (error) {
-      reportError(error)
+      if (
+        audioMeterSampleGenerationRef.current === sampleGeneration &&
+        clientRef.current === client
+      ) {
+        reportError(error)
+      }
+      return false
     } finally {
-      setAudioMeterLoading(false)
+      if (audioMeterSampleGenerationRef.current === sampleGeneration) {
+        setAudioMeterLoading(false)
+      }
     }
   }, [
     captureConfig.audio.microphoneGainDb,
@@ -8832,6 +8865,92 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const meterLevel = Math.round((audioMeter?.level ?? 0) * 100)
   const canSampleAudio = Boolean(wsStatus === 'connected' && selectedMicrophone && !isSessionActive)
+  const canSampleAudioRef = useRef(canSampleAudio)
+  const sampleAudioMeterRef = useRef(sampleAudioMeter)
+  canSampleAudioRef.current = canSampleAudio
+  sampleAudioMeterRef.current = sampleAudioMeter
+
+  useEffect(() => {
+    const pendingProof = pendingMicrophonePermissionProof
+    if (!pendingProof || !client || wsStatus !== 'connected') {
+      return
+    }
+
+    let cancelled = false
+    let retryTimer: number | undefined
+    const scheduleRetry = (): boolean => {
+      if (cancelled || clientRef.current !== client || pendingProof.retry >= 2) return false
+      retryTimer = window.setTimeout(() => {
+        setPendingMicrophonePermissionProof((current) =>
+          current === pendingProof && current ? { ...current, retry: current.retry + 1 } : current
+        )
+      }, 250)
+      return true
+    }
+    void (async () => {
+      try {
+        const { runMicrophonePermissionProof } =
+          await import('@/lib/system-permission-orchestration')
+        const completed = await runMicrophonePermissionProof({
+          client,
+          proof: pendingProof,
+          isCurrent: () =>
+            !cancelled && clientRef.current === client && wsStatusRef.current === 'connected',
+          setDeviceList,
+          canSampleAudio: () => canSampleAudioRef.current,
+          sampleAudioMeter: () => sampleAudioMeterRef.current()
+        })
+        if (completed && !cancelled) {
+          setPendingMicrophonePermissionProof((current) =>
+            current === pendingProof ? null : current
+          )
+        } else {
+          scheduleRetry()
+        }
+      } catch (error) {
+        if (!scheduleRetry() && !cancelled && clientRef.current === client) {
+          reportError(error)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    }
+  }, [canSampleAudio, client, pendingMicrophonePermissionProof, reportError, wsStatus])
+
+  const handleSystemPermission = useCallback(
+    async (pane: SystemPermissionPane): Promise<void> => {
+      try {
+        const { runSystemPermissionAction } = await import('@/lib/system-permission-orchestration')
+        await runSystemPermissionAction({
+          pane,
+          platform: runtimeInfo?.platform,
+          refreshMediaAccess,
+          getDeviceList: () => deviceListRef.current,
+          getAudioMeter: () => audioMeterRef.current,
+          openSystemPermissionSettings,
+          getClient: () => clientRef.current,
+          getWsStatus: () => wsStatusRef.current,
+          clearMicrophoneEvidence: () => {
+            audioMeterSampleGenerationRef.current += 1
+            audioMeterRef.current = null
+            setAudioMeterLoading(false)
+            setAudioMeter(null)
+            setPendingMicrophonePermissionProof(null)
+          },
+          deferMicrophoneProof: (proof) =>
+            setPendingMicrophonePermissionProof({ ...proof, retry: 0 }),
+          setDeviceList,
+          reportError
+        })
+      } catch (error) {
+        reportError(error)
+      }
+    },
+    [openSystemPermissionSettings, refreshMediaAccess, reportError, runtimeInfo?.platform]
+  )
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -9095,8 +9214,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       switchSourceDeviceLive,
       setSceneSourceVisible,
       moveSceneSource,
-      openSystemPermission,
-      openPreviewPermissions,
+      handleSystemPermission,
+      openSystemPermissionSettings,
       revealPermissionTarget,
       exportSupportBundle,
       registerPreviewSurfaceResize,
@@ -9267,8 +9386,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       switchSourceDeviceLive,
       setSceneSourceVisible,
       moveSceneSource,
-      openSystemPermission,
-      openPreviewPermissions,
+      handleSystemPermission,
+      openSystemPermissionSettings,
       revealPermissionTarget,
       exportSupportBundle,
       registerPreviewSurfaceResize,

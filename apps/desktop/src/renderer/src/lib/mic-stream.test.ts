@@ -1,12 +1,33 @@
 import { describe, expect, it } from 'vitest'
 
-import { createMicStreamController, type MicStreamConstraints } from './mic-stream'
+import {
+  createMicStreamController,
+  microphoneStreamAcquisitionEnabled,
+  type MicStreamConstraints
+} from './mic-stream'
 
 function fakeStream(): { stopped: number[]; stream: { getTracks: () => { stop: () => void }[] } } {
   const stopped: number[] = []
   const tracks = [0, 1].map((index) => ({ stop: (): void => void stopped.push(index) }))
   return { stopped, stream: { getTracks: () => tracks } }
 }
+
+describe('microphoneStreamAcquisitionEnabled', () => {
+  it('allows acquisition only when requested and OS microphone access is exactly granted', () => {
+    expect(microphoneStreamAcquisitionEnabled(true, 'granted')).toBe(true)
+    expect(microphoneStreamAcquisitionEnabled(false, 'granted')).toBe(false)
+
+    for (const status of [
+      'not-determined',
+      'denied',
+      'restricted',
+      'unknown',
+      undefined
+    ] as const) {
+      expect(microphoneStreamAcquisitionEnabled(true, status)).toBe(false)
+    }
+  })
+})
 
 describe('createMicStreamController', () => {
   it('matches the backend device name and requests that exact deviceId', async () => {

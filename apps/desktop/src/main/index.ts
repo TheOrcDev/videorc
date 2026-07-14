@@ -132,7 +132,11 @@ import {
   buildRuntimeInfo,
   permissionUrlForPane
 } from './runtime-info'
-import { requestMediaAccessWithRestart, type MediaAccessResult } from './media-access'
+import {
+  requestMediaAccessWithRestart,
+  type MediaAccessRestartResult,
+  type MediaAccessResult
+} from './media-access'
 import {
   clearGpuFallbackState,
   decideGpuFallback,
@@ -9770,8 +9774,9 @@ async function openSystemPermissions(pane: SystemPermissionPane = 'privacy'): Pr
   }
 }
 
-// Permissions onboarding: fire the native macOS grant prompt without also
-// jumping to System Settings (openSystemPermissions does both). Restart logic
+// Fire the native macOS grant prompt without jumping to System Settings.
+// openSystemPermissions remains navigation-only; renderer policy selects the
+// correct user-initiated path from the exact TCC status. Restart logic
 // lives in media-access.ts (FX1: an already-granted pane must NOT restart the
 // backend — that restart raced the renderer's follow-up meter sample).
 async function requestMediaAccessNative(pane: 'camera' | 'microphone'): Promise<MediaAccessResult> {
@@ -9858,11 +9863,22 @@ function retainDeferredPermissionRestart(reason: string): void {
   deferredPermissionRestartState = deferred.state
 }
 
-async function runPermissionBackendRestart(reason: string): Promise<boolean> {
+function currentBackendRestartBoundary(): MediaAccessRestartResult['staleBackend'] {
+  const connection = backendConnection
+  return connection
+    ? { port: connection.port, ...(connection.pid === undefined ? {} : { pid: connection.pid }) }
+    : undefined
+}
+
+async function runPermissionBackendRestart(reason: string): Promise<MediaAccessRestartResult> {
+  let staleBackend = currentBackendRestartBoundary()
   try {
     const restarted = await runBackendInterruptingAction(
       () => acquireCurrentBackendInterruption(reason),
-      () => restartBackend(reason)
+      () => {
+        staleBackend = currentBackendRestartBoundary()
+        return restartBackend(reason)
+      }
     )
     if (!restarted) {
       retainDeferredPermissionRestart(reason)
@@ -9871,7 +9887,10 @@ async function runPermissionBackendRestart(reason: string): Promise<boolean> {
         'Permission restart deferred because capture became active, started, or could not be confirmed idle.'
       )
     }
-    return restarted
+    return {
+      restarted,
+      ...(staleBackend ? { staleBackend } : {})
+    }
   } catch (error) {
     retainDeferredPermissionRestart(reason)
     throw error
@@ -9890,7 +9909,7 @@ function updateMainCaptureState(payload: unknown): void {
   }
 }
 
-async function requestPermissionBackendRestart(reason: string): Promise<boolean> {
+async function requestPermissionBackendRestart(reason: string): Promise<MediaAccessRestartResult> {
   const decision = requestPermissionRestart(
     deferredPermissionRestartState,
     mainCaptureState,
@@ -9899,7 +9918,11 @@ async function requestPermissionBackendRestart(reason: string): Promise<boolean>
   deferredPermissionRestartState = decision.state
   if (!decision.runReason) {
     logBackend('info', 'Permission restart deferred until the active capture is idle.')
-    return false
+    const staleBackend = currentBackendRestartBoundary()
+    return {
+      restarted: false,
+      ...(staleBackend ? { staleBackend } : {})
+    }
   }
   return runPermissionBackendRestart(decision.runReason)
 }

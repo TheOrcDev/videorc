@@ -40,6 +40,7 @@ import {
   type AudioSyncRecommendationReport
 } from '@/lib/capture'
 import type { SourceSelection } from '@/lib/backend'
+import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 
 // Live chip for a capture source (UI rewrite V3): what the preview pipeline says
 // about the source RIGHT NOW. A live source whose newest frame is old is reported
@@ -109,10 +110,10 @@ export function SourcesTab(): ReactElement {
     layoutSwitchPending,
     sourceDeviceSwitchPending,
     switchSourceDeviceLive,
-    openSystemPermission,
-    openPreviewPermissions,
+    handleSystemPermission,
     revealPermissionTarget,
     runtimeInfo,
+    mediaAccess,
     wsStatus
   } = useStudioCore()
   const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
@@ -129,11 +130,20 @@ export function SourcesTab(): ReactElement {
   const hasCapturePermissionRequired = captureDevices.some(
     (device) => device.status === 'permission-required'
   )
-  const selectedCamera = cameras.find((device) => device.id === captureConfig.sources.cameraId)
+  const cameraAccess = systemAccessRows({
+    deviceList,
+    audioMeter: null,
+    platform: runtimeInfo?.platform,
+    mediaAccess
+  }).find((row) => row.id === 'camera')
   const hasCameraPermissionRequired =
-    previewCameraStatus?.state === 'permission-needed' ||
-    selectedCamera?.status === 'permission-required' ||
-    cameras.some((device) => device.status === 'permission-required')
+    cameraAccess?.state === 'first-use' || cameraAccess?.state === 'not-granted'
+  const cameraPermissionAction = systemAccessAction({
+    pane: 'camera',
+    state: cameraAccess?.state,
+    platform: runtimeInfo?.platform,
+    mediaAccessStatus: mediaAccess?.camera
+  })
   const capturePermissionTargetName =
     runtimeInfo?.capturePermissionTargetName ?? runtimeInfo?.permissionTargetName ?? 'Videorc'
   const [syncRecommendation, setSyncRecommendation] =
@@ -236,7 +246,11 @@ export function SourcesTab(): ReactElement {
               Screen Recording permission is required for {capturePermissionTargetName}.
             </AlertTitle>
             <AlertDescription className="flex flex-wrap gap-2 pt-2">
-              <Button size="sm" variant="outline" onClick={() => void openPreviewPermissions()}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void handleSystemPermission('screen-recording')}
+              >
                 <Monitor data-icon="inline-start" />
                 Open Screen Recording
               </Button>
@@ -254,14 +268,18 @@ export function SourcesTab(): ReactElement {
               Camera permission is required for {capturePermissionTargetName}.
             </AlertTitle>
             <AlertDescription className="flex flex-wrap gap-2 pt-2">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => void openSystemPermission('camera')}
-              >
-                <VideoCamera data-icon="inline-start" />
-                Open Camera
-              </Button>
+              {cameraPermissionAction ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void handleSystemPermission('camera')}
+                >
+                  <VideoCamera data-icon="inline-start" />
+                  {cameraPermissionAction === 'request-media-access'
+                    ? 'Enable Camera'
+                    : 'Open Camera Settings'}
+                </Button>
+              ) : null}
               <Button size="sm" variant="ghost" onClick={() => void revealPermissionTarget()}>
                 <UploadSimple data-icon="inline-start" />
                 Show Capture Helper
@@ -391,7 +409,10 @@ export function SourcesTab(): ReactElement {
         />
         {/* See-before-you-pick: live waveform of the selected mic (shared with
             the Quick Settings popover). */}
-        <MicPickerPreview deviceName={selectedMicrophone?.name} />
+        <MicPickerPreview
+          deviceName={selectedMicrophone?.name}
+          permissionStatus={mediaAccess?.microphone}
+        />
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           {captureConfig.audio.microphoneMuted ? (
             <SpeakerSlash className="size-4" weight="duotone" />

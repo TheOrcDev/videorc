@@ -36,7 +36,7 @@ import { isActiveRecordingState } from '@/lib/format'
 import { recordingQuality, streamingSummary } from '@/lib/studio-session-view'
 import { shortcutsByGroup } from '@/lib/shortcuts'
 import { displayKeyGlyphs, osSettingsName } from '@/lib/platform'
-import { systemAccessRows } from '@/lib/system-access'
+import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 import { isUpdateInstallable } from '@/lib/update-ui'
 
 // ST1 (UX rework): Settings holds app-level facts and tools only. Session
@@ -58,7 +58,8 @@ export function SettingsTab({
     deviceList,
     mediaAccess,
     refreshBackend,
-    openSystemPermission,
+    handleSystemPermission,
+    openSystemPermissionSettings,
     exportSupportBundle,
     supportBundleExportPending,
     runtimeInfo
@@ -249,47 +250,68 @@ export function SettingsTab({
           }
         >
           <div className="flex flex-col gap-1">
-            {accessRows.map((row) => (
-              <div
-                key={row.id}
-                className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-row px-2.5 py-2 text-sm"
-              >
-                <span className="w-32 shrink-0 font-medium">{row.label}</span>
-                <StatusBadge
-                  tone={
-                    row.state === 'granted'
-                      ? 'good'
-                      : row.state === 'not-granted'
-                        ? 'warn'
-                        : 'neutral'
-                  }
-                  value={
-                    row.state === 'granted'
-                      ? 'Granted'
-                      : row.state === 'not-granted'
-                        ? 'Not granted'
-                        : 'Checked on first use'
-                  }
-                />
-                {/* Q4 (plan 022): the permission TARGET is the actionable part —
-                    truncation clipped it to "Captur…"/"Voice a…". The row
-                    flex-wraps, so let the detail take a full line when tight
-                    instead of truncating; tooltip keeps the hover affordance. */}
-                <span
-                  className="min-w-0 flex-1 basis-56 text-xs text-muted-foreground"
-                  title={`${row.purpose} ${row.detail}`}
+            {accessRows.map((row) => {
+              const action = systemAccessAction({
+                pane: row.id,
+                state: row.state,
+                platform: runtimeInfo?.platform,
+                mediaAccessStatus:
+                  row.id === 'camera' || row.id === 'microphone' ? mediaAccess?.[row.id] : undefined
+              })
+              return (
+                <div
+                  key={row.id}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-row px-2.5 py-2 text-sm"
                 >
-                  {row.purpose} {row.detail}
-                </span>
-                <Button
-                  size="xs"
-                  variant="outline"
-                  onClick={() => void openSystemPermission(row.id)}
-                >
-                  Open settings
-                </Button>
-              </div>
-            ))}
+                  <span className="w-32 shrink-0 font-medium">{row.label}</span>
+                  <StatusBadge
+                    tone={
+                      row.state === 'granted'
+                        ? 'good'
+                        : row.state === 'not-granted' || row.state === 'device-issue'
+                          ? 'warn'
+                          : 'neutral'
+                    }
+                    value={
+                      row.state === 'granted'
+                        ? 'Granted'
+                        : row.state === 'not-granted'
+                          ? 'Not granted'
+                          : row.state === 'device-issue'
+                            ? 'Device issue'
+                            : 'Checked on first use'
+                    }
+                  />
+                  {/* Q4 (plan 022): the permission TARGET is the actionable part —
+                      truncation clipped it to "Captur…"/"Voice a…". The row
+                      flex-wraps, so let the detail take a full line when tight
+                      instead of truncating; tooltip keeps the hover affordance. */}
+                  <span
+                    className="min-w-0 flex-1 basis-56 text-xs text-muted-foreground"
+                    title={`${row.purpose} ${row.detail}`}
+                  >
+                    {row.purpose} {row.detail}
+                  </span>
+                  {action ? (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() => void handleSystemPermission(row.id)}
+                    >
+                      {action === 'request-media-access' ? 'Enable' : 'Open settings'}
+                    </Button>
+                  ) : row.state === 'granted' ? (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() => void openSystemPermissionSettings(row.id)}
+                    >
+                      Manage settings
+                    </Button>
+                  ) : null}
+                </div>
+              )
+            })}
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <Button size="sm" variant="outline" onClick={onOpenPermissionsSetup}>

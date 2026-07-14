@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 import { BarVisualizer } from '@/components/ui/bar-visualizer'
 import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useMicStream } from '@/hooks/use-mic-stream'
+import type { MediaAccessStatus } from '@/lib/backend'
 import { fallbackBandLevels } from '@/lib/mic-meter'
 import { cn } from '@/lib/utils'
 
@@ -20,15 +21,17 @@ const SLIVER_BAR_COUNT = 5
 export function SessionMicSliver({
   sessionActive,
   deviceName,
-  muted
+  muted,
+  permissionStatus
 }: {
   sessionActive: boolean
   deviceName: string | undefined
   muted: boolean
+  permissionStatus: MediaAccessStatus | undefined
 }): ReactElement | null {
   const documentVisible = useDocumentVisible()
   const enabled = sessionActive && Boolean(deviceName) && !muted && documentVisible
-  const micStream = useMicStream({ deviceName, enabled })
+  const micStream = useMicStream({ deviceName, enabled, permissionStatus })
 
   if (!sessionActive || !deviceName) {
     return null

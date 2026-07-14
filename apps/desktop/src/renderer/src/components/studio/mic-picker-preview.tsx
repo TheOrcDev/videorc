@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 import { LiveWaveform } from '@/components/ui/live-waveform'
 import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useMicStream } from '@/hooks/use-mic-stream'
+import type { MediaAccessStatus } from '@/lib/backend'
 
 /**
  * See-before-you-pick mic preview (Studio audio rework S4): a scrolling live
@@ -14,14 +15,17 @@ import { useMicStream } from '@/hooks/use-mic-stream'
  * an honest inline reason, never a fake wave and never a toast.
  */
 export function MicPickerPreview({
-  deviceName
+  deviceName,
+  permissionStatus
 }: {
   /** Backend name of the mic to preview; undefined renders the idle line. */
   deviceName: string | undefined
+  /** Exact OS access status; unresolved/non-granted states stay passive. */
+  permissionStatus: MediaAccessStatus | undefined
 }): ReactElement {
   const documentVisible = useDocumentVisible()
   const enabled = Boolean(deviceName) && documentVisible
-  const micStream = useMicStream({ deviceName, enabled })
+  const micStream = useMicStream({ deviceName, enabled, permissionStatus })
 
   return (
     <div className="flex flex-col gap-1" data-videorc-mic-preview>

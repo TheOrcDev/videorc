@@ -199,7 +199,8 @@ function StudioPreviewPanel(): ReactElement {
   const {
     captureConfig,
     nativePreviewSurfaceEnabled,
-    openPreviewPermissions,
+    handleSystemPermission,
+    mediaAccess,
     openPreviewWindow,
     previewWindow,
     refreshPreview,
@@ -226,6 +227,7 @@ function StudioPreviewPanel(): ReactElement {
       <SessionMicSliver
         deviceName={selectedMicrophone?.name}
         muted={captureConfig.audio.microphoneMuted}
+        permissionStatus={mediaAccess?.microphone}
         sessionActive={active}
       />
       <span data-videorc-session-status>
@@ -251,7 +253,7 @@ function StudioPreviewPanel(): ReactElement {
       nativePreviewSurfaceEnabled={nativePreviewSurfaceEnabled}
       previewLiveStatus={previewLiveStatus}
       previewSurfaceStatus={previewSurfaceStatus}
-      onOpenPermissions={openPreviewPermissions}
+      onOpenPermissions={(pane) => void handleSystemPermission(pane)}
       onRetry={refreshPreview}
     />
   )

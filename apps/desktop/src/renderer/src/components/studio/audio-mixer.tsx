@@ -10,11 +10,23 @@ import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useMicLevelMeter } from '@/hooks/use-mic-level-meter'
 import { useMicStream } from '@/hooks/use-mic-stream'
 import { useStudioAudio, useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
+import type { AudioMeterStatus } from '@/lib/backend'
 import { formatDb } from '@/lib/format'
 import { advanceClipHoldDeadline, fallbackBandLevels } from '@/lib/mic-meter'
+import { systemAccessAction, systemAccessRows, type SystemAccessAction } from '@/lib/system-access'
 import { cn } from '@/lib/utils'
 
 const MIXER_BAR_COUNT = 28
+
+export function audioMixerNotice(
+  permissionAction: SystemAccessAction,
+  meterStatus: AudioMeterStatus | undefined,
+  deviceIssue: boolean
+): 'permission' | 'silent' | 'no-frames' | 'device-issue' | null {
+  if (permissionAction) return 'permission'
+  if (meterStatus === 'silent' || meterStatus === 'no-frames') return meterStatus
+  return deviceIssue ? 'device-issue' : null
+}
 
 /**
  * Audio mixer (SD4 + post-0.9.4 fix F7 + 2026-07-10 live-meter fix + Studio
@@ -29,8 +41,16 @@ const MIXER_BAR_COUNT = 28
  * is Phase-2 (F3).
  */
 export function AudioMixer(): ReactElement {
-  const { captureConfig, setCaptureConfig, selectedMicrophone, sampleAudioMeter, deviceList } =
-    useStudioCore()
+  const {
+    captureConfig,
+    setCaptureConfig,
+    selectedMicrophone,
+    sampleAudioMeter,
+    deviceList,
+    handleSystemPermission,
+    mediaAccess,
+    runtimeInfo
+  } = useStudioCore()
   const { audioMeter, audioMeterLoading } = useStudioAudio()
   const { diagnosticStats } = useStudioDiagnostics()
   const { openStudioPanel } = useWorkspaceNav()
@@ -39,6 +59,7 @@ export function AudioMixer(): ReactElement {
   const documentVisible = useDocumentVisible()
   const micStream = useMicStream({
     deviceName: selectedMicrophone?.name,
+    permissionStatus: mediaAccess?.microphone,
     enabled: Boolean(selectedMicrophone) && documentVisible
   })
   const micMeter = useMicLevelMeter({ stream: micStream.stream, muted })
@@ -67,6 +88,23 @@ export function AudioMixer(): ReactElement {
   // - silent/no-frames: warning tone over whatever level path is active;
   // - no mic: flat dim bars.
   const meterStatus = micMeter.active || liveLevel !== null ? 'ready' : audioMeter?.status
+  const microphoneAccess = systemAccessRows({
+    deviceList,
+    audioMeter,
+    platform: runtimeInfo?.platform,
+    mediaAccess
+  }).find((row) => row.id === 'microphone')
+  const microphonePermissionAction = systemAccessAction({
+    pane: 'microphone',
+    state: microphoneAccess?.state,
+    platform: runtimeInfo?.platform,
+    mediaAccessStatus: mediaAccess?.microphone
+  })
+  const notice = audioMixerNotice(
+    microphonePermissionAction,
+    meterStatus,
+    microphoneAccess?.state === 'device-issue'
+  )
   const analyserDriven = micStream.active && !muted
   const visualLevels = analyserDriven
     ? undefined
@@ -160,16 +198,27 @@ export function AudioMixer(): ReactElement {
             </Button>
           )}
         </div>
-        {meterStatus === 'silent' || meterStatus === 'no-frames' ? (
+        {notice === 'permission' ? (
+          <div className="flex items-center justify-between gap-2 text-xs text-warning">
+            <span>Microphone permission is required before levels can be read.</span>
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() => void handleSystemPermission('microphone')}
+            >
+              {microphonePermissionAction === 'request-media-access'
+                ? 'Enable microphone'
+                : 'Open settings'}
+            </Button>
+          </div>
+        ) : notice === 'silent' || notice === 'no-frames' ? (
           <span className="text-xs text-warning">
-            {meterStatus === 'silent'
+            {notice === 'silent'
               ? 'The mic delivered only silence on the last check.'
               : 'The mic opened but did not send audio frames.'}
           </span>
-        ) : meterStatus === 'permission-required' ? (
-          <span className="text-xs text-warning">
-            Microphone permission is required before levels can be read.
-          </span>
+        ) : notice === 'device-issue' ? (
+          <span className="text-xs text-warning">{microphoneAccess?.detail}</span>
         ) : null}
       </div>
 

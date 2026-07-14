@@ -9,6 +9,19 @@ export interface BackendConnection {
   parentPid?: number
 }
 
+/** Non-secret identity for a backend whose capture state predates a permission grant. */
+export interface BackendRestartBoundary {
+  port: number
+  pid?: number
+}
+
+export interface MediaAccessResult {
+  granted: boolean
+  restarted: boolean
+  /** Backend whose capture state predates this grant. */
+  staleBackend?: BackendRestartBoundary
+}
+
 export interface BackendHealth {
   status: string
   version: string
@@ -2911,9 +2924,7 @@ export interface VideorcApi {
   /** Fire the native macOS grant prompt in place (no System Settings jump).
    * `restarted` is true only when a fresh grant restarted the capture backend
    * — callers probing a device right after must wait for reconnect first. */
-  requestMediaAccess: (
-    pane: 'camera' | 'microphone'
-  ) => Promise<{ granted: boolean; restarted: boolean }>
+  requestMediaAccess: (pane: 'camera' | 'microphone') => Promise<MediaAccessResult>
   revealPermissionTarget: () => Promise<void>
   revealSelectedResource: (capabilityId: string) => Promise<void>
   revealSession: (sessionId: string) => Promise<void>

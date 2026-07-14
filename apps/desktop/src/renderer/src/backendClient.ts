@@ -78,7 +78,7 @@ export class BackendClient {
   private handlers = new Map<string, Set<EventHandler>>()
   private requestCounter = 0
 
-  constructor(private readonly connection: BackendConnection) {}
+  constructor(readonly connection: BackendConnection) {}
 
   get pendingRequestCount(): number {
     return this.pending.size

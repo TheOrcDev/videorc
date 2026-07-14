@@ -1,5 +1,5 @@
 import { ArrowRight, CircleNotch } from '@phosphor-icons/react'
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 
 import logoUrl from '@/assets/videorc-logo.png'
 import { StatusBadge } from '@/components/status-badge'
@@ -14,7 +14,12 @@ import {
 } from '@/components/ui/dialog'
 import { useStudioAudio, useStudioCore } from '@/hooks/use-studio'
 import { isWindowsPlatform, osSettingsName } from '@/lib/platform'
-import { systemAccessRows, type SystemAccessRow } from '@/lib/system-access'
+import {
+  systemAccessAction,
+  systemAccessRows,
+  type SystemAccessAction,
+  type SystemAccessRow
+} from '@/lib/system-access'
 
 // Permissions-only onboarding: the ONE thing a fresh install needs is macOS
 // grants, so this is the whole flow — three rows sharing the exact state
@@ -28,27 +33,10 @@ export function PermissionsOnboardingDialog({
   open: boolean
   onComplete: () => void
 }): ReactElement {
-  const {
-    deviceList,
-    wsStatus,
-    refreshBackend,
-    openSystemPermission,
-    sampleAudioMeter,
-    canSampleAudio,
-    runtimeInfo,
-    mediaAccess
-  } = useStudioCore()
+  const { deviceList, refreshBackend, handleSystemPermission, runtimeInfo, mediaAccess } =
+    useStudioCore()
   const { audioMeter } = useStudioAudio()
-  const [pending, setPending] = useState<'camera' | 'microphone' | null>(null)
-
-  // enableMedia awaits across renders (backend restart → reconnect), so it
-  // reads live state through refs — closure values would be stale by then.
-  const wsStatusRef = useRef(wsStatus)
-  const canSampleAudioRef = useRef(canSampleAudio)
-  useEffect(() => {
-    wsStatusRef.current = wsStatus
-    canSampleAudioRef.current = canSampleAudio
-  }, [canSampleAudio, wsStatus])
+  const [pending, setPending] = useState<SystemAccessRow['id'] | null>(null)
 
   // Grants flip in System Settings or the native prompt while we may be
   // backgrounded — re-enumerate on focus so the chips stay honest (same
@@ -68,32 +56,17 @@ export function PermissionsOnboardingDialog({
     platform: runtimeInfo?.platform,
     mediaAccess
   })
-  const allGranted = rows.every((row) => row.state === 'granted')
+  const allPermissionsResolved = rows.every(
+    (row) => row.state === 'granted' || row.state === 'device-issue'
+  )
   const isWindows = isWindowsPlatform(runtimeInfo?.platform)
   const deviceNoun = isWindows ? 'PC' : 'Mac'
   const settingsName = osSettingsName(runtimeInfo?.platform)
 
-  // Camera/microphone support a native in-place prompt on first use. The mic
-  // chip derives from the audio-meter probe, so a fresh grant is proven by
-  // sampling — user-initiated here, never run by the gate itself. When the
-  // grant transitioned, main restarted the backend: wait for the reconnect
-  // before sampling (FX1 — sampling mid-restart left the chip stuck).
-  const enableMedia = async (pane: 'camera' | 'microphone'): Promise<void> => {
+  const runPermissionAction = async (pane: SystemAccessRow['id']): Promise<void> => {
     setPending(pane)
     try {
-      const result = await window.videorc?.requestMediaAccess?.(pane)
-      if (result?.granted) {
-        if (result.restarted) {
-          await waitFor(() => wsStatusRef.current === 'connected')
-        }
-        if (pane === 'microphone') {
-          await waitFor(() => canSampleAudioRef.current)
-          if (canSampleAudioRef.current) {
-            await sampleAudioMeter()
-          }
-        }
-      }
-      await refreshBackend()
+      await handleSystemPermission(pane)
     } finally {
       setPending(null)
     }
@@ -120,11 +93,16 @@ export function PermissionsOnboardingDialog({
           {rows.map((row) => (
             <PermissionRow
               key={row.id}
-              isWindows={isWindows}
+              action={systemAccessAction({
+                pane: row.id,
+                state: row.state,
+                platform: runtimeInfo?.platform,
+                mediaAccessStatus:
+                  row.id === 'camera' || row.id === 'microphone' ? mediaAccess?.[row.id] : undefined
+              })}
               pending={pending === row.id}
               row={row}
-              onEnable={() => void enableMedia(row.id as 'camera' | 'microphone')}
-              onOpenSettings={() => void openSystemPermission(row.id)}
+              onAction={() => void runPermissionAction(row.id)}
             />
           ))}
         </div>
@@ -142,7 +120,7 @@ export function PermissionsOnboardingDialog({
             Recordings stay on this {deviceNoun}. Cloud AI only runs after you opt in.
           </span>
           <Button onClick={onComplete}>
-            {allGranted ? 'Continue' : 'Continue without granting'}
+            {allPermissionsResolved ? 'Continue' : 'Continue without granting'}
             <ArrowRight data-icon="inline-end" />
           </Button>
         </DialogFooter>
@@ -151,47 +129,28 @@ export function PermissionsOnboardingDialog({
   )
 }
 
-// Bounded poll (~10s) — resolves early when the condition holds; on timeout
-// the caller just proceeds and the honest derived state stays visible.
-async function waitFor(condition: () => boolean, timeoutMs = 10_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (!condition() && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 250))
-  }
-}
-
 function PermissionRow({
   row,
-  isWindows,
+  action,
   pending,
-  onEnable,
-  onOpenSettings
+  onAction
 }: {
   row: SystemAccessRow
-  isWindows: boolean
+  action: SystemAccessAction
   pending: boolean
-  onEnable: () => void
-  onOpenSettings: () => void
+  onAction: () => void
 }): ReactElement {
-  // Screen Recording has no native prompt API — System Settings is the only
-  // door. Camera/mic get the in-place prompt while undetermined; once macOS
-  // has said no, only System Settings can flip it (TCC never re-asks).
-  //
-  // Windows has NO in-place prompt at all (askForMediaAccess is macOS-only), so
-  // an "Enable" button there was a dead no-op (the tester's "clicking Enable
-  // does nothing") — every row opens Settings instead.
-  const canEnableInPlace = !isWindows && row.id !== 'screen-recording' && row.state === 'first-use'
-  const action =
-    row.state === 'granted' || row.state === 'device-issue' ? null : canEnableInPlace ? (
-      <Button disabled={pending} size="xs" variant="outline" onClick={onEnable}>
+  const actionButton =
+    action === 'request-media-access' ? (
+      <Button disabled={pending} size="xs" variant="outline" onClick={onAction}>
         {pending ? <CircleNotch className="animate-spin" data-icon="inline-start" /> : null}
         Enable
       </Button>
-    ) : (
-      <Button size="xs" variant="outline" onClick={onOpenSettings}>
+    ) : action === 'open-settings' ? (
+      <Button disabled={pending} size="xs" variant="outline" onClick={onAction}>
         Open settings
       </Button>
-    )
+    ) : null
 
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-row border bg-muted/30 px-3 py-2.5 text-sm">
@@ -217,7 +176,7 @@ function PermissionRow({
       <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={row.detail}>
         {row.purpose}
       </span>
-      {action}
+      {actionButton}
     </div>
   )
 }

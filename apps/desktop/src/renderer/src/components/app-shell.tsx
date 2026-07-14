@@ -3,7 +3,6 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactEle
 
 import { CommandPalette } from '@/components/command-palette'
 import { FooterActionBar, FooterActionDivider } from '@/components/footer-action-bar'
-import { PermissionsOnboardingDialog } from '@/components/permissions-onboarding-dialog'
 import { Sidebar } from '@/components/sidebar'
 import { Button } from '@/components/ui/button'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
@@ -25,7 +24,11 @@ import { useWhatsNew } from '@/hooks/use-whats-new'
 import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from '@/lib/capture'
 import { displayKeyGlyph } from '@/lib/platform'
 import { isActiveRecordingState } from '@/lib/format'
-import { shouldShowPermissionsOnboarding, systemAccessRows } from '@/lib/system-access'
+import {
+  isMediaAccessSnapshotReady,
+  shouldShowPermissionsOnboarding,
+  systemAccessRows
+} from '@/lib/system-access'
 import { cn } from '@/lib/utils'
 
 // Studio is the launch surface and stays eager. Every other workspace is loaded
@@ -56,6 +59,9 @@ const SourcesTab = lazy(async () => ({ default: (await loadSourcesTab()).Sources
 const StreamingTab = lazy(async () => ({
   default: (await import('@/components/tabs/streaming-tab')).StreamingTab
 }))
+const PermissionsOnboardingDialog = lazy(async () => ({
+  default: (await import('@/components/permissions-onboarding-dialog')).PermissionsOnboardingDialog
+}))
 
 function WorkspaceTabFallback(): ReactElement {
   return (
@@ -81,10 +87,16 @@ function PermissionsOnboardingGate({
   const { wsStatus, deviceList, mediaAccess, runtimeInfo } = useStudioCore()
   const { audioMeter } = useStudioAudio()
   const evaluatedRef = useRef(false)
+  const dialogMountedRef = useRef(open)
   const backendReady = wsStatus === 'connected' && deviceList.devices.length > 0
+  const mediaAccessReady = runtimeInfo !== null && isMediaAccessSnapshotReady(mediaAccess)
+
+  if (open) {
+    dialogMountedRef.current = true
+  }
 
   useEffect(() => {
-    if (evaluatedRef.current || !backendReady) {
+    if (evaluatedRef.current || !backendReady || !mediaAccessReady) {
       return
     }
     evaluatedRef.current = true
@@ -95,12 +107,26 @@ function PermissionsOnboardingGate({
       platform: runtimeInfo?.platform,
       mediaAccess
     })
-    if (shouldShowPermissionsOnboarding({ rows, dismissed, backendReady })) {
+    if (shouldShowPermissionsOnboarding({ rows, dismissed, backendReady, mediaAccessReady })) {
       onOpen()
     }
-  }, [audioMeter, backendReady, deviceList, mediaAccess, onOpen, runtimeInfo?.platform])
+  }, [
+    audioMeter,
+    backendReady,
+    deviceList,
+    mediaAccess,
+    mediaAccessReady,
+    onOpen,
+    runtimeInfo?.platform
+  ])
 
-  return <PermissionsOnboardingDialog open={open} onComplete={onComplete} />
+  return (
+    <Suspense fallback={null}>
+      {dialogMountedRef.current ? (
+        <PermissionsOnboardingDialog open={open} onComplete={onComplete} />
+      ) : null}
+    </Suspense>
+  )
 }
 
 export function AppShell(): ReactElement {

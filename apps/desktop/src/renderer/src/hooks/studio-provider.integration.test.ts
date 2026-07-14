@@ -13,7 +13,10 @@ vi.mock('sonner', () => ({ toast: toastSpies }))
 
 import type {
   AccountCallbackEnvelope,
+  AudioMeterResult,
+  BackendConnection,
   CompositorStatus,
+  DeviceList,
   LayoutSettings,
   NoiseCleanupJob,
   OAuthCallbackEnvelope,
@@ -27,6 +30,7 @@ import type {
 import { BackgroundAssetsProvider } from './use-background-assets'
 import {
   StudioProvider,
+  useStudioAudio,
   useStudioCore,
   useStudioRecording,
   type StudioCoreContextValue,
@@ -249,6 +253,24 @@ class StudioBackend {
   emitRecordingStatusBeforeStartResponse = false
   audioProcessingResponseDelayMs = 0
   audioProcessingReasonCode: 'session-ended' | null = null
+  deviceListFailuresRemaining = 0
+  audioMeterFailuresRemaining = 0
+  deviceList: DeviceList = {
+    devices: [
+      {
+        id: 'screen:dxgi:0000000000000001:1',
+        name: 'Display 1',
+        kind: 'screen',
+        status: 'available',
+        width: 2560,
+        height: 1440
+      },
+      { id: 'camera:1', name: 'Camera 1', kind: 'camera', status: 'available' },
+      { id: 'mic:1', name: 'Microphone 1', kind: 'microphone', status: 'available' }
+    ],
+    warnings: []
+  }
+  audioMeterResult: AudioMeterResult = { status: 'ready', level: 0.4 }
 
   invalidateCompletedNoiseCleanup(message: string): void {
     this.sourceMutationRevision += 1
@@ -303,21 +325,17 @@ class StudioBackend {
       case 'ai.quota.get':
         throw new Error('AI web dependency is intentionally offline in this lifecycle test.')
       case 'devices.list':
-        return {
-          devices: [
-            {
-              id: 'screen:dxgi:0000000000000001:1',
-              name: 'Display 1',
-              kind: 'screen',
-              status: 'available',
-              width: 2560,
-              height: 1440
-            },
-            { id: 'camera:1', name: 'Camera 1', kind: 'camera', status: 'available' },
-            { id: 'mic:1', name: 'Microphone 1', kind: 'microphone', status: 'available' }
-          ],
-          warnings: []
+        if (this.deviceListFailuresRemaining > 0) {
+          this.deviceListFailuresRemaining -= 1
+          throw new Error('Temporary devices.list failure.')
         }
+        return this.deviceList
+      case 'audio.meter.sample':
+        if (this.audioMeterFailuresRemaining > 0) {
+          this.audioMeterFailuresRemaining -= 1
+          throw new Error('Temporary audio.meter.sample failure.')
+        }
+        return this.audioMeterResult
       case 'recording.status':
         return { state: this.recordingState, message: 'Ready.' }
       case 'diagnostics.stats':
@@ -566,25 +584,30 @@ class TestWebSocket {
   static readonly OPEN = 1
   static readonly CLOSED = 3
   static backend: StudioBackend
+  static nextGeneration = 0
 
   readyState = TestWebSocket.OPEN
+  readonly backend: StudioBackend
+  readonly generation: number
   onopen: (() => void) | null = null
   onerror: (() => void) | null = null
   onmessage: ((event: { data: string }) => void) | null = null
   onclose: (() => void) | null = null
 
   constructor(readonly url: string) {
-    TestWebSocket.backend.sockets.push(this)
+    this.backend = TestWebSocket.backend
+    this.generation = ++TestWebSocket.nextGeneration
+    this.backend.sockets.push(this)
     queueMicrotask(() => this.onopen?.())
   }
 
   send(raw: string): void {
+    if (this.readyState !== TestWebSocket.OPEN) {
+      throw new Error(`Test WebSocket generation ${this.generation} is closed.`)
+    }
     const command = JSON.parse(raw) as BackendCommand
-    TestWebSocket.backend.sentCommands.push(command)
-    if (
-      command.method === 'session.start' &&
-      TestWebSocket.backend.emitRecordingStatusBeforeStartResponse
-    ) {
+    this.backend.sentCommands.push(command)
+    if (command.method === 'session.start' && this.backend.emitRecordingStatusBeforeStartResponse) {
       queueMicrotask(() => {
         this.onmessage?.({
           data: JSON.stringify({
@@ -600,12 +623,15 @@ class TestWebSocket {
       })
     }
     const respond = (): void => {
+      if (this.readyState !== TestWebSocket.OPEN) {
+        return
+      }
       try {
         this.onmessage?.({
           data: JSON.stringify({
             id: command.id,
             ok: true,
-            payload: TestWebSocket.backend.response(command)
+            payload: this.backend.response(command)
           })
         })
       } catch (error) {
@@ -628,11 +654,11 @@ class TestWebSocket {
       }
     }
     const responseDelayMs = command.method.startsWith('scene.layout.apply_')
-      ? TestWebSocket.backend.layoutResponseDelayMs
+      ? this.backend.layoutResponseDelayMs
       : command.method === 'session.start'
-        ? TestWebSocket.backend.sessionStartResponseDelayMs
+        ? this.backend.sessionStartResponseDelayMs
         : command.method === 'audio.processing.update'
-          ? TestWebSocket.backend.audioProcessingResponseDelayMs
+          ? this.backend.audioProcessingResponseDelayMs
           : 0
     if (responseDelayMs > 0) {
       setTimeout(respond, responseDelayMs)
@@ -649,14 +675,16 @@ class TestWebSocket {
 }
 
 type StudioObservation = {
+  audio: ReturnType<typeof useStudioAudio>
   core: StudioCoreContextValue
   recording: StudioRecordingContextValue
 }
 
 function Probe({ observe }: { observe: (value: StudioObservation) => void }): null {
+  const audio = useStudioAudio()
   const core = useStudioCore()
   const recording = useStudioRecording()
-  useEffect(() => observe({ core, recording }), [core, observe, recording])
+  useEffect(() => observe({ audio, core, recording }), [audio, core, observe, recording])
   return null
 }
 
@@ -674,6 +702,647 @@ describe('real StudioProvider lifecycle', () => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
     vi.useRealTimers()
+  })
+
+  it('requests fresh macOS camera access, then routes a denial to System Settings', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let cameraStatus: 'not-determined' | 'denied' = 'not-determined'
+    const requestMediaAccess = vi.fn(async () => {
+      cameraStatus = 'denied'
+      return { granted: false, restarted: false }
+    })
+    const openSystemPermissions = vi.fn(async () => undefined)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      platform: 'darwin',
+      getMediaAccessStatus: async () => ({
+        camera: cameraStatus,
+        microphone: 'granted'
+      }),
+      requestMediaAccess,
+      openSystemPermissions
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.mediaAccess?.camera === 'not-determined'
+    )
+
+    await act(async () => {
+      await latest()?.core.handleSystemPermission('camera')
+    })
+    await waitForObservation(() => latest()?.core.mediaAccess?.camera === 'denied')
+    expect(requestMediaAccess).toHaveBeenCalledOnce()
+    expect(requestMediaAccess).toHaveBeenCalledWith('camera')
+    expect(openSystemPermissions).not.toHaveBeenCalled()
+
+    await act(async () => {
+      await latest()?.core.handleSystemPermission('camera')
+    })
+    expect(requestMediaAccess).toHaveBeenCalledOnce()
+    expect(openSystemPermissions).toHaveBeenCalledOnce()
+    expect(openSystemPermissions).toHaveBeenCalledWith('camera')
+  })
+
+  it('does not reuse a stale permission snapshot when the click-time status read fails', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let statusReadAvailable = true
+    const requestMediaAccess = vi.fn(async () => ({ granted: false, restarted: false }))
+    const openSystemPermissions = vi.fn(async () => undefined)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      platform: 'darwin',
+      getMediaAccessStatus: async () => {
+        if (!statusReadAvailable) {
+          throw new Error('TCC status read failed')
+        }
+        return { camera: 'not-determined', microphone: 'granted' }
+      },
+      requestMediaAccess,
+      openSystemPermissions
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.mediaAccess?.camera === 'not-determined'
+    )
+
+    statusReadAvailable = false
+    await act(async () => {
+      await latest()?.core.handleSystemPermission('camera')
+    })
+
+    expect(requestMediaAccess).not.toHaveBeenCalled()
+    expect(openSystemPermissions).not.toHaveBeenCalled()
+    expect(toastSpies.error).toHaveBeenCalledWith('Could not check Camera permission.', {
+      description: 'Try again before changing access.'
+    })
+  })
+
+  it('clears stale microphone evidence before opening System Settings', async () => {
+    const backend = new StudioBackend()
+    backend.audioMeterResult = {
+      status: 'permission-required',
+      message: 'Microphone permission is required.'
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const requestMediaAccess = vi.fn(async () => ({ granted: false, restarted: false }))
+    const openSystemPermissions = vi.fn(async () => undefined)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      platform: 'darwin',
+      getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'denied' }),
+      requestMediaAccess,
+      openSystemPermissions
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.mediaAccess?.microphone === 'denied'
+    )
+    await act(async () => {
+      await latest()?.core.sampleAudioMeter()
+    })
+    await waitForObservation(() => latest()?.audio.audioMeter?.status === 'permission-required')
+
+    await act(async () => {
+      await latest()?.core.handleSystemPermission('microphone')
+    })
+
+    expect(latest()?.audio.audioMeter).toBeNull()
+    expect(openSystemPermissions).toHaveBeenCalledWith('microphone')
+    expect(requestMediaAccess).not.toHaveBeenCalled()
+  })
+
+  it('refreshes exact permission and devices through the reconnected backend after a grant', async () => {
+    const initialBackend = new StudioBackend()
+    const reconnectedBackend = new StudioBackend()
+    TestWebSocket.backend = initialBackend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let cameraStatus: 'not-determined' | 'granted' = 'not-determined'
+    let emit: ((name: string, value: unknown) => void) | undefined
+    const requestMediaAccess = vi.fn(async () => {
+      cameraStatus = 'granted'
+      TestWebSocket.backend = reconnectedBackend
+      queueMicrotask(() => {
+        emit?.('backend:connection', {
+          host: '127.0.0.1',
+          port: 9989,
+          token: 'restarted-test-token'
+        })
+      })
+      return { granted: true, restarted: true }
+    })
+    const openSystemPermissions = vi.fn(async () => undefined)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      platform: 'darwin',
+      getMediaAccessStatus: async () => ({
+        camera: cameraStatus,
+        microphone: 'granted'
+      }),
+      requestMediaAccess,
+      openSystemPermissions,
+      registerEmitter: (nextEmit) => {
+        emit = nextEmit
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.mediaAccess?.camera === 'not-determined'
+    )
+    const devicesBefore = initialBackend.commands.filter(
+      (command) => command.method === 'devices.list'
+    ).length
+
+    let permissionAction: Promise<void> | undefined
+    act(() => {
+      permissionAction = latest()?.core.handleSystemPermission('camera')
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' && latest()?.core.mediaAccess?.camera === 'granted'
+    )
+    await act(async () => {
+      await permissionAction
+    })
+
+    expect(requestMediaAccess).toHaveBeenCalledOnce()
+    expect(openSystemPermissions).not.toHaveBeenCalled()
+    expect(
+      initialBackend.commands.filter((command) => command.method === 'devices.list').length
+    ).toBe(devicesBefore)
+    expect(
+      reconnectedBackend.commands.filter((command) => command.method === 'devices.list').length
+    ).toBeGreaterThan(0)
+    expect(
+      initialBackend.sockets.every((socket) => socket.readyState === TestWebSocket.CLOSED)
+    ).toBe(true)
+
+    await act(async () => {
+      await latest()?.core.handleSystemPermission('camera')
+    })
+    expect(requestMediaAccess).toHaveBeenCalledOnce()
+    expect(openSystemPermissions).not.toHaveBeenCalled()
+  })
+
+  it('waits past a prompt-time backend generation that the permission restart retires', async () => {
+    const initialBackend = new StudioBackend()
+    const promptBackend = new StudioBackend()
+    const restartedBackend = new StudioBackend()
+    TestWebSocket.backend = initialBackend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let cameraStatus: 'not-determined' | 'granted' = 'not-determined'
+    let emit: ((name: string, value: unknown) => void) | undefined
+    let resolveRequest:
+      | ((value: Awaited<ReturnType<NonNullable<VideorcApi['requestMediaAccess']>>>) => void)
+      | undefined
+    const requestMediaAccess = vi.fn(
+      () =>
+        new Promise<Awaited<ReturnType<NonNullable<VideorcApi['requestMediaAccess']>>>>(
+          (resolve) => {
+            resolveRequest = resolve
+          }
+        )
+    )
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      platform: 'darwin',
+      backendConnection: { host: '127.0.0.1', port: 9988, token: 'initial', pid: 101 },
+      getMediaAccessStatus: async () => ({
+        camera: cameraStatus,
+        microphone: 'granted'
+      }),
+      requestMediaAccess,
+      registerEmitter: (nextEmit) => {
+        emit = nextEmit
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.mediaAccess?.camera === 'not-determined'
+    )
+
+    let permissionAction: Promise<void> | undefined
+    act(() => {
+      permissionAction = latest()?.core.handleSystemPermission('camera')
+    })
+    await waitForObservation(() => requestMediaAccess.mock.calls.length === 1)
+
+    TestWebSocket.backend = promptBackend
+    await act(async () => {
+      emit?.('backend:connection', {
+        host: '127.0.0.1',
+        port: 9989,
+        token: 'prompt-generation',
+        pid: 202
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        promptBackend.commands.some((command) => command.method === 'devices.list')
+    )
+
+    let actionSettled = false
+    void permissionAction?.then(() => {
+      actionSettled = true
+    })
+    cameraStatus = 'granted'
+    await act(async () => {
+      resolveRequest?.({
+        granted: true,
+        restarted: true,
+        staleBackend: { port: 9989, pid: 202 }
+      })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    })
+    expect(actionSettled).toBe(false)
+
+    TestWebSocket.backend = restartedBackend
+    await act(async () => {
+      emit?.('backend:connection', {
+        host: '127.0.0.1',
+        port: 9990,
+        token: 'post-grant-generation',
+        pid: 303
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        restartedBackend.commands.some((command) => command.method === 'devices.list')
+    )
+    await act(async () => {
+      await permissionAction
+    })
+
+    expect(restartedBackend.commands.some((command) => command.method === 'devices.list')).toBe(
+      true
+    )
+    expect(actionSettled).toBe(true)
+  })
+
+  it('samples the microphone only after a fresh grant has reconnected and refreshed devices', async () => {
+    const initialBackend = new StudioBackend()
+    const reconnectedBackend = new StudioBackend()
+    TestWebSocket.backend = initialBackend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let microphoneStatus: 'not-determined' | 'granted' = 'not-determined'
+    let emit: ((name: string, value: unknown) => void) | undefined
+    const requestMediaAccess = vi.fn(async () => {
+      microphoneStatus = 'granted'
+      TestWebSocket.backend = reconnectedBackend
+      queueMicrotask(() => {
+        emit?.('backend:connection', {
+          host: '127.0.0.1',
+          port: 9990,
+          token: 'microphone-restart-token'
+        })
+      })
+      return { granted: true, restarted: true }
+    })
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      platform: 'darwin',
+      getMediaAccessStatus: async () => ({
+        camera: 'granted',
+        microphone: microphoneStatus
+      }),
+      requestMediaAccess,
+      registerEmitter: (nextEmit) => {
+        emit = nextEmit
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.mediaAccess?.microphone === 'not-determined' &&
+        latest()?.core.canSampleAudio === true
+    )
+
+    let permissionAction: Promise<void> | undefined
+    act(() => {
+      permissionAction = latest()?.core.handleSystemPermission('microphone')
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.mediaAccess?.microphone === 'granted'
+    )
+    await act(async () => {
+      await permissionAction
+    })
+
+    const commandMethods = reconnectedBackend.commands.map((command) => command.method)
+    const deviceRefreshIndex = commandMethods.lastIndexOf('devices.list')
+    const meterSampleIndex = commandMethods.lastIndexOf('audio.meter.sample')
+    expect(requestMediaAccess).toHaveBeenCalledWith('microphone')
+    expect(deviceRefreshIndex).toBeGreaterThan(-1)
+    expect(meterSampleIndex).toBeGreaterThan(deviceRefreshIndex)
+    expect(initialBackend.commands.some((command) => command.method === 'audio.meter.sample')).toBe(
+      false
+    )
+    expect(
+      initialBackend.sockets.every((socket) => socket.readyState === TestWebSocket.CLOSED)
+    ).toBe(true)
+  })
+
+  it('invalidates stale microphone evidence and defers proof to the eventual backend generation', async () => {
+    const initialBackend = new StudioBackend()
+    initialBackend.deviceList = {
+      ...initialBackend.deviceList,
+      devices: initialBackend.deviceList.devices.map((device) =>
+        device.kind === 'microphone'
+          ? {
+              ...device,
+              status: 'permission-required',
+              detail: 'Microphone permission is required.'
+            }
+          : device
+      )
+    }
+    initialBackend.audioMeterResult = {
+      status: 'permission-required',
+      message: 'Microphone permission is required.'
+    }
+    TestWebSocket.backend = initialBackend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let microphoneStatus: 'not-determined' | 'granted' = 'not-determined'
+    let emit: ((name: string, value: unknown) => void) | undefined
+    const requestMediaAccess = vi.fn(async () => {
+      microphoneStatus = 'granted'
+      return {
+        granted: true,
+        restarted: false,
+        staleBackend: { port: 9988, pid: 401 }
+      }
+    })
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      platform: 'darwin',
+      backendConnection: { host: '127.0.0.1', port: 9988, token: 'initial', pid: 401 },
+      getMediaAccessStatus: async () => ({
+        camera: 'granted',
+        microphone: microphoneStatus
+      }),
+      requestMediaAccess,
+      registerEmitter: (nextEmit) => {
+        emit = nextEmit
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.mediaAccess?.microphone === 'not-determined'
+    )
+    await act(async () => {
+      await latest()?.core.sampleAudioMeter()
+    })
+    await waitForObservation(() => latest()?.audio.audioMeter?.status === 'permission-required')
+    const initialDeviceRefreshes = initialBackend.commands.filter(
+      (command) => command.method === 'devices.list'
+    ).length
+
+    await act(async () => {
+      await latest()?.core.handleSystemPermission('microphone')
+    })
+
+    expect(requestMediaAccess).toHaveBeenCalledWith('microphone')
+    expect(latest()?.core.mediaAccess?.microphone).toBe('granted')
+    expect(latest()?.audio.audioMeter).toBeNull()
+    expect(
+      initialBackend.commands.filter((command) => command.method === 'devices.list').length
+    ).toBe(initialDeviceRefreshes)
+
+    const reconnectedBackend = new StudioBackend()
+    reconnectedBackend.deviceListFailuresRemaining = 3
+    reconnectedBackend.audioMeterFailuresRemaining = 1
+    TestWebSocket.backend = reconnectedBackend
+    act(() => {
+      emit?.('backend:connection', {
+        host: '127.0.0.1',
+        port: 9991,
+        token: 'deferred-microphone-restart-token'
+      })
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' && latest()?.audio.audioMeter?.status === 'ready'
+    )
+
+    const reconnectedMethods = reconnectedBackend.commands.map((command) => command.method)
+    expect(
+      reconnectedMethods.filter((method) => method === 'devices.list').length
+    ).toBeGreaterThanOrEqual(4)
+    expect(reconnectedMethods.lastIndexOf('audio.meter.sample')).toBeGreaterThan(
+      reconnectedMethods.lastIndexOf('devices.list')
+    )
+    expect(reconnectedMethods.filter((method) => method === 'audio.meter.sample').length).toBe(2)
+    expect(
+      initialBackend.sockets.every((socket) => socket.readyState === TestWebSocket.CLOSED)
+    ).toBe(true)
+    expect(
+      reconnectedBackend.sockets.every((socket) => socket.backend === reconnectedBackend)
+    ).toBe(true)
   })
 
   it('boots, commits a layout, records, stops, and acknowledges a bound account callback', async () => {
@@ -1989,6 +2658,12 @@ function createVideorcApi(options: {
     registerEmitter?: (emit: (name: string, value: unknown) => void) => void
   }
   windowsLiveAudioSmokeMode?: boolean
+  platform?: string
+  getMediaAccessStatus?: VideorcApi['getMediaAccessStatus']
+  requestMediaAccess?: VideorcApi['requestMediaAccess']
+  openSystemPermissions?: VideorcApi['openSystemPermissions']
+  backendConnection?: BackendConnection
+  registerEmitter?: (emit: (name: string, value: unknown) => void) => void
 }): VideorcApi {
   const listeners = new Map<string, Set<(value: unknown) => void>>()
   const subscribe = (name: string, callback: (value: unknown) => void): (() => void) => {
@@ -1997,8 +2672,12 @@ function createVideorcApi(options: {
     listeners.set(name, bucket)
     return () => bucket.delete(callback)
   }
-  options.nativePreview?.registerEmitter?.((name, value) => {
+  const emit = (name: string, value: unknown): void => {
     for (const callback of listeners.get(name) ?? []) callback(value)
+  }
+  options.registerEmitter?.(emit)
+  options.nativePreview?.registerEmitter?.((name, value) => {
+    emit(name, value)
   })
   const idleNotes = {
     open: false,
@@ -2018,11 +2697,12 @@ function createVideorcApi(options: {
   }
   const api = new Proxy<Record<string, unknown>>(
     {
-      getBackendConnection: async () => ({ host: '127.0.0.1', port: 9988, token: 'test-token' }),
+      getBackendConnection: async () =>
+        options.backendConnection ?? { host: '127.0.0.1', port: 9988, token: 'test-token' },
       getBackendLogs: async () => [],
       getRuntimeInfo: async () => ({
         version: 'test',
-        platform: 'win32',
+        platform: options.platform ?? 'win32',
         arch: 'x64',
         osRelease: 'test',
         gpuDevices: [],
@@ -2058,7 +2738,11 @@ function createVideorcApi(options: {
       getNotesWindowState: async () => idleNotes,
       getCommentsWindowState: async () => idleComments,
       getCaptionsWindowState: async () => idleCaptions,
-      getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'granted' }),
+      getMediaAccessStatus:
+        options.getMediaAccessStatus ??
+        (async () => ({ camera: 'granted', microphone: 'granted' })),
+      requestMediaAccess: options.requestMediaAccess,
+      openSystemPermissions: options.openSystemPermissions,
       getViewerSample: async () => null,
       getCommentsSnapshot: async () => null,
       getCommentHighlightState: async () => ({ generation: 0, phase: 'idle' }),
