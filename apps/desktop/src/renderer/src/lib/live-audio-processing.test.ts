@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   activeAudioProcessingUpdateParams,
   LatestWinsLiveAudioProcessingQueue,
+  liveAudioProcessingSessionSyncDecision,
   rejectedLiveAudioProcessingUpdate
 } from './live-audio-processing'
 
@@ -148,6 +149,28 @@ describe('activeAudioProcessingUpdateParams', () => {
     })
   })
 
+  it('leaves terminal capture failure reporting authoritative when the session ended', () => {
+    expect(
+      rejectedLiveAudioProcessingUpdate({
+        recording: { state: 'recording', sessionId: 'session-1' },
+        current: { microphoneGainDb: 8, microphoneMuted: true },
+        requested: {
+          sessionId: 'session-1',
+          microphoneGainDb: 8,
+          microphoneMuted: true
+        },
+        result: {
+          applied: false,
+          sessionId: 'session-1',
+          microphoneGainDb: 8,
+          microphoneMuted: true,
+          reasonCode: 'session-ended'
+        },
+        lastApplied: { microphoneGainDb: -2, microphoneMuted: false }
+      })
+    ).toBeNull()
+  })
+
   it('ignores a stale non-controller rejection after the user has made a newer mic edit', () => {
     expect(
       rejectedLiveAudioProcessingUpdate({
@@ -256,6 +279,48 @@ describe('activeAudioProcessingUpdateParams', () => {
         lastApplied: { microphoneGainDb: -2, microphoneMuted: false }
       })
     ).toBeNull()
+  })
+})
+
+describe('liveAudioProcessingSessionSyncDecision', () => {
+  it('queues the latest controls after start when they differ from the exact start snapshot', () => {
+    expect(
+      liveAudioProcessingSessionSyncDecision(
+        {
+          sessionId: 'session-1',
+          microphoneGainDb: 6,
+          microphoneMuted: true
+        },
+        {
+          sessionId: 'session-1',
+          microphoneGainDb: 0,
+          microphoneMuted: false
+        }
+      )
+    ).toEqual({
+      lastApplied: { microphoneGainDb: 0, microphoneMuted: false },
+      enqueueDesired: true
+    })
+  })
+
+  it('does not seed a new session from a prior session snapshot', () => {
+    expect(
+      liveAudioProcessingSessionSyncDecision(
+        {
+          sessionId: 'session-2',
+          microphoneGainDb: 4,
+          microphoneMuted: false
+        },
+        {
+          sessionId: 'session-1',
+          microphoneGainDb: -12,
+          microphoneMuted: true
+        }
+      )
+    ).toEqual({
+      lastApplied: { microphoneGainDb: 4, microphoneMuted: false },
+      enqueueDesired: true
+    })
   })
 })
 

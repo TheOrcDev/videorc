@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
-use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, OwnedMutexGuard, mpsc, oneshot};
 use tokio::time::{Duration, sleep, timeout};
 use uuid::Uuid;
 
@@ -222,6 +222,8 @@ const STOP_KILL_DELAY_STREAMING: Duration = Duration::from_secs(5);
 const SHUTDOWN_GRACE_DELAY: Duration = Duration::from_millis(1200);
 const CAPTURE_AUDIO_FILTER: &str = "aresample=async=1:first_pts=0";
 const MONO_TO_STEREO_FILTER: &str = "pan=stereo|c0=c0|c1=c0";
+const DSHOW_AUDIO_OUTPUT_NORMALIZATION_FILTER: &str =
+    "aformat=sample_rates=48000:channel_layouts=stereo";
 const MICROPHONE_SYNC_OFFSET_MIN_MS: i32 = -1000;
 const MICROPHONE_SYNC_OFFSET_MAX_MS: i32 = 1000;
 // The isolated FLV/RTMP egress path adds about 130ms of audio latency relative
@@ -252,6 +254,13 @@ const ENCODER_BRIDGE_RAW_VIDEO_INPUT_QUEUE_FRAMES: u32 = 16;
 const ENCODER_BRIDGE_VIDEO_OUTPUT_ENV: &str = "VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT";
 const FFMPEG_LIVE_MIC_FILTER_TARGET: &str = "videorc_live_mic";
 const FFMPEG_PROGRESS_REPORT_PERIOD_SECONDS: u64 = 2;
+const MAX_CAPTURE_MEDIA_CLOCK_SECONDS: f64 = 7.0 * 24.0 * 60.0 * 60.0;
+// Readiness normally arrives on the first two-second progress report. Keep
+// four complete report periods for slow physical-device startup while still
+// finishing well before the renderer's 30-second RPC deadline. This timeout
+// is separate from the per-command acknowledgement budget below.
+const FFMPEG_LIVE_AUDIO_READY_TIMEOUT: Duration =
+    Duration::from_secs(FFMPEG_PROGRESS_REPORT_PERIOD_SECONDS * 4);
 // FFmpeg only polls stdin for filter commands on its progress-report cadence.
 // Keep a full extra reporting interval plus scheduling headroom so a command
 // written just after a report cannot time out after FFmpeg has applied it.
@@ -272,6 +281,7 @@ enum FfmpegLiveAudioCommandFailure {
 struct FfmpegLiveAudioApplyFailure {
     error: anyhow::Error,
     state_unknown: bool,
+    session_ended: bool,
     confirmed_settings: Option<AudioProcessingSettings>,
 }
 
@@ -284,6 +294,7 @@ struct FfmpegLiveAudioApplyFailure {
 struct FfmpegLiveAudioControl {
     expected_replies: usize,
     replies: mpsc::UnboundedReceiver<FfmpegFilterCommandReply>,
+    dispatches: Option<mpsc::UnboundedSender<()>>,
     last_applied: AudioProcessingSettings,
     healthy: bool,
     state_unknown: bool,
@@ -298,10 +309,16 @@ impl FfmpegLiveAudioControl {
         Self {
             expected_replies,
             replies,
+            dispatches: None,
             last_applied: initial,
             healthy: expected_replies > 0,
             state_unknown: false,
         }
+    }
+
+    fn with_dispatch_sender(mut self, sender: mpsc::UnboundedSender<()>) -> Self {
+        self.dispatches = Some(sender);
+        self
     }
 
     async fn apply<W>(
@@ -324,8 +341,13 @@ impl FfmpegLiveAudioControl {
                     )
                 },
                 state_unknown: self.state_unknown,
+                session_ended: false,
                 confirmed_settings: (!self.state_unknown).then_some(self.last_applied),
             });
+        }
+
+        if audio_processing_settings_match(self.last_applied, settings) {
+            return Ok(());
         }
 
         // There should be no queued reply while commands are serialized under
@@ -349,6 +371,7 @@ impl FfmpegLiveAudioControl {
                             "FFmpeg rejected the live microphone command with ret:{return_code}; the previous microphone settings were restored"
                         ),
                         state_unknown: false,
+                        session_ended: false,
                         confirmed_settings: Some(previous),
                     }),
                     Err(rollback_error) => Err(FfmpegLiveAudioApplyFailure {
@@ -359,6 +382,7 @@ impl FfmpegLiveAudioControl {
                             )
                         },
                         state_unknown: true,
+                        session_ended: false,
                         confirmed_settings: None,
                     }),
                 };
@@ -371,6 +395,7 @@ impl FfmpegLiveAudioControl {
                 return Err(FfmpegLiveAudioApplyFailure {
                     error,
                     state_unknown: true,
+                    session_ended: false,
                     confirmed_settings: None,
                 });
             }
@@ -399,6 +424,9 @@ impl FfmpegLiveAudioControl {
             .await
             .context("Could not flush the live microphone command to FFmpeg")
             .map_err(FfmpegLiveAudioCommandFailure::Uncertain)?;
+        if let Some(sender) = self.dispatches.as_ref() {
+            let _ = sender.send(());
+        }
 
         let replies = timeout(FFMPEG_LIVE_AUDIO_REPLY_TIMEOUT, async {
             let mut first_failure = None;
@@ -442,6 +470,7 @@ impl FfmpegLiveAudioSession {
             return Err(FfmpegLiveAudioApplyFailure {
                 error: anyhow::anyhow!("FFmpeg live microphone control stdin is closed"),
                 state_unknown,
+                session_ended: false,
                 confirmed_settings: (!state_unknown).then_some(self.control.last_applied),
             });
         };
@@ -475,13 +504,22 @@ impl FfmpegLiveAudioSession {
 #[derive(Debug)]
 struct FfmpegLiveAudioSessionHandle {
     stopping: AtomicBool,
+    command_ready: AtomicBool,
+    terminal: AtomicBool,
+    lifecycle_changed: Notify,
+    expected_replies: usize,
     session: Mutex<FfmpegLiveAudioSession>,
 }
 
 impl FfmpegLiveAudioSessionHandle {
     fn new(stdin: ChildStdin, control: FfmpegLiveAudioControl) -> Self {
+        let expected_replies = control.expected_replies;
         Self {
             stopping: AtomicBool::new(false),
+            command_ready: AtomicBool::new(false),
+            terminal: AtomicBool::new(false),
+            lifecycle_changed: Notify::new(),
+            expected_replies,
             session: Mutex::new(FfmpegLiveAudioSession {
                 stdin: Some(stdin),
                 control,
@@ -491,22 +529,143 @@ impl FfmpegLiveAudioSessionHandle {
 
     fn begin_stop(&self) {
         self.stopping.store(true, Ordering::Release);
+        self.lifecycle_changed.notify_waiters();
+    }
+
+    fn mark_command_ready(&self) -> bool {
+        let changed = self
+            .command_ready
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if changed {
+            self.lifecycle_changed.notify_waiters();
+        }
+        changed
+    }
+
+    fn mark_terminal(&self) -> bool {
+        let changed = !self.terminal.swap(true, Ordering::AcqRel);
+        if changed {
+            self.lifecycle_changed.notify_waiters();
+        }
+        changed
+    }
+
+    fn is_ended(&self) -> bool {
+        self.stopping.load(Ordering::Acquire) || self.terminal.load(Ordering::Acquire)
+    }
+
+    fn command_ready(&self) -> bool {
+        self.command_ready.load(Ordering::Acquire)
+    }
+
+    fn terminal(&self) -> bool {
+        self.terminal.load(Ordering::Acquire)
+    }
+
+    fn expected_replies(&self) -> usize {
+        self.expected_replies
+    }
+
+    async fn wait_for_end(&self) {
+        loop {
+            let changed = self.lifecycle_changed.notified();
+            tokio::pin!(changed);
+            let _ = changed.as_mut().enable();
+            if self.is_ended() {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn ended_failure(control: &FfmpegLiveAudioControl) -> FfmpegLiveAudioApplyFailure {
+        FfmpegLiveAudioApplyFailure {
+            error: anyhow::anyhow!("FFmpeg capture session ended during live microphone control"),
+            state_unknown: false,
+            session_ended: true,
+            confirmed_settings: (!control.state_unknown).then_some(control.last_applied),
+        }
     }
 
     async fn apply(
         &self,
         settings: AudioProcessingSettings,
     ) -> std::result::Result<(), FfmpegLiveAudioApplyFailure> {
-        let mut session = self.session.lock().await;
-        if self.stopping.load(Ordering::Acquire) {
-            let state_unknown = session.control.state_unknown;
-            return Err(FfmpegLiveAudioApplyFailure {
-                error: anyhow::anyhow!("FFmpeg live microphone control is stopping"),
-                state_unknown,
-                confirmed_settings: (!state_unknown).then_some(session.control.last_applied),
-            });
+        self.apply_with_ready_timeout(settings, FFMPEG_LIVE_AUDIO_READY_TIMEOUT)
+            .await
+    }
+
+    async fn apply_with_ready_timeout(
+        &self,
+        settings: AudioProcessingSettings,
+        ready_timeout: Duration,
+    ) -> std::result::Result<(), FfmpegLiveAudioApplyFailure> {
+        {
+            let session = self.session.lock().await;
+            if self.is_ended() {
+                return Err(Self::ended_failure(&session.control));
+            }
+            if session.control.healthy
+                && !session.control.state_unknown
+                && audio_processing_settings_match(session.control.last_applied, settings)
+            {
+                return Ok(());
+            }
         }
-        session.apply(settings).await
+
+        let readiness = timeout(ready_timeout, async {
+            loop {
+                let changed = self.lifecycle_changed.notified();
+                tokio::pin!(changed);
+                let _ = changed.as_mut().enable();
+                if self.is_ended() {
+                    return false;
+                }
+                if self.command_ready() {
+                    return true;
+                }
+                changed.await;
+            }
+        })
+        .await;
+        match readiness {
+            Ok(true) => {}
+            Ok(false) => {
+                let session = self.session.lock().await;
+                return Err(Self::ended_failure(&session.control));
+            }
+            Err(_) if self.command_ready() => {}
+            Err(_) => {
+                let session = self.session.lock().await;
+                if self.is_ended() {
+                    return Err(Self::ended_failure(&session.control));
+                }
+                let state_unknown = session.control.state_unknown;
+                return Err(FfmpegLiveAudioApplyFailure {
+                    error: anyhow::anyhow!(
+                        "FFmpeg live microphone command lane did not become ready within {}ms",
+                        ready_timeout.as_millis()
+                    ),
+                    state_unknown,
+                    session_ended: false,
+                    confirmed_settings: (!state_unknown).then_some(session.control.last_applied),
+                });
+            }
+        }
+
+        let mut session = self.session.lock().await;
+        if self.is_ended() {
+            return Err(Self::ended_failure(&session.control));
+        }
+        let ended = self.wait_for_end();
+        tokio::pin!(ended);
+        let update = tokio::select! {
+            biased;
+            _ = &mut ended => None,
+            result = session.apply(settings) => Some(result),
+        };
+        update.unwrap_or_else(|| Err(Self::ended_failure(&session.control)))
     }
 
     async fn quit(&self) -> Result<()> {
@@ -720,7 +879,7 @@ pub async fn update_active_audio_processing(
         confirmed_microphone_muted: None,
     };
 
-    let ffmpeg_live_audio_session = {
+    let (ffmpeg_live_audio_session, ffmpeg_pid) = {
         let recording = state.recording.lock().await;
         let Some(active) = recording.as_ref() else {
             result.reason_code = Some("no-active-session".to_string());
@@ -731,7 +890,7 @@ pub async fn update_active_audio_processing(
             return result;
         }
         if active.stop_requested {
-            result.reason_code = Some("live-audio-control-unavailable".to_string());
+            result.reason_code = Some("session-ended".to_string());
             return result;
         }
 
@@ -741,7 +900,7 @@ pub async fn update_active_audio_processing(
             return result;
         }
 
-        active.ffmpeg_live_audio_session.clone()
+        (active.ffmpeg_live_audio_session.clone(), active.pid)
     };
 
     let Some(ffmpeg_live_audio_session) = ffmpeg_live_audio_session else {
@@ -750,20 +909,49 @@ pub async fn update_active_audio_processing(
     };
     let update = ffmpeg_live_audio_session.apply(settings).await;
     if let Err(failure) = update {
-        state.emit_log(
-            "warn",
-            format!(
-                "Live microphone update was not applied: {:#}",
-                failure.error
-            ),
-        );
+        if !failure.session_ended {
+            state.emit_log(
+                "warn",
+                format!(
+                    "Live microphone update was not applied: {:#}",
+                    failure.error
+                ),
+            );
+        }
         result.reason_code = Some(
-            if failure.state_unknown {
+            if failure.session_ended {
+                "session-ended"
+            } else if failure.state_unknown {
                 "live-audio-control-state-unknown"
             } else {
                 "live-audio-control-unavailable"
             }
             .to_string(),
+        );
+        let failure_kind = if failure.session_ended {
+            "session-ended"
+        } else if failure.state_unknown {
+            "state-unknown"
+        } else {
+            "unavailable"
+        };
+        let process_alive = process_is_running(ffmpeg_pid).await;
+        let _ = emit_session_log(
+            state,
+            &params.session_id,
+            if failure.session_ended {
+                HealthLevel::Info
+            } else {
+                HealthLevel::Warn
+            },
+            "live-audio-control-failed",
+            &format!(
+                "failureKind={failure_kind} commandReady={} terminal={} processAlive={process_alive} expectedReplies={}",
+                ffmpeg_live_audio_session.command_ready(),
+                ffmpeg_live_audio_session.terminal(),
+                ffmpeg_live_audio_session.expected_replies(),
+            ),
+            None,
         );
         if let Some(confirmed) = failure.confirmed_settings {
             result.confirmed_microphone_gain_db = Some(confirmed.gain_db);
@@ -1487,20 +1675,28 @@ pub async fn start_session(
     let ffmpeg_live_audio_filter_count = ffmpeg_live_microphone_filter_count(&args);
     let retain_ffmpeg_stdin =
         retain_ffmpeg_stdin_for_session(use_encoder_bridge, ffmpeg_live_audio_filter_count);
-    let (ffmpeg_audio_reply_sender, pending_ffmpeg_live_audio_control) =
-        if ffmpeg_live_audio_filter_count > 0 {
-            let (sender, replies) = mpsc::unbounded_channel();
-            (
-                Some(sender),
-                Some(FfmpegLiveAudioControl::new(
+    let (
+        ffmpeg_audio_reply_sender,
+        ffmpeg_audio_dispatch_receiver,
+        pending_ffmpeg_live_audio_control,
+    ) = if ffmpeg_live_audio_filter_count > 0 {
+        let (sender, replies) = mpsc::unbounded_channel();
+        let (dispatch_sender, dispatches) = mpsc::unbounded_channel();
+        (
+            Some(sender),
+            Some(dispatches),
+            Some(
+                FfmpegLiveAudioControl::new(
                     ffmpeg_live_audio_filter_count,
                     replies,
                     audio_processing_settings(&params),
-                )),
-            )
-        } else {
-            (None, None)
-        };
+                )
+                .with_dispatch_sender(dispatch_sender),
+            ),
+        )
+    } else {
+        (None, None, None)
+    };
 
     publish_authorized_session_start(
         &state,
@@ -1547,6 +1743,8 @@ pub async fn start_session(
         }
         None => None,
     };
+    let ffmpeg_live_audio_stderr_session = ffmpeg_live_audio_session.clone();
+    let ffmpeg_live_audio_monitor_session = ffmpeg_live_audio_session.clone();
     let pid = child.id().unwrap_or_default();
     // FFmpeg opens every declared input before it starts draining raw video.
     // Attach the native-audio FIFO now, before waiting for the raw-video prime,
@@ -1703,6 +1901,37 @@ pub async fn start_session(
     // path will then reject it instead of silently replacing the startup scene.
     drop(recording_startup_scene.take());
     state.emit_event("recording.status", running_status.clone());
+    if matches!(
+        capture.microphone.as_ref(),
+        Some(MicrophoneInput::WindowsDshow { .. })
+    ) {
+        let _ = emit_session_log(
+            &state,
+            &session_id,
+            HealthLevel::Info,
+            "windows-directshow-audio-shape",
+            "inputShape=device-default outputShape=48000Hz/stereo",
+            None,
+        );
+    }
+    if let Some(mut dispatches) = ffmpeg_audio_dispatch_receiver {
+        let dispatch_state = state.clone();
+        let dispatch_session_id = session_id.clone();
+        tokio::spawn(async move {
+            let mut sequence = 0_u64;
+            while dispatches.recv().await.is_some() {
+                sequence = sequence.saturating_add(1);
+                let _ = emit_session_log(
+                    &dispatch_state,
+                    &dispatch_session_id,
+                    HealthLevel::Info,
+                    "live-audio-command-dispatched",
+                    &format!("sequence={sequence}"),
+                    None,
+                );
+            }
+        });
+    }
     publish_recording_live_preview_status(&state, use_encoder_bridge, None).await;
     if let Some(captions) = params
         .captions
@@ -1760,13 +1989,73 @@ pub async fn start_session(
         let log_session_id = session_id.clone();
         let target_fps = params.output.video.fps;
         let ffmpeg_audio_reply_sender = ffmpeg_audio_reply_sender;
+        let ffmpeg_live_audio_session = ffmpeg_live_audio_stderr_session;
         tokio::spawn(async move {
             let mut stream_runtime = stream_runtime;
+            let mut capture_media_clock_logged = false;
+            let mut first_fatal_ffmpeg_line_logged = false;
             let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let stderr_reached_eof = loop {
+                let line = match lines.next_line().await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break true,
+                    Err(_) => {
+                        let _ = emit_session_log(
+                            &log_state,
+                            &log_session_id,
+                            HealthLevel::Warn,
+                            "ffmpeg-stderr-read-failed",
+                            "diagnosticStream=stderr terminalState=process-monitor-pending",
+                            None,
+                        );
+                        break false;
+                    }
+                };
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
+                }
+
+                if !capture_media_clock_logged
+                    && let Some(message) = capture_media_clock_log_message(trimmed)
+                {
+                    capture_media_clock_logged = true;
+                    let _ = emit_session_log(
+                        &log_state,
+                        &log_session_id,
+                        HealthLevel::Info,
+                        "capture-media-clock-ready",
+                        &message,
+                        None,
+                    );
+                }
+
+                if !first_fatal_ffmpeg_line_logged
+                    && let Some(category) = classify_ffmpeg_fatal_line(trimmed)
+                {
+                    first_fatal_ffmpeg_line_logged = true;
+                    let _ = emit_session_log(
+                        &log_state,
+                        &log_session_id,
+                        HealthLevel::Error,
+                        "ffmpeg-first-fatal-line",
+                        &format!("category={category}"),
+                        None,
+                    );
+                }
+
+                if is_ffmpeg_live_audio_command_ready_evidence(trimmed)
+                    && let Some(session) = ffmpeg_live_audio_session.as_ref()
+                    && session.mark_command_ready()
+                {
+                    let _ = emit_session_log(
+                        &log_state,
+                        &log_session_id,
+                        HealthLevel::Info,
+                        "live-audio-command-ready",
+                        &format!("expectedReplies={}", session.expected_replies()),
+                        None,
+                    );
                 }
 
                 if let Some(reply) = parse_ffmpeg_filter_command_reply(trimmed) {
@@ -1907,14 +2196,30 @@ pub async fn start_session(
                         );
                     }
                 }
+            };
+            if stderr_reached_eof
+                && let Some(session) = ffmpeg_live_audio_session.as_ref()
+                && session.mark_terminal()
+            {
+                let _ = emit_session_log(
+                    &log_state,
+                    &log_session_id,
+                    HealthLevel::Info,
+                    "live-audio-command-terminal",
+                    "terminalSource=stderr-eof",
+                    None,
+                );
             }
         });
+    } else if let Some(session) = ffmpeg_live_audio_stderr_session.as_ref() {
+        session.mark_terminal();
     }
 
     tokio::spawn(monitor_session(
         state.clone(),
         child,
         stop_intent_receiver,
+        ffmpeg_live_audio_monitor_session,
         session_id,
         output_path,
         PostRecordingGate {
@@ -3779,12 +4084,25 @@ async fn monitor_session(
     state: AppState,
     mut child: tokio::process::Child,
     stop_intent: oneshot::Receiver<()>,
+    ffmpeg_live_audio_session: Option<SharedFfmpegLiveAudioSession>,
     session_id: String,
     output_path: Option<PathBuf>,
     gate: PostRecordingGate,
 ) {
     let (status, stop_intent_preceded_exit) =
         wait_for_process_exit_ordered(child.wait(), stop_intent).await;
+    if let Some(session) = ffmpeg_live_audio_session.as_ref()
+        && session.mark_terminal()
+    {
+        let _ = emit_session_log(
+            &state,
+            &session_id,
+            HealthLevel::Info,
+            "live-audio-command-terminal",
+            "terminalSource=process-exit",
+            None,
+        );
+    }
     let finalizing_permit = state.ffmpeg_work.begin_finalizing();
     let mut guard = state.recording.lock().await;
     let monitored_recording = guard
@@ -7632,6 +7950,10 @@ fn capture_audio_filter(input_layout: &InputLayout, audio: &AudioSettings) -> St
             "volume@{FFMPEG_LIVE_MIC_FILTER_TARGET}={}",
             ffmpeg_live_microphone_volume(settings)
         ));
+        // DirectShow devices negotiate their supported input format. Constrain
+        // the graph output instead of rejecting mono/44.1 kHz microphones at
+        // device open; FFmpeg inserts the required resample/upmix conversion.
+        filters.push(DSHOW_AUDIO_OUTPUT_NORMALIZATION_FILTER.to_string());
     }
 
     if has_mono_input {
@@ -7650,6 +7972,13 @@ fn normalized_audio_processing_settings(gain_db: f32, muted: bool) -> AudioProce
         },
         muted,
     }
+}
+
+fn audio_processing_settings_match(
+    left: AudioProcessingSettings,
+    right: AudioProcessingSettings,
+) -> bool {
+    left.gain_db == right.gain_db && left.muted == right.muted
 }
 
 fn ffmpeg_live_microphone_volume(settings: AudioProcessingSettings) -> String {
@@ -7711,6 +8040,63 @@ fn parse_ffmpeg_filter_command_reply(line: &str) -> Option<FfmpegFilterCommandRe
 
 fn is_ffmpeg_filter_command_prompt(line: &str) -> bool {
     line.trim_start().starts_with("Enter command:")
+}
+
+fn is_ffmpeg_live_audio_command_ready_evidence(line: &str) -> bool {
+    let line = line.trim();
+    is_ffmpeg_filter_command_prompt(line)
+        || parse_ffmpeg_filter_command_reply(line).is_some()
+        || line.starts_with("progress=")
+}
+
+fn capture_media_clock_log_message(line: &str) -> Option<String> {
+    parse_ffmpeg_progress_media_seconds(line).map(|seconds| format!("mediaSeconds={seconds:.3}"))
+}
+
+fn parse_ffmpeg_progress_media_seconds(line: &str) -> Option<f64> {
+    let (key, value) = line.trim().split_once('=')?;
+    let seconds = match key {
+        // FFmpeg's legacy `out_time_ms` key is also expressed in microseconds.
+        "out_time_us" | "out_time_ms" => value.parse::<u64>().ok()? as f64 / 1_000_000.0,
+        "out_time" => {
+            let mut parts = value.split(':');
+            let hours = parts.next()?.parse::<f64>().ok()?;
+            let minutes = parts.next()?.parse::<f64>().ok()?;
+            let seconds = parts.next()?.parse::<f64>().ok()?;
+            if parts.next().is_some() {
+                return None;
+            }
+            hours * 3600.0 + minutes * 60.0 + seconds
+        }
+        _ => return None,
+    };
+    seconds
+        .is_finite()
+        .then(|| seconds.clamp(0.0, MAX_CAPTURE_MEDIA_CLOCK_SECONDS))
+}
+
+fn classify_ffmpeg_fatal_line(line: &str) -> Option<&'static str> {
+    let line = line.to_ascii_lowercase();
+    if line.contains("could not find audio only device")
+        || line.contains("could not find audio device")
+    {
+        Some("directshow-device-not-found")
+    } else if line.contains("error opening input")
+        || (line.contains("could not open") && line.contains("audio device"))
+    {
+        Some("input-open-failed")
+    } else if line.contains("error initializing complex filters")
+        || line.contains("error reinitializing filters")
+        || line.contains("error while filtering")
+    {
+        Some("filter-graph-failed")
+    } else if line.contains("could not write header") {
+        Some("output-open-failed")
+    } else if line.contains("conversion failed") {
+        Some("conversion-failed")
+    } else {
+        None
+    }
 }
 
 fn audio_output_channels(input_layout: &InputLayout) -> u16 {
@@ -13484,6 +13870,14 @@ mod tests {
             graph.contains("volume@videorc_live_mic=6.5dB"),
             "ffmpeg-owned mic must carry gain in the graph: {graph}"
         );
+        assert!(
+            graph.contains(DSHOW_AUDIO_OUTPUT_NORMALIZATION_FILTER),
+            "DirectShow input shape must be normalized after device capture: {graph}"
+        );
+        assert!(
+            !native.contains(DSHOW_AUDIO_OUTPUT_NORMALIZATION_FILTER),
+            "native capture is already normalized before it reaches FFmpeg: {native}"
+        );
     }
 
     #[test]
@@ -13577,6 +13971,58 @@ mod tests {
         assert!(!is_ffmpeg_filter_command_prompt(
             "Error writing trailer: Broken pipe"
         ));
+        assert!(is_ffmpeg_live_audio_command_ready_evidence(
+            "progress=continue"
+        ));
+        assert!(is_ffmpeg_live_audio_command_ready_evidence(
+            "Enter command: <target>|all <time>|-1 <command>[ <argument>]"
+        ));
+        assert!(is_ffmpeg_live_audio_command_ready_evidence(
+            "Command reply for stream -1: ret:0 res:"
+        ));
+        assert!(!is_ffmpeg_live_audio_command_ready_evidence(
+            "[dshow @ 000001] Could not open audio device"
+        ));
+    }
+
+    #[test]
+    fn ffmpeg_progress_media_clock_is_sanitized_bounded_and_log_ready() {
+        assert_eq!(
+            capture_media_clock_log_message("out_time_us=2500123").as_deref(),
+            Some("mediaSeconds=2.500")
+        );
+        assert_eq!(
+            capture_media_clock_log_message("out_time=00:01:16.000011").as_deref(),
+            Some("mediaSeconds=76.000")
+        );
+        assert_eq!(
+            capture_media_clock_log_message("out_time_ms=999999999999999").as_deref(),
+            Some("mediaSeconds=604800.000")
+        );
+        assert_eq!(capture_media_clock_log_message("out_time_us=N/A"), None);
+        assert_eq!(capture_media_clock_log_message("progress=continue"), None);
+    }
+
+    #[test]
+    fn ffmpeg_first_fatal_line_classifier_emits_only_bounded_categories() {
+        assert_eq!(
+            classify_ffmpeg_fatal_line(
+                "[dshow @ 000001] Could not find audio only device with name [secret device]"
+            ),
+            Some("directshow-device-not-found")
+        );
+        assert_eq!(
+            classify_ffmpeg_fatal_line("Error opening input file C:\\Users\\secret\\capture.mp4"),
+            Some("input-open-failed")
+        );
+        assert_eq!(
+            classify_ffmpeg_fatal_line("Conversion failed!"),
+            Some("conversion-failed")
+        );
+        assert_eq!(
+            classify_ffmpeg_fatal_line("frame= 60 fps=30 speed=1x"),
+            None
+        );
     }
 
     #[test]
@@ -13598,9 +14044,19 @@ mod tests {
     #[test]
     fn ffmpeg_live_audio_reply_timeout_has_progress_cadence_headroom() {
         assert!(
+            FFMPEG_LIVE_AUDIO_READY_TIMEOUT
+                >= Duration::from_secs(FFMPEG_PROGRESS_REPORT_PERIOD_SECONDS * 4),
+            "physical-device startup gets four progress intervals to become command-ready"
+        );
+        assert!(
             FFMPEG_LIVE_AUDIO_REPLY_TIMEOUT
                 > Duration::from_secs(FFMPEG_PROGRESS_REPORT_PERIOD_SECONDS * 2),
             "a command written just after a progress report needs the next interval plus scheduling headroom"
+        );
+        assert!(
+            FFMPEG_LIVE_AUDIO_READY_TIMEOUT + FFMPEG_LIVE_AUDIO_REPLY_TIMEOUT
+                < Duration::from_secs(30),
+            "backend readiness plus acknowledgement must settle before the renderer RPC deadline"
         );
     }
 
@@ -13654,6 +14110,40 @@ mod tests {
         assert_eq!(written, expected);
         assert!(control.healthy);
         assert_eq!(control.last_applied.gain_db, 6.0);
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_live_audio_control_confirms_identical_healthy_settings_without_io() {
+        let (_sender, replies) = mpsc::unbounded_channel();
+        let initial = AudioProcessingSettings {
+            gain_db: 6.0,
+            muted: false,
+        };
+        let mut control = FfmpegLiveAudioControl::new(1, replies, initial);
+        let (mut stdin, mut ffmpeg_stdin) = tokio::io::duplex(1024);
+
+        timeout(
+            Duration::from_millis(100),
+            control.apply(&mut stdin, initial),
+        )
+        .await
+        .expect("an identical healthy update must not wait for an FFmpeg reply")
+        .expect("the graph already has the requested settings");
+
+        let mut byte = [0u8; 1];
+        assert!(
+            timeout(
+                Duration::from_millis(20),
+                ffmpeg_stdin.read_exact(&mut byte)
+            )
+            .await
+            .is_err(),
+            "an identical healthy update must not write to FFmpeg stdin"
+        );
+        assert!(control.healthy);
+        assert!(!control.state_unknown);
+        assert_eq!(control.last_applied.gain_db, 6.0);
+        assert!(!control.last_applied.muted);
     }
 
     #[tokio::test]
@@ -13821,6 +14311,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_audio_acknowledgement_budget_starts_after_command_readiness() {
+        let (mut child, stdin) = spawn_test_stdin_sink().await;
+        let (reply_sender, replies) = mpsc::unbounded_channel();
+        let (dispatch_sender, mut dispatches) = mpsc::unbounded_channel();
+        let session = Arc::new(FfmpegLiveAudioSessionHandle::new(
+            stdin,
+            FfmpegLiveAudioControl::new(1, replies, AudioProcessingSettings::default())
+                .with_dispatch_sender(dispatch_sender),
+        ));
+        let applying = {
+            let session = session.clone();
+            tokio::spawn(async move {
+                session
+                    .apply(AudioProcessingSettings {
+                        gain_db: 6.0,
+                        muted: false,
+                    })
+                    .await
+            })
+        };
+
+        sleep(Duration::from_millis(20)).await;
+        assert!(!applying.is_finished(), "update must wait for readiness");
+        assert!(
+            session.session.try_lock().is_ok(),
+            "readiness wait must happen before the serialized command lane"
+        );
+
+        assert!(session.mark_command_ready());
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if session.session.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ready update must enter the serialized command lane");
+        assert_eq!(
+            timeout(Duration::from_secs(1), dispatches.recv())
+                .await
+                .expect("written command must publish dispatch evidence"),
+            Some(())
+        );
+        reply_sender
+            .send(FfmpegFilterCommandReply { return_code: 0 })
+            .unwrap();
+        timeout(Duration::from_secs(1), applying)
+            .await
+            .expect("ready command must use the acknowledgement budget")
+            .unwrap()
+            .unwrap();
+
+        session.close_stdin().await.unwrap();
+        timeout(Duration::from_secs(1), child.wait())
+            .await
+            .expect("closed command pipe should reach EOF")
+            .expect("wait for stdin sink");
+    }
+
+    #[tokio::test]
+    async fn live_audio_readiness_timeout_finishes_without_orphaning_a_later_command() {
+        let (mut child, stdin) = spawn_test_stdin_sink().await;
+        let (_reply_sender, replies) = mpsc::unbounded_channel();
+        let (dispatch_sender, mut dispatches) = mpsc::unbounded_channel();
+        let session = Arc::new(FfmpegLiveAudioSessionHandle::new(
+            stdin,
+            FfmpegLiveAudioControl::new(1, replies, AudioProcessingSettings::default())
+                .with_dispatch_sender(dispatch_sender),
+        ));
+
+        let failure = session
+            .apply_with_ready_timeout(
+                AudioProcessingSettings {
+                    gain_db: 6.0,
+                    muted: false,
+                },
+                Duration::from_millis(20),
+            )
+            .await
+            .unwrap_err();
+        assert!(!failure.state_unknown);
+        assert!(!failure.session_ended);
+        let confirmed = failure
+            .confirmed_settings
+            .expect("readiness timeout keeps the previous settings confirmed");
+        assert_eq!(confirmed.gain_db, 0.0);
+        assert!(!confirmed.muted);
+        assert!(failure.error.to_string().contains("did not become ready"));
+
+        assert!(session.mark_command_ready());
+        sleep(Duration::from_millis(20)).await;
+        assert!(
+            dispatches.try_recv().is_err(),
+            "a request that timed out before readiness must never write later"
+        );
+        let last_applied = session.session.lock().await.control.last_applied;
+        assert_eq!(last_applied.gain_db, 0.0);
+        assert!(!last_applied.muted);
+
+        session.close_stdin().await.unwrap();
+        timeout(Duration::from_secs(1), child.wait())
+            .await
+            .expect("closed command pipe should reach EOF")
+            .expect("wait for stdin sink");
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_terminal_interrupt_is_session_ended_not_unknown_audio_state() {
+        let (mut child, stdin) = spawn_test_stdin_sink().await;
+        let (_reply_sender, replies) = mpsc::unbounded_channel();
+        let session = Arc::new(FfmpegLiveAudioSessionHandle::new(
+            stdin,
+            FfmpegLiveAudioControl::new(1, replies, AudioProcessingSettings::default()),
+        ));
+        session.mark_command_ready();
+        let applying = {
+            let session = session.clone();
+            tokio::spawn(async move {
+                session
+                    .apply(AudioProcessingSettings {
+                        gain_db: 6.0,
+                        muted: false,
+                    })
+                    .await
+            })
+        };
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if session.session.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("command must enter its acknowledgement wait");
+
+        assert!(session.mark_terminal());
+        let failure = timeout(Duration::from_millis(100), applying)
+            .await
+            .expect("terminal process state must interrupt acknowledgement promptly")
+            .unwrap()
+            .unwrap_err();
+        assert!(failure.session_ended);
+        assert!(!failure.state_unknown);
+        assert!(failure.confirmed_settings.is_some());
+
+        session.close_stdin().await.unwrap();
+        timeout(Duration::from_secs(1), child.wait())
+            .await
+            .expect("closed command pipe should reach EOF")
+            .expect("wait for stdin sink");
+    }
+
+    #[tokio::test]
     async fn live_audio_ack_wait_releases_global_lock_and_publishes_stop_before_session_wait() {
         let state = test_state();
         let mut events = state.events.subscribe();
@@ -13830,6 +14477,7 @@ mod tests {
             stdin,
             FfmpegLiveAudioControl::new(1, replies, AudioProcessingSettings::default()),
         ));
+        assert!(live_audio_session.mark_command_ready());
         let audio_tracks = vec![microphone_audio_track()];
         let (stop_intent_sender, stop_intent_receiver) = oneshot::channel();
         *state.recording.lock().await = Some(ActiveRecording {
@@ -13904,19 +14552,28 @@ mod tests {
         .expect("Stopping status must be published before the session acknowledgement wait");
         assert_eq!(stopping_event.payload["state"], "stopping");
         assert!(
-            !update.is_finished(),
-            "the live update should still be waiting for its FFmpeg acknowledgement"
-        );
-        assert!(
             !stop.is_finished(),
             "stop should be waiting behind the in-flight session command only after publication"
         );
 
-        reply_sender
-            .send(FfmpegFilterCommandReply { return_code: 0 })
+        let result = timeout(Duration::from_millis(100), update)
+            .await
+            .expect("stop must interrupt an in-flight live-audio acknowledgement")
             .unwrap();
-        let result = update.await.unwrap();
-        assert!(result.applied);
+        assert!(!result.applied);
+        assert_eq!(result.reason_code.as_deref(), Some("session-ended"));
+        let late_result = update_active_audio_processing(
+            &state,
+            AudioProcessingUpdateParams {
+                session_id: "live-audio-lock-test".to_string(),
+                microphone_gain_db: -3.0,
+                microphone_muted: true,
+            },
+        )
+        .await;
+        assert!(!late_result.applied);
+        assert_eq!(late_result.reason_code.as_deref(), Some("session-ended"));
+        drop(reply_sender);
 
         timeout(Duration::from_secs(1), child.wait())
             .await
@@ -13951,7 +14608,8 @@ mod tests {
         .unwrap_err();
 
         assert!(!error.state_unknown);
-        assert!(error.error.to_string().contains("stopping"));
+        assert!(error.session_ended);
+        assert!(error.error.to_string().contains("session ended"));
 
         {
             let mut session = live_audio_session.session.lock().await;
@@ -13965,7 +14623,8 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(sticky_error.state_unknown);
+        assert!(sticky_error.session_ended);
+        assert!(!sticky_error.state_unknown);
         assert!(sticky_error.confirmed_settings.is_none());
 
         live_audio_session.close_stdin().await.unwrap();

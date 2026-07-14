@@ -78,7 +78,8 @@ describe('runtime info helpers', () => {
         VIDEORC_NOTES_WINDOW: '1',
         VIDEORC_NOTES_RECORDING_OVERLAY: '1',
         VIDEORC_COMMENTS_WINDOW: '1',
-        VIDEORC_COMMENTS_RECORDING_OVERLAY: '1'
+        VIDEORC_COMMENTS_RECORDING_OVERLAY: '1',
+        VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE: '1'
       }
     })
 
@@ -92,6 +93,7 @@ describe('runtime info helpers', () => {
       commentsWindowEnabled: true,
       commentsWindowRecordingOverlayAllowed: true,
       previewSmokeMode: true,
+      windowsLiveAudioSmokeMode: true,
       disableAutoPreview: true,
       disableAutoSourcePreview: true,
       nativePreviewSurfaceStageSuspended: true

@@ -7,6 +7,15 @@ import type {
 
 export type LiveAudioProcessingValues = Pick<AudioSettings, 'microphoneGainDb' | 'microphoneMuted'>
 
+export interface LiveAudioProcessingSessionStartSnapshot extends LiveAudioProcessingValues {
+  sessionId: string
+}
+
+export interface LiveAudioProcessingSessionSyncDecision {
+  lastApplied: LiveAudioProcessingValues
+  enqueueDesired: boolean
+}
+
 export interface RejectedLiveAudioProcessingUpdate {
   rollback: LiveAudioProcessingValues
   disableForSession: boolean
@@ -122,6 +131,32 @@ export function activeAudioProcessingUpdateParams(
 }
 
 /**
+ * Seed a newly active session from the exact mic values included in its start
+ * request. Controls can still change while start is in flight; comparing the
+ * active values with this seed preserves that edit without inventing a
+ * redundant live mutation for an untouched start.
+ */
+export function liveAudioProcessingSessionSyncDecision(
+  desired: AudioProcessingUpdateParams,
+  startSnapshot: LiveAudioProcessingSessionStartSnapshot | null
+): LiveAudioProcessingSessionSyncDecision {
+  const startSnapshotMatches = startSnapshot?.sessionId === desired.sessionId
+  const lastApplied = {
+    microphoneGainDb: startSnapshotMatches
+      ? startSnapshot.microphoneGainDb
+      : desired.microphoneGainDb,
+    microphoneMuted: startSnapshotMatches ? startSnapshot.microphoneMuted : desired.microphoneMuted
+  }
+  return {
+    lastApplied,
+    enqueueDesired:
+      !startSnapshotMatches ||
+      desired.microphoneGainDb !== lastApplied.microphoneGainDb ||
+      desired.microphoneMuted !== lastApplied.microphoneMuted
+  }
+}
+
+/**
  * A successful websocket response is not enough: the backend can truthfully
  * reject a live change when this capture has no native post-controls audio
  * path. Roll back only while the UI still shows the rejected request; a late
@@ -139,6 +174,7 @@ export function rejectedLiveAudioProcessingUpdate(input: {
     !['recording', 'streaming'].includes(input.recording.state) ||
     input.recording.sessionId !== input.requested.sessionId ||
     input.result?.applied ||
+    input.result?.reasonCode === 'session-ended' ||
     (input.result && input.result.sessionId !== input.requested.sessionId)
   ) {
     return null

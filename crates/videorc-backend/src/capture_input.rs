@@ -234,10 +234,6 @@ pub fn append_microphone_input(
                 WINDOWS_DSHOW_AUDIO_BUFFER_MS.to_string(),
                 "-thread_queue_size".to_string(),
                 "512".to_string(),
-                "-sample_rate".to_string(),
-                NATIVE_AUDIO_SAMPLE_RATE.to_string(),
-                "-channels".to_string(),
-                NATIVE_AUDIO_CHANNELS.to_string(),
                 "-i".to_string(),
                 format!("audio={device_name}"),
             ]);
@@ -513,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_dshow_microphone_args_request_native_audio_shape() {
+    fn windows_dshow_microphone_args_negotiate_device_shape_before_output_normalization() {
         let microphone = MicrophoneInput::WindowsDshow {
             device_name: "Microphone Array".to_string(),
         };
@@ -533,10 +529,6 @@ mod tests {
                 WINDOWS_DSHOW_AUDIO_BUFFER_MS.to_string(),
                 "-thread_queue_size".to_string(),
                 "512".to_string(),
-                "-sample_rate".to_string(),
-                NATIVE_AUDIO_SAMPLE_RATE.to_string(),
-                "-channels".to_string(),
-                NATIVE_AUDIO_CHANNELS.to_string(),
                 "-i".to_string(),
                 "audio=Microphone Array".to_string(),
             ]

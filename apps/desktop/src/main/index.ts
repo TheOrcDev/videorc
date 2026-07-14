@@ -96,6 +96,10 @@ import { compositorSceneConflictsWithCommitted } from '../shared/native-preview-
 import { applyCommentsSnapshotDelta } from '../shared/comments-snapshot-delta'
 import { compositorStatusFromFrameReady } from '../shared/compositor-frame-ready'
 import {
+  validateWindowsLiveAudioSmokeRequest,
+  type WindowsLiveAudioSmokeRequest
+} from '../shared/windows-live-audio-smoke'
+import {
   parseMainBackendWireMessage,
   parseMainCompositorFrameReadyEvent,
   parseMainCompositorStatusEvent,
@@ -638,9 +642,11 @@ const packagedSmokeHarnessCapability =
   app.isPackaged && process.env.VIDEORC_PACKAGED_SMOKE_TEST === '1'
     ? process.env.VIDEORC_SMOKE_COMMAND_CAPABILITY
     : undefined
+const windowsLiveAudioSmokeMode = process.env.VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE === '1'
 const smokeCommandServerEnabled = smokeCommandServerAllowed(
   process.env.VIDEORC_SMOKE_PREVIEW_MOTION === '1' ||
-    process.env.VIDEORC_SMOKE_COMMAND_SERVER === '1',
+    process.env.VIDEORC_SMOKE_COMMAND_SERVER === '1' ||
+    windowsLiveAudioSmokeMode,
   app.isPackaged,
   packagedSmokeHarnessCapability
 )
@@ -7840,6 +7846,20 @@ async function runSmokePreviewMotionCommand(
     throw new Error('Main window is not ready for preview motion smoke.')
   }
 
+  if (command === 'windows-live-audio-harness') {
+    if (!app.isPackaged || !packagedSmokeHarnessCapability || !windowsLiveAudioSmokeMode) {
+      throw new Error('Windows live audio harness is unavailable in this app mode.')
+    }
+    const request = validateWindowsLiveAudioSmokeRequest(params)
+    if (!request) {
+      throw new Error('Invalid Windows live audio harness action.')
+    }
+    return mainWindow.webContents.executeJavaScript(
+      windowsLiveAudioSmokeRendererScript(request),
+      true
+    )
+  }
+
   if (command === 'resize-window') {
     const width = typeof params.width === 'number' ? params.width : 1180
     const height = typeof params.height === 'number' ? params.height : 780
@@ -9241,6 +9261,23 @@ function smokeCompositorStatusFromSceneParams(
     updatedAt: new Date().toISOString(),
     message: 'Smoke compositor scene update.'
   }
+}
+
+function windowsLiveAudioSmokeRendererScript(request: WindowsLiveAudioSmokeRequest): string {
+  const requestJson = jsonForInlineScript(request)
+  return `
+    (async () => {
+      const deadline = performance.now() + 15000;
+      while (performance.now() < deadline) {
+        const harness = window.__videorcWindowsLiveAudioHarness;
+        if (typeof harness === 'function') {
+          return harness(${requestJson});
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+      }
+      throw new Error('Windows live audio renderer harness did not become ready.');
+    })()
+  `
 }
 
 function smokeRendererScript(command: string, params: Record<string, unknown>): string {

@@ -96,7 +96,8 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'select-screen-device',
   'set-vibrancy',
   'suspend-native-preview-surface',
-  'window-bounds-storm'
+  'window-bounds-storm',
+  'windows-live-audio-harness'
 ])
 
 /**
@@ -247,7 +248,8 @@ export const PACKAGED_SMOKE_COMMAND_NAMES = new Set([
   'resize-window',
   'restore-window',
   'resume-native-preview-surface',
-  'suspend-native-preview-surface'
+  'suspend-native-preview-surface',
+  'windows-live-audio-harness'
 ])
 
 export type ValidatedSmokeCommand = {

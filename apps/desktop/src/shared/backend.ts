@@ -1178,6 +1178,7 @@ export interface AudioProcessingUpdateResult extends AudioProcessingUpdateParams
     | 'native-audio-unavailable'
     | 'live-audio-control-unavailable'
     | 'live-audio-control-state-unknown'
+    | 'session-ended'
   /** Present when the backend can conclusively report settings remaining after rejection. */
   confirmedMicrophoneGainDb?: number
   /** Present when the backend can conclusively report settings remaining after rejection. */
@@ -2512,6 +2513,8 @@ export interface RuntimeInfo {
   commentsWindowEnabled?: boolean
   commentsWindowRecordingOverlayAllowed?: boolean
   previewSmokeMode?: boolean
+  /** Enables the fixed, packaged Windows live-microphone acceptance bridge. */
+  windowsLiveAudioSmokeMode?: boolean
   disableAutoPreview?: boolean
   disableAutoSourcePreview?: boolean
   nativePreviewSurfaceStageSuspended?: boolean

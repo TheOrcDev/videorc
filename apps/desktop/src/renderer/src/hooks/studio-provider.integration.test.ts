@@ -35,6 +35,10 @@ import {
 import { DEFAULT_BASIC_ENTITLEMENTS } from '../lib/entitlements'
 import { defaultCaptureConfig } from '../lib/capture'
 import { deriveNoiseCleanupView } from '../lib/noise-cleanup-view'
+import type {
+  WindowsLiveAudioSmokeRequest,
+  WindowsLiveAudioSmokeState
+} from '../../../shared/windows-live-audio-smoke'
 
 type BackendCommand = { id: string; method: string; params?: unknown }
 
@@ -227,6 +231,7 @@ function compositorFor(scene: Scene, layout: LayoutSettings, revision: number): 
 class StudioBackend {
   sockets: TestWebSocket[] = []
   commands: BackendCommand[] = []
+  sentCommands: BackendCommand[] = []
   currentLayout = defaultCaptureConfig.layout
   currentScene = sceneForLayout(this.currentLayout)
   revision = 1
@@ -240,6 +245,10 @@ class StudioBackend {
   noiseCleanupJobs: NoiseCleanupJob[] = []
   sourceMutationRevision = 4
   layoutResponseDelayMs = 0
+  sessionStartResponseDelayMs = 0
+  emitRecordingStatusBeforeStartResponse = false
+  audioProcessingResponseDelayMs = 0
+  audioProcessingReasonCode: 'session-ended' | null = null
 
   invalidateCompletedNoiseCleanup(message: string): void {
     this.sourceMutationRevision += 1
@@ -525,9 +534,10 @@ class StudioBackend {
       case 'audio.processing.update':
         return {
           sessionId: params.sessionId,
-          applied: true,
+          applied: this.audioProcessingReasonCode === null,
           microphoneGainDb: params.microphoneGainDb,
-          microphoneMuted: params.microphoneMuted
+          microphoneMuted: params.microphoneMuted,
+          ...(this.audioProcessingReasonCode ? { reasonCode: this.audioProcessingReasonCode } : {})
         }
       case 'session.start':
         this.recordingState = 'recording'
@@ -570,6 +580,25 @@ class TestWebSocket {
 
   send(raw: string): void {
     const command = JSON.parse(raw) as BackendCommand
+    TestWebSocket.backend.sentCommands.push(command)
+    if (
+      command.method === 'session.start' &&
+      TestWebSocket.backend.emitRecordingStatusBeforeStartResponse
+    ) {
+      queueMicrotask(() => {
+        this.onmessage?.({
+          data: JSON.stringify({
+            event: 'recording.status',
+            payload: {
+              state: 'recording',
+              sessionId: 'session-1',
+              startedAt: now,
+              message: 'Recording.'
+            }
+          })
+        })
+      })
+    }
     const respond = (): void => {
       try {
         this.onmessage?.({
@@ -598,11 +627,15 @@ class TestWebSocket {
         })
       }
     }
-    if (
-      command.method.startsWith('scene.layout.apply_') &&
-      TestWebSocket.backend.layoutResponseDelayMs > 0
-    ) {
-      setTimeout(respond, TestWebSocket.backend.layoutResponseDelayMs)
+    const responseDelayMs = command.method.startsWith('scene.layout.apply_')
+      ? TestWebSocket.backend.layoutResponseDelayMs
+      : command.method === 'session.start'
+        ? TestWebSocket.backend.sessionStartResponseDelayMs
+        : command.method === 'audio.processing.update'
+          ? TestWebSocket.backend.audioProcessingResponseDelayMs
+          : 0
+    if (responseDelayMs > 0) {
+      setTimeout(respond, responseDelayMs)
     } else {
       queueMicrotask(respond)
     }
@@ -702,6 +735,10 @@ describe('real StudioProvider lifecycle', () => {
       'camera:1',
       'mic:1'
     ])
+    expect(
+      (window as Window & { __videorcWindowsLiveAudioHarness?: unknown })
+        .__videorcWindowsLiveAudioHarness
+    ).toBeUndefined()
     expect(latest()?.core.captureConfig.sources).toMatchObject({
       screenId: 'screen:dxgi:0000000000000001:1',
       cameraId: 'camera:1',
@@ -750,6 +787,9 @@ describe('real StudioProvider lifecycle', () => {
     expect(backend.commands.some((command) => command.method === 'session.start')).toBe(true)
     await waitForObservation(() => latest()?.recording.recording.state === 'recording')
     expect(
+      backend.commands.filter((command) => command.method === 'audio.processing.update')
+    ).toEqual([])
+    expect(
       backend.commands.find((command) => command.method === 'session.start')?.params
     ).toMatchObject({
       sources: {
@@ -770,6 +810,300 @@ describe('real StudioProvider lifecycle', () => {
       sessionId: 'session-1',
       durationMs: 1_000
     })
+  })
+
+  it('applies one latest microphone edit made while the session is starting', async () => {
+    const backend = new StudioBackend()
+    backend.sessionStartResponseDelayMs = 100
+    backend.emitRecordingStatusBeforeStartResponse = true
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+
+    let startPromise: Promise<void> | undefined
+    await act(async () => {
+      startPromise = latest()?.core.startSession()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'session.start')
+    )
+    const startAudio = (
+      backend.sentCommands.find((command) => command.method === 'session.start')?.params as {
+        audio?: { microphoneGainDb?: number; microphoneMuted?: boolean }
+      }
+    ).audio
+    expect(startAudio).toMatchObject({ microphoneGainDb: 0, microphoneMuted: false })
+
+    await act(async () => {
+      latest()?.core.setCaptureConfig((current) => ({
+        ...current,
+        audio: { ...current.audio, microphoneGainDb: 6, microphoneMuted: true }
+      }))
+    })
+    await act(async () => {
+      await startPromise
+    })
+    await waitForObservation(
+      () =>
+        backend.sentCommands.filter((command) => command.method === 'audio.processing.update')
+          .length === 1
+    )
+
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'audio.processing.update')
+    ).toEqual([
+      expect.objectContaining({
+        params: {
+          sessionId: 'session-1',
+          microphoneGainDb: 6,
+          microphoneMuted: true
+        }
+      })
+    ])
+  })
+
+  it('drops pending microphone edits without warning when the capture session ended', async () => {
+    const backend = new StudioBackend()
+    backend.audioProcessingResponseDelayMs = 100
+    backend.audioProcessingReasonCode = 'session-ended'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      await latest()?.core.startSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+
+    await act(async () => {
+      latest()?.core.setCaptureConfig((current) => ({
+        ...current,
+        audio: { ...current.audio, microphoneGainDb: 3 }
+      }))
+    })
+    await waitForObservation(
+      () =>
+        backend.sentCommands.filter((command) => command.method === 'audio.processing.update')
+          .length === 1
+    )
+    await act(async () => {
+      latest()?.core.setCaptureConfig((current) => ({
+        ...current,
+        audio: { ...current.audio, microphoneGainDb: 9, microphoneMuted: true }
+      }))
+      await new Promise((resolve) => setTimeout(resolve, 150))
+    })
+
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'audio.processing.update')
+    ).toHaveLength(1)
+    expect(latest()?.core.captureConfig.audio).toMatchObject({
+      microphoneGainDb: 9,
+      microphoneMuted: true
+    })
+    expect(latest()?.core.lastError).toBeNull()
+  })
+
+  it('drives the real StudioProvider start, audio queue, and stop through the packaged harness', async () => {
+    const backend = new StudioBackend()
+    backend.audioProcessingResponseDelayMs = 50
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      windowsLiveAudioSmokeMode: true
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+
+    type HarnessWindow = Window & {
+      __videorcWindowsLiveAudioHarness?: (
+        request: WindowsLiveAudioSmokeRequest
+      ) => Promise<WindowsLiveAudioSmokeState>
+    }
+    const invoke = (request: WindowsLiveAudioSmokeRequest): Promise<WindowsLiveAudioSmokeState> => {
+      const harness = (window as HarnessWindow).__videorcWindowsLiveAudioHarness
+      if (!harness) throw new Error('Windows live audio harness is not installed.')
+      return harness(request)
+    }
+    await waitForObservation(
+      () =>
+        observations.at(-1)?.core.wsStatus === 'connected' &&
+        typeof (window as HarnessWindow).__videorcWindowsLiveAudioHarness === 'function'
+    )
+
+    let state: WindowsLiveAudioSmokeState | undefined
+    await act(async () => {
+      state = await invoke({
+        action: 'configure',
+        screenId: 'screen:dxgi:0000000000000001:1',
+        cameraId: 'camera:1',
+        microphoneId: 'mic:1'
+      })
+    })
+    expect(state).toMatchObject({
+      sources: {
+        screenId: 'screen:dxgi:0000000000000001:1',
+        cameraId: 'camera:1',
+        microphoneId: 'mic:1',
+        testPattern: false
+      },
+      layout: { layoutPreset: 'screen-camera' },
+      video: { width: 1280, height: 720, fps: 30 },
+      output: { recordEnabled: true, streamEnabled: false },
+      audio: { microphoneGainDb: 0, microphoneMuted: false }
+    })
+
+    await act(async () => {
+      state = await invoke({ action: 'start' })
+    })
+    expect(state?.recording).toEqual({ state: 'recording', sessionId: 'session-1' })
+    expect(
+      backend.commands.find((command) => command.method === 'session.start')?.params
+    ).toMatchObject({
+      sources: {
+        screenId: 'screen:dxgi:0000000000000001:1',
+        cameraId: 'camera:1',
+        microphoneId: 'mic:1'
+      },
+      layout: { layoutPreset: 'screen-camera' },
+      output: {
+        recordEnabled: true,
+        streamEnabled: false,
+        video: { width: 1280, height: 720, fps: 30 }
+      },
+      audio: { microphoneGainDb: 0, microphoneMuted: false }
+    })
+
+    await act(async () => {
+      await invoke({ action: 'set-audio', microphoneGainDb: 6, microphoneMuted: true })
+    })
+    await waitForObservation(
+      () =>
+        backend.sentCommands.filter((command) => command.method === 'audio.processing.update')
+          .length >= 1
+    )
+    await act(async () => {
+      await invoke({ action: 'rapid-burst' })
+    })
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await act(async () => {
+        state = await invoke({ action: 'state' })
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      })
+      const observed = state
+      if (
+        observed &&
+        observed.telemetry.requestedCount >= 2 &&
+        observed.telemetry.requestedCount === observed.telemetry.settledCount &&
+        observed.telemetry.lastSettled?.settings?.microphoneGainDb === 0 &&
+        observed.telemetry.lastSettled.settings.microphoneMuted === false
+      ) {
+        break
+      }
+    }
+    expect(state?.audio).toEqual({ microphoneGainDb: 0, microphoneMuted: false })
+    expect(state?.telemetry.requestedCount).toBeGreaterThanOrEqual(2)
+    expect(state?.telemetry.settledCount).toBe(state?.telemetry.requestedCount)
+    expect(state?.telemetry.lastSettled).toMatchObject({
+      applied: true,
+      settings: { microphoneGainDb: 0, microphoneMuted: false }
+    })
+
+    await act(async () => {
+      state = await invoke({ action: 'stop' })
+    })
+    expect(state?.recording).toEqual({ state: 'idle', sessionId: 'session-1' })
+    expect(JSON.stringify(state)).not.toContain('recordings')
   })
 
   it('refreshes entitlements on focus and keeps cleanup jobs durable across row lifetimes', async () => {
@@ -1541,6 +1875,7 @@ function createVideorcApi(options: {
     drainHostCommands: (generation?: number) => Promise<PreviewSurfaceStatus>
     registerEmitter?: (emit: (name: string, value: unknown) => void) => void
   }
+  windowsLiveAudioSmokeMode?: boolean
 }): VideorcApi {
   const listeners = new Map<string, Set<(value: unknown) => void>>()
   const subscribe = (name: string, callback: (value: unknown) => void): (() => void) => {
@@ -1585,6 +1920,7 @@ function createVideorcApi(options: {
         capturePermissionTargetName: 'Videorc',
         capturePermissionTargetPath: 'C:\\Videorc.exe',
         nativePreviewSurfaceProofEnabled: Boolean(options.nativePreview),
+        windowsLiveAudioSmokeMode: options.windowsLiveAudioSmokeMode === true,
         disableAutoPreview: !options.nativePreview
       }),
       getBundledBackgroundAssets: async () => [],
@@ -1659,6 +1995,7 @@ function installProviderTestEnvironment(api: VideorcApi): {
     clearTimeout,
     setInterval,
     clearInterval,
+    requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(0), 0),
     addEventListener: eventTarget.addEventListener.bind(eventTarget),
     removeEventListener: eventTarget.removeEventListener.bind(eventTarget),
     dispatchEvent: eventTarget.dispatchEvent.bind(eventTarget),

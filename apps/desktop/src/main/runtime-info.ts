@@ -40,6 +40,7 @@ export interface RuntimeInfoInput {
       | 'VIDEORC_NOTES_RECORDING_OVERLAY'
       | 'VIDEORC_COMMENTS_WINDOW'
       | 'VIDEORC_COMMENTS_RECORDING_OVERLAY'
+      | 'VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE'
     >
   >
 }
@@ -113,6 +114,7 @@ export function buildRuntimeInfo({
     commentsWindowRecordingOverlayAllowed:
       env.VIDEORC_COMMENTS_WINDOW !== '0' && env.VIDEORC_COMMENTS_RECORDING_OVERLAY !== '0',
     previewSmokeMode: env.VIDEORC_SMOKE_PREVIEW_MOTION === '1',
+    windowsLiveAudioSmokeMode: env.VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE === '1',
     disableAutoPreview: env.VIDEORC_DISABLE_AUTO_PREVIEW === '1',
     disableAutoSourcePreview: env.VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW === '1',
     nativePreviewSurfaceStageSuspended: env.VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED === '1'
