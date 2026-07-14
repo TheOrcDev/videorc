@@ -229,12 +229,35 @@ describe('backend RPC contract', () => {
         { operationId: 'op-1', sessionId: 'session-1', pathCount: 1, blockedPathCount: 0 }
       ])
     ).toEqual([{ operationId: 'op-1', sessionId: 'session-1', pathCount: 1, blockedPathCount: 0 }])
+    expect(
+      validateBackendRpcResult('sessions.delete.pending', [
+        { operationId: 'op-1', sessionId: 'session-1', pathCount: 2, blockedPathCount: 1 }
+      ])
+    ).toEqual([{ operationId: 'op-1', sessionId: 'session-1', pathCount: 2, blockedPathCount: 1 }])
     expect(() =>
       validateBackendRpcParams('sessions.delete', {
         sessionIds: ['session-1'],
         deleteFiles: true
       })
     ).toThrow('deleteFiles must be a known field')
+  })
+
+  it('rejects private deletion paths from renderer-safe delete results', () => {
+    const operation = {
+      operationId: 'op-1',
+      sessionId: 'session-1',
+      pathCount: 2,
+      blockedPathCount: 1
+    }
+
+    for (const method of ['sessions.delete', 'sessions.delete.pending']) {
+      expect(() =>
+        validateBackendRpcResult(method, [{ ...operation, paths: ['/private/quarantine.mp4'] }])
+      ).toThrow('paths must be a known field')
+      expect(() =>
+        validateBackendRpcResult(method, [{ ...operation, blockedPaths: ['/private/blocked.mp4'] }])
+      ).toThrow('blockedPaths must be a known field')
+    }
   })
 
   it('types and bounds cursor pagination for recorded comments', () => {

@@ -563,6 +563,16 @@ const sessionSummarySchema = boundedSemanticValue(
   )
 )
 
+const sessionDeletionOperationSchema: RuntimeSchema<SessionDeletionOperation> = objectSchema(
+  {
+    operationId: boundedString,
+    sessionId: boundedString,
+    pathCount: numberSchema({ integer: true, min: 0, max: 16 }),
+    blockedPathCount: numberSchema({ integer: true, min: 0, max: 16 })
+  },
+  { allowUnknown: false }
+)
+
 const noiseCleanupJobFieldsSchema = objectSchema(
   {
     id: boundedString,
@@ -793,33 +803,11 @@ const runtimeContracts = {
       },
       { allowUnknown: false }
     ),
-    result: arraySchema(
-      objectSchema(
-        {
-          operationId: boundedString,
-          sessionId: boundedString,
-          pathCount: numberSchema({ integer: true, min: 0, max: 16 }),
-          blockedPathCount: numberSchema({ integer: true, min: 0, max: 16 })
-        },
-        { allowUnknown: false }
-      ),
-      { maxLength: 500 }
-    )
+    result: arraySchema(sessionDeletionOperationSchema, { maxLength: 500 })
   },
   'sessions.delete.pending': {
     params: undefinedSchema,
-    result: arraySchema(
-      objectSchema(
-        {
-          operationId: boundedString,
-          sessionId: boundedString,
-          paths: arraySchema(boundedPath, { maxLength: 16 }),
-          blockedPaths: optionalSchema(arraySchema(boundedPath, { maxLength: 16 }))
-        },
-        { allowUnknown: false }
-      ),
-      { maxLength: 500 }
-    )
+    result: arraySchema(sessionDeletionOperationSchema, { maxLength: 500 })
   },
   'noiseCleanup.start': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),

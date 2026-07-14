@@ -148,8 +148,10 @@ describe('shared high-risk protocol fixture', () => {
     expect(
       validateBackendRpcParams('sessions.delete', fixtures.comments.deleteParams)
     ).toStrictEqual(fixtures.comments.deleteParams)
-    expect(
-      validateBackendRpcResult('sessions.delete', [fixtures.comments.deletionOperation])
-    ).toStrictEqual([fixtures.comments.deletionOperation])
+    for (const method of ['sessions.delete', 'sessions.delete.pending']) {
+      expect(validateBackendRpcResult(method, [fixtures.comments.deletionOperation])).toStrictEqual(
+        [fixtures.comments.deletionOperation]
+      )
+    }
   })
 })

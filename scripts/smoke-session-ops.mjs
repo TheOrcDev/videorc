@@ -106,10 +106,23 @@ try {
       (operation) =>
         typeof operation.operationId === 'string' &&
         operation.pathCount === 1 &&
+        operation.blockedPathCount === 0 &&
         !Object.hasOwn(operation, 'paths') &&
         !Object.hasOwn(operation, 'blockedPaths')
     ),
     'delete prepare should return only renderer-safe operation handles'
+  )
+  const pendingOperations = await rpc('sessions.delete.pending')
+  assert.deepEqual(
+    pendingOperations,
+    operations,
+    'pending delete should return the same non-empty operation handles as prepare'
+  )
+  assert.ok(
+    pendingOperations.every(
+      (operation) => !Object.hasOwn(operation, 'paths') && !Object.hasOwn(operation, 'blockedPaths')
+    ),
+    'pending delete should not expose private path authority to the renderer'
   )
   sessions = await rpc('sessions.list', { limit: 200 })
   assert.equal(sessions.length, 0, 'prepared sessions should be hidden immediately')
@@ -203,8 +216,9 @@ function makeRpc(ws) {
     if (typeof message.id !== 'string' || !pending.has(message.id)) {
       return // server events
     }
-    const { resolve, reject, expectError } = pending.get(message.id)
+    const { resolve, reject, expectError, timer } = pending.get(message.id)
     pending.delete(message.id)
+    clearTimeout(timer)
     if (message.ok) {
       if (expectError) {
         reject(new Error(`expected an error but ${message.id} succeeded`))
@@ -220,14 +234,20 @@ function makeRpc(ws) {
   const send = (method, params, expectError) =>
     new Promise((resolve, reject) => {
       const id = `smoke-${nextId++}-${method}`
-      pending.set(id, { resolve, reject, expectError })
-      ws.send(JSON.stringify({ id, method, params: params ?? {} }))
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (pending.has(id)) {
           pending.delete(id)
           reject(new Error(`${method} timed out`))
         }
       }, timeoutMs)
+      pending.set(id, { resolve, reject, expectError, timer })
+      try {
+        ws.send(JSON.stringify({ id, method, params: params ?? {} }))
+      } catch (error) {
+        clearTimeout(timer)
+        pending.delete(id)
+        reject(error)
+      }
     })
   const rpc = (method, params) => send(method, params, false)
   rpc.expectError = (method, params) => send(method, params, true)
