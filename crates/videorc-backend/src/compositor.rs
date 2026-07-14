@@ -200,6 +200,18 @@ pub struct CompositorRuntime {
     stop_tx: Option<watch::Sender<bool>>,
     render_task: Option<JoinHandle<()>>,
     worker_activity: Arc<CompositorWorkerActivity>,
+    /// Writable dimensions for the current preview-only render loop. Recording
+    /// compositors deliberately keep this `None`: their canvas is fixed at
+    /// session start and must never follow a later preview-window resize.
+    preview_render_dimensions: Option<Arc<AtomicU64>>,
+}
+
+fn pack_render_dimensions(width: u32, height: u32) -> u64 {
+    (u64::from(width.max(1)) << 32) | u64::from(height.max(1))
+}
+
+fn unpack_render_dimensions(packed: u64) -> (u32, u32) {
+    (((packed >> 32) as u32).max(1), (packed as u32).max(1))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,8 +270,7 @@ pub struct CompositorAuxiliaryOutput {
 struct CompositorRenderLoopParams {
     run_id: String,
     target_fps: u32,
-    width: u32,
-    height: u32,
+    render_dimensions: Arc<AtomicU64>,
     frame_consumer: CompositorFrameConsumer,
     stream_output: Option<CompositorAuxiliaryOutput>,
     caption_overlay_on_primary: bool,
@@ -829,6 +840,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         stop_tx: None,
         render_task: None,
         worker_activity: Arc::new(CompositorWorkerActivity::default()),
+        preview_render_dimensions: None,
     }
 }
 
@@ -889,6 +901,14 @@ pub async fn start_synthetic_compositor(
     let stream_frame_store = params
         .stream_output
         .map(|_| Arc::new(StdMutex::new(FrameStore::new(2))));
+    let render_dimensions = Arc::new(AtomicU64::new(pack_render_dimensions(
+        status.width,
+        status.height,
+    )));
+    let preview_render_dimensions = (params.frame_consumer
+        == CompositorFrameConsumer::NativePreview
+        && params.stream_output.is_none())
+    .then(|| render_dimensions.clone());
 
     {
         let mut compositor = state.compositor.lock().await;
@@ -898,6 +918,7 @@ pub async fn start_synthetic_compositor(
         compositor.status = status.clone();
         compositor.run_id = Some(run_id.clone());
         compositor.stop_tx = Some(stop_tx);
+        compositor.preview_render_dimensions = preview_render_dimensions;
         // Spawn and publish the worker handle while holding the ownership lock. A concurrent
         // replacement can therefore never observe a live run id without the handle it must
         // await, avoiding the ineffective `abort` race of `spawn_blocking` workers.
@@ -906,8 +927,7 @@ pub async fn start_synthetic_compositor(
             CompositorRenderLoopParams {
                 run_id: run_id.clone(),
                 target_fps,
-                width: status.width,
-                height: status.height,
+                render_dimensions,
                 frame_consumer: params.frame_consumer,
                 stream_output: params.stream_output,
                 caption_overlay_on_primary: params.caption_overlay_on_primary,
@@ -924,16 +944,28 @@ pub async fn start_synthetic_compositor(
     status
 }
 
-pub async fn update_compositor_surface_size(
+pub async fn resize_preview_compositor_if_run_id(
     state: &AppState,
+    expected_run_id: &str,
     width: u32,
     height: u32,
-) -> CompositorStatus {
+) -> Option<CompositorStatus> {
     let status = {
         let mut compositor = state.compositor.lock().await;
+        if compositor.run_id.as_deref() != Some(expected_run_id) {
+            return None;
+        }
+        let dimensions = compositor.preview_render_dimensions.clone()?;
         compositor.status.width = width.max(1);
         compositor.status.height = height.max(1);
         compositor.status.updated_at = Utc::now().to_rfc3339();
+        // One packed atomic keeps width/height coherent without tying the hot
+        // render loop to the compositor mutex. Relaxed ordering is sufficient:
+        // no other state is published through this value.
+        dimensions.store(
+            pack_render_dimensions(compositor.status.width, compositor.status.height),
+            Ordering::Relaxed,
+        );
         compositor.status.clone()
     };
     state.emit_event("compositor.status", status.clone());
@@ -947,7 +979,7 @@ pub async fn update_compositor_surface_size(
         "diagnostics.stats",
         apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
     );
-    status
+    Some(status)
 }
 
 #[cfg(test)]
@@ -989,6 +1021,7 @@ pub async fn stop_compositor_if_run_id(state: &AppState, run_id: &str) -> Option
         let mut compositor = state.compositor.lock().await;
         if compositor.run_id.as_deref() == Some(run_id) {
             compositor.run_id = None;
+            compositor.preview_render_dimensions = None;
         }
         compositor.latest_frame_evidence = None;
         compositor.stream_frame_store = None;
@@ -1503,6 +1536,7 @@ async fn stop_current_compositor(state: &AppState) -> bool {
     }
     let mut compositor = state.compositor.lock().await;
     compositor.run_id = None;
+    compositor.preview_render_dimensions = None;
     compositor.latest_frame_evidence = None;
     compositor.stream_frame_store = None;
     true
@@ -1571,8 +1605,7 @@ async fn run_synthetic_compositor_loop(
     let CompositorRenderLoopParams {
         run_id,
         target_fps,
-        width,
-        height,
+        render_dimensions,
         frame_consumer,
         stream_output,
         caption_overlay_on_primary,
@@ -1657,6 +1690,12 @@ async fn run_synthetic_compositor_loop(
                 let render_started_at = Instant::now();
                 frames_rendered = frames_rendered.saturating_add(1);
                 frames_in_window = frames_in_window.saturating_add(1);
+                // Preview bounds can change without restarting the compositor
+                // (including portrait <-> landscape). Re-read every tick so
+                // the next published frame and Metal target adopt the new
+                // canvas instead of retaining the loop's startup dimensions.
+                let (width, height) =
+                    unpack_render_dimensions(render_dimensions.load(Ordering::Relaxed));
                 let published =
                     publish_compositor_frame(
                         &state,

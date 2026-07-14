@@ -1,6 +1,6 @@
 use crate::compositor::{
-    CompositorFrameConsumer, CompositorStartParams, start_synthetic_compositor,
-    stop_compositor_if_run_id, update_compositor_surface_size,
+    CompositorFrameConsumer, CompositorStartParams, resize_preview_compositor_if_run_id,
+    start_synthetic_compositor, stop_compositor_if_run_id,
 };
 use crate::diagnostics::{apply_preview_surface_resize, apply_runtime_diagnostics_snapshot};
 use crate::native_preview_host::{
@@ -155,7 +155,7 @@ async fn try_reuse_live_surface(
         return None;
     }
 
-    let status = {
+    let (status, preview_run_id) = {
         let mut slot = state.preview_surface.lock().await;
         if slot.status.state != PreviewSurfaceState::Live {
             return None;
@@ -182,12 +182,13 @@ async fn try_reuse_live_surface(
             slot.run_id = None;
         }
         slot.status = next.clone();
-        next
+        (next, slot.run_id.clone())
     };
 
     register_preview_surface_resize(state).await;
-    if !capture_owns_compositor(state) && preview_surface_owns_current_compositor(state).await {
-        update_compositor_surface_size(state, status.width, status.height).await;
+    if let Some(run_id) = preview_run_id {
+        let _ =
+            resize_preview_compositor_if_run_id(state, &run_id, status.width, status.height).await;
     }
     state.emit_event("preview.surface.status", status.clone());
     Some(status)
@@ -198,7 +199,7 @@ pub async fn update_preview_surface_bounds(
     params: PreviewSurfaceBoundsParams,
 ) -> PreviewSurfaceStatus {
     let _lifecycle = state.preview_surface_lifecycle.lock().await;
-    let status = {
+    let (status, preview_run_id) = {
         let mut slot = state.preview_surface.lock().await;
         let mut next = slot.status.clone();
         next.width = surface_dimension(params.bounds.width);
@@ -220,12 +221,13 @@ pub async fn update_preview_surface_bounds(
         }
         next.pending_host_command_count = pending_host_command_count(&slot);
         slot.status = next.clone();
-        next
+        (next, slot.run_id.clone())
     };
 
     register_preview_surface_resize(state).await;
-    if !capture_owns_compositor(state) && preview_surface_owns_current_compositor(state).await {
-        update_compositor_surface_size(state, status.width, status.height).await;
+    if let Some(run_id) = preview_run_id {
+        let _ =
+            resize_preview_compositor_if_run_id(state, &run_id, status.width, status.height).await;
     }
     state.emit_event("preview.surface.status", status.clone());
     status
@@ -575,7 +577,10 @@ fn unavailable_status(message: Option<String>) -> PreviewSurfaceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compositor::{compositor_latest_frame_evidence, compositor_status, stop_compositor};
+    use crate::compositor::{
+        CompositorFrameEvidence, compositor_latest_frame_evidence, compositor_status,
+        stop_compositor,
+    };
     use crate::native_preview_host::{NativePreviewHostActivation, NativePreviewHostCommandKind};
     use crate::protocol::{CompositorState, PreviewSurfaceBounds};
     use crate::storage::Database;
@@ -902,20 +907,27 @@ mod tests {
         assert_eq!(status.height, 360);
     }
 
-    async fn wait_for_frame_dimensions(state: &AppState, width: u32, height: u32) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    async fn wait_for_frame_dimensions_after(
+        state: &AppState,
+        width: u32,
+        height: u32,
+        after_sequence: Option<u64>,
+    ) -> Result<CompositorFrameEvidence, String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            if let Some(evidence) = compositor_latest_frame_evidence(state).await
+            let latest = compositor_latest_frame_evidence(state).await;
+            if let Some(evidence) = latest
                 && evidence.width == width
                 && evidence.height == height
+                && after_sequence.is_none_or(|sequence| evidence.sequence > sequence)
             {
-                return;
+                return Ok(evidence);
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "compositor never published a {width}x{height} frame (latest: {:?})",
-                compositor_latest_frame_evidence(state).await
-            );
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "compositor never published a {width}x{height} frame after sequence {after_sequence:?} (latest: {latest:?})"
+                ));
+            }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
@@ -931,28 +943,53 @@ mod tests {
         create_preview_surface(
             state.clone(),
             PreviewSurfaceCreateParams {
-                bounds: bounds(960.0, 540.0),
+                bounds: bounds(160.0, 90.0),
                 target_fps: 60,
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
         .await;
-        wait_for_frame_dimensions(&state, 960, 540).await;
+        let verification = async {
+            let initial = wait_for_frame_dimensions_after(&state, 160, 90, None).await?;
+            let initial_status = compositor_status(&state).await;
 
-        update_preview_surface_bounds(
-            &state,
-            PreviewSurfaceBoundsParams {
-                bounds: bounds(540.0, 960.0),
-            },
-        )
+            update_preview_surface_bounds(
+                &state,
+                PreviewSurfaceBoundsParams {
+                    bounds: bounds(90.0, 160.0),
+                },
+            )
+            .await;
+            let portrait =
+                wait_for_frame_dimensions_after(&state, 90, 160, Some(initial.sequence)).await?;
+
+            // The owner's 2026-07-14 regression was this reverse direction:
+            // horizontal mode returned while the compositor kept publishing
+            // the previous portrait canvas inside the landscape preview.
+            update_preview_surface_bounds(
+                &state,
+                PreviewSurfaceBoundsParams {
+                    bounds: bounds(160.0, 90.0),
+                },
+            )
+            .await;
+            let landscape =
+                wait_for_frame_dimensions_after(&state, 160, 90, Some(portrait.sequence)).await?;
+            let final_status = compositor_status(&state).await;
+            Ok::<_, String>((initial_status, portrait, landscape, final_status))
+        }
         .await;
-
-        wait_for_frame_dimensions(&state, 540, 960).await;
-        let status = compositor_status(&state).await;
         destroy_preview_surface(&state).await;
 
-        assert_eq!(status.width, 540);
-        assert_eq!(status.height, 960);
+        let (initial_status, portrait, landscape, final_status) =
+            verification.expect("preview compositor should follow both orientation changes");
+        assert_eq!(portrait.width, 90);
+        assert_eq!(portrait.height, 160);
+        assert_eq!(landscape.width, 160);
+        assert_eq!(landscape.height, 90);
+        assert_eq!(final_status.run_id, initial_status.run_id);
+        assert_eq!(final_status.width, 160);
+        assert_eq!(final_status.height, 90);
     }
 
     #[tokio::test]
@@ -961,19 +998,26 @@ mod tests {
         create_preview_surface(
             state.clone(),
             PreviewSurfaceCreateParams {
-                bounds: bounds(960.0, 540.0),
+                bounds: bounds(160.0, 90.0),
                 target_fps: 60,
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
         .await;
+        wait_for_frame_dimensions_after(&state, 160, 90, None)
+            .await
+            .expect("preview compositor should publish before ownership changes");
+        let preview_run_id = compositor_status(&state)
+            .await
+            .run_id
+            .expect("preview compositor run id");
 
         let recording_status = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
                 target_fps: 30,
-                width: 640,
-                height: 360,
+                width: 160,
+                height: 90,
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 stream_output: None,
                 caption_overlay_on_primary: false,
@@ -987,16 +1031,34 @@ mod tests {
         update_preview_surface_bounds(
             &state,
             PreviewSurfaceBoundsParams {
-                bounds: bounds(1280.0, 720.0),
+                bounds: bounds(90.0, 160.0),
             },
+        )
+        .await;
+        let stale_run_resize =
+            resize_preview_compositor_if_run_id(&state, &preview_run_id, 90, 160).await;
+        let recording_run_resize = resize_preview_compositor_if_run_id(
+            &state,
+            recording_status
+                .run_id
+                .as_deref()
+                .expect("recording run id"),
+            90,
+            160,
         )
         .await;
         let status = compositor_status(&state).await;
         stop_compositor(&state).await;
 
+        assert_ne!(
+            recording_status.run_id.as_deref(),
+            Some(preview_run_id.as_str())
+        );
+        assert!(stale_run_resize.is_none());
+        assert!(recording_run_resize.is_none());
         assert_eq!(status.run_id, recording_status.run_id);
-        assert_eq!(status.width, 640);
-        assert_eq!(status.height, 360);
+        assert_eq!(status.width, 160);
+        assert_eq!(status.height, 90);
     }
 
     #[tokio::test]
