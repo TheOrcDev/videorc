@@ -11,11 +11,14 @@ the tester's microphone.
 ## Scope
 
 This change addresses the two errors recorded in
-`Videorc_QsSAXDj3CE.mp4`:
+`Videorc_QsSAXDj3CE.mp4` and the follow-up record-only error captured in
+`CleanShot 2026-07-14 at 17.50.03@2x.png`:
 
 1. `backend.sessions.delete.pending.result[0].blockedPathCount must be a known field.`
 2. The live microphone state could not be confirmed even though the user did
    not change gain or mute.
+3. Clicking Record raised `Reconnect Twitch before starting an OAuth
+   livestream.` even though the requested output had streaming disabled.
 
 The pending-delete schema failure and the later FFmpeg/audio failure are kept as
 independent defects. Fixing the renderer contract does not mask capture-process
@@ -32,6 +35,20 @@ failure.
   boundary.
 - The real backend smoke inspects pending handles before resolve/complete and
   proves that no path is returned.
+
+### Record-only platform isolation
+
+- Saved livestream destinations remain available for a later Go Live, but a
+  record-only start performs no OAuth validation or platform activation.
+- Record-only `session.start` forces `streamEnabled: false` and omits the
+  streaming snapshot entirely.
+- Record-only Stop performs no YouTube/X lifecycle cleanup, even if saved
+  destination state is stale or previously marked live.
+- The backend independently treats `output.streamEnabled` as authoritative, so
+  older clients that still send saved streaming settings cannot turn a local
+  recording into an OAuth validation failure or attach live chat.
+- The confirmed Go Live flow retains its explicit streaming override,
+  validation, activation, and cleanup behavior.
 
 ### Live microphone lifecycle
 
@@ -88,10 +105,10 @@ Green gates:
 - `pnpm lint`
 - `pnpm format:check`
 - `pnpm test:scripts` — 636/636
-- `pnpm --filter @videorc/desktop test` — 1,077 passed, 1 skipped
+- `pnpm --filter @videorc/desktop test` — 1,078 passed, 1 skipped
 - `pnpm build`
 - `cargo fmt --check --all`
-- `cargo test -p videorc-backend` — native helper 53 passed; backend 1,290
+- `cargo test -p videorc-backend` — native helper 53 passed; backend 1,291
   passed and 8 ignored; integration 1 passed
 - `cargo clippy -p videorc-backend -- -D warnings`
 - `pnpm smoke:session-ops`
@@ -104,11 +121,13 @@ Green gates:
 - real ScreenCaptureKit live-layout record and record+stream artifacts
 - native preview recording — analyzed artifact, 7 ms A/V skew
 
-`pnpm smoke:recording-studio` passed its contract, backend recording/audio,
-caption, noise-cleanup, all-layout artifact, imported-screen, first-frame, and
-active-layout rows before stopping at the pre-existing comment-highlight split
-record/stream failure. A focused rerun reproduced zero highlight pixels. This
-branch does not touch the highlight/caption compositor.
+After the record-only isolation fix, `pnpm smoke:recording-studio` again passed
+its provider integration contract, backend recording/audio, caption,
+noise-cleanup, all-layout record-only artifacts, imported-screen, first-frame,
+layout/source, and active-layout record/stream rows before stopping at the
+pre-existing comment-highlight split record/stream failure. The rerun reproduced
+zero highlight pixels. This branch does not touch the highlight/caption
+compositor.
 
 The remaining rows were run individually. Two real-source baseline rows fail on
 the base branch as well: the smoke labels the step `preview.surface.create`, but

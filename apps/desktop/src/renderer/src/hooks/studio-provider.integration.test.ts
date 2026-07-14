@@ -812,6 +812,119 @@ describe('real StudioProvider lifecycle', () => {
     })
   })
 
+  it('starts record-only without validating or activating saved OAuth livestream targets', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.screenId != null
+    )
+
+    await act(async () => {
+      latest()?.core.setCaptureConfig((current) => ({
+        ...current,
+        recordEnabled: true,
+        streamEnabled: false,
+        streaming: {
+          ...current.streaming,
+          enabled: true,
+          enabledTargetIds: ['twitch', 'x'],
+          targets: current.streaming.targets.map((target) =>
+            target.platform === 'twitch'
+              ? {
+                  ...target,
+                  enabled: true,
+                  authMode: 'oauth' as const,
+                  accountId: 'twitch-account',
+                  status: { state: 'ready' as const }
+                }
+              : target.platform === 'x'
+                ? {
+                    ...target,
+                    enabled: true,
+                    authMode: 'oauth' as const,
+                    accountId: 'x-account',
+                    platformBroadcastId: 'x-broadcast',
+                    platformStreamId: 'x-source',
+                    status: { state: 'live' as const }
+                  }
+                : target
+          )
+        }
+      }))
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.streamEnabled === false &&
+        latest()?.core.captureConfig.streaming.targets.some(
+          (target) => target.platform === 'twitch' && target.enabled && target.authMode === 'oauth'
+        ) === true
+    )
+
+    const commandStart = backend.sentCommands.length
+    await act(async () => {
+      await latest()?.core.startSession()
+    })
+
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    const startCommand = backend.sentCommands
+      .slice(commandStart)
+      .find((command) => command.method === 'session.start')
+    expect(latest()?.core.lastError).toBeNull()
+    expect(startCommand?.params).toMatchObject({
+      output: { recordEnabled: true, streamEnabled: false }
+    })
+    expect(startCommand?.params).not.toHaveProperty('streaming')
+
+    await act(async () => {
+      await latest()?.core.stopSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+
+    const recordLifecycleCommands = backend.sentCommands.slice(commandStart)
+    expect(
+      recordLifecycleCommands.filter(
+        (command) =>
+          command.method === 'platformAccounts.validate' ||
+          command.method.startsWith('streamTargets.') ||
+          command.method.startsWith('liveChat.')
+      )
+    ).toEqual([])
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    expect(toastSpies.warning).not.toHaveBeenCalled()
+  })
+
   it('applies one latest microphone edit made while the session is starting', async () => {
     const backend = new StudioBackend()
     backend.sessionStartResponseDelayMs = 100

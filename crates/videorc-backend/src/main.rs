@@ -2035,12 +2035,20 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
     validations
 }
 
-fn validate_start_session_oauth_availability(params: &protocol::StartSessionParams) -> Result<()> {
-    let Some(streaming) = params
+fn oauth_streaming_for_start(
+    params: &protocol::StartSessionParams,
+) -> Option<&crate::streaming::StreamingSettings> {
+    if !params.output.stream_enabled {
+        return None;
+    }
+    params
         .streaming
         .as_ref()
         .filter(|streaming| streaming.enabled)
-    else {
+}
+
+fn validate_start_session_oauth_availability(params: &protocol::StartSessionParams) -> Result<()> {
+    let Some(streaming) = oauth_streaming_for_start(params) else {
         return Ok(());
     };
     for target in &streaming.targets {
@@ -2399,11 +2407,10 @@ fn twitch_chat_config(
 /// problem must not fail the stream (slice 8). One destination's failure leaves others alone.
 /// Live comments only exist for sessions with a live audience: chat providers
 /// attach when the session actually STREAMS, never for local recordings. The
-/// renderer sends its streaming settings with every session start, so the
-/// mere presence of `streaming` is not a streaming session — gating on it
-/// warned "Twitch comments are not connected" on every plain recording
-/// whenever a disconnected stream target was configured (owner report,
-/// 2026-07-13).
+/// Older or alternate clients may still send saved streaming settings with a
+/// recording request, so the mere presence of `streaming` is not a streaming
+/// session. The output flag is authoritative (owner reports, 2026-07-13 and
+/// 2026-07-14).
 fn session_attaches_live_chat(params: &protocol::StartSessionParams) -> bool {
     params.output.stream_enabled && params.streaming.is_some()
 }
@@ -9414,6 +9421,31 @@ mod tests {
         }
     }
 
+    fn session_params_with_stream_output(stream_enabled: bool) -> protocol::StartSessionParams {
+        serde_json::from_value(serde_json::json!({
+            "sources": { "testPattern": true },
+            "layout": {
+                "cameraCorner": "bottom-right",
+                "cameraSize": "medium",
+                "cameraShape": "rectangle",
+                "cameraMargin": 32
+            },
+            "output": {
+                "recordEnabled": true,
+                "streamEnabled": stream_enabled,
+                "video": {
+                    "preset": "custom",
+                    "width": 1280,
+                    "height": 720,
+                    "fps": 30,
+                    "bitrateKbps": 2000
+                },
+                "rtmp": { "preset": "youtube", "serverUrl": "", "streamKey": "" }
+            }
+        }))
+        .expect("minimal session params")
+    }
+
     fn upsert_twitch_account(state: &AppState, scopes: Vec<String>) {
         state
             .database
@@ -9499,30 +9531,6 @@ mod tests {
 
     #[test]
     fn live_chat_attaches_only_to_streaming_sessions() {
-        let params = |stream_enabled: bool| -> protocol::StartSessionParams {
-            serde_json::from_value(serde_json::json!({
-                "sources": { "testPattern": true },
-                "layout": {
-                    "cameraCorner": "bottom-right",
-                    "cameraSize": "medium",
-                    "cameraShape": "rectangle",
-                    "cameraMargin": 32
-                },
-                "output": {
-                    "recordEnabled": true,
-                    "streamEnabled": stream_enabled,
-                    "video": {
-                        "preset": "custom",
-                        "width": 1280,
-                        "height": 720,
-                        "fps": 30,
-                        "bitrateKbps": 2000
-                    },
-                    "rtmp": { "preset": "youtube", "serverUrl": "", "streamKey": "" }
-                }
-            }))
-            .expect("minimal session params")
-        };
         let streaming = streaming_with_enabled_target(
             StreamPlatform::Twitch,
             crate::streaming::StreamAuthMode::ManualRtmp,
@@ -9531,18 +9539,37 @@ mod tests {
         // A recording with configured stream targets must NOT attach chat —
         // this exact shape toasted "Twitch comments are not connected" on
         // every plain recording.
-        let mut recording = params(false);
+        let mut recording = session_params_with_stream_output(false);
         recording.streaming = Some(streaming.clone());
         assert!(!session_attaches_live_chat(&recording));
 
         // A real go-live with the same targets keeps the 2026-07-10 guarantee:
         // broken chat setup at go-live must surface, never fail silently.
-        let mut live = params(true);
+        let mut live = session_params_with_stream_output(true);
         live.streaming = Some(streaming);
         assert!(session_attaches_live_chat(&live));
 
         // No streaming settings at all → nothing to attach either way.
-        assert!(!session_attaches_live_chat(&params(true)));
+        assert!(!session_attaches_live_chat(
+            &session_params_with_stream_output(true)
+        ));
+    }
+
+    #[test]
+    fn oauth_start_validation_only_applies_to_streaming_sessions() {
+        let streaming = streaming_with_enabled_target(
+            StreamPlatform::Youtube,
+            crate::streaming::StreamAuthMode::Oauth,
+        );
+
+        let mut recording = session_params_with_stream_output(false);
+        recording.streaming = Some(streaming.clone());
+        assert!(oauth_streaming_for_start(&recording).is_none());
+        assert!(validate_start_session_oauth_availability(&recording).is_ok());
+
+        let mut live = session_params_with_stream_output(true);
+        live.streaming = Some(streaming);
+        assert!(oauth_streaming_for_start(&live).is_some());
     }
 
     #[test]

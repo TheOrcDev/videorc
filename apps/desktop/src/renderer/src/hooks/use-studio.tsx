@@ -2229,6 +2229,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const automaticSourceFallbacks = useRef<AutomaticSourceFallbackEvent[]>([])
   const toastedFailedTargets = useRef<Set<string>>(new Set())
   const platformLifecycleRun = useRef(0)
+  const platformLifecycleStreamingRef = useRef<StreamingSettings | null>(null)
   // One-shot playback toasts per broadcast+status (probe events may repeat).
   const xPlaybackToastsRef = useRef(new Set<string>())
   const [previewRefreshNonce, setPreviewRefreshNonce] = useState(0)
@@ -7649,12 +7650,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setStreamHealth(null)
         setStreamTargets([])
         setStartRequestPending(true)
-        streamingForStart = streamingOverride ?? captureConfig.streaming
+        streamingForStart = streamingOverride ?? null
+        platformLifecycleStreamingRef.current = streamingForStart
         const lifecycleRunId = platformLifecycleRun.current + 1
         platformLifecycleRun.current = lifecycleRunId
-        const enabledOauthTargets = streamingForStart.targets.filter(
-          (target) => target.enabled && target.authMode === 'oauth'
-        )
+        const enabledOauthTargets =
+          streamingForStart?.targets.filter(
+            (target) => target.enabled && target.authMode === 'oauth'
+          ) ?? []
         if (enabledOauthTargets.length) {
           const validations = await validatePlatformAccountsForClient(client)
           let unhealthy: StreamTargetSettings | null = null
@@ -7717,7 +7720,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               output: { ...authorizedOutput, streamEnabled: true },
               streaming: streamingOverride
             }
-          : { ...sessionParams, output: authorizedOutput }
+          : {
+              ...sessionParams,
+              output: { ...authorizedOutput, streamEnabled: false },
+              streaming: undefined
+            }
         const startAudioSnapshot = nextSessionParams.audio
           ? {
               microphoneGainDb: nextSessionParams.audio.microphoneGainDb,
@@ -7738,16 +7745,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             : null
         applyRecordingStatus(status)
         await refreshSessions(client)
-        await activatePreparedYouTubeBroadcasts(streamingForStart, lifecycleRunId)
-        await activatePreparedXBroadcasts(
-          streamingForStart,
-          lifecycleRunId,
-          status.sessionId ?? recordingRef.current.sessionId
-        )
+        if (streamingForStart) {
+          await activatePreparedYouTubeBroadcasts(streamingForStart, lifecycleRunId)
+          await activatePreparedXBroadcasts(
+            streamingForStart,
+            lifecycleRunId,
+            status.sessionId ?? recordingRef.current.sessionId
+          )
+        }
       } catch (error) {
         if (streamingOverride && streamingForStart) {
           await completePreparedPlatformBroadcasts(streamingForStart)
         }
+        platformLifecycleStreamingRef.current = null
         reportError(error)
         if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
           applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
@@ -7760,7 +7770,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       activatePreparedYouTubeBroadcasts,
       activatePreparedXBroadcasts,
       applyRecordingStatus,
-      captureConfig.streaming,
       client,
       completePreparedPlatformBroadcasts,
       isSessionActive,
@@ -8133,16 +8142,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       platformLifecycleRun.current += 1
       setStopRequestPending(true)
       liveAudioProcessingSyncRef.current?.queue.stop()
-      // Docs order: END the X broadcast while the feed is still up, THEN stop
-      // the encoder. Bounded so a slow END can never hold the stop hostage.
-      const cleaned = await endPreparedXBroadcasts(
-        captureConfig.streaming,
-        recordingRef.current.sessionId,
-        4000
-      )
+      const sessionHasStreamOutput =
+        platformLifecycleStreamingRef.current !== null || Boolean(recordingRef.current.streamUrl)
+      // Docs order for a real Go Live: END X while the feed is still up, THEN
+      // stop the encoder. A local recording must never inspect or mutate stale
+      // platform lifecycle state merely because saved destinations are enabled.
+      const cleaned = sessionHasStreamOutput
+        ? await endPreparedXBroadcasts(
+            captureConfig.streaming,
+            recordingRef.current.sessionId,
+            4000
+          )
+        : null
       const status = await client.requestTyped('session.stop')
       applyRecordingStatus(status)
-      await completePreparedPlatformBroadcasts(cleaned)
+      if (cleaned) {
+        await completePreparedPlatformBroadcasts(cleaned)
+      }
+      platformLifecycleStreamingRef.current = null
     } catch (error) {
       reportError(error)
     } finally {
