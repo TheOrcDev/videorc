@@ -41,6 +41,18 @@ The implementation direction is:
 - FFmpeg stays as the first downstream encoder/muxer backend, fed by Videorc-owned capture/render output.
 - Recordings remain MKV-first, with optional MP4 remux after stop.
 
+### Current platform implementation note
+
+As of 2026-07-14, macOS implements the native preview decision with the
+detached CAMetalLayer presenter. The Windows alpha has an explicit, temporary
+platform exception: its supported presenter is the uncompressed, latest-wins
+BMP Electron proof surface described in `docs/windows-port-plan.md`. A healthy
+Windows proof presenter may be live at the product-lifecycle level only after
+its first-frame and source-liveness contracts pass, but it must continue to
+report `electron-proof-surface` / `electron-browser-window` and must never be
+counted as native-rendered OBS-parity evidence. A future Windows-native host can
+replace this exception without changing the lifecycle contract.
+
 ## Source References
 
 The OBS source references used for behavior mapping live in [OBS parity source map](../obs-parity-source-map.md).

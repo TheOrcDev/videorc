@@ -35,8 +35,9 @@ CI covers Rust advisory audit, Rust fmt, clippy, Rust tests, JS production advis
 
 ## Native Preview Rules
 
-- Production preview is the detached native CAMetalLayer path. MJPEG/JPEG preview routes are fallback or debug paths only.
-- Do not silently downgrade a session that claims native preview. If native CAMetalLayer cannot run, surface the fallback reason in status, diagnostics, or health copy.
+- Production macOS preview is the detached native CAMetalLayer path. MJPEG/JPEG preview routes are fallback or debug paths only.
+- The current Windows production presenter is the uncompressed, latest-wins BMP Electron proof surface documented in `docs/windows-port-plan.md`. It may report a healthy lifecycle only after its first-frame and source-liveness contracts pass, and it must remain identified as `electron-proof-surface` / `electron-browser-window`; it must never claim native CAMetalLayer transport or backing. Production PNG requests remain a transport bug.
+- Do not silently downgrade a session that claims native preview. If native CAMetalLayer cannot run on macOS, surface the fallback reason in status, diagnostics, or health copy. On Windows, surface proof-presenter startup and source stalls without mislabeling the supported proof transport as native.
 - Probe before merging preview changes. At minimum run the relevant native preview tests and use the smoke/probe command that exercises the touched path.
 - For detached preview window lifecycle, toggle, close/reopen, placement ownership, frame-polling suppression, or proof-surface teardown changes, run `pnpm probe:preview-lifecycle`; add `pnpm probe:preview-window` when placement or move/resize behavior is touched.
 - `PreviewSurfaceBounds` has mirrors in Rust protocol, shared TS types, native host/helper protocol, and normalization/comparison code. Any field change must preserve all mirrors and must include a regression test proving fields survive normalization and helper serialization.

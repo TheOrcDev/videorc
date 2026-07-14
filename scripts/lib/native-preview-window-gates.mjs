@@ -13,11 +13,17 @@ export function previewWindowSurfaceReady(
     : windowState?.surface?.visible === true &&
       surfaceStatus?.nativePreviewHostKind === 'proof-surface' &&
       surfaceStatus?.framePollingSuppressed === false
+  const supervisorReady =
+    windowState?.supervisor?.lifecycleState === 'surface-live' &&
+    windowState?.supervisor?.surfaceActive === true
+  const firstFrameReady = expectNativeMetalPreview || surfaceStatus?.firstFrameContract === 'met'
 
   return (
     windowState?.open === true &&
     windowState?.visible === true &&
     windowState?.surface?.exists === true &&
+    supervisorReady &&
+    firstFrameReady &&
     placementReady &&
     surfaceStatus?.state === 'live' &&
     surfaceStatus?.transport === expectedTransport &&

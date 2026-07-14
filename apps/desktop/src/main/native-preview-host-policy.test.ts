@@ -9,7 +9,9 @@ import {
   nativePreviewPlacementOwnedByNativeSurface,
   nativePreviewFramePollingSuppressionStatus,
   nativePreviewHelperFallbackAllowed,
-  nativePreviewProofPollingSuppressed
+  nativePreviewProofPollingSuppressed,
+  nativePreviewSupervisorFallbackReason,
+  nativePreviewSupervisorDisposition
 } from './native-preview-host-policy'
 
 describe('native preview host policy', () => {
@@ -84,6 +86,56 @@ describe('native preview host policy', () => {
   it('allows the transitional helper only through an explicit diagnostic route', () => {
     expect(nativePreviewHelperFallbackAllowed({ fallbackFlag: '1' })).toBe(true)
     expect(nativePreviewHelperFallbackAllowed({ explicitHelperPath: '/tmp/helper' })).toBe(true)
+  })
+
+  it('treats the supported Windows proof presenter as live', () => {
+    expect(
+      nativePreviewSupervisorDisposition(
+        surfaceStatus({
+          transport: 'electron-proof-surface',
+          backing: 'electron-browser-window',
+          firstFrameContract: 'met'
+        }),
+        'win32'
+      )
+    ).toBe('live')
+  })
+
+  it('keeps the Windows proof presenter pending until its first-frame contract is met', () => {
+    const proof = surfaceStatus({
+      transport: 'electron-proof-surface',
+      backing: 'electron-browser-window'
+    })
+    expect(nativePreviewSupervisorDisposition(proof, 'win32')).toBe('pending')
+    expect(
+      nativePreviewSupervisorDisposition({ ...proof, firstFrameContract: 'pending' }, 'win32')
+    ).toBe('pending')
+  })
+
+  it('keeps macOS proof presentation and a stalled Windows presenter truthful', () => {
+    const proof = surfaceStatus({
+      transport: 'electron-proof-surface',
+      backing: 'electron-browser-window',
+      firstFrameContract: 'met'
+    })
+    expect(nativePreviewSupervisorDisposition(proof, 'darwin')).toBe('fallback')
+    expect(
+      nativePreviewSupervisorDisposition({ ...proof, firstFrameContract: 'fallback' }, 'win32')
+    ).toBe('fallback')
+  })
+
+  it('uses the Windows first-frame stall diagnosis instead of healthy compositor copy', () => {
+    expect(
+      nativePreviewSupervisorFallbackReason(
+        surfaceStatus({
+          transport: 'electron-proof-surface',
+          firstFrameContract: 'fallback',
+          firstFrameReason: 'Windows preview source frames stopped advancing.'
+        }),
+        'win32',
+        'Preview is displaying compositor output.'
+      )
+    ).toBe('Windows preview source frames stopped advancing.')
   })
 
   it('suppresses only the Electron poller while an attached CAMetalLayer keeps presenting', () => {

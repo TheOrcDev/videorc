@@ -64,13 +64,20 @@ export function nativePreviewFirstFrameWatchdogEnabled(platform: NodeJS.Platform
   return platform === 'darwin'
 }
 
+export function nativePreviewProofWatchdogEnabled(platform: NodeJS.Platform): boolean {
+  return platform === 'win32'
+}
+
 export const DEFAULT_PROOF_SOURCE_FRAME_STALE_MS = 1500
+export const DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS = 15_000
+export const DEFAULT_PROOF_WATCHDOG_READ_TIMEOUT_MS = 500
 
 export type ProofSourceFrameAssessment = 'not-applicable' | 'paused' | 'pending' | 'met' | 'stalled'
 
 export function assessProofSourceFrame(params: {
   platform: NodeJS.Platform
   framePollingSuppressed: boolean
+  sourceExpected?: boolean
   sourcePollerCount: number
   freshSourceLayerCount: number
   sourceFrameAgeMs?: number
@@ -83,7 +90,7 @@ export function assessProofSourceFrame(params: {
     return 'paused'
   }
   if (params.sourcePollerCount <= 0) {
-    return 'not-applicable'
+    return params.sourceExpected ? 'pending' : 'not-applicable'
   }
   const staleAfterMs = params.staleAfterMs ?? DEFAULT_PROOF_SOURCE_FRAME_STALE_MS
   if (
@@ -97,6 +104,163 @@ export function assessProofSourceFrame(params: {
     return 'stalled'
   }
   return 'pending'
+}
+
+export function assessProofPresentationWatch(params: {
+  platform: NodeJS.Platform
+  framePollingSuppressed: boolean
+  surfaceReady: boolean
+  sourceExpected: boolean
+  sourcePollerCount: number
+  freshSourceLayerCount: number
+  sourceFrameAgeMs?: number
+  pendingElapsedMs: number
+  pendingTimeoutMs?: number
+  staleAfterMs?: number
+}): ProofSourceFrameAssessment {
+  if (params.platform === 'darwin') {
+    return 'not-applicable'
+  }
+  if (params.framePollingSuppressed) {
+    return 'paused'
+  }
+  const pendingTimeoutMs = params.pendingTimeoutMs ?? DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS
+  if (!params.surfaceReady) {
+    return params.pendingElapsedMs >= pendingTimeoutMs ? 'stalled' : 'pending'
+  }
+  const assessment = assessProofSourceFrame(params)
+  return assessment === 'pending' && params.pendingElapsedMs >= pendingTimeoutMs
+    ? 'stalled'
+    : assessment
+}
+
+export function boundedProofWatchdogRead<T>(
+  read: Promise<T>,
+  timeoutMs = DEFAULT_PROOF_WATCHDOG_READ_TIMEOUT_MS
+): Promise<T | null> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return Promise.resolve(null)
+  }
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (value: T | null): void => {
+      if (settled) {
+        return
+      }
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish(null), timeoutMs)
+    void read.then(
+      (value) => finish(value),
+      () => finish(null)
+    )
+  })
+}
+
+export interface ProofWatchdogRendererReadOwner {
+  watchdogRun: object
+  webContents: object
+}
+
+export interface WatchdogRunToken {
+  readonly id: symbol
+}
+
+export interface WatchdogTickToken {
+  readonly id: symbol
+  readonly run: WatchdogRunToken
+}
+
+// A stopped run releases its slot immediately so close/reopen is responsive,
+// but the old async tick still owns a distinct token. Its eventual `finally`
+// therefore cannot clear a tick already acquired by the reopened run.
+export class WatchdogTickOwnership {
+  private currentRun: WatchdogRunToken | null = null
+  private inFlight: WatchdogTickToken | null = null
+
+  startRun(): WatchdogRunToken {
+    const run = { id: Symbol('watchdog-run') }
+    this.currentRun = run
+    this.inFlight = null
+    return run
+  }
+
+  stopRun(run: WatchdogRunToken): void {
+    if (this.currentRun === run) {
+      this.currentRun = null
+      this.inFlight = null
+    }
+  }
+
+  tryAcquire(run: WatchdogRunToken): WatchdogTickToken | null {
+    if (this.currentRun !== run || this.inFlight) {
+      return null
+    }
+    const tick = { id: Symbol('watchdog-tick'), run }
+    this.inFlight = tick
+    return tick
+  }
+
+  isCurrent(tick: WatchdogTickToken): boolean {
+    return this.currentRun === tick.run && this.inFlight === tick
+  }
+
+  release(tick: WatchdogTickToken): void {
+    if (this.inFlight === tick) {
+      this.inFlight = null
+    }
+  }
+}
+
+// The timeout bounds each watchdog tick, not Electron's non-cancellable
+// executeJavaScript call. Keep reusing that underlying call until it settles;
+// only a new watchdog run or WebContents may supersede it.
+export class ProofWatchdogRendererReadSingleFlight<T> {
+  private owner: ProofWatchdogRendererReadOwner | null = null
+  private pending: Promise<T> | null = null
+
+  read(
+    owner: ProofWatchdogRendererReadOwner,
+    startRead: () => Promise<T>,
+    timeoutMs = DEFAULT_PROOF_WATCHDOG_READ_TIMEOUT_MS
+  ): Promise<T | null> {
+    if (!this.pending || !this.ownerMatches(owner)) {
+      const pending = startRead()
+      this.owner = owner
+      this.pending = pending
+      const clear = (): void => {
+        if (this.pending === pending && this.ownerMatches(owner)) {
+          this.owner = null
+          this.pending = null
+        }
+      }
+      void pending.then(clear, clear)
+    }
+    return boundedProofWatchdogRead(this.pending, timeoutMs)
+  }
+
+  retire(owner?: ProofWatchdogRendererReadOwner): void {
+    if (!owner || this.ownerMatches(owner)) {
+      this.owner = null
+      this.pending = null
+    }
+  }
+
+  private ownerMatches(owner: ProofWatchdogRendererReadOwner): boolean {
+    return (
+      this.owner?.watchdogRun === owner.watchdogRun && this.owner.webContents === owner.webContents
+    )
+  }
+}
+
+export function proofWatchdogRendererReadAllowed(input: {
+  framePollingSuppressed: boolean
+  intentionallyHidden: boolean
+  proofWindowVisible: boolean
+}): boolean {
+  return !input.framePollingSuppressed && !input.intentionallyHidden && input.proofWindowVisible
 }
 
 export type FirstFrameAssessment =

@@ -14,6 +14,10 @@ const windowsEvidence = () => ({
     open: true,
     visible: true,
     nativeOwnsPlacement: false,
+    supervisor: {
+      lifecycleState: 'surface-live',
+      surfaceActive: true
+    },
     surface: { exists: true, visible: true }
   },
   surfaceStatus: {
@@ -23,6 +27,7 @@ const windowsEvidence = () => ({
     targetFps: 60,
     nativePreviewHostKind: 'proof-surface',
     framePollingSuppressed: false,
+    firstFrameContract: 'met',
     pendingHostCommandCount: 0,
     bounds: { width: 960, height: 540 }
   }
@@ -46,10 +51,21 @@ test('Windows proof readiness accepts a visible unsuppressed proof host', () => 
   assert.equal(previewWindowSurfaceReady(windowsEvidence(), windowsOptions), true)
 })
 
+test('Windows proof readiness rejects a supervisor that still calls the supported host fallback', () => {
+  const evidence = windowsEvidence()
+  evidence.windowState.supervisor = {
+    lifecycleState: 'surface-fallback',
+    surfaceActive: false
+  }
+
+  assert.equal(previewWindowSurfaceReady(evidence, windowsOptions), false)
+})
+
 test('Windows proof readiness rejects hidden, suppressed, or pending hosts', () => {
   for (const mutate of [
     (evidence) => (evidence.windowState.surface.visible = false),
     (evidence) => (evidence.surfaceStatus.framePollingSuppressed = true),
+    (evidence) => (evidence.surfaceStatus.firstFrameContract = 'pending'),
     (evidence) => (evidence.surfaceStatus.pendingHostCommandCount = 1),
     (evidence) => (evidence.surfaceStatus.bounds.width = 0)
   ]) {

@@ -73,6 +73,8 @@ import {
   nativePreviewPresentFailureDisposition,
   nativePreviewProofPollingSuppressed,
   nativePreviewSurfaceHasAttachedNativePixels,
+  nativePreviewSupervisorFallbackReason,
+  nativePreviewSupervisorDisposition,
   nativePreviewValidatedHandoffStatus
 } from './native-preview-host-policy'
 import { loadNativePreviewInProcessDriver } from './native-preview-in-process-loader'
@@ -167,16 +169,22 @@ import {
 } from './avatar-cache'
 import { DARK_WINDOW_PALETTE, windowPalette } from './window-palette'
 import {
+  assessProofPresentationWatch,
   assessProofSourceFrame,
   assessFirstFrame,
   assessPresenting,
   emptyFirstFrameLedger,
   emptyPresentingWatch,
   nativePreviewFirstFrameWatchdogEnabled,
+  nativePreviewProofWatchdogEnabled,
+  ProofWatchdogRendererReadSingleFlight,
+  proofWatchdogRendererReadAllowed,
+  WatchdogTickOwnership,
   type FirstFrameLedger,
   type FirstFrameSnapshot,
   type PresentingAssessment,
-  type PresentingWatchState
+  type PresentingWatchState,
+  type WatchdogRunToken
 } from './native-preview-first-frame'
 import { NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT } from './native-preview-proof-poller-runtime'
 import { NATIVE_PREVIEW_PROOF_MEASUREMENT_RUNTIME_SCRIPT } from './native-preview-proof-measurement-runtime'
@@ -706,16 +714,24 @@ let firstFrameLastPresentedFrameId: number | null = null
 // states distinct makes the first hide update observable without a magic
 // string sentinel (and keeps this source file valid text).
 let firstFrameLastHint: string | null | undefined
-let firstFrameTickInFlight = false
+const firstFrameTickOwnership = new WatchdogTickOwnership()
+const firstFrameProofRendererReads = new ProofWatchdogRendererReadSingleFlight<Record<
+  string,
+  unknown
+> | null>()
+let firstFrameWatchdogRun: WatchdogRunToken | null = null
 // After the first frame lands the watchdog does NOT stop: it flips into the
 // presenting watch (plan 021 F1) and keeps assessing the same chain so a
 // mid-session stall self-heals instead of leaving the placeholder forever.
 let firstFrameWatchdogMode: 'first-frame' | 'presenting-watch' = 'first-frame'
 let presentingWatch: PresentingWatchState = emptyPresentingWatch()
 let presentingWatchLastKind: PresentingAssessment['kind'] = 'presenting'
+let nativePreviewProofPendingStartedAtMs: number | null = null
 
 function startFirstFrameWatchdog(): void {
   stopFirstFrameWatchdog()
+  const watchdogRun = firstFrameTickOwnership.startRun()
+  firstFrameWatchdogRun = watchdogRun
   firstFrameWatchdogStartedAtMs = Date.now()
   firstFrameLedger = emptyFirstFrameLedger()
   firstFrameLastFramesRendered = null
@@ -726,16 +742,41 @@ function startFirstFrameWatchdog(): void {
   presentingWatchLastKind = 'presenting'
   setFirstFrameStatus('pending', 'Preview surface is starting.')
   firstFrameWatchdogTimer = setInterval(() => {
-    void runFirstFrameWatchdogTick()
+    void runFirstFrameWatchdogTick(watchdogRun)
   }, FIRST_FRAME_TICK_MS)
 }
 
-function stopFirstFrameWatchdog(): void {
+function startWindowsProofFrameWatchdog(): void {
+  stopFirstFrameWatchdog()
+  const watchdogRun = firstFrameTickOwnership.startRun()
+  firstFrameWatchdogRun = watchdogRun
+  firstFrameWatchdogStartedAtMs = Date.now()
+  firstFrameLastFramesRendered = null
+  firstFrameLastHint = undefined
+  nativePreviewProofPendingStartedAtMs = firstFrameWatchdogStartedAtMs
+  const reason = 'Waiting for the Windows preview surface to deliver pixels.'
+  setFirstFrameStatus('pending', reason)
+  updatePreviewWindowWaitDetail(reason)
+  firstFrameWatchdogTimer = setInterval(() => {
+    void runWindowsProofFrameWatchdogTick(watchdogRun)
+  }, FIRST_FRAME_TICK_MS)
+}
+
+function stopFirstFrameWatchdog(expectedRun?: WatchdogRunToken): void {
+  if (expectedRun && firstFrameWatchdogRun !== expectedRun) {
+    return
+  }
   if (firstFrameWatchdogTimer) {
     clearInterval(firstFrameWatchdogTimer)
     firstFrameWatchdogTimer = null
   }
-  firstFrameTickInFlight = false
+  const watchdogRun = firstFrameWatchdogRun
+  firstFrameWatchdogRun = null
+  if (watchdogRun) {
+    firstFrameTickOwnership.stopRun(watchdogRun)
+  }
+  firstFrameProofRendererReads.retire()
+  nativePreviewProofPendingStartedAtMs = null
 }
 
 function setFirstFrameStatus(
@@ -794,40 +835,199 @@ async function fetchFirstFrameCompositorStatus(): Promise<CompositorStatus | nul
   }
 }
 
-async function runFirstFrameWatchdogTick(): Promise<void> {
-  if (firstFrameTickInFlight) {
+function observeFirstFrameCompositorProgress(compositor: CompositorStatus | null): boolean {
+  const framesRendered = compositor?.framesRendered ?? null
+  const framesAdvancing =
+    framesRendered != null &&
+    firstFrameLastFramesRendered != null &&
+    framesRendered > firstFrameLastFramesRendered
+  if (framesRendered != null) {
+    firstFrameLastFramesRendered = framesRendered
+  }
+  return framesAdvancing
+}
+
+function nativePreviewProofSourceExpected(): boolean {
+  return Boolean(
+    nativePreviewSurfaceScene?.sources.some(
+      (source) =>
+        source.visible &&
+        (source.kind === 'screen' || source.kind === 'window' || source.kind === 'camera')
+    )
+  )
+}
+
+function retireStalledNativePreviewMainPump(framesAdvancing: boolean): void {
+  const mainPumpSocket = backendEventSocket
+  const mainPumpConnection = backendAdminConnection
+  if (
+    !mainPumpSocket ||
+    !mainPumpConnection ||
+    !mainPumpFrameDeliveryStalled({
+      active: nativePreviewMainPumpActive,
+      surfaceLive: nativePreviewSurfaceStatus.state === 'live',
+      compositorFramesAdvancing: framesAdvancing,
+      activatedAtMs: nativePreviewMainPumpActivatedAtMs,
+      lastPresentDrivingEventAtMs: nativePreviewMainLastPresentDrivingEventAtMs,
+      nowMs: Date.now()
+    })
+  ) {
     return
   }
-  firstFrameTickInFlight = true
+  retireBackendEventSocket(
+    mainPumpSocket,
+    mainPumpConnection,
+    `presentation event heartbeat stalled for ${Math.max(0, Date.now() - Math.max(nativePreviewMainPumpActivatedAtMs, nativePreviewMainLastPresentDrivingEventAtMs))}ms while compositor frames advanced`
+  )
+}
+
+async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise<void> {
+  const tick = firstFrameTickOwnership.tryAcquire(watchdogRun)
+  if (!tick) {
+    return
+  }
   try {
     const window = previewWindow
     if (!window || window.isDestroyed() || appIsQuitting) {
-      stopFirstFrameWatchdog()
+      stopFirstFrameWatchdog(watchdogRun)
+      return
+    }
+    const compositor = await fetchFirstFrameCompositorStatus()
+    if (
+      !firstFrameTickOwnership.isCurrent(tick) ||
+      firstFrameWatchdogRun !== watchdogRun ||
+      firstFrameWatchdogTimer == null ||
+      previewWindow !== window ||
+      window.isDestroyed()
+    ) {
       return
     }
 
-    const watchdogGeneration = firstFrameWatchdogStartedAtMs
+    const framePollingSuppressed = nativePreviewProofPollingIsSuppressed()
+    const intentionallyHidden = nativePreviewSurfaceStatus.bounds?.visible === false
+    const proofWindow = nativePreviewSurfaceWindow
+    const proofWindowCanPaint = Boolean(
+      proofWindow &&
+      !proofWindow.isDestroyed() &&
+      !proofWindow.webContents.isDestroyed() &&
+      proofWindow.isVisible()
+    )
+    const metrics =
+      !proofWatchdogRendererReadAllowed({
+        framePollingSuppressed,
+        intentionallyHidden,
+        proofWindowVisible: proofWindowCanPaint
+      }) || !proofWindow
+        ? null
+        : await firstFrameProofRendererReads.read(
+            { watchdogRun, webContents: proofWindow.webContents },
+            () => readNativePreviewSurfaceMetricsAfterPaint(proofWindow)
+          )
+    if (
+      !firstFrameTickOwnership.isCurrent(tick) ||
+      firstFrameWatchdogRun !== watchdogRun ||
+      firstFrameWatchdogTimer == null ||
+      previewWindow !== window ||
+      window.isDestroyed() ||
+      (proofWindow != null &&
+        (nativePreviewSurfaceWindow !== proofWindow ||
+          proofWindow.isDestroyed() ||
+          proofWindow.webContents.isDestroyed()))
+    ) {
+      return
+    }
+
+    retireStalledNativePreviewMainPump(observeFirstFrameCompositorProgress(compositor))
+    if (framePollingSuppressed || intentionallyHidden) {
+      nativePreviewProofPendingStartedAtMs = null
+      return
+    }
+
+    const nowMs = Date.now()
+    const pendingStartedAtMs = nativePreviewProofPendingStartedAtMs ?? nowMs
+    nativePreviewProofPendingStartedAtMs = pendingStartedAtMs
+    const presentedFrameId = finiteMetric(metrics?.presentedCompositorFrame)
+    const sourceFrameAgeMs = finiteMetric(metrics?.sourceFrameAgeMs)
+    const assessment = assessProofPresentationWatch({
+      platform: process.platform,
+      framePollingSuppressed,
+      surfaceReady: (presentedFrameId ?? 0) > 0,
+      sourceExpected: nativePreviewProofSourceExpected(),
+      sourcePollerCount: finiteMetric(metrics?.sourcePollerCount) ?? 0,
+      freshSourceLayerCount: finiteMetric(metrics?.freshSourceLayerCount) ?? 0,
+      sourceFrameAgeMs,
+      pendingElapsedMs: Math.max(0, nowMs - pendingStartedAtMs)
+    })
+
+    if (assessment === 'paused') {
+      nativePreviewProofPendingStartedAtMs = null
+      return
+    }
+    if (assessment === 'pending') {
+      if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
+        const reason = 'Waiting for the Windows preview surface to deliver pixels.'
+        setFirstFrameStatus('pending', reason)
+        updatePreviewWindowWaitDetail(reason)
+      }
+    } else if (assessment === 'met' || assessment === 'not-applicable') {
+      nativePreviewProofPendingStartedAtMs = null
+      if (nativePreviewSurfaceStatus.firstFrameContract !== 'met') {
+        const reason =
+          assessment === 'met'
+            ? 'Windows preview pixels are live.'
+            : 'Windows preview compositor output is live.'
+        setFirstFrameStatus('met', reason)
+        updatePreviewWindowWaitDetail(null)
+        logBackend('info', '[proof-preview] presentation watchdog is live')
+      }
+    } else if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
+      const pendingElapsedMs = Math.max(0, nowMs - pendingStartedAtMs)
+      const reason =
+        sourceFrameAgeMs === undefined
+          ? `Windows preview did not deliver a first frame within ${Math.round(pendingElapsedMs)}ms.`
+          : `Windows preview source frames have not advanced for ${Math.round(sourceFrameAgeMs)}ms; keeping the last good frame while polling retries.`
+      setFirstFrameStatus('fallback', reason)
+      updatePreviewWindowWaitDetail(reason)
+      logBackend('warn', `[proof-preview] ${reason}`)
+    }
+
+    syncPreviewSupervisorSurface(
+      nativePreviewSurfaceStatus,
+      previewWindowSurfaceGeneration(),
+      nativePreviewSurfaceStatus.message ?? 'Electron proof preview surface.'
+    )
+  } finally {
+    firstFrameTickOwnership.release(tick)
+  }
+}
+
+async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise<void> {
+  const tick = firstFrameTickOwnership.tryAcquire(watchdogRun)
+  if (!tick) {
+    return
+  }
+  try {
+    const window = previewWindow
+    if (!window || window.isDestroyed() || appIsQuitting) {
+      stopFirstFrameWatchdog(watchdogRun)
+      return
+    }
+
     const compositor = await fetchFirstFrameCompositorStatus()
     // The window may have closed — or the watchdog restarted for a new
     // surface — while the status fetch was in flight. Assessing (and above
     // all HEALING) after teardown respawns the helper post-destroy, which the
     // lifecycle probe's rapid toggle cycles catch.
     if (
+      !firstFrameTickOwnership.isCurrent(tick) ||
+      firstFrameWatchdogRun !== watchdogRun ||
       firstFrameWatchdogTimer == null ||
-      watchdogGeneration !== firstFrameWatchdogStartedAtMs ||
       previewWindow !== window ||
       window.isDestroyed()
     ) {
       return
     }
-    const framesRendered = compositor?.framesRendered ?? null
-    const framesAdvancing =
-      framesRendered != null &&
-      firstFrameLastFramesRendered != null &&
-      framesRendered > firstFrameLastFramesRendered
-    if (framesRendered != null) {
-      firstFrameLastFramesRendered = framesRendered
-    }
+    const framesAdvancing = observeFirstFrameCompositorProgress(compositor)
     const presentedFrameId = nativePreviewSurfaceStatus.presentedFrameId ?? null
     const presentationAdvancing =
       presentedFrameId != null &&
@@ -836,26 +1036,7 @@ async function runFirstFrameWatchdogTick(): Promise<void> {
     if (presentedFrameId != null) {
       firstFrameLastPresentedFrameId = presentedFrameId
     }
-    const mainPumpSocket = backendEventSocket
-    const mainPumpConnection = backendAdminConnection
-    if (
-      mainPumpSocket &&
-      mainPumpConnection &&
-      mainPumpFrameDeliveryStalled({
-        active: nativePreviewMainPumpActive,
-        surfaceLive: nativePreviewSurfaceStatus.state === 'live',
-        compositorFramesAdvancing: framesAdvancing,
-        activatedAtMs: nativePreviewMainPumpActivatedAtMs,
-        lastPresentDrivingEventAtMs: nativePreviewMainLastPresentDrivingEventAtMs,
-        nowMs: Date.now()
-      })
-    ) {
-      retireBackendEventSocket(
-        mainPumpSocket,
-        mainPumpConnection,
-        `presentation event heartbeat stalled for ${Math.max(0, Date.now() - Math.max(nativePreviewMainPumpActivatedAtMs, nativePreviewMainLastPresentDrivingEventAtMs))}ms while compositor frames advanced`
-      )
-    }
+    retireStalledNativePreviewMainPump(framesAdvancing)
 
     const snapshot: FirstFrameSnapshot = {
       elapsedMs: Date.now() - firstFrameWatchdogStartedAtMs,
@@ -908,11 +1089,11 @@ async function runFirstFrameWatchdogTick(): Promise<void> {
         setFirstFrameStatus('fallback', assessment.reason)
         updatePreviewWindowWaitDetail(`Preview could not start natively: ${assessment.reason}`)
         logBackend('warn', `[first-frame] contract failed: ${assessment.reason}`)
-        stopFirstFrameWatchdog()
+        stopFirstFrameWatchdog(watchdogRun)
         return
     }
   } finally {
-    firstFrameTickInFlight = false
+    firstFrameTickOwnership.release(tick)
   }
 }
 
@@ -3151,11 +3332,10 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   // guarantees false resets because an IOSurface can never appear.
   if (nativePreviewFirstFrameWatchdogEnabled(process.platform)) {
     startFirstFrameWatchdog()
+  } else if (nativePreviewProofWatchdogEnabled(process.platform)) {
+    startWindowsProofFrameWatchdog()
   } else {
     stopFirstFrameWatchdog()
-    firstFrameLastHint = undefined
-    setFirstFrameStatus('pending', 'Waiting for the Windows preview surface to deliver pixels.')
-    updatePreviewWindowWaitDetail('Waiting for the Windows preview surface to deliver pixels.')
   }
   return previewWindowState()
 }
@@ -4653,18 +4833,11 @@ async function createNativePreviewSurface(
     updatedAt: new Date().toISOString(),
     message: preserveNativeSurface ? nativePreviewSurfaceStatus.message : fallbackMessage
   }
-  if (preserveNativeSurface) {
-    previewSupervisor.surfaceLive({
-      generation,
-      transport: nativePreviewSurfaceStatus.transport,
-      backing: nativePreviewSurfaceStatus.backing
-    })
-  } else {
-    previewSupervisor.surfaceFallback(
-      generation,
-      nativePreviewSurfaceStatus.message ?? 'Electron proof preview surface.'
-    )
-  }
+  syncPreviewSupervisorSurface(
+    nativePreviewSurfaceStatus,
+    generation,
+    nativePreviewSurfaceStatus.message ?? 'Electron proof preview surface.'
+  )
   return nativePreviewSurfaceStatus
 }
 
@@ -5270,6 +5443,7 @@ async function presentNativePreviewSurfaceCompositor(
   const proofSourceAssessment = assessProofSourceFrame({
     platform: process.platform,
     framePollingSuppressed: nativePreviewProofPollingIsSuppressed(),
+    sourceExpected: nativePreviewProofSourceExpected(),
     sourcePollerCount,
     freshSourceLayerCount,
     sourceFrameAgeMs
@@ -5288,13 +5462,38 @@ async function presentNativePreviewSurfaceCompositor(
       logBackend('warn', `[proof-preview] ${reason}`)
     }
   }
-  previewSupervisor.surfaceFallback(
+  syncPreviewSupervisorSurface(
+    nativePreviewSurfaceStatus,
     previewWindowSurfaceGeneration(),
     nativePreviewSurfaceStatus.message ??
       realSurfaceAttempt.reason ??
       'Electron proof preview surface.'
   )
   return nativePreviewSurfaceStatus
+}
+
+function syncPreviewSupervisorSurface(
+  status: PreviewSurfaceStatus,
+  generation: number,
+  fallbackReason: string
+): void {
+  const disposition = nativePreviewSupervisorDisposition(status, process.platform)
+  if (disposition === 'pending') {
+    previewSupervisor.requestSurface()
+    return
+  }
+  if (disposition === 'live') {
+    previewSupervisor.surfaceLive({
+      generation,
+      transport: status.transport,
+      backing: status.backing
+    })
+    return
+  }
+  previewSupervisor.surfaceFallback(
+    generation,
+    nativePreviewSupervisorFallbackReason(status, process.platform, fallbackReason)
+  )
 }
 
 type NativePreviewRealSurfacePresentAttempt =
@@ -5742,14 +5941,18 @@ async function syncNativePreviewProofPollingSuppression(): Promise<boolean> {
   return nativePreviewProofPollingIsSuppressed()
 }
 
-async function readNativePreviewSurfaceMetricsAfterPaint(): Promise<Record<
-  string,
-  unknown
-> | null> {
-  if (!nativePreviewSurfaceWindow || nativePreviewSurfaceWindow.isDestroyed()) {
+async function readNativePreviewSurfaceMetricsAfterPaint(
+  surfaceWindow: BrowserWindow | null = nativePreviewSurfaceWindow
+): Promise<Record<string, unknown> | null> {
+  if (
+    !surfaceWindow ||
+    surfaceWindow.isDestroyed() ||
+    surfaceWindow.webContents.isDestroyed() ||
+    nativePreviewSurfaceWindow !== surfaceWindow
+  ) {
     return null
   }
-  return nativePreviewSurfaceWindow.webContents.executeJavaScript(
+  return surfaceWindow.webContents.executeJavaScript(
     `window.__videorcPresentNativePreviewNow?.() ?? new Promise((resolve) => requestAnimationFrame(() => resolve(window.__videorcNativePreviewMetrics?.() ?? null)))`,
     true
   )
