@@ -90,12 +90,17 @@ the bundled FFmpeg/FFprobe paths, as configured in `.github/workflows/windows.ym
 ```powershell
 pnpm smoke:windows-native-screen
 pnpm smoke:recording-native-preview
+pnpm smoke:windows-live-audio-controls
 ```
 
 The first command selects DXGI (gdigrab fallback), validates decoded BMP pixels
 and frame advancement during a real ScreenOnly recording, then inspects the final
 artifact. The second keeps the detached Electron proof surface mounted and fed by
-that real source throughout recording.
+that real source throughout recording. The third requires a physical DirectShow
+microphone and a steady, unclipped calibration tone. It records and streams while
+checking acknowledged gain, mute, unmute, and stop-during-update behavior against
+the resulting audio artifacts. No available physical microphone is an explicit
+blocked gate, not a synthetic pass.
 
 Full Windows merge gate (release build + package + packaged smoke; slow):
 

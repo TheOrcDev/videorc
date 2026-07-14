@@ -143,6 +143,8 @@ function smokeEnvValue(env, name) {
  * @param {number} [options.timeoutMs]
  * @param {string[]} [options.requiredMarkers] - marker names to wait for (without the
  *   `[smoke] ` prefix), e.g. ['backend-ready'].
+ * @param {string} [options.packagedSmokeCommandCapability] - caller-held capability for a
+ *   packaged app marker, which intentionally never prints its bearer secret.
  * @param {(line:string)=>void} [options.onLine] - called for every stdout/stderr line.
  * @returns {Promise<{connections:Record<string,object>, process:import('node:child_process').ChildProcess, stop:()=>Promise<void>}>}
  */
@@ -151,6 +153,7 @@ export function launchDevApp({
   timeoutMs = 120000,
   requiredMarkers = ['backend-ready'],
   onLine,
+  packagedSmokeCommandCapability,
   spawnSpec: requestedSpawnSpec
 } = {}) {
   return new Promise((resolveLaunch, rejectLaunch) => {
@@ -224,6 +227,9 @@ export function launchDevApp({
           continue
         }
         if (marker === 'preview-motion-ready') {
+          if (packagedSmokeCommandCapability && connection?.capability === undefined) {
+            connection = { ...connection, capability: packagedSmokeCommandCapability }
+          }
           try {
             assertSmokeCommandConnection(connection)
           } catch (error) {

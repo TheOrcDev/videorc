@@ -133,8 +133,29 @@ export function buildWindowsLocalGateSteps({
         VIDEORC_NATIVE_PREVIEW_EXERCISE_PROOF_POLLING: '1',
         VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'raw-yuv420p'
       }
+    },
+    {
+      label: 'physical Windows live microphone controls smoke',
+      command: 'pnpm',
+      args: ['smoke:windows-live-audio-controls'],
+      blockedExitCode: 2,
+      blockedReportPath: join(outputDir, 'live-audio-controls', 'windows-live-audio-controls.json'),
+      env: {
+        VIDEORC_PERF_APP_EXECUTABLE: executable,
+        VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'live-audio-controls'),
+        VIDEORC_SMOKE_FFMPEG_PATH: packagedFfmpeg,
+        VIDEORC_SMOKE_FFPROBE_PATH: packagedFfprobe,
+        VIDEORC_SMOKE_TIMEOUT_MS: '240000',
+        VIDEORC_WINDOWS_SUPPORT_BUNDLE_PATH: join(outputDir, 'support-bundle.json')
+      }
     }
   ]
+}
+
+export function classifyWindowsLocalGateStepExit(step, code) {
+  if (code === 0) return 'passed'
+  if (step?.blockedExitCode && code === step.blockedExitCode) return 'blocked'
+  return 'failed'
 }
 
 export function formatWindowsLocalGatePlan({ host, steps }) {

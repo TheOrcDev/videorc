@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { release } from 'node:os'
 import { resolve } from 'node:path'
 
 import {
   buildWindowsLocalGateSteps,
+  classifyWindowsLocalGateStepExit,
   createWindowsLocalGateManifest,
   evaluateWindowsLocalGateHost,
   formatWindowsLocalGatePlan,
@@ -53,6 +54,7 @@ if (!host.ok) {
   process.exit(1)
 }
 
+let blockedStep = null
 for (const [index, step] of steps.entries()) {
   const manifestStep = manifest.steps[index]
   const stepStartedAt = Date.now()
@@ -61,8 +63,12 @@ for (const [index, step] of steps.entries()) {
   await writeManifest()
 
   try {
-    await runStep(step)
-    manifestStep.status = 'passed'
+    manifestStep.status = await runStep(step)
+    if (manifestStep.status === 'blocked') {
+      blockedStep = step
+      manifest.status = 'blocked'
+      manifestStep.error = { message: await blockedStepReason(step) }
+    }
   } catch (error) {
     manifestStep.status = 'failed'
     manifestStep.error = {
@@ -76,12 +82,20 @@ for (const [index, step] of steps.entries()) {
     manifestStep.durationMs = Date.now() - stepStartedAt
     await writeManifest()
   }
+  if (blockedStep) break
 }
 
-manifest.status = 'passed'
-manifest.finishedAt = new Date().toISOString()
-await writeManifest()
-console.log('windows-local-gates: PASS')
+if (blockedStep) {
+  manifest.finishedAt = new Date().toISOString()
+  await writeManifest()
+  console.error(`windows-local-gates: BLOCKED at ${blockedStep.label}`)
+  process.exitCode = blockedStep.blockedExitCode
+} else {
+  manifest.status = 'passed'
+  manifest.finishedAt = new Date().toISOString()
+  await writeManifest()
+  console.log('windows-local-gates: PASS')
+}
 
 function runStep(step) {
   return new Promise((resolveStep, rejectStep) => {
@@ -98,8 +112,13 @@ function runStep(step) {
 
     child.on('error', rejectStep)
     child.on('exit', (code, signal) => {
-      if (code === 0) {
-        resolveStep()
+      const outcome = classifyWindowsLocalGateStepExit(step, code)
+      if (outcome === 'passed') {
+        resolveStep('passed')
+        return
+      }
+      if (outcome === 'blocked') {
+        resolveStep('blocked')
         return
       }
       rejectStep(
@@ -113,4 +132,18 @@ function runStep(step) {
 
 function writeManifest() {
   return writeFile(manifest.evidence.runManifest, `${JSON.stringify(manifest, null, 2)}\n`)
+}
+
+async function blockedStepReason(step) {
+  if (step.blockedReportPath) {
+    try {
+      const report = JSON.parse(await readFile(step.blockedReportPath, 'utf8'))
+      if (report?.status === 'blocked' && typeof report?.error?.message === 'string') {
+        return report.error.message
+      }
+    } catch {
+      // Fall through to the stable parent-level reason when evidence is unreadable.
+    }
+  }
+  return `${step.label} reported a blocked physical-device prerequisite.`
 }

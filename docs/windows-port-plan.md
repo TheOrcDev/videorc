@@ -402,8 +402,11 @@ app in exile.
   build, pinned Windows FFmpeg fetch, package preflight, Windows dir package,
   owned-process lifecycle cleanup, packaged recording plus bundled-background
   decode, native DXGI/gdigrab ScreenOnly + BMP transport, and the recording-time
-  Electron proof surface. The packaged smoke understands both macOS app bundles
-  and Windows `win-unpacked` layouts.
+  Electron proof surface. It also runs a physical DirectShow microphone gate over
+  record-only, record-and-stream, and stream-only sessions, with final-artifact
+  evidence for acknowledged gain, mute, unmute, and stop-during-update behavior.
+  An unavailable physical microphone blocks this gate explicitly. The packaged
+  smoke understands both macOS app bundles and Windows `win-unpacked` layouts.
   **Manifest slice DONE 2026-07-08:** the gate writes
   `windows-local-gates.manifest.json` into the ignored Windows acceptance
   artifact directory with host blockers, command status, errors, and evidence

@@ -144,12 +144,7 @@ test('dev app launch uses explicit cmd.exe without shell argv reconstruction on 
   })
 
   assert.equal(windowsSpec.command, 'C:\\Windows\\System32\\cmd.exe')
-  assert.deepEqual(windowsSpec.args, [
-    '/d',
-    '/s',
-    '/c',
-    'pnpm --filter @videorc/desktop dev'
-  ])
+  assert.deepEqual(windowsSpec.args, ['/d', '/s', '/c', 'pnpm --filter @videorc/desktop dev'])
   assert.equal(windowsSpec.options.shell, false)
   assert.equal(devAppSpawnOptions({ platform: 'darwin' }).shell, false)
   assert.equal(devAppSpawnOptions({ platform: 'linux' }).shell, false)
@@ -272,6 +267,38 @@ test(
       }),
       /Invalid \[smoke\] preview-motion-ready marker:.*per-run capability/
     )
+  }
+)
+
+test(
+  'launchDevApp attaches a caller-held packaged capability before marker validation',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const capability = 'x'.repeat(43)
+    const fixtureScript = `
+      console.log('[smoke] preview-motion-ready ' + JSON.stringify({ host: '127.0.0.1', port: 43210 }))
+      setInterval(() => {}, 1_000)
+    `
+    const launched = await launchDevApp({
+      timeoutMs: 2_000,
+      requiredMarkers: ['preview-motion-ready'],
+      packagedSmokeCommandCapability: capability,
+      spawnSpec: {
+        command: process.execPath,
+        args: ['-e', fixtureScript],
+        cwd: process.cwd()
+      }
+    })
+
+    try {
+      assert.deepEqual(launched.connections['preview-motion-ready'], {
+        host: '127.0.0.1',
+        port: 43210,
+        capability
+      })
+    } finally {
+      await launched.stop()
+    }
   }
 )
 

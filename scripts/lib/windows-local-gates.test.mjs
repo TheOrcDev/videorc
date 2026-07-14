@@ -4,6 +4,7 @@ import { describe, it } from 'node:test'
 
 import {
   buildWindowsLocalGateSteps,
+  classifyWindowsLocalGateStepExit,
   createWindowsLocalGateManifest,
   evaluateWindowsLocalGateHost,
   formatWindowsLocalGatePlan,
@@ -62,7 +63,8 @@ describe('buildWindowsLocalGateSteps', () => {
       'package desktop Windows dir',
       'packaged recording and bundled-background smoke',
       'native Windows ScreenOnly and BMP smoke',
-      'recording-time Windows proof-surface smoke'
+      'recording-time Windows proof-surface smoke',
+      'physical Windows live microphone controls smoke'
     ])
     const packaged = steps.find(
       (step) => step.label === 'packaged recording and bundled-background smoke'
@@ -76,12 +78,30 @@ describe('buildWindowsLocalGateSteps', () => {
       posixPath(packaged.env.VIDEORC_SMOKE_OUTPUT_DIR),
       /C:\/repo\/docs\/acceptance\/artifacts\/windows\/\d{4}-\d{2}-\d{2}$/
     )
-    assert.deepEqual(steps.at(-2).args, ['smoke:windows-native-screen'])
-    assert.deepEqual(steps.at(-1).args, ['smoke:recording-native-preview'])
+    assert.deepEqual(steps.at(-3).args, ['smoke:windows-native-screen'])
+    assert.deepEqual(steps.at(-2).args, ['smoke:recording-native-preview'])
+    assert.deepEqual(steps.at(-1).args, ['smoke:windows-live-audio-controls'])
+    assert.equal(steps.at(-1).blockedExitCode, 2)
+    assert.match(
+      posixPath(steps.at(-1).blockedReportPath),
+      /live-audio-controls\/windows-live-audio-controls\.json$/
+    )
+    assert.match(
+      posixPath(steps.at(-1).env.VIDEORC_WINDOWS_SUPPORT_BUNDLE_PATH),
+      /C:\/repo\/docs\/acceptance\/artifacts\/windows\/\d{4}-\d{2}-\d{2}\/support-bundle\.json$/
+    )
     assert.match(
       posixPath(windowsLocalGateOutputDir(steps)),
       /C:\/repo\/docs\/acceptance\/artifacts\/windows\/\d{4}-\d{2}-\d{2}$/
     )
+  })
+
+  it('preserves an explicit physical-device blocker instead of reporting a failure', () => {
+    const step = buildWindowsLocalGateSteps({ repoRoot: 'C:/repo' }).at(-1)
+
+    assert.equal(classifyWindowsLocalGateStepExit(step, 0), 'passed')
+    assert.equal(classifyWindowsLocalGateStepExit(step, 2), 'blocked')
+    assert.equal(classifyWindowsLocalGateStepExit(step, 1), 'failed')
   })
 
   it('allows the Windows acceptance artifact directory to be pinned', () => {
@@ -117,6 +137,7 @@ describe('buildWindowsLocalGateSteps', () => {
     assert.match(report, /smoke:packaged:bundled/)
     assert.match(report, /smoke:windows-native-screen/)
     assert.match(report, /smoke:recording-native-preview/)
+    assert.match(report, /smoke:windows-live-audio-controls/)
   })
 
   it('builds an acceptance manifest with host, evidence, and command state', () => {
