@@ -36,6 +36,7 @@ type ProofPollerRuntime = {
     now: number,
     freshnessBudgetMs: number
   ) => boolean
+  proofPollersHaveCompleteFrameHistory: (pollers: Map<string, RuntimePoller>) => boolean
 }
 
 function loadRuntime(
@@ -55,7 +56,8 @@ function loadRuntime(
       proofPollerFrameAgeMs,
       proofPollerTransportAgeMs,
       proofPollerFrameIsFresh,
-      proofPollerTransportIsFresh
+      proofPollerTransportIsFresh,
+      proofPollersHaveCompleteFrameHistory
     };`
   )
   const pixels = new Uint8ClampedArray(8 * 8 * 4)
@@ -143,6 +145,32 @@ describe('Windows proof poller runtime', () => {
     expect(runtime.proofPollerFrameAgeMs(current, 2_000)).toBe(1_500)
     expect(runtime.proofPollerTransportIsFresh(current, 2_000, 1_000)).toBe(true)
     expect(runtime.proofPollerFrameIsFresh(current, 2_000, 1_000)).toBe(false)
+  })
+
+  it('tracks first-frame history only for the active poller generation', () => {
+    const established = poller()
+    const replacement = { ...poller(), lastFrameAdvanceAt: established.lastFrameAdvanceAt }
+    const newGeneration = { ...poller(), lastFrameAdvanceAt: null }
+    const runtime = loadRuntime(new Map(), vi.fn())
+
+    expect(runtime.proofPollersHaveCompleteFrameHistory(new Map([['screen', established]]))).toBe(
+      true
+    )
+    expect(
+      runtime.proofPollersHaveCompleteFrameHistory(
+        new Map([
+          ['screen', established],
+          ['camera', newGeneration]
+        ])
+      )
+    ).toBe(false)
+    expect(runtime.proofPollersHaveCompleteFrameHistory(new Map([['screen', replacement]]))).toBe(
+      true
+    )
+    expect(runtime.proofPollersHaveCompleteFrameHistory(new Map([['screen', newGeneration]]))).toBe(
+      false
+    )
+    expect(runtime.proofPollersHaveCompleteFrameHistory(new Map())).toBe(false)
   })
 
   it('counts only decoded images with no visible pixels as blank', () => {

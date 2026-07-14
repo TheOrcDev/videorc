@@ -94,6 +94,11 @@ function proofPollerFrameIsFresh(poller, now, freshnessBudgetMs) {
     proofPollerFrameAgeMs(poller, now) <= freshnessBudgetMs;
 }
 
+function proofPollersHaveCompleteFrameHistory(activePollers) {
+  return activePollers.size > 0 &&
+    [...activePollers.values()].every((poller) => poller.lastFrameAdvanceAt != null);
+}
+
 function proofPollerTransportIsFresh(poller, now, freshnessBudgetMs) {
   return poller.lastTransportSuccessAt != null &&
     proofPollerTransportAgeMs(poller, now) <= freshnessBudgetMs;

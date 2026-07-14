@@ -178,6 +178,7 @@ import {
   nativePreviewFirstFrameWatchdogEnabled,
   nativePreviewProofWatchdogEnabled,
   ProofWatchdogRendererReadSingleFlight,
+  proofPresentationFallbackReason,
   proofWatchdogRendererReadAllowed,
   WatchdogTickOwnership,
   type FirstFrameLedger,
@@ -948,6 +949,7 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
     nativePreviewProofPendingStartedAtMs = pendingStartedAtMs
     const presentedFrameId = finiteMetric(metrics?.presentedCompositorFrame)
     const sourceFrameAgeMs = finiteMetric(metrics?.sourceFrameAgeMs)
+    const sourceFrameHistoryComplete = metrics?.sourceFrameHistoryComplete === true
     const assessment = assessProofPresentationWatch({
       platform: process.platform,
       framePollingSuppressed,
@@ -955,6 +957,7 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
       sourceExpected: nativePreviewProofSourceExpected(),
       sourcePollerCount: finiteMetric(metrics?.sourcePollerCount) ?? 0,
       freshSourceLayerCount: finiteMetric(metrics?.freshSourceLayerCount) ?? 0,
+      sourceFrameHistoryComplete,
       sourceFrameAgeMs,
       pendingElapsedMs: Math.max(0, nowMs - pendingStartedAtMs)
     })
@@ -982,10 +985,11 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
       }
     } else if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
       const pendingElapsedMs = Math.max(0, nowMs - pendingStartedAtMs)
-      const reason =
-        sourceFrameAgeMs === undefined
-          ? `Windows preview did not deliver a first frame within ${Math.round(pendingElapsedMs)}ms.`
-          : `Windows preview source frames have not advanced for ${Math.round(sourceFrameAgeMs)}ms; keeping the last good frame while polling retries.`
+      const reason = proofPresentationFallbackReason({
+        sourceFrameHistoryComplete,
+        sourceFrameAgeMs,
+        pendingElapsedMs
+      })
       setFirstFrameStatus('fallback', reason)
       updatePreviewWindowWaitDetail(reason)
       logBackend('warn', `[proof-preview] ${reason}`)
@@ -4552,6 +4556,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               compositorSources: compositorStatus?.sources ?? [],
               layerCount: layers.size,
               sourcePollerCount: pollers.size,
+              sourceFrameHistoryComplete: proofPollersHaveCompleteFrameHistory(pollers),
               liveLayerCount,
               freshSourceLayerCount,
               sourceFrames: Object.fromEntries(sourceFrames),
@@ -5446,6 +5451,7 @@ async function presentNativePreviewSurfaceCompositor(
     sourceExpected: nativePreviewProofSourceExpected(),
     sourcePollerCount,
     freshSourceLayerCount,
+    sourceFrameHistoryComplete: metrics?.sourceFrameHistoryComplete === true,
     sourceFrameAgeMs
   })
   if (proofSourceAssessment === 'met') {

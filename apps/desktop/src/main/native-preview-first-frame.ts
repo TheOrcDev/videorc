@@ -80,6 +80,8 @@ export function assessProofSourceFrame(params: {
   sourceExpected?: boolean
   sourcePollerCount: number
   freshSourceLayerCount: number
+  /** Every active source poller has decoded at least one frame in its current generation. */
+  sourceFrameHistoryComplete: boolean
   sourceFrameAgeMs?: number
   staleAfterMs?: number
 }): ProofSourceFrameAssessment {
@@ -100,7 +102,11 @@ export function assessProofSourceFrame(params: {
   ) {
     return 'met'
   }
-  if (params.sourceFrameAgeMs != null && params.sourceFrameAgeMs > staleAfterMs) {
+  if (
+    params.sourceFrameHistoryComplete &&
+    params.sourceFrameAgeMs != null &&
+    params.sourceFrameAgeMs > staleAfterMs
+  ) {
     return 'stalled'
   }
   return 'pending'
@@ -113,6 +119,7 @@ export function assessProofPresentationWatch(params: {
   sourceExpected: boolean
   sourcePollerCount: number
   freshSourceLayerCount: number
+  sourceFrameHistoryComplete: boolean
   sourceFrameAgeMs?: number
   pendingElapsedMs: number
   pendingTimeoutMs?: number
@@ -132,6 +139,20 @@ export function assessProofPresentationWatch(params: {
   return assessment === 'pending' && params.pendingElapsedMs >= pendingTimeoutMs
     ? 'stalled'
     : assessment
+}
+
+export function proofPresentationFallbackReason(params: {
+  sourceFrameHistoryComplete: boolean
+  sourceFrameAgeMs?: number
+  pendingElapsedMs: number
+}): string {
+  if (!params.sourceFrameHistoryComplete) {
+    return `Windows preview did not deliver a first frame within ${Math.round(params.pendingElapsedMs)}ms.`
+  }
+  if (params.sourceFrameAgeMs != null) {
+    return `Windows preview source frames have not advanced for ${Math.round(params.sourceFrameAgeMs)}ms; keeping the last good frame while polling retries.`
+  }
+  return `Windows preview source frame liveness did not update within ${Math.round(params.pendingElapsedMs)}ms.`
 }
 
 export function boundedProofWatchdogRead<T>(
@@ -215,11 +236,14 @@ export class WatchdogTickOwnership {
 }
 
 // The timeout bounds each watchdog tick, not Electron's non-cancellable
-// executeJavaScript call. Keep reusing that underlying call until it settles;
-// only a new watchdog run or WebContents may supersede it.
+// executeJavaScript call. Keep reusing both that underlying call and its one
+// bounded result until the read settles; otherwise every timed-out tick would
+// attach another reaction retained forever by a hung renderer promise. Only a
+// new watchdog run or WebContents may supersede them.
 export class ProofWatchdogRendererReadSingleFlight<T> {
   private owner: ProofWatchdogRendererReadOwner | null = null
   private pending: Promise<T> | null = null
+  private bounded: Promise<T | null> | null = null
 
   read(
     owner: ProofWatchdogRendererReadOwner,
@@ -228,23 +252,27 @@ export class ProofWatchdogRendererReadSingleFlight<T> {
   ): Promise<T | null> {
     if (!this.pending || !this.ownerMatches(owner)) {
       const pending = startRead()
+      const bounded = boundedProofWatchdogRead(pending, timeoutMs)
       this.owner = owner
       this.pending = pending
+      this.bounded = bounded
       const clear = (): void => {
         if (this.pending === pending && this.ownerMatches(owner)) {
           this.owner = null
           this.pending = null
+          this.bounded = null
         }
       }
       void pending.then(clear, clear)
     }
-    return boundedProofWatchdogRead(this.pending, timeoutMs)
+    return this.bounded!
   }
 
   retire(owner?: ProofWatchdogRendererReadOwner): void {
     if (!owner || this.ownerMatches(owner)) {
       this.owner = null
       this.pending = null
+      this.bounded = null
     }
   }
 

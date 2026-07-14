@@ -16,6 +16,7 @@ import {
   nativePreviewFirstFrameWatchdogEnabled,
   nativePreviewProofWatchdogEnabled,
   ProofWatchdogRendererReadSingleFlight,
+  proofPresentationFallbackReason,
   proofWatchdogRendererReadAllowed,
   WatchdogTickOwnership,
   type FirstFrameSnapshot,
@@ -61,6 +62,7 @@ describe('assessProofSourceFrame', () => {
         framePollingSuppressed: false,
         sourcePollerCount: 1,
         freshSourceLayerCount: 1,
+        sourceFrameHistoryComplete: true,
         sourceFrameAgeMs: 125
       })
     ).toBe('met')
@@ -70,6 +72,7 @@ describe('assessProofSourceFrame', () => {
         framePollingSuppressed: false,
         sourcePollerCount: 1,
         freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: true,
         sourceFrameAgeMs: 1_501
       })
     ).toBe('stalled')
@@ -82,6 +85,7 @@ describe('assessProofSourceFrame', () => {
         framePollingSuppressed: true,
         sourcePollerCount: 1,
         freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: true,
         sourceFrameAgeMs: 10_000
       })
     ).toBe('paused')
@@ -91,6 +95,7 @@ describe('assessProofSourceFrame', () => {
         framePollingSuppressed: false,
         sourcePollerCount: 1,
         freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: true,
         sourceFrameAgeMs: 10_000
       })
     ).toBe('not-applicable')
@@ -104,6 +109,7 @@ describe('assessProofSourceFrame', () => {
         sourceExpected: false,
         sourcePollerCount: 0,
         freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: false,
         sourceFrameAgeMs: 10_000
       })
     ).toBe('not-applicable')
@@ -116,7 +122,8 @@ describe('assessProofSourceFrame', () => {
         framePollingSuppressed: false,
         sourceExpected: true,
         sourcePollerCount: 0,
-        freshSourceLayerCount: 0
+        freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: false
       })
     ).toBe('pending')
   })
@@ -128,9 +135,24 @@ describe('assessProofSourceFrame', () => {
         framePollingSuppressed: false,
         sourcePollerCount: 2,
         freshSourceLayerCount: 1,
+        sourceFrameHistoryComplete: true,
         sourceFrameAgeMs: 1_501
       })
     ).toBe('stalled')
+  })
+
+  it('keeps a started poller pending until its first decoded frame reaches the startup budget', () => {
+    expect(
+      assessProofSourceFrame({
+        platform: 'win32',
+        framePollingSuppressed: false,
+        sourceExpected: true,
+        sourcePollerCount: 1,
+        freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: false,
+        sourceFrameAgeMs: 1_501
+      })
+    ).toBe('pending')
   })
 })
 
@@ -144,6 +166,7 @@ describe('assessProofPresentationWatch', () => {
         sourceExpected: true,
         sourcePollerCount: 0,
         freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: false,
         pendingElapsedMs: DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS
       })
     ).toBe('stalled')
@@ -158,6 +181,7 @@ describe('assessProofPresentationWatch', () => {
         sourceExpected: true,
         sourcePollerCount: 1,
         freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: true,
         sourceFrameAgeMs: 1_501,
         pendingElapsedMs: 0
       })
@@ -173,6 +197,7 @@ describe('assessProofPresentationWatch', () => {
         sourceExpected: true,
         sourcePollerCount: 0,
         freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: false,
         pendingElapsedMs: DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS
       })
     ).toBe('stalled')
@@ -187,9 +212,61 @@ describe('assessProofPresentationWatch', () => {
         sourceExpected: false,
         sourcePollerCount: 0,
         freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: false,
         pendingElapsedMs: DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS
       })
     ).toBe('not-applicable')
+  })
+
+  it('gives an initialized poller the full first-frame budget before declaring fallback', () => {
+    const startup = {
+      platform: 'win32' as const,
+      framePollingSuppressed: false,
+      surfaceReady: true,
+      sourceExpected: true,
+      sourcePollerCount: 1,
+      freshSourceLayerCount: 0,
+      sourceFrameHistoryComplete: false,
+      sourceFrameAgeMs: 1_501
+    }
+
+    expect(
+      assessProofPresentationWatch({
+        ...startup,
+        pendingElapsedMs: DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS - 1
+      })
+    ).toBe('pending')
+    expect(
+      assessProofPresentationWatch({
+        ...startup,
+        pendingElapsedMs: DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS
+      })
+    ).toBe('stalled')
+  })
+})
+
+describe('proofPresentationFallbackReason', () => {
+  it('does not claim a last good frame when startup never delivered one', () => {
+    const reason = proofPresentationFallbackReason({
+      sourceFrameHistoryComplete: false,
+      sourceFrameAgeMs: 15_000,
+      pendingElapsedMs: 15_000
+    })
+
+    expect(reason).toBe('Windows preview did not deliver a first frame within 15000ms.')
+    expect(reason).not.toContain('last good frame')
+  })
+
+  it('identifies a post-live source stall and retained frame', () => {
+    expect(
+      proofPresentationFallbackReason({
+        sourceFrameHistoryComplete: true,
+        sourceFrameAgeMs: 1_501,
+        pendingElapsedMs: 200
+      })
+    ).toBe(
+      'Windows preview source frames have not advanced for 1501ms; keeping the last good frame while polling retries.'
+    )
   })
 })
 
@@ -219,8 +296,8 @@ describe('ProofWatchdogRendererReadSingleFlight', () => {
       await expect(first).resolves.toBeNull()
 
       const second = reads.read(owner, startRead, 500)
+      expect(second).toBe(first)
       expect(startRead).toHaveBeenCalledTimes(1)
-      await vi.advanceTimersByTimeAsync(500)
       await expect(second).resolves.toBeNull()
       expect(startRead).toHaveBeenCalledTimes(1)
     } finally {
