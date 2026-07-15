@@ -146,6 +146,7 @@
     "smoke:oauth": "node scripts/smoke-oauth-app.mjs",
     "smoke:screens": "node scripts/smoke-screens-app.mjs",
     "smoke:multistream": "node scripts/smoke-multistream-app.mjs",
+    "smoke:multistream-endurance": "node scripts/smoke-multistream-endurance-app.mjs",
     "smoke:packaged": "node scripts/smoke-packaged-app.mjs",
     "smoke:packaged:bundled": "node scripts/smoke-packaged-app.mjs --require-bundled-ffmpeg",
     "smoke:packaged:native-preview": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_SMOKE_PACKAGED_APP=1 VIDEORC_EXPECT_NATIVE_METAL_PREVIEW=1 -- node scripts/smoke-preview-surface-app.mjs",
