@@ -1142,6 +1142,8 @@ export interface OutputSettings {
   outputDirectory?: string
   outputDirectoryCapability?: string
   ffmpegPath?: string
+  /** Keep the capture MKV (lossless audio) next to the exported MP4. */
+  keepOriginalMkv?: boolean
   video: VideoSettings
   rtmp: RtmpSettings
 }

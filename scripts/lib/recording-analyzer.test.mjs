@@ -29,11 +29,14 @@ import {
   DEFAULT_GATES,
   analyzeRecording,
   audioPtsGaps,
+  avSkewComponents,
   avSkewMs,
   evaluateGates,
   maxConsecutiveRun,
+  maxKeyframeInterval,
   normalizeProbe,
   pacingStats,
+  requiredH264Level,
   parseCsvFloatColumn,
   parseFramemd5,
   parseFreezedetect,
@@ -258,7 +261,13 @@ describe('evaluateGates', () => {
     avSkewMs: 10,
     durationSeconds: 3,
     frameDerivedDurationSeconds: 3,
-    durationStretchRatio: 1
+    durationStretchRatio: 1,
+    // The recording colorimetry law (Q1): a clean artifact is TAGGED BT.709
+    // video-range; untagged now warns (or fails under requireColorTags).
+    colorSpace: 'bt709',
+    colorPrimaries: 'bt709',
+    colorTransfer: 'bt709',
+    colorRange: 'tv'
   }
 
   it('passes a clean metrics set', () => {
@@ -337,6 +346,70 @@ describe('evaluateGates', () => {
     const v = evaluateGates({ ...clean, longestSilenceMs: 400, silenceCount: 1 })
     assert.equal(v.pass, true)
     assert.equal(v.warnings.length, 1)
+  })
+
+  it('warns on missing color tags by default and fails under requireColorTags', () => {
+    const untagged = { ...clean, colorSpace: null, colorPrimaries: null, colorTransfer: null, colorRange: null }
+    const soft = evaluateGates(untagged)
+    assert.equal(soft.pass, true)
+    assert.ok(soft.warnings.some((warning) => /colorimetry not tagged/.test(warning)))
+    const hard = evaluateGates(untagged, { ...DEFAULT_GATES, requireColorTags: true })
+    assert.equal(hard.pass, false)
+    assert.ok(hard.failures.some((failure) => /colorimetry not tagged/.test(failure)))
+  })
+
+  it('flags an under-spec H.264 level (the audit-shipped 1080p60@L4.0 defect)', () => {
+    const underLeveled = {
+      ...clean,
+      width: 1920,
+      height: 1080,
+      intendedFps: 60,
+      level: 40
+    }
+    const soft = evaluateGates(underLeveled)
+    assert.equal(soft.pass, true)
+    assert.ok(soft.warnings.some((warning) => /level 4\.0 below spec minimum 4\.2/.test(warning)))
+    const hard = evaluateGates(underLeveled, { ...DEFAULT_GATES, requireValidLevel: true })
+    assert.equal(hard.pass, false)
+  })
+
+  it('fails an unbounded A/V stop tail only when the gate is armed', () => {
+    const tailed = { ...clean, tailMismatchMs: 273 }
+    assert.equal(evaluateGates(tailed).pass, true)
+    const gated = evaluateGates(tailed, { ...DEFAULT_GATES, maxTailMismatchMs: 100 })
+    assert.equal(gated.pass, false)
+    assert.ok(gated.failures.some((failure) => /tail mismatch 273ms/.test(failure)))
+  })
+
+  it('fails a broken keyframe cadence when the gate is armed', () => {
+    const sparse = { ...clean, keyframeCount: 2, maxKeyframeIntervalSeconds: 5.2 }
+    assert.equal(evaluateGates(sparse).pass, true)
+    const gated = evaluateGates(sparse, { ...DEFAULT_GATES, keyframeMaxIntervalSeconds: 2.5 })
+    assert.equal(gated.pass, false)
+  })
+
+  it('requiredH264Level matches the shipping recording matrix', () => {
+    // Mirrors crates/videorc-backend/src/h264_profile.rs test vectors.
+    assert.equal(requiredH264Level(1920, 1080, 30), 40)
+    assert.equal(requiredH264Level(1920, 1080, 60), 42)
+    assert.equal(requiredH264Level(2560, 1440, 60), 51)
+    assert.equal(requiredH264Level(3840, 2160, 30), 51)
+    assert.equal(requiredH264Level(3840, 2160, 60), 52)
+    assert.equal(requiredH264Level(3840, 2160, 120), null)
+  })
+
+  it('avSkewComponents separates start skew from stop-tail mismatch', () => {
+    const { startSkewMs, tailMismatchMs } = avSkewComponents({
+      video: { startTime: 0, duration: 6.516 },
+      audio: [{ startTime: 0, duration: 6.336 }]
+    })
+    assert.equal(startSkewMs, 0)
+    assert.ok(Math.abs(tailMismatchMs - 180) < 0.001)
+  })
+
+  it('maxKeyframeInterval reports the widest gap', () => {
+    assert.equal(maxKeyframeInterval([0, 2, 4.5, 6]), 2.5)
+    assert.equal(maxKeyframeInterval([0]), null)
   })
 
   it('fails when audio is expected but missing', () => {

@@ -27,6 +27,7 @@ import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioAudio, useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
@@ -178,6 +179,24 @@ export function SettingsTab({
                     : ''}
                 </p>
               ) : null}
+            </Field>
+            <Field>
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <FieldLabel htmlFor="keep-original-recording">Keep original recording</FieldLabel>
+                  <p className="text-xs text-muted-foreground">
+                    Keeps the capture MKV (lossless audio) next to the exported MP4 instead of
+                    deleting it. Uses more disk space.
+                  </p>
+                </div>
+                <Switch
+                  checked={settings.keepOriginalRecording}
+                  id="keep-original-recording"
+                  onCheckedChange={(checked) =>
+                    setSettings((current) => ({ ...current, keepOriginalRecording: checked }))
+                  }
+                />
+              </div>
             </Field>
           </FieldGroup>
 

@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, sleep};
 use uuid::Uuid;
 
-use crate::color::rgb_to_yuv_full_range_bt601 as rgb_to_yuv;
+use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
 use crate::compositor_synthetic::SyntheticMovingSource;
 use crate::diagnostics::{
     CompositorLiveSourceFetchStats, CompositorOutsideRenderTimingStats,
@@ -7548,16 +7548,19 @@ mod tests {
         // Comments upgrade S2: the highlight card (top) and the captions bar
         // (bottom) render in the SAME frame from their independent slots.
         let (canvas_w, canvas_h) = (32_u32, 16_u32);
+        // Solid red (not white): video-range white luma (235) can collide
+        // with bright idle-pattern pixels, making the "overlay changed the
+        // pixel" assertion vacuous.
         let caption = test_caption_overlay(
             8,
             4,
-            [255, 255, 255, 255],
+            [255, 0, 0, 255],
             crate::captions::CaptionOverlayPosition::Bottom,
         );
         let highlight = test_caption_overlay(
             8,
             4,
-            [255, 255, 255, 255],
+            [255, 0, 0, 255],
             crate::captions::CaptionOverlayPosition::Top,
         );
         let base_inputs = CompositorRenderInputs {
@@ -7583,14 +7586,14 @@ mod tests {
             },
             &mut with_both,
         );
-        let (white_y, _, _) = rgb_to_yuv(255, 255, 255);
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
         // Highlight owns the top band (margin = round(16*0.04) = 1 → rows 1..5).
         let top_index = 2 * canvas_w as usize + (canvas_w as usize / 2);
-        assert_eq!(with_both[top_index], white_y);
+        assert_eq!(with_both[top_index], red_y);
         assert_ne!(with_both[top_index], baseline[top_index]);
         // Captions own the bottom band (rows 11..15).
         let bottom_index = 13 * canvas_w as usize + (canvas_w as usize / 2);
-        assert_eq!(with_both[bottom_index], white_y);
+        assert_eq!(with_both[bottom_index], red_y);
         assert_ne!(with_both[bottom_index], baseline[bottom_index]);
     }
 

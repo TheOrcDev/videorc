@@ -10,17 +10,56 @@ use objc2_core_media::{
     CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetH264ParameterSetAtIndex, kCMTimeInvalid,
     kCMVideoCodecType_H264,
 };
-use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
+use objc2_core_video::{
+    CVPixelBufferGetHeight, CVPixelBufferGetWidth, kCVImageBufferColorPrimaries_ITU_R_709_2,
+    kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+};
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSession, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
-    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxFrameDelayCount,
-    kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    kVTCompressionPropertyKey_ColorPrimaries, kVTCompressionPropertyKey_ExpectedFrameRate,
+    kVTCompressionPropertyKey_MaxFrameDelayCount, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
-    kVTCompressionPropertyKey_RealTime,
+    kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
+    kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
+    kVTProfileLevel_H264_High_3_0, kVTProfileLevel_H264_High_3_1, kVTProfileLevel_H264_High_3_2,
+    kVTProfileLevel_H264_High_4_0, kVTProfileLevel_H264_High_4_1, kVTProfileLevel_H264_High_4_2,
+    kVTProfileLevel_H264_High_5_0, kVTProfileLevel_H264_High_5_1, kVTProfileLevel_H264_High_5_2,
+    kVTProfileLevel_H264_High_AutoLevel,
 };
 
+use crate::h264_profile::h264_high_level_label;
 use crate::metal_compositor::MetalCompositorTargetPixelBuffer;
+
+/// The High-profile/level VideoToolbox must write for this output, computed
+/// from the REAL macroblock rate (the encoder's auto pick under-levels 60fps
+/// streams), plus the label recorded in diagnostics. Streams beyond level 5.2
+/// fall back to AutoLevel rather than lying.
+fn vt_h264_high_profile_level(
+    width: usize,
+    height: usize,
+    fps: i32,
+) -> (&'static CFString, &'static str) {
+    let label = h264_high_level_label(
+        u32::try_from(width).unwrap_or(u32::MAX),
+        u32::try_from(height).unwrap_or(u32::MAX),
+        u32::try_from(fps.max(1)).unwrap_or(1),
+    );
+    unsafe {
+        match label {
+            Some("3.0") => (kVTProfileLevel_H264_High_3_0, "High@3.0"),
+            Some("3.1") => (kVTProfileLevel_H264_High_3_1, "High@3.1"),
+            Some("3.2") => (kVTProfileLevel_H264_High_3_2, "High@3.2"),
+            Some("4.0") => (kVTProfileLevel_H264_High_4_0, "High@4.0"),
+            Some("4.1") => (kVTProfileLevel_H264_High_4_1, "High@4.1"),
+            Some("4.2") => (kVTProfileLevel_H264_High_4_2, "High@4.2"),
+            Some("5.0") => (kVTProfileLevel_H264_High_5_0, "High@5.0"),
+            Some("5.1") => (kVTProfileLevel_H264_High_5_1, "High@5.1"),
+            Some("5.2") => (kVTProfileLevel_H264_High_5_2, "High@5.2"),
+            _ => (kVTProfileLevel_H264_High_AutoLevel, "High@Auto"),
+        }
+    }
+}
 
 const NO_ERR: OSStatus = 0;
 type OSStatus = i32;
@@ -33,11 +72,17 @@ pub struct VideoToolboxRealtimePropertyStatuses {
     pub max_key_frame_interval: OSStatus,
     pub average_bit_rate: Option<OSStatus>,
     pub prioritize_encoding_speed: OSStatus,
-    pub max_frame_delay_count: OSStatus,
+    pub max_frame_delay_count: Option<OSStatus>,
+    pub profile_level: OSStatus,
+    pub color_primaries: OSStatus,
+    pub transfer_function: OSStatus,
+    pub ycbcr_matrix: OSStatus,
     pub expected_frame_rate_value: i32,
     pub max_key_frame_interval_value: i32,
     pub average_bit_rate_value: Option<i64>,
-    pub max_frame_delay_count_value: i32,
+    pub max_frame_delay_count_value: Option<i32>,
+    pub prioritize_encoding_speed_value: bool,
+    pub profile_level_label: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,26 +305,35 @@ impl VideoToolboxH264Session {
             expected_frame_rate,
             max_key_frame_interval,
             None,
+            true,
         )
     }
 
-    pub fn new_realtime_with_bitrate(
+    /// Session tuned per output intent: `low_latency` keeps today's streaming
+    /// behavior (speed over quality, 1-frame delay cap); record-only sessions
+    /// pass `false` so the hardware spends its headroom on quality — nothing
+    /// downstream needs the frames within a frame interval.
+    pub fn new_tuned(
         width: usize,
         height: usize,
         expected_frame_rate: i32,
         max_key_frame_interval: i32,
-        average_bit_rate_bps: i64,
+        average_bit_rate_bps: Option<i64>,
+        low_latency: bool,
     ) -> Result<Self> {
-        ensure!(
-            average_bit_rate_bps > 0,
-            "VideoToolbox average bit rate must be positive"
-        );
+        if let Some(average_bit_rate_bps) = average_bit_rate_bps {
+            ensure!(
+                average_bit_rate_bps > 0,
+                "VideoToolbox average bit rate must be positive"
+            );
+        }
         Self::new_realtime_configured(
             width,
             height,
             expected_frame_rate,
             max_key_frame_interval,
-            Some(average_bit_rate_bps),
+            average_bit_rate_bps,
+            low_latency,
         )
     }
 
@@ -289,6 +343,7 @@ impl VideoToolboxH264Session {
         expected_frame_rate: i32,
         max_key_frame_interval: i32,
         average_bit_rate_bps: Option<i64>,
+        low_latency: bool,
     ) -> Result<Self> {
         ensure!(width > 0, "VideoToolbox session width must be non-zero");
         ensure!(height > 0, "VideoToolbox session height must be non-zero");
@@ -337,17 +392,24 @@ impl VideoToolboxH264Session {
                 max_key_frame_interval: NO_ERR,
                 average_bit_rate: None,
                 prioritize_encoding_speed: NO_ERR,
-                max_frame_delay_count: NO_ERR,
+                max_frame_delay_count: None,
+                profile_level: NO_ERR,
+                color_primaries: NO_ERR,
+                transfer_function: NO_ERR,
+                ycbcr_matrix: NO_ERR,
                 expected_frame_rate_value: expected_frame_rate,
                 max_key_frame_interval_value: max_key_frame_interval,
                 average_bit_rate_value: average_bit_rate_bps,
-                max_frame_delay_count_value: 1,
+                max_frame_delay_count_value: None,
+                prioritize_encoding_speed_value: low_latency,
+                profile_level_label: "High@Auto",
             },
         };
         session.property_statuses = session.configure_realtime_low_latency(
             expected_frame_rate,
             max_key_frame_interval,
             average_bit_rate_bps,
+            low_latency,
         )?;
         Ok(session)
     }
@@ -672,6 +734,7 @@ impl VideoToolboxH264Session {
         expected_frame_rate: i32,
         max_key_frame_interval: i32,
         average_bit_rate_bps: Option<i64>,
+        low_latency: bool,
     ) -> Result<VideoToolboxRealtimePropertyStatuses> {
         let real_time = self.set_property(
             "RealTime",
@@ -702,14 +765,50 @@ impl VideoToolboxH264Session {
                 average_bit_rate_value.as_ref(),
             )
         });
+        // Record-only sessions trade the streaming latency posture for quality:
+        // an explicit `false` here beats the encoder's "auto" default, and the
+        // 1-frame delay cap only applies when a live leg needs frames now.
         let prioritize_encoding_speed = self.set_property_status(
             unsafe { kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality },
-            CFBoolean::new(true).as_ref(),
+            CFBoolean::new(low_latency).as_ref(),
         );
-        let max_frame_delay_count_value = 1;
-        let max_frame_delay_count = self.set_property_status(
-            unsafe { kVTCompressionPropertyKey_MaxFrameDelayCount },
-            CFNumber::new_i32(max_frame_delay_count_value).as_ref(),
+        let (max_frame_delay_count, max_frame_delay_count_value) = if low_latency {
+            let capped_delay_frames = 1;
+            (
+                Some(self.set_property_status(
+                    unsafe { kVTCompressionPropertyKey_MaxFrameDelayCount },
+                    CFNumber::new_i32(capped_delay_frames).as_ref(),
+                )),
+                Some(capped_delay_frames),
+            )
+        } else {
+            (None, None)
+        };
+
+        // Spec-valid High profile/level (the audit caught auto picks below the
+        // real macroblock rate at 60fps) — best-effort: a refusing encoder
+        // keeps its auto selection and the status records the refusal.
+        let (profile_level_value, profile_level_label) =
+            vt_h264_high_profile_level(self.width, self.height, expected_frame_rate);
+        let profile_level = self.set_property_status(
+            unsafe { kVTCompressionPropertyKey_ProfileLevel },
+            profile_level_value.as_ref(),
+        );
+
+        // Recording colorimetry law: BT.709 video-range, TAGGED. These drive
+        // both the encoder's internal BGRA→Y'CbCr conversion and the SPS VUI,
+        // so the bytes and the label always agree.
+        let color_primaries = self.set_property_status(
+            unsafe { kVTCompressionPropertyKey_ColorPrimaries },
+            unsafe { kCVImageBufferColorPrimaries_ITU_R_709_2 }.as_ref(),
+        );
+        let transfer_function = self.set_property_status(
+            unsafe { kVTCompressionPropertyKey_TransferFunction },
+            unsafe { kCVImageBufferTransferFunction_ITU_R_709_2 }.as_ref(),
+        );
+        let ycbcr_matrix = self.set_property_status(
+            unsafe { kVTCompressionPropertyKey_YCbCrMatrix },
+            unsafe { kCVImageBufferYCbCrMatrix_ITU_R_709_2 }.as_ref(),
         );
 
         Ok(VideoToolboxRealtimePropertyStatuses {
@@ -720,10 +819,16 @@ impl VideoToolboxH264Session {
             average_bit_rate,
             prioritize_encoding_speed,
             max_frame_delay_count,
+            profile_level,
+            color_primaries,
+            transfer_function,
+            ycbcr_matrix,
             expected_frame_rate_value: expected_frame_rate,
             max_key_frame_interval_value: max_key_frame_interval,
             average_bit_rate_value: average_bit_rate_bps,
             max_frame_delay_count_value,
+            prioritize_encoding_speed_value: low_latency,
+            profile_level_label,
         })
     }
 

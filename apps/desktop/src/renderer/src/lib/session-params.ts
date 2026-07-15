@@ -13,7 +13,13 @@ export function buildStartSessionParams(input: {
   settings: SettingsState
   suppressCaptionsForSession?: boolean
 }): StartSessionParams {
-  const { captureConfig, scene, sceneEditMode = false, suppressCaptionsForSession = false } = input
+  const {
+    captureConfig,
+    scene,
+    sceneEditMode = false,
+    settings,
+    suppressCaptionsForSession = false
+  } = input
 
   // Send the scene whenever edit mode is on OR it carries a background, so the
   // backend learns the selected background even outside transform editing (A5).
@@ -41,6 +47,7 @@ export function buildStartSessionParams(input: {
     output: {
       recordEnabled: captureConfig.recordEnabled,
       streamEnabled: captureConfig.streamEnabled,
+      keepOriginalMkv: settings.keepOriginalRecording,
       video: captureConfig.video,
       rtmp: {
         preset: captureConfig.rtmpPreset,

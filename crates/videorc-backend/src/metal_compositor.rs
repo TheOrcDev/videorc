@@ -39,7 +39,7 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
-use crate::color::rgb_to_yuv_full_range_bt601 as rgb_to_yuv;
+use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
 
 type MetalDevice = ProtocolObject<dyn MTLDevice>;
 type MetalTexture = ProtocolObject<dyn MTLTexture>;
@@ -1793,14 +1793,16 @@ mod tests {
     }
 
     #[test]
-    fn bgra_to_yuv420p_matches_full_range_bt601() {
-        // 4×4 solid red. BGRA red = [0, 0, 255, 255]. Full-range BT.601: Y=76, U=85, V=255.
+    fn bgra_to_yuv420p_matches_video_range_bt709() {
+        // 4×4 solid red. BGRA red = [0, 0, 255, 255]. Video-range BT.709:
+        // Y=63, U=102, V=240 (the recording colorimetry law — matches the
+        // color.rs round-trip fixtures and the tagged bitstream).
         let red = [0u8, 0, 255, 255].repeat(16);
         let yuv = bgra_to_yuv420p(&red, 4, 4);
         assert_eq!(yuv.len(), 16 + 2 * 4); // Y(16) + U(4) + V(4)
-        assert!(yuv[..16].iter().all(|&y| y == 76), "Y plane");
-        assert!(yuv[16..20].iter().all(|&u| u == 85), "U plane");
-        assert!(yuv[20..24].iter().all(|&v| v == 255), "V plane");
+        assert!(yuv[..16].iter().all(|&y| y == 63), "Y plane");
+        assert!(yuv[16..20].iter().all(|&u| u == 102), "U plane");
+        assert!(yuv[20..24].iter().all(|&v| v == 240), "V plane");
     }
 
     #[test]
@@ -1849,8 +1851,8 @@ mod tests {
         }];
         let yuv = compositor.compose_yuv420p(4, 4, &sources).unwrap();
         assert_eq!(yuv.len(), 16 + 2 * 4);
-        assert!(yuv[..16].iter().all(|&y| y == 76), "Y plane red");
-        assert!(yuv[16..20].iter().all(|&u| u == 85), "U plane red");
+        assert!(yuv[..16].iter().all(|&y| y == 63), "Y plane red");
+        assert!(yuv[16..20].iter().all(|&u| u == 102), "U plane red");
     }
 
     #[test]

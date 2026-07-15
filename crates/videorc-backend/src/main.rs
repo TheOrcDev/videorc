@@ -19,6 +19,7 @@ mod ffmpeg;
 mod ffmpeg_work;
 mod fifo;
 mod frame_store;
+mod h264_profile;
 mod live_chat;
 mod live_chat_persistence;
 mod live_layout;

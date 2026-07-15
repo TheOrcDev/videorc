@@ -808,6 +808,10 @@ pub struct OutputSettings {
     pub stream_enabled: bool,
     pub output_directory: Option<String>,
     pub ffmpeg_path: Option<String>,
+    /// Keep the capture MKV (lossless PCM audio) next to the exported MP4
+    /// instead of removing it after a committed export. Off by default.
+    #[serde(default)]
+    pub keep_original_mkv: bool,
     pub video: VideoSettings,
     pub rtmp: RtmpSettings,
 }

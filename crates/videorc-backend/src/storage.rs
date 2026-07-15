@@ -1336,6 +1336,7 @@ impl Database {
                 stream_enabled: true,
                 output_directory: None,
                 ffmpeg_path: None,
+                keep_original_mkv: false,
                 video: crate::protocol::VideoSettings {
                     preset: crate::protocol::VideoPreset::StreamSafe1080p30,
                     width: 1920,
@@ -5846,6 +5847,7 @@ mod tests {
                 camera_chroma_key_spill_pct: 10,
             },
             output: OutputSettings {
+                keep_original_mkv: false,
                 record_enabled: true,
                 stream_enabled: false,
                 output_directory: None,
@@ -5970,6 +5972,7 @@ mod tests {
             test_pattern: false,
         };
         let output = OutputSettings {
+            keep_original_mkv: false,
             record_enabled: true,
             stream_enabled: true,
             output_directory: None,

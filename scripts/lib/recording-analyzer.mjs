@@ -42,8 +42,50 @@ export const DEFAULT_GATES = Object.freeze({
   maxDurationStretchRatio: 1.1, // container duration must not stretch far past decoded frames at intended FPS
   freezeNoiseDb: -60, // freezedetect near-identical noise floor (matches repair.rs)
   silenceDb: -50, // silencedetect dropout noise floor
-  minSilenceGapMs: 20 // silence run that counts as a candidate dropout
+  minSilenceGapMs: 20, // silence run that counts as a candidate dropout
+  // Recording colorimetry law (2026-07 quality plan Q1): artifacts must be
+  // TAGGED BT.709 video-range. Warn by default (legacy files and third-party
+  // callers); the recording matrix smoke sets true to hard-fail.
+  requireColorTags: false,
+  // Spec-valid H.264 level for the stream's real macroblock rate (Q3). Warn by
+  // default; the matrix smoke sets true to hard-fail.
+  requireValidLevel: false,
+  // Max keyframe interval in seconds (recordings pin a 2s GOP); null disables
+  // the check (it decodes frame metadata — the matrix smoke enables it).
+  keyframeMaxIntervalSeconds: null,
+  // Max A/V stream tail mismatch in ms (stop drain); null keeps the combined
+  // avSkew gates as the only sync check.
+  maxTailMismatchMs: null
 })
+
+// H.264 High-profile level table (label ×10 as ffprobe reports `level`),
+// mirrored from crates/videorc-backend/src/h264_profile.rs: (level, MaxFS
+// macroblocks, MaxMBPS macroblocks/second).
+const H264_LEVELS = [
+  [30, 1620, 40500],
+  [31, 3600, 108000],
+  [32, 5120, 216000],
+  [40, 8192, 245760],
+  [41, 8192, 245760],
+  [42, 8704, 522240],
+  [50, 22080, 589824],
+  [51, 36864, 983040],
+  [52, 36864, 2073600]
+]
+
+/**
+ * Smallest spec-valid H.264 level (ffprobe integer form, e.g. 42) for the
+ * stream's dimensions × fps, or null beyond level 5.2.
+ */
+export function requiredH264Level(width, height, fps) {
+  if (!width || !height || !fps) return null
+  const frameMacroblocks = Math.ceil(width / 16) * Math.ceil(height / 16)
+  const macroblocksPerSecond = frameMacroblocks * fps
+  const row = H264_LEVELS.find(
+    ([, maxFs, maxMbps]) => frameMacroblocks <= maxFs && macroblocksPerSecond <= maxMbps
+  )
+  return row ? row[0] : null
+}
 
 // ---------------------------------------------------------------------------
 // Pure parsers (no I/O — unit-testable)
@@ -285,6 +327,29 @@ export function avSkewMs(probe) {
   return skew
 }
 
+/**
+ * The two components the combined avSkewMs folds together, reported
+ * separately: `startSkewMs` (streams begin apart — perceived through the whole
+ * file) and `tailMismatchMs` (one stream outlives the other at stop — the
+ * uncontrolled-drain signature the 2026-07 audit measured at up to 273ms on
+ * 60fps legacy recordings).
+ * @returns {{startSkewMs:number|null, tailMismatchMs:number|null}}
+ */
+export function avSkewComponents(probe) {
+  const video = probe.video
+  const audio = probe.audio?.[0]
+  if (!video || !audio) return { startSkewMs: null, tailMismatchMs: null }
+  const startSkewMs =
+    Number.isFinite(video.startTime) && Number.isFinite(audio.startTime)
+      ? Math.abs(video.startTime - audio.startTime) * 1000
+      : null
+  const tailMismatchMs =
+    Number.isFinite(video.duration) && Number.isFinite(audio.duration)
+      ? Math.abs(video.duration - audio.duration) * 1000
+      : null
+  return { startSkewMs, tailMismatchMs }
+}
+
 function parseFraction(value) {
   if (typeof value !== 'string') return null
   const [num, den] = value.split('/')
@@ -325,6 +390,12 @@ export function normalizeProbe(ffprobeJson) {
         duration: parseMaybeFloat(videoRaw.duration),
         startTime: parseMaybeFloat(videoRaw.start_time),
         pixFmt: videoRaw.pix_fmt ?? null,
+        profile: videoRaw.profile ?? null,
+        level: parseMaybeInt(videoRaw.level),
+        colorSpace: videoRaw.color_space ?? null,
+        colorPrimaries: videoRaw.color_primaries ?? null,
+        colorTransfer: videoRaw.color_transfer ?? null,
+        colorRange: videoRaw.color_range ?? null,
         encoderTag: videoRaw.tags?.encoder ?? null,
         handler: videoRaw.tags?.handler_name ?? null
       }
@@ -456,6 +527,68 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
     }
   } else if (metrics.expectAudio) {
     failures.push('audio expected but no audio stream present')
+  }
+
+  // Colorimetry tags (Q1): untagged output makes every player guess.
+  if (metrics.hasVideo) {
+    const wrongTags = []
+    if (metrics.colorSpace !== 'bt709') wrongTags.push(`color_space=${metrics.colorSpace ?? 'unknown'}`)
+    if (metrics.colorPrimaries !== 'bt709') {
+      wrongTags.push(`color_primaries=${metrics.colorPrimaries ?? 'unknown'}`)
+    }
+    if (metrics.colorTransfer !== 'bt709') {
+      wrongTags.push(`color_transfer=${metrics.colorTransfer ?? 'unknown'}`)
+    }
+    if (metrics.colorRange !== 'tv') wrongTags.push(`color_range=${metrics.colorRange ?? 'unknown'}`)
+    if (wrongTags.length > 0) {
+      const message = `colorimetry not tagged BT.709 video-range: ${wrongTags.join(', ')}`
+      if (gates.requireColorTags) {
+        failures.push(message)
+      } else {
+        warnings.push(`${message} — players will guess the color matrix`)
+      }
+    }
+  }
+
+  // H.264 level validity (Q3): the level tag must cover the stream's real
+  // macroblock rate or strict decoders/upload validators may reject the file.
+  if (metrics.hasVideo && metrics.level != null) {
+    const fpsForLevel = metrics.intendedFps ?? metrics.observedFps ?? metrics.avgFps
+    const required = requiredH264Level(metrics.width, metrics.height, fpsForLevel)
+    if (required != null && metrics.level < required) {
+      const message =
+        `H.264 level ${(metrics.level / 10).toFixed(1)} below spec minimum ` +
+        `${(required / 10).toFixed(1)} for ${metrics.width}x${metrics.height}@${fmt(fpsForLevel, 0)}`
+      if (gates.requireValidLevel) {
+        failures.push(message)
+      } else {
+        warnings.push(message)
+      }
+    }
+  }
+
+  // Keyframe cadence (recordings pin a 2s GOP for seekability).
+  if (
+    gates.keyframeMaxIntervalSeconds != null &&
+    metrics.maxKeyframeIntervalSeconds != null &&
+    metrics.maxKeyframeIntervalSeconds > gates.keyframeMaxIntervalSeconds
+  ) {
+    failures.push(
+      `keyframe interval ${metrics.maxKeyframeIntervalSeconds.toFixed(2)}s exceeds ` +
+        `${gates.keyframeMaxIntervalSeconds}s (${metrics.keyframeCount} keyframe(s) sampled)`
+    )
+  }
+
+  // Stream tail mismatch (stop drain), separate from the combined skew gate.
+  if (
+    gates.maxTailMismatchMs != null &&
+    metrics.tailMismatchMs != null &&
+    metrics.tailMismatchMs > gates.maxTailMismatchMs
+  ) {
+    failures.push(
+      `A/V tail mismatch ${metrics.tailMismatchMs.toFixed(0)}ms exceeds ` +
+        `${gates.maxTailMismatchMs}ms — one stream outlives the other at stop`
+    )
   }
 
   // A/V skew.
@@ -600,6 +733,48 @@ export async function runVideoPacing(filePath, { ffprobePath = 'ffprobe' } = {})
   return parseCsvFloatColumn(stdout, 0)
 }
 
+/**
+ * Keyframe presentation times (seconds) from the first `sampleSeconds` of the
+ * video stream. Uses packet flags (no decode) so it stays cheap at 4K.
+ * @returns {Promise<number[]>}
+ */
+export async function runKeyframeTimes(filePath, { ffprobePath = 'ffprobe', sampleSeconds = 30 } = {}) {
+  const { stdout } = await run(ffprobePath, [
+    '-v',
+    'error',
+    '-select_streams',
+    'v:0',
+    '-show_entries',
+    'packet=pts_time,flags',
+    '-of',
+    'csv=p=0',
+    '-read_intervals',
+    `%+${sampleSeconds}`,
+    filePath
+  ])
+  const times = []
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const [pts, flags] = line.split(',')
+    if (typeof flags === 'string' && flags.includes('K')) {
+      const time = Number.parseFloat(pts)
+      if (Number.isFinite(time)) times.push(time)
+    }
+  }
+  return times.sort((a, b) => a - b)
+}
+
+/** Longest gap between consecutive keyframes, in seconds. */
+export function maxKeyframeInterval(keyframeTimes) {
+  let max = null
+  for (let i = 1; i < keyframeTimes.length; i += 1) {
+    const gap = keyframeTimes[i] - keyframeTimes[i - 1]
+    if (max == null || gap > max) max = gap
+  }
+  return max
+}
+
 export async function runAudioPackets(filePath, { ffprobePath = 'ffprobe' } = {}) {
   const { stdout } = await run(ffprobePath, [
     '-v',
@@ -656,25 +831,29 @@ export async function analyzeRecording(filePath, options = {}) {
   // Run the video passes (freeze, exact-dup frames, pacing) and the audio passes
   // (packet gaps, silence) concurrently. A frozen/black source can still produce a
   // technically valid file, so every pass observes the decoded artifact directly.
-  const [freezes, frameHashes, ptsTimes, audioPackets, silences] = await Promise.all([
-    hasVideo
-      ? runFreezedetect(filePath, {
-          ffmpegPath,
-          noiseDb: gates.freezeNoiseDb,
-          minFreezeMs: gates.maxFreezeMs
-        })
-      : [],
-    hasVideo ? runFramemd5(filePath, { ffmpegPath }) : [],
-    hasVideo ? runVideoPacing(filePath, { ffprobePath }) : [],
-    hasAudio ? runAudioPackets(filePath, { ffprobePath }) : [],
-    hasAudio
-      ? runSilencedetect(filePath, {
-          ffmpegPath,
-          noiseDb: gates.silenceDb,
-          minSilenceMs: gates.minSilenceGapMs
-        })
-      : []
-  ])
+  const [freezes, frameHashes, ptsTimes, audioPackets, silences, keyframeTimes] =
+    await Promise.all([
+      hasVideo
+        ? runFreezedetect(filePath, {
+            ffmpegPath,
+            noiseDb: gates.freezeNoiseDb,
+            minFreezeMs: gates.maxFreezeMs
+          })
+        : [],
+      hasVideo ? runFramemd5(filePath, { ffmpegPath }) : [],
+      hasVideo ? runVideoPacing(filePath, { ffprobePath }) : [],
+      hasAudio ? runAudioPackets(filePath, { ffprobePath }) : [],
+      hasAudio
+        ? runSilencedetect(filePath, {
+            ffmpegPath,
+            noiseDb: gates.silenceDb,
+            minSilenceMs: gates.minSilenceGapMs
+          })
+        : [],
+      hasVideo && gates.keyframeMaxIntervalSeconds != null
+        ? runKeyframeTimes(filePath, { ffprobePath })
+        : []
+    ])
 
   const pacing = pacingStats(ptsTimes)
   const duplicatePts = duplicatePtsStats(ptsTimes)
@@ -683,6 +862,7 @@ export async function analyzeRecording(filePath, options = {}) {
   const longestSilence = silences.reduce((max, s) => Math.max(max, s.duration), 0)
   const audioGaps = audioPtsGaps(audioPackets)
   const skew = avSkewMs(probe)
+  const skewComponents = avSkewComponents(probe)
 
   const intendedFps = options.intendedFps ?? probe.video?.nominalFps ?? probe.video?.avgFps ?? null
   const durationForCount = probe.video?.duration ?? probe.formatDuration ?? null
@@ -712,6 +892,12 @@ export async function analyzeRecording(filePath, options = {}) {
     durationSeconds: durationForCount,
     codec: probe.video?.codec ?? null,
     pixFmt: probe.video?.pixFmt ?? null,
+    profile: probe.video?.profile ?? null,
+    level: probe.video?.level ?? null,
+    colorSpace: probe.video?.colorSpace ?? null,
+    colorPrimaries: probe.video?.colorPrimaries ?? null,
+    colorTransfer: probe.video?.colorTransfer ?? null,
+    colorRange: probe.video?.colorRange ?? null,
     encoderTag: probe.encoderTag,
     width: probe.video?.width ?? null,
     height: probe.video?.height ?? null,
@@ -735,7 +921,11 @@ export async function analyzeRecording(filePath, options = {}) {
     audioGapCount: audioGaps.gaps.length,
     silenceCount: silences.length,
     longestSilenceMs: hasAudio ? longestSilence * 1000 : null,
-    avSkewMs: skew
+    avSkewMs: skew,
+    startSkewMs: skewComponents.startSkewMs,
+    tailMismatchMs: skewComponents.tailMismatchMs,
+    keyframeCount: keyframeTimes.length > 0 ? keyframeTimes.length : null,
+    maxKeyframeIntervalSeconds: maxKeyframeInterval(keyframeTimes)
   }
 
   const verdict = evaluateGates(metrics, gates)
@@ -811,6 +1001,10 @@ export function renderMarkdownReport(report) {
   lines.push(
     `- Container: ${m.codec ?? 'n/a'} ${m.width ?? '?'}×${m.height ?? '?'} ${m.pixFmt ?? ''}`.trim()
   )
+  lines.push(
+    `- Profile/level: ${m.profile ?? 'n/a'}@${m.level != null ? (m.level / 10).toFixed(1) : 'n/a'} | ` +
+      `Color: ${m.colorSpace ?? 'unknown'}/${m.colorPrimaries ?? 'unknown'}/${m.colorTransfer ?? 'unknown'} range=${m.colorRange ?? 'unknown'}`
+  )
   lines.push(`- Encoder tag: ${m.encoderTag ?? 'n/a'}`)
   lines.push(`- Size: ${fmtBytes(m.fileBytes)} | Duration: ${fmt(m.durationSeconds, 2)}s`)
   lines.push(
@@ -838,6 +1032,15 @@ export function renderMarkdownReport(report) {
     lines.push(`- Audio: ${m.expectAudio ? 'EXPECTED BUT MISSING' : 'none (not expected)'}`)
   }
   lines.push(`- A/V skew: ${m.avSkewMs == null ? 'n/a' : `${fmt(m.avSkewMs)}ms`}`)
+  lines.push(
+    `- A/V components: start skew ${m.startSkewMs == null ? 'n/a' : `${fmt(m.startSkewMs)}ms`} | ` +
+      `tail mismatch ${m.tailMismatchMs == null ? 'n/a' : `${fmt(m.tailMismatchMs)}ms`}`
+  )
+  if (m.keyframeCount != null) {
+    lines.push(
+      `- Keyframes: ${m.keyframeCount} sampled | max interval ${fmt(m.maxKeyframeIntervalSeconds, 2)}s`
+    )
+  }
   lines.push('')
   const findings = report.findings ?? {}
   if (

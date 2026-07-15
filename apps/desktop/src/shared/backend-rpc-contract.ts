@@ -644,6 +644,7 @@ const sessionStartParamsSchema = objectSchema(
         recordEnabled: booleanSchema,
         streamEnabled: booleanSchema,
         outputDirectoryCapability: optionalSchema(boundedString),
+        keepOriginalMkv: optionalSchema(booleanSchema),
         video: boundedBackendParamValueSchema,
         rtmp: boundedBackendParamValueSchema
       },

@@ -28,6 +28,11 @@ export type SettingsState = {
   /** Human-readable picker label only; never a filesystem path. */
   outputDirectory: string
   outputDirectoryHandle?: string
+  /**
+   * Keep the capture MKV (lossless PCM audio) next to the exported MP4
+   * instead of removing it after finalization.
+   */
+  keepOriginalRecording: boolean
 }
 
 export type CaptionBurnTarget = 'off' | 'stream' | 'recording' | 'both'
@@ -304,7 +309,8 @@ export const MICROPHONE_SYNC_OFFSET_MAX_MS = 1000
 
 export const defaultSettings: SettingsState = {
   outputDirectory: '',
-  outputDirectoryHandle: undefined
+  outputDirectoryHandle: undefined,
+  keepOriginalRecording: false
 }
 
 export const rtmpDefaults: Record<RtmpPreset, string> = {
