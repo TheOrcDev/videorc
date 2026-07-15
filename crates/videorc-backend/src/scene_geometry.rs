@@ -243,23 +243,41 @@ pub fn camera_mask(layout: &LayoutSettings) -> SceneMask {
 }
 
 /// Chroma key spec for the camera layer — THE single source every render path
-/// (CPU, Metal shader, FFmpeg filter) derives its keying from. Distances are
-/// in full-range BT.601 CbCr units (0..=255 per axis), matching
-/// `crate::color::rgb_to_yuv_full_range_bt601`'s coefficient family.
+/// (CPU, Metal shader, FFmpeg filter) derives its keying from.
+///
+/// The keyer works on chroma DIRECTION, not absolute CbCr distance: a pixel
+/// keys when the ANGLE between its CbCr vector and the key color's CbCr
+/// direction is small, gated by a saturation floor so near-grey pixels never
+/// key. The 0.9.39 absolute-distance model could not key real screens: pure
+/// `#00FF00` sits at CbCr saturation ~136 while studio-lit screens sit at
+/// 35–62, putting their DISTANCE at 75–101 units regardless of hue — above
+/// any usable threshold (owner report + numeric repro, 2026-07-14). Angle is
+/// lighting-invariant: bright and shadowed screen tones cluster within ~8° of
+/// the key direction while subjects sit 90°+ away.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChromaKeySpec {
     pub key_rgb: [u8; 3],
-    /// CbCr distance at/below which a pixel is fully transparent.
-    pub threshold: f64,
-    /// Ramp width above `threshold` over which alpha rises 0→255 (0 = hard cut).
-    pub band: f64,
+    /// Angle (degrees) from the key's chroma direction at/below which a
+    /// pixel is fully transparent.
+    pub max_angle_deg: f64,
+    /// Ramp band (degrees) beyond `max_angle_deg` over which alpha rises
+    /// 0→255 (0 = hard cut).
+    pub band_deg: f64,
     /// Spill suppression strength, 0..=1.
     pub spill: f64,
 }
 
-/// Similarity/smoothness percent → CbCr distance. 100% maps to 180 units —
-/// half the CbCr plane's diagonal, past which everything keys out.
-const CHROMA_KEY_PCT_TO_DISTANCE: f64 = 1.8;
+/// Similarity/smoothness percent → degrees. 100% maps to 60°; the default
+/// similarity of 40% is a 24° cone — real screen tones cluster within ~8° of
+/// the key direction, subjects sit 90°+ away, so defaults key with margin.
+const CHROMA_KEY_PCT_TO_DEGREES: f64 = 0.6;
+
+/// Chroma saturation (|CbCr vector|) below which a pixel can never key —
+/// greys, whites, and blacks have no meaningful hue direction. Ramps to fully
+/// keyable over `CHROMA_KEY_SATURATION_RAMP` units. The Metal shader mirrors
+/// both constants.
+pub const CHROMA_KEY_SATURATION_FLOOR: f64 = 14.0;
+pub const CHROMA_KEY_SATURATION_RAMP: f64 = 6.0;
 
 impl ChromaKeySpec {
     pub fn key_cb(&self) -> f64 {
@@ -268,6 +286,18 @@ impl ChromaKeySpec {
 
     pub fn key_cr(&self) -> f64 {
         rgb_cr_f64(self.key_rgb)
+    }
+
+    /// Unit vector of the key color's chroma direction. `None` when the key
+    /// color is (near-)grey — no direction exists and nothing may key.
+    pub fn key_direction(&self) -> Option<(f64, f64)> {
+        let cb = self.key_cb() - 128.0;
+        let cr = self.key_cr() - 128.0;
+        let length = (cb * cb + cr * cr).sqrt();
+        if length < 1.0 {
+            return None;
+        }
+        Some((cb / length, cr / length))
     }
 
     /// Which channel spills: blue screens contaminate blue, everything else
@@ -316,28 +346,42 @@ pub fn camera_chroma_key(layout: &LayoutSettings) -> Option<ChromaKeySpec> {
     });
     Some(ChromaKeySpec {
         key_rgb,
-        threshold: f64::from(layout.camera_chroma_key_similarity_pct.min(100))
-            * CHROMA_KEY_PCT_TO_DISTANCE,
-        band: f64::from(layout.camera_chroma_key_smoothness_pct.min(100))
-            * CHROMA_KEY_PCT_TO_DISTANCE,
+        max_angle_deg: f64::from(layout.camera_chroma_key_similarity_pct.min(100))
+            * CHROMA_KEY_PCT_TO_DEGREES,
+        band_deg: f64::from(layout.camera_chroma_key_smoothness_pct.min(100))
+            * CHROMA_KEY_PCT_TO_DEGREES,
         spill: f64::from(layout.camera_chroma_key_spill_pct.min(100)) / 100.0,
     })
 }
 
-/// Alpha for one source pixel: 0 at/below `threshold` CbCr distance from the
-/// key, 255 at/above `threshold + band`, linear ramp between. This f64 form is
-/// the reference the CPU path calls directly and the Metal shader mirrors.
+/// Alpha for one source pixel. Angle model: θ = angle between the pixel's
+/// CbCr vector and the key direction; 0 at/below `max_angle_deg`, 255 at/above
+/// `max_angle_deg + band_deg`, linear ramp between. The saturation floor then
+/// pulls low-chroma pixels back toward opaque (greys never key). This f64
+/// form is the reference the CPU path calls directly and the Metal shader
+/// mirrors in f32.
 pub fn chroma_key_alpha(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> u8 {
-    let cb = rgb_cb_f64([r, g, b]) - spec.key_cb();
-    let cr = rgb_cr_f64([r, g, b]) - spec.key_cr();
-    let distance = (cb * cb + cr * cr).sqrt();
-    if distance <= spec.threshold {
-        return 0;
-    }
-    if spec.band <= 0.0 || distance >= spec.threshold + spec.band {
+    let Some((dir_cb, dir_cr)) = spec.key_direction() else {
+        return 255;
+    };
+    let cb = rgb_cb_f64([r, g, b]) - 128.0;
+    let cr = rgb_cr_f64([r, g, b]) - 128.0;
+    let saturation = (cb * cb + cr * cr).sqrt();
+    if saturation <= CHROMA_KEY_SATURATION_FLOOR {
         return 255;
     }
-    ((distance - spec.threshold) / spec.band * 255.0).round() as u8
+    let cos_theta = ((cb * dir_cb + cr * dir_cr) / saturation).clamp(-1.0, 1.0);
+    let theta_deg = cos_theta.acos().to_degrees();
+    let angle_alpha = if theta_deg <= spec.max_angle_deg {
+        0.0
+    } else if spec.band_deg <= 0.0 || theta_deg >= spec.max_angle_deg + spec.band_deg {
+        255.0
+    } else {
+        (theta_deg - spec.max_angle_deg) / spec.band_deg * 255.0
+    };
+    let eligibility =
+        ((saturation - CHROMA_KEY_SATURATION_FLOOR) / CHROMA_KEY_SATURATION_RAMP).clamp(0.0, 1.0);
+    (255.0 - eligibility * (255.0 - angle_alpha)).round() as u8
 }
 
 /// Spill suppression on kept pixels: pull the key channel down toward the
@@ -710,8 +754,8 @@ mod tests {
             layout.camera_chroma_key_enabled = true;
             let spec = camera_chroma_key(&layout).expect("keying enabled");
             assert_eq!(spec.key_rgb, [0, 255, 0]);
-            assert_eq!(spec.threshold, 40.0 * 1.8);
-            assert_eq!(spec.band, 8.0 * 1.8);
+            assert_eq!(spec.max_angle_deg, 40.0 * 0.6);
+            assert_eq!(spec.band_deg, 8.0 * 0.6);
             assert_eq!(spec.spill, 0.10);
         }
     }
@@ -726,8 +770,8 @@ mod tests {
         layout.camera_chroma_key_spill_pct = 900;
         let spec = camera_chroma_key(&layout).expect("keying enabled");
         assert_eq!(spec.key_rgb, [0, 255, 0], "unparseable color keys green");
-        assert_eq!(spec.threshold, 180.0);
-        assert_eq!(spec.band, 180.0);
+        assert_eq!(spec.max_angle_deg, 60.0);
+        assert_eq!(spec.band_deg, 60.0);
         assert_eq!(spec.spill, 1.0);
     }
 
@@ -749,55 +793,111 @@ mod tests {
         }
     }
 
-    #[test]
-    fn chroma_key_alpha_ramps_from_key_to_far_colors() {
-        let spec = ChromaKeySpec {
+    fn default_green_spec() -> ChromaKeySpec {
+        ChromaKeySpec {
             key_rgb: [0, 255, 0],
-            threshold: 72.0,
-            band: 14.4,
+            max_angle_deg: 24.0,
+            band_deg: 4.8,
             spill: 0.0,
-        };
-        assert_eq!(chroma_key_alpha(&spec, 0, 255, 0), 0, "exact key");
-        assert_eq!(chroma_key_alpha(&spec, 30, 200, 40), 0, "screen variance");
-        assert_eq!(chroma_key_alpha(&spec, 255, 0, 0), 255, "red survives");
-        assert_eq!(chroma_key_alpha(&spec, 128, 128, 128), 255, "grey survives");
-        // Alpha never decreases as a pixel moves away from the key color.
-        let mut previous = 0;
-        for step in 0..=8 {
-            let toward_grey = |key: u8, grey: u8| {
-                (f64::from(key) + (f64::from(grey) - f64::from(key)) * f64::from(step) / 8.0)
-                    .round() as u8
-            };
-            let alpha = chroma_key_alpha(
-                &spec,
-                toward_grey(0, 128),
-                toward_grey(255, 128),
-                toward_grey(0, 128),
-            );
-            assert!(alpha >= previous, "ramp not monotonic at step {step}");
-            previous = alpha;
         }
-        assert_eq!(previous, 255);
+    }
+
+    /// THE calibration pin (2026-07-14 owner report): the keyer must key a
+    /// REALISTIC studio-lit screen with the SHIPPED DEFAULTS, not just pure
+    /// fixture colors. The 0.9.39 absolute-distance model passed every
+    /// pure-color test and keyed nothing real; this table is the regression
+    /// guard against that class of miscalibration.
+    #[test]
+    fn chroma_key_keys_a_realistic_screen_palette_with_defaults() {
+        let spec = default_green_spec();
+        // Real screen tones across lighting — ALL must key fully.
+        for (label, rgb) in [
+            ("pure green", [0u8, 255, 0]),
+            ("bright lit screen", [80, 200, 90]),
+            ("well-lit screen", [60, 180, 70]),
+            ("mid screen", [40, 140, 55]),
+            ("shadowed screen", [30, 100, 40]),
+            ("overexposed edge", [110, 190, 120]),
+        ] {
+            assert_eq!(
+                chroma_key_alpha(&spec, rgb[0], rgb[1], rgb[2]),
+                0,
+                "{label} must key with defaults"
+            );
+        }
+        // The subject must survive untouched.
+        for (label, rgb) in [
+            ("skin", [200u8, 160, 140]),
+            ("dark hair", [40, 30, 25]),
+            ("white shirt", [230, 230, 230]),
+            ("red", [255, 0, 0]),
+            ("grey", [128, 128, 128]),
+        ] {
+            assert_eq!(
+                chroma_key_alpha(&spec, rgb[0], rgb[1], rgb[2]),
+                255,
+                "{label} must survive with defaults"
+            );
+        }
+        // Documented physics (true of every chroma keyer): a saturated green
+        // GARMENT keys too — the saturation floor cannot save a green shirt.
+        assert_eq!(chroma_key_alpha(&spec, 90, 140, 95), 0);
     }
 
     #[test]
-    fn chroma_key_alpha_zero_band_is_a_hard_cut() {
+    fn chroma_key_alpha_ramps_by_angle_and_saturation() {
+        let spec = default_green_spec();
+        // Alpha never decreases as hue rotates away from the key direction:
+        // blend green toward red through yellow.
+        let mut previous = 0;
+        for step in 0..=10 {
+            let t = f64::from(step) / 10.0;
+            let r = (255.0 * t).round() as u8;
+            let g = (255.0 * (1.0 - t) + 100.0 * t).round() as u8;
+            let alpha = chroma_key_alpha(&spec, r, g, 0);
+            assert!(
+                alpha >= previous,
+                "hue ramp not monotonic at step {step}: {alpha} < {previous}"
+            );
+            previous = alpha;
+        }
+        assert_eq!(previous, 255);
+        // The saturation floor ramps: a key-direction color fades to opaque
+        // as it desaturates toward grey.
+        // (100,135,100): saturation ~18.7 → partially eligible → mid alpha.
+        let partial = chroma_key_alpha(&spec, 100, 135, 100);
+        assert!(
+            partial > 0 && partial < 255,
+            "low-saturation screen tone should partially key, got {partial}"
+        );
+        // (110,130,110): saturation ~10.7, below the floor → fully opaque.
+        assert_eq!(chroma_key_alpha(&spec, 110, 130, 110), 255);
+    }
+
+    #[test]
+    fn chroma_key_alpha_zero_band_is_a_hard_cut_and_grey_key_never_keys() {
         let spec = ChromaKeySpec {
-            key_rgb: [0, 255, 0],
-            threshold: 72.0,
-            band: 0.0,
-            spill: 0.0,
+            band_deg: 0.0,
+            ..default_green_spec()
         };
         assert_eq!(chroma_key_alpha(&spec, 0, 255, 0), 0);
         assert_eq!(chroma_key_alpha(&spec, 128, 128, 128), 255);
+        assert_eq!(chroma_key_alpha(&spec, 255, 0, 0), 255);
+        // A grey key color has no chroma direction — nothing may key.
+        let grey_key = ChromaKeySpec {
+            key_rgb: [128, 128, 128],
+            ..default_green_spec()
+        };
+        assert_eq!(chroma_key_alpha(&grey_key, 0, 255, 0), 255);
+        assert!(grey_key.key_direction().is_none());
     }
 
     #[test]
     fn chroma_key_despill_clamps_only_the_dominant_key_channel() {
         let green = ChromaKeySpec {
             key_rgb: [0, 255, 0],
-            threshold: 72.0,
-            band: 14.4,
+            max_angle_deg: 24.0,
+            band_deg: 4.8,
             spill: 1.0,
         };
         assert_eq!(chroma_key_despill(&green, 100, 200, 80), (100, 100, 80));

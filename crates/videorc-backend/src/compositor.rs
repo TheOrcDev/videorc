@@ -2166,19 +2166,21 @@ fn scene_mask_into_metal(mask: SceneMask) -> crate::metal_compositor::SourceMask
 }
 
 /// f32 projection of the shared keyer spec for the shader. The spec from
-/// `camera_chroma_key` stays the single source of truth.
+/// `camera_chroma_key` stays the single source of truth. A grey key color has
+/// no chroma direction — returns None so the quad renders unkeyed.
 #[cfg(target_os = "macos")]
 fn scene_chroma_key_into_metal(
     spec: &crate::scene_geometry::ChromaKeySpec,
-) -> crate::metal_compositor::GpuChromaKey {
-    crate::metal_compositor::GpuChromaKey {
-        key_cb: spec.key_cb() as f32,
-        key_cr: spec.key_cr() as f32,
-        threshold: spec.threshold as f32,
-        band: spec.band as f32,
+) -> Option<crate::metal_compositor::GpuChromaKey> {
+    let (dir_cb, dir_cr) = spec.key_direction()?;
+    Some(crate::metal_compositor::GpuChromaKey {
+        key_dir_cb: dir_cb as f32,
+        key_dir_cr: dir_cr as f32,
+        max_angle_rad: spec.max_angle_deg.to_radians() as f32,
+        band_rad: spec.band_deg.to_radians() as f32,
         spill: spec.spill as f32,
         spill_is_blue: spec.spill_is_blue(),
-    }
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -2626,10 +2628,13 @@ fn try_gpu_compose(
                         // The keyed camera is the one capture source that
                         // blends: its alpha comes from the shader's keyer,
                         // not the (untrustworthy) capture alpha channel.
-                        blend: camera_chroma_key(layout).is_some(),
+                        blend: camera_chroma_key(layout)
+                            .as_ref()
+                            .and_then(scene_chroma_key_into_metal)
+                            .is_some(),
                         chroma_key: camera_chroma_key(layout)
                             .as_ref()
-                            .map(scene_chroma_key_into_metal),
+                            .and_then(scene_chroma_key_into_metal),
                     });
                 } else {
                     let placeholder =
@@ -5155,12 +5160,14 @@ mod tests {
             eprintln!("skipping: no Metal device available in this environment");
             return;
         };
-        // Key green (out), red (kept), a mid green-grey (partial alpha), and
-        // grey (kept + despill-neutral), over a blue background. RGBA order.
+        // A REALISTIC shadowed screen tone (out — the 0.9.39 model failed
+        // here), red (kept), a low-saturation screen tone inside the
+        // saturation-floor ramp (partial alpha), and grey (kept), over a
+        // blue background. RGBA order.
         let pixels: [[u8; 4]; 4] = [
-            [0, 255, 0, 255],
+            [30, 100, 40, 255],
             [255, 0, 0, 255],
-            [74, 181, 74, 255],
+            [100, 135, 100, 255],
             [128, 128, 128, 255],
         ];
         let spec = chroma_key_test_spec();
@@ -5213,7 +5220,7 @@ mod tests {
                     mirror: false,
                     mask: SourceMask::None,
                     blend: true,
-                    chroma_key: Some(scene_chroma_key_into_metal(&spec)),
+                    chroma_key: scene_chroma_key_into_metal(&spec),
                 }],
             )
             .expect("metal compose");
@@ -5238,7 +5245,7 @@ mod tests {
         assert!(gpu_pixels[1] <= 2 && gpu_pixels[2] <= 2);
         // The partial pixel genuinely blended on both paths (neither the
         // background nor the despilled source survives verbatim).
-        let partial_alpha = chroma_key_alpha(&spec, 74, 181, 74);
+        let partial_alpha = chroma_key_alpha(&spec, 100, 135, 100);
         assert!(
             partial_alpha > 0 && partial_alpha < 255,
             "fixture pixel must ramp, got {partial_alpha}"

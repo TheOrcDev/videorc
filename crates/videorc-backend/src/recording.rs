@@ -8429,21 +8429,31 @@ fn scene_source_layer_filter(
     )
 }
 
-/// FFmpeg mirror of the shared keyer (`scene_geometry::camera_chroma_key`):
-/// `chromakey` computes the same CbCr-plane distance normalized to the plane's
-/// diagonal (255·√2), so `similarity`/`blend` are exactly the spec's
-/// threshold/band divided by that constant, and `despill`'s `mix` is the spill
-/// strength. Empty when keying is off. Trailing comma composes into chains.
+/// Chroma saturation of a typical studio-lit screen — the anchor for the
+/// FFmpeg leg's calibrated approximation of the angle keyer (real screens
+/// measured at 35–62 units; see the realistic-palette test).
+const FFMPEG_CHROMA_KEY_REFERENCE_SATURATION: f64 = 55.0;
+
+/// FFmpeg approximation of the shared ANGLE keyer. `chromakey` can only
+/// express absolute CbCr distance, and a per-pixel `geq` keyer is too slow at
+/// full frame — so this leg anchors an EFFECTIVE key color at the spec's
+/// chroma direction scaled to a realistic screen saturation (not the pure
+/// preset color, whose saturation ~136 put real screens 75+ units away — the
+/// 0.9.39 bug), with a similarity radius that covers the screen cluster at
+/// the spec's angle. The Metal/CPU paths key by true angle; this bounded
+/// divergence is pinned by `ffmpeg_chroma_mapping_keys_the_realistic_palette`.
 fn camera_chroma_key_filter(layout: &LayoutSettings) -> String {
     let Some(spec) = camera_chroma_key(layout) else {
         return String::new();
     };
-    let [r, g, b] = spec.key_rgb;
+    let Some((effective_rgb, similarity_units)) = ffmpeg_chroma_key_mapping(&spec) else {
+        return String::new();
+    };
+    let [r, g, b] = effective_rgb;
     let normalize = 255.0 * std::f64::consts::SQRT_2;
-    // chromakey rejects similarity 0; the floor keeps a zero threshold keying
-    // only exact key pixels, matching the reference's hard edge.
-    let similarity = (spec.threshold / normalize).clamp(0.0001, 1.0);
-    let blend = (spec.band / normalize).clamp(0.0, 1.0);
+    let similarity = (similarity_units / normalize).clamp(0.01, 1.0);
+    let blend = (spec.band_deg.to_radians() * FFMPEG_CHROMA_KEY_REFERENCE_SATURATION / normalize)
+        .clamp(0.0, 1.0);
     let despill = if spec.spill > 0.0 {
         let kind = if spec.spill_is_blue() {
             "blue"
@@ -8457,6 +8467,32 @@ fn camera_chroma_key_filter(layout: &LayoutSettings) -> String {
     format!(
         "chromakey=color=0x{r:02X}{g:02X}{b:02X}:similarity={similarity:.4}:blend={blend:.4}{despill},"
     )
+}
+
+/// Effective key color + similarity radius (CbCr units) for the chromakey
+/// approximation: the key DIRECTION at reference saturation, with a radius
+/// covering saturation spread (±20 units around the reference) plus the
+/// angular cone at that saturation.
+fn ffmpeg_chroma_key_mapping(
+    spec: &crate::scene_geometry::ChromaKeySpec,
+) -> Option<([u8; 3], f64)> {
+    let (dir_cb, dir_cr) = spec.key_direction()?;
+    let cb = 128.0 + dir_cb * FFMPEG_CHROMA_KEY_REFERENCE_SATURATION;
+    let cr = 128.0 + dir_cr * FFMPEG_CHROMA_KEY_REFERENCE_SATURATION;
+    // Full-range BT.601 inverse at mid luma; chromakey compares CbCr only,
+    // so the Y channel of the encoded color is irrelevant.
+    let y = 128.0;
+    let red = (y + 1.402 * (cr - 128.0)).clamp(0.0, 255.0).round() as u8;
+    let green = (y - 0.344136 * (cb - 128.0) - 0.714136 * (cr - 128.0))
+        .clamp(0.0, 255.0)
+        .round() as u8;
+    let blue = (y + 1.772 * (cb - 128.0)).clamp(0.0, 255.0).round() as u8;
+    // Radius: saturation spread of a real screen around the reference plus
+    // the chord of the angle cone at reference saturation.
+    let angular_reach =
+        FFMPEG_CHROMA_KEY_REFERENCE_SATURATION * spec.max_angle_deg.to_radians().sin();
+    let similarity_units = 20.0 + angular_reach;
+    Some(([red, green, blue], similarity_units))
 }
 
 fn normalized_crop_filter(transform: &crate::protocol::SceneTransform) -> String {
@@ -13628,10 +13664,11 @@ mod tests {
         assert!(clamped.contains("2500.000"), "{clamped}");
     }
 
-    // Chroma key (2026-07-13 plan): the FFmpeg leg maps the ONE keyer spec to
-    // chromakey/despill — similarity and blend are the spec's threshold/band
-    // normalized to the CbCr diagonal (255·√2). Pin the string so the mapping
-    // cannot silently drift from the CPU/Metal keyers.
+    // Chroma key (real-screen fix, 2026-07-14): the FFmpeg leg approximates
+    // the angle keyer with chromakey anchored at an EFFECTIVE key color — the
+    // spec's chroma direction at realistic screen saturation (NOT the pure
+    // preset color, whose saturation put real screens outside any usable
+    // radius — the 0.9.39 bug). Pin the mapping so it cannot drift.
     #[test]
     fn camera_chroma_key_filter_pins_the_chromakey_despill_mapping() {
         let mut layout = crate::protocol::default_layout_settings();
@@ -13640,7 +13677,7 @@ mod tests {
         layout.camera_chroma_key_enabled = true;
         assert_eq!(
             camera_chroma_key_filter(&layout),
-            "chromakey=color=0x00FF00:similarity=0.1997:blend=0.0399,despill=type=green:mix=0.1000,"
+            "chromakey=color=0x44AB43:similarity=0.1175:blend=0.0128,despill=type=green:mix=0.1000,"
         );
 
         layout.camera_chroma_key_color = "#0000FF".to_string();
@@ -13648,17 +13685,69 @@ mod tests {
         layout.camera_chroma_key_spill_pct = 0;
         assert_eq!(
             camera_chroma_key_filter(&layout),
-            "chromakey=color=0x0000FF:similarity=0.1997:blend=0.0000,",
+            "chromakey=color=0x7474E0:similarity=0.1175:blend=0.0000,",
             "zero band is a hard cut and zero spill drops despill"
         );
 
-        // A zero similarity floors at chromakey's minimum instead of erroring.
+        // Zero similarity keeps the base saturation-spread radius (a real
+        // screen still keys) instead of collapsing to an exact-color match.
         layout.camera_chroma_key_similarity_pct = 0;
         assert!(
-            camera_chroma_key_filter(&layout).contains("similarity=0.0001"),
+            camera_chroma_key_filter(&layout).contains("similarity=0.0555"),
             "{}",
             camera_chroma_key_filter(&layout)
         );
+    }
+
+    /// The FFmpeg-leg twin of scene_geometry's realistic-palette pin: under
+    /// chromakey's absolute-CbCr-distance model, the DEFAULT mapping must key
+    /// every real screen tone and keep the subject. (Pure synthetic green
+    /// falls outside the effective disc — real footage is the contract.)
+    #[test]
+    fn ffmpeg_chroma_mapping_keys_the_realistic_palette() {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.camera_chroma_key_enabled = true;
+        let spec = camera_chroma_key(&layout).expect("keying enabled");
+        let (effective_rgb, similarity_units) =
+            ffmpeg_chroma_key_mapping(&spec).expect("green key has a direction");
+        // Same coefficient family as color.rs / scene_geometry, local to the
+        // test because the spec helpers work on the key color only.
+        let cbcr = |rgb: [u8; 3]| {
+            let [r, g, b] = rgb.map(f64::from);
+            (
+                128.0 + (-43.0 * r - 85.0 * g + 128.0 * b) / 256.0,
+                128.0 + (128.0 * r - 107.0 * g - 21.0 * b) / 256.0,
+            )
+        };
+        let (key_cb, key_cr) = cbcr(effective_rgb);
+        let distance = |rgb: [u8; 3]| {
+            let (cb, cr) = cbcr(rgb);
+            ((cb - key_cb).powi(2) + (cr - key_cr).powi(2)).sqrt()
+        };
+        for (label, rgb) in [
+            ("bright lit screen", [80u8, 200, 90]),
+            ("well-lit screen", [60, 180, 70]),
+            ("mid screen", [40, 140, 55]),
+            ("shadowed screen", [30, 100, 40]),
+            ("overexposed edge", [110, 190, 120]),
+        ] {
+            assert!(
+                distance(rgb) <= similarity_units,
+                "{label} must be inside the chromakey disc ({:.1} > {similarity_units:.1})",
+                distance(rgb)
+            );
+        }
+        for (label, rgb) in [
+            ("skin", [200u8, 160, 140]),
+            ("dark hair", [40, 30, 25]),
+            ("white shirt", [230, 230, 230]),
+        ] {
+            assert!(
+                distance(rgb) > similarity_units + 10.0,
+                "{label} must stay clearly outside the disc ({:.1})",
+                distance(rgb)
+            );
+        }
     }
 
     #[test]

@@ -54,11 +54,11 @@ struct FragParams {
     float circle;
     float aspect;
     float radius;
-    // Chroma key, mirroring scene_geometry's f64 reference keyer:
-    // chroma_key = (enabled, key_cb, key_cr, threshold); chroma_key2 =
-    // (band, spill, spill_is_blue, reserved). CbCr and distances are in
-    // 0..255 units with the SAME -43/-85/128 and 128/-107/-21 coefficient
-    // family as color.rs — if these drift, the CPU and GPU keyers disagree.
+    // Chroma key, mirroring scene_geometry's f64 reference keyer (ANGLE
+    // model): chroma_key = (enabled, key_dir_cb, key_dir_cr, max_angle_rad);
+    // chroma_key2 = (band_rad, spill, spill_is_blue, saturation_floor).
+    // CbCr uses the SAME -43/-85/128 and 128/-107/-21 coefficient family as
+    // color.rs — if these drift, the CPU and GPU keyers disagree.
     float4 chroma_key;
     float4 chroma_key2;
 };
@@ -117,20 +117,30 @@ fragment float4 f_main(VOut in [[stage_in]],
     float2 src = float2(cl + u * (1.0 - cl - cr), ct + uv.y * (1.0 - ct - cb));
     float4 color = tex.sample(samp, src);
     // Chroma key (scene_geometry::chroma_key_alpha / chroma_key_despill in
-    // f32): CbCr distance from the key ramps alpha 0->1 across the band, and
-    // spill pulls the dominant key channel down toward the other channels'
-    // max. The quad must be drawn on the blending pipeline for the computed
-    // alpha to matter.
+    // f32, ANGLE model): the angle between the pixel's CbCr vector and the
+    // key direction ramps alpha 0->1 across the band; a saturation floor
+    // (ramp width 6.0, mirroring CHROMA_KEY_SATURATION_RAMP) pulls greys
+    // back to opaque. Spill pulls the dominant key channel down toward the
+    // other channels' max. The quad must be drawn on the blending pipeline
+    // for the computed alpha to matter.
     if (params.chroma_key.x > 0.5) {
         float r = color.r * 255.0, g = color.g * 255.0, b = color.b * 255.0;
-        float dcb = 128.0 + (-43.0 * r - 85.0 * g + 128.0 * b) / 256.0 - params.chroma_key.y;
-        float dcr = 128.0 + (128.0 * r - 107.0 * g - 21.0 * b) / 256.0 - params.chroma_key.z;
-        float dist = sqrt(dcb * dcb + dcr * dcr);
-        float threshold = params.chroma_key.w;
-        float band = params.chroma_key2.x;
-        float alpha = (band > 0.0)
-            ? clamp((dist - threshold) / band, 0.0, 1.0)
-            : (dist <= threshold ? 0.0 : 1.0);
+        float vcb = (-43.0 * r - 85.0 * g + 128.0 * b) / 256.0;
+        float vcr = (128.0 * r - 107.0 * g - 21.0 * b) / 256.0;
+        float saturation = sqrt(vcb * vcb + vcr * vcr);
+        float angle_alpha = 1.0;
+        if (saturation > 1e-4) {
+            float cos_theta = clamp(
+                (vcb * params.chroma_key.y + vcr * params.chroma_key.z) / saturation, -1.0, 1.0);
+            float theta = acos(cos_theta);
+            float max_angle = params.chroma_key.w;
+            float band = params.chroma_key2.x;
+            angle_alpha = (band > 0.0)
+                ? clamp((theta - max_angle) / band, 0.0, 1.0)
+                : (theta <= max_angle ? 0.0 : 1.0);
+        }
+        float eligibility = clamp((saturation - params.chroma_key2.w) / 6.0, 0.0, 1.0);
+        float alpha = 1.0 - eligibility * (1.0 - angle_alpha);
         float spill = params.chroma_key2.y;
         if (spill > 0.0) {
             if (params.chroma_key2.z > 0.5) {
@@ -168,27 +178,33 @@ struct FragParams {
 
 /// Per-quad chroma key in shader units, converted once from
 /// `scene_geometry::ChromaKeySpec` at the compositor bridge (the spec stays
-/// the single source; this is just its f32 projection).
+/// the single source; this is just its f32 projection). Angle model: the key
+/// is a unit CbCr DIRECTION plus a max angle and ramp band in radians.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GpuChromaKey {
-    pub key_cb: f32,
-    pub key_cr: f32,
-    pub threshold: f32,
-    pub band: f32,
+    pub key_dir_cb: f32,
+    pub key_dir_cr: f32,
+    pub max_angle_rad: f32,
+    pub band_rad: f32,
     pub spill: f32,
     pub spill_is_blue: bool,
 }
+
+/// Mirrors scene_geometry::CHROMA_KEY_SATURATION_FLOOR / _RAMP — if these
+/// drift the CPU and GPU keyers disagree about which greys survive.
+const CHROMA_KEY_SATURATION_FLOOR: f32 = 14.0;
+const CHROMA_KEY_SATURATION_RAMP: f32 = 6.0;
 
 impl GpuChromaKey {
     fn frag_params(source: Option<&GpuChromaKey>) -> ([f32; 4], [f32; 4]) {
         match source {
             Some(key) => (
-                [1.0, key.key_cb, key.key_cr, key.threshold],
+                [1.0, key.key_dir_cb, key.key_dir_cr, key.max_angle_rad],
                 [
-                    key.band,
+                    key.band_rad,
                     key.spill,
                     if key.spill_is_blue { 1.0 } else { 0.0 },
-                    0.0,
+                    CHROMA_KEY_SATURATION_FLOOR,
                 ],
             ),
             None => ([0.0; 4], [0.0; 4]),
@@ -1896,14 +1912,17 @@ mod tests {
         assert_eq!(pixel(&px, 1, 0, 0)[..3], [0, 0, 0]);
     }
 
-    /// Green key in the shader's CbCr units — the same -85/-107 coefficient
-    /// family the Rust reference keyer uses.
-    fn green_key(threshold: f32, band: f32, spill: f32) -> GpuChromaKey {
+    /// Pure-green key DIRECTION (unit CbCr vector) with angles in radians —
+    /// the same -85/-107 coefficient family the Rust reference keyer uses.
+    fn green_key(max_angle_deg: f32, band_deg: f32, spill: f32) -> GpuChromaKey {
+        let cb = -85.0_f32 * 255.0 / 256.0;
+        let cr = -107.0_f32 * 255.0 / 256.0;
+        let length = (cb * cb + cr * cr).sqrt();
         GpuChromaKey {
-            key_cb: 128.0 + (-85.0 * 255.0) / 256.0,
-            key_cr: 128.0 + (-107.0 * 255.0) / 256.0,
-            threshold,
-            band,
+            key_dir_cb: cb / length,
+            key_dir_cr: cr / length,
+            max_angle_rad: max_angle_deg.to_radians(),
+            band_rad: band_deg.to_radians(),
             spill,
             spill_is_blue: false,
         }
@@ -1915,30 +1934,33 @@ mod tests {
             eprintln!("skipping: no Metal device available in this environment");
             return;
         };
-        // BGRA texels: key green (keys out), red (kept), a green-grey mix
-        // (partial alpha), grey (kept). Composed over a BLUE background.
+        // BGRA texels: a REALISTIC shadowed screen tone (the 0.9.39 model
+        // failed exactly here), red (kept), a desaturated screen tone in the
+        // saturation-floor ramp (partial), grey (kept). Over a BLUE frame.
         let camera = [
-            0u8, 255, 0, 255, // green
+            40u8, 100, 30, 255, // shadowed screen green (rgb 30,100,40)
             0, 0, 255, 255, // red
-            74, 181, 74, 255, // partial
+            100, 135, 100, 255, // low-saturation screen tone (partial)
             128, 128, 128, 255, // grey
         ];
         let mut source = full_frame(&camera, 4, 1, false, SourceMask::None, [0.0; 4]);
         source.blend = true;
-        source.chroma_key = Some(green_key(72.0, 14.4, 0.0));
+        source.chroma_key = Some(green_key(24.0, 4.8, 0.0));
         let px = compositor
             .compose_bgra(4, 1, [0.0, 0.0, 1.0, 1.0], &[source])
             .unwrap();
         assert_eq!(
             pixel(&px, 4, 0, 0)[..3],
             [255, 0, 0],
-            "key green shows the blue frame"
+            "shadowed REAL screen tone keys with defaults (the 0.9.39 bug)"
         );
         assert_eq!(pixel(&px, 4, 1, 0)[..3], [0, 0, 255], "red survives");
+        // Reference alpha for (100,135,100) is ~55/255 (saturation 18.7 in
+        // the 14..20 ramp): out ≈ src*0.22 + blue*0.78 → BGRA ≈ (221, 30, 22).
         let partial = pixel(&px, 4, 2, 0);
         assert!(
-            partial[1] > 30 && partial[1] < 165 && partial[0] > 60 && partial[0] < 220,
-            "green-grey mix blends fractionally over blue, got {partial:?}"
+            partial[0] > 190 && partial[0] < 245 && partial[1] > 15 && partial[1] < 60,
+            "saturation-ramp tone blends fractionally over blue, got {partial:?}"
         );
         assert_eq!(
             pixel(&px, 4, 3, 0)[..3],
@@ -1958,7 +1980,9 @@ mod tests {
         let camera = [80u8, 200, 100, 255]; // BGRA: r=100 g=200 b=80
         let mut source = full_frame(&camera, 1, 1, false, SourceMask::None, [0.0; 4]);
         source.blend = true;
-        source.chroma_key = Some(green_key(40.0, 0.0, 1.0));
+        // Narrow 5-degree cone: this green-dominant tone sits ~8.5 degrees
+        // off the key direction, so it is KEPT — and only despilled.
+        source.chroma_key = Some(green_key(5.0, 0.0, 1.0));
         let px = compositor
             .compose_bgra(1, 1, [0.0, 0.0, 0.0, 1.0], &[source])
             .unwrap();
@@ -1983,7 +2007,7 @@ mod tests {
         let red = [0u8, 0, 255, 255].repeat(2 * 2);
         let mut source = full_frame(&red, 2, 2, false, SourceMask::Circle, [0.0; 4]);
         source.blend = true;
-        source.chroma_key = Some(green_key(72.0, 14.4, 0.1));
+        source.chroma_key = Some(green_key(24.0, 4.8, 0.1));
         let px = compositor
             .compose_bgra(out, out, [0.0, 0.0, 1.0, 1.0], &[source])
             .unwrap();
