@@ -836,15 +836,21 @@ impl ActiveRecording {
         Ok(())
     }
 
-    fn encoder_bridge_terminal_failure(&self) -> Option<String> {
+    fn recording_bridge_terminal_failure(&self) -> Option<String> {
         self.encoder_bridge
             .as_ref()
             .and_then(EncoderBridgeRecordingSession::terminal_failure)
-            .or_else(|| {
-                self.encoder_bridge_stream
-                    .as_ref()
-                    .and_then(EncoderBridgeRecordingSession::terminal_failure)
-            })
+    }
+
+    /// Kept SEPARATE from the recording signal on purpose: a dead stream
+    /// output is reported per-destination and the session still finalizes
+    /// the local file. OR-merging the two (the pre-2026-07-15 shape) made a
+    /// stream latency failure indistinguishable from a recording failure and
+    /// discarded healthy multi-minute recordings.
+    fn stream_bridge_terminal_failure(&self) -> Option<String> {
+        self.encoder_bridge_stream
+            .as_ref()
+            .and_then(EncoderBridgeRecordingSession::terminal_failure)
     }
 }
 
@@ -4156,7 +4162,8 @@ async fn monitor_session(
             });
             MonitoredRecording {
                 stop_intent_preceded_exit,
-                encoder_bridge_terminal_failure: active.encoder_bridge_terminal_failure(),
+                recording_bridge_terminal_failure: active.recording_bridge_terminal_failure(),
+                stream_bridge_terminal_failure: active.stream_bridge_terminal_failure(),
                 ffmpeg_path: active.ffmpeg_path.clone(),
                 started_at: active.started_at.clone(),
                 pipeline: active.pipeline.clone(),
@@ -4263,14 +4270,31 @@ async fn monitor_session(
     let ended_at = Utc::now().to_rfc3339();
     let duration_ms = recording_duration_ms(&monitored_recording.started_at, &ended_at);
     let final_diagnostics = final_session_diagnostics_snapshot(&state, &session_id).await;
-    let encoder_bridge_terminal_failure =
-        monitored_recording.encoder_bridge_terminal_failure.clone();
+    let recording_bridge_terminal_failure = monitored_recording
+        .recording_bridge_terminal_failure
+        .clone();
+    let stream_bridge_terminal_failure = monitored_recording.stream_bridge_terminal_failure.clone();
+    // A dead stream output is its own user-visible truth, whatever happens to
+    // the recording below: streaming stopped, the destinations went dark, and
+    // the reason must reach the session log — as an event, not a session kill.
+    if let Some(stream_error) = stream_bridge_terminal_failure.as_deref() {
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Error,
+            "stream-output-failed",
+            &format!(
+                "Streaming stopped early: {stream_error}. The local recording continued and is being preserved."
+            ),
+        );
+    }
     let terminal_status = match status {
         Ok(exit_status)
             if should_finalize_recording_session(
                 exit_status.success(),
                 monitored_recording.stop_intent_preceded_exit,
-                encoder_bridge_terminal_failure.as_deref(),
+                recording_bridge_terminal_failure.as_deref(),
+                stream_bridge_terminal_failure.as_deref(),
             ) =>
         {
             let message = if exit_status.success() {
@@ -4532,8 +4556,11 @@ async fn monitor_session(
             terminal_status
         }
         Ok(exit_status) => {
+            // Only the RECORDING bridge condemns the session here — a stream
+            // failure was already reported above and, with a clean exit,
+            // finalizes in the arm before this one.
             let (failed_stage, health_code, mut message) = if let Some(error) =
-                encoder_bridge_terminal_failure.as_deref()
+                recording_bridge_terminal_failure.as_deref()
             {
                 (
                     RecordingPipelineStage::VideoEncoder,
@@ -5475,7 +5502,8 @@ struct NativeAudioStats {
 #[derive(Debug)]
 struct MonitoredRecording {
     stop_intent_preceded_exit: bool,
-    encoder_bridge_terminal_failure: Option<String>,
+    recording_bridge_terminal_failure: Option<String>,
+    stream_bridge_terminal_failure: Option<String>,
     ffmpeg_path: String,
     started_at: String,
     pipeline: RecordingPipeline,
@@ -5486,7 +5514,8 @@ struct MonitoredRecording {
 fn should_finalize_recording_session(
     ffmpeg_exit_success: bool,
     stop_intent_preceded_exit: bool,
-    encoder_bridge_terminal_failure: Option<&str>,
+    recording_bridge_terminal_failure: Option<&str>,
+    stream_bridge_terminal_failure: Option<&str>,
 ) -> bool {
     // Production capture is intentionally unbounded. A clean FFmpeg exit
     // before the user asks to stop is still an early termination (for example,
@@ -5497,7 +5526,15 @@ fn should_finalize_recording_session(
     // TERM/KILL or any non-zero FFmpeg exit keeps the artifact as recovery
     // media and marks the session failed unless a future explicit verifier can
     // prove the container is complete.
-    encoder_bridge_terminal_failure.is_none() && stop_intent_preceded_exit && ffmpeg_exit_success
+    if recording_bridge_terminal_failure.is_some() || !ffmpeg_exit_success {
+        return false;
+    }
+    // A dead STREAM output ends FFmpeg without a user stop, but the RECORDING
+    // data is intact and the muxer flushed cleanly (exit 0) — finalize it.
+    // The 2026-07-15 incident marked whole sessions failed and buried healthy
+    // multi-minute recordings because a stream latency failure was
+    // indistinguishable from a recording failure here.
+    stop_intent_preceded_exit || stream_bridge_terminal_failure.is_some()
 }
 
 fn should_begin_captioned_copy_render(requested: bool, caption_chunk_count: usize) -> bool {
@@ -14847,6 +14884,7 @@ mod tests {
         assert!(!should_finalize_recording_session(
             true,
             stop_intent_preceded_exit,
+            None,
             None
         ));
     }
@@ -14874,28 +14912,57 @@ mod tests {
         assert!(should_finalize_recording_session(
             true,
             stop_intent_preceded_exit,
+            None,
             None
         ));
     }
 
     #[test]
     fn only_an_explicit_graceful_stop_can_finalize_an_unbounded_capture() {
-        assert!(!should_finalize_recording_session(true, false, None));
+        assert!(!should_finalize_recording_session(true, false, None, None));
         assert!(
-            !should_finalize_recording_session(false, true, None),
+            !should_finalize_recording_session(false, true, None, None),
             "a non-zero/forced FFmpeg exit after stop must remain failed"
         );
-        assert!(should_finalize_recording_session(true, true, None));
+        assert!(should_finalize_recording_session(true, true, None, None));
 
         assert!(!should_finalize_recording_session(
             true,
             false,
-            Some("recording raw-video encoder output stopped: FIFO timed out")
+            Some("recording raw-video encoder output stopped: FIFO timed out"),
+            None
         ));
         assert!(!should_finalize_recording_session(
             false,
             true,
-            Some("recording raw-video encoder output stopped: FIFO timed out")
+            Some("recording raw-video encoder output stopped: FIFO timed out"),
+            None
+        ));
+    }
+
+    #[test]
+    fn stream_output_death_preserves_the_recording() {
+        // The 2026-07-15 incident: a stream latency failure ended FFmpeg
+        // cleanly with NO user stop — the healthy multi-minute recording was
+        // marked failed. A stream-only failure with a clean exit finalizes.
+        assert!(should_finalize_recording_session(
+            true,
+            false,
+            None,
+            Some("stream encoder output stopped: exceeded its bounded latency contract")
+        ));
+        // But it can never override a RECORDING failure or a dirty exit.
+        assert!(!should_finalize_recording_session(
+            true,
+            false,
+            Some("recording raw-video encoder output stopped"),
+            Some("stream encoder output stopped")
+        ));
+        assert!(!should_finalize_recording_session(
+            false,
+            false,
+            None,
+            Some("stream encoder output stopped")
         ));
     }
 

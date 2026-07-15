@@ -60,6 +60,13 @@ const STREAM_OUTPUT_QUEUE_COALESCE_FRAMES: usize = 4;
 const STREAM_OUTPUT_QUEUE_COALESCE_AGE: Duration = Duration::from_millis(100);
 const STREAM_OUTPUT_QUEUE_MAX_FRAMES: usize = 8;
 const STREAM_OUTPUT_QUEUE_MAX_AGE: Duration = Duration::from_millis(150);
+/// A stream output over its age budget DEGRADES (latest-wins coalescing) for
+/// this long before the failure is treated as real. A single over-budget
+/// sample used to be a death sentence: one 166ms-old frame killed a
+/// 3-platform live session (2026-07-15 owner incident) while the queue held
+/// 2 of 8 frames. Transient downstream stalls recover within this window; a
+/// genuinely wedged output still fails honestly.
+const STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW: Duration = Duration::from_secs(2);
 // Raw frames receive wall-clock PTS at FFmpeg demux. Keep no stale waiting
 // frames: the writer accepts the latest scheduler frame only when it is ready
 // for another complete write; busy ticks are explicitly coalesced and the
@@ -191,6 +198,38 @@ fn encoder_bridge_pre_encode_admission(
         return EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame;
     }
     EncoderBridgePreEncodeAdmission::Submit
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncoderBridgeOverBudgetEscalation {
+    /// Keep the output alive: drop pre-encode like coalescing and re-check.
+    Degrade,
+    /// The violation is sustained (or the queue truly full): fail the output.
+    Fail,
+}
+
+/// Only the stream role degrades — its latest-wins coalescing makes dropped
+/// frames an honest, visible quality trade. Recording/shared outputs have no
+/// such semantics: silently dropping recording frames is exactly the
+/// corruption the contract exists to prevent, so they fail immediately.
+fn encoder_bridge_over_budget_escalation(
+    policy: EncoderBridgeOutputQueuePolicy,
+    queue_depth: u64,
+    over_budget_since: Instant,
+    now: Instant,
+) -> EncoderBridgeOverBudgetEscalation {
+    if policy.role != EncoderBridgeOutputRole::Stream {
+        return EncoderBridgeOverBudgetEscalation::Fail;
+    }
+    // A queue at its frame ceiling means the consumer made no progress across
+    // the whole depth ladder — that is not jitter.
+    if queue_depth >= policy.max_frames as u64 {
+        return EncoderBridgeOverBudgetEscalation::Fail;
+    }
+    if now.duration_since(over_budget_since) >= STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW {
+        return EncoderBridgeOverBudgetEscalation::Fail;
+    }
+    EncoderBridgeOverBudgetEscalation::Degrade
 }
 
 fn encoder_bridge_output_pressure_error(
@@ -1087,6 +1126,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut pending_video_toolbox_fifo_started_at = VecDeque::<Instant>::new();
     let mut output_queue_capacity_pressure_events = 0_u64;
     let mut output_queue_dropped_frames = 0_u64;
+    // First instant the output queue went over its hard budget; cleared the
+    // moment it recovers. Drives the sustained-violation escalation.
+    let mut output_over_budget_since: Option<Instant> = None;
     #[cfg(target_os = "macos")]
     macro_rules! oldest_output_queue_age {
         () => {
@@ -1508,6 +1550,33 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 oldest_output_queue_age!(),
             )
         };
+        // Over-budget is a death sentence only when SUSTAINED (or the queue is
+        // truly full): a transient downstream stall degrades to latest-wins
+        // coalescing and recovers, instead of one over-age sample killing a
+        // live session (2026-07-15 incident).
+        let admission = match admission {
+            EncoderBridgePreEncodeAdmission::FailOutput => {
+                let now = Instant::now();
+                let since = *output_over_budget_since.get_or_insert(now);
+                match encoder_bridge_over_budget_escalation(
+                    output_queue_policy,
+                    queue_depth,
+                    since,
+                    now,
+                ) {
+                    EncoderBridgeOverBudgetEscalation::Degrade => {
+                        EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame
+                    }
+                    EncoderBridgeOverBudgetEscalation::Fail => {
+                        EncoderBridgePreEncodeAdmission::FailOutput
+                    }
+                }
+            }
+            other => {
+                output_over_budget_since = None;
+                other
+            }
+        };
         match admission {
             EncoderBridgePreEncodeAdmission::Submit => {}
             EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame => {
@@ -1831,13 +1900,26 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             }
         };
         if let Err(error) = write_result {
-            let error = record_encoder_bridge_terminal_failure(
-                &terminal_failure,
+            // A closed downstream (EPIPE/EOF: FFmpeg exited or was stopped)
+            // is not this bridge's verdict — the process exit status decides
+            // the session outcome. Recording it as terminal made a STREAM
+            // death condemn a healthy recording: the stream writer died, the
+            // shared FFmpeg exited cleanly, and the recording writer's EPIPE
+            // was then indistinguishable from a real encoder failure.
+            let error = if io_error_is_downstream_closed(&error) {
                 format!(
-                    "{} encoder output stopped: {error}",
+                    "{} encoder output ended: downstream closed ({error})",
                     encoder_bridge_output_role_label(output_queue_policy.role)
-                ),
-            );
+                )
+            } else {
+                record_encoder_bridge_terminal_failure(
+                    &terminal_failure,
+                    format!(
+                        "{} encoder output stopped: {error}",
+                        encoder_bridge_output_role_label(output_queue_policy.role)
+                    ),
+                )
+            };
             terminal_writer_error = Some(error.clone());
             emit_encoder_bridge_diagnostics_from_thread(
                 &diagnostics_tx,
@@ -2844,8 +2926,19 @@ struct QueuedVideoToolboxFrame {
 #[cfg(target_os = "macos")]
 #[derive(Debug)]
 enum VideoToolboxFifoWriterResult {
-    FrameWritten { encoded_bytes: u64, write_ms: f64 },
-    Error(String),
+    FrameWritten {
+        encoded_bytes: u64,
+        write_ms: f64,
+    },
+    Error {
+        message: String,
+        /// True when the write side saw EPIPE/EOF — the downstream FFmpeg
+        /// closed or exited. That is not a bridge verdict: the process exit
+        /// status is the authority, and treating it as a terminal bridge
+        /// failure condemned healthy recordings when the STREAM writer died
+        /// first and FFmpeg exited cleanly (2026-07-15 incident cascade).
+        downstream_closed: bool,
+    },
 }
 
 #[cfg(target_os = "macos")]
@@ -2861,6 +2954,17 @@ impl VideoToolboxFifoWriter {
         // One extra slot preserves a terminal flush error without deadlocking
         // close_and_join if the bridge is already tearing down.
         let (result_tx, result_rx) = std_mpsc::sync_channel(policy.max_frames + 2);
+        // The per-frame write deadline bounds COMPLETE-frame delivery. The
+        // stream role gets the sustained-violation grace on top of its queue
+        // budget so a transient downstream freeze degrades instead of killing
+        // the writer (a 500ms FFmpeg stall used to trip the 150ms budget and
+        // end the stream). Recording keeps its strict budget: silently
+        // buffering recording frames is the corruption its contract prevents.
+        let write_frame_age = if policy.role == EncoderBridgeOutputRole::Stream {
+            policy.max_age + STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW
+        } else {
+            policy.max_age
+        };
         let join = thread::Builder::new()
             .name(format!("videorc-{:?}-h264-fifo-writer", policy.role))
             .spawn(move || {
@@ -2870,7 +2974,7 @@ impl VideoToolboxFifoWriter {
                     frame_rx,
                     result_tx,
                     stop,
-                    policy.max_age,
+                    write_frame_age,
                 );
             })
             .expect("could not start VideoToolbox FIFO writer thread");
@@ -2979,7 +3083,10 @@ fn run_video_toolbox_fifo_writer_loop<W: StdWrite>(
                 });
             }
             Err(error) => {
-                let _ = result_tx.send(VideoToolboxFifoWriterResult::Error(error.to_string()));
+                let _ = result_tx.send(VideoToolboxFifoWriterResult::Error {
+                    message: error.to_string(),
+                    downstream_closed: io_error_is_downstream_closed(&error),
+                });
                 return;
             }
         }
@@ -2987,8 +3094,20 @@ fn run_video_toolbox_fifo_writer_loop<W: StdWrite>(
     if !stop.load(Ordering::Relaxed)
         && let Err(error) = sink.flush()
     {
-        let _ = result_tx.send(VideoToolboxFifoWriterResult::Error(error.to_string()));
+        let _ = result_tx.send(VideoToolboxFifoWriterResult::Error {
+            message: error.to_string(),
+            downstream_closed: io_error_is_downstream_closed(&error),
+        });
     }
+}
+
+/// EPIPE/EOF class: the reader (FFmpeg) went away. The writer must stop, but
+/// the SESSION verdict belongs to the process exit status, not this error.
+fn io_error_is_downstream_closed(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe | io::ErrorKind::WriteZero | io::ErrorKind::UnexpectedEof
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -3256,8 +3375,19 @@ fn drain_video_toolbox_fifo_writer_results(
                     video_toolbox_output_bytes.saturating_add(encoded_bytes);
                 video_toolbox_fifo_write_times_ms.push(write_ms);
             }
-            VideoToolboxFifoWriterResult::Error(error) => {
-                return Err(io::Error::other(error));
+            VideoToolboxFifoWriterResult::Error {
+                message,
+                downstream_closed,
+            } => {
+                // Preserve the classification through the io::Error kind so
+                // the terminal-failure funnel can tell "FFmpeg went away"
+                // apart from a real bridge failure.
+                let kind = if downstream_closed {
+                    io::ErrorKind::BrokenPipe
+                } else {
+                    io::ErrorKind::Other
+                };
+                return Err(io::Error::new(kind, message));
             }
         }
     }
@@ -3557,6 +3687,13 @@ fn recording_queue_drop_watch_update(
 static RECORDING_QUEUE_DROP_WATCH: std::sync::Mutex<Option<RecordingQueueDropWatch>> =
     std::sync::Mutex::new(None);
 
+// The stream twin: pressure on the STREAM output was previously counted in
+// diagnostics but never surfaced — the 2026-07-15 incident sessions logged 11
+// silent pressure events and then died with no prior warning. Fires once per
+// session so a jittery platform cannot spam the session log.
+static STREAM_QUEUE_PRESSURE_WATCH: std::sync::Mutex<Option<RecordingQueueDropWatch>> =
+    std::sync::Mutex::new(None);
+
 async fn emit_encoder_bridge_diagnostics(
     state: &AppState,
     session_id: &str,
@@ -3591,6 +3728,34 @@ async fn emit_encoder_bridge_diagnostics(
                 crate::protocol::HealthLevel::Warn,
                 "recording-output-queue-drops",
                 &message,
+            );
+        }
+    }
+
+    // Stream pressure must be audible BEFORE any failure: the watchdog now
+    // degrades (drops to latest-wins) instead of dying on one over-age
+    // sample, and this is the user's signal that a platform connection is
+    // struggling while the stream still runs.
+    if effective_encoder_bridge_output_role(diagnostics_context) == EncoderBridgeOutputRole::Stream
+    {
+        let fire = {
+            let mut guard = STREAM_QUEUE_PRESSURE_WATCH
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let watch = guard.get_or_insert_with(RecordingQueueDropWatch::default);
+            recording_queue_drop_watch_update(
+                watch,
+                session_id,
+                runtime.output_queue_capacity_pressure_events,
+            )
+        };
+        if fire {
+            let _ = crate::recording::emit_health_event(
+                state,
+                Some(session_id),
+                crate::protocol::HealthLevel::Warn,
+                "stream-output-pressure",
+                "Stream output is under pressure: a destination is accepting data slower than the stream produces it. Frames are being dropped from the live stream to keep latency; the recording is unaffected.",
             );
         }
     }
@@ -4005,6 +4170,66 @@ mod tests {
             encoder_bridge_pre_encode_admission(policy, 2, Some(Duration::from_millis(150))),
             EncoderBridgePreEncodeAdmission::FailOutput
         );
+    }
+
+    #[test]
+    fn stream_over_budget_degrades_first_and_fails_only_when_sustained() {
+        let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Stream,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        let since = Instant::now();
+
+        // A fresh over-age sample (the 2026-07-15 incident shape: depth 2/8,
+        // oldest 166ms) degrades instead of killing the stream.
+        assert_eq!(
+            encoder_bridge_over_budget_escalation(policy, 2, since, since),
+            EncoderBridgeOverBudgetEscalation::Degrade
+        );
+        assert_eq!(
+            encoder_bridge_over_budget_escalation(
+                policy,
+                2,
+                since,
+                since + STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW - Duration::from_millis(1),
+            ),
+            EncoderBridgeOverBudgetEscalation::Degrade
+        );
+        // Continuously over budget for the whole window → real failure.
+        assert_eq!(
+            encoder_bridge_over_budget_escalation(
+                policy,
+                2,
+                since,
+                since + STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW,
+            ),
+            EncoderBridgeOverBudgetEscalation::Fail
+        );
+        // A queue at its frame ceiling is not jitter — fail immediately.
+        assert_eq!(
+            encoder_bridge_over_budget_escalation(policy, 8, since, since),
+            EncoderBridgeOverBudgetEscalation::Fail
+        );
+    }
+
+    #[test]
+    fn recording_over_budget_never_degrades() {
+        for role in [
+            EncoderBridgeOutputRole::Recording,
+            EncoderBridgeOutputRole::Shared,
+        ] {
+            let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+                role,
+                ..EncoderBridgeDiagnosticsContext::default()
+            });
+            let since = Instant::now();
+            // Dropping recording frames silently is the corruption the
+            // contract prevents — recording outputs keep the one-sample fail.
+            assert_eq!(
+                encoder_bridge_over_budget_escalation(policy, 2, since, since),
+                EncoderBridgeOverBudgetEscalation::Fail
+            );
+        }
     }
 
     #[test]
@@ -5199,8 +5424,8 @@ mod tests {
                     assert_eq!(encoded_bytes, 64);
                     assert!(write_ms >= 0.0);
                 }
-                VideoToolboxFifoWriterResult::Error(error) => {
-                    panic!("unexpected FIFO writer error: {error}");
+                VideoToolboxFifoWriterResult::Error { message, .. } => {
+                    panic!("unexpected FIFO writer error: {message}");
                 }
             }
         }
@@ -5277,10 +5502,67 @@ mod tests {
 
         assert!(started_at.elapsed() < Duration::from_millis(500));
         let result = result_rx.recv().expect("terminal writer result");
-        let VideoToolboxFifoWriterResult::Error(error) = result else {
+        let VideoToolboxFifoWriterResult::Error {
+            message,
+            downstream_closed,
+        } = result
+        else {
             panic!("stalled writer must fail explicitly")
         };
-        assert!(error.contains("complete-frame delivery budget"));
+        assert!(message.contains("complete-frame delivery budget"));
+        // A timeout is a REAL failure, not a closed downstream — it must
+        // still reach the terminal-failure funnel.
+        assert!(!downstream_closed);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn videotoolbox_fifo_writer_classifies_a_closed_downstream() {
+        let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(3);
+        frame_tx
+            .send(QueuedVideoToolboxFrame {
+                frame: VideoToolboxH264AnnexBFrame {
+                    timing: VideoToolboxFrameTiming::new(0, 30, 1, 30),
+                    bytes: vec![0x44; 64],
+                    nal_types: vec![1],
+                    is_idr: false,
+                },
+                submitted_at: Instant::now(),
+            })
+            .expect("queue frame");
+        drop(frame_tx);
+
+        struct BrokenPipeSink;
+        impl StdWrite for BrokenPipeSink {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "EPIPE"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        run_video_toolbox_fifo_writer_loop(
+            BrokenPipeSink,
+            VideoToolboxH264PipeWriter::for_output(
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            ),
+            frame_rx,
+            result_tx,
+            Arc::new(AtomicBool::new(false)),
+            Duration::from_millis(250),
+        );
+
+        let result = result_rx.recv().expect("terminal writer result");
+        let VideoToolboxFifoWriterResult::Error {
+            downstream_closed, ..
+        } = result
+        else {
+            panic!("EPIPE must surface as a writer error")
+        };
+        // FFmpeg going away is the process exit's story, not a bridge verdict.
+        assert!(downstream_closed);
     }
 
     struct AlwaysWouldBlockSink;
