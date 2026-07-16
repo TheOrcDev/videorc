@@ -33,6 +33,15 @@ export type SettingsState = {
    * instead of removing it after finalization.
    */
   keepOriginalRecording: boolean
+  /**
+   * OS-global shortcuts (work with the app unfocused — a Stream Deck's
+   * native Hotkey action drives these). Electron accelerator syntax.
+   */
+  globalShortcuts?: {
+    recordToggle?: string
+    streamToggle?: string
+    micToggle?: string
+  }
 }
 
 export type CaptionBurnTarget = 'off' | 'stream' | 'recording' | 'both'

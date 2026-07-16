@@ -27,10 +27,12 @@ import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioAudio, useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
+import type { RemoteControlStatus } from '@/lib/backend'
 import { useUpdater } from '@/hooks/use-updater'
 import type { DirectoryFacts, UpdateStatus } from '@/lib/backend'
 import { isActiveRecordingState } from '@/lib/format'
@@ -63,7 +65,8 @@ export function SettingsTab({
     openSystemPermissionSettings,
     exportSupportBundle,
     supportBundleExportPending,
-    runtimeInfo
+    runtimeInfo,
+    remoteControl
   } = useStudioCore()
   const { audioMeter } = useStudioAudio()
   const { openStudioPanel } = useWorkspaceNav()
@@ -112,6 +115,20 @@ export function SettingsTab({
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [refreshBackend])
+
+  const [remoteStatus, setRemoteStatus] = useState<RemoteControlStatus | null>(null)
+  const [remotePending, setRemotePending] = useState(false)
+  useEffect(() => {
+    void remoteControl.getStatus().then(setRemoteStatus)
+  }, [remoteControl])
+  const runRemoteAction = (action: () => Promise<RemoteControlStatus | null>): void => {
+    setRemotePending(true)
+    void action()
+      .then((status) => {
+        if (status) setRemoteStatus(status)
+      })
+      .finally(() => setRemotePending(false))
+  }
 
   const accessRows = systemAccessRows({
     deviceList,
@@ -342,6 +359,106 @@ export function SettingsTab({
               here — rows refresh automatically.
             </p>
           </div>
+        </PanelSection>
+
+        <PanelSection
+          action={
+            <Switch
+              aria-label="Enable remote control"
+              checked={remoteStatus?.enabled ?? false}
+              disabled={remotePending}
+              onCheckedChange={(checked) =>
+                runRemoteAction(checked ? remoteControl.enable : remoteControl.disable)
+              }
+            />
+          }
+          description="Let a Stream Deck or other local remote start recordings, switch scenes, and mute your mic. Off by default; clients pair with the token below on this Mac only."
+          icon={GearSix}
+          title="Remote control"
+        >
+          {remoteStatus?.enabled ? (
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="remote-token">Pairing token</FieldLabel>
+                <div className="flex gap-2">
+                  <div
+                    id="remote-token"
+                    className="min-w-0 flex-1 truncate rounded-md border bg-muted/30 px-3 py-2 font-mono text-xs text-muted-foreground"
+                  >
+                    {remoteStatus.token
+                      ? `${remoteStatus.token.slice(0, 8)}…${remoteStatus.token.slice(-4)}`
+                      : '—'}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      if (remoteStatus.token) {
+                        void navigator.clipboard.writeText(remoteStatus.token)
+                      }
+                    }}
+                  >
+                    Copy
+                  </Button>
+                  <Button
+                    disabled={remotePending}
+                    size="sm"
+                    variant="outline"
+                    onClick={() => runRemoteAction(remoteControl.regenerate)}
+                  >
+                    Regenerate
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {remoteStatus.connectedClients > 0
+                    ? `${remoteStatus.connectedClients} client${remoteStatus.connectedClients === 1 ? '' : 's'} connected.`
+                    : 'No clients connected.'}{' '}
+                  Regenerating disconnects every paired client. The Stream Deck plugin pairs
+                  automatically on this Mac.
+                </p>
+              </Field>
+            </FieldGroup>
+          ) : null}
+        </PanelSection>
+
+        <PanelSection
+          description="Work system-wide, even when Videorc is in the background — bind them to Stream Deck keys or any macro tool. Electron accelerator syntax, e.g. Cmd+Shift+R."
+          icon={GearSix}
+          title="Global shortcuts"
+        >
+          <FieldGroup>
+            {(
+              [
+                ['recordToggle', 'Start / stop recording', 'Cmd+Shift+R'],
+                ['streamToggle', 'Go live / end stream', 'Cmd+Shift+L'],
+                ['micToggle', 'Mute / unmute mic', 'Cmd+Shift+M']
+              ] as const
+            ).map(([key, label, placeholder]) => (
+              <Field key={key}>
+                <div className="flex items-center justify-between gap-3">
+                  <FieldLabel htmlFor={`global-shortcut-${key}`}>{label}</FieldLabel>
+                  <Input
+                    className="w-44 font-mono text-xs"
+                    id={`global-shortcut-${key}`}
+                    placeholder={placeholder}
+                    value={settings.globalShortcuts?.[key] ?? ''}
+                    onChange={(event) =>
+                      setSettings((current) => ({
+                        ...current,
+                        globalShortcuts: {
+                          ...current.globalShortcuts,
+                          [key]: event.target.value
+                        }
+                      }))
+                    }
+                  />
+                </div>
+              </Field>
+            ))}
+            <p className="text-xs text-muted-foreground">
+              Leave a field empty to release the key combination.
+            </p>
+          </FieldGroup>
         </PanelSection>
       </ConfigGrid>
 

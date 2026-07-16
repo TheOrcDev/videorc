@@ -65,6 +65,8 @@ import {
   verticalOrientationVideoPatch,
   videoProfileCompatibility,
   videoPresets,
+  HORIZONTAL_LAYOUT_PRESETS,
+  VERTICAL_LAYOUT_PRESETS,
   type CaptureConfig,
   type SettingsState,
   type WsStatus
@@ -164,6 +166,7 @@ import type {
   OAuthStartResult,
   OAuthProviderCredentialStatus,
   RecordingStatus,
+  RemoteControlStatus,
   RuntimeInfo,
   RtmpPreset,
   Scene,
@@ -673,6 +676,13 @@ export type StudioContextValue = {
   screenImportPending: boolean
   streamMetadataSavePending: boolean
   supportBundleExportPending: boolean
+  // remote control (Stream Deck et al)
+  remoteControl: {
+    getStatus: () => Promise<RemoteControlStatus | null>
+    enable: () => Promise<RemoteControlStatus | null>
+    disable: () => Promise<RemoteControlStatus | null>
+    regenerate: () => Promise<RemoteControlStatus | null>
+  }
   // settings + capture config
   settings: SettingsState
   setSettings: Dispatch<SetStateAction<SettingsState>>
@@ -1321,6 +1331,7 @@ export function StudioContextProviders({
 export function StudioProvider({ children }: { children: ReactNode }): ReactElement {
   const [connection, setConnection] = useState<BackendConnection | null>(null)
   const [client, setClient] = useState<BackendClient | null>(null)
+  const remoteIntentHandlerRef = useRef<((payload: unknown) => void) | null>(null)
   const clientRef = useRef<BackendClient | null>(null)
   const accountCallbacksInFlightRef = useRef<Set<string>>(new Set())
   const accountCallbacksCompletedRef = useRef<Set<string>>(new Set())
@@ -3644,6 +3655,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
     const unsubscribers = [
       nextClient.on('backend.ready', () => setWsStatus('connected')),
+      // Remote-control intents (Stream Deck et al) arrive as events relayed
+      // by the backend; dispatch through a ref so the executor (declared
+      // after the session handlers) is always the latest closure.
+      nextClient.on('remote.intent', (payload) => {
+        remoteIntentHandlerRef.current?.(payload)
+      }),
       nextClient.on('devices.changed', (payload) => {
         bootstrapGuard.mark('devices')
         setDeviceList(payload as DeviceList)
@@ -9021,6 +9038,253 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     stopSession
   ])
 
+  // ── Remote control (issue #143) ──────────────────────────────────────
+  // Intents execute through the SAME handlers as the on-screen buttons —
+  // no second session-start path, no validation bypass. Every intent is
+  // acked so deck keys can show failure reasons.
+  const handleRemoteIntent = useCallback(
+    async (payload: unknown) => {
+      const envelope = payload as {
+        intentId?: string
+        intent?: { kind?: string } & Record<string, unknown>
+      } | null
+      const intentId = envelope?.intentId
+      const intent = envelope?.intent
+      if (!client || !intentId || !intent?.kind) {
+        return
+      }
+      const ack = async (ok: boolean, message?: string): Promise<void> => {
+        try {
+          await client.request('remote.intent.ack', {
+            intentId,
+            ok,
+            ...(message ? { message } : {})
+          })
+        } catch {
+          // The remote client also observes state; a lost ack is non-fatal.
+        }
+      }
+      const active = isActiveRecordingState(recording.state)
+      try {
+        switch (intent.kind) {
+          case 'recordStart':
+            if (active) return void (await ack(false, 'A session is already active.'))
+            await startSession()
+            return void (await ack(true))
+          case 'recordStop':
+          case 'streamStop':
+            if (!active) return void (await ack(false, 'No active session.'))
+            await stopSession()
+            return void (await ack(true))
+          case 'recordToggle':
+            if (active) {
+              await stopSession()
+            } else {
+              await startSession()
+            }
+            return void (await ack(true))
+          case 'streamStart':
+            if (!captureConfigRef.current.streamEnabled) {
+              return void (await ack(false, 'Enable streaming in the Studio first.'))
+            }
+            if (active) return void (await ack(false, 'A session is already active.'))
+            await startSession()
+            return void (await ack(true))
+          case 'micMute':
+          case 'micUnmute':
+          case 'micToggle': {
+            setCaptureConfig((current) => ({
+              ...current,
+              audio: {
+                ...current.audio,
+                microphoneMuted:
+                  intent.kind === 'micToggle'
+                    ? !current.audio.microphoneMuted
+                    : intent.kind === 'micMute'
+              }
+            }))
+            return void (await ack(true))
+          }
+          case 'sceneApply': {
+            const layoutPreset = intent.layoutPreset as LayoutPreset | undefined
+            if (!layoutPreset) {
+              return void (await ack(false, 'Only layoutPreset scene switches are supported.'))
+            }
+            const known = [...HORIZONTAL_LAYOUT_PRESETS, ...VERTICAL_LAYOUT_PRESETS]
+            if (!(known as readonly string[]).includes(layoutPreset)) {
+              return void (await ack(false, `Unknown layout preset "${layoutPreset}".`))
+            }
+            applyLayoutPatch({ layoutPreset })
+            return void (await ack(true))
+          }
+          case 'takeoverShow': {
+            const assetId = intent.assetId as string | undefined
+            const screen = screens.find((candidate) => candidate.id === assetId)
+            if (!screen) {
+              return void (await ack(false, 'No takeover with that id.'))
+            }
+            await activateScreen(screen.id)
+            return void (await ack(true))
+          }
+          case 'takeoverHide':
+            await clearActiveScreen()
+            return void (await ack(true))
+          case 'windowFront': {
+            const window = intent.window as string | undefined
+            if (window === 'notes') await openNotesWindow()
+            else if (window === 'comments') await openCommentsWindow()
+            else if (window === 'preview') await openPreviewWindow()
+            else return void (await ack(false, `Unknown window "${window}".`))
+            return void (await ack(true))
+          }
+          default:
+            return void (await ack(false, `Unsupported intent "${intent.kind}".`))
+        }
+      } catch (error) {
+        await ack(false, error instanceof Error ? error.message : 'Intent failed.')
+      }
+    },
+    [
+      activateScreen,
+      applyLayoutPatch,
+      clearActiveScreen,
+      client,
+      openCommentsWindow,
+      openNotesWindow,
+      openPreviewWindow,
+      recording.state,
+      screens,
+      startSession,
+      stopSession
+    ]
+  )
+  useEffect(() => {
+    remoteIntentHandlerRef.current = (payload) => {
+      void handleRemoteIntent(payload)
+    }
+  }, [handleRemoteIntent])
+
+  // The state projection deck keys render. Minimal by design and the ONLY
+  // payload remote sockets receive — never widen it with tokens/paths/URLs.
+  const remoteStateProjection = useMemo(
+    () => ({
+      sessionState: recording.state,
+      sessionActive: isSessionActive,
+      recordEnabled: captureConfig.recordEnabled,
+      streamEnabled: captureConfig.streamEnabled,
+      micMuted: captureConfig.audio.microphoneMuted,
+      layoutPreset: captureConfig.layout.layoutPreset,
+      activeTakeoverId: activeScreen?.id ?? null,
+      windows: {
+        notes: notesWindow.open,
+        preview: previewWindow.open
+      }
+    }),
+    [
+      activeScreen?.id,
+      captureConfig.audio.microphoneMuted,
+      captureConfig.layout.layoutPreset,
+      captureConfig.recordEnabled,
+      captureConfig.streamEnabled,
+      isSessionActive,
+      notesWindow.open,
+      previewWindow.open,
+      recording.state
+    ]
+  )
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') {
+      return
+    }
+    void client
+      .request('remote.surface.publish', {
+        state: remoteStateProjection,
+        describe: {
+          layoutPresets: [...HORIZONTAL_LAYOUT_PRESETS, ...VERTICAL_LAYOUT_PRESETS],
+          takeovers: screens.map((screen) => ({ id: screen.id, name: screen.name })),
+          windows: ['notes', 'comments', 'preview']
+        }
+      })
+      .catch(() => {
+        // Remote surface publishing is best-effort; the next change retries.
+      })
+  }, [client, remoteStateProjection, screens, wsStatus])
+
+  const remoteControlRequest = useCallback(
+    async (method: string): Promise<RemoteControlStatus | null> => {
+      if (!client) {
+        return null
+      }
+      try {
+        return await client.request<RemoteControlStatus>(method)
+      } catch (error) {
+        reportError(error)
+        return null
+      }
+    },
+    [client, reportError]
+  )
+  const remoteControl = useMemo(
+    () => ({
+      getStatus: () => remoteControlRequest('remote.control.status'),
+      enable: () => remoteControlRequest('remote.control.enable'),
+      disable: () => remoteControlRequest('remote.control.disable'),
+      regenerate: () => remoteControlRequest('remote.control.regenerate')
+    }),
+    [remoteControlRequest]
+  )
+
+  // OS-global shortcuts (RC0): registration follows Settings; triggers run
+  // the same handlers as the buttons and the remote intents.
+  useEffect(() => {
+    const shortcuts = settings.globalShortcuts ?? {}
+    void window.videorc?.setGlobalShortcuts?.(shortcuts).then((result) => {
+      const failed = Object.entries(result?.registered ?? {})
+        .filter(([, ok]) => !ok)
+        .map(([action]) => action)
+      if (failed.length > 0) {
+        toast.error('Some global shortcuts could not be registered', {
+          id: 'global-shortcuts-conflict',
+          description:
+            'Another app may already use that key combination. Pick a different one in Settings.'
+        })
+      }
+    })
+  }, [settings.globalShortcuts])
+  useEffect(() => {
+    const unsubscribe = window.videorc?.onGlobalShortcut?.((action) => {
+      const active = isActiveRecordingState(recordingRef.current.state)
+      if (action === 'record-toggle') {
+        if (active) {
+          void stopSession()
+        } else {
+          void startSession()
+        }
+        return
+      }
+      if (action === 'stream-toggle') {
+        if (active) {
+          void stopSession()
+        } else if (captureConfigRef.current.streamEnabled) {
+          void startSession()
+        } else {
+          toast.error('Streaming is not configured', {
+            id: 'global-shortcut-stream',
+            description: 'Enable streaming in the Studio before using the Go Live shortcut.'
+          })
+        }
+        return
+      }
+      if (action === 'mic-toggle') {
+        setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, microphoneMuted: !current.audio.microphoneMuted }
+        }))
+      }
+    })
+    return () => unsubscribe?.()
+  }, [startSession, stopSession])
+
   const shellValue = useMemo<StudioShellContextValue>(
     () => ({
       wsStatus,
@@ -9164,6 +9428,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       screenImportPending,
       streamMetadataSavePending,
       supportBundleExportPending,
+      remoteControl,
       settings,
       setSettings,
       captureConfig,
@@ -9336,6 +9601,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       screenImportPending,
       streamMetadataSavePending,
       supportBundleExportPending,
+      remoteControl,
       settings,
       setSettings,
       captureConfig,

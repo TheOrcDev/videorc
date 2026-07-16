@@ -4,6 +4,7 @@ import {
   contentTracing,
   desktopCapturer,
   dialog,
+  globalShortcut,
   nativeImage,
   nativeTheme,
   net,
@@ -320,6 +321,60 @@ import type {
 } from '../shared/backend'
 
 let mainWindow: BrowserWindow | null = null
+
+// ── OS-global shortcuts (remote-control plan RC0) ─────────────────────────
+// Registered system-wide so a Stream Deck's native Hotkey action can drive
+// record/stream/mic with the app unfocused. Off unless the user configures
+// accelerators in Settings; every set call replaces the previous set.
+const registeredGlobalShortcuts = new Set<string>()
+
+function setGlobalShortcuts(shortcuts: {
+  recordToggle?: string
+  streamToggle?: string
+  micToggle?: string
+}): { registered: Record<string, boolean> } {
+  for (const accelerator of registeredGlobalShortcuts) {
+    try {
+      globalShortcut.unregister(accelerator)
+    } catch {
+      // Unregistering a stale accelerator must never block the update.
+    }
+  }
+  registeredGlobalShortcuts.clear()
+  const requested: Array<['record-toggle' | 'stream-toggle' | 'mic-toggle', string | undefined]> = [
+    ['record-toggle', shortcuts.recordToggle],
+    ['stream-toggle', shortcuts.streamToggle],
+    ['mic-toggle', shortcuts.micToggle]
+  ]
+  const registered: Record<string, boolean> = {}
+  for (const [action, accelerator] of requested) {
+    const trimmed = accelerator?.trim()
+    if (!trimmed) {
+      continue
+    }
+    let ok: boolean
+    try {
+      ok = globalShortcut.register(trimmed, () => {
+        const window = mainWindow
+        if (window && !window.isDestroyed()) {
+          sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
+        }
+      })
+    } catch {
+      // An invalid accelerator string reports as not registered.
+      ok = false
+    }
+    registered[action] = ok
+    if (ok) {
+      registeredGlobalShortcuts.add(trimmed)
+    }
+  }
+  return { registered }
+}
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll()
+})
 let nativePreviewSurfaceWindow: BrowserWindow | null = null
 let notesWindow: BrowserWindow | null = null
 let notesWindowLastFrame: Electron.Rectangle | null = null
@@ -10786,6 +10841,13 @@ app.whenReady().then(async () => {
     }
     return previewWindowState()
   })
+  secureIpcHandle(
+    'global-shortcuts:set',
+    (
+      _event,
+      shortcuts: { recordToggle?: string; streamToggle?: string; micToggle?: string } | undefined
+    ) => setGlobalShortcuts(shortcuts ?? {})
+  )
   secureIpcHandle('notes-window:open', () => openNotesWindow())
   secureIpcHandle('notes-window:close', () => closeNotesWindow())
   secureIpcHandle('notes-window:get-state', () => notesWindowState())

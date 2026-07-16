@@ -84,6 +84,8 @@ const api: VideorcApi = {
     invoke('preview-window:set-aspect-ratio', width, height),
   onPreviewWindowState: (callback) => subscribe('preview-window:state', callback),
   openNotesWindow: () => invoke('notes-window:open'),
+  setGlobalShortcuts: (shortcuts) => invoke('global-shortcuts:set', shortcuts),
+  onGlobalShortcut: (callback) => subscribe('global-shortcuts:triggered', callback),
   closeNotesWindow: () => invoke('notes-window:close'),
   getNotesWindowState: () => invoke('notes-window:get-state'),
   setNotesWindowAlwaysOnTop: (alwaysOnTop) => invoke('notes-window:set-always-on-top', alwaysOnTop),

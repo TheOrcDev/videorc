@@ -11,6 +11,11 @@ use serde::Serialize;
 pub enum BackendRole {
     Renderer,
     Admin,
+    /// Remote-control clients (Stream Deck plugin, Companion, ...). Hard
+    /// allowlist: `remote.describe` + `remote.intent` only, and the event
+    /// stream is locked to `remote.state`/`remote.ack` at connection setup.
+    /// Assume hostile local software probes the port — everything else 403s.
+    Remote,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,10 +96,35 @@ pub fn authorize_backend_method(
         return Ok(());
     }
 
+    if role == BackendRole::Remote {
+        // Default-deny: the remote surface is an allowlist, never a blocklist.
+        return if remote_allowed_method(method) {
+            Ok(())
+        } else {
+            Err(MethodAdmissionError::AdminOnly)
+        };
+    }
+
     if admin_only_method(method) && role != BackendRole::Admin {
         return Err(MethodAdmissionError::AdminOnly);
     }
     Ok(())
+}
+
+fn remote_allowed_method(method: &str) -> bool {
+    matches!(method, "remote.describe" | "remote.intent")
+}
+
+/// Constant-time check of a supplied token against the (optional, runtime-
+/// rotatable) remote-control token. Disabled surface or absent token never
+/// authenticates.
+pub fn authenticate_remote_token(supplied: &str, remote_token: Option<&str>) -> bool {
+    match remote_token {
+        Some(token) if !token.is_empty() => {
+            constant_time_equal(supplied.as_bytes(), token.as_bytes())
+        }
+        _ => false,
+    }
 }
 
 fn smoke_or_test_method(method: &str) -> bool {
@@ -274,5 +304,52 @@ mod tests {
         assert!(serialized.contains("renderer-only"));
         assert!(!serialized.contains("admin"));
         assert!(!serialized.contains("adminToken"));
+    }
+}
+
+#[cfg(test)]
+mod remote_role_tests {
+    use super::*;
+
+    #[test]
+    fn remote_role_is_a_hard_allowlist() {
+        for allowed in ["remote.describe", "remote.intent"] {
+            assert!(authorize_backend_method(BackendRole::Remote, allowed, false).is_ok());
+        }
+        // The public repo assumption: hostile local software probes the port.
+        for forbidden in [
+            "session.start",
+            "session.stop",
+            "sessions.delete.resolve",
+            "account.auth.begin_intent",
+            "account.sign_out",
+            "recordings.list",
+            "health.ping",
+            "preview.surface.status",
+            "remote.control.enable",
+            "remote.control.regenerate",
+            "remote.surface.publish",
+            "remote.intent.ack",
+            "resource.capability.mint",
+            "test.anything",
+        ] {
+            assert!(
+                authorize_backend_method(BackendRole::Remote, forbidden, false).is_err(),
+                "remote role must not reach {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_token_authentication_is_optional_and_exact() {
+        assert!(authenticate_remote_token("tok", Some("tok")));
+        assert!(!authenticate_remote_token("tok", Some("other")));
+        assert!(!authenticate_remote_token("tok", Some("")));
+        assert!(!authenticate_remote_token("tok", None));
+        // The renderer/admin tokens never authenticate as remote implicitly.
+        assert_eq!(
+            authenticate_backend_token("remote-tok", "renderer", "admin"),
+            None
+        );
     }
 }

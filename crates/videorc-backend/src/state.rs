@@ -397,6 +397,12 @@ pub struct AppState {
     pub last_audio_meter: Arc<tokio::sync::Mutex<Option<AudioMeterSampleSnapshot>>>,
     pub logs: Arc<StdMutex<Vec<BackendLogEvent>>>,
     pub database: Database,
+    /// Remote-control surface (Stream Deck et al): enabled flag, rotatable
+    /// token, renderer-published describe/state snapshots, intent debounce.
+    pub remote_control: crate::remote_control::RemoteControlSlot,
+    /// Bumped on remote token regenerate/disable: live remote sockets watch
+    /// it and close, so a rotated token cuts existing clients immediately.
+    pub remote_generation: tokio::sync::watch::Sender<u64>,
     pub resource_authority: ResourceAuthority,
     pub oauth: Arc<OAuthSessions>,
     /// Pending 3-legged OAuth 1.0a authorizations for X Live (keyed by
@@ -466,6 +472,10 @@ impl AppState {
             logs: Arc::new(StdMutex::new(Vec::new())),
             live_chat_persistence: LiveChatPersistence::new(database.clone()),
             database,
+            remote_control: std::sync::Arc::new(StdMutex::new(
+                crate::remote_control::RemoteControlRuntime::load_from_secrets(),
+            )),
+            remote_generation: tokio::sync::watch::channel(0).0,
             resource_authority: ResourceAuthority::default(),
             oauth: Arc::new(OAuthSessions::new_with_secret_store(
                 oauth_store_path,

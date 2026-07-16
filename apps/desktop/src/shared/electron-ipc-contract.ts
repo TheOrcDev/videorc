@@ -88,6 +88,7 @@ export const electronInvokeApiMethods = {
   'preview-window:set-dock-overlay': 'setPreviewDockOverlayOpen',
   'preview-window:set-aspect-ratio': 'setPreviewWindowAspectRatio',
   'notes-window:open': 'openNotesWindow',
+  'global-shortcuts:set': 'setGlobalShortcuts',
   'notes-window:close': 'closeNotesWindow',
   'notes-window:get-state': 'getNotesWindowState',
   'notes-window:set-always-on-top': 'setNotesWindowAlwaysOnTop',
@@ -155,6 +156,10 @@ export type ElectronInvokeArgs<TChannel extends ElectronInvokeChannel> =
 export type ElectronInvokeResult<TChannel extends ElectronInvokeChannel> =
   ElectronIpcInvokeMap[TChannel]['result']
 
+/** OS-global shortcut actions (registered via globalShortcut, work with the
+ * app unfocused — Stream Deck's native Hotkey action drives these). */
+export type GlobalShortcutAction = 'record-toggle' | 'stream-toggle' | 'mic-toggle'
+
 export interface ElectronIpcEventMap {
   'account:callback': AccountCallbackEnvelope
   'backend:connection': BackendConnection
@@ -177,6 +182,7 @@ export interface ElectronIpcEventMap {
   'captions-window:lines': CaptionsUpdate[]
   'oauth:callback-url': OAuthCallbackEnvelope
   'shortcut:navigate': string
+  'global-shortcuts:triggered': GlobalShortcutAction
   'preview-surface:pump-mode': boolean
   'preview-surface:resync-scene': undefined
   'glass:wallpaper': GlassWallpaperState
@@ -208,6 +214,7 @@ export const electronEventChannels = [
   'captions-window:lines',
   'oauth:callback-url',
   'shortcut:navigate',
+  'global-shortcuts:triggered',
   'preview-surface:pump-mode',
   'preview-surface:resync-scene',
   'glass:wallpaper',
@@ -855,6 +862,7 @@ export const boundedPassthroughElectronInvokeChannels = [
   'preview-window:report-dock-slot',
   'preview-window:set-dock-overlay',
   'notes-window:open',
+  'global-shortcuts:set',
   'notes-window:close',
   'notes-window:get-state',
   'notes-window:set-always-on-top',
@@ -963,6 +971,7 @@ const specificRuntimeEventSchemas = {
   'notes-window:flush-request': undefinedSchema,
   'oauth:callback-url': oauthCallbackEnvelopeSchema,
   'shortcut:navigate': enumSchema(['1', '2', '3', '4', '5', '6', '7', '8', '9', ',']),
+  'global-shortcuts:triggered': enumSchema(['record-toggle', 'stream-toggle', 'mic-toggle']),
   'preview-surface:pump-mode': booleanSchema,
   'preview-surface:resync-scene': undefinedSchema,
   'captions-window:lines': runtimeSchema<unknown[]>('bounded caption lines', (value, path) => {

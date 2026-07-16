@@ -42,6 +42,7 @@ mod process_job;
 mod protocol;
 mod publish_clips;
 mod recording;
+mod remote_control;
 mod repair;
 mod repair_service;
 mod resource_authority;
@@ -286,6 +287,12 @@ async fn main() -> Result<()> {
     std::io::stdout().flush()?;
 
     state.emit_log("info", "Videorc backend ready.");
+    if let Err(error) = sync_remote_discovery_file(&state) {
+        state.emit_log(
+            "warn",
+            format!("Remote-control discovery file could not be written: {error:#}"),
+        );
+    }
     // Restore the signed-in account's verified entitlement at boot so a
     // premium user's multistream limits survive an app restart without
     // touching the AI tab first (fail-closed: no stored session -> basic).
@@ -381,6 +388,9 @@ async fn shutdown_signal(state: AppState) {
         "info",
         "Backend shutdown requested; stopping caption, capture, and artifact processes.",
     );
+    if let Some(path) = crate::remote_control::discovery_path(state.database.path()) {
+        crate::remote_control::remove_discovery(&path);
+    }
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
     shutdown_capture_processes(state.clone()).await;
@@ -3269,6 +3279,26 @@ impl ConnectionEventFilter {
     }
 }
 
+/// Remote sockets must not widen their locked event filter: the
+/// remote.state/remote.ack inclusion IS the leak boundary.
+fn deny_remote_connection_control(text: &str) -> Option<ServerResponse> {
+    let command: serde_json::Value = serde_json::from_str(text).ok()?;
+    let method = command.get("method").and_then(|method| method.as_str())?;
+    if !matches!(method, "events.setExcluded" | "events.setIncluded") {
+        return None;
+    }
+    let id = command
+        .get("id")
+        .and_then(|id| id.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(ServerResponse::error(
+        id,
+        "forbidden-method",
+        "Remote-control connections cannot change their event filter.",
+    ))
+}
+
 /// Handles connection-scoped control commands ("events.setExcluded" and
 /// "events.setIncluded") that
 /// mutate this socket's event filter instead of shared app state. Returns None
@@ -4039,13 +4069,127 @@ async fn await_websocket_stateful_barrier(
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteControlStatus {
+    enabled: bool,
+    /// Full token — this RPC is renderer/admin-only; the renderer renders the
+    /// copy field + QR. Remote sockets can never call it.
+    token: Option<String>,
+    port: u16,
+    connected_clients: usize,
+    discovery_path: Option<String>,
+}
+
+fn remote_control_status(state: &AppState) -> RemoteControlStatus {
+    let (enabled, token, connected_clients) = state
+        .remote_control
+        .lock()
+        .map(|runtime| {
+            (
+                runtime.enabled,
+                runtime.token.clone(),
+                runtime.connected_clients,
+            )
+        })
+        .unwrap_or((false, None, 0));
+    RemoteControlStatus {
+        token: enabled.then_some(token).flatten(),
+        enabled,
+        port: state.port,
+        connected_clients,
+        discovery_path: crate::remote_control::discovery_path(state.database.path())
+            .map(|path| path.display().to_string()),
+    }
+}
+
+fn sync_remote_discovery_file(state: &AppState) -> anyhow::Result<()> {
+    let Some(path) = crate::remote_control::discovery_path(state.database.path()) else {
+        return Ok(());
+    };
+    let (enabled, token) = state
+        .remote_control
+        .lock()
+        .map(|runtime| (runtime.enabled, runtime.token.clone()))
+        .unwrap_or((false, None));
+    match (enabled, token) {
+        (true, Some(token)) => {
+            crate::remote_control::write_discovery(&path, "127.0.0.1", state.port, &token)
+        }
+        _ => {
+            crate::remote_control::remove_discovery(&path);
+            Ok(())
+        }
+    }
+}
+
+fn enable_remote_control(state: &AppState) -> anyhow::Result<RemoteControlStatus> {
+    {
+        let mut runtime = state
+            .remote_control
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Remote control state unavailable."))?;
+        if runtime.token.is_none() {
+            runtime.token = Some(crate::remote_control::generate_token());
+        }
+        runtime.enabled = true;
+        crate::remote_control::persist_enabled(true, runtime.token.as_deref())?;
+    }
+    sync_remote_discovery_file(state)?;
+    Ok(remote_control_status(state))
+}
+
+fn disable_remote_control(state: &AppState) -> anyhow::Result<RemoteControlStatus> {
+    {
+        let mut runtime = state
+            .remote_control
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Remote control state unavailable."))?;
+        runtime.enabled = false;
+        crate::remote_control::persist_enabled(false, None)?;
+    }
+    sync_remote_discovery_file(state)?;
+    // Cut live remote clients immediately.
+    state
+        .remote_generation
+        .send_modify(|generation| *generation += 1);
+    Ok(remote_control_status(state))
+}
+
+fn regenerate_remote_control_token(state: &AppState) -> anyhow::Result<RemoteControlStatus> {
+    {
+        let mut runtime = state
+            .remote_control
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Remote control state unavailable."))?;
+        runtime.token = Some(crate::remote_control::generate_token());
+        if runtime.enabled {
+            crate::remote_control::persist_enabled(true, runtime.token.as_deref())?;
+        }
+    }
+    sync_remote_discovery_file(state)?;
+    state
+        .remote_generation
+        .send_modify(|generation| *generation += 1);
+    Ok(remote_control_status(state))
+}
+
 async fn ws_handler(
     State(state): State<AppState>,
     Query(query): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let Some(role) = authenticate_backend_token(&query.token, &state.token, &state.admin_token)
-    else {
+    let role =
+        authenticate_backend_token(&query.token, &state.token, &state.admin_token).or_else(|| {
+            let runtime = state.remote_control.lock().ok()?;
+            (runtime.enabled
+                && crate::backend_authority::authenticate_remote_token(
+                    &query.token,
+                    runtime.token.as_deref(),
+                ))
+            .then_some(BackendRole::Remote)
+        });
+    let Some(role) = role else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
@@ -4129,10 +4273,11 @@ async fn relay_websocket_events(
 }
 
 async fn websocket_session(socket: WebSocket, state: AppState, role: BackendRole) {
-    websocket_session_with_handler_and_redaction(
+    websocket_session_with_handler_role_and_redaction(
         socket,
         state,
         production_websocket_command_handler(role),
+        role,
         role == BackendRole::Renderer,
     )
     .await;
@@ -4144,13 +4289,21 @@ async fn websocket_session_with_handler(
     state: AppState,
     command_handler: WebSocketCommandHandler,
 ) {
-    websocket_session_with_handler_and_redaction(socket, state, command_handler, false).await;
+    websocket_session_with_handler_role_and_redaction(
+        socket,
+        state,
+        command_handler,
+        BackendRole::Admin,
+        false,
+    )
+    .await;
 }
 
-async fn websocket_session_with_handler_and_redaction(
+async fn websocket_session_with_handler_role_and_redaction(
     socket: WebSocket,
     state: AppState,
     command_handler: WebSocketCommandHandler,
+    role: BackendRole,
     redact_renderer_paths: bool,
 ) {
     let (sender, mut receiver) = socket.split();
@@ -4173,8 +4326,26 @@ async fn websocket_session_with_handler_and_redaction(
     // frame-ready lane while the main process drives presents, and unmutes
     // instantly when it must take over as the fallback pump. Full compositor
     // diagnostics remain visible at their low bounded cadence.
-    let event_filter = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter::default()));
+    // Remote clients only ever see their own lane: state projections and
+    // intent acks. This is transport-level leak safety — no recording paths,
+    // tokens, or diagnostics can reach a remote socket even by accident.
+    let event_filter = std::sync::Arc::new(std::sync::Mutex::new(if role == BackendRole::Remote {
+        ConnectionEventFilter {
+            excluded: std::collections::HashSet::new(),
+            included: Some(std::collections::HashSet::from([
+                "remote.state".to_string(),
+                "remote.ack".to_string(),
+            ])),
+        }
+    } else {
+        ConnectionEventFilter::default()
+    }));
     let event_filter_for_events = event_filter.clone();
+    if role == BackendRole::Remote
+        && let Ok(mut runtime) = state.remote_control.lock()
+    {
+        runtime.connected_clients = runtime.connected_clients.saturating_add(1);
+    }
 
     let writer_task = tokio::spawn(run_websocket_writer(
         sender,
@@ -4228,10 +4399,21 @@ async fn websocket_session_with_handler_and_redaction(
         command_handler,
     ));
 
+    // A rotated/disabled remote token must cut existing remote sockets, not
+    // just future ones: watch the generation and close when it moves.
+    let mut remote_generation_rx = state.remote_generation.subscribe();
+    let watch_remote_generation = role == BackendRole::Remote;
+
     loop {
         let incoming = tokio::select! {
             incoming = receiver.next() => incoming,
             _ = pressure_rx.recv() => {
+                break;
+            }
+            changed = remote_generation_rx.changed(), if watch_remote_generation => {
+                if changed.is_ok() {
+                    tracing::info!("Remote-control token rotated or surface disabled; closing remote client.");
+                }
                 break;
             }
         };
@@ -4243,6 +4425,21 @@ async fn websocket_session_with_handler_and_redaction(
             Ok(Message::Text(text)) => {
                 // Connection-local control messages never reach the shared
                 // dispatcher (the exclusion set is per socket).
+                if role == BackendRole::Remote
+                    && let Some(response) = deny_remote_connection_control(text.as_str())
+                {
+                    if !send_tracked_reliable_websocket_item(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        Message::Text(serde_json::to_string(&response).unwrap_or_default().into()),
+                        &slow_pressure,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 if let Some(response) = handle_connection_control(&event_filter, text.as_str()) {
                     if !queue_websocket_response(
                         &outgoing_tx,
@@ -4287,6 +4484,11 @@ async fn websocket_session_with_handler_and_redaction(
     // Every command read from the socket is accepted work. Closing this
     // connection stops new intake, but the detached dispatcher drains the
     // accepted queue so native/source mutations are never canceled halfway.
+    if role == BackendRole::Remote
+        && let Ok(mut runtime) = state.remote_control.lock()
+    {
+        runtime.connected_clients = runtime.connected_clients.saturating_sub(1);
+    }
     drop(command_tx);
     drop(command_dispatcher_task);
     event_task.abort();
@@ -5070,6 +5272,83 @@ async fn handle_text_message_with_role(
         "preview.surface.take_native_host_commands" => {
             let commands = take_native_preview_host_commands(state).await;
             ServerResponse::ok(command.id, commands)
+        }
+        "remote.control.status" => ServerResponse::ok(command.id, remote_control_status(state)),
+        "remote.control.enable" => match enable_remote_control(state) {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, "remote-control", error.to_string()),
+        },
+        "remote.control.disable" => match disable_remote_control(state) {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, "remote-control", error.to_string()),
+        },
+        "remote.control.regenerate" => match regenerate_remote_control_token(state) {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, "remote-control", error.to_string()),
+        },
+        "remote.surface.publish" => {
+            // Renderer-published catalog + state projection. The state event
+            // is the ONLY payload remote sockets receive (their event filter
+            // is locked to remote.state/remote.ack).
+            let describe = command.params.get("describe").cloned();
+            let state_snapshot = command.params.get("state").cloned();
+            if let Ok(mut runtime) = state.remote_control.lock() {
+                if let Some(describe) = describe {
+                    runtime.describe = Some(describe);
+                }
+                if let Some(snapshot) = state_snapshot.clone() {
+                    runtime.state = Some(snapshot);
+                }
+            }
+            if let Some(snapshot) = state_snapshot {
+                state.emit_event("remote.state", snapshot);
+            }
+            ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+        }
+        "remote.intent.ack" => {
+            state.emit_event("remote.ack", command.params);
+            ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+        }
+        "remote.describe" => {
+            let (describe, snapshot) = state
+                .remote_control
+                .lock()
+                .map(|runtime| (runtime.describe.clone(), runtime.state.clone()))
+                .unwrap_or((None, None));
+            ServerResponse::ok(
+                command.id,
+                serde_json::json!({ "describe": describe, "state": snapshot, "protocol": 1 }),
+            )
+        }
+        "remote.intent" => {
+            match serde_json::from_value::<crate::remote_control::RemoteIntent>(
+                command.params.clone(),
+            ) {
+                Ok(intent) => {
+                    if let Err(message) = intent.validate() {
+                        return ServerResponse::error(command.id, "invalid-intent", message);
+                    }
+                    let ticket = state
+                        .remote_control
+                        .lock()
+                        .map(|mut runtime| runtime.admit_intent(&intent, std::time::Instant::now()))
+                        .unwrap_or(crate::remote_control::RemoteIntentTicket {
+                            intent_id: String::new(),
+                            accepted: false,
+                            message: Some("Remote control state unavailable.".to_string()),
+                        });
+                    if ticket.accepted {
+                        state.emit_event(
+                            "remote.intent",
+                            serde_json::json!({ "intentId": ticket.intent_id, "intent": intent }),
+                        );
+                    }
+                    ServerResponse::ok(command.id, ticket)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-intent", error.to_string())
+                }
+            }
         }
         "compositor.status" => {
             let status = compositor_status(state).await;

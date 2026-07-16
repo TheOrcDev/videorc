@@ -773,6 +773,68 @@ describe('real StudioProvider lifecycle', () => {
     expect(openSystemPermissions).toHaveBeenCalledWith('camera')
   })
 
+  it('executes remote intents through the same handlers and acks them', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      platform: 'darwin',
+      getMediaAccessStatus: async () => ({
+        camera: 'not-determined',
+        microphone: 'granted'
+      }),
+      requestMediaAccess: vi.fn(async () => ({ granted: false, restarted: false })),
+      openSystemPermissions: vi.fn(async () => undefined)
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+
+    const micBefore = latest()?.core.captureConfig.audio.microphoneMuted ?? false
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: { intentId: 'ri-test-1', intent: { kind: 'micToggle' } }
+          })
+        })
+      }
+    })
+    await waitForObservation(
+      () => latest()?.core.captureConfig.audio.microphoneMuted === !micBefore
+    )
+    // The renderer must ack the executed intent so deck keys learn the result.
+    const ack = backend.sentCommands.find((command) => command.method === 'remote.intent.ack')
+    expect(ack?.params).toMatchObject({ intentId: 'ri-test-1', ok: true })
+  })
+
   it('never revokes persisted cloud-AI consent when readiness is not ready', async () => {
     // 2026-07-16 owner incident: an effect silently flipped the consent
     // toggle off whenever cloud AI readiness was not ready (signed-out,
