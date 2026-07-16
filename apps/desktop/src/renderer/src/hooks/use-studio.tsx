@@ -5042,9 +5042,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             )
             return
           }
-          if (status.mode === 'warm' && status.message) {
-            toast.success(status.message)
-          }
+          // A successful layout commit is the EXPECTED outcome — the stage
+          // already shows it (owner call, 2026-07-16: no green popups for
+          // routine scene changes). Only lag/failure states surface above.
         } catch (error) {
           // Superseded requests are expected and must not overwrite the newer
           // selection or flash an error. The latest request still reports exact
@@ -5204,9 +5204,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         await rememberLiveLayoutCommit(status)
         applyScene(status.scene)
         setCaptureConfig((current) => ({ ...current, sources }))
-        if (status.message) {
-          toast.success(status.message)
-        }
+        // Success is visible in the preview itself — no confirmation popup
+        // for a routine source switch (errors still report below).
       } catch (error) {
         reportError(error)
       } finally {

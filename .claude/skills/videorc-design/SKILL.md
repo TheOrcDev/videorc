@@ -54,6 +54,23 @@ Icons
 Motion
 - Fast and subtle: 100–150ms ease-out. Panels fade+scale from 0.98; rows highlight instantly (no transition on selection). Nothing bounces.
 
+## Toast discipline
+
+Toasts are for NEWS the interface does not already show — never for
+confirming a routine interaction the user just watched succeed.
+
+- **Never toast success for scene/layout/source changes.** The stage/preview
+  IS the confirmation (owner call, 2026-07-16 — "no green popups on every
+  small thing"). This includes live layout applies, preset clicks, and
+  source device switches.
+- Success toasts are reserved for: async work finishing out of view
+  (recording saved, import complete, publish pack generated), destructive
+  confirmations (deleted), and account-level side effects (connected,
+  authorized).
+- Warnings/errors always surface — silence is only for the expected outcome.
+- When in doubt, don't toast. A user mid-flow reads every popup as an
+  interruption.
+
 ## Core patterns
 
 **Glass panel** — the universal container (windows, dialogs, palettes): translucent blurred black glass, hairline ring, big radius, floating shadow. Content sits directly on it; no nested cards-on-cards.
