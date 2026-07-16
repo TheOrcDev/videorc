@@ -1213,6 +1213,10 @@ pub enum EncodeBackend {
     HardwareMediaFoundation,
     /// h264_mf's software MFT fallback after the exact hardware profile probe failed.
     SoftwareMediaFoundation,
+    /// libopenh264 (software), the Windows fallback after the hardware probe
+    /// failed — software Media Foundation ran below realtime on real devices
+    /// (issue #149).
+    SoftwareOpenH264,
 }
 
 /// Which compositor rendered the active shared-compositor frame.
@@ -3399,6 +3403,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(EncodeBackend::SoftwareMediaFoundation).unwrap(),
             serde_json::json!("software-media-foundation")
+        );
+        assert_eq!(
+            serde_json::to_value(EncodeBackend::SoftwareOpenH264).unwrap(),
+            serde_json::json!("software-open-h264")
         );
     }
 

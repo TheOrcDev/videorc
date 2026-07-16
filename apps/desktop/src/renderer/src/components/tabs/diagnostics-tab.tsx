@@ -1204,6 +1204,8 @@ function formatEncodeBackend(backend?: string): string {
       return 'Hardware (MediaFoundation)'
     case 'software-media-foundation':
       return 'Software (MediaFoundation)'
+    case 'software-open-h264':
+      return 'Software (OpenH264)'
     default:
       return '--'
   }

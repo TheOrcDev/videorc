@@ -6290,9 +6290,14 @@ fn ffmpeg_h264_encoder(platform: FfmpegH264Platform) -> FfmpegH264Encoder {
             backend: EncodeBackend::HardwareMediaFoundation,
         },
         FfmpegH264Platform::WindowsSoftware => FfmpegH264Encoder {
-            codec: "h264_mf",
-            pix_fmt: "nv12",
-            backend: EncodeBackend::SoftwareMediaFoundation,
+            // Issue #149 (real device): software h264_mf ran at 0.86x realtime
+            // at 1080p30 and stalled the raw pipe; the bundled ffmpeg's
+            // libopenh264 measured ~2.5x realtime on the same box. OpenH264 is
+            // the reliable software fallback; hardware Media Foundation stays
+            // the probed fast path.
+            codec: "libopenh264",
+            pix_fmt: "yuv420p",
+            backend: EncodeBackend::SoftwareOpenH264,
         },
         FfmpegH264Platform::Other => FfmpegH264Encoder {
             codec: "libx264",
@@ -6502,14 +6507,14 @@ fn append_h264_encoding_args_for_platform_with_timing(
             ]);
         }
         FfmpegH264Platform::WindowsSoftware => {
-            // Keep the low-delay Media Foundation profile, but let the encoder
-            // select its software implementation only after the exact hardware
-            // probe failed for this output profile.
+            // libopenh264 tuned per the #149 real-device benchmark (~2.5x
+            // realtime at 1080p30/8Mbps on the bundled build): bitrate rate
+            // control with frame-skip permitted only under overshoot.
             args.extend([
-                "-rate_control".to_string(),
-                "ld_vbr".to_string(),
-                "-scenario".to_string(),
-                "live_streaming".to_string(),
+                "-rc_mode".to_string(),
+                "bitrate".to_string(),
+                "-allow_skip_frames".to_string(),
+                "1".to_string(),
             ]);
         }
         FfmpegH264Platform::Other => {
@@ -6587,6 +6592,7 @@ fn encode_backend_label(backend: Option<EncodeBackend>) -> &'static str {
         Some(EncodeBackend::HardwareVideotoolbox) => "hardware-videotoolbox",
         Some(EncodeBackend::HardwareMediaFoundation) => "hardware-media-foundation",
         Some(EncodeBackend::SoftwareMediaFoundation) => "software-media-foundation",
+        Some(EncodeBackend::SoftwareOpenH264) => "software-open-h264",
         Some(EncodeBackend::SoftwareX264) => "software-x264",
         None => "unknown",
     }
@@ -10942,8 +10948,23 @@ mod tests {
             FfmpegH264Platform::WindowsSoftware,
             true,
         );
-        assert_eq!(arg_value(&windows_software_args, "-c:v"), Some("h264_mf"));
+        assert_eq!(
+            arg_value(&windows_software_args, "-c:v"),
+            Some("libopenh264")
+        );
+        assert_eq!(
+            arg_value(&windows_software_args, "-pix_fmt"),
+            Some("yuv420p")
+        );
         assert_eq!(arg_value(&windows_software_args, "-hw_encoding"), None);
+        assert_eq!(
+            arg_value(&windows_software_args, "-rc_mode"),
+            Some("bitrate")
+        );
+        assert_eq!(
+            arg_value(&windows_software_args, "-allow_skip_frames"),
+            Some("1")
+        );
 
         let mut fallback_args = Vec::new();
         append_h264_encoding_args_for_platform(
@@ -10987,7 +11008,7 @@ mod tests {
         );
         assert_eq!(
             ffmpeg_h264_encoder(FfmpegH264Platform::WindowsSoftware).backend,
-            EncodeBackend::SoftwareMediaFoundation
+            EncodeBackend::SoftwareOpenH264
         );
         assert_eq!(
             ffmpeg_h264_encoder(FfmpegH264Platform::Other).backend,

@@ -1234,6 +1234,9 @@ export type EncodeBackend =
   | 'hardware-videotoolbox'
   | 'hardware-media-foundation'
   | 'software-media-foundation'
+  // libopenh264 software fallback on Windows — software Media Foundation ran
+  // below realtime on real devices (issue #149).
+  | 'software-open-h264'
 export type CompositorBackend = 'metal' | 'cpu' | 'cpu-fallback'
 
 /** Cumulative request counts for the HTTP image-polling preview transports. A native
