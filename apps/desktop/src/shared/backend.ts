@@ -93,7 +93,10 @@ export interface StreamingEntitlementLimits {
   maxHeight: number
   maxFps: number
   maxBitrateKbps: number
+  /** Total enabled destinations across both orientations. */
   maxDestinations: number
+  /** Enabled destinations per orientation leg (Premium 3+3, Basic 1). */
+  maxDestinationsPerOrientation: number
 }
 
 export interface EntitlementLimits {
@@ -635,10 +638,16 @@ export interface RtmpSettings {
   streamKey: string
 }
 
-// Multi-platform streaming (per-target) model. Replaces the single RtmpSettings
-// streaming config over phases M1-M4; today it is migrated alongside the legacy
-// fields and not yet consumed by session start.
-export type StreamPlatform = 'youtube' | 'twitch' | 'x' | 'custom'
+// Multi-platform streaming (per-target) model. Session start consumes it
+// (recording.rs reads params.streaming for the per-target fan-out); the legacy
+// single-RTMP fields remain only as the no-settings fallback.
+export type StreamPlatform = 'youtube' | 'twitch' | 'x' | 'tiktok' | 'instagram' | 'custom'
+/**
+ * Which composed leg a destination consumes in a dual-orientation session.
+ * Explicit per-target property — never inferred from resolution equality.
+ * Absent means horizontal (legacy migration).
+ */
+export type StreamOutputOrientation = 'horizontal' | 'vertical'
 export type StreamUrlMode = 'server-and-key' | 'full-url'
 export type StreamAuthMode = 'manual-rtmp' | 'oauth'
 export type StreamPrivacy = 'public' | 'unlisted' | 'private'
@@ -687,6 +696,8 @@ export interface StreamTargetSettings {
   platformStreamId?: string
   outputPreset?: VideoPreset
   outputBitrateKbps?: number
+  /** Dual-orientation leg binding; absent = horizontal (legacy migration). */
+  outputOrientation?: StreamOutputOrientation
   status?: StreamTargetStatus
   createdAt: string
   updatedAt: string
@@ -1156,6 +1167,20 @@ export interface StartSessionParams {
   audio?: AudioSettings
   streaming?: StreamingSettings
   captions?: CaptionsSessionParams
+  /**
+   * Dual-orientation simulcast: a second composed leg with its own vertical
+   * scene from the same captured sources. Present only when a vertical-bound
+   * destination is armed; vertical targets consume this leg.
+   */
+  simulcast?: SimulcastParams
+}
+
+/** The vertical leg of a dual-orientation session: a vertical scene preset on
+ *  a portrait canvas, validated per leg at session start. */
+export interface SimulcastParams {
+  layout: LayoutSettings
+  scene?: Scene
+  video: VideoSettings
 }
 
 /** Burn-in intent for the session (shapes output legs; see burn-in plan A0/R1)

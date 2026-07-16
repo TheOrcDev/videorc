@@ -410,12 +410,11 @@ mod tests {
     fn preflight_blocks_youtube_oauth_while_twitch_is_ready_and_x_is_blocked() {
         let mut targets = default_stream_targets();
         for target in &mut targets {
-            match target.platform {
-                StreamPlatform::Youtube | StreamPlatform::Twitch | StreamPlatform::X => {
-                    target.enabled = true;
-                    target.auth_mode = StreamAuthMode::Oauth;
-                }
-                StreamPlatform::Custom => {}
+            // Enable the horizontal trio by ID — the platform alone is
+            // ambiguous now that YouTube Vertical shares StreamPlatform::Youtube.
+            if matches!(target.id.as_str(), "youtube" | "twitch" | "x") {
+                target.enabled = true;
+                target.auth_mode = StreamAuthMode::Oauth;
             }
         }
         let streaming = StreamingSettings {
@@ -687,6 +686,8 @@ mod tests {
             StreamPlatform::Youtube => "youtube",
             StreamPlatform::Twitch => "twitch",
             StreamPlatform::X => "x",
+            StreamPlatform::Tiktok => "tiktok",
+            StreamPlatform::Instagram => "instagram",
             StreamPlatform::Custom => "custom",
         }
     }

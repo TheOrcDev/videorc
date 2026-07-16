@@ -77,7 +77,8 @@ describe('backend RPC contract', () => {
           maxHeight: 2160,
           maxFps: 30,
           maxBitrateKbps: 30_000,
-          maxDestinations: 3
+          maxDestinations: 6,
+          maxDestinationsPerOrientation: 3
         }
       },
       checkedAt: '2026-07-13T10:00:00.000Z'

@@ -192,6 +192,10 @@ impl CompositorPixelFormat {
 pub struct CompositorRuntime {
     pub status: CompositorStatus,
     scene: Option<CompositorSceneSnapshot>,
+    /// The vertical leg's scene in a dual-orientation session. Composed by the
+    /// auxiliary output when it is simulcast-bound; independent of (and never
+    /// a rescale of) the primary snapshot.
+    simulcast_scene: Option<CompositorSceneSnapshot>,
     image_sources: CompositorImageCache,
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
@@ -264,6 +268,9 @@ pub struct CompositorAuxiliaryOutput {
     pub width: u32,
     pub height: u32,
     pub frame_consumer: CompositorFrameConsumer,
+    /// Simulcast-bound aux composes its OWN scene (the vertical leg) instead
+    /// of re-rendering the primary snapshot at a second resolution.
+    pub composes_simulcast_scene: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -371,6 +378,7 @@ struct CompositorRenderCache {
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
     snapshot: Option<CompositorSceneSnapshot>,
+    simulcast_snapshot: Option<CompositorSceneSnapshot>,
     active_image_source: Option<CompositorImageSource>,
     background_image_source: Option<CompositorImageSource>,
 }
@@ -409,6 +417,7 @@ impl CompositorRenderCache {
             frame_store: compositor.frame_store.clone(),
             stream_frame_store: compositor.stream_frame_store.clone(),
             snapshot: compositor.scene.clone(),
+            simulcast_snapshot: compositor.simulcast_scene.clone(),
             active_image_source,
             background_image_source,
         }
@@ -829,6 +838,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
     CompositorRuntime {
         status: stopped_status(Some("Compositor is not running.".to_string())),
         scene: None,
+        simulcast_scene: None,
         image_sources: CompositorImageCache::new(
             COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES,
             COMPOSITOR_IMAGE_CACHE_ENTRY_BUDGET,
@@ -1307,6 +1317,48 @@ pub async fn update_compositor_scene(
     };
     state.emit_event("compositor.status", status.clone());
     status
+}
+
+/// Set (or replace) the vertical leg's scene. Revision-ordered like the
+/// primary; stale revisions are ignored. Image-cache pinning stays owned by
+/// the primary snapshot — vertical scenes are camera-first by design (0.9.36
+/// one-source collapse), and the aux render reuses the primary's image cache.
+pub async fn update_compositor_simulcast_scene(
+    state: &AppState,
+    params: CompositorSceneUpdateParams,
+) {
+    let CompositorSceneUpdateParams {
+        revision,
+        scene,
+        layout,
+        active_screen,
+    } = params;
+    let mut compositor = state.compositor.lock().await;
+    if compositor
+        .simulcast_scene
+        .as_ref()
+        .is_some_and(|current| revision < current.revision)
+    {
+        return;
+    }
+    compositor.simulcast_scene = Some(CompositorSceneSnapshot {
+        revision,
+        scene,
+        layout,
+        active_screen,
+    });
+}
+
+/// Session stop / non-dual sessions: the vertical leg has no scene.
+pub async fn clear_compositor_simulcast_scene(state: &AppState) {
+    let mut compositor = state.compositor.lock().await;
+    compositor.simulcast_scene = None;
+}
+
+/// Whether a simulcast scene is currently committed (live_layout uses this to
+/// route vertical-scene transactions to the vertical leg instead of bailing).
+pub async fn has_compositor_simulcast_scene(state: &AppState) -> bool {
+    state.compositor.lock().await.simulcast_scene.is_some()
 }
 
 pub async fn update_compositor_active_screen(
@@ -3216,11 +3268,18 @@ async fn publish_compositor_frame(
     let frame_store = render_cache.frame_store.clone();
     let stream_frame_store = render_cache.stream_frame_store.clone();
     let snapshot = render_cache.snapshot.clone();
+    // The simulcast leg composes its own scene; without a simulcast-bound aux
+    // it is inert and the tick behaves byte-identically to before.
+    let simulcast_snapshot = stream_output
+        .filter(|output| output.composes_simulcast_scene)
+        .and_then(|_| render_cache.simulcast_snapshot.clone());
     let active_image_source = render_cache.active_image_source.clone();
     let background_image_source = render_cache.background_image_source.clone();
     let scene_snapshot_ms = scene_snapshot_started_at.elapsed().as_secs_f64() * 1000.0;
     let (camera_frame, camera_frame_fetch_ms) =
-        if scene_needs_live_camera_frame(snapshot.as_ref(), active_image_source.as_ref()) {
+        if scene_needs_live_camera_frame(snapshot.as_ref(), active_image_source.as_ref())
+            || scene_needs_live_camera_frame(simulcast_snapshot.as_ref(), None)
+        {
             let camera_fetch_started_at = Instant::now();
             (
                 live_sources.latest_camera_frame(),
@@ -3230,7 +3289,9 @@ async fn publish_compositor_frame(
             (None, 0.0)
         };
     let (screen_frame, screen_frame_fetch_ms) =
-        if scene_needs_live_screen_frame(snapshot.as_ref(), active_image_source.as_ref()) {
+        if scene_needs_live_screen_frame(snapshot.as_ref(), active_image_source.as_ref())
+            || scene_needs_live_screen_frame(simulcast_snapshot.as_ref(), None)
+        {
             let screen_fetch_started_at = Instant::now();
             (
                 live_sources.latest_screen_frame(),
@@ -3354,22 +3415,37 @@ async fn publish_compositor_frame(
         timings.frame_store_publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
     }
     if let (Some(stream_output), Some(stream_frame_store)) = (stream_output, stream_frame_store) {
+        // A simulcast-bound aux composes the VERTICAL scene; the classic
+        // caption/profile-split aux re-renders the primary snapshot. The
+        // vertical leg streams clean in Phase 1 (no caption bar/highlight —
+        // their rasters are sized for the primary geometry).
+        let aux_snapshot = if stream_output.composes_simulcast_scene {
+            simulcast_snapshot.as_ref()
+        } else {
+            snapshot.as_ref()
+        };
         let inputs = CompositorRenderInputs {
             sequence,
             width: stream_output.width.max(1),
             height: stream_output.height.max(1),
-            snapshot: snapshot.as_ref(),
+            snapshot: aux_snapshot,
             active_image_source: active_image_source.as_ref(),
             background_image_source: background_image_source.as_ref(),
             camera_frame: camera_frame.as_ref().map(|(frame, _layout)| frame),
             screen_frame: screen_frame.as_ref(),
             // The auxiliary (stream) leg carries the bar per the leg plan.
-            caption_overlay: caption_overlay_for_output(
-                &caption_overlays,
-                crate::captions::CaptionOverlayTarget::Auxiliary,
-                caption_overlay_on_aux,
-            ),
-            highlight_overlay: if highlight_overlay_on_aux {
+            caption_overlay: if stream_output.composes_simulcast_scene {
+                None
+            } else {
+                caption_overlay_for_output(
+                    &caption_overlays,
+                    crate::captions::CaptionOverlayTarget::Auxiliary,
+                    caption_overlay_on_aux,
+                )
+            },
+            highlight_overlay: if highlight_overlay_on_aux
+                && !stream_output.composes_simulcast_scene
+            {
                 highlight_overlay.as_ref()
             } else {
                 None
@@ -6455,6 +6531,7 @@ mod tests {
                     width: 320,
                     height: 180,
                     frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                    composes_simulcast_scene: false,
                 }),
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
@@ -6525,6 +6602,164 @@ mod tests {
         assert!(compositor_stream_frame_store(&state).await.is_none());
     }
 
+    #[tokio::test]
+    async fn simulcast_bound_aux_composes_its_own_vertical_scene() {
+        let state = test_state();
+        start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                target_fps: 30,
+                width: 640,
+                height: 360,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                stream_output: Some(CompositorAuxiliaryOutput {
+                    // A PORTRAIT aux canvas: the vertical leg is its own
+                    // composition, never a rescale of the landscape frame.
+                    width: 180,
+                    height: 320,
+                    frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                    composes_simulcast_scene: true,
+                }),
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: false,
+                highlight_overlay_on_aux: false,
+            },
+        )
+        .await;
+        let sources = SourceSelection {
+            screen_id: None,
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: true,
+        };
+        let horizontal_layout = crate::protocol::default_layout_settings();
+        let horizontal_scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            sources: sources.clone(),
+            layout: horizontal_layout.clone(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width: 640,
+                height: 360,
+                fps: 30,
+                bitrate_kbps: 2000,
+            }),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        update_compositor_scene(
+            &state,
+            CompositorSceneUpdateParams {
+                revision: 1,
+                scene: Some(horizontal_scene),
+                layout: horizontal_layout,
+                active_screen: None,
+            },
+        )
+        .await;
+        let mut vertical_layout = crate::protocol::default_layout_settings();
+        vertical_layout.layout_preset = crate::protocol::LayoutPreset::VerticalCameraOnly;
+        let vertical_scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            sources,
+            layout: vertical_layout.clone(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width: 180,
+                height: 320,
+                fps: 30,
+                bitrate_kbps: 2000,
+            }),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        update_compositor_simulcast_scene(
+            &state,
+            CompositorSceneUpdateParams {
+                revision: 1,
+                scene: Some(vertical_scene),
+                layout: vertical_layout,
+                active_screen: None,
+            },
+        )
+        .await;
+        assert!(has_compositor_simulcast_scene(&state).await);
+
+        let recording_store = compositor_frame_store(&state).await;
+        let stream_store = compositor_stream_frame_store(&state)
+            .await
+            .expect("stream frame store");
+        let mut recording_latest = None;
+        let mut stream_latest = None;
+        for _ in 0..50 {
+            recording_latest = recording_store
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .latest();
+            stream_latest = stream_store
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .latest();
+            if recording_latest.is_some() && stream_latest.is_some() {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        stop_compositor(&state).await;
+
+        // One frame tick published BOTH orientations: the primary landscape
+        // scene and the simulcast portrait scene, each on its own canvas.
+        let recording = recording_latest.expect("recording frame");
+        let stream = stream_latest.expect("stream frame");
+        assert_eq!((recording.width, recording.height), (640, 360));
+        assert_eq!((stream.width, stream.height), (180, 320));
+        assert_eq!(stream.bytes.len(), raw_yuv420p_len(180, 320));
+
+        clear_compositor_simulcast_scene(&state).await;
+        assert!(!has_compositor_simulcast_scene(&state).await);
+    }
+
+    #[tokio::test]
+    async fn simulcast_scene_updates_are_revision_ordered() {
+        let state = test_state();
+        let layout = {
+            let mut layout = crate::protocol::default_layout_settings();
+            layout.layout_preset = crate::protocol::LayoutPreset::VerticalCameraOnly;
+            layout
+        };
+        let update = |revision: u64| CompositorSceneUpdateParams {
+            revision,
+            scene: None,
+            layout: layout.clone(),
+            active_screen: None,
+        };
+        update_compositor_simulcast_scene(&state, update(5)).await;
+        // A stale revision is ignored…
+        update_compositor_simulcast_scene(&state, update(3)).await;
+        {
+            let compositor = state.compositor.lock().await;
+            assert_eq!(
+                compositor
+                    .simulcast_scene
+                    .as_ref()
+                    .map(|snapshot| snapshot.revision),
+                Some(5)
+            );
+        }
+        // …a newer one lands.
+        update_compositor_simulcast_scene(&state, update(9)).await;
+        {
+            let compositor = state.compositor.lock().await;
+            assert_eq!(
+                compositor
+                    .simulcast_scene
+                    .as_ref()
+                    .map(|snapshot| snapshot.revision),
+                Some(9)
+            );
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn compositor_publishes_auxiliary_stream_metal_target_or_skips() {
@@ -6590,6 +6825,7 @@ mod tests {
                 width: 32,
                 height: 18,
                 frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                composes_simulcast_scene: false,
             }),
             Some(&mut stream_gpu),
             false,

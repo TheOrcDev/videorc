@@ -155,7 +155,7 @@ export function ScenesGallery(): ReactElement {
 // A small diagram of each preset's arrangement — clearer (and more honest) than
 // a generic icon, and it never claims to be a live thumbnail of the program.
 // Vertical scenes draw on a portrait frame so the whole gallery reads 9:16.
-function LayoutThumb({ preset }: { preset: LayoutPreset }): ReactElement {
+export function LayoutThumb({ preset }: { preset: LayoutPreset }): ReactElement {
   if (layoutPresetOrientation(preset) === 'vertical') {
     return (
       <div className="relative mx-auto aspect-[9/16] w-3/5 overflow-hidden rounded-chip border bg-gradient-to-br from-muted/40 to-muted/70">

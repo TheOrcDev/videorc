@@ -19,7 +19,21 @@ pub enum StreamPlatform {
     Youtube,
     Twitch,
     X,
+    Tiktok,
+    Instagram,
     Custom,
+}
+
+/// Which composed leg a destination consumes in a dual-orientation session.
+/// EXPLICIT per-target property (one home) — never inferred from resolution
+/// equality, which ties when recording and vertical stream share 1080×1920.
+/// Absent (legacy configs) means horizontal.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamOutputOrientation {
+    #[default]
+    Horizontal,
+    Vertical,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,10 +114,19 @@ pub struct StreamTargetSettings {
     pub output_preset: Option<VideoPreset>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_bitrate_kbps: Option<u32>,
+    /// Dual-orientation leg binding; absent = horizontal (legacy migration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_orientation: Option<StreamOutputOrientation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<StreamTargetStatus>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl StreamTargetSettings {
+    pub fn effective_output_orientation(&self) -> StreamOutputOrientation {
+        self.output_orientation.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -422,6 +445,8 @@ pub(crate) fn stream_platform_id(platform: StreamPlatform) -> &'static str {
         StreamPlatform::Youtube => "youtube",
         StreamPlatform::Twitch => "twitch",
         StreamPlatform::X => "x",
+        StreamPlatform::Tiktok => "tiktok",
+        StreamPlatform::Instagram => "instagram",
         StreamPlatform::Custom => "custom",
     }
 }
@@ -494,6 +519,8 @@ pub(crate) fn stream_platform_label(platform: StreamPlatform) -> &'static str {
         StreamPlatform::Youtube => "YouTube",
         StreamPlatform::Twitch => "Twitch",
         StreamPlatform::X => "X / Twitter",
+        StreamPlatform::Tiktok => "TikTok",
+        StreamPlatform::Instagram => "Instagram",
         StreamPlatform::Custom => "Custom RTMP",
     }
 }
@@ -512,8 +539,24 @@ fn default_stream_target(
     label: &str,
     server_url: &str,
 ) -> StreamTargetSettings {
+    default_stream_target_with_id(
+        stream_platform_id(platform),
+        platform,
+        label,
+        server_url,
+        None,
+    )
+}
+
+fn default_stream_target_with_id(
+    id: &str,
+    platform: StreamPlatform,
+    label: &str,
+    server_url: &str,
+    output_orientation: Option<StreamOutputOrientation>,
+) -> StreamTargetSettings {
     StreamTargetSettings {
-        id: stream_platform_id(platform).to_string(),
+        id: id.to_string(),
         platform,
         label: label.to_string(),
         enabled: false,
@@ -540,10 +583,15 @@ fn default_stream_target(
         // The renderer owns timestamps; the backend default leaves them blank.
         created_at: String::new(),
         updated_at: String::new(),
+        output_orientation,
     }
 }
 
-/// The fixed built-in destinations (YouTube, Twitch, X, Custom) in display order.
+/// The fixed built-in destinations in display order: the horizontal trio
+/// (YouTube, Twitch, X), the vertical trio (YouTube Vertical — a SECOND
+/// broadcast on the same channel — TikTok, Instagram), then Custom RTMP.
+/// Vertical destinations are pinned to the vertical leg; TikTok and
+/// Instagram are manual-key only (no public ingest APIs).
 pub fn default_stream_targets() -> Vec<StreamTargetSettings> {
     vec![
         default_stream_target(
@@ -557,6 +605,27 @@ pub fn default_stream_targets() -> Vec<StreamTargetSettings> {
             "rtmp://live.twitch.tv/app",
         ),
         default_stream_target(StreamPlatform::X, "X / Twitter", ""),
+        default_stream_target_with_id(
+            "youtube-vertical",
+            StreamPlatform::Youtube,
+            "YouTube Vertical",
+            "rtmp://a.rtmp.youtube.com/live2",
+            Some(StreamOutputOrientation::Vertical),
+        ),
+        default_stream_target_with_id(
+            "tiktok",
+            StreamPlatform::Tiktok,
+            "TikTok",
+            "",
+            Some(StreamOutputOrientation::Vertical),
+        ),
+        default_stream_target_with_id(
+            "instagram",
+            StreamPlatform::Instagram,
+            "Instagram",
+            "rtmps://live-upload.instagram.com:443/rtmp/",
+            Some(StreamOutputOrientation::Vertical),
+        ),
         default_stream_target(StreamPlatform::Custom, "Custom RTMP", ""),
     ]
 }

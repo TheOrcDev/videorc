@@ -4,7 +4,12 @@ import {
   captionsSuppressedForSession,
   captionSessionOutputReadiness
 } from './captions-preflight'
-import { streamOutputVideosForTargets, type CaptureConfig, type SettingsState } from './capture'
+import {
+  buildSimulcastParams,
+  streamOutputVideosForTargets,
+  type CaptureConfig,
+  type SettingsState
+} from './capture'
 
 export function buildStartSessionParams(input: {
   captureConfig: CaptureConfig
@@ -69,6 +74,9 @@ export function buildStartSessionParams(input: {
       styleRevision: captureConfig.captions.styleRevision,
       position: captureConfig.captions.position,
       textSize: captureConfig.captions.textSize
-    }
+    },
+    // Present only when a vertical destination is armed on a horizontal
+    // session — the backend refuses vertical targets without this leg.
+    simulcast: buildSimulcastParams(captureConfig)
   }
 }

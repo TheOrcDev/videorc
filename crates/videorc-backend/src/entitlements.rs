@@ -19,12 +19,18 @@ const BASIC_STREAMING_MAX_HEIGHT: u32 = 1080;
 const BASIC_STREAMING_MAX_FPS: u32 = 30;
 const BASIC_STREAMING_MAX_BITRATE_KBPS: u32 = 6000;
 const BASIC_STREAMING_MAX_DESTINATIONS: u32 = 1;
+const BASIC_STREAMING_MAX_DESTINATIONS_PER_ORIENTATION: u32 = 1;
 // Premium streams up to 4K30 (the YouTube 4K30 preset); basic stays HD.
 const PREMIUM_STREAMING_MAX_WIDTH: u32 = 3840;
 const PREMIUM_STREAMING_MAX_HEIGHT: u32 = 2160;
 const PREMIUM_STREAMING_MAX_FPS: u32 = 30;
 const PREMIUM_STREAMING_MAX_BITRATE_KBPS: u32 = 30_000;
-const PREMIUM_STREAMING_MAX_DESTINATIONS: u32 = 3;
+// Dual-orientation multistream: up to 3 destinations per composed leg
+// (horizontal + vertical), 6 total. The per-orientation cap exists because a
+// leg's fan-out is copies of ONE encode — 3 legs per encode is the tested
+// shape; 6 horizontal targets would be an untested fan-out.
+const PREMIUM_STREAMING_MAX_DESTINATIONS: u32 = 6;
+const PREMIUM_STREAMING_MAX_DESTINATIONS_PER_ORIENTATION: u32 = 3;
 
 const MULTISTREAMING_DISABLED_REASON: &str =
     "Multistreaming requires Videorc Premium. Basic can stream to one destination at HD.";
@@ -277,6 +283,7 @@ fn basic_limits() -> EntitlementLimits {
             max_fps: BASIC_STREAMING_MAX_FPS,
             max_bitrate_kbps: BASIC_STREAMING_MAX_BITRATE_KBPS,
             max_destinations: BASIC_STREAMING_MAX_DESTINATIONS,
+            max_destinations_per_orientation: BASIC_STREAMING_MAX_DESTINATIONS_PER_ORIENTATION,
         },
     }
 }
@@ -290,6 +297,7 @@ fn premium_limits() -> EntitlementLimits {
             max_fps: PREMIUM_STREAMING_MAX_FPS,
             max_bitrate_kbps: PREMIUM_STREAMING_MAX_BITRATE_KBPS,
             max_destinations: PREMIUM_STREAMING_MAX_DESTINATIONS,
+            max_destinations_per_orientation: PREMIUM_STREAMING_MAX_DESTINATIONS_PER_ORIENTATION,
         },
     }
 }
@@ -516,7 +524,11 @@ mod tests {
         assert!(feature_entitled(&snapshot, FeatureId::CloudAi));
         assert_eq!(snapshot.limits.recording.max_width, 3840);
         assert_eq!(snapshot.limits.recording.max_height, 2160);
-        assert_eq!(snapshot.limits.streaming.max_destinations, 3);
+        assert_eq!(snapshot.limits.streaming.max_destinations, 6);
+        assert_eq!(
+            snapshot.limits.streaming.max_destinations_per_orientation,
+            3
+        );
     }
 
     // Permanent regression guard: no env value may ever unlock premium in a
@@ -546,7 +558,11 @@ mod tests {
         assert_eq!(snapshot.source, EntitlementSource::EnvOverride);
         assert!(feature_entitled(&snapshot, FeatureId::Multistreaming));
         assert!(feature_entitled(&snapshot, FeatureId::CloudAi));
-        assert_eq!(snapshot.limits.streaming.max_destinations, 3);
+        assert_eq!(snapshot.limits.streaming.max_destinations, 6);
+        assert_eq!(
+            snapshot.limits.streaming.max_destinations_per_orientation,
+            3
+        );
         assert_eq!(
             capability(&snapshot, FeatureId::Multistreaming)
                 .expect("multistreaming capability")
@@ -658,7 +674,11 @@ mod tests {
             value["capabilities"][1]["state"],
             json!("developer-override")
         );
-        assert_eq!(value["limits"]["streaming"]["maxDestinations"], json!(3));
+        assert_eq!(value["limits"]["streaming"]["maxDestinations"], json!(6));
+        assert_eq!(
+            value["limits"]["streaming"]["maxDestinationsPerOrientation"],
+            json!(3)
+        );
     }
 
     fn test_signing_key() -> ed25519_dalek::SigningKey {
