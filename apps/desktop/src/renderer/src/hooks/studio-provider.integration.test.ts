@@ -773,6 +773,62 @@ describe('real StudioProvider lifecycle', () => {
     expect(openSystemPermissions).toHaveBeenCalledWith('camera')
   })
 
+  it('never revokes persisted cloud-AI consent when readiness is not ready', async () => {
+    // 2026-07-16 owner incident: an effect silently flipped the consent
+    // toggle off whenever cloud AI readiness was not ready (signed-out,
+    // server unconfigured, ...), which also made the run-time readiness
+    // error toast unreachable — every AI run downgraded to local-only with
+    // no visible reason. Consent is the user's durable intent: readiness
+    // gates the RUN, never the stored preference.
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      platform: 'darwin',
+      getMediaAccessStatus: async () => ({
+        camera: 'not-determined',
+        microphone: 'granted'
+      }),
+      requestMediaAccess: vi.fn(async () => ({ granted: false, restarted: false })),
+      openSystemPermissions: vi.fn(async () => undefined)
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem('videorc.aiConsent', '1')
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+
+    // No account is signed in on this fake backend, so cloud AI readiness is
+    // NOT ready — and the persisted consent must survive untouched. (The
+    // removed auto-revoke effect flipped it to '0' on mount.)
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
+  })
+
   it('does not reuse a stale permission snapshot when the click-time status read fails', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend

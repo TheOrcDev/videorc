@@ -6456,11 +6456,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [isSessionActive, suppressCaptionsForSession])
 
-  useEffect(() => {
-    if (aiConsent && !currentCloudAiReadiness.ready) {
-      setAiConsent(false)
-    }
-  }, [aiConsent, currentCloudAiReadiness.ready, setAiConsent])
+  // Consent is the USER'S durable intent — no code path may revoke it. An
+  // earlier effect here silently flipped the toggle off whenever cloud AI
+  // readiness was not ready, which also made runAiWorkflow's readiness error
+  // toast unreachable (it checks consent first): every run silently downgraded
+  // to local-only and "nothing worked" with no visible reason (2026-07-16
+  // owner incident — the server had never been configured, and the app never
+  // said so). Readiness gates the RUN and the switch's enabled state, never
+  // the stored consent.
 
   // Burn-in driver: a serial latest-wins scheduler replaces the old boolean
   // busy gate, which could permanently drop a final/style update that arrived
