@@ -110,7 +110,20 @@ function sessionParams({ outputDirectoryCapability, combo }) {
   }
 }
 
-async function recordCombo({ ws, smoke, combo }) {
+// Stress combos (full-canvas incompressible noise at 4K) make the encoder
+// deliberately encoder-bound: the contract is SURVIVAL (no mid-recording
+// death), preview liveness, colorimetry, and level — not frame cadence. A
+// slideshow under impossible content is the designed degradation; dying is
+// the 0.9.44 bug.
+const STRESS_GATES = Object.freeze({
+  ...MATRIX_GATES,
+  frameCountTolerance: Number.POSITIVE_INFINITY,
+  maxDurationStretchRatio: Number.POSITIVE_INFINITY,
+  keyframeMaxIntervalSeconds: null,
+  maxTailMismatchMs: null
+})
+
+async function recordCombo({ ws, smoke, combo, assertPreviewLiveness = false, stress = false }) {
   // The output-directory capability is single-use: one grant per session.start.
   const { capabilityId } = await requestSmokeCommand(
     smoke,
@@ -127,7 +140,29 @@ async function recordCombo({ ws, smoke, combo }) {
   if (started.state !== 'recording') {
     throw new Error(`session.start state ${started.state}: ${started.message ?? ''}`)
   }
-  await new Promise((resolveSleep) => setTimeout(resolveSleep, recordingMs))
+  let livenessFailure = null
+  if (assertPreviewLiveness) {
+    // The 0.9.44 regression starved the compositor mid-recording (encoder
+    // held the whole target ring): the preview froze while the session ran.
+    // Prove the compositor keeps rendering DURING the recording.
+    const sampleGapMs = Math.min(2000, Math.max(1000, recordingMs / 3))
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, sampleGapMs))
+    const first = await request(ws, timeoutMs, 'compositor.status')
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, sampleGapMs))
+    const second = await request(ws, timeoutMs, 'compositor.status')
+    const advanced = (second.framesRendered ?? 0) - (first.framesRendered ?? 0)
+    const expected = (combo.fps * sampleGapMs) / 1000
+    if (!(advanced >= expected * 0.25)) {
+      livenessFailure =
+        `compositor stalled during recording: ${advanced} frames rendered in ` +
+        `${sampleGapMs}ms (expected ≈${expected.toFixed(0)})`
+    }
+    await new Promise((resolveSleep) =>
+      setTimeout(resolveSleep, Math.max(0, recordingMs - 2 * sampleGapMs))
+    )
+  } else {
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, recordingMs))
+  }
   const stopped = await request(ws, timeoutMs, 'session.stop')
   const outputPath = stopped.outputPath ?? started.outputPath
   if (!outputPath || !existsSync(outputPath)) {
@@ -139,17 +174,20 @@ async function recordCombo({ ws, smoke, combo }) {
     ffprobePath,
     intendedFps: combo.fps,
     expectAudio: true,
-    gates: MATRIX_GATES
+    gates: stress ? STRESS_GATES : MATRIX_GATES
   })
   writeReports(quality)
 
   const failures = [...quality.verdict.failures]
+  if (livenessFailure) {
+    failures.push(livenessFailure)
+  }
   const { width, height } = quality.metrics
   if (width !== combo.width || height !== combo.height) {
     failures.push(`dimensions ${width}x${height} != requested ${combo.width}x${combo.height}`)
   }
   const observedFps = quality.metrics.observedFps
-  if (observedFps != null && Math.abs(observedFps - combo.fps) > combo.fps * 0.02) {
+  if (!stress && observedFps != null && Math.abs(observedFps - combo.fps) > combo.fps * 0.02) {
     failures.push(`observed fps ${observedFps.toFixed(2)} != requested ${combo.fps}`)
   }
   return {
@@ -162,52 +200,91 @@ async function recordCombo({ ws, smoke, combo }) {
   }
 }
 
-let stopApp = async () => {}
+async function runPass({ passLabel, combos, extraEnv = {}, assertPreviewLiveness = false }) {
+  const passResults = []
+  let stopApp = async () => {}
+  try {
+    const launch = await launchDevApp({
+      env: {
+        VIDEORC_SMOKE_COMMAND_SERVER: '1',
+        VIDEORC_SMOKE_STATE_DIR: outputDirectory,
+        VIDEORC_USER_DATA_DIR: userDataDir,
+        ...extraEnv
+      },
+      timeoutMs,
+      requiredMarkers: ['backend-ready', 'preview-motion-ready'],
+      onLine: () => {}
+    })
+    stopApp = launch.stop
+    const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
+    const smoke = launch.connections['preview-motion-ready']
+
+    for (const combo of combos) {
+      const label = `${combo.label}${passLabel ? `:${passLabel}` : ''}`
+      try {
+        const result = await recordCombo({
+          ws,
+          smoke,
+          combo,
+          assertPreviewLiveness,
+          stress: combo.stress ?? false
+        })
+        result.combo = label
+        passResults.push(result)
+        const status = result.failures.length === 0 ? 'PASS' : 'FAIL'
+        console.log(
+          `Recording matrix [${label}] ${status}: ${(result.sizeBytes / 1024).toFixed(0)}KB, ` +
+            `level ${result.metrics.level != null ? (result.metrics.level / 10).toFixed(1) : '?'}, ` +
+            `color ${result.metrics.colorSpace ?? 'unknown'}/${result.metrics.colorRange ?? 'unknown'}, ` +
+            `tail ${result.metrics.tailMismatchMs == null ? 'n/a' : `${result.metrics.tailMismatchMs.toFixed(0)}ms`}`
+        )
+        for (const failure of result.failures) {
+          console.error(`  ❌ ${failure}`)
+        }
+      } catch (error) {
+        passResults.push({ combo: label, failures: [String(error?.message ?? error)] })
+        console.error(`Recording matrix [${label}] FAIL: ${String(error?.message ?? error)}`)
+        // A start-time refusal leaves no live session; a mid-recording error may.
+        try {
+          await request(ws, timeoutMs, 'session.stop')
+        } catch {
+          // No live session to stop — expected for start-time refusals.
+        }
+      }
+    }
+  } finally {
+    await stopApp()
+  }
+  return passResults
+}
+
 const results = []
 let launchedOk = false
 try {
-  const launch = await launchDevApp({
-    env: {
-      VIDEORC_SMOKE_COMMAND_SERVER: '1',
-      VIDEORC_SMOKE_STATE_DIR: outputDirectory,
-      VIDEORC_USER_DATA_DIR: userDataDir
-    },
-    timeoutMs,
-    requiredMarkers: ['backend-ready', 'preview-motion-ready'],
-    onLine: () => {}
-  })
-  stopApp = launch.stop
+  results.push(...(await runPass({ passLabel: '', combos: MATRIX })))
   launchedOk = true
-  const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
-  const smoke = launch.connections['preview-motion-ready']
-
-  for (const combo of MATRIX) {
-    try {
-      const result = await recordCombo({ ws, smoke, combo })
-      results.push(result)
-      const status = result.failures.length === 0 ? 'PASS' : 'FAIL'
-      console.log(
-        `Recording matrix [${combo.label}] ${status}: ${(result.sizeBytes / 1024).toFixed(0)}KB, ` +
-          `level ${result.metrics.level != null ? (result.metrics.level / 10).toFixed(1) : '?'}, ` +
-          `color ${result.metrics.colorSpace ?? 'unknown'}/${result.metrics.colorRange ?? 'unknown'}, ` +
-          `tail ${result.metrics.tailMismatchMs == null ? 'n/a' : `${result.metrics.tailMismatchMs.toFixed(0)}ms`}`
-      )
-      for (const failure of result.failures) {
-        console.error(`  ❌ ${failure}`)
-      }
-    } catch (error) {
-      results.push({ combo: combo.label, failures: [String(error?.message ?? error)] })
-      console.error(`Recording matrix [${combo.label}] FAIL: ${String(error?.message ?? error)}`)
-      // A start-time refusal leaves no live session; a mid-recording error may.
-      try {
-        await request(ws, timeoutMs, 'session.stop')
-      } catch {
-        // No live session to stop — expected for start-time refusals.
-      }
-    }
+  // Hard-content pass: per-frame noise makes the encoder do real-content
+  // work, surfacing bridge-pressure defects (encoder behind realtime, ring
+  // starvation, latency-contract kills) that the easy 64x64 pattern hides —
+  // 0.9.44 shipped its mid-recording-crash regression through green gates
+  // exactly that way. Preview must stay live THROUGH the recording.
+  // 1080p60 must hold FULL cadence under noise (proven headroom); 4K noise is
+  // beyond any real content, so 4K30 runs as a survival stress combo.
+  const hardCombos = MATRIX.filter((combo) => ['4K30', '1080p60'].includes(combo.label)).map(
+    (combo) => (combo.label === '4K30' ? { ...combo, stress: true } : combo)
+  )
+  if (hardCombos.length > 0) {
+    results.push(
+      ...(await runPass({
+        passLabel: 'hard',
+        combos: hardCombos,
+        extraEnv: { VIDEORC_SYNTHETIC_HARD_CONTENT: '1' },
+        assertPreviewLiveness: true
+      }))
+    )
   }
-} finally {
-  await stopApp()
+} catch (error) {
+  console.error(`Recording matrix pass failed to launch: ${String(error?.message ?? error)}`)
 }
 
 const resultsPath = join(outputDirectory, 'recording-matrix-results.json')

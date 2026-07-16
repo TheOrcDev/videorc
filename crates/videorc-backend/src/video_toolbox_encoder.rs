@@ -28,7 +28,7 @@ use objc2_video_toolbox::{
     kVTProfileLevel_H264_High_AutoLevel,
 };
 
-use crate::h264_profile::h264_high_level_label;
+use crate::h264_profile::{h264_high_level_label, quality_posture_canvas_envelope};
 use crate::metal_compositor::MetalCompositorTargetPixelBuffer;
 
 /// The High-profile/level VideoToolbox must write for this output, computed
@@ -401,7 +401,7 @@ impl VideoToolboxH264Session {
                 max_key_frame_interval_value: max_key_frame_interval,
                 average_bit_rate_value: average_bit_rate_bps,
                 max_frame_delay_count_value: None,
-                prioritize_encoding_speed_value: low_latency,
+                prioritize_encoding_speed_value: true,
                 profile_level_label: "High@Auto",
             },
         };
@@ -461,6 +461,9 @@ impl VideoToolboxH264Session {
             iosurface_backed,
             "retained Metal target is not IOSurface-backed"
         );
+        // Ring correctness: the slot stays out of the compositor's rotation
+        // for the duration of this synchronous encode probe.
+        let _encode_in_flight = target.begin_in_flight();
 
         let state = Arc::new(Mutex::new(EncodeCallbackState::default()));
         let callback_state = state.clone();
@@ -673,12 +676,18 @@ impl VideoToolboxH264Session {
         };
         let duration = unsafe { CMTime::new(timing.duration_value, timing.duration_time_scale) };
         let retained_target = target.clone();
+        // Ring correctness: mark the slot in-flight for the whole encode.
+        // The guard rides the output-handler block — VideoToolbox releases
+        // the block after the callback (or after a failed submission), which
+        // drops the guard and returns the slot to the compositor ring.
+        let encode_in_flight = target.begin_in_flight();
         let output_handler: RcBlock<dyn Fn(OSStatus, VTEncodeInfoFlags, *mut CMSampleBuffer)> =
             RcBlock::new(
                 move |status: OSStatus,
                       info_flags: VTEncodeInfoFlags,
                       sample_buffer: *mut CMSampleBuffer| {
                     let _retained_target = &retained_target;
+                    let _encode_in_flight = &encode_in_flight;
                     let result = async_annex_b_result_from_callback(
                         status,
                         info_flags,
@@ -765,25 +774,34 @@ impl VideoToolboxH264Session {
                 average_bit_rate_value.as_ref(),
             )
         });
-        // Record-only sessions trade the streaming latency posture for quality:
-        // an explicit `false` here beats the encoder's "auto" default, and the
-        // 1-frame delay cap only applies when a live leg needs frames now.
+        // Record-only sessions inside the proven envelope (≤1440p canvas)
+        // trade the streaming latency posture for quality — an explicit
+        // `false` beats the encoder's "auto" default. 4K stays speed-priority
+        // even record-only: the 0.9.44 owner incident showed quality-mode 4K
+        // warmup falls behind realtime and trips the recording output's
+        // latency contract mid-session.
+        let prioritize_speed_value = low_latency
+            || !quality_posture_canvas_envelope(
+                u32::try_from(self.width).unwrap_or(u32::MAX),
+                u32::try_from(self.height).unwrap_or(u32::MAX),
+            );
         let prioritize_encoding_speed = self.set_property_status(
             unsafe { kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality },
-            CFBoolean::new(low_latency).as_ref(),
+            CFBoolean::new(prioritize_speed_value).as_ref(),
         );
-        let (max_frame_delay_count, max_frame_delay_count_value) = if low_latency {
-            let capped_delay_frames = 1;
-            (
-                Some(self.set_property_status(
-                    unsafe { kVTCompressionPropertyKey_MaxFrameDelayCount },
-                    CFNumber::new_i32(capped_delay_frames).as_ref(),
-                )),
-                Some(capped_delay_frames),
-            )
-        } else {
-            (None, None)
-        };
+        // The frame-delay cap is NOT a latency nicety — it is the compositor
+        // target ring's correctness guard: every in-flight VideoToolbox frame
+        // retains one of the TARGET_RING_SIZE (3) ring slots, and an uncapped
+        // pipeline lets the ring cycle into a slot the encoder still owns
+        // (the 0.9.44 preview-scribble regression). Always cap: 1 for live
+        // legs (frames are needed now), 2 (= ring size - 1, one slot always
+        // free for compose+present) for record-only quality mode.
+        let capped_delay_frames = if low_latency { 1 } else { 2 };
+        let max_frame_delay_count = Some(self.set_property_status(
+            unsafe { kVTCompressionPropertyKey_MaxFrameDelayCount },
+            CFNumber::new_i32(capped_delay_frames).as_ref(),
+        ));
+        let max_frame_delay_count_value = Some(capped_delay_frames);
 
         // Spec-valid High profile/level (the audit caught auto picks below the
         // real macroblock rate at 60fps) — best-effort: a refusing encoder
@@ -827,7 +845,7 @@ impl VideoToolboxH264Session {
             max_key_frame_interval_value: max_key_frame_interval,
             average_bit_rate_value: average_bit_rate_bps,
             max_frame_delay_count_value,
-            prioritize_encoding_speed_value: low_latency,
+            prioritize_encoding_speed_value: prioritize_speed_value,
             profile_level_label,
         })
     }

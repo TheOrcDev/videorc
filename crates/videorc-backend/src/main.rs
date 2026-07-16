@@ -3324,6 +3324,7 @@ const WEBSOCKET_RELIABLE_QUEUE_CAPACITY: usize = 128;
 const WEBSOCKET_COMMAND_QUEUE_CAPACITY: usize = 64;
 const WEBSOCKET_TELEMETRY_KIND_CAPACITY: usize = 32;
 const WEBSOCKET_LAYOUT_CONCURRENCY: usize = 8;
+const WEBSOCKET_READ_ONLY_CONCURRENCY: usize = 4;
 // The renderer already sends live audio updates single-flight/latest-wins.
 // Keep the transport path independently bounded so a malformed/raw client
 // cannot build a task backlog, while session.stop remains dispatchable during
@@ -3816,6 +3817,21 @@ fn production_websocket_command_handler(role: BackendRole) -> WebSocketCommandHa
     })
 }
 
+/// Pure state reads that must never queue behind a multi-second stateful
+/// command (`session.start`/`session.stop` awaits the MP4 export inline). The
+/// serial dispatcher starved `preview.surface.status` behind exactly that,
+/// and the renderer's 5s budget turned every recording stop into "Backend
+/// request timed out" toasts (2026-07-16 owner incident). Each method here is
+/// verified read-only: it locks, clones, and answers.
+fn websocket_command_is_read_only(text: &str) -> bool {
+    serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
+        matches!(
+            command.method.as_str(),
+            "preview.surface.status" | "compositor.status" | "diagnostics.stats" | "health.ping"
+        )
+    })
+}
+
 fn websocket_command_may_overlap(text: &str) -> bool {
     serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
         matches!(
@@ -3876,11 +3892,46 @@ async fn run_websocket_command_dispatcher(
 ) {
     let mut layout_tasks = tokio::task::JoinSet::new();
     let mut audio_processing_tasks = tokio::task::JoinSet::new();
+    let mut read_only_tasks = tokio::task::JoinSet::new();
+    // At most ONE stateful mutation runs at a time; it is a barrier for every
+    // later non-read command but runs as a task so read-only queries keep
+    // answering while it is in flight (a session.stop awaits the MP4 export
+    // inline — serial dispatch starved preview.surface.status for its whole
+    // duration, the 2026-07-16 owner incident).
+    let mut stateful_task: Option<tokio::task::JoinHandle<bool>> = None;
 
     while let Some(text) = commands.recv().await {
         command_metrics.record_dequeue_oldest();
         reap_websocket_audio_processing_commands(&mut audio_processing_tasks);
+        while read_only_tasks.try_join_next().is_some() {}
+        // Read-only queries answer concurrently with ANY in-flight command —
+        // they are never an ordering barrier and no barrier waits for them.
+        if websocket_command_is_read_only(text.as_str()) {
+            if read_only_tasks.len() >= WEBSOCKET_READ_ONLY_CONCURRENCY
+                && let Some(completed) = read_only_tasks.join_next().await
+                && let Err(error) = completed
+            {
+                tracing::warn!("WebSocket read-only command task failed: {error}");
+            }
+            let command_state = state.clone();
+            let response_tx = outgoing.clone();
+            let response_metrics = reliable_metrics.clone();
+            let response_pressure = slow_pressure.clone();
+            let handler = command_handler.clone();
+            read_only_tasks.spawn(async move {
+                let response = handler(command_state, text).await;
+                let _ = queue_websocket_response(
+                    &response_tx,
+                    &response_metrics,
+                    &response_pressure,
+                    response,
+                )
+                .await;
+            });
+            continue;
+        }
         if websocket_command_may_overlap(text.as_str()) {
+            await_websocket_stateful_barrier(&mut stateful_task).await;
             if layout_tasks.len() >= WEBSOCKET_LAYOUT_CONCURRENCY
                 && let Some(completed) = layout_tasks.join_next().await
                 && let Err(error) = completed
@@ -3906,6 +3957,7 @@ async fn run_websocket_command_dispatcher(
         }
 
         if let Some(command_id) = websocket_audio_processing_command_id(text.as_str()) {
+            await_websocket_stateful_barrier(&mut stateful_task).await;
             // Audio gain/mute is independent from scene layout. Do not hold the
             // dispatcher during FFmpeg's acknowledgement cadence; a following
             // session.stop must be able to publish its stopping marker.
@@ -3946,18 +3998,45 @@ async fn run_websocket_command_dispatcher(
         // until this mutation completes. session.stop is the deliberate narrow
         // exception for an in-flight live audio acknowledgement: the backend's
         // session mutex and stop marker preserve native ordering.
+        await_websocket_stateful_barrier(&mut stateful_task).await;
         drain_websocket_layout_commands(&mut layout_tasks).await;
         if !websocket_command_is_session_stop(text.as_str()) {
             drain_websocket_audio_processing_commands(&mut audio_processing_tasks).await;
         }
-        let response = command_handler(state.clone(), text).await;
-        if !queue_websocket_response(&outgoing, &reliable_metrics, &slow_pressure, response).await {
-            break;
-        }
+        let command_state = state.clone();
+        let response_tx = outgoing.clone();
+        let response_metrics = reliable_metrics.clone();
+        let response_pressure = slow_pressure.clone();
+        let handler = command_handler.clone();
+        stateful_task = Some(tokio::spawn(async move {
+            let response = handler(command_state, text).await;
+            queue_websocket_response(
+                &response_tx,
+                &response_metrics,
+                &response_pressure,
+                response,
+            )
+            .await
+        }));
     }
 
+    await_websocket_stateful_barrier(&mut stateful_task).await;
     drain_websocket_layout_commands(&mut layout_tasks).await;
     drain_websocket_audio_processing_commands(&mut audio_processing_tasks).await;
+    while read_only_tasks.join_next().await.is_some() {}
+}
+
+/// Wait for the in-flight stateful mutation (if any) before dispatching the
+/// next non-read-only command — mutation ordering is exactly the old serial
+/// dispatcher's; only read-only queries bypass the barrier.
+async fn await_websocket_stateful_barrier(
+    stateful_task: &mut Option<tokio::task::JoinHandle<bool>>,
+) {
+    if let Some(task) = stateful_task.take()
+        && let Err(error) = task.await
+    {
+        tracing::warn!("WebSocket stateful command task failed: {error}");
+    }
 }
 
 async fn ws_handler(
@@ -7662,6 +7741,80 @@ mod tests {
         assert!(!websocket_event_is_coalescible(
             "platformAccounts.oauth.callback"
         ));
+    }
+
+    #[tokio::test]
+    async fn websocket_read_only_queries_answer_while_a_stateful_command_is_in_flight() {
+        // The 0.9.44 owner incident: session.stop (which awaits the MP4
+        // export inline) starved preview.surface.status behind the serial
+        // dispatcher until the renderer's 5s budget expired. Read-only
+        // queries must overlap stateful commands.
+        let handler: WebSocketCommandHandler = std::sync::Arc::new(move |_state, text| {
+            Box::pin(async move {
+                let command: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if command["method"] == "session.stop" {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                ServerResponse::ok(command["id"].as_str().unwrap(), json!({}))
+            })
+        });
+        let (command_tx, command_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let command_metrics = connection.incoming_command_queue;
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport.clone());
+        let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            test_state(),
+            command_rx,
+            command_metrics.clone(),
+            outgoing_tx,
+            reliable_metrics.clone(),
+            slow_pressure,
+            handler,
+        ));
+
+        assert!(
+            send_tracked_websocket_item(
+                &command_tx,
+                &command_metrics,
+                json!({ "id": "stop", "method": "session.stop", "params": {} }).to_string(),
+            )
+            .await
+        );
+        for index in 0..3 {
+            assert!(
+                send_tracked_websocket_item(
+                    &command_tx,
+                    &command_metrics,
+                    json!({
+                        "id": format!("status-{index}"),
+                        "method": "preview.surface.status",
+                        "params": {}
+                    })
+                    .to_string(),
+                )
+                .await
+            );
+        }
+        drop(command_tx);
+        dispatcher.await.unwrap();
+
+        let mut response_order = Vec::new();
+        while let Some(Message::Text(text)) = outgoing_rx.recv().await {
+            reliable_metrics.record_dequeue_oldest();
+            let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+            response_order.push(response["id"].as_str().unwrap().to_string());
+        }
+        assert_eq!(response_order.len(), 4);
+        // Every status query answered BEFORE the slow stateful command.
+        assert_eq!(
+            response_order.last().map(String::as_str),
+            Some("stop"),
+            "read-only queries must not queue behind session.stop: {response_order:?}"
+        );
     }
 
     #[tokio::test]

@@ -17,6 +17,8 @@
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
 use objc2::rc::Retained;
@@ -513,6 +515,9 @@ pub fn composite_sources(
 // moving content (the camera circle). With the ring, frame N is presented and
 // encoded from a slot no render touches again until N+TARGET_RING_SIZE.
 const TARGET_RING_SIZE: usize = 3;
+/// Growth headroom when every base slot is held by an in-flight encode; the
+/// VideoToolbox frame-delay cap (≤2) makes reaching this bound an anomaly.
+const TARGET_RING_MAX_SIZE: usize = TARGET_RING_SIZE + 2;
 
 pub struct MetalSceneCompositor {
     device: Retained<MetalDevice>,
@@ -534,6 +539,11 @@ pub struct MetalSceneCompositor {
 struct CachedTargetTexture {
     texture: Retained<MetalTexture>,
     pixel_buffer: Option<CFRetained<CVPixelBuffer>>,
+    /// Number of consumers (VideoToolbox encodes) still holding this slot's
+    /// frame. The ring must NEVER hand a slot back to the renderer while an
+    /// encode is in flight — the 0.9.44 regression let an uncapped encoder
+    /// pipeline hold >2 slots and the ring scribbled over frames mid-encode.
+    in_flight: Arc<AtomicUsize>,
 }
 
 struct CachedSourceTexture {
@@ -635,6 +645,22 @@ pub struct MetalCompositorTargetPixelBuffer {
     pixel_buffer: CFRetained<CVPixelBuffer>,
     width: usize,
     height: usize,
+    in_flight: Arc<AtomicUsize>,
+}
+
+/// RAII mark that a consumer (a VideoToolbox encode) still needs this ring
+/// slot's pixels. While any guard lives, `ensure_target_texture` will not
+/// select the slot for rendering. Dropping the guard (encode callback done,
+/// or an encode submission error unwinding) releases the slot.
+pub struct MetalTargetInFlightGuard {
+    in_flight: Arc<AtomicUsize>,
+}
+
+impl Drop for MetalTargetInFlightGuard {
+    fn drop(&mut self) {
+        self.in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 impl MetalCompositorTargetPixelBuffer {
@@ -656,6 +682,17 @@ impl MetalCompositorTargetPixelBuffer {
 
     pub fn has_iosurface(&self) -> bool {
         CVPixelBufferGetIOSurface(Some(self.pixel_buffer.as_ref())).is_some()
+    }
+
+    /// Mark this target's ring slot as consumed by an in-flight encode. Hold
+    /// the guard until the encoder no longer reads the pixels (output
+    /// callback complete).
+    pub fn begin_in_flight(&self) -> MetalTargetInFlightGuard {
+        self.in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        MetalTargetInFlightGuard {
+            in_flight: self.in_flight.clone(),
+        }
     }
 
     pub fn iosurface_id(&self) -> Option<u32> {
@@ -916,6 +953,7 @@ impl MetalSceneCompositor {
             pixel_buffer: target.pixel_buffer.as_ref()?.clone(),
             width: self.target_width,
             height: self.target_height,
+            in_flight: target.in_flight.clone(),
         })
     }
 
@@ -935,8 +973,31 @@ impl MetalSceneCompositor {
             self.target_cursor = self.targets.len() - 1;
             return Some(());
         }
-        self.target_cursor = (self.target_cursor + 1) % TARGET_RING_SIZE;
-        Some(())
+        // Never render into a slot an encode still holds (in-flight guard):
+        // walk the ring for a free slot, and if every slot is held — an
+        // encoder pipelining anomaly — grow by a bounded number of extra
+        // slots rather than scribbling over frames mid-encode.
+        let ring_len = self.targets.len();
+        for step in 1..=ring_len {
+            let candidate = (self.target_cursor + step) % ring_len;
+            if self.targets[candidate]
+                .in_flight
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 0
+            {
+                self.target_cursor = candidate;
+                return Some(());
+            }
+        }
+        if self.targets.len() < TARGET_RING_MAX_SIZE {
+            self.targets
+                .push(make_target_texture(&self.device, width, height)?);
+            self.target_cursor = self.targets.len() - 1;
+            return Some(());
+        }
+        // Pathological: every slot (including growth headroom) is held.
+        // Skipping this compose is strictly better than corrupting frames.
+        None
     }
 
     // The slot most recently selected by `ensure_target_texture` — during a
@@ -1456,6 +1517,7 @@ fn make_target_texture(
         .map(|texture| CachedTargetTexture {
             texture,
             pixel_buffer: None,
+            in_flight: Arc::new(AtomicUsize::new(0)),
         })
     })
 }
@@ -1481,6 +1543,7 @@ fn make_iosurface_target_texture(
     Some(CachedTargetTexture {
         texture,
         pixel_buffer: Some(pixel_buffer),
+        in_flight: Arc::new(AtomicUsize::new(0)),
     })
 }
 
@@ -2140,6 +2203,68 @@ mod tests {
             .expect("compose after resize");
         assert_eq!(compositor.cached_target_size(), Some((16, 8)));
         assert_eq!(compositor.target_ring_iosurface_ids().len(), 1);
+    }
+
+    #[test]
+    fn ring_never_reuses_a_slot_held_by_an_in_flight_encode_or_skips() {
+        // The 0.9.44 regression: an uncapped encoder pipeline held >2 ring
+        // slots and `ensure_target_texture` cycled into them anyway,
+        // scribbling over frames mid-encode. With the in-flight guard the
+        // ring must route around held slots (growing if necessary) and only
+        // hand them back once the guard drops.
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        let red = [0u8, 0, 255, 255];
+        let sources = [full_frame(&red, 1, 1, false, SourceMask::None, [0.0; 4])];
+
+        // Hold guards on two consecutive composed frames, like an encoder
+        // with two frames in flight.
+        let mut held = Vec::new();
+        for _ in 0..2 {
+            compositor
+                .compose_bgra(8, 4, [0.0, 0.0, 0.0, 1.0], &sources)
+                .expect("compose into ring target");
+            let Some(target) = compositor.latest_target_pixel_buffer() else {
+                eprintln!("skipping: IOSurface-backed render target unavailable on this device");
+                return;
+            };
+            held.push((target.iosurface_id(), target.begin_in_flight(), target));
+        }
+        let held_ids: Vec<_> = held.iter().map(|(id, _, _)| *id).collect();
+
+        // Twice around the (grown) ring: no compose may land on a held slot.
+        for _ in 0..(TARGET_RING_MAX_SIZE * 2) {
+            compositor
+                .compose_bgra(8, 4, [0.0, 0.0, 0.0, 1.0], &sources)
+                .expect("compose must keep succeeding while slots are held");
+            let exported = compositor
+                .latest_target_pixel_buffer()
+                .and_then(|target| target.iosurface_id());
+            assert!(
+                !held_ids.contains(&exported),
+                "compose landed on a slot held by an in-flight encode: {exported:?} in {held_ids:?}"
+            );
+        }
+
+        // Releasing the guards returns the slots to the rotation.
+        drop(held);
+        let mut seen = Vec::new();
+        for _ in 0..(TARGET_RING_MAX_SIZE * 2) {
+            compositor
+                .compose_bgra(8, 4, [0.0, 0.0, 0.0, 1.0], &sources)
+                .expect("compose after guards released");
+            seen.push(
+                compositor
+                    .latest_target_pixel_buffer()
+                    .and_then(|target| target.iosurface_id()),
+            );
+        }
+        assert!(
+            held_ids.iter().any(|id| seen.contains(id)),
+            "released slots should rejoin the rotation: held {held_ids:?}, saw {seen:?}"
+        );
     }
 
     #[test]

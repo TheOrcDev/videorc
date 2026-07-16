@@ -53,7 +53,7 @@ use crate::encoder_bridge::{
 use crate::entitlements;
 use crate::ffmpeg::{ffprobe_path_for, resolve_ffmpeg_path};
 use crate::ffmpeg_work::{CapturePermit, MaintenanceCancelToken};
-use crate::h264_profile::h264_high_level_label;
+use crate::h264_profile::{h264_high_level_label, quality_posture_canvas_envelope};
 use crate::pipeline::{RecordingPipeline, container_for_outputs, container_key};
 use crate::preview_camera::{
     preview_camera_latest_frame_info, reset_preview_camera_capture_timings,
@@ -6483,10 +6483,12 @@ fn append_h264_encoding_args_for_platform_with_timing(
                 "-realtime".to_string(),
                 "1".to_string(),
             ]);
-            // Speed-over-quality is a STREAMING posture; a record-only output
-            // lets VideoToolbox spend its headroom on quality (capture still
-            // paces the encoder via -realtime).
-            if low_latency {
+            // Speed-over-quality is a STREAMING posture; a record-only
+            // output inside the proven ≤1440p envelope lets VideoToolbox
+            // spend its headroom on quality (capture still paces the encoder
+            // via -realtime). 4K keeps the speed posture — quality-mode 4K
+            // warmup falls behind realtime (0.9.44 owner incident).
+            if low_latency || !quality_posture_canvas_envelope(video.width, video.height) {
                 args.extend(["-prio_speed".to_string(), "1".to_string()]);
             }
         }
@@ -10877,6 +10879,9 @@ mod tests {
             false,
         );
         assert_eq!(arg_value(&experimental_args, "-level"), Some("5.2"));
+        // 4K stays speed-priority even record-only: quality-mode 4K warmup
+        // falls behind realtime (0.9.44 owner incident).
+        assert_eq!(arg_value(&experimental_args, "-prio_speed"), Some("1"));
 
         // Media Foundation exposes no profile/level options — Windows arms
         // still get the colorimetry tags but keep the encoder-default level.

@@ -202,25 +202,30 @@ fn encoder_bridge_pre_encode_admission(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EncoderBridgeOverBudgetEscalation {
-    /// Keep the output alive: drop pre-encode like coalescing and re-check.
+    /// Keep the stream output alive: drop pre-encode like coalescing and re-check.
     Degrade,
+    /// Keep the recording output alive WITHOUT dropping: frames keep
+    /// submitting late while the encoder catches up. Late is fine for a
+    /// file; only wedged is fatal.
+    SubmitUnderPressure,
     /// The violation is sustained (or the queue truly full): fail the output.
     Fail,
 }
 
-/// Only the stream role degrades — its latest-wins coalescing makes dropped
-/// frames an honest, visible quality trade. Recording/shared outputs have no
-/// such semantics: silently dropping recording frames is exactly the
-/// corruption the contract exists to prevent, so they fail immediately.
+/// Over-budget posture is role-specific. The stream role DEGRADES — its
+/// latest-wins coalescing makes dropped frames an honest, visible quality
+/// trade. Recording/shared outputs must never drop (that is the corruption
+/// the contract prevents) but they also have no downstream latency consumer:
+/// they SUBMIT UNDER PRESSURE and fail only when the breach is sustained.
+/// A single over-age sample used to kill a recording outright — the
+/// 2026-07-16 owner incident lost a 4K session 2s in at "oldest 251/250ms"
+/// while the encoder was merely warming up (depth 6/16, still progressing).
 fn encoder_bridge_over_budget_escalation(
     policy: EncoderBridgeOutputQueuePolicy,
     queue_depth: u64,
     over_budget_since: Instant,
     now: Instant,
 ) -> EncoderBridgeOverBudgetEscalation {
-    if policy.role != EncoderBridgeOutputRole::Stream {
-        return EncoderBridgeOverBudgetEscalation::Fail;
-    }
     // A queue at its frame ceiling means the consumer made no progress across
     // the whole depth ladder — that is not jitter.
     if queue_depth >= policy.max_frames as u64 {
@@ -229,7 +234,11 @@ fn encoder_bridge_over_budget_escalation(
     if now.duration_since(over_budget_since) >= STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW {
         return EncoderBridgeOverBudgetEscalation::Fail;
     }
-    EncoderBridgeOverBudgetEscalation::Degrade
+    if policy.role == EncoderBridgeOutputRole::Stream {
+        EncoderBridgeOverBudgetEscalation::Degrade
+    } else {
+        EncoderBridgeOverBudgetEscalation::SubmitUnderPressure
+    }
 }
 
 fn encoder_bridge_output_pressure_error(
@@ -1574,6 +1583,17 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 ) {
                     EncoderBridgeOverBudgetEscalation::Degrade => {
                         EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame
+                    }
+                    EncoderBridgeOverBudgetEscalation::SubmitUnderPressure => {
+                        // Recording keeps every frame: submit late, surface
+                        // pressure in stats, never drop.
+                        output_queue_capacity_pressure_events =
+                            output_queue_capacity_pressure_events.saturating_add(1);
+                        tracing::warn!(
+                            "Recording encoder output over its age budget (depth {queue_depth}, since {:?} ago); submitting under pressure instead of failing.",
+                            now.duration_since(since)
+                        );
+                        EncoderBridgePreEncodeAdmission::Submit
                     }
                     EncoderBridgeOverBudgetEscalation::Fail => {
                         EncoderBridgePreEncodeAdmission::FailOutput
@@ -4225,7 +4245,7 @@ mod tests {
     }
 
     #[test]
-    fn recording_over_budget_never_degrades() {
+    fn recording_over_budget_submits_under_pressure_then_fails_when_sustained() {
         for role in [
             EncoderBridgeOutputRole::Recording,
             EncoderBridgeOutputRole::Shared,
@@ -4235,10 +4255,36 @@ mod tests {
                 ..EncoderBridgeDiagnosticsContext::default()
             });
             let since = Instant::now();
-            // Dropping recording frames silently is the corruption the
-            // contract prevents — recording outputs keep the one-sample fail.
+            // Recording outputs never drop, but a single over-age sample is no
+            // longer a death sentence (2026-07-16 owner incident: 4K session
+            // killed 2s in at "oldest 251/250ms" during encoder warmup): they
+            // submit under pressure and fail only when sustained.
             assert_eq!(
-                encoder_bridge_over_budget_escalation(policy, 2, since, since),
+                encoder_bridge_over_budget_escalation(policy, 6, since, since),
+                EncoderBridgeOverBudgetEscalation::SubmitUnderPressure
+            );
+            assert_eq!(
+                encoder_bridge_over_budget_escalation(
+                    policy,
+                    6,
+                    since,
+                    since + STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW - Duration::from_millis(1),
+                ),
+                EncoderBridgeOverBudgetEscalation::SubmitUnderPressure
+            );
+            // Continuously over budget for the whole window → real failure.
+            assert_eq!(
+                encoder_bridge_over_budget_escalation(
+                    policy,
+                    6,
+                    since,
+                    since + STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW,
+                ),
+                EncoderBridgeOverBudgetEscalation::Fail
+            );
+            // A queue at its frame ceiling is a stalled consumer — immediate.
+            assert_eq!(
+                encoder_bridge_over_budget_escalation(policy, 16, since, since),
                 EncoderBridgeOverBudgetEscalation::Fail
             );
         }

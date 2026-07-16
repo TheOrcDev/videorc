@@ -2747,7 +2747,8 @@ fn try_gpu_compose(
                 }
             }
             SceneSourceKind::TestPattern => {
-                let pattern = synthetic_test_pattern_bgra(inputs.sequence);
+                let pattern =
+                    synthetic_test_pattern_bgra(inputs.sequence, inputs.width, inputs.height);
                 let (dest, crop) = gpu_source_placement(
                     pattern.width as u32,
                     pattern.height as u32,
@@ -2972,7 +2973,70 @@ fn missing_source_placeholder_bgra(
     }
 }
 
-fn synthetic_test_pattern_bgra(sequence: u64) -> SyntheticTestPatternBgra {
+/// Hard-content mode (VIDEORC_SYNTHETIC_HARD_CONTENT=1): the 64x64 pattern is
+/// trivially cheap to encode at any canvas size, so bridge-pressure defects
+/// (encoder falling behind realtime, ring starvation, latency-contract kills)
+/// are invisible to the smokes — the 0.9.44 regression shipped through green
+/// gates exactly this way. Hard mode paints deterministic per-frame noise at
+/// quarter-canvas resolution: every macroblock changes every frame and the
+/// encoder does real-content work.
+fn synthetic_hard_content_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("VIDEORC_SYNTHETIC_HARD_CONTENT")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+fn xorshift64(state: &mut u64) -> u64 {
+    let mut value = *state;
+    value ^= value << 13;
+    value ^= value >> 7;
+    value ^= value << 17;
+    *state = value;
+    value
+}
+
+fn synthetic_hard_content_bgra(
+    sequence: u64,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> SyntheticTestPatternBgra {
+    let width = (canvas_width as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_WIDTH, 960);
+    let height = (canvas_height as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_HEIGHT, 960);
+    let mut bytes = vec![0; width * height * 4];
+    // Deterministic per (frame, run): reproducible artifacts, zero skip blocks.
+    let mut rng = sequence.wrapping_mul(0x9E37_79B9_7F4A_7C15).max(1);
+    for pixel in bytes.chunks_exact_mut(4) {
+        let noise = xorshift64(&mut rng);
+        pixel[0] = noise as u8;
+        pixel[1] = (noise >> 8) as u8;
+        pixel[2] = (noise >> 16) as u8;
+        pixel[3] = 255;
+    }
+    crate::synthetic_diagnostic::overlay_frame_markers(
+        &mut bytes,
+        width,
+        height,
+        sequence,
+        crate::synthetic_diagnostic::SYNTHETIC_TIMECODE_FPS,
+    );
+    SyntheticTestPatternBgra {
+        bytes,
+        width,
+        height,
+    }
+}
+
+fn synthetic_test_pattern_bgra(
+    sequence: u64,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> SyntheticTestPatternBgra {
+    if synthetic_hard_content_enabled() {
+        return synthetic_hard_content_bgra(sequence, canvas_width, canvas_height);
+    }
     let width = SYNTHETIC_TEST_PATTERN_WIDTH;
     let height = SYNTHETIC_TEST_PATTERN_HEIGHT;
     let mut bytes = vec![0; width * height * 4];
@@ -3973,7 +4037,7 @@ fn render_synthetic_source_rect(
     rect: PixelRect,
     bytes: &mut [u8],
 ) {
-    let pattern = synthetic_test_pattern_bgra(sequence);
+    let pattern = synthetic_test_pattern_bgra(sequence, canvas_width, canvas_height);
     let source = RgbaSource {
         bytes: &pattern.bytes,
         width: pattern.width as u32,
@@ -5314,8 +5378,8 @@ mod tests {
 
     #[test]
     fn synthetic_test_pattern_bgra_has_spatial_and_temporal_motion() {
-        let first = synthetic_test_pattern_bgra(7);
-        let next = synthetic_test_pattern_bgra(8);
+        let first = synthetic_test_pattern_bgra(7, 1920, 1080);
+        let next = synthetic_test_pattern_bgra(8, 1920, 1080);
 
         assert_eq!(first.width, SYNTHETIC_TEST_PATTERN_WIDTH);
         assert_eq!(first.height, SYNTHETIC_TEST_PATTERN_HEIGHT);
