@@ -13006,7 +13006,8 @@ mod tests {
                 assert_eq!(arg_value(args, "-realtime"), None);
                 assert_eq!(arg_value(args, "-prio_speed"), None);
                 assert_eq!(arg_value(args, "-hw_encoding"), None);
-                assert_eq!(encoder.backend, EncodeBackend::SoftwareMediaFoundation);
+                // libopenh264 fallback since #151 (issue #149).
+                assert_eq!(encoder.backend, EncodeBackend::SoftwareOpenH264);
             }
             FfmpegH264Platform::Other => {
                 assert_eq!(arg_value(args, "-allow_sw"), None);
