@@ -41,16 +41,38 @@ import streamDeck, { action, SingletonAction } from '@elgato/streamdeck';
 import { VideorcClient } from './videorc-client.js';
 const client = new VideorcClient();
 class VideorcAction extends SingletonAction {
+    constructor() {
+        super();
+        // Shared-client subscriptions live here, once per action CLASS —
+        // onWillAppear fires on every visibility change and would stack
+        // duplicate listeners (each refresh() would then run N times).
+        client.on('state', this.refresh);
+        client.on('connected', this.refresh);
+        client.on('describe', this.pushInspectorOptions);
+        client.on('disconnected', this.refresh);
+    }
     refresh = () => {
         for (const visible of this.actions) {
             void visible.setTitle(this.renderTitle(client.state, client.connected));
         }
     };
+    pushInspectorOptions = () => {
+        void streamDeck.ui.current?.sendToPropertyInspector({
+            event: 'videorc-options',
+            connected: client.connected,
+            options: this.inspectorOptions()
+        });
+    };
+    /** Options the property inspector offers for this action's setting. */
+    inspectorOptions() {
+        return [];
+    }
     onWillAppear(ev) {
         void ev.action.setTitle(this.renderTitle(client.state, client.connected));
-        client.on('state', this.refresh);
-        client.on('connected', this.refresh);
-        client.on('disconnected', this.refresh);
+    }
+    /** The property inspector asks for options when it opens. */
+    onSendToPlugin() {
+        this.pushInspectorOptions();
     }
     async onKeyDown(ev) {
         if (!client.connected) {
@@ -62,7 +84,12 @@ class VideorcAction extends SingletonAction {
             await ev.action.showAlert();
             return;
         }
-        client.sendIntent(intent);
+        // End-to-end truth: false covers backend rejection (debounce, invalid),
+        // renderer refusal ("Enable streaming first"), disconnects, and timeouts.
+        const ok = await client.sendIntent(intent);
+        if (!ok) {
+            await ev.action.showAlert();
+        }
     }
 }
 let RecordToggle = (() => {
@@ -157,6 +184,12 @@ let SceneApply = (() => {
             }
             return { kind: 'sceneApply', layoutPreset: settings.layoutPreset };
         }
+        inspectorOptions() {
+            return (client.describe?.layoutPresets ?? []).map((preset) => ({
+                value: preset,
+                label: preset
+            }));
+        }
     };
     return SceneApply = _classThis;
 })();
@@ -185,6 +218,12 @@ let TakeoverToggle = (() => {
             }
             return { kind: 'takeoverShow', assetId: settings.assetId };
         }
+        inspectorOptions() {
+            return (client.describe?.takeovers ?? []).map((takeover) => ({
+                value: takeover.id,
+                label: takeover.name
+            }));
+        }
     };
     return TakeoverToggle = _classThis;
 })();
@@ -209,6 +248,12 @@ let WindowFront = (() => {
                 return null;
             }
             return { kind: 'windowFront', window: settings.window };
+        }
+        inspectorOptions() {
+            return (client.describe?.windows ?? ['notes', 'comments', 'preview']).map((name) => ({
+                value: name,
+                label: name.charAt(0).toUpperCase() + name.slice(1)
+            }));
         }
     };
     return WindowFront = _classThis;

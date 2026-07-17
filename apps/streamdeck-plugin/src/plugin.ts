@@ -13,6 +13,11 @@ const client = new VideorcClient()
 
 type TitleRenderer = (state: RemoteState | null, connected: boolean) => string
 
+type InspectorOption = {
+  value: string
+  label: string
+}
+
 abstract class VideorcAction<TSettings extends JsonObject> extends SingletonAction<TSettings> {
   protected abstract renderTitle: TitleRenderer
   protected abstract intentFor(settings: TSettings, state: RemoteState | null): Record<
@@ -20,17 +25,43 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
     unknown
   > | null
 
+  constructor() {
+    super()
+    // Shared-client subscriptions live here, once per action CLASS —
+    // onWillAppear fires on every visibility change and would stack
+    // duplicate listeners (each refresh() would then run N times).
+    client.on('state', this.refresh)
+    client.on('connected', this.refresh)
+    client.on('describe', this.pushInspectorOptions)
+    client.on('disconnected', this.refresh)
+  }
+
   private refresh = (): void => {
     for (const visible of this.actions) {
       void visible.setTitle(this.renderTitle(client.state, client.connected))
     }
   }
 
+  private pushInspectorOptions = (): void => {
+    void streamDeck.ui.current?.sendToPropertyInspector({
+      event: 'videorc-options',
+      connected: client.connected,
+      options: this.inspectorOptions()
+    })
+  }
+
+  /** Options the property inspector offers for this action's setting. */
+  protected inspectorOptions(): InspectorOption[] {
+    return []
+  }
+
   override onWillAppear(ev: WillAppearEvent<TSettings>): void {
     void ev.action.setTitle(this.renderTitle(client.state, client.connected))
-    client.on('state', this.refresh)
-    client.on('connected', this.refresh)
-    client.on('disconnected', this.refresh)
+  }
+
+  /** The property inspector asks for options when it opens. */
+  override onSendToPlugin(): void {
+    this.pushInspectorOptions()
   }
 
   override async onKeyDown(ev: KeyDownEvent<TSettings>): Promise<void> {
@@ -43,7 +74,12 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
       await ev.action.showAlert()
       return
     }
-    client.sendIntent(intent)
+    // End-to-end truth: false covers backend rejection (debounce, invalid),
+    // renderer refusal ("Enable streaming first"), disconnects, and timeouts.
+    const ok = await client.sendIntent(intent)
+    if (!ok) {
+      await ev.action.showAlert()
+    }
   }
 }
 
@@ -90,6 +126,12 @@ class SceneApply extends VideorcAction<SceneSettings> {
     }
     return { kind: 'sceneApply', layoutPreset: settings.layoutPreset }
   }
+  protected override inspectorOptions(): InspectorOption[] {
+    return (client.describe?.layoutPresets ?? []).map((preset) => ({
+      value: preset,
+      label: preset
+    }))
+  }
 }
 
 type TakeoverSettings = { assetId?: string }
@@ -110,6 +152,12 @@ class TakeoverToggle extends VideorcAction<TakeoverSettings> {
     }
     return { kind: 'takeoverShow', assetId: settings.assetId }
   }
+  protected override inspectorOptions(): InspectorOption[] {
+    return (client.describe?.takeovers ?? []).map((takeover) => ({
+      value: takeover.id,
+      label: takeover.name
+    }))
+  }
 }
 
 type WindowSettings = { window?: 'notes' | 'comments' | 'preview' }
@@ -123,6 +171,12 @@ class WindowFront extends VideorcAction<WindowSettings> {
       return null
     }
     return { kind: 'windowFront', window: settings.window }
+  }
+  protected override inspectorOptions(): InspectorOption[] {
+    return (client.describe?.windows ?? ['notes', 'comments', 'preview']).map((name) => ({
+      value: name,
+      label: name.charAt(0).toUpperCase() + name.slice(1)
+    }))
   }
 }
 

@@ -13,8 +13,7 @@
 //
 // No recording is started: the intents exercised here are disk-free.
 
-import { existsSync, statSync, readFileSync } from 'node:fs'
-import { mkdtempSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import WebSocket from 'ws'
@@ -26,8 +25,7 @@ const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-remote-control-user-data-'))
 
 function fail(message) {
-  console.error(`remote-control smoke FAIL: ${message}`)
-  process.exit(1)
+  throw new Error(`remote-control smoke FAIL: ${message}`)
 }
 
 function connectRemote(host, port, token) {
@@ -206,7 +204,12 @@ try {
   if (existsSync(status.discoveryPath)) fail('discovery file still present after disable')
   console.log('remote-control smoke: PASS')
 } catch (error) {
-  fail(error instanceof Error ? (error.stack ?? error.message) : String(error))
+  console.error(error instanceof Error ? (error.stack ?? error.message) : String(error))
+  process.exitCode = 1
 } finally {
-  await stopApp()
+  try {
+    await stopApp()
+  } finally {
+    rmSync(userDataDir, { recursive: true, force: true })
+  }
 }

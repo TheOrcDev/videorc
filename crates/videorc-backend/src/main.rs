@@ -4069,12 +4069,14 @@ async fn await_websocket_stateful_barrier(
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteControlStatus {
     enabled: bool,
-    /// Full token — this RPC is renderer/admin-only; the renderer renders the
-    /// copy field + QR. Remote sockets can never call it.
+    /// Full token — this RPC (and the remote.control.status event) is
+    /// renderer/admin-only; the renderer renders the copy field + QR. Remote
+    /// sockets can never call it, and their locked included-event filter
+    /// (remote.state/remote.ack only) never relays the event to them.
     token: Option<String>,
     port: u16,
     connected_clients: usize,
@@ -4136,7 +4138,9 @@ fn enable_remote_control(state: &AppState) -> anyhow::Result<RemoteControlStatus
         crate::remote_control::persist_enabled(true, runtime.token.as_deref())?;
     }
     sync_remote_discovery_file(state)?;
-    Ok(remote_control_status(state))
+    let status = remote_control_status(state);
+    state.emit_event("remote.control.status", status.clone());
+    Ok(status)
 }
 
 fn disable_remote_control(state: &AppState) -> anyhow::Result<RemoteControlStatus> {
@@ -4153,7 +4157,9 @@ fn disable_remote_control(state: &AppState) -> anyhow::Result<RemoteControlStatu
     state
         .remote_generation
         .send_modify(|generation| *generation += 1);
-    Ok(remote_control_status(state))
+    let status = remote_control_status(state);
+    state.emit_event("remote.control.status", status.clone());
+    Ok(status)
 }
 
 fn regenerate_remote_control_token(state: &AppState) -> anyhow::Result<RemoteControlStatus> {
@@ -4171,7 +4177,9 @@ fn regenerate_remote_control_token(state: &AppState) -> anyhow::Result<RemoteCon
     state
         .remote_generation
         .send_modify(|generation| *generation += 1);
-    Ok(remote_control_status(state))
+    let status = remote_control_status(state);
+    state.emit_event("remote.control.status", status.clone());
+    Ok(status)
 }
 
 async fn ws_handler(
@@ -4341,11 +4349,27 @@ async fn websocket_session_with_handler_role_and_redaction(
         ConnectionEventFilter::default()
     }));
     let event_filter_for_events = event_filter.clone();
-    if role == BackendRole::Remote
-        && let Ok(mut runtime) = state.remote_control.lock()
-    {
-        runtime.connected_clients = runtime.connected_clients.saturating_add(1);
+    // Count Remote clients with a Drop guard: every exit path (early return on
+    // a failed ready send, read-loop break, panic) must decrement, and the
+    // count feeds Settings via remote.control.status — a leak shows users a
+    // phantom connected deck forever.
+    struct RemoteClientCountGuard(AppState);
+    impl Drop for RemoteClientCountGuard {
+        fn drop(&mut self) {
+            if let Ok(mut runtime) = self.0.remote_control.lock() {
+                runtime.connected_clients = runtime.connected_clients.saturating_sub(1);
+            }
+            self.0
+                .emit_event("remote.control.status", remote_control_status(&self.0));
+        }
     }
+    let _remote_client_guard = (role == BackendRole::Remote).then(|| {
+        if let Ok(mut runtime) = state.remote_control.lock() {
+            runtime.connected_clients = runtime.connected_clients.saturating_add(1);
+        }
+        state.emit_event("remote.control.status", remote_control_status(&state));
+        RemoteClientCountGuard(state.clone())
+    });
 
     let writer_task = tokio::spawn(run_websocket_writer(
         sender,
@@ -4484,11 +4508,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     // Every command read from the socket is accepted work. Closing this
     // connection stops new intake, but the detached dispatcher drains the
     // accepted queue so native/source mutations are never canceled halfway.
-    if role == BackendRole::Remote
-        && let Ok(mut runtime) = state.remote_control.lock()
-    {
-        runtime.connected_clients = runtime.connected_clients.saturating_sub(1);
-    }
+    // (Remote client count is decremented by RemoteClientCountGuard's Drop.)
     drop(command_tx);
     drop(command_dispatcher_task);
     event_task.abort();

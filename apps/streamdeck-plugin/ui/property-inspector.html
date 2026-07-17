@@ -1,0 +1,191 @@
+<!doctype html>
+<!--
+  Shared property inspector for the three setting-backed Videorc actions
+  (scene-apply, takeover-toggle, window-front). No external dependencies:
+  it speaks the Stream Deck property-inspector WebSocket protocol directly
+  and asks the plugin (sendToPlugin) for live options from Videorc's
+  remote.describe projection.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Videorc</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        padding: 10px 12px;
+        background: #2d2d2d;
+        color: #d8d8d8;
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        font-size: 12px;
+      }
+      label {
+        display: block;
+        margin: 0 0 4px;
+        color: #969696;
+      }
+      select,
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px 8px;
+        border: 1px solid #3d3d3d;
+        border-radius: 5px;
+        background: #3d3d3d;
+        color: #d8d8d8;
+        font-size: 12px;
+      }
+      select:focus,
+      input:focus {
+        outline: 1px solid #0078ff;
+      }
+      .hint {
+        margin: 8px 0 0;
+        color: #969696;
+      }
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <label id="field-label" for="value-select"></label>
+    <select id="value-select" class="hidden"></select>
+    <input id="value-input" class="hidden" type="text" autocomplete="off" spellcheck="false" />
+    <p class="hint" id="hint"></p>
+
+    <script>
+      // Per-action field wiring: which settings key this inspector edits.
+      const FIELDS = {
+        'com.videorc.streamdeck.scene-apply': {
+          key: 'layoutPreset',
+          label: 'Layout preset',
+          hint: 'Presets come from Videorc while it is running.'
+        },
+        'com.videorc.streamdeck.takeover-toggle': {
+          key: 'assetId',
+          label: 'Takeover',
+          hint: 'Your saved takeover screens (BRB, starting soon).'
+        },
+        'com.videorc.streamdeck.window-front': {
+          key: 'window',
+          label: 'Window',
+          hint: 'Which window the key brings to the front.'
+        }
+      }
+
+      let websocket = null
+      let pluginUUID = null
+      let actionUUID = null
+      let field = null
+      let currentValue = ''
+
+      const labelEl = document.getElementById('field-label')
+      const selectEl = document.getElementById('value-select')
+      const inputEl = document.getElementById('value-input')
+      const hintEl = document.getElementById('hint')
+
+      function send(payload) {
+        if (websocket && websocket.readyState === WebSocket.OPEN) {
+          websocket.send(JSON.stringify(payload))
+        }
+      }
+
+      function saveValue(value) {
+        currentValue = value
+        const settings = {}
+        settings[field.key] = value
+        send({ event: 'setSettings', context: pluginUUID, payload: settings })
+      }
+
+      function renderOptions(options, connected) {
+        if (Array.isArray(options) && options.length > 0) {
+          selectEl.classList.remove('hidden')
+          inputEl.classList.add('hidden')
+          selectEl.innerHTML = ''
+          const placeholder = document.createElement('option')
+          placeholder.value = ''
+          placeholder.textContent = 'Choose…'
+          selectEl.appendChild(placeholder)
+          for (const option of options) {
+            const el = document.createElement('option')
+            el.value = option.value
+            el.textContent = option.label
+            selectEl.appendChild(el)
+          }
+          selectEl.value = currentValue
+          hintEl.textContent = field.hint
+          return
+        }
+        // No live options (Videorc closed or Remote Control off): keep the
+        // key configurable with a plain text value instead of a dead end.
+        selectEl.classList.add('hidden')
+        inputEl.classList.remove('hidden')
+        inputEl.value = currentValue
+        hintEl.textContent = connected
+          ? field.hint
+          : 'Open Videorc and enable Settings → Remote control to pick from a list.'
+      }
+
+      selectEl.addEventListener('change', () => saveValue(selectEl.value))
+      inputEl.addEventListener('change', () => saveValue(inputEl.value.trim()))
+
+      // Stream Deck calls this global with connection + action context.
+      window.connectElgatoStreamDeckSocket = function (
+        inPort,
+        inPropertyInspectorUUID,
+        inRegisterEvent,
+        inInfo,
+        inActionInfo
+      ) {
+        pluginUUID = inPropertyInspectorUUID
+        const actionInfo = JSON.parse(inActionInfo)
+        actionUUID = actionInfo.action
+        field = FIELDS[actionUUID] || { key: 'value', label: 'Value', hint: '' }
+        currentValue = String((actionInfo.payload?.settings ?? {})[field.key] ?? '')
+        labelEl.textContent = field.label
+        renderOptions([], false)
+
+        websocket = new WebSocket('ws://127.0.0.1:' + inPort)
+        websocket.onopen = () => {
+          send({ event: inRegisterEvent, uuid: inPropertyInspectorUUID })
+          // Ask the plugin for live options from Videorc's describe payload.
+          send({
+            event: 'sendToPlugin',
+            action: actionUUID,
+            context: inPropertyInspectorUUID,
+            payload: { request: 'options' }
+          })
+        }
+        websocket.onmessage = (raw) => {
+          let message
+          try {
+            message = JSON.parse(raw.data)
+          } catch {
+            return
+          }
+          if (!message || typeof message !== 'object') {
+            return
+          }
+          if (message.event === 'sendToPropertyInspector') {
+            const payload = message.payload || {}
+            if (payload.event === 'videorc-options') {
+              renderOptions(payload.options, payload.connected === true)
+            }
+            return
+          }
+          if (message.event === 'didReceiveSettings') {
+            const settings = message.payload?.settings ?? {}
+            currentValue = String(settings[field.key] ?? '')
+            selectEl.value = currentValue
+            inputEl.value = currentValue
+          }
+        }
+      }
+    </script>
+  </body>
+</html>

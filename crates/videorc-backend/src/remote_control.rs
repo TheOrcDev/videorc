@@ -214,13 +214,28 @@ pub fn write_discovery(path: &Path, host: &str, port: u16, token: &str) -> Resul
         token,
         protocol: 1,
     })?;
-    std::fs::write(path, body).with_context(|| format!("Could not write {}", path.display()))?;
+    // The file must be born 0600 — a create-then-chmod sequence leaves a
+    // umask-dependent window where another local user could read the token.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("Could not write {}", path.display()))?;
+        file.write_all(&body)
+            .with_context(|| format!("Could not write {}", path.display()))?;
+        // mode() only applies at creation; tighten a pre-existing file too.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("Could not restrict permissions on {}", path.display()))?;
     }
+    // Windows: %APPDATA% files inherit the user profile's private ACL.
+    #[cfg(not(unix))]
+    std::fs::write(path, body).with_context(|| format!("Could not write {}", path.display()))?;
     Ok(())
 }
 

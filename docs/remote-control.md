@@ -70,6 +70,12 @@ Intent params (`kind` + fields):
 - `remote.ack` — `{ intentId, ok, message? }` after the renderer executed
   (or refused) an accepted intent.
 
+Renderer/admin sockets (never remote sockets — their event filter is locked
+to the two events above) additionally receive `remote.control.status` —
+`{ enabled, token, port, connectedClients, discoveryPath }` — on every
+enable/disable/regenerate and on each remote client connect/disconnect, so
+UI surfaces track the remote-control state without polling.
+
 ## Gates
 
 `pnpm smoke:remote-control` (part of `smoke:local-gates`) drives the real

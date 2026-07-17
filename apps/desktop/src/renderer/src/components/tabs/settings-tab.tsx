@@ -116,18 +116,20 @@ export function SettingsTab({
     return () => window.removeEventListener('focus', onFocus)
   }, [refreshBackend])
 
-  const [remoteStatus, setRemoteStatus] = useState<RemoteControlStatus | null>(null)
+  // Remote-control status is pushed into the studio context by the backend
+  // (remote.control.status events) — this tab only renders it and fires
+  // actions; the switch settles when the backend confirms.
+  const remoteStatus = remoteControl.status
   const [remotePending, setRemotePending] = useState(false)
-  useEffect(() => {
-    void remoteControl.getStatus().then(setRemoteStatus)
-  }, [remoteControl])
-  const runRemoteAction = (action: () => Promise<RemoteControlStatus | null>): void => {
+  const runRemoteAction = async (
+    action: () => Promise<RemoteControlStatus | null>
+  ): Promise<void> => {
     setRemotePending(true)
-    void action()
-      .then((status) => {
-        if (status) setRemoteStatus(status)
-      })
-      .finally(() => setRemotePending(false))
+    try {
+      await action()
+    } finally {
+      setRemotePending(false)
+    }
   }
 
   const accessRows = systemAccessRows({
@@ -368,7 +370,7 @@ export function SettingsTab({
               checked={remoteStatus?.enabled ?? false}
               disabled={remotePending}
               onCheckedChange={(checked) =>
-                runRemoteAction(checked ? remoteControl.enable : remoteControl.disable)
+                void runRemoteAction(checked ? remoteControl.enable : remoteControl.disable)
               }
             />
           }
@@ -404,7 +406,7 @@ export function SettingsTab({
                     disabled={remotePending}
                     size="sm"
                     variant="outline"
-                    onClick={() => runRemoteAction(remoteControl.regenerate)}
+                    onClick={() => void runRemoteAction(remoteControl.regenerate)}
                   >
                     Regenerate
                   </Button>

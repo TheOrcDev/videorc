@@ -20,7 +20,7 @@ export interface RemoteState {
   micMuted?: boolean
   layoutPreset?: string
   activeTakeoverId?: string | null
-  windows?: { notes?: boolean; preview?: boolean }
+  windows?: { notes?: boolean; comments?: boolean; preview?: boolean }
 }
 
 export interface RemoteDescribe {
@@ -37,6 +37,9 @@ interface Discovery {
 }
 
 const RECONNECT_DELAY_MS = 2_000
+/** An intent that neither acked nor failed within this window counts as
+ * failed — the deck key must never hang waiting for feedback. */
+const INTENT_ACK_TIMEOUT_MS = 5_000
 
 export function defaultDiscoveryPath(): string {
   if (process.platform === 'darwin') {
@@ -85,6 +88,10 @@ export class VideorcClient extends EventEmitter {
   private nextRequestId = 0
   private reconnectTimer: NodeJS.Timeout | null = null
   private stopped = false
+  /** Intent sends awaiting their ServerResponse, keyed by request id. */
+  private pendingRequests = new Map<string, (ok: boolean) => void>()
+  /** Admitted intents awaiting the renderer's remote.ack, keyed by intentId. */
+  private pendingAcks = new Map<string, (ok: boolean) => void>()
 
   constructor(private readonly discoveryPath: string = defaultDiscoveryPath()) {
     super()
@@ -105,18 +112,43 @@ export class VideorcClient extends EventEmitter {
     this.ws = null
   }
 
-  sendIntent(intent: Record<string, unknown>): void {
+  /**
+   * Resolves with the END-TO-END outcome: false when the backend rejects the
+   * intent (invalid, debounced, remote control unavailable), when the
+   * renderer's ack reports failure, on disconnect, or on timeout. Deck keys
+   * render the result — a rejected press must never look like success.
+   */
+  sendIntent(intent: Record<string, unknown>): Promise<boolean> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      return
+      return Promise.resolve(false)
     }
     this.nextRequestId += 1
+    const requestId = `sd-${this.nextRequestId}`
+    const result = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => settle(false), INTENT_ACK_TIMEOUT_MS)
+      const settle = (ok: boolean): void => {
+        clearTimeout(timer)
+        this.pendingRequests.delete(requestId)
+        resolve(ok)
+      }
+      this.pendingRequests.set(requestId, settle)
+    })
     this.ws.send(
       JSON.stringify({
-        id: `sd-${this.nextRequestId}`,
+        id: requestId,
         method: 'remote.intent',
         params: intent
       })
     )
+    return result
+  }
+
+  private settleAllPending(ok: boolean): void {
+    for (const settle of [...this.pendingRequests.values(), ...this.pendingAcks.values()]) {
+      settle(ok)
+    }
+    this.pendingRequests.clear()
+    this.pendingAcks.clear()
   }
 
   private connect(): void {
@@ -135,21 +167,57 @@ export class VideorcClient extends EventEmitter {
       ws.send(JSON.stringify({ id: `sd-${this.nextRequestId}`, method: 'remote.describe' }))
     })
     ws.on('message', (raw) => {
-      let message: {
-        event?: string
-        payload?: { describe?: RemoteDescribe; state?: RemoteState } & Record<string, unknown>
-      }
+      let parsed: unknown
       try {
-        message = JSON.parse(String(raw))
+        parsed = JSON.parse(String(raw))
       } catch {
         return
+      }
+      // JSON.parse('null') succeeds; anything non-object would throw below
+      // and take the plugin process down with it.
+      if (typeof parsed !== 'object' || parsed === null) {
+        return
+      }
+      const message = parsed as {
+        id?: string
+        ok?: boolean
+        event?: string
+        payload?: {
+          describe?: RemoteDescribe
+          state?: RemoteState
+          intentId?: string
+          accepted?: boolean
+          ok?: boolean
+        } & Record<string, unknown>
       }
       if (message.event === 'remote.state') {
         this.state = message.payload as RemoteState
         this.emit('state', this.state)
         return
       }
-      // Request responses carry `payload` (ServerResponse shape).
+      // The renderer executed (or refused) an admitted intent.
+      if (message.event === 'remote.ack') {
+        const intentId = message.payload?.intentId
+        if (intentId) {
+          this.pendingAcks.get(intentId)?.(message.payload?.ok === true)
+          this.pendingAcks.delete(intentId)
+        }
+        return
+      }
+      // ServerResponse shape: {id, ok, payload}. Settle intent sends: a
+      // rejected admission fails now; an accepted one waits for remote.ack.
+      if (message.id && this.pendingRequests.has(message.id)) {
+        const settle = this.pendingRequests.get(message.id)
+        if (message.ok === false || message.payload?.accepted === false || !settle) {
+          settle?.(false)
+        } else if (message.payload?.intentId) {
+          this.pendingRequests.delete(message.id)
+          this.pendingAcks.set(message.payload.intentId, settle)
+        } else {
+          settle(true)
+        }
+        return
+      }
       if (message.payload?.describe !== undefined || message.payload?.state !== undefined) {
         if (message.payload.describe) {
           this.describe = message.payload.describe
@@ -164,6 +232,7 @@ export class VideorcClient extends EventEmitter {
     const onGone = (): void => {
       if (this.ws === ws) {
         this.ws = null
+        this.settleAllPending(false)
         if (this.connected) {
           this.connected = false
           this.emit('disconnected')
