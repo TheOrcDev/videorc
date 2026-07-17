@@ -54,6 +54,64 @@ interface HighRiskContractFixtures {
     deleteParams: BackendRpcParams<'sessions.delete'>
     deletionOperation: SessionDeletionOperation
   }
+  mediaPolicyProfile: {
+    wire: {
+      requested: {
+        intent: string
+        requested: {
+          capture: string
+          audio: string
+          compositor: string
+          preview: string
+          recordingEncoder: string
+          streamingEncoder: string
+          benchmarkRecommendation?: string
+        }
+      }
+      selected: {
+        capture: string
+        audio: string
+        compositor: string
+        preview: string
+        recordingEncoder: string
+        streamingEncoder: string
+        benchmarkRecommendation?: string
+      }
+      fallbackMode: string
+      capabilityVerdict: string
+      observedRuntimePath: string
+      hardwareFingerprint: string
+      benchmarkRecommendation?: string
+    }
+    normalized: {
+      requested: {
+        intent: string
+        requested: {
+          capture: string
+          audio: string
+          compositor: string
+          preview: string
+          recordingEncoder: string
+          streamingEncoder: string
+          benchmarkRecommendation?: string
+        }
+      }
+      selected: {
+        capture: string
+        audio: string
+        compositor: string
+        preview: string
+        recordingEncoder: string
+        streamingEncoder: string
+        benchmarkRecommendation?: string
+      }
+      fallbackMode: string
+      capabilityVerdict: string
+      observedRuntimePath: string
+      hardwareFingerprint: string
+      benchmarkRecommendation?: string
+    }
+  }
 }
 
 const fixtures = JSON.parse(
@@ -153,5 +211,62 @@ describe('shared high-risk protocol fixture', () => {
         [fixtures.comments.deletionOperation]
       )
     }
+  })
+
+  it('normalizes Linux media policy from wire fixture before session start', () => {
+    const base = {
+      sources: {
+        screenId: 'screen-1',
+        cameraId: 'camera-1',
+        microphoneId: 'microphone-1',
+        testPattern: false
+      },
+      layout: {
+        layoutPreset: 'screen-camera',
+        cameraTransformMode: 'preset',
+        cameraTransform: null,
+        cameraCorner: 'bottom-right',
+        cameraSize: 'medium',
+        cameraShape: 'rectangle',
+        cameraCornerRadiusPct: 12,
+        cameraAspect: 'source',
+        cameraMargin: 32,
+        cameraFit: 'fill',
+        cameraMirror: false,
+        cameraZoom: 100,
+        cameraOffsetX: 0,
+        cameraOffsetY: 0,
+        sideBySideSplit: '70-30',
+        sideBySideCameraSide: 'right'
+      },
+      output: {
+        recordEnabled: true,
+        streamEnabled: false,
+        video: {
+          preset: 'record-1080p60',
+          width: 1920,
+          height: 1080,
+          fps: 60,
+          bitrateKbps: 8000
+        },
+        rtmp: {
+          preset: 'youtube',
+          serverUrl: 'https://localhost.local/stream',
+          streamKey: 'abc'
+        }
+      }
+    }
+
+    expect(
+      jsonShape(
+        validateBackendRpcParams('session.start', {
+          ...base,
+          mediaPolicy: fixtures.mediaPolicyProfile.normalized
+        } as never)
+      )
+    ).toEqual({
+      ...base,
+      mediaPolicy: fixtures.mediaPolicyProfile.normalized
+    })
   })
 })

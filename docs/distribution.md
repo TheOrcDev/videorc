@@ -217,6 +217,37 @@ A distributable macOS build still needs:
 
 Electron Builder's [macOS docs](https://www.electron.build/docs/mac) describe hardened runtime, entitlements, and notarization requirements. Electron's [code signing guide](https://www.electronjs.org/docs/latest/tutorial/code-signing) explains why distributed macOS apps need signing and notarization.
 
+## Linux Distribution Channel
+
+Linux uses workflow-produced artifacts only; this keeps your Debian laptop out of
+the build path.
+
+- `.github/workflows/linux.yml`:
+  - runs Rust + JS gates,
+  - builds a `.deb` on PR and `main`,
+  - validates `build-info.json`, `linux-capabilities.json`, `THIRD-PARTY-NOTICES.txt`,
+    and checksums,
+  - uploads PR preview artifacts to `Actions -> Artifacts`, and
+  - publishes/refreshes the rolling `linux-main` GitHub prerelease on `main`.
+- `.github/workflows/release-linux.yml`:
+  - runs full Linux gates for `v*` tags,
+  - uploads the same Linux artifact set,
+  - creates an immutable GitHub Release for that tag.
+- `.github/workflows/upstream-sync.yml`:
+  - creates or refreshes an upstream sync PR instead of fast-forwarding `main`
+    directly from the scheduled job.
+
+Linux install/update/rollback evidence on real hardware should be produced from:
+
+```sh
+pnpm acceptance:linux:verify -- docs/acceptance/artifacts/linux/YYYY-MM-DD/manifest.json
+pnpm release:validate:linux
+pnpm smoke:packaged:linux:health
+```
+
+Until installable Linux snapshots are fully signed/reviewed, the first acceptance
+checkpoint is checksum-verified install, process cleanup verification, and a real-device smoke pass.
+
 ## Clean-Machine Release Candidate Checklist
 
 Run this only with a signed and notarized release artifact. Use

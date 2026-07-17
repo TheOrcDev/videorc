@@ -1,0 +1,148 @@
+name: Release Linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: 'Optional release id written into build metadata'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-linux-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-linux:
+    name: Linux release build and upload candidates
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run full Linux gates
+        run: |
+          cargo fmt --check --all
+          cargo audit --deny warnings
+          cargo clippy -p videorc-backend -- -D warnings
+          cargo test -p videorc-backend
+          pnpm audit:js
+          pnpm format:check
+          pnpm typecheck
+          pnpm --filter @videorc/desktop test
+
+      - name: Build signed Linux package
+        env:
+          VIDEORC_BUNDLED_FFMPEG_PATH: vendor/ffmpeg/current/bin/ffmpeg
+          VIDEORC_BUNDLED_FFPROBE_PATH: vendor/ffmpeg/current/bin/ffprobe
+          VIDEORC_BUNDLED_LICENSE_PATH: vendor/ffmpeg/current/LICENSE.txt
+          RELEASE_ID: ${{ github.event.inputs.release_id }}
+        run: pnpm dist:desktop:linux
+
+      - name: Generate release metadata
+        run: |
+          DEB_PATH=$(ls apps/desktop/release/*.deb | head -n 1)
+          node scripts/build-linux-build-info.mjs "$DEB_PATH" apps/desktop/release/build-info.json
+          node scripts/validate-linux-artifacts.mjs apps/desktop/release
+
+      - name: Release artifact smoke (Linux packaged health)
+        env:
+          VIDEORC_PACKAGED_APP_EXECUTABLE: apps/desktop/release/linux-unpacked/videorc
+          VIDEORC_SMOKE_FFPROBE_PATH: vendor/ffmpeg/current/bin/ffprobe
+        run: pnpm smoke:packaged:linux:health
+
+      - name: Generate Linux artifact metadata
+        run: |
+          DEB_PATH=$(ls apps/desktop/release/*.deb | head -n 1)
+          node scripts/build-linux-capabilities.mjs "$DEB_PATH" apps/desktop/release/linux-capabilities.json
+          node scripts/build-linux-notices.mjs apps/desktop/release/THIRD-PARTY-NOTICES.txt
+
+      - name: Upload Linux release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: videorc-linux-release-${{ github.run_id }}
+          path: |
+            apps/desktop/release/*.deb
+            apps/desktop/release/*.sha256
+            apps/desktop/release/build-info.json
+            apps/desktop/release/linux-capabilities.json
+            apps/desktop/release/THIRD-PARTY-NOTICES.txt
+          if-no-files-found: error
+          retention-days: 60
+
+      - name: Build Linux release notes
+        id: release-notes
+        run: |
+          mkdir -p /tmp/videorc-linux-release
+          NOTES=/tmp/videorc-linux-release/notes.md
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -n "$LAST_TAG" ]; then
+            RANGE="$LAST_TAG..${GITHUB_SHA}"
+          else
+            RANGE="${GITHUB_SHA}"
+          fi
+          {
+            echo "# Linux release ${{ github.ref_name }}${{ github.event.inputs.release_id != '' && format(' (%s)', github.event.inputs.release_id) || '' }}"
+            echo
+            echo "- Commit: ${{ github.sha }}"
+            echo "- Ref: ${{ github.ref }}"
+            echo "- Actor: ${{ github.actor }}"
+            echo "- Channel: tagged release"
+            echo
+            echo "## Commit / PR changes"
+            git log --no-merges --pretty=format:'- %h %s' "$RANGE"
+            echo
+            echo "## Artifact checksums"
+            sha256sum apps/desktop/release/*.deb apps/desktop/release/*.sha256
+          } > "$NOTES"
+          echo "notes_path=$NOTES" >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable Linux release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          NOTES_PATH="${{ steps.release-notes.outputs.notes_path }}"
+          if gh release view "$TAG_NAME" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "release exists for $TAG_NAME; refusing to overwrite for immutable release policy"
+            exit 1
+          fi
+          gh release create "$TAG_NAME" \
+            --repo "${{ github.repository }}" \
+            --notes-file "$NOTES_PATH" \
+            --title "Linux ${{ github.ref_name }}" \
+            --target "$GITHUB_SHA" \
+            --prerelease=false \
+            apps/desktop/release/*.deb \
+            apps/desktop/release/*.sha256 \
+            apps/desktop/release/build-info.json \
+            apps/desktop/release/linux-capabilities.json \
+            apps/desktop/release/THIRD-PARTY-NOTICES.txt

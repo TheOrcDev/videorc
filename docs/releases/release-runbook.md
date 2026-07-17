@@ -1,9 +1,12 @@
-# Releasing Videorc (macOS beta) — Runbook
+# Releasing Videorc (macOS beta + Debian Linux) — Runbook
 
 How to cut a new version and make existing users auto-update to it. This is the
 repeatable per-release process. For one-time signing setup see
 [macos-signing.md](macos-signing.md); for the broader packaging reference see
 [../distribution.md](../distribution.md).
+
+Linux uses GitHub-hosted build jobs and publishes Debian `.deb` releases to
+GitHub Releases instead of web auto-update.
 
 ## What a release is
 
@@ -81,6 +84,48 @@ pnpm release:upload:preflight:macos
 pnpm release:upload:macos       # uploads dmg + sha + release.json + latest-mac.yml + zip + blockmap
                                 # + the compiled changelog -> changelog/changelog.json
 ```
+
+### Linux release candidate/release path
+
+Linux artifacts are built and released via GitHub workflows:
+
+- `pull_request`: preview `.deb` artifacts to Actions
+- `main`: rolling prerelease `linux-main`
+- `tag v*`: immutable `Linux` GitHub Release
+- scheduled/dispatch: upstream sync branch updates
+
+For Linux release candidates, keep secrets out of PR context and trigger a manual
+workflow dispatch on `release-linux.yml` only from trusted branches:
+
+```sh
+cd ~/projects/videorc
+
+# Dry-run workflow + main branch gate check
+gh workflow run release-linux.yml --repo oladapodev/videorc -f release_id="linux-$(date +%Y%m%d-%H%M)"
+
+# For a tagged immutable release candidate (same command path as production tags):
+# (replace 0.0.0 with the intended desktop version, keep a unique suffix)
+git tag -a v0.0.0-linux.1 -m "Linux release"
+git push --tags
+```
+
+For tagged Linux releases, `release-linux.yml` should:
+
+1. Run Linux gates (`fmt`, `lint`, `typecheck`, tests, smoke)
+2. Build the `.deb`
+3. Write and validate `build-info.json`, `linux-capabilities.json`,
+   `THIRD-PARTY-NOTICES.txt`
+4. Attach checksums and release metadata
+5. Create an immutable release entry only if absent
+
+When creating the release note, include:
+
+- commit list for the tag range
+- PR intent references when available
+- full provenance and capability summary
+
+The release is considered valid only if `gh release view <tag>` shows the
+artifact URLs and each artifact URL downloads successfully.
 
 `release:upload:macos` fails closed if the feed files are missing,
 `latest-mac.yml` points at a stale zip, or there is no valid

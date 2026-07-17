@@ -119,6 +119,29 @@ win:
     - dir
     - nsis
 
+linux:
+  icon: build-resources/icon.icns
+  category: AudioVideo
+  executableName: videorc
+  target:
+    - target: deb
+      arch:
+        - x64
+  extraResources:
+    - from: ../../target/release/videorc-backend
+      to: videorc-backend
+      filter:
+        - videorc-backend
+    - from: ../../vendor/ffmpeg/current
+      to: ffmpeg
+      filter:
+        - bin/ffmpeg
+        - bin/ffprobe
+        - LICENSE.txt
+        - SOURCE.txt
+        - BUILD-CONFIG.txt
+        - licenses/**/*
+
 nsis:
   oneClick: false
   perMachine: false

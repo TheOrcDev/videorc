@@ -235,5 +235,61 @@
       "pathCount": 2,
       "blockedPathCount": 0
     }
+  },
+  "mediaPolicyProfile": {
+    "wire": {
+      "requested": {
+        "intent": "automatic",
+        "requested": {
+          "capture": "pipewire-portal",
+          "audio": "pipewire",
+          "compositor": "automatic",
+          "preview": "automatic",
+          "recordingEncoder": "automatic",
+          "streamingEncoder": "automatic"
+        }
+      },
+      "selected": {
+        "capture": "pipewire-portal",
+        "audio": "pipewire",
+        "compositor": "automatic",
+        "preview": "native-wgpu",
+        "recordingEncoder": "h264-vaapi",
+        "streamingEncoder": "libx264",
+        "benchmarkRecommendation": "balanced"
+      },
+      "fallbackMode": "safe-auto",
+      "capabilityVerdict": "supported",
+      "observedRuntimePath": "linux::main-session-v1",
+      "hardwareFingerprint": "intel-haswell-i965",
+      "benchmarkRecommendation": "balanced"
+    },
+    "normalized": {
+      "requested": {
+        "intent": "automatic",
+        "requested": {
+          "capture": "pipewire-portal",
+          "audio": "pipewire",
+          "compositor": "automatic",
+          "preview": "automatic",
+          "recordingEncoder": "automatic",
+          "streamingEncoder": "automatic"
+        }
+      },
+      "selected": {
+        "capture": "pipewire-portal",
+        "audio": "pipewire",
+        "compositor": "automatic",
+        "preview": "native-wgpu",
+        "recordingEncoder": "h264-vaapi",
+        "streamingEncoder": "libx264",
+        "benchmarkRecommendation": "balanced"
+      },
+      "fallbackMode": "safe-auto",
+      "capabilityVerdict": "supported",
+      "observedRuntimePath": "linux::main-session-v1",
+      "hardwareFingerprint": "intel-haswell-i965",
+      "benchmarkRecommendation": "balanced"
+    }
   }
 }

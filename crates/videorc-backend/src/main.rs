@@ -26,6 +26,7 @@ mod live_layout;
 mod live_pipeline;
 mod live_render;
 mod live_scene;
+mod media_policy;
 mod metal_compositor;
 mod mpeg_ts;
 mod native_preview_host;

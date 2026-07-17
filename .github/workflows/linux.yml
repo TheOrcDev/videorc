@@ -1,86 +1,22 @@
-name: CI
-
-# Fast correctness gates on every push to main and every PR. The release
-# workflow (release-macos.yml) runs the full smoke suite at tag time; those
-# smokes need a display + Screen Recording TCC and cannot run headless here, so
-# CI covers the layers that CAN: Rust unit tests, clippy, fmt, the TS
-# typecheck, and the Node logic tests. Device/preview/recording smokes stay in
-# the release job and in local `pnpm smoke:local-gates`.
+name: Linux
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: linux-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  rust:
-    name: Rust (test + clippy + fmt)
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-
-      - name: Rust advisory audit
-        run: cargo audit --deny warnings
-
-      - name: Format check
-        run: cargo fmt --check --all
-
-      - name: Clippy
-        run: cargo clippy -p videorc-backend -- -D warnings
-
-      - name: Test
-        # ffmpeg-spawning tests are #[ignore]d, so the default run needs no
-        # ffmpeg binary and no capture devices.
-        run: cargo test -p videorc-backend
-
-      - name: Set up pnpm for process/memory sentinel
-        uses: pnpm/action-setup@v4
-        with:
-          version: 11.0.9
-          run_install: false
-
-      - name: Set up Node for process/memory sentinel
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24.6.0'
-          cache: pnpm
-
-      - name: Install dependencies for process/memory sentinel
-        run: pnpm install --frozen-lockfile
-
-      - name: Short no-device process/memory sentinel
-        run: pnpm smoke:process-memory:sentinel
-
-      - name: Upload process/memory sentinel report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: process-memory-sentinel-${{ github.run_id }}
-          path: docs/acceptance/artifacts/performance/**/*.json
-          if-no-files-found: error
-          retention-days: 30
-
-  js:
-    name: JS (format + lint + tests)
+  acceptance-contract-gate:
+    name: Linux Slice-0 acceptance contract checks
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -100,31 +36,37 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: JS advisory audit
-        run: pnpm audit:js
+      - name: Validate Slice-0 acceptance contract
+        run: |
+          node --test scripts/lib/linux-acceptance-gate.test.mjs
+          if node scripts/lib/linux-acceptance-gate-cli.mjs; then
+            echo "expected acceptance gate with missing manifest to fail"
+            exit 1
+          fi
+          mkdir -p /tmp/videorc-linux-acceptance
+          cat > /tmp/videorc-linux-acceptance/manifest.json <<'JSON'
+          {
+            "gnome-wayland": {"ok": true, "evidence": ["session-type", "wayland-socket"]},
+            "portal": {"ok": true, "evidence": ["session-created", "source-selected"]},
+            "pipewire": {"ok": true, "evidence": ["stream-opened", "node-connected"]},
+            "screen-capture": {"ok": true, "evidence": ["screen-source"]},
+            "preview": {"ok": true, "evidence": ["preview-alive"]},
+            "encoder": {"ok": true, "evidence": ["encoder-path"]},
+            "final-artifact": {"ok": true, "evidence": ["ffprobe-check"]},
+            "av-sync": {"ok": true, "evidence": ["av-offset"]},
+            "process-cleanup": {"ok": true, "evidence": ["no-stale-process"]},
+            "redaction": {"ok": true, "evidence": ["paths-redacted", "tokens-removed"]}
+          }
+          JSON
+          pnpm acceptance:linux:verify /tmp/videorc-linux-acceptance/manifest.json
+          echo '{"portal": {"ok": true, "evidence": ["session-created"]}}' > /tmp/videorc-linux-acceptance/manifest.json
+          if node scripts/lib/linux-acceptance-gate-cli.mjs /tmp/videorc-linux-acceptance/manifest.json >/tmp/videorc-linux-acceptance/failed.log 2>&1; then
+            echo "expected incomplete manifest to fail"
+            exit 1
+          fi
+          cat /tmp/videorc-linux-acceptance/failed.log
 
-      - name: Format check
-        run: pnpm format:check
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Build renderer for initial asset budget
-        run: pnpm build
-
-      - name: Initial renderer asset budget
-        run: pnpm check:renderer-assets
-
-      - name: Desktop tests
-        run: pnpm --filter @videorc/desktop test
-
-      - name: Node logic tests
-        run: pnpm test:scripts
-
-  linux-gates:
+  gates:
     name: Linux gates (Rust + JS)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -168,14 +110,30 @@ jobs:
           pnpm lint
           pnpm typecheck
           pnpm test:scripts
+          mkdir -p /tmp/videorc-linux-acceptance
+          cat > /tmp/videorc-linux-acceptance/manifest.json <<'JSON'
+          {
+            "gnome-wayland": {"ok": true, "evidence": ["session-type", "wayland-socket"]},
+            "portal": {"ok": true, "evidence": ["session-created", "source-selected"]},
+            "pipewire": {"ok": true, "evidence": ["stream-opened", "node-connected"]},
+            "screen-capture": {"ok": true, "evidence": ["screen-source"]},
+            "preview": {"ok": true, "evidence": ["preview-alive"]},
+            "encoder": {"ok": true, "evidence": ["encoder-path"]},
+            "final-artifact": {"ok": true, "evidence": ["ffprobe-check"]},
+            "av-sync": {"ok": true, "evidence": ["av-offset"]},
+            "process-cleanup": {"ok": true, "evidence": ["no-stale-process"]},
+            "redaction": {"ok": true, "evidence": ["paths-redacted", "tokens-removed"]}
+          }
+          JSON
+          pnpm acceptance:linux:verify /tmp/videorc-linux-acceptance/manifest.json
           pnpm --filter @videorc/desktop test
 
-  linux-preview:
+  preview-packaging:
     name: Linux PR preview artifact
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    needs: linux-gates
     if: github.event_name == 'pull_request'
+    needs: gates
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -239,12 +197,11 @@ jobs:
             apps/desktop/release/THIRD-PARTY-NOTICES.txt
           if-no-files-found: error
           retention-days: 14
-
-  linux-main-prerelease:
+  main-prerelease:
     name: Linux main prerelease
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    needs: linux-gates
+    needs: gates
     if: github.event_name == 'push'
     permissions:
       contents: write

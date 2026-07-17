@@ -11,6 +11,7 @@ vendor/ffmpeg/current/
 vendor/ffmpeg/macos-*/
 vendor/ffmpeg/windows-x64/
 docs/acceptance/artifacts/
+docs/acceptance/artifacts/linux/
 
 .DS_Store
 *.log
