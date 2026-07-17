@@ -5,6 +5,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { successfulLiveCommandReplies } from './lib/live-audio-control-protocol.mjs'
+
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const productionStatsPeriodSeconds = 2
 const productionReplyTimeoutMs = 5000
@@ -49,7 +51,7 @@ try {
   )
   const { stderr, acknowledgements } = await runLiveAudioControlProbe()
   const acknowledgementLatencyMs = acknowledgements.map(({ latencyMs }) => latencyMs)
-  const successfulReplies = stderr.match(/Command reply for stream [^\r\n]*ret:0/g) ?? []
+  const successfulReplies = successfulLiveCommandReplies(stderr)
   assert.equal(
     successfulReplies.length,
     artifacts.length * liveCommands.length,
@@ -234,7 +236,7 @@ function runLiveAudioControlProbe() {
     }
 
     const processProtocolLine = (line) => {
-      const successfulReplies = line.match(/Command reply for stream [^\r\n]*ret:0/g) ?? []
+      const successfulReplies = successfulLiveCommandReplies(line)
       for (const _reply of successfulReplies) {
         successfulRepliesSeen += 1
         if (successfulRepliesSeen % artifacts.length !== 0) continue
