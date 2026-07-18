@@ -209,6 +209,10 @@ import {
 } from './native-preview-main-pump-health'
 import { discoverObs, readObsSetup, readObsStreamKey } from './obs-import'
 import { initAutoUpdater, registerUpdaterIpc } from './updater'
+import {
+  sanitizedChildProcessEnvironment,
+  scrubReleaseAuthorityEnvironment
+} from './release-authority-env'
 import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
 import {
   MAX_NOTES_TEXT_LENGTH,
@@ -563,6 +567,12 @@ async function refreshGlassWallpaper(): Promise<void> {
 }
 // Lifecycle smokes can isolate the app-level backend ledger without touching
 // the developer's real app data.
+if (app.isPackaged) {
+  // Packaged runtime code never needs build/signing/storage authority. Retain
+  // the operator-only pilot bearer only until updater initialization copies it.
+  scrubReleaseAuthorityEnvironment(process.env, { preservePilotToken: true })
+}
+
 const appDataDirOverride = process.env.VIDEORC_APP_DATA_DIR?.trim()
 if (appDataDirOverride) {
   app.setPath('appData', appDataDirOverride)
@@ -6464,7 +6474,7 @@ function createNativePreviewHelperProcessDriverConfig():
   const ffmpegBinDir = resolvePackagedFfmpegBinDir()
   const pathEntries = [ffmpegBinDir, cargoBinDir, process.env.PATH].filter(Boolean)
   const env = {
-    ...process.env,
+    ...sanitizedChildProcessEnvironment(process.env),
     ...devCargoEnvOverrides(),
     PATH: pathEntries.join(delimiter)
   }
@@ -7013,7 +7023,7 @@ function startBackendWithRegistryLock(): void {
   backendProcess = spawn(command, args, {
     cwd: root,
     env: {
-      ...process.env,
+      ...sanitizedChildProcessEnvironment(process.env),
       ...devCargoEnvOverrides(),
       // Full isolation or none: when app/user data dirs are overridden (smokes,
       // probes), the backend's sqlite + secrets must move with them instead of

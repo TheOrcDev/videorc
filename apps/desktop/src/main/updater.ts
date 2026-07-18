@@ -15,6 +15,7 @@ import {
   shouldBackgroundRecheck,
   updateStatusFromEvent
 } from './updater-status'
+import { consumeWindowsUpdaterStartupConfig } from './windows-pilot-update'
 
 const { autoUpdater } = electronUpdater
 
@@ -36,6 +37,7 @@ type CaptureInstallBlockedGetter = () => boolean
 let currentStatus: UpdateStatus = { phase: 'idle' }
 let getMainWindow: MainWindowGetter = () => null
 let listenersAttached = false
+let updaterConfigurationBlocked = false
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -116,9 +118,34 @@ function attachUpdaterListeners(): void {
 // cut off; the sidebar chip and Settings reflect the same shared status.
 // Escape hatch: VIDEORC_DISABLE_AUTO_UPDATE=1.
 export function initAutoUpdater(): void {
-  if (!app.isPackaged || process.env.VIDEORC_DISABLE_AUTO_UPDATE === '1') {
+  if (!app.isPackaged) {
+    delete process.env.VIDEORC_WINDOWS_PILOT_UPDATE_TOKEN
     return
   }
+
+  let backgroundUpdatesDisabled: boolean
+  try {
+    const startup = consumeWindowsUpdaterStartupConfig(process.env, process.platform)
+    backgroundUpdatesDisabled = startup.backgroundUpdatesDisabled
+    const pilot = startup.pilot
+    if (pilot) {
+      autoUpdater.setFeedURL({ provider: 'generic', url: pilot.url })
+      autoUpdater.requestHeaders = pilot.requestHeaders
+      // Keep the operator bearer on the branded proxy. electron-updater's
+      // differential downloader follows redirects without cross-origin header
+      // stripping, so pilot mode always uses the normal full downloader.
+      autoUpdater.disableDifferentialDownload = pilot.disableDifferentialDownload
+    }
+  } catch (error) {
+    updaterConfigurationBlocked = true
+    safeConsole.warn(`[auto-update] pilot configuration blocked: ${errorMessage(error)}`)
+    setStatus(updateStatusFromEvent({ type: 'unsupported' }))
+    return
+  }
+
+  // The opt-out suppresses only silent checks. Pilot feed routing and bearer
+  // ownership still apply to the packaged app's explicit manual update flow.
+  if (backgroundUpdatesDisabled) return
 
   attachUpdaterListeners()
 
@@ -152,7 +179,7 @@ export function initAutoUpdater(): void {
 
 // Wire the manual update controls (Settings → About & updates). A manual check
 // works whenever the app is packaged (explicit user intent) and does NOT require
-// VIDEORC_ENABLE_AUTO_UPDATE — that flag only gates the silent background check.
+// VIDEORC_DISABLE_AUTO_UPDATE — that flag only gates the silent background check.
 export function registerUpdaterIpc(
   mainWindowGetter: MainWindowGetter,
   captureInstallBlocked: CaptureInstallBlockedGetter,
@@ -162,12 +189,14 @@ export function registerUpdaterIpc(
   ) => ReturnType<AcquireBackendInterruption>
 ): void {
   getMainWindow = mainWindowGetter
-  attachUpdaterListeners()
+  if (!updaterConfigurationBlocked) {
+    attachUpdaterListeners()
+  }
 
   secureIpcHandle('updates:get-status', () => currentStatus)
 
   secureIpcHandle('updates:check', async (): Promise<UpdateStatus> => {
-    if (!app.isPackaged) {
+    if (!app.isPackaged || updaterConfigurationBlocked) {
       setStatus(updateStatusFromEvent({ type: 'unsupported' }))
       return currentStatus
     }
@@ -192,7 +221,7 @@ export function registerUpdaterIpc(
   })
 
   secureIpcHandle('updates:download', async (): Promise<UpdateStatus> => {
-    if (!app.isPackaged) {
+    if (!app.isPackaged || updaterConfigurationBlocked) {
       setStatus(updateStatusFromEvent({ type: 'unsupported' }))
       return currentStatus
     }
@@ -209,7 +238,7 @@ export function registerUpdaterIpc(
   // Quit, install, and relaunch. The renderer MUST block this while a capture is
   // live — never interrupt a recording.
   secureIpcHandle('updates:install', async () => {
-    if (!app.isPackaged) {
+    if (!app.isPackaged || updaterConfigurationBlocked) {
       return
     }
     try {

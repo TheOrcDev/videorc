@@ -13,11 +13,18 @@ screen and camera, stream to multiple platforms at once, and walk away with a
 transcript, titles, chapters, and a ready-to-paste publish pack — all from one
 window.
 
-**[Download for macOS →](https://videorc.com)** (macOS 13+, Apple Silicon)
+**Current release tracks**
 
-**Beta status:** Videorc is still in beta. Expect fast-moving releases,
-rough edges, and occasional recording/streaming bugs while the app is being
-hardened.
+- **[macOS Beta →](https://www.videorc.com/download/mac)** — macOS 13+, Apple
+  Silicon. Signed and notarized beta builds are the current public desktop
+  release.
+- **[Windows Alpha guide →](https://www.videorc.com/windows-alpha)** — Windows
+  11 x64 only. A Windows installer is published only after the signed candidate,
+  clean-machine, malware-scan, update, uninstall, and real-device acceptance
+  gates pass. A CI artifact or unsigned local package is not a public alpha.
+
+Both tracks are pre-release software. Expect fast-moving releases, rough edges,
+and occasional recording or streaming bugs while the app is being hardened.
 
 ## Why Videorc
 
@@ -40,9 +47,13 @@ happens underneath.
 - **Post-recording AI.** Transcript, title/description suggestions, summaries,
   chapters, highlights, and an exportable publish pack — explicit-consent,
   post-recording only.
-- **Native preview.** A detached CAMetalLayer preview window driven directly by
-  the Rust engine; raw media frames never cross Electron IPC.
-- **Auto-updates.** Signed, notarized builds that update in place.
+- **Platform-aware preview.** macOS uses a detached native CAMetalLayer preview.
+  Windows Alpha currently uses the documented uncompressed, latest-wins Electron
+  proof surface; it must not be described as CAMetalLayer or as final native
+  parity.
+- **Gated auto-updates.** Signed, notarized macOS Beta builds update in place.
+  Windows updating is a release-candidate gate and is enabled only for an
+  accepted, signed Alpha feed.
 
 ## How it works
 
@@ -66,9 +77,11 @@ extraction works without any account. Hosted AI is what funds the project.
 
 ## Build from source
 
-Prerequisites: Node.js 24.x, Rust stable (rustup), and FFmpeg on `PATH` for
-development. The checked-in `.node-version`, `engines`, and `packageManager`
-fields keep local tools aligned with CI; Corepack installs the pinned pnpm 11.
+Prerequisites: Node.js 24.x and Rust stable (rustup). macOS source development
+uses FFmpeg on `PATH`; Windows development fetches the pinned LGPL bundle with
+`pnpm ffmpeg:fetch:windows`. The checked-in `.node-version`, `engines`, and
+`packageManager` fields keep local tools aligned with CI; Corepack installs the
+pinned pnpm 11.
 
 ```sh
 corepack enable
@@ -77,9 +90,10 @@ pnpm install
 pnpm dev
 ```
 
-The app launches the Rust backend automatically. Recordings default to
-`~/Movies/Videorc/Recordings`; session metadata lives in
-`~/Library/Application Support/Videorc/videorc.sqlite3`.
+The app launches the Rust backend automatically. On macOS, recordings default
+to `~/Movies/Videorc/Recordings` and session metadata lives in
+`~/Library/Application Support/Videorc/videorc.sqlite3`; Windows uses its native
+user data and Videos locations.
 
 Developing on Windows? See [docs/windows-dev-loop.md](docs/windows-dev-loop.md)
 for setup, the version-floor escape hatch, and the fast verify loop.
@@ -124,11 +138,13 @@ a real ScreenOnly recording.
 
 ## Contributing
 
-Videorc is in beta and moving fast. Bug reports with reproduction steps are
-very welcome; for larger changes, please open an issue first so we can agree
-on the shape before you invest in a PR. Read [AGENTS.md](AGENTS.md) before
-touching recording or native-preview code — those areas have non-negotiable
-verification gates.
+Videorc's macOS track is in Beta and its gated Windows track is in Alpha. Bug
+reports with reproduction steps are very welcome; Windows testers should use
+the privacy-safe Windows Alpha issue form and never attach credentials,
+recordings, or an unverified support bundle to a public issue. For larger
+changes, please open an issue first so we can agree on the shape before you
+invest in a PR. Read [AGENTS.md](AGENTS.md) before touching recording or
+native-preview code — those areas have non-negotiable verification gates.
 
 ## Contributors
 

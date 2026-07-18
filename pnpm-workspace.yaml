@@ -2,6 +2,8 @@ packages:
   - apps/*
 overrides:
   js-yaml: 4.3.0
+patchedDependencies:
+  app-builder-lib@26.8.1: patches/app-builder-lib@26.8.1.patch
 allowBuilds:
   electron: true
   electron-winstaller: true

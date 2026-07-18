@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
 import {
+  changelogPlatformForRuntime,
   fetchChangelogEntries,
   resolveWhatsNewAction,
   WHATS_NEW_STORAGE_KEY,
@@ -12,7 +13,10 @@ import {
 // one, fetch the changelog entries published in between and surface the newest
 // in a dialog. First run initializes silently; a failed fetch retries on the
 // next launch (last-seen is only advanced on a good answer or dismissal).
-export function useWhatsNew(version: string | undefined): {
+export function useWhatsNew(
+  version: string | undefined,
+  runtimePlatform: string | undefined
+): {
   entry: ChangelogEntry | null
   open: boolean
   dismiss: () => void
@@ -20,6 +24,7 @@ export function useWhatsNew(version: string | undefined): {
 } {
   const [entry, setEntry] = useState<ChangelogEntry | null>(null)
   const [open, setOpen] = useState(false)
+  const platform = changelogPlatformForRuntime(runtimePlatform)
 
   useEffect(() => {
     const action = resolveWhatsNewAction({
@@ -33,9 +38,13 @@ export function useWhatsNew(version: string | undefined): {
       localStorage.setItem(WHATS_NEW_STORAGE_KEY, version)
       return
     }
+    if (!platform) {
+      return
+    }
 
     let cancelled = false
     void fetchChangelogEntries({
+      platform,
       since: localStorage.getItem(WHATS_NEW_STORAGE_KEY) ?? undefined
     }).then((entries) => {
       if (cancelled || entries === null) {
@@ -51,7 +60,7 @@ export function useWhatsNew(version: string | undefined): {
     return () => {
       cancelled = true
     }
-  }, [version])
+  }, [platform, version])
 
   const dismiss = useCallback(() => {
     if (version) {
@@ -63,7 +72,11 @@ export function useWhatsNew(version: string | undefined): {
   // Manual entry point (Settings → About & updates): always shows the latest
   // release, independent of the last-seen gate.
   const showLatest = useCallback(() => {
-    void fetchChangelogEntries().then((entries) => {
+    if (!platform) {
+      toast.info('Release notes are not available right now.')
+      return
+    }
+    void fetchChangelogEntries({ platform }).then((entries) => {
       if (entries === null || entries.length === 0) {
         toast.info('Release notes are not available right now.')
         return
@@ -71,7 +84,7 @@ export function useWhatsNew(version: string | undefined): {
       setEntry(entries[0])
       setOpen(true)
     })
-  }, [])
+  }, [platform])
 
   return { entry, open, dismiss, showLatest }
 }

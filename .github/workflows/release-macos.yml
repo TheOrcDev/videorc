@@ -14,7 +14,7 @@ on:
       release_notes_url:
         description: 'Public release notes URL written to release.json'
         required: false
-        default: 'https://videorc.app/releases/0.9.0-beta.1'
+        default: 'https://www.videorc.com/releases/0.9.0-beta.1'
   push:
     tags:
       - 'v*'
@@ -23,7 +23,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-macos-${{ github.ref }}
+  # Prevent an older changelog or latest pointer from racing another platform.
+  group: release-publication
   cancel-in-progress: false
 
 env:

@@ -1,0 +1,535 @@
+name: Build Windows Alpha Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Exact <package version>-alpha.1 id; bump package version for every candidate
+        required: true
+        type: string
+
+concurrency:
+  group: windows-alpha-candidate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  unsigned:
+    name: Build and test unsigned candidate payload
+    runs-on: windows-latest
+    timeout-minutes: 180
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      manifest_sha256: ${{ steps.handoff.outputs.manifest_sha256 }}
+    steps:
+      - name: Check out dispatch commit
+        # actions/checkout v4.2.2, pinned from the verified upstream tag.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Verify current protected-main source
+        shell: pwsh
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw 'Windows candidate builds must be dispatched from the protected main branch.'
+          }
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:EXPECTED_SOURCE_COMMIT) {
+            throw "Checked out $actual, expected $env:EXPECTED_SOURCE_COMMIT."
+          }
+
+          git fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to fetch the protected main branch.'
+          }
+          $currentMain = (git rev-parse origin/main).Trim()
+          if ($actual -ne $currentMain) {
+            throw "Main advanced to $currentMain. Re-dispatch the candidate build from current main."
+          }
+
+      - name: Set up pnpm
+        # pnpm/action-setup v4.1.0, pinned from the verified upstream tag.
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        # actions/setup-node v4.4.0, pinned from the verified upstream tag.
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default stable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run source and unit gates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Invoke-NativeGate {
+            param(
+              [Parameter(Mandatory)] [string] $Label,
+              [Parameter(Mandatory)] [scriptblock] $Command
+            )
+            & $Command
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0) {
+              throw "$Label failed with exit code $exitCode."
+            }
+          }
+
+          Invoke-NativeGate 'Prettier' { pnpm format:check }
+          Invoke-NativeGate 'text integrity' { pnpm check:text-files }
+          Invoke-NativeGate 'script tests' { pnpm test:scripts }
+          Invoke-NativeGate 'TypeScript' { pnpm typecheck }
+          Invoke-NativeGate 'ESLint' { pnpm lint }
+          Invoke-NativeGate 'desktop tests' { pnpm --filter @videorc/desktop test }
+          Invoke-NativeGate 'Rustfmt' { cargo fmt --check --all }
+          Invoke-NativeGate 'Rust tests' { cargo test -p videorc-backend }
+          Invoke-NativeGate 'Clippy' { cargo clippy -p videorc-backend -- -D warnings }
+
+      - name: Build exact unsigned staging payload
+        env:
+          VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
+          VIDEORC_WINDOWS_ACCEPTANCE_STATUS: pending
+          VIDEORC_WINDOWS_PUBLISHER_NAME: ${{ vars.VIDEORC_WINDOWS_PUBLISHER_NAME }}
+        run: pnpm package:desktop:windows:unsigned
+
+      - name: Verify unsigned handoff and bind its manifest
+        id: handoff
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appPath = 'apps/desktop/release/win-unpacked/Videorc.exe'
+          $manifestPath = 'apps/desktop/release/windows-unsigned-staging.json'
+          if (-not (Test-Path -LiteralPath $appPath -PathType Leaf)) {
+            throw 'Unsigned staging payload is missing Videorc.exe.'
+          }
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw 'Unsigned staging payload is missing its exact file manifest.'
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $appPath
+          if ([string]$signature.Status -ne 'NotSigned') {
+            throw "Unsigned handoff must be NotSigned, got $($signature.Status)."
+          }
+          $manifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifestSha256 -notmatch '^[a-f0-9]{64}$') {
+            throw 'Unsigned staging manifest SHA-256 is not canonical.'
+          }
+          "manifest_sha256=$manifestSha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload one-day hash-bound unsigned handoff
+        id: upload
+        # actions/upload-artifact v7.0.1, pinned from the verified upstream tag.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-alpha-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            apps/desktop/release/win-unpacked
+            apps/desktop/release/windows-unsigned-staging.json
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          overwrite: false
+          retention-days: 1
+
+  sign:
+    name: OIDC-sign, validate, and store exact candidate
+    needs: unsigned
+    runs-on: windows-latest
+    timeout-minutes: 120
+    environment: windows-alpha-release
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out exact candidate source
+        # actions/checkout v4.2.2, pinned from the verified upstream tag.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Reverify current protected-main source after approval
+        shell: pwsh
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw 'Windows candidate signing must run from the protected main branch.'
+          }
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:EXPECTED_SOURCE_COMMIT) {
+            throw "Checked out $actual, expected $env:EXPECTED_SOURCE_COMMIT."
+          }
+          git fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to fetch the protected main branch.'
+          }
+          $currentMain = (git rev-parse origin/main).Trim()
+          if ($actual -ne $currentMain) {
+            throw "Main advanced to $currentMain while approval was pending. Re-dispatch from current main."
+          }
+
+      - name: Set up pnpm
+        # pnpm/action-setup v4.1.0, pinned from the verified upstream tag.
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        # actions/setup-node v4.4.0, pinned from the verified upstream tag.
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install signing-job dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Download exact unsigned handoff
+        # actions/download-artifact v8.0.1, pinned from the verified upstream tag.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.unsigned.outputs.artifact_id }}
+          path: apps/desktop/release
+          merge-multiple: true
+
+      - name: Verify GitHub artifact and exact unsigned contents
+        shell: pwsh
+        env:
+          EXPECTED_ARTIFACT_ID: ${{ needs.unsigned.outputs.artifact_id }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.unsigned.outputs.artifact_digest }}
+          EXPECTED_MANIFEST_SHA256: ${{ needs.unsigned.outputs.manifest_sha256 }}
+          VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
+          VIDEORC_WINDOWS_PUBLISHER_NAME: ${{ vars.VIDEORC_WINDOWS_PUBLISHER_NAME }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EXPECTED_ARTIFACT_ID -notmatch '^[1-9][0-9]*$') {
+            throw 'The upload action did not expose a canonical immutable artifact ID.'
+          }
+          if ($env:EXPECTED_ARTIFACT_DIGEST -notmatch '^[a-f0-9]{64}$') {
+            throw 'The upload action did not expose a canonical artifact digest.'
+          }
+          if ($env:EXPECTED_MANIFEST_SHA256 -notmatch '^[a-f0-9]{64}$') {
+            throw 'The unsigned job did not expose a canonical manifest SHA-256.'
+          }
+          $manifestPath = 'apps/desktop/release/windows-unsigned-staging.json'
+          $actualManifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualManifestSha256 -ne $env:EXPECTED_MANIFEST_SHA256) {
+            throw "Unsigned staging manifest changed across jobs: $actualManifestSha256."
+          }
+          pnpm release:staging:verify:windows
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unsigned staging manifest verification failed.'
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath 'apps/desktop/release/win-unpacked/Videorc.exe'
+          if ([string]$signature.Status -ne 'NotSigned') {
+            throw "Downloaded handoff must be NotSigned, got $($signature.Status)."
+          }
+
+      - name: Prewarm NSIS before Azure login
+        shell: pwsh
+        env:
+          VIDEORC_WINDOWS_PUBLISHER_NAME: ${{ vars.VIDEORC_WINDOWS_PUBLISHER_NAME }}
+          VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm --filter @videorc/desktop exec electron-builder --win nsis --publish never --prepackaged release/win-unpacked --config electron-builder.windows-unsigned.cjs
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to prewarm the pinned NSIS packaging path.'
+          }
+          $releaseRoot = 'apps/desktop/release'
+          $generatedInstaller = Get-ChildItem -LiteralPath $releaseRoot -File -Filter 'Videorc-*-win-x64.exe'
+          if ($generatedInstaller.Count -ne 1) {
+            throw 'The NSIS prewarm did not produce exactly one unsigned installer.'
+          }
+          Get-ChildItem -LiteralPath $releaseRoot -File |
+            Where-Object { $_.Name -ne 'windows-unsigned-staging.json' } |
+            Remove-Item -Force
+          pnpm release:staging:verify:windows
+          if ($LASTEXITCODE -ne 0) {
+            throw 'NSIS prewarm changed the hash-bound unsigned staging payload.'
+          }
+
+      - name: Install hash-pinned Trusted Signing module
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $moduleVersion = '0.5.0'
+          $moduleRoot = Join-Path $env:RUNNER_TEMP 'videorc-powershell-modules'
+          $modulePath = Join-Path $moduleRoot "TrustedSigning\$moduleVersion"
+          $signingLocalAppData = Join-Path $env:RUNNER_TEMP 'videorc-signing-localappdata'
+
+          function Expand-VerifiedPackage {
+            param(
+              [Parameter(Mandatory)] [string] $Uri,
+              [Parameter(Mandatory)] [string] $ExpectedSha256,
+              [Parameter(Mandatory)] [string] $Destination,
+              [Parameter(Mandatory)] [string] $Label
+            )
+            $packagePath = Join-Path $env:RUNNER_TEMP "$Label.nupkg"
+            $zipPath = Join-Path $env:RUNNER_TEMP "$Label.zip"
+            Invoke-WebRequest -Uri $Uri -OutFile $packagePath
+            $actualSha256 = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualSha256 -ne $ExpectedSha256) {
+              throw "$Label package SHA-256 mismatch: $actualSha256."
+            }
+            Copy-Item -LiteralPath $packagePath -Destination $zipPath
+            New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+            Expand-Archive -LiteralPath $zipPath -DestinationPath $Destination -Force
+          }
+
+          Expand-VerifiedPackage `
+            -Uri "https://www.powershellgallery.com/api/v2/package/TrustedSigning/$moduleVersion" `
+            -ExpectedSha256 'dd6bc36b20a7c3de8db24f1cd6bef89c9453a9bbcded52478705aa33a6fc2f4e' `
+            -Destination $modulePath `
+            -Label "TrustedSigning.$moduleVersion"
+
+          $dependencyRoot = Join-Path $signingLocalAppData 'TrustedSigning'
+          $pinnedDependencies = @(
+            @{
+              Name = 'Microsoft.Windows.SDK.BuildTools'
+              Version = '10.0.22621.3233'
+              Sha256 = '333109862e342aa04c217c91ebb2d550d8a5decdcb0a7e8b83f115623c830e0b'
+              RequiredFile = 'bin\10.0.22621.0\x64\signtool.exe'
+            },
+            @{
+              Name = 'Microsoft.Trusted.Signing.Client'
+              Version = '1.0.53'
+              Sha256 = 'b5abe405d1464e59c2c4f4fe8b4653bf184fe3e975a75c9628d366ed384c6979'
+              RequiredFile = 'bin\x64\Azure.CodeSigning.Dlib.dll'
+            },
+            @{
+              Name = 'sign'
+              Version = '0.9.1-beta.24469.1'
+              Sha256 = '08547275544d32ecc1fadac466b93da6b71075a98e9a72c21124f8b8c2340019'
+              RequiredFile = 'tools\net8.0\any\sign.dll'
+            }
+          )
+          foreach ($dependency in $pinnedDependencies) {
+            $nameLower = $dependency.Name.ToLowerInvariant()
+            $versionLower = $dependency.Version.ToLowerInvariant()
+            $destination = Join-Path `
+              (Join-Path $dependencyRoot $dependency.Name) `
+              "$($dependency.Name).$($dependency.Version)"
+            Expand-VerifiedPackage `
+              -Uri "https://api.nuget.org/v3-flatcontainer/$nameLower/$versionLower/$nameLower.$versionLower.nupkg" `
+              -ExpectedSha256 $dependency.Sha256 `
+              -Destination $destination `
+              -Label "$($dependency.Name).$($dependency.Version)"
+            if (-not (Test-Path -LiteralPath (Join-Path $destination $dependency.RequiredFile))) {
+              throw "$($dependency.Name) is missing $($dependency.RequiredFile)."
+            }
+          }
+
+          Import-Module (Join-Path $modulePath 'TrustedSigning.psd1') `
+            -RequiredVersion $moduleVersion -Force -ErrorAction Stop
+          if ((Get-Module TrustedSigning).Version.ToString() -ne $moduleVersion) {
+            throw 'The pinned TrustedSigning module did not import at the required version.'
+          }
+          "PSModulePath=$moduleRoot;$env:PSModulePath" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify protected OIDC and signing configuration
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          VIDEORC_WINDOWS_CERTIFICATE_PROFILE_NAME: ${{ vars.VIDEORC_WINDOWS_CERTIFICATE_PROFILE_NAME }}
+          VIDEORC_WINDOWS_PUBLISHER_NAME: ${{ vars.VIDEORC_WINDOWS_PUBLISHER_NAME }}
+          VIDEORC_WINDOWS_SIGNING_ACCOUNT_NAME: ${{ vars.VIDEORC_WINDOWS_SIGNING_ACCOUNT_NAME }}
+          VIDEORC_WINDOWS_SIGNING_ENDPOINT: ${{ vars.VIDEORC_WINDOWS_SIGNING_ENDPOINT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($name in @('AZURE_CLIENT_ID', 'AZURE_SUBSCRIPTION_ID', 'AZURE_TENANT_ID')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            $parsed = [Guid]::Empty
+            if (-not [Guid]::TryParse($value, [ref]$parsed) -or $parsed -eq [Guid]::Empty) {
+              throw "$name must be a non-empty canonical Azure UUID."
+            }
+          }
+          pnpm release:secrets:windows
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows signing service configuration is incomplete.'
+          }
+
+      - name: Log in to Azure with GitHub OIDC
+        # Azure/login v3.0.0, pinned from the verified upstream tag.
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43
+        env:
+          AZURE_LOGIN_POST_CLEANUP: true
+          AZURE_LOGIN_PRE_CLEANUP: true
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+          enable-AzPSSession: false
+
+      - name: Sign staged executables and build signed NSIS installer
+        shell: pwsh
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          LOCALAPPDATA: ${{ runner.temp }}\videorc-signing-localappdata
+          VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
+          VIDEORC_RELEASE_NOTES_URL: https://www.videorc.com/releases/${{ inputs.release_id }}
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
+          VIDEORC_WINDOWS_ACCEPTANCE_STATUS: pending
+          VIDEORC_WINDOWS_CERTIFICATE_PROFILE_NAME: ${{ vars.VIDEORC_WINDOWS_CERTIFICATE_PROFILE_NAME }}
+          VIDEORC_WINDOWS_KNOWN_ISSUES_URL: https://www.videorc.com/windows-alpha
+          VIDEORC_WINDOWS_PUBLISHER_NAME: ${{ vars.VIDEORC_WINDOWS_PUBLISHER_NAME }}
+          VIDEORC_WINDOWS_SIGNING_ACCOUNT_NAME: ${{ vars.VIDEORC_WINDOWS_SIGNING_ACCOUNT_NAME }}
+          VIDEORC_WINDOWS_SIGNING_ENDPOINT: ${{ vars.VIDEORC_WINDOWS_SIGNING_ENDPOINT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $forbidden = @(
+            'AZURE_CLIENT_SECRET',
+            'AZURE_CLIENT_CERTIFICATE_PATH',
+            'AZURE_CLIENT_CERTIFICATE_PASSWORD',
+            'AZURE_CLIENT_SEND_CERTIFICATE_CHAIN',
+            'AZURE_USERNAME',
+            'AZURE_PASSWORD'
+          )
+          $configuredForbidden = $forbidden | Where-Object {
+            -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_))
+          }
+          if ($configuredForbidden.Count -gt 0) {
+            throw "Long-lived Azure credential variables are forbidden: $($configuredForbidden -join ', ')."
+          }
+
+          $account = az account show --output json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $account) {
+            throw 'Azure CLI is not authenticated by the OIDC login step.'
+          }
+          if ($account.tenantId -ne $env:AZURE_TENANT_ID) {
+            throw "Azure CLI tenant mismatch: $($account.tenantId)."
+          }
+          if ($account.id -ne $env:AZURE_SUBSCRIPTION_ID) {
+            throw "Azure CLI subscription mismatch: $($account.id)."
+          }
+
+          Import-Module TrustedSigning -RequiredVersion '0.5.0' -Force -ErrorAction Stop
+          $unpackedRoot = (Resolve-Path 'apps/desktop/release/win-unpacked').Path
+          $executables = @(Get-ChildItem -LiteralPath $unpackedRoot -File -Recurse -Filter '*.exe')
+          if ($executables.Count -lt 4) {
+            throw "Expected at least four packaged executables, found $($executables.Count)."
+          }
+          $signingParams = @{
+            Endpoint = $env:VIDEORC_WINDOWS_SIGNING_ENDPOINT
+            CodeSigningAccountName = $env:VIDEORC_WINDOWS_SIGNING_ACCOUNT_NAME
+            CertificateProfileName = $env:VIDEORC_WINDOWS_CERTIFICATE_PROFILE_NAME
+            FilesFolder = $unpackedRoot
+            FilesFolderFilter = 'exe'
+            FilesFolderRecurse = $true
+            FileDigest = 'SHA256'
+            TimestampRfc3161 = 'http://timestamp.acs.microsoft.com'
+            TimestampDigest = 'SHA256'
+            ExcludeEnvironmentCredential = $true
+            ExcludeWorkloadIdentityCredential = $true
+            ExcludeManagedIdentityCredential = $true
+            ExcludeSharedTokenCacheCredential = $true
+            ExcludeVisualStudioCredential = $true
+            ExcludeVisualStudioCodeCredential = $true
+            ExcludeAzurePowerShellCredential = $true
+            ExcludeAzureDeveloperCliCredential = $true
+            ExcludeInteractiveBrowserCredential = $true
+          }
+          Invoke-TrustedSigning @signingParams
+
+          foreach ($executable in $executables) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $executable.FullName
+            $publisher = if ($signature.SignerCertificate) {
+              $signature.SignerCertificate.GetNameInfo(
+                [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+                $false
+              )
+            } else {
+              $null
+            }
+            if ([string]$signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature: $($executable.FullName) ($($signature.Status))."
+            }
+            if ($publisher -ne $env:VIDEORC_WINDOWS_PUBLISHER_NAME) {
+              throw "Unexpected Authenticode publisher for $($executable.FullName): $publisher."
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "Missing Authenticode timestamp for $($executable.FullName)."
+            }
+          }
+
+          pnpm release:staging:write-signed:windows
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to bind the exact signed staging payload.'
+          }
+          pnpm dist:desktop:windows:prepackaged
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Signed NSIS packaging or release manifest generation failed.'
+          }
+
+      - name: Clear Azure CLI session immediately
+        if: always()
+        shell: pwsh
+        run: |
+          $cleanupFailures = [System.Collections.Generic.List[string]]::new()
+          try {
+            az logout
+            if ($LASTEXITCODE -ne 0) {
+              $cleanupFailures.Add("az logout exited $LASTEXITCODE")
+            }
+          } catch {
+            $cleanupFailures.Add("az logout failed: $($_.Exception.Message)")
+          }
+          try {
+            az account clear
+            if ($LASTEXITCODE -ne 0) {
+              $cleanupFailures.Add("az account clear exited $LASTEXITCODE")
+            }
+          } catch {
+            $cleanupFailures.Add("az account clear failed: $($_.Exception.Message)")
+          }
+          if ($cleanupFailures.Count -gt 0) {
+            throw "Azure CLI cleanup failed: $($cleanupFailures -join '; ')."
+          }
+
+      - name: Validate exact signed release bundle after logout
+        env:
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
+          VIDEORC_WINDOWS_PUBLISHER_NAME: ${{ vars.VIDEORC_WINDOWS_PUBLISHER_NAME }}
+        run: pnpm release:validate:windows
+
+      - name: Store immutable private candidate
+        env:
+          VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_WINDOWS_CANDIDATE_WRITE_S3_ACCESS_KEY_ID }}
+          VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_WINDOWS_CANDIDATE_WRITE_S3_SECRET_ACCESS_KEY }}
+          VIDEORC_RELEASE_UPLOAD_S3_BUCKET: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_BUCKET }}
+          VIDEORC_RELEASE_UPLOAD_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_REGION }}
+          VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL }}
+          VIDEORC_RELEASE_UPLOAD_S3_FORCE_PATH_STYLE: 'true'
+        run: pnpm release:candidate:upload:windows

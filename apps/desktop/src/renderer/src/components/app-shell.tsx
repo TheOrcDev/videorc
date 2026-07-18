@@ -151,7 +151,7 @@ export function AppShell(): ReactElement {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
   const [commandOpen, setCommandOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
-  const whatsNew = useWhatsNew(runtimeInfo?.version)
+  const whatsNew = useWhatsNew(runtimeInfo?.version, runtimeInfo?.platform)
   const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
   const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
 

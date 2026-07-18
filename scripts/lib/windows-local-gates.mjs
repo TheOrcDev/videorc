@@ -1,4 +1,4 @@
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 export const WINDOWS_LOCAL_GATE_MANIFEST_NAME = 'windows-local-gates.manifest.json'
 
@@ -6,7 +6,8 @@ export function evaluateWindowsLocalGateHost({
   platform = process.platform,
   arch = process.arch,
   release = '',
-  allowUnsupportedBuild = false
+  allowUnsupportedBuild = false,
+  requireKnownBuild = false
 } = {}) {
   const failures = []
   if (platform !== 'win32') {
@@ -17,6 +18,9 @@ export function evaluateWindowsLocalGateHost({
   }
 
   const build = windowsBuildNumber(release)
+  if (platform === 'win32' && build === null && requireKnownBuild) {
+    failures.push('requires a parseable Windows build number for release acceptance')
+  }
   if (platform === 'win32' && build !== null && build < 22000 && !allowUnsupportedBuild) {
     failures.push(`requires Windows 11 build 22000 or newer; current build is ${build}`)
   }
@@ -28,9 +32,128 @@ export function evaluateWindowsLocalGateHost({
   }
 }
 
+export function sanitizeWindowsLocalGateChildEnvironment(env) {
+  const sanitized = { ...env }
+  const sensitiveName =
+    /^(?:AZURE_|APPLE_|CSC_|WIN_CSC_|VIDEORC_(?:DOWNLOAD|RELEASE_UPLOAD)_S3_|VIDEORC_WINDOWS_(?:SIGNING_|PILOT_UPDATE_TOKEN$))/
+  for (const name of Object.keys(sanitized)) {
+    if (sensitiveName.test(name)) {
+      delete sanitized[name]
+    }
+  }
+  return sanitized
+}
+
+export function assertInstalledWindowsCandidateIdentity({
+  executablePath,
+  releaseId,
+  sourceCommit,
+  installerSha256,
+  expectedAppSha256,
+  actualAppSha256,
+  expectedPublisher,
+  signature,
+  productVersion,
+  registration
+} = {}) {
+  const executableName = String(executablePath ?? '')
+    .split(/[\\/]/)
+    .at(-1)
+  if (executableName !== 'Videorc.exe') {
+    throw new Error('Installed candidate executable must be named exactly Videorc.exe.')
+  }
+  const releaseMatch = /^(\d+\.\d+\.\d+)-alpha\.1$/.exec(releaseId ?? '')
+  if (!releaseMatch) {
+    throw new Error(
+      'VIDEORC_RELEASE_ID must be exactly <numeric version>-alpha.1; bump the numeric package version for every candidate.'
+    )
+  }
+  if (!/^[a-f0-9]{40}$/.test(sourceCommit ?? '')) {
+    throw new Error('VIDEORC_RELEASE_SOURCE_COMMIT must be a lowercase full Git commit SHA.')
+  }
+  if (!/^[a-f0-9]{64}$/.test(installerSha256 ?? '')) {
+    throw new Error('VIDEORC_RELEASE_EXPECTED_SHA256 must be a lowercase SHA-256 digest.')
+  }
+  if (!/^[a-f0-9]{64}$/.test(expectedAppSha256 ?? '')) {
+    throw new Error(
+      'VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256 must be a lowercase SHA-256 digest.'
+    )
+  }
+  if (!/^[a-f0-9]{64}$/.test(actualAppSha256 ?? '')) {
+    throw new Error('Installed Videorc.exe did not produce a valid lowercase SHA-256 digest.')
+  }
+  if (actualAppSha256 !== expectedAppSha256) {
+    throw new Error('Installed Videorc.exe SHA-256 does not match the verified private candidate.')
+  }
+  if (typeof expectedPublisher !== 'string' || !expectedPublisher.trim()) {
+    throw new Error('VIDEORC_WINDOWS_PUBLISHER_NAME is required.')
+  }
+  if (signature?.status !== 'Valid') {
+    throw new Error('Installed Videorc.exe Authenticode status must be Valid.')
+  }
+  if (signature?.publisher !== expectedPublisher.trim()) {
+    throw new Error('Installed Videorc.exe publisher does not match the exact pinned publisher.')
+  }
+  if (signature?.timestampPresent !== true) {
+    throw new Error('Installed Videorc.exe must carry an Authenticode timestamp countersignature.')
+  }
+
+  const coreVersion = releaseMatch[1]
+  if (productVersion !== coreVersion && productVersion !== `${coreVersion}.0`) {
+    throw new Error('Installed Videorc.exe ProductVersion does not match the candidate release ID.')
+  }
+  if (
+    registration?.matched !== true ||
+    !['HKCU', 'HKLM'].includes(registration?.scope) ||
+    registration?.displayName !== 'Videorc' ||
+    registration?.uninstallCommandPresent !== true
+  ) {
+    throw new Error('Installed Videorc.exe must match exactly one registered Videorc NSIS install.')
+  }
+  if (
+    registration.displayVersion !== coreVersion &&
+    registration.displayVersion !== `${coreVersion}.0`
+  ) {
+    throw new Error('Registered NSIS DisplayVersion does not match the candidate release ID.')
+  }
+  if (
+    registration.uninstallerSignature?.status !== 'Valid' ||
+    registration.uninstallerSignature?.publisher !== expectedPublisher.trim() ||
+    registration.uninstallerSignature?.timestampPresent !== true
+  ) {
+    throw new Error(
+      'Registered NSIS uninstaller must have a valid timestamped signature from the pinned publisher.'
+    )
+  }
+
+  return {
+    verified: true,
+    executableName,
+    releaseId,
+    sourceCommit,
+    installerSha256,
+    expectedAppSha256,
+    actualAppSha256,
+    publisherName: expectedPublisher.trim(),
+    signatureStatus: signature.status,
+    timestampPresent: true,
+    productVersion,
+    registration: {
+      matched: true,
+      scope: registration.scope,
+      displayName: registration.displayName,
+      displayVersion: registration.displayVersion,
+      uninstallCommandPresent: true,
+      uninstallerSignatureStatus: registration.uninstallerSignature.status,
+      uninstallerTimestampPresent: true
+    }
+  }
+}
+
 export function buildWindowsLocalGateSteps({
   repoRoot,
   packagedAppExecutable,
+  useExistingCandidate = false,
   acceptanceDir
 } = {}) {
   if (!repoRoot) {
@@ -38,19 +161,19 @@ export function buildWindowsLocalGateSteps({
   }
   const executable =
     packagedAppExecutable ?? resolve(repoRoot, 'apps/desktop/release/win-unpacked/Videorc.exe')
-  const packagedFfmpeg = resolve(
-    repoRoot,
-    'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffmpeg.exe'
-  )
-  const packagedFfprobe = resolve(
-    repoRoot,
-    'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffprobe.exe'
-  )
+  const packagedResources = packagedAppExecutable
+    ? join(dirname(executable), 'resources')
+    : resolve(repoRoot, 'apps/desktop/release/win-unpacked/resources')
+  const packagedFfmpeg = join(packagedResources, 'ffmpeg', 'bin', 'ffmpeg.exe')
+  const packagedFfprobe = join(packagedResources, 'ffmpeg', 'bin', 'ffprobe.exe')
   const outputDir = acceptanceDir
     ? resolve(repoRoot, acceptanceDir)
     : defaultWindowsAcceptanceArtifactDir({ repoRoot })
+  const supportBundlePath = join(outputDir, 'support-bundle.json')
+  const [supportBundleVerifierCommand, ...supportBundleVerifierArgs] =
+    windowsSupportBundleVerifierCommand({ bundlePath: supportBundlePath })
 
-  return [
+  const sourceAndProcessSteps = [
     {
       label: 'desktop unit tests',
       command: 'pnpm',
@@ -73,27 +196,36 @@ export function buildWindowsLocalGateSteps({
       env: {
         VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'process-lifecycle')
       }
-    },
-    {
-      label: 'build release backend',
-      command: 'pnpm',
-      args: ['package:backend']
-    },
-    {
-      label: 'fetch pinned Windows FFmpeg',
-      command: 'pnpm',
-      args: ['ffmpeg:fetch:windows']
-    },
-    {
-      label: 'Windows package preflight',
-      command: 'pnpm',
-      args: ['package:preflight:windows']
-    },
-    {
-      label: 'package desktop Windows dir',
-      command: 'pnpm',
-      args: ['--filter', '@videorc/desktop', 'package']
-    },
+    }
+  ]
+  const localPackageSteps = useExistingCandidate
+    ? []
+    : [
+        {
+          label: 'build release backend',
+          command: 'pnpm',
+          args: ['package:backend']
+        },
+        {
+          label: 'fetch pinned Windows FFmpeg',
+          command: 'pnpm',
+          args: ['ffmpeg:fetch:windows']
+        },
+        {
+          label: 'Windows package preflight',
+          command: 'pnpm',
+          args: ['package:preflight:windows']
+        },
+        {
+          label: 'package desktop Windows dir',
+          command: 'pnpm',
+          args: ['--filter', '@videorc/desktop', 'package']
+        }
+      ]
+
+  return [
+    ...sourceAndProcessSteps,
+    ...localPackageSteps,
     {
       label: 'packaged recording and bundled-background smoke',
       command: 'pnpm',
@@ -146,8 +278,13 @@ export function buildWindowsLocalGateSteps({
         VIDEORC_SMOKE_FFMPEG_PATH: packagedFfmpeg,
         VIDEORC_SMOKE_FFPROBE_PATH: packagedFfprobe,
         VIDEORC_SMOKE_TIMEOUT_MS: '240000',
-        VIDEORC_WINDOWS_SUPPORT_BUNDLE_PATH: join(outputDir, 'support-bundle.json')
+        VIDEORC_WINDOWS_SUPPORT_BUNDLE_PATH: supportBundlePath
       }
+    },
+    {
+      label: 'strict Windows support-bundle verification',
+      command: supportBundleVerifierCommand,
+      args: supportBundleVerifierArgs
     }
   ]
 }
@@ -212,6 +349,7 @@ export function createWindowsLocalGateManifest({
   host,
   steps,
   repoRoot,
+  candidateIdentity = null,
   outputDir = windowsLocalGateOutputDir(steps),
   platform = process.platform,
   arch = process.arch,
@@ -238,6 +376,7 @@ export function createWindowsLocalGateManifest({
     startedAt: toIsoString(startedAt),
     finishedAt: null,
     repoRoot,
+    candidateIdentity,
     host: {
       ok: host.ok,
       platform,

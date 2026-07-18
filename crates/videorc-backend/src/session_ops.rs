@@ -571,11 +571,17 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            output_duration_probe(&mut command),
-        )
-        .await;
+        // Windows runners can take more than a second to cold-start
+        // powershell.exe before the script writes its PID. Keep the command's
+        // 30-second sleep as the behavior under test while allowing startup
+        // enough time that a slow host does not turn this lifecycle assertion
+        // into a PID-file race.
+        let probe_timeout = if cfg!(target_os = "windows") {
+            std::time::Duration::from_secs(5)
+        } else {
+            std::time::Duration::from_secs(1)
+        };
+        let result = tokio::time::timeout(probe_timeout, output_duration_probe(&mut command)).await;
         assert!(result.is_err(), "probe child should exceed the timeout");
 
         let pid = std::fs::read_to_string(&pid_file)

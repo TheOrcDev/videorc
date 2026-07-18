@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Windows Alpha guide and known issues
+    url: https://www.videorc.com/windows-alpha
+    about: Check supported Windows versions, current limitations, and safe reporting guidance first.
+  - name: Report a security vulnerability privately
+    url: https://github.com/TheOrcDev/videorc/security/advisories/new
+    about: Use a private security advisory for vulnerabilities or reports that cannot be safely disclosed in public.
