@@ -6,7 +6,9 @@ import {
   collectProcessCensus,
   collectProcessResourceDetails,
   collectStableProcessResourceCheckpoint,
-  compareProcessResourceCheckpoints
+  compareProcessResourceCheckpoints,
+  processTreeRows,
+  readSystemProcessTable
 } from './process-census.mjs'
 import { summarizeProcessMemory } from './process-memory-gate.mjs'
 import {
@@ -160,6 +162,144 @@ export async function sampleProcessGroupCpu(
   if (platform !== 'darwin') return {}
   const { stdout } = await exec('ps', ['-axo', 'pid=,pgid=,pcpu=,rss=,comm=,args='])
   return parseProcessGroupCpu(stdout, pgid)
+}
+
+/**
+ * Windows has no app-scoped equivalent to a POSIX process group.  Sample the
+ * packaged Electron launcher and every live descendant, then calculate CPU
+ * from the cumulative kernel/user times returned by Win32_Process.  Keeping
+ * the previous sample in this closure makes the first call a baseline rather
+ * than a misleading zero-percent observation.
+ */
+export function createProcessTreeCpuSampler({
+  rootPid,
+  platform = process.platform,
+  readProcessTable = ({ platform: requestedPlatform } = {}) =>
+    readSystemProcessTable({ platform: requestedPlatform }),
+  now = monotonicNowMs
+} = {}) {
+  if (!Number.isInteger(rootPid) || rootPid <= 1) {
+    throw new Error(`Process-tree CPU sampling requires a valid root PID, got ${rootPid}.`)
+  }
+
+  let previous = null
+  return async (sampleRows) => {
+    if (platform !== 'win32') return {}
+
+    const observedAtMs = now()
+    const rows = Array.isArray(sampleRows)
+      ? sampleRows
+      : processTreeRows(await readProcessTable({ platform }), rootPid)
+    const current = new Map(
+      rows
+        .filter((row) => Number.isFinite(row.cpuTimeMs))
+        .map((row) => [row.pid, { cpuTimeMs: row.cpuTimeMs, role: classifyProcess(row) }])
+    )
+    const elapsedMs = previous ? observedAtMs - previous.observedAtMs : 0
+    const byRole = {}
+    if (previous && elapsedMs > 0) {
+      for (const [pid, row] of current) {
+        const prior = previous.rows.get(pid)
+        if (!prior || row.cpuTimeMs < prior.cpuTimeMs) continue
+        const percent = ((row.cpuTimeMs - prior.cpuTimeMs) / elapsedMs) * 100
+        if (!Number.isFinite(percent)) continue
+        byRole[row.role] = (byRole[row.role] ?? 0) + percent
+      }
+    }
+    previous = { observedAtMs, rows: current }
+    return byRole
+  }
+}
+
+/**
+ * Lightweight Windows process-tree evidence for performance scenarios.  RSS
+ * is sampled from the same tree as CPU.  macOS-only footprint/file-descriptor
+ * checkpoints intentionally remain in collectProcessEndurance rather than
+ * being represented as bogus Windows values.
+ */
+export async function collectWindowsProcessTreeTelemetry({
+  ledgerPaths = [],
+  rootPid,
+  warmupMs = 0,
+  measurementMs,
+  intervalMs,
+  tailWindowMs = Math.min(120_000, Math.max(intervalMs, measurementMs / 3)),
+  collectCensus = collectProcessCensus,
+  collectCpu,
+  now = monotonicNowMs,
+  sleep = sleepMs
+} = {}) {
+  if (!Number.isInteger(rootPid) || rootPid <= 1) {
+    throw new Error(`Windows process telemetry requires a valid root PID, got ${rootPid}.`)
+  }
+  if (!Number.isFinite(measurementMs) || measurementMs <= 0) {
+    throw new Error(`Windows process telemetry measurement must be positive, got ${measurementMs}.`)
+  }
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    throw new Error(`Windows process telemetry interval must be positive, got ${intervalMs}.`)
+  }
+
+  const effectiveWarmupMs = Math.max(0, Number(warmupMs) || 0)
+  const cpuSampler = collectCpu ?? createProcessTreeCpuSampler({ rootPid, now })
+  if (effectiveWarmupMs > 0) await sleep(effectiveWarmupMs)
+
+  // Establish the CPU-time baseline before the scheduled measurement window.
+  const baselineCensus = await collectCensus({ ledgerPaths, rootPid })
+  await cpuSampler(baselineCensus.processGroupRows)
+  const censuses = []
+  const memorySamples = []
+  const cpuSamples = []
+  const scheduledSamples = await collectPerformanceSamplesOnSchedule({
+    measurementMs,
+    intervalMs,
+    nowMs: now,
+    sleep,
+    collectSample: async () => {
+      const census = await collectCensus({ ledgerPaths, rootPid })
+      const cpuByRole = await cpuSampler(census.processGroupRows)
+      return { census, cpuByRole, observedAtMs: now() }
+    }
+  })
+  for (const [index, sample] of scheduledSamples.samples.entries()) {
+    const timing = scheduledSamples.sampleTimings[index]
+    const census = sample.census
+    census.sampledAtMs = sample.observedAtMs
+    census.scheduledAtMs = timing.scheduledAtMs
+    censuses.push(census)
+    memorySamples.push(compactProcessMemorySample(census))
+    cpuSamples.push({
+      sampledAtMs: timing.observedAtMs,
+      scheduledAtMs: timing.scheduledAtMs,
+      byRole: sample.cpuByRole
+    })
+  }
+
+  return {
+    timing: {
+      warmupMs: effectiveWarmupMs,
+      requestedMeasurementMs: measurementMs,
+      measuredDurationMs: Math.max(
+        0,
+        scheduledSamples.measurementEndedAtMs - scheduledSamples.measurementStartedAtMs
+      ),
+      intervalMs,
+      tailWindowMs,
+      measurementStartedAtMs: scheduledSamples.measurementStartedAtMs,
+      measurementEndedAtMs: scheduledSamples.measurementEndedAtMs
+    },
+    sampling: {
+      ...scheduledSamples.evidence,
+      observations: scheduledSamples.sampleTimings
+    },
+    memory: {
+      samples: memorySamples,
+      summary: summarizeProcessMemory(censuses, { tailWindowMs })
+    },
+    cpu: {
+      samples: cpuSamples,
+      summary: summarizeProcessCpu(cpuSamples)
+    }
+  }
 }
 
 export function parseProcessGroupCpu(stdout, pgid) {

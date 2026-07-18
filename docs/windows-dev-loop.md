@@ -109,6 +109,33 @@ checking acknowledged gain, mute, unmute, and stop-during-update behavior agains
 the resulting audio artifacts. No available physical microphone is an explicit
 blocked gate, not a synthetic pass.
 
+## Packaged Windows performance calibration
+
+On a Windows 11 x64 physical acceptance device, capture three report-only runs
+for each representative profile. This exercises the DXGI/GDI source, Electron
+BMP proof surface, recording pipeline, final-media analyzer, and per-role
+Electron/backend/FFmpeg CPU and RSS telemetry together.
+
+```powershell
+$env:VIDEORC_PERF_APP_EXECUTABLE = 'apps/desktop/release/win-unpacked/Videorc.exe'
+$env:VIDEORC_SMOKE_FFMPEG_PATH = "$PWD/apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffmpeg.exe"
+$env:VIDEORC_SMOKE_FFPROBE_PATH = "$PWD/apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffprobe.exe"
+$env:VIDEORC_PERF_HARDWARE_CLASS = 'win11-x64-<reviewed-device-class>'
+
+pnpm perf:scenario --scenario windows-proof-recording-1080p --report-only --profile-class endurance --warmup-seconds 60 --measurement-seconds 600 --sample-interval-ms 1000
+pnpm perf:scenario --scenario windows-proof-recording-4k --report-only --profile-class endurance --warmup-seconds 60 --measurement-seconds 600 --sample-interval-ms 1000
+```
+
+Keep the three reports for a profile together and calibrate a reviewed budget
+only from comparable runs on that exact hardware class. Until a reviewed Windows
+budget is active, `--gate` intentionally fails after writing its evidence report.
+Activate a reviewed profile with `VIDEORC_WINDOWS_PERF_BUDGET_PATH` (and, when a
+file contains more than one profile, `VIDEORC_WINDOWS_PERF_BUDGET_PROFILE`). The
+budget binds the scenario, explicit hardware class, Windows architecture, packaged
+build mode, exact timing, three retained calibration reports, CPU/RSS trend
+thresholds for Electron/backend/FFmpeg roles, and BMP polling cadence. Hosted CI
+remains functional-only and is not calibration evidence.
+
 Full Windows merge gate (release build + package + packaged smoke; slow):
 
 ```powershell

@@ -26,6 +26,16 @@ const MACOS_PACKAGED_APP_PAYLOAD_SPECS = [
 export const MACOS_PACKAGED_APP_PAYLOAD_COMPONENTS = MACOS_PACKAGED_APP_PAYLOAD_SPECS.map(
   ({ relativePath }) => relativePath
 )
+const WINDOWS_PACKAGED_APP_PAYLOAD_SPECS = [
+  { relativePath: 'Videorc.exe', requiresCodeSignature: false },
+  { relativePath: 'resources/app.asar', requiresCodeSignature: false },
+  { relativePath: 'resources/videorc-backend.exe', requiresCodeSignature: false },
+  { relativePath: 'resources/ffmpeg/bin/ffmpeg.exe', requiresCodeSignature: false },
+  { relativePath: 'resources/ffmpeg/bin/ffprobe.exe', requiresCodeSignature: false }
+]
+export const WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS = WINDOWS_PACKAGED_APP_PAYLOAD_SPECS.map(
+  ({ relativePath }) => relativePath
+)
 const MACOS_CAFFEINATE_REQUIRED_ASSERTION_TYPES = [
   'PreventUserIdleDisplaySleep',
   'PreventUserIdleSystemSleep',
@@ -491,11 +501,19 @@ export function sha256File(path) {
 
 export async function packagedAppPayloadIdentity(
   executablePath,
-  { sha256 = sha256FileOrNull, codeDirectoryHash = macosCodeDirectoryHash } = {}
+  {
+    sha256 = sha256FileOrNull,
+    codeDirectoryHash = macosCodeDirectoryHash,
+    osPlatform = platform(),
+    payloadSpecs = packagedAppPayloadSpecs(osPlatform)
+  } = {}
 ) {
-  const contentsPath = dirname(dirname(resolve(executablePath)))
+  const contentsPath =
+    osPlatform === 'win32'
+      ? dirname(resolve(executablePath))
+      : dirname(dirname(resolve(executablePath)))
   const components = await Promise.all(
-    MACOS_PACKAGED_APP_PAYLOAD_SPECS.map(async ({ relativePath, requiresCodeSignature }) => {
+    payloadSpecs.map(async ({ relativePath, requiresCodeSignature }) => {
       const path = join(contentsPath, relativePath)
       const componentSha256 = await sha256(path)
       const componentCodeDirectoryHash =
@@ -509,34 +527,33 @@ export async function packagedAppPayloadIdentity(
     })
   )
   const unsignedComponents = components
-    .filter(
-      (component, index) =>
-        MACOS_PACKAGED_APP_PAYLOAD_SPECS[index].requiresCodeSignature && !component.identity
-    )
+    .filter((component, index) => payloadSpecs[index].requiresCodeSignature && !component.identity)
     .map((component) => component.relativePath)
   return {
     root: contentsPath,
     algorithm: 'sha256-packaged-code-manifest-v1',
-    sha256: packagedAppPayloadManifestSha256(components),
+    sha256: packagedAppPayloadManifestSha256(components, { payloadSpecs }),
     components,
     unsignedComponents
   }
 }
 
-export function packagedAppPayloadManifestSha256(components) {
+export function packagedAppPayloadManifestSha256(
+  components,
+  { payloadSpecs = MACOS_PACKAGED_APP_PAYLOAD_SPECS } = {}
+) {
   if (
     !Array.isArray(components) ||
-    components.length !== MACOS_PACKAGED_APP_PAYLOAD_COMPONENTS.length ||
+    components.length !== payloadSpecs.length ||
     components.some(
       (component, index) =>
-        component?.relativePath !== MACOS_PACKAGED_APP_PAYLOAD_COMPONENTS[index] ||
+        component?.relativePath !== payloadSpecs[index].relativePath ||
         !validSha256(component?.sha256) ||
         component?.identityKind !==
-          (MACOS_PACKAGED_APP_PAYLOAD_SPECS[index].requiresCodeSignature
-            ? 'codesign-cdhash'
-            : 'sha256') ||
-        !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(component?.identity ?? '') ||
-        (component.identityKind === 'sha256' && component.identity !== component.sha256)
+          (payloadSpecs[index].requiresCodeSignature ? 'codesign-cdhash' : 'sha256') ||
+        (payloadSpecs[index].requiresCodeSignature
+          ? !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(component?.identity ?? '')
+          : component.identity !== component.sha256)
     )
   ) {
     return null
@@ -554,6 +571,12 @@ export function packagedAppPayloadManifestSha256(components) {
       })
     )
     .digest('hex')
+}
+
+function packagedAppPayloadSpecs(osPlatform) {
+  return osPlatform === 'win32'
+    ? WINDOWS_PACKAGED_APP_PAYLOAD_SPECS
+    : MACOS_PACKAGED_APP_PAYLOAD_SPECS
 }
 
 async function macosCodeDirectoryHash(path) {

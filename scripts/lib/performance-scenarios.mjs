@@ -9,6 +9,8 @@ export const PERFORMANCE_SCENARIOS = [
   'real-devices-1080p',
   'record-1080p60',
   'record-vertical-4k30',
+  'windows-proof-recording-1080p',
+  'windows-proof-recording-4k',
   'studio-live-mic-visuals',
   'lifecycle-churn',
   'record-4k',
@@ -96,6 +98,29 @@ export function buildPerformanceScenario({
         VIDEORC_PROCESS_MEMORY_INTERVAL_MS: String(sampleIntervalMs)
       },
       deviceRequired: false
+    }
+  }
+
+  if (scenario === 'windows-proof-recording-1080p' || scenario === 'windows-proof-recording-4k') {
+    const fourK = scenario === 'windows-proof-recording-4k'
+    const width = fourK ? 3840 : 1920
+    const height = fourK ? 2160 : 1080
+    const fps = 30
+    return {
+      command: node,
+      args: ['scripts/smoke-windows-native-screen-app.mjs'],
+      env: {
+        ...commonEnv,
+        VIDEORC_WINDOWS_NATIVE_SCREEN_RECORDING_MS: String(
+          (warmupSeconds + measurementSeconds) * 1_000
+        ),
+        VIDEORC_SMOKE_TIMEOUT_MS: String((warmupSeconds + measurementSeconds + 300) * 1_000),
+        VIDEORC_SMOKE_VIDEO_WIDTH: String(width),
+        VIDEORC_SMOKE_VIDEO_HEIGHT: String(height),
+        VIDEORC_SMOKE_VIDEO_FPS: String(fps),
+        VIDEORC_SMOKE_VIDEO_BITRATE_KBPS: fourK ? '30000' : '6000'
+      },
+      deviceRequired: true
     }
   }
 
@@ -248,6 +273,18 @@ function scenarioMetadataEnvironment(scenario) {
       VIDEORC_PERF_SOURCE_FPS: '30',
       VIDEORC_PERF_OUTPUTS_JSON: JSON.stringify([
         { role: 'recording', width: 3840, height: 2160, fps: 30 }
+      ])
+    }
+  }
+  if (scenario === 'windows-proof-recording-1080p' || scenario === 'windows-proof-recording-4k') {
+    const fourK = scenario === 'windows-proof-recording-4k'
+    return {
+      VIDEORC_PERF_APP_ROLE: 'windows-proof-surface-recording',
+      VIDEORC_PERF_SOURCE_WIDTH: fourK ? '3840' : '1920',
+      VIDEORC_PERF_SOURCE_HEIGHT: fourK ? '2160' : '1080',
+      VIDEORC_PERF_SOURCE_FPS: '30',
+      VIDEORC_PERF_OUTPUTS_JSON: JSON.stringify([
+        { role: 'recording', width: fourK ? 3840 : 1920, height: fourK ? 2160 : 1080, fps: 30 }
       ])
     }
   }

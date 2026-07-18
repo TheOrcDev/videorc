@@ -129,6 +129,35 @@ describe('buildPerformanceScenario', () => {
     ])
   })
 
+  it('defines packaged Windows proof-surface recording calibration at 1080p and 4K', () => {
+    const fullHd = buildPerformanceScenario({
+      scenario: 'windows-proof-recording-1080p',
+      mode: 'report-only',
+      warmupSeconds: 60,
+      measurementSeconds: 600,
+      childReportPath: '/tmp/windows-1080p.json',
+      node: 'node'
+    })
+    const fourK = buildPerformanceScenario({
+      scenario: 'windows-proof-recording-4k',
+      mode: 'report-only',
+      warmupSeconds: 60,
+      measurementSeconds: 600,
+      childReportPath: '/tmp/windows-4k.json',
+      node: 'node'
+    })
+
+    assert.equal(fullHd.deviceRequired, true)
+    assert.deepEqual(fullHd.args, ['scripts/smoke-windows-native-screen-app.mjs'])
+    assert.equal(fullHd.env.VIDEORC_WINDOWS_NATIVE_SCREEN_RECORDING_MS, '660000')
+    assert.equal(fullHd.env.VIDEORC_SMOKE_VIDEO_WIDTH, '1920')
+    assert.equal(fullHd.env.VIDEORC_SMOKE_VIDEO_HEIGHT, '1080')
+    assert.equal(fullHd.env.VIDEORC_PERF_APP_ROLE, 'windows-proof-surface-recording')
+    assert.equal(fourK.env.VIDEORC_SMOKE_VIDEO_WIDTH, '3840')
+    assert.equal(fourK.env.VIDEORC_SMOKE_VIDEO_HEIGHT, '2160')
+    assert.equal(fourK.env.VIDEORC_SMOKE_VIDEO_BITRATE_KBPS, '30000')
+  })
+
   it('defines live Studio mic visuals and explicit lifecycle-churn workloads', () => {
     const mic = buildPerformanceScenario({
       scenario: 'studio-live-mic-visuals',

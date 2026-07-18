@@ -12,6 +12,7 @@ import {
   ownedProcessLedgerPaths,
   parseProcessTable,
   parseWindowsProcessTable,
+  processTreeRows,
   pruneDeadOwnedProcessRecords,
   readOwnedProcessLedgers,
   summarizeRows,
@@ -177,6 +178,8 @@ test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videor
       "ProcessId": 301,
       "ParentProcessId": 300,
       "WorkingSetSize": 4194304,
+      "KernelModeTime": 10000000,
+      "UserModeTime": 20000000,
       "ExecutablePath": "C:\\\\repo\\\\target\\\\debug\\\\videorc-backend.exe",
       "CommandLine": "\\"C:\\\\repo\\\\target\\\\debug\\\\videorc-backend.exe\\" --port 1234"
     },
@@ -184,6 +187,8 @@ test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videor
       "ProcessId": 302,
       "ParentProcessId": 301,
       "WorkingSetSize": 2097152,
+      "KernelModeTime": 3000000,
+      "UserModeTime": 4000000,
       "ExecutablePath": null,
       "CommandLine": "\\"C:\\\\repo\\\\vendor\\\\ffmpeg\\\\bin\\\\ffmpeg.exe\\" -version"
     },
@@ -191,6 +196,8 @@ test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videor
       "ProcessId": 303,
       "ParentProcessId": 301,
       "WorkingSetSize": 1048576,
+      "KernelModeTime": 5000000,
+      "UserModeTime": 6000000,
       "ExecutablePath": "C:\\\\repo\\\\target\\\\debug\\\\native_preview_host_helper.exe",
       "CommandLine": null
     }
@@ -202,6 +209,7 @@ test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videor
       ppid: row.ppid,
       pgid: row.pgid,
       rssKb: row.rssKb,
+      cpuTimeMs: row.cpuTimeMs,
       command: row.command,
       role: classifyProcess(row)
     })),
@@ -211,6 +219,7 @@ test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videor
         ppid: 300,
         pgid: null,
         rssKb: 4096,
+        cpuTimeMs: 3000,
         command: 'C:\\repo\\target\\debug\\videorc-backend.exe',
         role: 'backend'
       },
@@ -219,6 +228,7 @@ test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videor
         ppid: 301,
         pgid: null,
         rssKb: 2048,
+        cpuTimeMs: 700,
         command: 'C:\\repo\\vendor\\ffmpeg\\bin\\ffmpeg.exe',
         role: 'ffmpeg'
       },
@@ -227,6 +237,7 @@ test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videor
         ppid: 301,
         pgid: null,
         rssKb: 1024,
+        cpuTimeMs: 1100,
         command: 'C:\\repo\\target\\debug\\native_preview_host_helper.exe',
         role: 'native-preview-helper'
       }
@@ -280,6 +291,36 @@ test('collectProcessCensus reports alive and dead ledger records without killing
   )
   assert.equal(census.processGroupRows.length, 2)
   assert.deepEqual(summarizeRows(census.processRows).cargo, { count: 1, rssKb: 2048 })
+})
+
+test('processTreeRows and rootPid census include the complete Windows app tree', async () => {
+  const table = parseWindowsProcessTable(`[
+    {"ProcessId": 100, "ParentProcessId": 1, "WorkingSetSize": 1024, "ExecutablePath": "C:\\\\Videorc.exe"},
+    {"ProcessId": 101, "ParentProcessId": 100, "WorkingSetSize": 2048, "ExecutablePath": "C:\\\\Videorc.exe", "CommandLine": "C:\\\\Videorc.exe --type=renderer"},
+    {"ProcessId": 102, "ParentProcessId": 100, "WorkingSetSize": 4096, "ExecutablePath": "C:\\\\videorc-backend.exe"},
+    {"ProcessId": 103, "ParentProcessId": 102, "WorkingSetSize": 8192, "ExecutablePath": "C:\\\\ffmpeg.exe"},
+    {"ProcessId": 200, "ParentProcessId": 1, "WorkingSetSize": 16384, "ExecutablePath": "C:\\\\unrelated.exe"}
+  ]`)
+
+  assert.deepEqual(
+    processTreeRows(table, 100).map((row) => row.pid),
+    [100, 101, 102, 103]
+  )
+  const census = await collectProcessCensus({
+    ledgerPaths: [],
+    rootPid: 100,
+    readProcessTable: async () => table
+  })
+  assert.deepEqual(
+    census.processGroupRows.map((row) => row.pid),
+    [100, 101, 102, 103]
+  )
+  assert.deepEqual(Object.keys(census.summary).sort(), [
+    'backend',
+    'electron-main',
+    'electron-renderer',
+    'ffmpeg'
+  ])
 })
 
 test('collectProcessResourceDetails records macOS physical footprint and open files at checkpoints', async () => {

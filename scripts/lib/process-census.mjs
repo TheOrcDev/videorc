@@ -47,6 +47,7 @@ export function readOwnedProcessLedgers(ledgerPaths, { readFile = readFileSync }
 export async function collectProcessCensus({
   ledgerPaths,
   pgid,
+  rootPid,
   extraPids = [],
   readFile = readFileSync,
   readProcessTable = readSystemProcessTable
@@ -56,11 +57,16 @@ export async function collectProcessCensus({
   const rowsByPid = new Map(processTable.map((row) => [row.pid, row]))
   const interestingPids = new Set([...records.map((record) => record.pid), ...extraPids])
   const processGroupRows =
-    typeof pgid === 'number' ? processTable.filter((row) => row.pgid === pgid) : []
+    typeof pgid === 'number'
+      ? processTable.filter((row) => row.pgid === pgid)
+      : Number.isInteger(rootPid) && rootPid > 1
+        ? processTreeRows(processTable, rootPid)
+        : []
+  for (const row of processGroupRows) {
+    interestingPids.add(row.pid)
+  }
   const processRows = processTable
-    .filter(
-      (row) => interestingPids.has(row.pid) || (typeof pgid === 'number' && row.pgid === pgid)
-    )
+    .filter((row) => interestingPids.has(row.pid))
     .map((row) => ({ ...row, role: classifyProcess(row) }))
     .sort((a, b) => a.pid - b.pid)
   const aliveRecords = records.filter((record) => rowsByPid.has(record.pid))
@@ -74,6 +80,44 @@ export async function collectProcessCensus({
     processGroupRows: processGroupRows.map((row) => ({ ...row, role: classifyProcess(row) })),
     summary: summarizeRows(processRows)
   }
+}
+
+/**
+ * Windows does not expose POSIX process groups. Follow the launcher PID and
+ * every descendant instead, so an Electron main process, its renderer/GPU
+ * children, backend, and FFmpeg are measured as one owned app tree.
+ */
+export function processTreeRows(processTable, rootPid) {
+  if (!Number.isInteger(rootPid) || rootPid <= 1) {
+    return []
+  }
+  const childrenByParent = new Map()
+  for (const row of processTable ?? []) {
+    if (!Number.isInteger(row?.pid) || !Number.isInteger(row?.ppid)) {
+      continue
+    }
+    const children = childrenByParent.get(row.ppid) ?? []
+    children.push(row)
+    childrenByParent.set(row.ppid, children)
+  }
+  const rowsByPid = new Map((processTable ?? []).map((row) => [row.pid, row]))
+  if (!rowsByPid.has(rootPid)) {
+    return []
+  }
+  const seen = new Set([rootPid])
+  const queue = [rootPid]
+  while (queue.length > 0) {
+    const parentPid = queue.shift()
+    for (const child of childrenByParent.get(parentPid) ?? []) {
+      if (seen.has(child.pid)) continue
+      seen.add(child.pid)
+      queue.push(child.pid)
+    }
+  }
+  return [...seen]
+    .map((pid) => rowsByPid.get(pid))
+    .filter(Boolean)
+    .sort((left, right) => left.pid - right.pid)
 }
 
 /**
@@ -394,7 +438,7 @@ export async function readSystemProcessTable({ platform = process.platform } = {
         '-Command',
         [
           'Get-CimInstance Win32_Process',
-          'Select-Object ProcessId,ParentProcessId,WorkingSetSize,ExecutablePath,CommandLine',
+          'Select-Object ProcessId,ParentProcessId,WorkingSetSize,KernelModeTime,UserModeTime,ExecutablePath,CommandLine',
           'ConvertTo-Json -Compress'
         ].join(' | ')
       ],
@@ -725,6 +769,8 @@ function windowsProcessRow(entry) {
   }
   const ppid = Number(entry?.ParentProcessId)
   const workingSetSize = Number(entry?.WorkingSetSize)
+  const kernelModeTime = Number(entry?.KernelModeTime)
+  const userModeTime = Number(entry?.UserModeTime)
   const args = typeof entry?.CommandLine === 'string' ? entry.CommandLine : ''
   const command =
     typeof entry?.ExecutablePath === 'string' && entry.ExecutablePath.trim()
@@ -736,6 +782,10 @@ function windowsProcessRow(entry) {
     ppid: Number.isInteger(ppid) && ppid >= 0 ? ppid : 0,
     pgid: null,
     rssKb: Number.isFinite(workingSetSize) ? Math.round(workingSetSize / 1024) : 0,
+    cpuTimeMs:
+      Number.isFinite(kernelModeTime) && Number.isFinite(userModeTime)
+        ? (kernelModeTime + userModeTime) / 10_000
+        : null,
     command,
     args
   }

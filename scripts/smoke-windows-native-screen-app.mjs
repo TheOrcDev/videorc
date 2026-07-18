@@ -7,6 +7,19 @@ import { performanceAppSpawnSpec, launchDevApp } from './lib/app-launcher.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 import {
+  collectPerformanceMetadata,
+  createPerformanceReport,
+  failingChecks,
+  passingCheck,
+  performanceMode,
+  writePerformanceReport
+} from './lib/performance-contract.mjs'
+import { collectWindowsProcessTreeTelemetry } from './lib/process-endurance.mjs'
+import {
+  evaluateWindowsPerformanceBudget,
+  loadWindowsPerformanceBudget
+} from './lib/windows-performance-budget.mjs'
+import {
   assertBmpHeaders,
   assertNonblankBmp,
   nativeWindowsCompositorUsesScreen,
@@ -18,6 +31,8 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 if (process.platform !== 'win32') {
   throw new Error('The native Windows screen/BMP smoke must run on Windows.')
 }
+
+const performanceModeValue = performanceMode()
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const spawnSpec = performanceAppSpawnSpec()
@@ -33,6 +48,12 @@ const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180_000)
 const recordingMs = Number(process.env.VIDEORC_WINDOWS_NATIVE_SCREEN_RECORDING_MS ?? 6_000)
+const performanceWarmupMs = Number(process.env.VIDEORC_PERF_WARMUP_MS ?? 0)
+const performanceMeasurementMs = Number(
+  process.env.VIDEORC_PERF_MEASUREMENT_MS ?? Math.max(1, recordingMs - performanceWarmupMs)
+)
+const performanceIntervalMs = Number(process.env.VIDEORC_PERF_SAMPLE_INTERVAL_MS ?? 1_000)
+const performanceReportRequested = Boolean(process.env.VIDEORC_PERF_REPORT_PATH)
 const video = {
   preset: 'custom',
   width: Number(process.env.VIDEORC_SMOKE_VIDEO_WIDTH ?? 1280),
@@ -55,6 +76,11 @@ const launched = await launchDevApp({
 })
 
 let ws
+let performanceTelemetry = null
+let bmpEvidence = null
+let recordingEvidence = null
+let selectedScreen = null
+let teardownEvidence = null
 try {
   const connection = launched.connections['backend-ready']
   ws = await connectBackend(connection, timeoutMs)
@@ -71,6 +97,7 @@ try {
     )
   }
   const screen = await startAvailableWindowsScreenPreview(ws, candidates)
+  selectedScreen = screen
   const sources = { screenId: screen.id, testPattern: false }
   console.log(`Windows native screen smoke selected ${screen.id}: ${screen.detail ?? screen.name}`)
   await waitForNativeScreenFrame(ws, screen.id)
@@ -89,7 +116,16 @@ try {
     )
   }
 
-  const bmpEvidence = await pollBmpDuringRecording(connection, firstBmp.cursor, recordingMs)
+  const telemetryPromise = performanceReportRequested
+    ? collectWindowsProcessTreeTelemetry({
+        rootPid: launched.process.pid,
+        warmupMs: performanceWarmupMs,
+        measurementMs: performanceMeasurementMs,
+        intervalMs: performanceIntervalMs
+      })
+    : Promise.resolve(null)
+  bmpEvidence = await pollBmpDuringRecording(connection, firstBmp.cursor, recordingMs)
+  performanceTelemetry = await telemetryPromise
   const stopRequestedAt = Date.now()
   const stopped = await request(ws, timeoutMs, 'session.stop')
   const outputPath = stopped?.outputPath ?? started?.outputPath
@@ -106,6 +142,12 @@ try {
     expectAudio: false,
     gates: { requireMotion: false }
   })
+  recordingEvidence = {
+    outputPath,
+    sizeBytes: statSync(outputPath).size,
+    metrics: report.metrics,
+    verdict: report.verdict
+  }
   const reportPaths = writeReports(report)
   if (!report.verdict.pass) {
     throw new Error(
@@ -135,7 +177,95 @@ try {
     }
     ws.close()
   }
-  await launched.stop()
+  teardownEvidence = await launched.stop()
+}
+
+if (performanceReportRequested) {
+  const requiredRoles = ['backend', 'electron-main', 'electron-renderer', 'electron-gpu', 'ffmpeg']
+  const telemetryFailures = requiredRoles.filter(
+    (role) =>
+      (performanceTelemetry?.memory?.summary?.roles?.[role]?.minMeasuredCount ?? 0) < 1 ||
+      (performanceTelemetry?.cpu?.summary?.byRole?.[role]?.samples ?? 0) < 1
+  )
+  const hardFailures = [
+    ...(telemetryFailures.length > 0
+      ? [`Windows process telemetry did not continuously identify: ${telemetryFailures.join(', ')}`]
+      : []),
+    ...(bmpEvidence?.advancedFrames > 0
+      ? []
+      : ['BMP proof polling did not observe frame progress']),
+    ...(recordingEvidence?.verdict?.pass === true
+      ? []
+      : ['final recording media validity was missing'])
+  ]
+  const metadata = await collectPerformanceMetadata({ cwd: repoRoot })
+  let activeBudget = null
+  let budgetFailures = []
+  if (performanceModeValue === 'gate') {
+    try {
+      activeBudget = await loadWindowsPerformanceBudget({
+        path: process.env.VIDEORC_WINDOWS_PERF_BUDGET_PATH,
+        profileId: process.env.VIDEORC_WINDOWS_PERF_BUDGET_PROFILE,
+        context: {
+          scenario: process.env.VIDEORC_PERF_SCENARIO ?? 'windows-proof-recording',
+          hardwareClass: metadata.hardwareClass,
+          profileClass: metadata.profileClass,
+          buildMode: metadata.buildMode,
+          operatingSystem: metadata.operatingSystem,
+          timing: {
+            warmupMs: performanceWarmupMs,
+            measurementMs: performanceMeasurementMs,
+            intervalMs: performanceIntervalMs
+          }
+        }
+      })
+      budgetFailures = evaluateWindowsPerformanceBudget(activeBudget.profile, {
+        processTree: performanceTelemetry,
+        bmp: bmpEvidence,
+        recording: recordingEvidence,
+        teardownClean: teardownEvidence?.state === 'terminated'
+      })
+    } catch (error) {
+      budgetFailures = [error?.message ?? String(error)]
+    }
+  }
+  const report = createPerformanceReport({
+    scenario: process.env.VIDEORC_PERF_SCENARIO ?? 'windows-proof-recording',
+    mode: performanceModeValue,
+    metadata,
+    timing: {
+      warmupMs: performanceWarmupMs,
+      measurementMs: performanceMeasurementMs,
+      intervalMs: performanceIntervalMs
+    },
+    metrics: {
+      screen: selectedScreen,
+      processTree: performanceTelemetry,
+      bmp: bmpEvidence,
+      recording: recordingEvidence,
+      teardown: teardownEvidence,
+      activeBudget: activeBudget
+        ? { path: activeBudget.path, profileId: activeBudget.profile.id }
+        : null,
+      budgetFailures
+    },
+    checks: [
+      ...(hardFailures.length === 0
+        ? [
+            passingCheck(
+              'packaged Windows source, media, BMP, and per-role process evidence passed'
+            )
+          ]
+        : []),
+      ...failingChecks(hardFailures),
+      ...failingChecks(budgetFailures)
+    ]
+  })
+  const reportPath = await writePerformanceReport(report)
+  console.log(`Windows packaged performance report: ${reportPath}`)
+  if (hardFailures.length > 0 || budgetFailures.length > 0) {
+    throw new Error([...hardFailures, ...budgetFailures].join('\n'))
+  }
 }
 
 async function startAvailableWindowsScreenPreview(ws, candidates) {
@@ -218,6 +348,7 @@ async function pollBmpDuringRecording(connection, initialCursor, durationMs) {
   let cursor = initialCursor
   let advancedFrames = 0
   let nonblankFrames = 0
+  const observations = []
   while (Date.now() < deadline) {
     const frame = await fetchBmpFrame(connection, cursor)
     if (frame.status === 200) {
@@ -225,6 +356,11 @@ async function pollBmpDuringRecording(connection, initialCursor, durationMs) {
       cursor = frame.cursor
       advancedFrames += 1
       nonblankFrames += 1
+      observations.push({
+        atMs: Date.now(),
+        bytes: frame.bytes.length,
+        sequence: frame.cursor.sequence
+      })
     }
     await sleep(100)
   }
@@ -233,7 +369,19 @@ async function pollBmpDuringRecording(connection, initialCursor, durationMs) {
       `Native BMP preview did not stay live during recording: advanced=${advancedFrames}, nonblank=${nonblankFrames}.`
     )
   }
-  return { advancedFrames, cursor }
+  const intervalsMs = observations
+    .slice(1)
+    .map((sample, index) => sample.atMs - observations[index].atMs)
+    .filter((intervalMs) => Number.isFinite(intervalMs) && intervalMs >= 0)
+  const bytes = observations.map((sample) => sample.bytes)
+  return {
+    advancedFrames,
+    cursor,
+    observations,
+    totalBytes: bytes.reduce((total, value) => total + value, 0),
+    maxBytes: bytes.length > 0 ? Math.max(...bytes) : 0,
+    intervalP95Ms: percentileNearestRank(intervalsMs, 0.95)
+  }
 }
 
 async function fetchBmpFrame(connection, cursor) {
@@ -340,4 +488,10 @@ function assertNonblankRecordingFrame(outputPath) {
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
+}
+
+function percentileNearestRank(values, percentile) {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((left, right) => left - right)
+  return sorted[Math.max(0, Math.ceil(percentile * sorted.length) - 1)]
 }
