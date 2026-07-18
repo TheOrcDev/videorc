@@ -11,65 +11,43 @@ import {
 
 import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useStudioCore } from '@/hooks/use-studio'
-import {
-  createMicVisualFrameBuffer,
-  createMicVisualPipeline,
-  type MicVisualFrameBuffer,
-  type MicVisualLifecycleSnapshot,
-  type MicVisualPipeline,
-  type MicVisualSource
+import { createMicVisualFrameBuffer, type MicVisualFrameBuffer } from '@/lib/mic-visual-frame'
+import type {
+  MicVisualLifecycleSnapshot,
+  MicVisualPipeline,
+  MicVisualSource
 } from '@/lib/mic-visual-pipeline'
 
-const StudioMicVisualContext = createContext<MicVisualPipeline | null>(null)
+const StudioMicVisualContext = createContext<MicVisualPipeline | undefined>(undefined)
 const PEAK_LABEL_INTERVAL_MS = 250
-
-function createBrowserMicVisualPipeline(): MicVisualPipeline {
-  return createMicVisualPipeline<MediaStream>({
-    mediaDevices:
-      typeof navigator === 'undefined' ? undefined : (navigator.mediaDevices ?? undefined),
-    createAudioContext: () => {
-      const context = new AudioContext()
-      return {
-        sampleRate: context.sampleRate,
-        createAnalyser: () => {
-          const analyser = context.createAnalyser()
-          return {
-            get fftSize() {
-              return analyser.fftSize
-            },
-            set fftSize(value: number) {
-              analyser.fftSize = value
-            },
-            get frequencyBinCount() {
-              return analyser.frequencyBinCount
-            },
-            get smoothingTimeConstant() {
-              return analyser.smoothingTimeConstant
-            },
-            set smoothingTimeConstant(value: number) {
-              analyser.smoothingTimeConstant = value
-            },
-            getFloatFrequencyData: (samples) =>
-              analyser.getFloatFrequencyData(samples as Float32Array<ArrayBuffer>),
-            getFloatTimeDomainData: (samples) =>
-              analyser.getFloatTimeDomainData(samples as Float32Array<ArrayBuffer>)
-          }
-        },
-        createMediaStreamSource: (stream) => {
-          const source = context.createMediaStreamSource(stream)
-          return {
-            connect: (analyser) => source.connect(analyser as AnalyserNode),
-            disconnect: () => source.disconnect()
-          }
-        },
-        close: () => context.close()
-      }
-    },
-    requestFrame: (callback) => window.requestAnimationFrame(callback),
-    cancelFrame: (id) => window.cancelAnimationFrame(id),
-    queueMicrotask: (callback) => globalThis.queueMicrotask(callback)
-  })
-}
+const IDLE_LIFECYCLE: MicVisualLifecycleSnapshot = Object.freeze({
+  status: 'idle',
+  active: false
+})
+const EMPTY_FRAME = Object.freeze({
+  bands: Object.freeze([]),
+  history: Object.freeze([]),
+  peakDb: null
+})
+const EMPTY_HISTORY_RING = new Float32Array(0)
+const IDLE_PIPELINE: MicVisualPipeline = Object.freeze({
+  configure: () => undefined,
+  retain: () => () => undefined,
+  getLifecycleSnapshot: () => IDLE_LIFECYCLE,
+  getFrameSnapshot: () => EMPTY_FRAME,
+  readFrame: (target) => {
+    target.bands.length = 0
+    target.historyRing = EMPTY_HISTORY_RING
+    target.historyStart = 0
+    target.historyLength = 0
+    target.peakDb = null
+    return target
+  },
+  getPeakDb: () => null,
+  subscribeLifecycle: () => () => undefined,
+  subscribeFrame: () => () => undefined,
+  dispose: () => undefined
+})
 
 /**
  * Workspace-scoped owner for renderer microphone visuals. The backend remains
@@ -85,7 +63,7 @@ export function StudioMicVisualProvider({
 }): ReactElement {
   const { captureConfig, selectedMicrophone, mediaAccess } = useStudioCore()
   const documentVisible = useDocumentVisible()
-  const [pipeline] = useState(createBrowserMicVisualPipeline)
+  const [pipeline, setPipeline] = useState<MicVisualPipeline | null>(null)
   const selectionKey = selectedMicrophone?.id
   const deviceName = selectedMicrophone?.name
   const permissionStatus = mediaAccess?.microphone
@@ -97,8 +75,28 @@ export function StudioMicVisualProvider({
       enabled && documentVisible && Boolean(selectionKey) && !captureConfig.audio.microphoneMuted
   }
 
+  useEffect(() => {
+    if (pipeline || !source.enabled) {
+      return
+    }
+    let cancelled = false
+    void import('@/lib/browser-mic-visual-pipeline')
+      .then(({ createBrowserMicVisualPipeline }) => createBrowserMicVisualPipeline())
+      .then((loadedPipeline) => {
+        if (cancelled) {
+          loadedPipeline.dispose()
+          return
+        }
+        setPipeline(loadedPipeline)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [pipeline, source.enabled])
+
   return (
-    <MicVisualPipelineProvider pipeline={pipeline} source={source}>
+    <MicVisualPipelineProvider pipeline={pipeline ?? IDLE_PIPELINE} source={source}>
       {children}
     </MicVisualPipelineProvider>
   )

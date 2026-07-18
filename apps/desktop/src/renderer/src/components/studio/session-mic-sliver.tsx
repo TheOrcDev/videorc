@@ -2,8 +2,8 @@ import { useRef, type ReactElement, type RefObject } from 'react'
 
 import { BarVisualizer, paintBarVisualizer } from '@/components/ui/bar-visualizer'
 import { useStudioMicVisualPainter } from '@/hooks/use-studio-mic-visual'
+import { resampleMicVisualLevelsInto } from '@/lib/mic-visual-frame'
 import { fallbackBandLevels } from '@/lib/mic-meter'
-import { resampleMicVisualLevelsInto } from '@/lib/mic-visual-pipeline'
 import { cn } from '@/lib/utils'
 
 const SLIVER_BAR_COUNT = 5

@@ -63,6 +63,8 @@ describe('StudioMicVisualProvider', () => {
           })
         )
       )
+      await import('../lib/browser-mic-visual-pipeline')
+      await Promise.resolve()
     })
     await vi.waitFor(() => expect(environment.contexts).toHaveLength(1))
     expect(lifecycleStates.at(-1)).toBe(true)
@@ -108,6 +110,7 @@ describe('StudioMicVisualProvider', () => {
             })
           )
         )
+        await import('../lib/browser-mic-visual-pipeline')
         await Promise.resolve()
       })
     }

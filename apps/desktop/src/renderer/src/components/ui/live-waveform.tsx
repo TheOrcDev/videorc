@@ -7,7 +7,7 @@ import {
   type HTMLAttributes
 } from 'react'
 
-import { resampleMicVisualLevelsInto } from '@/lib/mic-visual-pipeline'
+import { resampleMicVisualLevelsInto } from '@/lib/mic-visual-frame'
 import { cn } from '@/lib/utils'
 
 export type LiveWaveformHandle = {

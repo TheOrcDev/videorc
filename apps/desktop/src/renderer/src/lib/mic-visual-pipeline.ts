@@ -1,4 +1,5 @@
 import type { MediaAccessStatus } from './backend'
+import type { MicVisualFrameBuffer } from './mic-visual-frame'
 import { amplitudeToDb, dbToMeterLevel } from './mic-meter'
 import {
   createMicStreamController,
@@ -22,14 +23,12 @@ export type MicVisualFrameSnapshot = Readonly<{
 }>
 
 /** Caller-owned mutable read buffer. Reuse it for every analyser notification. */
-export type MicVisualFrameBuffer = {
-  bands: number[]
-  /** Borrowed fixed ring; valid until the session is replaced or released. */
-  historyRing: Float32Array
-  historyStart: number
-  historyLength: number
-  peakDb: number | null
-}
+export type { MicVisualFrameBuffer } from './mic-visual-frame'
+export {
+  createMicVisualFrameBuffer,
+  resampleMicVisualLevels,
+  resampleMicVisualLevelsInto
+} from './mic-visual-frame'
 
 export type MicVisualAnalyserLike = {
   fftSize: number
@@ -98,16 +97,6 @@ const VISUAL_LOW_HZ = 80
 const VISUAL_HIGH_HZ = 8000
 const EMPTY_HISTORY_RING = new Float32Array(0)
 
-export function createMicVisualFrameBuffer(): MicVisualFrameBuffer {
-  return {
-    bands: [],
-    historyRing: EMPTY_HISTORY_RING,
-    historyStart: 0,
-    historyLength: 0,
-    peakDb: null
-  }
-}
-
 function normalizeSpectrumDb(value: number): number {
   if (!Number.isFinite(value)) {
     return 0
@@ -138,66 +127,6 @@ function spectrumBandsInto(
     }
     bands[band] = total / Math.max(1, end - start)
   }
-}
-
-/** Resample into a fixed caller-owned target without allocating per frame. */
-export function resampleMicVisualLevelsInto(levels: ArrayLike<number>, target: number[]): number[] {
-  const count = target.length
-  if (count === 0) {
-    return target
-  }
-  if (levels.length === 0) {
-    target.fill(0)
-    return target
-  }
-  if (levels.length === count) {
-    for (let index = 0; index < count; index += 1) {
-      target[index] = levels[index]
-    }
-    return target
-  }
-  if (count === 1) {
-    let total = 0
-    for (let index = 0; index < levels.length; index += 1) total += levels[index]
-    target[0] = total / levels.length
-    return target
-  }
-  if (count > levels.length) {
-    for (let index = 0; index < count; index += 1) {
-      const position = (index * (levels.length - 1)) / (count - 1)
-      const left = Math.floor(position)
-      const right = Math.min(levels.length - 1, left + 1)
-      const fraction = position - left
-      target[index] = levels[left] * (1 - fraction) + levels[right] * fraction
-    }
-    return target
-  }
-
-  for (let index = 0; index < count; index += 1) {
-    const start = (index * levels.length) / count
-    const end = ((index + 1) * levels.length) / count
-    let total = 0
-    let weight = 0
-    for (let source = Math.floor(start); source < Math.ceil(end); source += 1) {
-      const overlap = Math.max(0, Math.min(end, source + 1) - Math.max(start, source))
-      total += levels[Math.min(source, levels.length - 1)] * overlap
-      weight += overlap
-    }
-    target[index] = weight > 0 ? total / weight : 0
-  }
-  return target
-}
-
-/** Resize one shared analyser spectrum for a visual's bar geometry. */
-export function resampleMicVisualLevels(
-  levels: ArrayLike<number>,
-  requestedCount: number
-): number[] {
-  const count = Math.max(0, Math.floor(requestedCount))
-  if (count === 0) {
-    return []
-  }
-  return resampleMicVisualLevelsInto(levels, new Array<number>(count).fill(0))
 }
 
 /**

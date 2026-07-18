@@ -14,8 +14,8 @@ import {
 } from '@/hooks/use-studio-mic-visual'
 import type { AudioMeterStatus } from '@/lib/backend'
 import { formatDb } from '@/lib/format'
+import { resampleMicVisualLevelsInto } from '@/lib/mic-visual-frame'
 import { advanceClipHoldDeadline, fallbackBandLevels } from '@/lib/mic-meter'
-import { resampleMicVisualLevelsInto } from '@/lib/mic-visual-pipeline'
 import { systemAccessAction, systemAccessRows, type SystemAccessAction } from '@/lib/system-access'
 import { cn } from '@/lib/utils'
 
