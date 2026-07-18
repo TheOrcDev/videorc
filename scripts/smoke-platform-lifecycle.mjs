@@ -1,27 +1,17 @@
 import assert from 'node:assert/strict'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { compileCaptureModule } from './lib/compile-capture-module.mjs'
+
 const require = createRequire(import.meta.url)
-const ts = require('../apps/desktop/node_modules/typescript')
 
-const sourcePath = join(process.cwd(), 'apps/desktop/src/renderer/src/lib/capture.ts')
 const tempDir = join(tmpdir(), `videorc-platform-lifecycle-${Date.now()}`)
-const tempModule = join(tempDir, 'capture.cjs')
 
-await mkdir(tempDir, { recursive: true })
 try {
-  const source = await readFile(sourcePath, 'utf8')
-  const transpiled = ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2022,
-      esModuleInterop: true
-    }
-  })
-  await writeFile(tempModule, transpiled.outputText)
+  const tempModule = await compileCaptureModule(tempDir)
 
   const {
     defaultCaptureConfig,
@@ -74,13 +64,18 @@ try {
 
   assert.deepEqual(
     preparedYouTubeActivationTargets(streaming).map((item) => item.id),
-    []
+    ['youtube-ready']
   )
   assert.deepEqual(
     preparedYouTubeCompletionTargets(streaming).map((item) => item.id),
-    []
+    ['youtube-ready']
   )
-  assert.deepEqual(readyStreamTargetLabels(streaming), ['twitch-ready', 'youtube-manual'])
+  assert.deepEqual(readyStreamTargetLabels(streaming), [
+    'youtube-ready',
+    'youtube-no-stream',
+    'twitch-ready',
+    'youtube-manual'
+  ])
 
   const patched = patchPreparedStreamTarget(
     streaming,
@@ -120,7 +115,7 @@ try {
   assert.equal(failedTarget.status.message, 'YouTube setup failed.')
 
   console.log(
-    'Platform lifecycle smoke OK - paused YouTube OAuth, ready labels, and status patching verified.'
+    'Platform lifecycle smoke OK - available YouTube OAuth, ready labels, and status patching verified.'
   )
 } finally {
   await rm(tempDir, { recursive: true, force: true })

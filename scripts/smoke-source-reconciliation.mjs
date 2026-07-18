@@ -1,27 +1,17 @@
 import assert from 'node:assert/strict'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 
+import { compileCaptureModule } from './lib/compile-capture-module.mjs'
+
 const require = createRequire(import.meta.url)
-const ts = require('../apps/desktop/node_modules/typescript')
 
-const sourcePath = join(process.cwd(), 'apps/desktop/src/renderer/src/lib/capture.ts')
 const tempDir = join(tmpdir(), `videorc-source-reconciliation-${Date.now()}`)
-const tempModule = join(tempDir, 'capture.cjs')
 
-await mkdir(tempDir, { recursive: true })
 try {
-  const source = await readFile(sourcePath, 'utf8')
-  const transpiled = ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2022,
-      esModuleInterop: true
-    }
-  })
-  await writeFile(tempModule, transpiled.outputText)
+  const tempModule = await compileCaptureModule(tempDir)
 
   const storage = new Map()
   globalThis.localStorage = {

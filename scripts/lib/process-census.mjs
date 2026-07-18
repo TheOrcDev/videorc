@@ -474,9 +474,10 @@ export function classifyProcess(row) {
     return 'electron-child'
   }
   if (
-    /electron\.app\/contents\/macos\/electron/.test(lowerText) ||
-    /\/videorc(?:\.app)?\//.test(lowerText) ||
-    commandName === 'videorc.exe'
+    (executableNames.has('electron') &&
+      /electron\.app\/contents\/macos\/electron/.test(lowerText)) ||
+    executableNames.has('videorc') ||
+    executableNames.has('videorc.exe')
   ) {
     return 'electron-main'
   }

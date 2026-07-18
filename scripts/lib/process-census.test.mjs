@@ -130,6 +130,47 @@ test('classifyProcess uses the exact argv executable when macOS truncates comm',
   )
 })
 
+test('classifyProcess counts electron-vite under the Videorc workspace as tooling', () => {
+  assert.equal(
+    classifyProcess({
+      command: '/opt/homebrew/bin/node',
+      args: '/Users/orcdev/projects/videorc/node_modules/electron-vite/bin/electron-vite.js dev'
+    }),
+    'tooling'
+  )
+})
+
+test('classifyProcess counts an esbuild service under the Videorc workspace as tooling', () => {
+  assert.equal(
+    classifyProcess({
+      command: '/Users/orcdev/projects/videorc/node_modules/@esbuild/darwin-arm64/bin/esbuild',
+      args: '/Users/orcdev/projects/videorc/node_modules/@esbuild/darwin-arm64/bin/esbuild --service=0.25.6 --ping'
+    }),
+    'tooling'
+  )
+})
+
+test('classifyProcess still counts the Electron app executable as electron-main', () => {
+  assert.equal(
+    classifyProcess({
+      command:
+        '/Users/orcdev/projects/videorc/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron',
+      args: '/Users/orcdev/projects/videorc/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron .'
+    }),
+    'electron-main'
+  )
+})
+
+test('classifyProcess does not count arbitrary Videorc workspace descendants as electron-main', () => {
+  assert.equal(
+    classifyProcess({
+      command: '/opt/homebrew/bin/node',
+      args: '/Users/orcdev/projects/videorc/scripts/preview-lifecycle-probe.mjs'
+    }),
+    'other'
+  )
+})
+
 test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videorc roles', () => {
   const rows = parseWindowsProcessTable(`[
     {
