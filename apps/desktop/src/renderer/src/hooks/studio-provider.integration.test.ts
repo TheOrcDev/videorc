@@ -3105,6 +3105,12 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.captureConfig.video.width === 1080 &&
         latest()?.core.captureConfig.video.height === 1920
     )
+    // The aspect push rides a render-synced bridge (one post-commit tick,
+    // deduped); the contract is that the NEW dimensions arrive — never the
+    // old ones after the commit — not that the IPC lands synchronously.
+    await waitForObservation(
+      () => previewAspectCalls.at(-1)?.[0] === 1080 && previewAspectCalls.at(-1)?.[1] === 1920
+    )
     expect(previewAspectCalls.at(-1)).toEqual([1080, 1920])
     expect(
       backend.commands.find((command) => command.method === 'scene.layout.apply_preview')?.params
@@ -3152,6 +3158,9 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.captureConfig.layout.layoutPreset === 'screen-camera' &&
         latest()?.core.captureConfig.video.width === 2560 &&
         latest()?.core.captureConfig.video.height === 1440
+    )
+    await waitForObservation(
+      () => previewAspectCalls.at(-1)?.[0] === 2560 && previewAspectCalls.at(-1)?.[1] === 1440
     )
     expect(previewAspectCalls.at(-1)).toEqual([2560, 1440])
 

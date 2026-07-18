@@ -17,6 +17,8 @@ import { toast } from 'sonner'
 
 import { BackendClient, BackendRequestError } from '@/backendClient'
 import { GlobalShortcutsRegistrar } from '@/lib/global-shortcuts'
+import { LocalStoragePersister } from '@/lib/local-storage-persister'
+import { RenderSyncedCall } from '@/lib/render-synced-call'
 import { RemoteSurfacePublisher, type RemoteSurfaceSnapshot } from '@/lib/remote-surface'
 import { previewSurfaceBoundsChanged } from '../../../shared/native-preview-bounds'
 import {
@@ -150,6 +152,7 @@ import type {
   LiveChatMessage,
   LiveChatProviderState,
   CaptionsStatus,
+  CaptionWindowSnapshot,
   CaptionsUpdate,
   CaptionsWindowState,
   CaptionStyleId,
@@ -1390,6 +1393,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Imperative bridges: the render body hands them the latest values and they
   // own change-detection, post-commit debounce, and retry — no effects.
   const [remoteSurfacePublisher] = useState(() => new RemoteSurfacePublisher())
+  const [storagePersister] = useState(() => new LocalStoragePersister())
+  // Render-synced one-way pushes (E4): dedupe by content, send post-commit.
+  const [captionSnapshotPusher] = useState(
+    () =>
+      new RenderSyncedCall<CaptionWindowSnapshot>(
+        (snapshot) => void window.videorc?.pushCaptionSnapshot?.(snapshot)
+      )
+  )
+  const [previewAspectRatioSync] = useState(
+    () =>
+      new RenderSyncedCall<{ width: number; height: number }>(
+        ({ width, height }) => void window.videorc?.setPreviewWindowAspectRatio?.(width, height)
+      )
+  )
   const [globalShortcutsRegistrar] = useState(() => new GlobalShortcutsRegistrar())
   const accountCallbacksInFlightRef = useRef<Set<string>>(new Set())
   const accountCallbacksCompletedRef = useRef<Set<string>>(new Set())
@@ -1417,9 +1434,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [deviceList.devices]
   )
   const deviceListRef = useRef(deviceList)
-  useEffect(() => {
-    deviceListRef.current = deviceList
-  }, [deviceList])
+  deviceListRef.current = deviceList
   const [recording, setRecording] = useState<RecordingStatus>({ state: 'idle', message: 'Ready.' })
   const [logs, setLogs] = useState<BackendLogEvent[]>([])
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([])
@@ -1697,15 +1712,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       offState?.()
     }
   }, [])
-  useEffect(() => {
-    void window.videorc?.pushCaptionSnapshot?.({
-      lines: captionLines,
-      status: captionsStatus,
-      styleId: captureConfig.captions.styleId,
-      position: captureConfig.captions.position,
-      textSize: captureConfig.captions.textSize
-    })
-  }, [captionLines, captionsStatus, captureConfig.captions])
+  captionSnapshotPusher.sync({
+    lines: captionLines,
+    status: captionsStatus,
+    styleId: captureConfig.captions.styleId,
+    position: captureConfig.captions.position,
+    textSize: captureConfig.captions.textSize
+  })
   const openCaptionsWindow = useCallback(async () => {
     await window.videorc
       ?.pushCaptionSnapshot?.({
@@ -1874,87 +1887,98 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [applyCommentHighlight, client, publishCommentHighlightState]
   )
 
-  useEffect(() => {
-    const off = window.videorc?.onCommentHighlightRequest?.((command: CommentHighlightCommand) => {
-      const intent = ++commentHighlightIntentRef.current
-      setCommentHighlightFailure(null)
-      const message = liveChatSnapshot.messages.find(
-        (candidate) =>
-          candidate.id === command.messageId && candidate.sessionId === command.sessionId
-      )
-      void (
-        message
-          ? applyCommentHighlight(message, command.sessionId, intent)
-          : Promise.reject(new Error('The selected live comment is no longer available.'))
-      )
-        .then(async (state) => {
-          const resolvedState =
-            state ??
-            (await client
-              ?.request<CommentHighlightState>('comments.highlight.status')
-              .catch(() => null))
-          if (!resolvedState) {
-            throw new Error('A newer comment highlight replaced this request.')
-          }
-          if (state && commentHighlightIntentRef.current === intent) {
-            publishCommentHighlightState(state)
-          }
-          await window.videorc?.pushCommentHighlightResult?.({
-            requestId: command.requestId,
-            ok: true,
-            value: resolvedState
-          })
-        })
-        .catch(async (error) => {
-          if (commentHighlightIntentRef.current === intent) {
-            setCommentHighlightFailure({
-              messageId: command.messageId,
-              reason: error instanceof Error ? error.message : 'Highlight failed.'
-            })
-          }
-          const authoritative = await client
+  // Effect event (effect-elimination plan E2): the old effect resubscribed
+  // this IPC listener whenever the chat message list or a callback identity
+  // changed — thousands of unsubscribe/resubscribe cycles per stream, each
+  // with a window where a highlight request could drop.
+  const handleCommentHighlightRequest = useEffectEvent((command: CommentHighlightCommand): void => {
+    const intent = ++commentHighlightIntentRef.current
+    setCommentHighlightFailure(null)
+    const message = liveChatSnapshot.messages.find(
+      (candidate) => candidate.id === command.messageId && candidate.sessionId === command.sessionId
+    )
+    void (
+      message
+        ? applyCommentHighlight(message, command.sessionId, intent)
+        : Promise.reject(new Error('The selected live comment is no longer available.'))
+    )
+      .then(async (state) => {
+        const resolvedState =
+          state ??
+          (await client
             ?.request<CommentHighlightState>('comments.highlight.status')
-            .catch(() => null)
-          if (authoritative && commentHighlightIntentRef.current === intent) {
-            publishCommentHighlightState(authoritative)
-          }
-          await window.videorc?.pushCommentHighlightResult?.({
-            requestId: command.requestId,
-            ok: false,
-            error: error instanceof Error ? error.message : 'Highlight failed.'
-          })
+            .catch(() => null))
+        if (!resolvedState) {
+          throw new Error('A newer comment highlight replaced this request.')
+        }
+        if (state && commentHighlightIntentRef.current === intent) {
+          publishCommentHighlightState(state)
+        }
+        await window.videorc?.pushCommentHighlightResult?.({
+          requestId: command.requestId,
+          ok: true,
+          value: resolvedState
         })
-    })
-    return off
-  }, [applyCommentHighlight, client, liveChatSnapshot.messages, publishCommentHighlightState])
+      })
+      .catch(async (error) => {
+        if (commentHighlightIntentRef.current === intent) {
+          setCommentHighlightFailure({
+            messageId: command.messageId,
+            reason: error instanceof Error ? error.message : 'Highlight failed.'
+          })
+        }
+        const authoritative = await client
+          ?.request<CommentHighlightState>('comments.highlight.status')
+          .catch(() => null)
+        if (authoritative && commentHighlightIntentRef.current === intent) {
+          publishCommentHighlightState(authoritative)
+        }
+        await window.videorc?.pushCommentHighlightResult?.({
+          requestId: command.requestId,
+          ok: false,
+          error: error instanceof Error ? error.message : 'Highlight failed.'
+        })
+      })
+  })
 
+  const handleChatSendRequest = useEffectEvent((command: CommentsSendCommand): void => {
+    void (async () => {
+      if (!client) throw new Error('Backend socket is not connected.')
+      return client.request<CommentsSendOperation>('liveChat.send', {
+        operationId: command.operationId,
+        sessionId: command.sessionId,
+        text: command.text
+      })
+    })()
+      .then(async (operation) => {
+        await window.videorc?.pushChatSendResult?.({
+          requestId: command.requestId,
+          ok: true,
+          value: operation
+        })
+      })
+      .catch(async (error) => {
+        await window.videorc?.pushChatSendResult?.({
+          requestId: command.requestId,
+          ok: false,
+          error: error instanceof Error ? error.message : 'Send failed.'
+        })
+      })
+  })
+
+  // ONE mount-only subscription for main-process comment IPC: the handlers
+  // are effect events, so they always see the latest client/snapshot without
+  // ever re-registering the listeners.
   useEffect(() => {
-    const off = window.videorc?.onChatSendRequest?.((command: CommentsSendCommand) => {
-      void (async () => {
-        if (!client) throw new Error('Backend socket is not connected.')
-        return client.request<CommentsSendOperation>('liveChat.send', {
-          operationId: command.operationId,
-          sessionId: command.sessionId,
-          text: command.text
-        })
-      })()
-        .then(async (operation) => {
-          await window.videorc?.pushChatSendResult?.({
-            requestId: command.requestId,
-            ok: true,
-            value: operation
-          })
-        })
-        .catch(async (error) => {
-          await window.videorc?.pushChatSendResult?.({
-            requestId: command.requestId,
-            ok: false,
-            error: error instanceof Error ? error.message : 'Send failed.'
-          })
-        })
-    })
-    return off
-  }, [client])
+    const offHighlight = window.videorc?.onCommentHighlightRequest?.((command) =>
+      handleCommentHighlightRequest(command)
+    )
+    const offSend = window.videorc?.onChatSendRequest?.((command) => handleChatSendRequest(command))
+    return () => {
+      offHighlight?.()
+      offSend?.()
+    }
+  }, [])
 
   const refreshLiveChatSnapshotForComments = useCallback(async (): Promise<void> => {
     if (!client) {
@@ -2194,6 +2218,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // the same session (fast assessment, then post-repair); one toast is enough.
   const qualityToastSessionsRef = useRef<Set<string>>(new Set())
   const captureConfigRef = useRef(captureConfig)
+  captureConfigRef.current = captureConfig
   const liveAudioProcessingSyncRef = useRef<{
     token: object
     sessionId: string
@@ -2213,18 +2238,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const layoutIntentAwaitingProofRef = useRef<number | null>(null)
   const latestLayoutTransactionCommitRef = useRef<LayoutTransactionSnapshot | null>(null)
   const skipNextConfigSceneReloadRef = useRef(false)
-  useEffect(() => {
-    captureConfigRef.current = captureConfig
-  }, [captureConfig])
+
   useEffect(
     () => () => {
       liveAudioProcessingSyncRef.current?.queue.stop()
     },
     []
   )
-  useEffect(() => {
-    latestLayoutTransactionCommitRef.current = null
-  }, [client])
+
   // Smoke-only: isolated smoke profiles persist no camera selection, so
   // camera-dependent layout presets would always be disabled under gates.
   // DEV-gated like the synthetic-source toggle; driven by the
@@ -2355,12 +2376,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Surface a per-target stream drop from any tab (the Streaming tab has the full
   // banner + badges). Each failed destination toasts once per session; the set is
   // cleared whenever streaming returns to an empty snapshot (session start/idle).
-  useEffect(() => {
-    if (streamTargets.length === 0) {
+  // Runs from the streamTargets mutation sites (E3): failed-target toasts
+  // react to the snapshot the backend just delivered, not to a re-derived
+  // state change. An empty snapshot resets the per-session dedupe.
+  const announceStreamTargetFailures = useCallback((targets: StreamTargetRuntime[]): void => {
+    if (targets.length === 0) {
       toastedFailedTargets.current = new Set()
       return
     }
-    for (const target of streamTargets) {
+    for (const target of targets) {
       if (target.state === 'failed' && !toastedFailedTargets.current.has(target.targetId)) {
         toastedFailedTargets.current.add(target.targetId)
         toast.error(`Streaming to ${target.label} stopped`, {
@@ -2368,7 +2392,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
       }
     }
-  }, [streamTargets])
+  }, [])
 
   const { registry: backgroundRegistry } = useBackgroundAssets()
   const activeSceneBackground = useMemo(
@@ -2568,11 +2592,48 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     []
   )
 
-  const applyRecordingStatus = useCallback((status: RecordingStatus) => {
-    recordingRef.current = status
-    setRecording(status)
-    syncFramePollingSuppressionRef.current?.()
+  const xProducerReminderShownRef = useRef(false)
+  // Runs from applyRecordingStatus (E3): the reminder is a reaction to the
+  // recording-state TRANSITION, so it lives in the handler that applies it,
+  // not in an effect that re-derives the transition from state.
+  const maybeRemindXProducer = useCallback((state: string): void => {
+    if (state !== 'streaming') {
+      if (state === 'idle' || state === 'failed') {
+        xProducerReminderShownRef.current = false
+      }
+      return
+    }
+    if (xProducerReminderShownRef.current) {
+      return
+    }
+    const xManualTarget = captureConfigRef.current.streaming.targets.find(
+      (target) => target.platform === 'x' && target.enabled && target.authMode === 'manual-rtmp'
+    )
+    if (!xManualTarget) {
+      return
+    }
+    xProducerReminderShownRef.current = true
+    toast.info('X feed is connected — now start the Broadcast on X.', {
+      description:
+        'X does not go live from the RTMP feed alone: open Media Studio → Producer → Broadcasts, ' +
+        'create a broadcast from your source, and press Broadcast.',
+      duration: 20000,
+      action: {
+        label: 'Open Media Studio',
+        onClick: () => void window.videorc?.openOAuthUrl?.('https://studio.x.com')
+      }
+    })
   }, [])
+
+  const applyRecordingStatus = useCallback(
+    (status: RecordingStatus) => {
+      recordingRef.current = status
+      setRecording(status)
+      syncFramePollingSuppressionRef.current?.()
+      maybeRemindXProducer(status.state)
+    },
+    [maybeRemindXProducer]
+  )
 
   // Smoke-only state hydration for harnesses that start a capture through a
   // second backend client. It uses the same authoritative status query and
@@ -3562,49 +3623,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [client, refreshStreamMetadataForClient, reportError])
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings))
-  }, [settings])
-
-  useEffect(() => {
-    localStorage.setItem(
-      STORAGE_KEYS.captureConfig,
-      JSON.stringify(persistableCaptureConfig(captureConfig))
-    )
-  }, [captureConfig])
+  // Render-synced persistence (effect-elimination plan E1): identity fast
+  // path + content dedupe + trailing debounce; flushes on pagehide. The old
+  // effects serialized the full captureConfig synchronously on every change.
+  storagePersister.sync(STORAGE_KEYS.settings, settings)
+  storagePersister.sync(STORAGE_KEYS.captureConfig, captureConfig, persistableCaptureConfig)
 
   // X is the one destination where a connected RTMP feed is NOT live yet: the
   // user must start a Broadcast in Media Studio Producer attached to their
   // source. Remind them the moment the stream goes up, once per session.
-  const xProducerReminderShownRef = useRef(false)
-  useEffect(() => {
-    if (recording.state !== 'streaming') {
-      if (recording.state === 'idle' || recording.state === 'failed') {
-        xProducerReminderShownRef.current = false
-      }
-      return
-    }
-    if (xProducerReminderShownRef.current) {
-      return
-    }
-    const xManualTarget = captureConfigRef.current.streaming.targets.find(
-      (target) => target.platform === 'x' && target.enabled && target.authMode === 'manual-rtmp'
-    )
-    if (!xManualTarget) {
-      return
-    }
-    xProducerReminderShownRef.current = true
-    toast.info('X feed is connected — now start the Broadcast on X.', {
-      description:
-        'X does not go live from the RTMP feed alone: open Media Studio → Producer → Broadcasts, ' +
-        'create a broadcast from your source, and press Broadcast.',
-      duration: 20000,
-      action: {
-        label: 'Open Media Studio',
-        onClick: () => void window.videorc?.openOAuthUrl?.('https://studio.x.com')
-      }
-    })
-  }, [recording.state])
 
   useEffect(() => {
     audioMeterSampleGenerationRef.current += 1
@@ -3743,6 +3770,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const generationIsCurrent = (): boolean =>
       !disposed && bootstrapGenerationRef.current === generation
     const nextClient = new BackendClient(connection)
+    // A fresh backend conversation invalidates the last layout-commit proof.
+    latestLayoutTransactionCommitRef.current = null
     const platformBootstrapClient = new BackendClient(connection)
     const bootstrapRequest = <TPayload,>(method: string, params?: unknown): Promise<TPayload> =>
       nextClient.request<TPayload>(method, params, { signal: bootstrapAbort.signal })
@@ -4045,6 +4074,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         applyRecordingStatus(status)
         if (['idle', 'failed'].includes(status.state)) {
           setStreamTargets([])
+          announceStreamTargetFailures([])
           void refreshSessions(nextClient)
           // Session over: the viewer chip must clear, not freeze (rider V2).
           void window.videorc?.pushViewerSample?.(null)
@@ -4184,6 +4214,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('stream.targets', (payload) => {
         setStreamTargets((payload as StreamTargetsSnapshot).targets)
+        announceStreamTargetFailures((payload as StreamTargetsSnapshot).targets)
       }),
       nextClient.on('diagnostics.stats', (payload) => {
         bootstrapGuard.mark('diagnostics')
@@ -6362,12 +6393,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   // The preview window is locked to the OUTPUT aspect ratio — the user can never
   // squeeze or stretch what they will record/stream.
-  useEffect(() => {
-    void window.videorc?.setPreviewWindowAspectRatio?.(
-      captureConfig.video.width,
-      captureConfig.video.height
-    )
-  }, [captureConfig.video.width, captureConfig.video.height])
+  previewAspectRatioSync.sync({
+    width: captureConfig.video.width,
+    height: captureConfig.video.height
+  })
 
   const syncNativePreviewSurfaceCompositor = useCallback(async () => {
     if (!nativePreviewSurfaceEnabled || !client || wsStatus !== 'connected') {
@@ -8129,6 +8158,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setLastError(null)
         setStreamHealth(null)
         setStreamTargets([])
+        announceStreamTargetFailures([])
         setStartRequestPending(true)
         streamingForStart = streamingOverride ?? null
         platformLifecycleStreamingRef.current = streamingForStart
@@ -9399,72 +9429,65 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [openSystemPermissionSettings, refreshMediaAccess, reportError, runtimeInfo?.platform]
   )
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.repeat || isEditableTargetSafe(event.target)) {
-        return
-      }
-
-      if (event.code === 'Space') {
-        event.preventDefault()
-        if (canStop) {
-          void stopSession()
-          return
-        }
-        if (canStart) {
-          void startSession()
-        }
-        return
-      }
-
-      if (event.key.toLowerCase() === 'p') {
-        event.preventDefault()
-        void refreshPreview()
-      }
-
-      if (sceneEditMode && selectedSceneSourceId && !isSessionActive) {
-        const large = event.shiftKey
-        if (event.key === 'ArrowUp') {
-          event.preventDefault()
-          void nudgeSceneSource(selectedSceneSourceId, 0, -1, large)
-          return
-        }
-        if (event.key === 'ArrowDown') {
-          event.preventDefault()
-          void nudgeSceneSource(selectedSceneSourceId, 0, 1, large)
-          return
-        }
-        if (event.key === 'ArrowLeft') {
-          event.preventDefault()
-          void nudgeSceneSource(selectedSceneSourceId, -1, 0, large)
-          return
-        }
-        if (event.key === 'ArrowRight') {
-          event.preventDefault()
-          void nudgeSceneSource(selectedSceneSourceId, 1, 0, large)
-          return
-        }
-        if (event.key.toLowerCase() === 'r') {
-          event.preventDefault()
-          void resetSceneSource(selectedSceneSourceId)
-        }
-      }
+  // Effect event (E2): the old effect re-registered the window keydown
+  // listener whenever any of TEN callback identities changed — practically
+  // every session-state render, each swap a window where a shortcut drops.
+  const handleStudioKeyDown = useEffectEvent((event: KeyboardEvent): void => {
+    if (event.repeat || isEditableTargetSafe(event.target)) {
+      return
     }
 
+    if (event.code === 'Space') {
+      event.preventDefault()
+      if (canStop) {
+        void stopSession()
+        return
+      }
+      if (canStart) {
+        void startSession()
+      }
+      return
+    }
+
+    if (event.key.toLowerCase() === 'p') {
+      event.preventDefault()
+      void refreshPreview()
+    }
+
+    if (sceneEditMode && selectedSceneSourceId && !isSessionActive) {
+      const large = event.shiftKey
+      if (event.key === 'ArrowUp') {
+        event.preventDefault()
+        void nudgeSceneSource(selectedSceneSourceId, 0, -1, large)
+        return
+      }
+      if (event.key === 'ArrowDown') {
+        event.preventDefault()
+        void nudgeSceneSource(selectedSceneSourceId, 0, 1, large)
+        return
+      }
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault()
+        void nudgeSceneSource(selectedSceneSourceId, -1, 0, large)
+        return
+      }
+      if (event.key === 'ArrowRight') {
+        event.preventDefault()
+        void nudgeSceneSource(selectedSceneSourceId, 1, 0, large)
+        return
+      }
+      if (event.key.toLowerCase() === 'r') {
+        event.preventDefault()
+        void resetSceneSource(selectedSceneSourceId)
+      }
+    }
+  })
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => handleStudioKeyDown(event)
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [
-    canStart,
-    canStop,
-    isSessionActive,
-    nudgeSceneSource,
-    refreshPreview,
-    resetSceneSource,
-    sceneEditMode,
-    selectedSceneSourceId,
-    startSession,
-    stopSession
-  ])
+  }, [])
 
   // ── Remote control (issue #143) ──────────────────────────────────────
   // Intents execute through the SAME handlers as the on-screen buttons —
