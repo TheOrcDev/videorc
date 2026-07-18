@@ -1470,6 +1470,13 @@ export interface PreviewSurfaceStatus {
   framesRendered: number
   presentedFrameId?: number
   compositorFrameLag?: number
+  /** Windows proof-surface transport metrics (issue #157): observed frame
+   * request rate, payload bandwidth, decode cadence, and decoded per-layer
+   * source dimensions. Absent on native CAMetalLayer transports. */
+  proofTransportRequestsPerSecond?: number
+  proofTransportBytesPerSecond?: number
+  proofTransportDecodedFramesPerSecond?: number
+  proofSourceDimensions?: Record<string, { width: number; height: number }>
   droppedFrames: number
   inputToPresentLatencyMs?: number
   inputToPresentLatencyP50Ms?: number

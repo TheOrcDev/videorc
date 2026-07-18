@@ -434,6 +434,11 @@ function streamingWithTargetPatch(
   }
 }
 const NATIVE_PREVIEW_COMPOSITOR_POLL_INTERVAL_MS = 1000 / 60
+// Fallback-pump dedupe (issue #157): an unchanged compositor status carries no
+// new pixels, so resubmitting it at 60Hz only burns main-process present work.
+// A bounded refresh still goes through so main's staleness/liveness gates keep
+// seeing a heartbeat while the compositor is genuinely idle.
+const NATIVE_PREVIEW_FALLBACK_LIVENESS_REFRESH_MS = 1000
 const NATIVE_PREVIEW_COMPOSITOR_TIMING_SAMPLE_LIMIT = 900
 const NATIVE_PREVIEW_SCENE_FRAME_WAIT_TIMEOUT_MS = 750
 const NATIVE_PREVIEW_SCENE_FRAME_WAIT_INTERVAL_MS = 33
@@ -2301,6 +2306,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const nativePreviewCompositorLastEventAtRef = useRef(0)
   const nativePreviewCompositorPollInFlightRef = useRef(false)
   const nativePreviewCompositorPumpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const nativePreviewFallbackLastPresentRef = useRef<{ key: string; at: number } | null>(null)
   const nativePreviewCompositorPollIntervalSamplesRef = useRef<number[]>([])
   const nativePreviewCompositorPollRoundTripSamplesRef = useRef<number[]>([])
   const nativePreviewCompositorPresentRoundTripSamplesRef = useRef<number[]>([])
@@ -2909,7 +2915,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         nativePreviewCompositorLastPollStartedAtRef.current = pollStartedAt
         if (latestStatus) {
-          queueNativePreviewCompositorPresent(client, latestStatus)
+          // A new frame, run, or scene presents immediately (its key differs);
+          // an unchanged status is only re-presented as a bounded liveness
+          // refresh instead of 60 times per second.
+          const presentKey = `${latestStatus.runId ?? ''}:${latestStatus.framesRendered}:${latestStatus.sceneRevision ?? ''}`
+          const lastPresent = nativePreviewFallbackLastPresentRef.current
+          if (
+            !lastPresent ||
+            lastPresent.key !== presentKey ||
+            pollStartedAt - lastPresent.at >= NATIVE_PREVIEW_FALLBACK_LIVENESS_REFRESH_MS
+          ) {
+            nativePreviewFallbackLastPresentRef.current = { key: presentKey, at: pollStartedAt }
+            queueNativePreviewCompositorPresent(client, latestStatus)
+          }
         }
       }
       nativePreviewCompositorPumpTimerRef.current = setTimeout(
@@ -2925,6 +2943,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return () => {
       cancelled = true
       nativePreviewCompositorPollInFlightRef.current = false
+      nativePreviewFallbackLastPresentRef.current = null
       if (nativePreviewCompositorPumpTimerRef.current) {
         clearTimeout(nativePreviewCompositorPumpTimerRef.current)
         nativePreviewCompositorPumpTimerRef.current = null
