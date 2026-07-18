@@ -4,8 +4,45 @@ import test from 'node:test'
 import {
   evaluateProcessMemoryGate,
   formatProcessMemorySummary,
+  requiredProcessMemoryTrendThresholdFailures,
   summarizeProcessMemory
 } from './process-memory-gate.mjs'
+
+test('requiredProcessMemoryTrendThresholdFailures rejects a gate without owned and per-role trend limits', () => {
+  assert.deepEqual(requiredProcessMemoryTrendThresholdFailures({}), [
+    'owned process RSS slope threshold was missing or invalid',
+    'owned process RSS second-half slope threshold was missing or invalid',
+    'owned process RSS plateau growth threshold was missing or invalid',
+    'backend RSS slope threshold was missing or invalid',
+    'backend RSS second-half slope threshold was missing or invalid',
+    'backend RSS plateau growth threshold was missing or invalid',
+    'electron-main RSS slope threshold was missing or invalid',
+    'electron-main RSS second-half slope threshold was missing or invalid',
+    'electron-main RSS plateau growth threshold was missing or invalid',
+    'electron-renderer RSS slope threshold was missing or invalid',
+    'electron-renderer RSS second-half slope threshold was missing or invalid',
+    'electron-renderer RSS plateau growth threshold was missing or invalid'
+  ])
+})
+
+test('requiredProcessMemoryTrendThresholdFailures accepts reviewed owned and required-role trend limits', () => {
+  const perRole = {
+    backend: 0,
+    'electron-main': 1,
+    'electron-renderer': 2
+  }
+  assert.deepEqual(
+    requiredProcessMemoryTrendThresholdFailures({
+      maxOwnedSlopeMbPerMinute: 0,
+      maxOwnedSecondHalfSlopeMbPerMinute: 1,
+      maxOwnedPlateauGrowthMb: 2,
+      maxRoleSlopeMbPerMinute: perRole,
+      maxRoleSecondHalfSlopeMbPerMinute: perRole,
+      maxRolePlateauGrowthMb: perRole
+    }),
+    []
+  )
+})
 
 test('summarizeProcessMemory tracks peak process tree, owned RSS, and role totals', () => {
   const summary = summarizeProcessMemory([

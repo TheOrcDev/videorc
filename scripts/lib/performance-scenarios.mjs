@@ -7,6 +7,10 @@ export const PERFORMANCE_SCENARIOS = [
   'preview-lifecycle',
   'jpeg-fallback',
   'real-devices-1080p',
+  'record-1080p60',
+  'record-vertical-4k30',
+  'studio-live-mic-visuals',
+  'lifecycle-churn',
   'record-4k',
   'record-4k-stream-1080p'
 ]
@@ -53,6 +57,9 @@ export function buildPerformanceScenario({
   childReportPath,
   runNonce,
   expectedBuildMode,
+  profileClass,
+  appVersion,
+  sampleIntervalMs = 1_000,
   node = process.execPath
 }) {
   if (!PERFORMANCE_SCENARIOS.includes(scenario)) {
@@ -70,6 +77,11 @@ export function buildPerformanceScenario({
     VIDEORC_PERF_SCENARIO: scenario,
     VIDEORC_PERF_RUN_NONCE: runNonce,
     VIDEORC_PERF_EXPECT_BUILD_MODE: expectedBuildMode,
+    ...(profileClass ? { VIDEORC_PERF_PROFILE_CLASS: profileClass } : {}),
+    ...(appVersion ? { VIDEORC_PERF_APP_VERSION: appVersion } : {}),
+    VIDEORC_PERF_WARMUP_MS: String(warmupSeconds * 1_000),
+    VIDEORC_PERF_MEASUREMENT_MS: String(measurementSeconds * 1_000),
+    VIDEORC_PERF_SAMPLE_INTERVAL_MS: String(sampleIntervalMs),
     ...scenarioMetadataEnvironment(scenario)
   }
 
@@ -80,13 +92,19 @@ export function buildPerformanceScenario({
       env: {
         ...commonEnv,
         VIDEORC_PROCESS_MEMORY_WARMUP_MS: String(warmupSeconds * 1000),
-        VIDEORC_PROCESS_MEMORY_SAMPLE_MS: String(measurementSeconds * 1000)
+        VIDEORC_PROCESS_MEMORY_SAMPLE_MS: String(measurementSeconds * 1000),
+        VIDEORC_PROCESS_MEMORY_INTERVAL_MS: String(sampleIntervalMs)
       },
       deviceRequired: false
     }
   }
 
-  if (scenario === 'docked-native-preview' || scenario === 'detached-native-preview') {
+  if (
+    scenario === 'docked-native-preview' ||
+    scenario === 'detached-native-preview' ||
+    scenario === 'studio-live-mic-visuals'
+  ) {
+    const micVisuals = scenario === 'studio-live-mic-visuals'
     return {
       command: node,
       args: ['scripts/perf-idle-probe.mjs', modeArg],
@@ -94,14 +112,18 @@ export function buildPerformanceScenario({
         ...commonEnv,
         VIDEORC_PERF_WARMUP_SECONDS: String(warmupSeconds),
         VIDEORC_PERF_SAMPLE_SECONDS: String(measurementSeconds),
-        VIDEORC_PERF_PREVIEW_MODE: scenario === 'docked-native-preview' ? 'docked' : 'detached'
+        VIDEORC_PERF_PREVIEW_MODE:
+          scenario === 'docked-native-preview' || micVisuals ? 'docked' : 'detached',
+        ...(micVisuals ? { VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS: '1' } : {})
       },
-      deviceRequired: false
+      deviceRequired: micVisuals
     }
   }
 
-  if (scenario === 'preview-lifecycle') {
-    const cycles = process.env.VIDEORC_PREVIEW_LIFECYCLE_CYCLES ?? '100'
+  if (scenario === 'preview-lifecycle' || scenario === 'lifecycle-churn') {
+    const cycles =
+      process.env.VIDEORC_PREVIEW_LIFECYCLE_CYCLES ??
+      (scenario === 'lifecycle-churn' ? '200' : '100')
     return {
       command: node,
       args: ['scripts/preview-lifecycle-probe.mjs'],
@@ -144,6 +166,7 @@ export function buildPerformanceScenario({
         VIDEORC_PERF_EXPECT_TRANSPORT: 'native-surface',
         VIDEORC_PERF_EXPECT_BACKING: 'cametal-layer',
         VIDEORC_BASELINE_WARMUP_MS: String(warmupSeconds * 1000),
+        VIDEORC_BASELINE_SAMPLE_MS: String(sampleIntervalMs),
         VIDEORC_BASELINE_RECORDING_MS: String((warmupSeconds + measurementSeconds) * 1000),
         VIDEORC_SMOKE_TIMEOUT_MS: String((warmupSeconds + measurementSeconds + 300) * 1000)
       },
@@ -161,6 +184,34 @@ export function buildPerformanceScenario({
         VIDEORC_PERF_EXPECT_TRANSPORT: 'native-surface',
         VIDEORC_PERF_EXPECT_BACKING: 'cametal-layer',
         VIDEORC_BASELINE_WARMUP_MS: String(warmupSeconds * 1000),
+        VIDEORC_BASELINE_SAMPLE_MS: String(sampleIntervalMs),
+        VIDEORC_BASELINE_RECORDING_MS: String((warmupSeconds + measurementSeconds) * 1000),
+        VIDEORC_SMOKE_TIMEOUT_MS: String((warmupSeconds + measurementSeconds + 300) * 1000)
+      },
+      deviceRequired: true
+    }
+  }
+
+  if (scenario === 'record-1080p60' || scenario === 'record-vertical-4k30') {
+    const vertical = scenario === 'record-vertical-4k30'
+    const width = vertical ? 2160 : 1920
+    const height = vertical ? 3840 : 1080
+    const fps = vertical ? 30 : 60
+    return {
+      command: 'pnpm',
+      args: ['baseline:real-source', modeArg],
+      env: {
+        ...commonEnv,
+        VIDEORC_BASELINE_WIDTH: String(width),
+        VIDEORC_BASELINE_HEIGHT: String(height),
+        VIDEORC_BASELINE_FPS: String(fps),
+        VIDEORC_BASELINE_BITRATE_KBPS: vertical ? '30000' : '12000',
+        VIDEORC_BASELINE_SCREEN_MOTION_STIMULUS: '1',
+        VIDEORC_BASELINE_NO_PREVIEW_SURFACE: '0',
+        VIDEORC_PERF_EXPECT_TRANSPORT: 'native-surface',
+        VIDEORC_PERF_EXPECT_BACKING: 'cametal-layer',
+        VIDEORC_BASELINE_WARMUP_MS: String(warmupSeconds * 1000),
+        VIDEORC_BASELINE_SAMPLE_MS: String(sampleIntervalMs),
         VIDEORC_BASELINE_RECORDING_MS: String((warmupSeconds + measurementSeconds) * 1000),
         VIDEORC_SMOKE_TIMEOUT_MS: String((warmupSeconds + measurementSeconds + 300) * 1000)
       },
@@ -177,6 +228,7 @@ export function buildPerformanceScenario({
       VIDEORC_PERF_EXPECT_TRANSPORT: 'native-surface',
       VIDEORC_PERF_EXPECT_BACKING: 'cametal-layer',
       VIDEORC_BASELINE_WARMUP_MS: String(warmupSeconds * 1000),
+      VIDEORC_BASELINE_SAMPLE_MS: String(sampleIntervalMs),
       VIDEORC_BASELINE_RECORDING_MS: String((warmupSeconds + measurementSeconds) * 1000),
       VIDEORC_SMOKE_TIMEOUT_MS: String((warmupSeconds + measurementSeconds + 300) * 1000)
     },
@@ -196,6 +248,28 @@ function scenarioMetadataEnvironment(scenario) {
       VIDEORC_PERF_SOURCE_FPS: '30',
       VIDEORC_PERF_OUTPUTS_JSON: JSON.stringify([
         { role: 'recording', width: 3840, height: 2160, fps: 30 }
+      ])
+    }
+  }
+  if (scenario === 'record-1080p60') {
+    return {
+      VIDEORC_PERF_APP_ROLE: 'recording',
+      VIDEORC_PERF_SOURCE_WIDTH: '1920',
+      VIDEORC_PERF_SOURCE_HEIGHT: '1080',
+      VIDEORC_PERF_SOURCE_FPS: '60',
+      VIDEORC_PERF_OUTPUTS_JSON: JSON.stringify([
+        { role: 'recording', width: 1920, height: 1080, fps: 60 }
+      ])
+    }
+  }
+  if (scenario === 'record-vertical-4k30') {
+    return {
+      VIDEORC_PERF_APP_ROLE: 'vertical-recording',
+      VIDEORC_PERF_SOURCE_WIDTH: '2160',
+      VIDEORC_PERF_SOURCE_HEIGHT: '3840',
+      VIDEORC_PERF_SOURCE_FPS: '30',
+      VIDEORC_PERF_OUTPUTS_JSON: JSON.stringify([
+        { role: 'recording', width: 2160, height: 3840, fps: 30 }
       ])
     }
   }

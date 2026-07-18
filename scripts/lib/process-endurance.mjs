@@ -194,6 +194,7 @@ export function summarizeProcessCpu(samples) {
             values.length > 0
               ? values.reduce((total, value) => total + value, 0) / values.length
               : 0,
+          p95Percent: percentileNearestRank(values, 0.95),
           maxPercent: values.length > 0 ? Math.max(...values) : 0
         }
       ]
@@ -269,6 +270,7 @@ export function evaluateProcessEnduranceEvidence(
         !roleCpu ||
         roleCpu.samples < minimumSamples ||
         !Number.isFinite(roleCpu.averagePercent) ||
+        !Number.isFinite(roleCpu.p95Percent) ||
         !Number.isFinite(roleCpu.maxPercent)
       ) {
         failures.push(`per-role CPU series did not continuously cover required role ${role}`)
@@ -295,6 +297,12 @@ export function evaluateOwnedTeardown(teardown) {
   const failures = []
   if (!teardown || typeof teardown !== 'object') return ['app-owned teardown evidence was missing']
   if (teardown.clean !== true) failures.push('app-owned process teardown was not clean')
+  if (teardown.gracefulQuitError) {
+    failures.push(`app-owned graceful quit failed: ${teardown.gracefulQuitError}`)
+  }
+  if (teardown.stopResult && teardown.stopResult.state !== 'skipped') {
+    failures.push('app-owned teardown required forced process termination')
+  }
   if ((teardown.finalCensus?.records?.length ?? 0) !== 0) {
     failures.push('app-owned process ledger was not empty after teardown')
   }
@@ -307,7 +315,7 @@ export function evaluateOwnedTeardown(teardown) {
 
 export function performanceEnduranceMetrics({ evidence, teardown, pipeline, thresholds = {} }) {
   return {
-    teardownClean: teardown?.clean === true,
+    teardownClean: evaluateOwnedTeardown(teardown).length === 0,
     pipeline: pipeline ?? null,
     memory: evidence?.memory?.summary ?? null,
     memorySamples: evidence?.memory?.samples ?? null,
@@ -316,6 +324,12 @@ export function performanceEnduranceMetrics({ evidence, teardown, pipeline, thre
       Object.entries(evidence?.cpu?.summary?.byRole ?? {}).map(([role, summary]) => [
         role,
         summary.averagePercent
+      ])
+    ),
+    cpuP95PercentByRole: Object.fromEntries(
+      Object.entries(evidence?.cpu?.summary?.byRole ?? {}).map(([role, summary]) => [
+        role,
+        summary.p95Percent
       ])
     ),
     cpu: evidence?.cpu ?? null,
@@ -336,4 +350,11 @@ function finiteNumber(value) {
 
 function finiteNumberOrNull(value) {
   return Number.isFinite(value) ? value : null
+}
+
+function percentileNearestRank(values, percentile) {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((left, right) => left - right)
+  const index = Math.max(0, Math.ceil(percentile * sorted.length) - 1)
+  return sorted[index]
 }

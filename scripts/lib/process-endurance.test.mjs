@@ -55,6 +55,7 @@ describe('process endurance evidence', () => {
     )
     assert.equal(evidence.cpu.samples.length, 2)
     assert.equal(evidence.cpu.summary.byRole.backend.averagePercent, 10)
+    assert.equal(evidence.cpu.summary.byRole.backend.p95Percent, 10)
     assert.deepEqual(evidence.sampling, {
       expectedSamples: 2,
       collectedSamples: 2,
@@ -162,9 +163,23 @@ describe('process endurance evidence', () => {
     assert.deepEqual(cpu, {
       samples: 2,
       byRole: {
-        backend: { samples: 2, averagePercent: 15, maxPercent: 20 },
-        'electron-main': { samples: 2, averagePercent: 10, maxPercent: 15 }
+        backend: { samples: 2, averagePercent: 15, p95Percent: 20, maxPercent: 20 },
+        'electron-main': { samples: 2, averagePercent: 10, p95Percent: 15, maxPercent: 15 }
       }
+    })
+  })
+
+  it('uses a nearest-rank p95 that exposes sustained CPU spikes', () => {
+    const samples = Array.from({ length: 20 }, (_, index) => ({
+      sampledAtMs: index * 1_000,
+      byRole: { backend: index < 18 ? 10 : index === 18 ? 70 : 90 }
+    }))
+
+    assert.deepEqual(summarizeProcessCpu(samples).byRole.backend, {
+      samples: 20,
+      averagePercent: 17,
+      p95Percent: 70,
+      maxPercent: 90
     })
   })
 
@@ -184,6 +199,27 @@ describe('process endurance evidence', () => {
     const evidence = completeEvidence()
     assert.deepEqual(evaluateProcessEnduranceEvidence(evidence), [])
     assert.deepEqual(evaluateOwnedTeardown(cleanTeardown()), [])
+
+    assert.deepEqual(
+      evaluateOwnedTeardown({
+        ...cleanTeardown(),
+        gracefulQuitRequested: true,
+        gracefulQuitError: 'app quit timed out',
+        stopResult: { state: 'killed', escalated: true }
+      }),
+      [
+        'app-owned graceful quit failed: app quit timed out',
+        'app-owned teardown required forced process termination'
+      ]
+    )
+    assert.deepEqual(
+      evaluateOwnedTeardown({
+        ...cleanTeardown(),
+        gracefulQuitRequested: true,
+        stopResult: { state: 'terminated', escalated: false }
+      }),
+      ['app-owned teardown required forced process termination']
+    )
 
     const incomplete = structuredClone(evidence)
     incomplete.memory.samples = []
@@ -223,6 +259,7 @@ describe('process endurance evidence', () => {
     assert.equal(metrics.memorySamples, evidence.memory.samples)
     assert.equal(metrics.sampling, evidence.sampling)
     assert.equal(metrics.cpuAveragePercentByRole.backend, 10)
+    assert.equal(metrics.cpuP95PercentByRole.backend, 20)
     assert.equal(metrics.resourceCheckpoints, evidence.resourceCheckpoints)
     assert.equal(metrics.processEndurance, evidence)
     assert.deepEqual(metrics.thresholds, {})
@@ -236,7 +273,7 @@ function completeEvidence() {
   const cpuRoles = Object.fromEntries(
     ['backend', 'electron-main', 'electron-renderer'].map((role) => [
       role,
-      { samples: 2, averagePercent: 10, maxPercent: 20 }
+      { samples: 2, averagePercent: 10, p95Percent: 20, maxPercent: 20 }
     ])
   )
   return {

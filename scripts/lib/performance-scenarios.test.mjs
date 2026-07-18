@@ -95,6 +95,64 @@ describe('buildPerformanceScenario', () => {
     assert.equal(scenario.env.VIDEORC_PERF_EXPECT_BACKING, 'cametal-layer')
   })
 
+  it('defines representative 1080p60 and vertical 4K30 recording endurance workloads', () => {
+    const fullHd = buildPerformanceScenario({
+      scenario: 'record-1080p60',
+      mode: 'gate',
+      warmupSeconds: 60,
+      measurementSeconds: 600,
+      childReportPath: '/tmp/1080p60.json'
+    })
+    const vertical = buildPerformanceScenario({
+      scenario: 'record-vertical-4k30',
+      mode: 'gate',
+      warmupSeconds: 60,
+      measurementSeconds: 600,
+      childReportPath: '/tmp/vertical-4k30.json'
+    })
+
+    assert.deepEqual(fullHd.args, ['baseline:real-source', '--gate'])
+    assert.equal(fullHd.env.VIDEORC_BASELINE_WIDTH, '1920')
+    assert.equal(fullHd.env.VIDEORC_BASELINE_HEIGHT, '1080')
+    assert.equal(fullHd.env.VIDEORC_BASELINE_FPS, '60')
+    assert.equal(fullHd.env.VIDEORC_BASELINE_RECORDING_MS, '660000')
+    assert.deepEqual(JSON.parse(fullHd.env.VIDEORC_PERF_OUTPUTS_JSON), [
+      { role: 'recording', width: 1920, height: 1080, fps: 60 }
+    ])
+
+    assert.deepEqual(vertical.args, ['baseline:real-source', '--gate'])
+    assert.equal(vertical.env.VIDEORC_BASELINE_WIDTH, '2160')
+    assert.equal(vertical.env.VIDEORC_BASELINE_HEIGHT, '3840')
+    assert.equal(vertical.env.VIDEORC_BASELINE_FPS, '30')
+    assert.deepEqual(JSON.parse(vertical.env.VIDEORC_PERF_OUTPUTS_JSON), [
+      { role: 'recording', width: 2160, height: 3840, fps: 30 }
+    ])
+  })
+
+  it('defines live Studio mic visuals and explicit lifecycle-churn workloads', () => {
+    const mic = buildPerformanceScenario({
+      scenario: 'studio-live-mic-visuals',
+      mode: 'gate',
+      warmupSeconds: 60,
+      measurementSeconds: 600,
+      childReportPath: '/tmp/mic.json',
+      node: 'node'
+    })
+    const churn = buildPerformanceScenario({
+      scenario: 'lifecycle-churn',
+      mode: 'gate',
+      childReportPath: '/tmp/churn.json',
+      node: 'node'
+    })
+
+    assert.deepEqual(mic.args, ['scripts/perf-idle-probe.mjs', '--gate'])
+    assert.equal(mic.env.VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS, '1')
+    assert.equal(mic.env.VIDEORC_PERF_PREVIEW_MODE, 'docked')
+    assert.equal(mic.deviceRequired, true)
+    assert.deepEqual(churn.args, ['scripts/preview-lifecycle-probe.mjs'])
+    assert.equal(churn.timing.cycles, 200)
+  })
+
   it('keeps split-output report-only mode neutral through the package script', () => {
     const scenario = buildPerformanceScenario({
       scenario: 'record-4k-stream-1080p',
