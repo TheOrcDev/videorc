@@ -191,12 +191,14 @@ export function updateFeedZipNameFromYml(ymlText) {
   return match ? match[1].trim() : null
 }
 
-export function buildSignedS3Request({ config, method, objectKey }) {
+export function buildSignedS3Request({ additionalHeaders = {}, config, method, objectKey }) {
   const date = new Date()
   const url = buildS3ObjectUrl(config, objectKey)
+  const signedAdditionalHeaders = normalizeAdditionalSignedHeaders(additionalHeaders)
   const headers = {
     'x-amz-content-sha256': S3_PAYLOAD_HASH,
-    'x-amz-date': formatS3Date(date)
+    'x-amz-date': formatS3Date(date),
+    ...signedAdditionalHeaders
   }
   if (config.sessionToken) {
     headers['x-amz-security-token'] = config.sessionToken
@@ -223,10 +225,64 @@ export function buildSignedS3Request({ config, method, objectKey }) {
       }),
       'X-Amz-Content-Sha256': S3_PAYLOAD_HASH,
       'X-Amz-Date': formatS3Date(date),
-      ...(config.sessionToken ? { 'X-Amz-Security-Token': config.sessionToken } : {})
+      ...(config.sessionToken ? { 'X-Amz-Security-Token': config.sessionToken } : {}),
+      ...signedAdditionalHeaders
     },
     url: url.toString()
   }
+}
+
+function normalizeAdditionalSignedHeaders(headers) {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) {
+    throw new ReleaseUploadConfigError(
+      'invalid-signed-headers',
+      'Additional S3 signed headers must be a plain object.'
+    )
+  }
+  const normalized = {}
+  const reserved = new Set([
+    'authorization',
+    'host',
+    'x-amz-content-sha256',
+    'x-amz-date',
+    'x-amz-security-token'
+  ])
+  for (const [rawName, rawValue] of Object.entries(headers)) {
+    const name = rawName.trim().toLowerCase()
+    if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(name)) {
+      throw new ReleaseUploadConfigError(
+        'invalid-signed-header-name',
+        `Invalid additional S3 signed header name: ${rawName}.`
+      )
+    }
+    if (reserved.has(name)) {
+      throw new ReleaseUploadConfigError(
+        'reserved-signed-header',
+        `Additional S3 signed headers may not override ${name}.`
+      )
+    }
+    if (Object.hasOwn(normalized, name)) {
+      throw new ReleaseUploadConfigError(
+        'duplicate-signed-header',
+        `Duplicate additional S3 signed header: ${name}.`
+      )
+    }
+    if (typeof rawValue !== 'string' || /[\0\r\n]/.test(rawValue)) {
+      throw new ReleaseUploadConfigError(
+        'invalid-signed-header-value',
+        `Additional S3 signed header ${name} must have a safe string value.`
+      )
+    }
+    const value = rawValue.trim().replace(/[ \t]+/g, ' ')
+    if (!value) {
+      throw new ReleaseUploadConfigError(
+        'invalid-signed-header-value',
+        `Additional S3 signed header ${name} must not be empty.`
+      )
+    }
+    normalized[name] = value
+  }
+  return normalized
 }
 
 export function buildS3ObjectUrl(config, objectKey) {
@@ -275,18 +331,16 @@ function parseS3EndpointUrl(value) {
 
   try {
     const url = new URL(value)
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
       throw new Error('Unsupported S3 endpoint URL protocol.')
     }
 
     url.pathname = url.pathname.replace(/\/+$/, '')
-    url.search = ''
-    url.hash = ''
     return url.toString()
   } catch {
     throw new ReleaseUploadConfigError(
       'invalid-endpoint-url',
-      'Release upload S3 endpoint URL must be a valid HTTP(S) URL.'
+      'Release upload S3 endpoint URL must be a credential-free HTTPS URL.'
     )
   }
 }

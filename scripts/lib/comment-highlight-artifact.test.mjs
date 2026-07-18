@@ -80,6 +80,29 @@ describe('comment highlight artifact gate', () => {
     assert.equal(verdict.pass, true)
   })
 
+  it('detects a correctly sized 1080p card inside the compositor top margin', () => {
+    const sampleWidth = 160
+    const sampleHeight = 90
+    const frame = Buffer.alloc(sampleWidth * sampleHeight * 3)
+    fillRect(frame, sampleWidth, 0, 0, sampleWidth, sampleHeight, [80, 120, 160])
+    fillRect(frame, sampleWidth, 48, 6, 112, 25, [16, 16, 18])
+    fillRect(frame, sampleWidth, 48, 16, 112, 21, [235, 235, 238])
+    fillRect(frame, sampleWidth, 0, 45, sampleWidth, sampleHeight, CAPTION_MARKER_RGB)
+
+    const metrics = measureCommentHighlightArtifactRgb(Buffer.concat([frame, frame]), {
+      width: sampleWidth,
+      height: sampleHeight
+    })
+    const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
+      highlightDisposition: 'live'
+    })
+
+    assert.equal(verdict.observations.markerHighlightFrames, 0)
+    assert.equal(verdict.observations.renderedCardFrames, 2)
+    assert.equal(verdict.observations.coexistFrames, 2)
+    assert.equal(verdict.pass, true)
+  })
+
   it('accepts explicit legacy unavailability when stream frames were decoded', () => {
     const rgb = Buffer.concat([markerFrame(), markerFrame()])
     const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height })
@@ -261,6 +284,17 @@ function fillRows(rgb, startRow, endRow, color) {
   for (let row = startRow; row < endRow; row += 1) {
     for (let column = 0; column < width; column += 1) {
       const offset = (row * width + column) * 3
+      rgb[offset] = color[0]
+      rgb[offset + 1] = color[1]
+      rgb[offset + 2] = color[2]
+    }
+  }
+}
+
+function fillRect(rgb, frameWidth, startColumn, startRow, endColumn, endRow, color) {
+  for (let row = startRow; row < endRow; row += 1) {
+    for (let column = startColumn; column < endColumn; column += 1) {
+      const offset = (row * frameWidth + column) * 3
       rgb[offset] = color[0]
       rgb[offset + 1] = color[1]
       rgb[offset + 2] = color[2]

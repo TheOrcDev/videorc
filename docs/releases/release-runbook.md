@@ -1,11 +1,40 @@
-# Releasing Videorc (macOS beta) — Runbook
+# Releasing Videorc (macOS Beta) — Runbook
 
 How to cut a new version and make existing users auto-update to it. This is the
 repeatable per-release process. For one-time signing setup see
 [macos-signing.md](macos-signing.md); for the broader packaging reference see
 [../distribution.md](../distribution.md).
 
-## What a release is
+This runbook publishes the **macOS Beta only**. Windows is a separate,
+default-deny **Alpha** track. Do not rename these artifacts, reuse the macOS R2
+keys, or treat a Windows CI artifact as a release.
+
+## Windows Alpha Is A Separate Gated Track
+
+A Windows 11 x64 candidate stays private until all of the following are recorded
+as `PASS` in a dated copy of
+[../acceptance/windows-app-acceptance-template.md](../acceptance/windows-app-acceptance-template.md):
+
+1. `pnpm smoke:local-gates:windows` completes on a real Windows 11 x64 machine,
+   including the physical-device gates and strict
+   `support-bundle:verify --windows-acceptance` step.
+2. Authenticode status is valid, the certificate subject exactly matches the
+   pinned publisher identity, and a trusted timestamp is present.
+3. The release manifest SHA-256 and byte size exactly match a newly downloaded
+   installer, and a current Microsoft Defender scan reports no detections.
+4. A clean user profile proves install, first launch, real-source recording,
+   update/feed behavior, rollback behavior, and uninstall/process cleanup.
+5. A sanitized accepted-evidence record, release notes, and known-issues URL are
+   public, while recordings, credentials, support bundles, device IDs, and local
+   paths remain private.
+
+Any failed or blocked gate keeps the Windows download unavailable. Never mutate
+an installer or manifest in place; issue a new Alpha identifier after fixing the
+candidate. Development setup and evidence handling are documented in
+[../windows-dev-loop.md](../windows-dev-loop.md) and
+[../distribution.md](../distribution.md).
+
+## What a macOS release is
 
 Two artifact sets in the same private R2 bucket (`videorc-releases`), fronted by
 videorc-web:
@@ -119,7 +148,7 @@ videorc-web's `VIDEORC_DOWNLOAD_MANIFEST_OBJECT_KEY` points at (one-time Vercel
 setting — do NOT pin it to a versioned key, or the download page freezes on
 that release while the update feed moves on).
 
-## Acceptance gate
+## macOS acceptance gate
 
 A signed beta is releasable only after a clean-machine pass recorded under
 `docs/acceptance/` — use
@@ -146,7 +175,7 @@ release candidate:
   environment, run readiness with `VIDEORC_SMOKE_REQUIRE_PROVIDER_READY=1`
   so missing prerequisites FAIL the gate instead of printing advice.
 
-## How users get the update
+## How macOS users get the update
 
 1. On launch — and on **Settings → About & updates → Check for updates** — the
    app GETs `latest-mac.yml` and compares `version` to its own.
@@ -179,7 +208,7 @@ ever changes again, update `publish.url`, `videorc-web-links.ts`, and the Rust
 - **Feed = package.json `version`, not `releaseId`** — bump `version` to ship an
   update; the `-beta.N` suffix only names the download archive.
 
-## Rollback
+## macOS rollback
 
 Fail closed instead of mutating a bad release — see "Beta Download Rollback" in
 [../distribution.md](../distribution.md): set

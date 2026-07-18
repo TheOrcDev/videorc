@@ -44,6 +44,49 @@ function markProofPollerFrameAdvance(poller, now) {
   poller.lastFrameAdvanceAt = now;
 }
 
+// Transport accounting (issue #157): the proof surface is a production
+// preview transport on Windows, so its request rate, payload bytes, and
+// decoded source dimensions must be observable instead of inferred.
+function markProofPollerRequestStarted(poller) {
+  poller.requestCount = (poller.requestCount ?? 0) + 1;
+}
+
+function markProofPollerNotModified(poller) {
+  poller.notModifiedCount = (poller.notModifiedCount ?? 0) + 1;
+}
+
+function markProofPollerFrameDecoded(poller, byteLength, width, height, now) {
+  poller.bytesReceived = (poller.bytesReceived ?? 0) +
+    (Number.isFinite(byteLength) && byteLength > 0 ? byteLength : 0);
+  poller.decodedFrames = (poller.decodedFrames ?? 0) + 1;
+  if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) {
+    poller.lastFrameWidth = width;
+    poller.lastFrameHeight = height;
+  }
+  poller.lastDecodeAt = now;
+}
+
+function proofPollerTransportTotals(activePollers) {
+  let requestCount = 0;
+  let notModifiedCount = 0;
+  let bytesReceived = 0;
+  let decodedFrames = 0;
+  const sourceDimensions = {};
+  for (const [id, poller] of activePollers) {
+    requestCount += poller.requestCount ?? 0;
+    notModifiedCount += poller.notModifiedCount ?? 0;
+    bytesReceived += poller.bytesReceived ?? 0;
+    decodedFrames += poller.decodedFrames ?? 0;
+    if (poller.lastFrameWidth != null && poller.lastFrameHeight != null) {
+      sourceDimensions[id] = {
+        width: poller.lastFrameWidth,
+        height: poller.lastFrameHeight
+      };
+    }
+  }
+  return { requestCount, notModifiedCount, bytesReceived, decodedFrames, sourceDimensions };
+}
+
 function presentProofPollerFrame(poller, objectUrl) {
   const previousObjectUrl = poller.objectUrl;
   poller.image.src = objectUrl;

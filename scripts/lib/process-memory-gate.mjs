@@ -1,5 +1,43 @@
 import { summarizeNumericSeries } from './performance-contract.mjs'
 
+const REQUIRED_TREND_ROLES = ['backend', 'electron-main', 'electron-renderer']
+
+export function requiredProcessMemoryTrendThresholdFailures(
+  thresholds,
+  { roles = REQUIRED_TREND_ROLES } = {}
+) {
+  const failures = []
+  requireTrendThreshold(failures, 'owned process RSS slope', thresholds?.maxOwnedSlopeMbPerMinute)
+  requireTrendThreshold(
+    failures,
+    'owned process RSS second-half slope',
+    thresholds?.maxOwnedSecondHalfSlopeMbPerMinute
+  )
+  requireTrendThreshold(
+    failures,
+    'owned process RSS plateau growth',
+    thresholds?.maxOwnedPlateauGrowthMb
+  )
+  for (const role of roles) {
+    requireTrendThreshold(
+      failures,
+      `${role} RSS slope`,
+      thresholds?.maxRoleSlopeMbPerMinute?.[role]
+    )
+    requireTrendThreshold(
+      failures,
+      `${role} RSS second-half slope`,
+      thresholds?.maxRoleSecondHalfSlopeMbPerMinute?.[role]
+    )
+    requireTrendThreshold(
+      failures,
+      `${role} RSS plateau growth`,
+      thresholds?.maxRolePlateauGrowthMb?.[role]
+    )
+  }
+  return failures
+}
+
 export function summarizeProcessMemory(censuses, { warmupMs = 0, tailWindowMs = 120000 } = {}) {
   const summary = {
     samples: censuses.length,
@@ -198,6 +236,12 @@ function addLimitFailure(failures, label, actualKb, limitMb) {
   const limitKb = limitMb * 1024
   if (actualKb > limitKb) {
     failures.push(`${label} ${formatMb(actualKb)} exceeded ${limitMb}MB`)
+  }
+}
+
+function requireTrendThreshold(failures, label, value) {
+  if (!Number.isFinite(value) || value < 0) {
+    failures.push(`${label} threshold was missing or invalid`)
   }
 }
 

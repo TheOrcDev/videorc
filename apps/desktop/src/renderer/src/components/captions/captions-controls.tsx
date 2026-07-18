@@ -47,6 +47,7 @@ import {
 } from '@/lib/captions-ui'
 import type { CaptionBurnTarget, CaptionsCaptureSettings } from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
+import { displayKeyGlyph } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 const LANGUAGES = [
@@ -192,6 +193,7 @@ export function CaptionsControls(): ReactElement {
     captureConfig,
     entitlements,
     isSessionActive,
+    runtimeInfo,
     setCaptureConfig,
     startCaptions,
     toggleCaptionsWindow
@@ -209,6 +211,8 @@ export function CaptionsControls(): ReactElement {
     captions.enabled &&
     isSessionActive &&
     (captionsStatus.state === 'blocked' || captionsStatus.state === 'error')
+  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
+  const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
 
   const patchCaptions = (
     patch: Partial<CaptionsCaptureSettings>,
@@ -502,8 +506,8 @@ export function CaptionsControls(): ReactElement {
             <ArrowSquareOut data-icon="inline-start" />
             {captionsWindow.open ? 'Close reader' : 'Open reader'}
             <KbdGroup className="ml-1">
-              <Kbd>⌘</Kbd>
-              <Kbd>⇧</Kbd>
+              <Kbd>{modKey}</Kbd>
+              <Kbd>{shiftKey}</Kbd>
               <Kbd>C</Kbd>
             </KbdGroup>
           </Button>

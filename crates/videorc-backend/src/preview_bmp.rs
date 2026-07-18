@@ -117,7 +117,11 @@ fn bounded_bgra_pixels(
     let target_height = ((u64::from(height) * u64::from(max_width)) / u64::from(width))
         .max(1)
         .min(u64::from(u32::MAX)) as u32;
-    let image = image::RgbaImage::from_raw(width, height, bytes.to_vec())?;
+    // Borrow the retained capture bytes for the downscale source (issue #157):
+    // cloning them first cost a second full-source allocation — ~33 MB per 4K
+    // response — before any resampling had happened. Only the small resized
+    // target is allocated now.
+    let image = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(width, height, bytes)?;
     let resized = image::imageops::resize(&image, max_width, target_height, FilterType::Triangle);
     Some((Cow::Owned(resized.into_raw()), max_width, target_height))
 }

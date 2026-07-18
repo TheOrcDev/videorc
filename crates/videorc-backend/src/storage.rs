@@ -9,7 +9,7 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -22,7 +22,8 @@ use crate::live_chat::{
 use crate::process_job::output_owned_std;
 use crate::protocol::{
     AiArtifact, AiArtifactKind, AiArtifactStatus, DiagnosticStats, HealthEvent, HealthLevel,
-    LayoutSettings, NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings, SessionLogEntry,
+    LayoutSettings, NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings, SessionAiArtifactsPage,
+    SessionHealthEventsPage, SessionListItem, SessionListPage, SessionLogEntry, SessionLogsPage,
     SessionStorageTotals, SessionSummary, SourceSelection, StreamScreen, StreamScreenStatus,
 };
 use crate::repair::{GateStatus, RepairJob, RepairJobStatus};
@@ -2802,6 +2803,24 @@ impl Database {
         .map_err(Into::into)
     }
 
+    pub fn latest_chat_send_operation(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<CommentsSendOperation>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, session_id, message_text, phase_json, destinations_json, created_at, updated_at
+             FROM live_chat_send_operations
+             WHERE session_id = ?1
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+            params![session_id],
+            chat_send_operation_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn list_chat_send_operations(
         &self,
         session_id: &str,
@@ -2878,9 +2897,103 @@ impl Database {
         self.ai_artifacts_for_session_locked(&conn, session_id)
     }
 
+    pub fn list_ai_artifacts_page(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        requested_limit: usize,
+    ) -> Result<SessionAiArtifactsPage> {
+        let limit = requested_limit.clamp(1, 120);
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(121);
+        let (cursor_created_at, cursor_id) = cursor
+            .map(parse_session_detail_cursor)
+            .transpose()?
+            .map(|(created_at, id)| (Some(created_at), Some(id)))
+            .unwrap_or((None, None));
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, session_id, kind, status, content_json, file_path, created_at
+             FROM ai_artifacts
+             WHERE session_id = ?1
+               AND (
+                    ?2 IS NULL
+                    OR created_at < ?2
+                    OR (created_at = ?2 AND id < ?3)
+               )
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![session_id, cursor_created_at, cursor_id, query_limit],
+            ai_artifact_from_row,
+        )?;
+        let mut artifacts = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_older = artifacts.len() > limit;
+        artifacts.truncate(limit);
+        let next_cursor = has_older
+            .then(|| {
+                artifacts
+                    .last()
+                    .map(|artifact| session_detail_cursor(&artifact.created_at, &artifact.id))
+            })
+            .flatten();
+        artifacts.reverse();
+        Ok(SessionAiArtifactsPage {
+            artifacts,
+            next_cursor,
+        })
+    }
+
     pub fn list_health_events(&self, session_id: &str) -> Result<Vec<HealthEvent>> {
         let conn = self.lock()?;
         self.health_events_for_session_locked(&conn, session_id)
+    }
+
+    pub fn list_health_events_page(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        requested_limit: usize,
+    ) -> Result<SessionHealthEventsPage> {
+        let limit = requested_limit.clamp(1, 120);
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(121);
+        let (cursor_created_at, cursor_id) = cursor
+            .map(parse_session_detail_cursor)
+            .transpose()?
+            .map(|(created_at, id)| (Some(created_at), Some(id)))
+            .unwrap_or((None, None));
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, session_id, level, code, message, permission_pane, created_at
+             FROM health_events
+             WHERE session_id = ?1
+               AND (
+                    ?2 IS NULL
+                    OR created_at < ?2
+                    OR (created_at = ?2 AND id < ?3)
+               )
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![session_id, cursor_created_at, cursor_id, query_limit],
+            health_event_from_row,
+        )?;
+        let mut events = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_older = events.len() > limit;
+        events.truncate(limit);
+        let next_cursor = has_older
+            .then(|| {
+                events
+                    .last()
+                    .map(|event| session_detail_cursor(&event.created_at, &event.id))
+            })
+            .flatten();
+        events.reverse();
+        Ok(SessionHealthEventsPage {
+            events,
+            next_cursor,
+        })
     }
 
     pub fn add_health_event(
@@ -2961,6 +3074,53 @@ impl Database {
             ],
         )?;
         Ok(entry)
+    }
+
+    pub fn list_session_logs_page(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        requested_limit: usize,
+    ) -> Result<SessionLogsPage> {
+        let limit = requested_limit.clamp(1, 120);
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(121);
+        let (cursor_created_at, cursor_id) = cursor
+            .map(parse_session_detail_cursor)
+            .transpose()?
+            .map(|(created_at, id)| (Some(created_at), Some(id)))
+            .unwrap_or((None, None));
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, session_id, level, code, message, source_id, permission_pane, created_at
+             FROM session_logs
+             WHERE session_id = ?1
+               AND (
+                    ?2 IS NULL
+                    OR created_at < ?2
+                    OR (created_at = ?2 AND id < ?3)
+               )
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![session_id, cursor_created_at, cursor_id, query_limit],
+            session_log_entry_from_row,
+        )?;
+        let mut entries = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_older = entries.len() > limit;
+        entries.truncate(limit);
+        let next_cursor = has_older
+            .then(|| {
+                entries
+                    .last()
+                    .map(|entry| session_detail_cursor(&entry.created_at, &entry.id))
+            })
+            .flatten();
+        entries.reverse();
+        Ok(SessionLogsPage {
+            entries,
+            next_cursor,
+        })
     }
 
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
@@ -3079,6 +3239,306 @@ impl Database {
         }
 
         Ok(sessions)
+    }
+
+    /// Return one bounded Library page with a fixed SQL statement count.
+    /// Histories are represented only by counts/ready-kind summaries and are
+    /// loaded through their dedicated detail endpoints when a row is opened.
+    pub fn list_session_items_page(
+        &self,
+        cursor: Option<&str>,
+        requested_limit: usize,
+    ) -> Result<SessionListPage> {
+        let limit = requested_limit.clamp(1, 200);
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(201);
+        let (cursor_started_at, cursor_id) = cursor
+            .map(parse_session_list_cursor)
+            .transpose()?
+            .map(|(started_at, id)| (Some(started_at), Some(id)))
+            .unwrap_or((None, None));
+
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "WITH
+                page_sessions AS (
+                    SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
+                           stream_preset, container, duration_ms, layout_json, file_size_bytes,
+                           derived_from_session_id, source_title, processing_kind
+                    FROM sessions
+                    WHERE library_hidden = 0
+                      AND (
+                           ?1 IS NULL
+                           OR started_at < ?1
+                           OR (started_at = ?1 AND id < ?2)
+                      )
+                    ORDER BY started_at DESC, id DESC
+                    LIMIT ?3
+                ),
+                health_counts AS (
+                    SELECT health_events.session_id, COUNT(*) AS count
+                    FROM health_events
+                    JOIN page_sessions ON page_sessions.id = health_events.session_id
+                    GROUP BY health_events.session_id
+                ),
+                log_counts AS (
+                    SELECT session_logs.session_id, COUNT(*) AS count
+                    FROM session_logs
+                    JOIN page_sessions ON page_sessions.id = session_logs.session_id
+                    GROUP BY session_logs.session_id
+                ),
+                artifact_summaries AS (
+                    SELECT ai_artifacts.session_id, COUNT(*) AS count,
+                           GROUP_CONCAT(
+                               DISTINCT CASE
+                                   WHEN ai_artifacts.status = '\"ready\"'
+                                   THEN ai_artifacts.kind
+                               END
+                           )
+                               AS ready_kinds
+                    FROM ai_artifacts
+                    JOIN page_sessions ON page_sessions.id = ai_artifacts.session_id
+                    GROUP BY ai_artifacts.session_id
+                ),
+                comment_counts AS (
+                    SELECT live_chat_messages.session_id, COUNT(*) AS count
+                    FROM live_chat_messages
+                    JOIN page_sessions ON page_sessions.id = live_chat_messages.session_id
+                    GROUP BY live_chat_messages.session_id
+                ),
+                quality_candidate_values AS (
+                    SELECT page_sessions.id AS session_id, repair_jobs.outcome_json,
+                           repair_jobs.status AS job_status, repair_jobs.reason,
+                           repair_jobs.updated_at, repair_jobs.created_at, repair_jobs.id,
+                           CASE
+                               WHEN repair_jobs.file_path = page_sessions.mp4_path THEN 0
+                               ELSE 1
+                           END AS path_priority,
+                           CASE
+                               WHEN json_valid(repair_jobs.outcome_json)
+                               THEN json_extract(repair_jobs.outcome_json, '$.status')
+                               ELSE NULL
+                           END AS gate_status,
+                           CASE
+                               WHEN json_valid(repair_jobs.outcome_json)
+                               THEN CASE
+                                   WHEN json_type(repair_jobs.outcome_json) = 'object'
+                                    AND (
+                                        (
+                                            json_extract(repair_jobs.outcome_json, '$.status') = 'ready'
+                                            AND json_type(repair_jobs.outcome_json, '$.path') = 'text'
+                                        )
+                                        OR (
+                                            json_extract(repair_jobs.outcome_json, '$.status') = 'repaired'
+                                            AND json_type(repair_jobs.outcome_json, '$.path') = 'text'
+                                            AND json_type(repair_jobs.outcome_json, '$.interpolated')
+                                                IN ('true', 'false')
+                                        )
+                                        OR (
+                                            json_extract(repair_jobs.outcome_json, '$.status') = 'not-hundred-percent'
+                                            AND json_type(repair_jobs.outcome_json, '$.path') = 'text'
+                                            AND json_type(repair_jobs.outcome_json, '$.reasons') = 'array'
+                                            AND NOT EXISTS (
+                                                SELECT 1
+                                                FROM json_each(
+                                                    repair_jobs.outcome_json,
+                                                    '$.reasons'
+                                                ) AS reason
+                                                WHERE reason.type <> 'text'
+                                            )
+                                            AND (
+                                                json_type(
+                                                    repair_jobs.outcome_json,
+                                                    '$.needs_attention'
+                                                ) IS NULL
+                                                OR json_type(
+                                                    repair_jobs.outcome_json,
+                                                    '$.needs_attention'
+                                                ) IN ('true', 'false')
+                                            )
+                                        )
+                                        OR (
+                                            json_extract(repair_jobs.outcome_json, '$.status') = 'failed'
+                                            AND json_type(repair_jobs.outcome_json, '$.path') = 'text'
+                                            AND json_type(repair_jobs.outcome_json, '$.reason') = 'text'
+                                        )
+                                    )
+                                   THEN 1
+                                   ELSE 0
+                               END
+                               ELSE 0
+                           END AS gate_status_valid
+                    FROM page_sessions
+                    JOIN repair_jobs
+                      ON repair_jobs.file_path = page_sessions.output_path
+                      OR repair_jobs.file_path = page_sessions.mp4_path
+                    WHERE repair_jobs.status IN ('completed', 'running')
+                      AND repair_jobs.outcome_json IS NOT NULL
+                ),
+                quality_candidates AS (
+                    SELECT session_id, outcome_json,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY session_id
+                               ORDER BY updated_at DESC, path_priority ASC,
+                                        created_at DESC, id DESC
+                           ) AS rank
+                    FROM quality_candidate_values
+                    WHERE gate_status_valid = 1
+                      AND NOT (
+                          gate_status IN ('ready', 'repaired')
+                          AND (job_status = 'running' OR COALESCE(reason, '') <> '')
+                      )
+                )
+             SELECT page_sessions.id, page_sessions.title, page_sessions.started_at,
+                    page_sessions.ended_at, page_sessions.status, page_sessions.mode,
+                    page_sessions.output_path, page_sessions.mp4_path,
+                    page_sessions.stream_preset, page_sessions.container,
+                    page_sessions.duration_ms, page_sessions.layout_json,
+                    page_sessions.file_size_bytes, page_sessions.derived_from_session_id,
+                    page_sessions.source_title, page_sessions.processing_kind,
+                    quality_candidates.outcome_json,
+                    COALESCE(health_counts.count, 0), COALESCE(log_counts.count, 0),
+                    COALESCE(artifact_summaries.count, 0), artifact_summaries.ready_kinds,
+                    COALESCE(comment_counts.count, 0)
+             FROM page_sessions
+             LEFT JOIN health_counts ON health_counts.session_id = page_sessions.id
+             LEFT JOIN log_counts ON log_counts.session_id = page_sessions.id
+             LEFT JOIN artifact_summaries ON artifact_summaries.session_id = page_sessions.id
+             LEFT JOIN comment_counts ON comment_counts.session_id = page_sessions.id
+             LEFT JOIN quality_candidates
+                    ON quality_candidates.session_id = page_sessions.id
+                   AND quality_candidates.rank = 1
+             ORDER BY page_sessions.started_at DESC, page_sessions.id DESC",
+        )?;
+
+        let rows =
+            statement.query_map(params![cursor_started_at, cursor_id, query_limit], |row| {
+                let layout_json: String = row.get(11)?;
+                let stream_preset: Option<String> = row.get(8)?;
+                let mode: String = row.get(5)?;
+                let layout: LayoutSettings =
+                    serde_json::from_str(&layout_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            11,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                let ready_kinds: Option<String> = row.get(20)?;
+                let ready_ai_artifact_kinds = ready_kinds
+                    .as_deref()
+                    .into_iter()
+                    .flat_map(|value| value.split(','))
+                    .filter_map(|value| serde_json::from_str(value).ok())
+                    .collect();
+                let quality_json: Option<String> = row.get(16)?;
+                Ok(SessionListItem {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    started_at: row.get(2)?,
+                    ended_at: row.get(3)?,
+                    status: row.get(4)?,
+                    mode: mode.clone(),
+                    output_path: row.get(6)?,
+                    mp4_path: row.get(7)?,
+                    stream_preset: stream_preset.clone(),
+                    container: row.get(9)?,
+                    duration_ms: row.get(10)?,
+                    file_size_bytes: row.get(12)?,
+                    scene_label: session_scene_label(&layout, stream_preset.as_deref(), &mode),
+                    quality_status: quality_json
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str(value).ok()),
+                    health_event_count: row.get::<_, i64>(17)?.max(0) as u64,
+                    session_log_count: row.get::<_, i64>(18)?.max(0) as u64,
+                    ai_artifact_count: row.get::<_, i64>(19)?.max(0) as u64,
+                    ready_ai_artifact_kinds,
+                    comment_count: row.get::<_, i64>(21)?.max(0) as u64,
+                    derived_from_session_id: row.get(13)?,
+                    source_title: row.get(14)?,
+                    processing_kind: row.get(15)?,
+                })
+            })?;
+        let mut items = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(conn);
+
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+
+        // Filesystem metadata can block on removable/network volumes. It must
+        // never run while the shared SQLite mutex is held.
+        let mut live_size_writebacks = Vec::new();
+        for item in &mut items {
+            let Some(visible_path) = item.mp4_path.as_deref().or(item.output_path.as_deref())
+            else {
+                continue;
+            };
+            if let Some(live_size) = std::fs::metadata(visible_path)
+                .ok()
+                .map(|metadata| metadata.len() as i64)
+            {
+                let stored_size = item.file_size_bytes;
+                item.file_size_bytes = Some(live_size);
+                if Some(live_size) != stored_size {
+                    live_size_writebacks.push((
+                        item.id.clone(),
+                        visible_path.to_string(),
+                        live_size,
+                        stored_size,
+                    ));
+                }
+            }
+        }
+        self.persist_live_session_file_sizes(&live_size_writebacks)?;
+
+        let next_cursor = has_more
+            .then(|| items.last().map(session_list_cursor))
+            .flatten();
+        Ok(items_page(items, next_cursor))
+    }
+
+    /// Persist all live sizes observed by one bounded Library page in one SQL
+    /// statement. The path and previous-size guards prevent a stat result from
+    /// overwriting a concurrent session update while the SQLite mutex was
+    /// intentionally released for filesystem I/O.
+    fn persist_live_session_file_sizes(
+        &self,
+        writebacks: &[(String, String, i64, Option<i64>)],
+    ) -> Result<()> {
+        if writebacks.is_empty() {
+            return Ok(());
+        }
+        let values = (0..writebacks.len())
+            .map(|_| "(?, ?, ?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "WITH live_session_sizes(id, visible_path, observed_size, stored_size) AS (
+                 VALUES {values}
+             )
+             UPDATE sessions
+             SET file_size_bytes = (
+                 SELECT live_session_sizes.observed_size
+                 FROM live_session_sizes
+                 WHERE live_session_sizes.id = sessions.id
+             )
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM live_session_sizes
+                 WHERE live_session_sizes.id = sessions.id
+                   AND live_session_sizes.visible_path = COALESCE(sessions.mp4_path, sessions.output_path)
+                   AND sessions.file_size_bytes IS live_session_sizes.stored_size
+             )"
+        );
+        let mut parameters = Vec::with_capacity(writebacks.len() * 4);
+        for (id, visible_path, observed_size, stored_size) in writebacks {
+            parameters.push(Value::Text(id.clone()));
+            parameters.push(Value::Text(visible_path.clone()));
+            parameters.push(Value::Integer(*observed_size));
+            parameters.push(stored_size.map(Value::Integer).unwrap_or(Value::Null));
+        }
+        self.lock()?.execute(&sql, params_from_iter(parameters))?;
+        Ok(())
     }
 
     /// Rename a session (Library L3). Title is validated at the RPC edge.
@@ -4821,7 +5281,15 @@ impl Database {
              CREATE INDEX idx_noise_cleanup_completed_identity_preset
                 ON noise_cleanup_jobs(source_session_id, source_identity_json,
                                       source_object_identity_json, source_full_sha256, preset)
-                WHERE status = 'completed';",
+                WHERE status = 'completed';
+             CREATE INDEX IF NOT EXISTS idx_sessions_library_started
+                ON sessions(library_hidden, started_at DESC, id DESC);
+             CREATE INDEX IF NOT EXISTS idx_health_events_session_created
+                ON health_events(session_id, created_at DESC, id DESC);
+             CREATE INDEX IF NOT EXISTS idx_session_logs_session_created
+                ON session_logs(session_id, created_at DESC, id DESC);
+             CREATE INDEX IF NOT EXISTS idx_ai_artifacts_session_created
+                ON ai_artifacts(session_id, created_at DESC, id DESC);",
         )?;
         ensure_column(
             &conn,
@@ -4876,21 +5344,7 @@ impl Database {
              WHERE session_id = ?1
              ORDER BY created_at ASC",
         )?;
-        let rows = stmt.query_map(params![session_id], |row| {
-            let kind_json: String = row.get(2)?;
-            let status_json: String = row.get(3)?;
-            let content_json: String = row.get(4)?;
-            Ok(AiArtifact {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                kind: serde_json::from_str(&kind_json).unwrap_or(AiArtifactKind::Transcript),
-                status: serde_json::from_str(&status_json).unwrap_or(AiArtifactStatus::Failed),
-                content: serde_json::from_str(&content_json)
-                    .unwrap_or_else(|_| serde_json::json!({})),
-                file_path: row.get(5)?,
-                created_at: row.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![session_id], ai_artifact_from_row)?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -4968,21 +5422,7 @@ impl Database {
              WHERE session_id = ?1
              ORDER BY created_at ASC",
         )?;
-        let rows = stmt.query_map(params![session_id], |row| {
-            let level_json: String = row.get(2)?;
-            let permission_json: Option<String> = row.get(5)?;
-            Ok(HealthEvent {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                level: serde_json::from_str(&level_json).unwrap_or(HealthLevel::Warn),
-                code: row.get(3)?,
-                message: row.get(4)?,
-                permission_pane: permission_json
-                    .as_deref()
-                    .and_then(|value| serde_json::from_str(value).ok()),
-                created_at: row.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![session_id], health_event_from_row)?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -4998,22 +5438,7 @@ impl Database {
              WHERE session_id = ?1
              ORDER BY created_at ASC",
         )?;
-        let rows = stmt.query_map(params![session_id], |row| {
-            let level_json: String = row.get(2)?;
-            let permission_json: Option<String> = row.get(6)?;
-            Ok(SessionLogEntry {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                level: serde_json::from_str(&level_json).unwrap_or(HealthLevel::Warn),
-                code: row.get(3)?,
-                message: row.get(4)?,
-                source_id: row.get(5)?,
-                permission_pane: permission_json
-                    .as_deref()
-                    .and_then(|value| serde_json::from_str(value).ok()),
-                created_at: row.get(7)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![session_id], session_log_entry_from_row)?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -5036,6 +5461,54 @@ fn stream_screen_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StreamScr
         status: serde_json::from_str(&status_json).unwrap_or(StreamScreenStatus::Missing),
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+    })
+}
+
+fn health_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HealthEvent> {
+    let level_json: String = row.get(2)?;
+    let permission_json: Option<String> = row.get(5)?;
+    Ok(HealthEvent {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        level: serde_json::from_str(&level_json).unwrap_or(HealthLevel::Warn),
+        code: row.get(3)?,
+        message: row.get(4)?,
+        permission_pane: permission_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok()),
+        created_at: row.get(6)?,
+    })
+}
+
+fn session_log_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionLogEntry> {
+    let level_json: String = row.get(2)?;
+    let permission_json: Option<String> = row.get(6)?;
+    Ok(SessionLogEntry {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        level: serde_json::from_str(&level_json).unwrap_or(HealthLevel::Warn),
+        code: row.get(3)?,
+        message: row.get(4)?,
+        source_id: row.get(5)?,
+        permission_pane: permission_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok()),
+        created_at: row.get(7)?,
+    })
+}
+
+fn ai_artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiArtifact> {
+    let kind_json: String = row.get(2)?;
+    let status_json: String = row.get(3)?;
+    let content_json: String = row.get(4)?;
+    Ok(AiArtifact {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        kind: serde_json::from_str(&kind_json).unwrap_or(AiArtifactKind::Transcript),
+        status: serde_json::from_str(&status_json).unwrap_or(AiArtifactStatus::Failed),
+        content: serde_json::from_str(&content_json).unwrap_or_else(|_| serde_json::json!({})),
+        file_path: row.get(5)?,
+        created_at: row.get(6)?,
     })
 }
 
@@ -5110,6 +5583,38 @@ fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
 
 fn live_chat_cursor(message: &LiveChatMessage) -> String {
     format!("{}\n{}", message.received_at, message.id)
+}
+
+fn items_page(items: Vec<SessionListItem>, next_cursor: Option<String>) -> SessionListPage {
+    SessionListPage { items, next_cursor }
+}
+
+fn session_list_cursor(item: &SessionListItem) -> String {
+    format!("{}\n{}", item.started_at, item.id)
+}
+
+fn parse_session_list_cursor(cursor: &str) -> Result<(&str, &str)> {
+    let (started_at, id) = cursor
+        .split_once('\n')
+        .ok_or_else(|| anyhow::anyhow!("Session list cursor is invalid."))?;
+    if started_at.is_empty() || id.is_empty() || id.contains('\n') {
+        bail!("Session list cursor is invalid.");
+    }
+    Ok((started_at, id))
+}
+
+fn session_detail_cursor(created_at: &str, id: &str) -> String {
+    format!("{created_at}\n{id}")
+}
+
+fn parse_session_detail_cursor(cursor: &str) -> Result<(&str, &str)> {
+    let (created_at, id) = cursor
+        .split_once('\n')
+        .ok_or_else(|| anyhow::anyhow!("Session detail cursor is invalid."))?;
+    if created_at.is_empty() || id.is_empty() || id.contains('\n') {
+        bail!("Session detail cursor is invalid.");
+    }
+    Ok((created_at, id))
 }
 
 fn parse_live_chat_cursor(cursor: &str) -> Result<(&str, &str)> {
@@ -5560,6 +6065,8 @@ mod tests {
     }
 
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::live_chat::{
         CommentsSendOperation, CommentsSendOperationPhase, DestinationDelivery,
         DestinationDeliveryPhase, LiveChatEventType, LiveChatMessage, LiveChatMessageFragment,
@@ -5574,6 +6081,26 @@ mod tests {
         PlatformAccountStatus, StreamPlatform, StreamPrivacy, UpsertPlatformAccount,
         default_stream_metadata_draft,
     };
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+
+    static SESSION_LIST_TRACED_STATEMENTS: AtomicUsize = AtomicUsize::new(0);
+    static SESSION_SIZE_WRITEBACK_STATEMENTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_session_list_statement(event: TraceEvent<'_>) {
+        if let TraceEvent::Stmt(statement, _) = event
+            && statement.sql().contains("page_sessions AS")
+        {
+            SESSION_LIST_TRACED_STATEMENTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn count_session_size_writeback_statement(event: TraceEvent<'_>) {
+        if let TraceEvent::Stmt(statement, _) = event
+            && statement.sql().contains("live_session_sizes")
+        {
+            SESSION_SIZE_WRITEBACK_STATEMENTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     fn test_database() -> Database {
         let database = Database {
@@ -6043,6 +6570,307 @@ mod tests {
     }
 
     #[test]
+    fn session_list_page_is_slim_and_uses_one_query_for_any_page_size() {
+        let database = test_database();
+        for index in 0..200 {
+            let session_id = format!("session-{index:03}");
+            let mut session = sample_session(&session_id);
+            session.started_at = format!("2026-06-01T00:{:02}:{:02}Z", index / 60, index % 60);
+            database.create_session(&session).unwrap();
+            database
+                .add_health_event(
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "fixture-health",
+                    "Fixture health event.",
+                )
+                .unwrap();
+            database
+                .add_session_log(
+                    &session_id,
+                    HealthLevel::Info,
+                    "fixture-log",
+                    "Fixture session log.",
+                    None,
+                )
+                .unwrap();
+            database
+                .save_ai_artifact(
+                    &session_id,
+                    AiArtifactKind::Transcript,
+                    AiArtifactStatus::Ready,
+                    serde_json::json!({ "text": "fixture" }),
+                    None,
+                )
+                .unwrap();
+        }
+
+        database.conn.lock().unwrap().trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(count_session_list_statement),
+        );
+        for limit in [1, 20, 200] {
+            SESSION_LIST_TRACED_STATEMENTS.store(0, Ordering::Relaxed);
+            let started = std::time::Instant::now();
+            let page = database.list_session_items_page(None, limit).unwrap();
+            let query_count = SESSION_LIST_TRACED_STATEMENTS.load(Ordering::Relaxed);
+            let encoded = serde_json::to_vec(&page).unwrap();
+            eprintln!(
+                "session-list rows={} queries={} bytes={} elapsed_us={}",
+                limit,
+                query_count,
+                encoded.len(),
+                started.elapsed().as_micros()
+            );
+
+            assert_eq!(page.items.len(), limit);
+            assert_eq!(query_count, 1, "list query count must not grow with rows");
+            assert!(encoded.len() < limit * 4_096 + 256);
+            let first = serde_json::to_value(&page.items[0]).unwrap();
+            assert!(first.get("healthEvents").is_none());
+            assert!(first.get("sessionLogs").is_none());
+            assert!(first.get("aiArtifacts").is_none());
+            assert_eq!(first["healthEventCount"], 1);
+            assert_eq!(first["sessionLogCount"], 1);
+            assert_eq!(first["aiArtifactCount"], 1);
+            assert_eq!(
+                first["readyAiArtifactKinds"],
+                serde_json::json!(["transcript"])
+            );
+        }
+
+        let newest = database.list_session_items_page(None, 20).unwrap();
+        let older = database
+            .list_session_items_page(newest.next_cursor.as_deref(), 20)
+            .unwrap();
+        assert_eq!(newest.items.len(), 20);
+        assert_eq!(older.items.len(), 20);
+        assert!(
+            newest
+                .items
+                .iter()
+                .all(|item| !older.items.iter().any(|older| older.id == item.id))
+        );
+        assert!(
+            database
+                .list_session_items_page(Some("invalid"), 20)
+                .unwrap_err()
+                .to_string()
+                .contains("cursor")
+        );
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+    }
+
+    #[test]
+    fn session_list_page_persists_live_sizes_in_one_batch_for_missing_file_fallback() {
+        let database = test_database();
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-session-list-size-writeback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let fixtures = [
+            (
+                "session-size-a",
+                "first.mkv",
+                b"fresh first media".as_slice(),
+            ),
+            (
+                "session-size-b",
+                "second.mkv",
+                b"fresh second media with more bytes".as_slice(),
+            ),
+        ];
+
+        for (index, (session_id, file_name, live_bytes)) in fixtures.iter().enumerate() {
+            let path = directory.join(file_name);
+            std::fs::write(&path, live_bytes).unwrap();
+            let mut session = sample_session(session_id);
+            session.started_at = format!("2026-06-01T00:00:0{index}Z");
+            session.output_path = Some(path.display().to_string());
+            database
+                .create_completed_session(
+                    &session,
+                    "2026-06-01T00:01:00Z",
+                    None,
+                    Some(60_000),
+                    Some(1),
+                )
+                .unwrap();
+        }
+
+        SESSION_SIZE_WRITEBACK_STATEMENTS.store(0, Ordering::Relaxed);
+        database.conn.lock().unwrap().trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(count_session_size_writeback_statement),
+        );
+        let page = database
+            .list_session_items_page(None, fixtures.len())
+            .unwrap();
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+
+        let expected_total = fixtures
+            .iter()
+            .map(|(_, _, bytes)| bytes.len() as i64)
+            .sum::<i64>();
+        assert_eq!(SESSION_SIZE_WRITEBACK_STATEMENTS.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.file_size_bytes.unwrap_or_default())
+                .sum::<i64>(),
+            expected_total
+        );
+        assert_eq!(
+            database.session_storage_totals().unwrap().total_bytes,
+            expected_total
+        );
+
+        for (_, file_name, _) in &fixtures {
+            std::fs::remove_file(directory.join(file_name)).unwrap();
+        }
+        let missing_files_page = database
+            .list_session_items_page(None, fixtures.len())
+            .unwrap();
+        assert_eq!(
+            missing_files_page
+                .items
+                .iter()
+                .map(|item| item.file_size_bytes.unwrap_or_default())
+                .sum::<i64>(),
+            expected_total
+        );
+        assert_eq!(
+            database.session_storage_totals().unwrap().total_bytes,
+            expected_total
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn health_event_pages_are_bounded_stable_and_non_overlapping() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-health-page"))
+            .unwrap();
+        for sequence in 0..5 {
+            database
+                .add_health_event(
+                    Some("session-health-page"),
+                    HealthLevel::Info,
+                    &format!("health-{sequence}"),
+                    "Health fixture.",
+                )
+                .unwrap();
+        }
+
+        let newest = database
+            .list_health_events_page("session-health-page", None, 2)
+            .unwrap();
+        let older = database
+            .list_health_events_page("session-health-page", newest.next_cursor.as_deref(), 2)
+            .unwrap();
+        assert_eq!(newest.events.len(), 2);
+        assert_eq!(older.events.len(), 2);
+        assert!(newest.next_cursor.is_some());
+        assert!(
+            newest
+                .events
+                .iter()
+                .all(|event| !older.events.iter().any(|older| older.id == event.id))
+        );
+
+        let capped = database
+            .list_health_events_page("session-health-page", None, usize::MAX)
+            .unwrap();
+        assert_eq!(capped.events.len(), 5);
+        assert!(
+            database
+                .list_health_events_page("session-health-page", Some("invalid"), 2)
+                .unwrap_err()
+                .to_string()
+                .contains("cursor")
+        );
+    }
+
+    #[test]
+    fn session_log_pages_are_bounded_stable_and_non_overlapping() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-log-page"))
+            .unwrap();
+        for sequence in 0..5 {
+            database
+                .add_session_log(
+                    "session-log-page",
+                    HealthLevel::Info,
+                    &format!("log-{sequence}"),
+                    "Log fixture.",
+                    None,
+                )
+                .unwrap();
+        }
+
+        let newest = database
+            .list_session_logs_page("session-log-page", None, 2)
+            .unwrap();
+        let older = database
+            .list_session_logs_page("session-log-page", newest.next_cursor.as_deref(), 2)
+            .unwrap();
+        assert_eq!(newest.entries.len(), 2);
+        assert_eq!(older.entries.len(), 2);
+        assert!(
+            newest
+                .entries
+                .iter()
+                .all(|entry| !older.entries.iter().any(|older| older.id == entry.id))
+        );
+    }
+
+    #[test]
+    fn ai_artifact_pages_are_bounded_stable_and_non_overlapping() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-artifact-page"))
+            .unwrap();
+        for sequence in 0..5 {
+            database
+                .save_ai_artifact(
+                    "session-artifact-page",
+                    AiArtifactKind::Summary,
+                    AiArtifactStatus::Ready,
+                    serde_json::json!({ "sequence": sequence }),
+                    None,
+                )
+                .unwrap();
+        }
+
+        let newest = database
+            .list_ai_artifacts_page("session-artifact-page", None, 2)
+            .unwrap();
+        let older = database
+            .list_ai_artifacts_page("session-artifact-page", newest.next_cursor.as_deref(), 2)
+            .unwrap();
+        assert_eq!(newest.artifacts.len(), 2);
+        assert_eq!(older.artifacts.len(), 2);
+        assert!(
+            newest
+                .artifacts
+                .iter()
+                .all(|artifact| !older.artifacts.iter().any(|older| older.id == artifact.id))
+        );
+    }
+
+    #[test]
     fn live_chat_messages_round_trip_and_count_on_session_summary() {
         let database = test_database();
         database
@@ -6171,6 +6999,40 @@ mod tests {
         assert_eq!(
             database.list_chat_send_operations("session-1").unwrap(),
             vec![recovered]
+        );
+    }
+
+    #[test]
+    fn latest_chat_send_operation_stays_single_row_with_high_cardinality_history() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-many-operations"))
+            .unwrap();
+
+        for index in 0..1_024 {
+            let operation = CommentsSendOperation {
+                id: format!("operation-{index:04}"),
+                session_id: "session-many-operations".to_string(),
+                text: format!("message {index}"),
+                phase: CommentsSendOperationPhase::Sent,
+                destinations: Vec::new(),
+                created_at: "2026-07-18T00:00:00Z".to_string(),
+                updated_at: "2026-07-18T00:00:00Z".to_string(),
+            };
+            database.save_chat_send_operation(&operation).unwrap();
+        }
+
+        let latest = database
+            .latest_chat_send_operation("session-many-operations")
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, "operation-1023");
+        assert_eq!(latest.text, "message 1023");
+        assert!(
+            database
+                .latest_chat_send_operation("missing-session")
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -8411,6 +9273,8 @@ mod tests {
                 needs_attention: false,
             })
         );
+        let page = database.list_session_items_page(None, 1).unwrap();
+        assert_eq!(page.items[0].quality_status, sessions[0].quality_status);
 
         let mut running_fast_gate = RepairJob::pending(
             "job-running-fast-not-100".to_string(),
@@ -8436,6 +9300,8 @@ mod tests {
                 needs_attention: false,
             })
         );
+        let page = database.list_session_items_page(None, 1).unwrap();
+        assert_eq!(page.items[0].quality_status, sessions[0].quality_status);
 
         let mut stale_repair_outcome = RepairJob::pending(
             "job-stale-repaired".to_string(),
@@ -8463,6 +9329,169 @@ mod tests {
                 needs_attention: false,
             })
         );
+        let page = database.list_session_items_page(None, 1).unwrap();
+        assert_eq!(page.items[0].quality_status, sessions[0].quality_status);
+
+        let malformed_outcomes = [
+            (
+                "ready-missing-path",
+                serde_json::json!({ "status": "ready" }),
+            ),
+            (
+                "ready-path-type",
+                serde_json::json!({ "status": "ready", "path": 7 }),
+            ),
+            (
+                "repaired-missing-path",
+                serde_json::json!({ "status": "repaired", "interpolated": true }),
+            ),
+            (
+                "repaired-path-type",
+                serde_json::json!({ "status": "repaired", "path": false, "interpolated": true }),
+            ),
+            (
+                "repaired-missing-interpolated",
+                serde_json::json!({ "status": "repaired", "path": "/tmp/videorc-test.mp4" }),
+            ),
+            (
+                "repaired-interpolated-type",
+                serde_json::json!({
+                    "status": "repaired",
+                    "path": "/tmp/videorc-test.mp4",
+                    "interpolated": 1
+                }),
+            ),
+            (
+                "not-hundred-percent-missing-path",
+                serde_json::json!({ "status": "not-hundred-percent", "reasons": [] }),
+            ),
+            (
+                "not-hundred-percent-path-type",
+                serde_json::json!({
+                    "status": "not-hundred-percent",
+                    "path": 7,
+                    "reasons": []
+                }),
+            ),
+            (
+                "not-hundred-percent-missing-reasons",
+                serde_json::json!({
+                    "status": "not-hundred-percent",
+                    "path": "/tmp/videorc-test.mp4"
+                }),
+            ),
+            (
+                "not-hundred-percent-reasons-type",
+                serde_json::json!({
+                    "status": "not-hundred-percent",
+                    "path": "/tmp/videorc-test.mp4",
+                    "reasons": "not-an-array"
+                }),
+            ),
+            (
+                "not-hundred-percent-reason-element-type",
+                serde_json::json!({
+                    "status": "not-hundred-percent",
+                    "path": "/tmp/videorc-test.mp4",
+                    "reasons": ["valid", 7]
+                }),
+            ),
+            (
+                "not-hundred-percent-attention-type",
+                serde_json::json!({
+                    "status": "not-hundred-percent",
+                    "path": "/tmp/videorc-test.mp4",
+                    "reasons": [],
+                    "needs_attention": null
+                }),
+            ),
+            (
+                "failed-missing-path",
+                serde_json::json!({ "status": "failed", "reason": "probe failed" }),
+            ),
+            (
+                "failed-path-type",
+                serde_json::json!({ "status": "failed", "path": 7, "reason": "probe failed" }),
+            ),
+            (
+                "failed-missing-reason",
+                serde_json::json!({ "status": "failed", "path": "/tmp/videorc-test.mp4" }),
+            ),
+            (
+                "failed-reason-type",
+                serde_json::json!({
+                    "status": "failed",
+                    "path": "/tmp/videorc-test.mp4",
+                    "reason": false
+                }),
+            ),
+        ];
+        for (index, (label, outcome)) in malformed_outcomes.into_iter().enumerate() {
+            let mut malformed_job = RepairJob::pending(
+                format!("job-malformed-{label}"),
+                "/tmp/videorc-test.mp4".to_string(),
+                &expectations,
+                "t0".to_string(),
+            );
+            malformed_job.status = RepairJobStatus::Completed;
+            malformed_job.outcome = Some(outcome);
+            malformed_job.updated_at = format!("t3-malformed-{index:02}");
+            database.upsert_repair_job(&malformed_job).unwrap();
+
+            // A recognized tag is not enough: legacy summary selection fully
+            // deserializes GateStatus and skips malformed rows before
+            // considering the next older candidate.
+            let sessions = database.list_sessions(1).unwrap();
+            assert_eq!(
+                sessions[0].quality_status,
+                Some(GateStatus::NotHundredPercent {
+                    path: "/tmp/videorc-test.mp4".to_string(),
+                    reasons: vec!["Only 8fps observed while live.".to_string()],
+                    needs_attention: false,
+                }),
+                "legacy fallback for {label}"
+            );
+            let page = database.list_session_items_page(None, 1).unwrap();
+            assert_eq!(
+                page.items[0].quality_status, sessions[0].quality_status,
+                "slim fallback for {label}"
+            );
+        }
+
+        let mut raw_invalid_json_job = RepairJob::pending(
+            "job-raw-invalid-json".to_string(),
+            "/tmp/videorc-test.mp4".to_string(),
+            &expectations,
+            "t0".to_string(),
+        );
+        raw_invalid_json_job.status = RepairJobStatus::Completed;
+        raw_invalid_json_job.outcome = Some(serde_json::json!({
+            "status": "ready",
+            "path": "/tmp/videorc-test.mp4"
+        }));
+        raw_invalid_json_job.updated_at = "t3-raw-invalid".to_string();
+        database.upsert_repair_job(&raw_invalid_json_job).unwrap();
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE repair_jobs SET outcome_json = '{not-json' WHERE id = ?1",
+                params![raw_invalid_json_job.id],
+            )
+            .unwrap();
+
+        let sessions = database.list_sessions(1).unwrap();
+        assert_eq!(
+            sessions[0].quality_status,
+            Some(GateStatus::NotHundredPercent {
+                path: "/tmp/videorc-test.mp4".to_string(),
+                reasons: vec!["Only 8fps observed while live.".to_string()],
+                needs_attention: false,
+            })
+        );
+        let page = database.list_session_items_page(None, 1).unwrap();
+        assert_eq!(page.items[0].quality_status, sessions[0].quality_status);
 
         let mut newer_repair_outcome = RepairJob::pending(
             "job-newer-repaired".to_string(),
@@ -8487,6 +9516,8 @@ mod tests {
                 interpolated: true,
             })
         );
+        let page = database.list_session_items_page(None, 1).unwrap();
+        assert_eq!(page.items[0].quality_status, sessions[0].quality_status);
     }
 
     #[test]

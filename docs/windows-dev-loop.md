@@ -3,6 +3,13 @@
 How to develop and verify Videorc on a Windows box. First proven on-box
 2026-07-08 (Windows 10 x64, unsupported configuration — see the floor note).
 
+Windows is a gated **Alpha** track for Windows 11 x64; macOS remains the public
+**Beta** track. This document helps create engineering and acceptance evidence,
+but a successful dev run or hosted Actions artifact is not publication
+authorization. A public Windows installer additionally needs signed-identity,
+malware-scan, clean-machine, feed/update, rollback, uninstall, and real-device
+evidence in a dated acceptance record.
+
 ## One-time setup
 
 Prerequisites: Node 24.x (the `.node-version` and `engines` line used by CI),
@@ -109,6 +116,41 @@ $env:VIDEORC_ALLOW_UNSUPPORTED_WINDOWS = '1'   # only needed below Windows 11
 pnpm smoke:local-gates:windows
 ```
 
+The gate writes `windows-local-gates.manifest.json` under the selected
+acceptance directory. After the physical live-microphone smoke creates
+`support-bundle.json`, the final step invokes the strict verifier:
+
+```powershell
+pnpm support-bundle:verify -- <support-bundle.json> --windows-acceptance
+```
+
+That verifier must run as part of the gate, not merely appear as a suggested
+command in the manifest. If a physical device is unavailable, the gate remains
+`BLOCKED` and no public Alpha can be cut.
+
+## Release-candidate handoff
+
+Copy
+[`acceptance/windows-app-acceptance-template.md`](acceptance/windows-app-acceptance-template.md)
+to a dated acceptance note and fill it with evidence from the exact installer
+candidate. At minimum, independently record:
+
+- exact Authenticode certificate subject, expected publisher match, signature
+  status, and trusted timestamp evidence;
+- installer SHA-256 and byte size from both the release manifest and the newly
+  downloaded file;
+- current Microsoft Defender engine/signature versions, scan time, and
+  no-detections verdict;
+- clean-profile install and first launch, the published update feed and update
+  path, rollback behavior, and uninstall/process cleanup; and
+- the strict support-bundle verifier verdict without committing or posting the
+  bundle, recordings, credentials, device identifiers, or local user paths.
+
+Every required row must be `PASS`. Treat `FAIL`, `BLOCKED`, missing evidence, an
+unsigned installer, an unexpected publisher, or a missing timestamp as a hard
+stop. Keep that candidate private and cut a new Alpha identifier after fixing
+it; never overwrite an accepted release in place.
+
 ## Windows-specific launcher rules (for smoke/script authors)
 
 Learned on-box 2026-07-08; encoded in `scripts/lib/app-launcher.mjs`:
@@ -144,9 +186,10 @@ ERROR: Cannot create symbolic link : A required privilege is not held by the cli
 ... winCodeSign\...\darwin\10.12\lib\libcrypto.dylib
 ```
 
-Unsigned local packages set `win.signAndEditExecutable: false` in
-`apps/desktop/electron-builder.yml` so packaging never downloads that bundle.
-When Authenticode signing / exe resource editing is re-enabled, either:
+Unsigned local packages may set `win.signAndEditExecutable: false` so packaging
+does not download that bundle. Those packages are internal-only. The signed
+public-Alpha candidate path requires Authenticode and executable resource
+editing; on a Windows build host, either:
 
 1. Turn on **Settings → System → For developers → Developer Mode**, then clear
    the broken cache and rebuild:

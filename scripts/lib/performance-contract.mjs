@@ -10,6 +10,22 @@ const execFileAsync = promisify(execFile)
 
 export const PERFORMANCE_REPORT_SCHEMA_VERSION = 1
 export const MACOS_CAFFEINATE_POWER_ASSERTION = 'caffeinate:-d,-i,-s'
+const MACOS_PACKAGED_APP_PAYLOAD_SPECS = [
+  { relativePath: 'MacOS/Videorc', requiresCodeSignature: true },
+  { relativePath: 'Resources/app.asar', requiresCodeSignature: false },
+  { relativePath: 'Resources/videorc-backend', requiresCodeSignature: true },
+  { relativePath: 'Resources/native_preview_host_helper', requiresCodeSignature: true },
+  { relativePath: 'Resources/videorc_native_preview.node', requiresCodeSignature: true },
+  { relativePath: 'Resources/ffmpeg/bin/ffmpeg', requiresCodeSignature: true },
+  { relativePath: 'Resources/ffmpeg/bin/ffprobe', requiresCodeSignature: true },
+  {
+    relativePath: 'Frameworks/Electron Framework.framework/Versions/A/Electron Framework',
+    requiresCodeSignature: true
+  }
+]
+export const MACOS_PACKAGED_APP_PAYLOAD_COMPONENTS = MACOS_PACKAGED_APP_PAYLOAD_SPECS.map(
+  ({ relativePath }) => relativePath
+)
 const MACOS_CAFFEINATE_REQUIRED_ASSERTION_TYPES = [
   'PreventUserIdleDisplaySleep',
   'PreventUserIdleSystemSleep',
@@ -243,6 +259,7 @@ export async function collectPerformanceMetadata({ cwd = process.cwd(), env = pr
     macosVersion,
     displayScale,
     executableSha256,
+    packagePayload,
     powerAssertionVerified
   ] = await Promise.all([
     commandOutput('git', ['rev-parse', 'HEAD'], cwd),
@@ -251,6 +268,7 @@ export async function collectPerformanceMetadata({ cwd = process.cwd(), env = pr
     commandOutput('sw_vers', ['-productVersion']),
     displayScaleFactor(),
     executablePath ? sha256FileOrNull(executablePath) : null,
+    executablePath ? packagedAppPayloadIdentity(executablePath) : null,
     currentMacosCaffeinatePowerAssertionVerified({ env })
   ])
   return {
@@ -266,6 +284,13 @@ export async function collectPerformanceMetadata({ cwd = process.cwd(), env = pr
       arch: arch()
     },
     displayScaleFactor: displayScale,
+    profileClass: nonEmptyString(env.VIDEORC_PERF_PROFILE_CLASS),
+    appVersion: nonEmptyString(env.VIDEORC_PERF_APP_VERSION),
+    performanceWindow: {
+      warmupMs: positiveNumber(env.VIDEORC_PERF_WARMUP_MS),
+      measurementMs: positiveNumber(env.VIDEORC_PERF_MEASUREMENT_MS),
+      intervalMs: positiveNumber(env.VIDEORC_PERF_SAMPLE_INTERVAL_MS)
+    },
     buildMode: performanceBuildMode(env),
     expectedBuildMode: nonEmptyString(env.VIDEORC_PERF_EXPECT_BUILD_MODE),
     runNonce: nonEmptyString(env.VIDEORC_PERF_RUN_NONCE),
@@ -277,6 +302,7 @@ export async function collectPerformanceMetadata({ cwd = process.cwd(), env = pr
           sha256: executableSha256
         }
       : null,
+    packagePayload,
     appRole: env.VIDEORC_PERF_APP_ROLE || null,
     source: {
       width: positiveNumber(env.VIDEORC_PERF_SOURCE_WIDTH),
@@ -391,6 +417,16 @@ export function evaluateChildPerformanceMetadata({ actual, expected, requireClea
       `child hardware class was ${actual?.hardwareClass ?? 'missing'}; expected ${expected?.hardwareClass ?? 'missing'}`
     )
   }
+  for (const field of ['profileClass', 'appVersion']) {
+    if ((actual?.[field] ?? null) !== (expected?.[field] ?? null)) {
+      failures.push(
+        `child ${field} was ${actual?.[field] ?? 'missing'}; expected ${expected?.[field] ?? 'missing'}`
+      )
+    }
+  }
+  if (stableJson(actual?.performanceWindow) !== stableJson(expected?.performanceWindow)) {
+    failures.push('child performance window identity did not match the wrapper')
+  }
   if ((actual?.powerAssertion ?? null) !== (expected?.powerAssertion ?? null)) {
     failures.push(
       `child power assertion was ${actual?.powerAssertion ?? 'missing'}; expected ${expected?.powerAssertion ?? 'missing'}`
@@ -428,6 +464,16 @@ export function evaluateChildPerformanceMetadata({ actual, expected, requireClea
     } else if (validSha256(expectedHash) && actualHash !== expectedHash) {
       failures.push('child packaged executable SHA-256 did not match the wrapper executable')
     }
+    const expectedPayloadHash = expected?.packagePayload?.sha256
+    const actualPayloadHash = actual?.packagePayload?.sha256
+    if (!validSha256(expectedPayloadHash)) {
+      failures.push('wrapper packaged app payload SHA-256 was missing or invalid')
+    }
+    if (!validSha256(actualPayloadHash)) {
+      failures.push('child packaged app payload SHA-256 was missing or invalid')
+    } else if (validSha256(expectedPayloadHash) && actualPayloadHash !== expectedPayloadHash) {
+      failures.push('child packaged app payload SHA-256 did not match the wrapper payload')
+    }
   }
 
   return failures
@@ -441,6 +487,92 @@ export function sha256File(path) {
     input.on('data', (chunk) => hash.update(chunk))
     input.on('end', () => resolveHash(hash.digest('hex')))
   })
+}
+
+export async function packagedAppPayloadIdentity(
+  executablePath,
+  { sha256 = sha256FileOrNull, codeDirectoryHash = macosCodeDirectoryHash } = {}
+) {
+  const contentsPath = dirname(dirname(resolve(executablePath)))
+  const components = await Promise.all(
+    MACOS_PACKAGED_APP_PAYLOAD_SPECS.map(async ({ relativePath, requiresCodeSignature }) => {
+      const path = join(contentsPath, relativePath)
+      const componentSha256 = await sha256(path)
+      const componentCodeDirectoryHash =
+        requiresCodeSignature && componentSha256 ? await codeDirectoryHash(path) : null
+      return {
+        relativePath,
+        sha256: componentSha256,
+        identityKind: requiresCodeSignature ? 'codesign-cdhash' : 'sha256',
+        identity: requiresCodeSignature ? componentCodeDirectoryHash : componentSha256
+      }
+    })
+  )
+  const unsignedComponents = components
+    .filter(
+      (component, index) =>
+        MACOS_PACKAGED_APP_PAYLOAD_SPECS[index].requiresCodeSignature && !component.identity
+    )
+    .map((component) => component.relativePath)
+  return {
+    root: contentsPath,
+    algorithm: 'sha256-packaged-code-manifest-v1',
+    sha256: packagedAppPayloadManifestSha256(components),
+    components,
+    unsignedComponents
+  }
+}
+
+export function packagedAppPayloadManifestSha256(components) {
+  if (
+    !Array.isArray(components) ||
+    components.length !== MACOS_PACKAGED_APP_PAYLOAD_COMPONENTS.length ||
+    components.some(
+      (component, index) =>
+        component?.relativePath !== MACOS_PACKAGED_APP_PAYLOAD_COMPONENTS[index] ||
+        !validSha256(component?.sha256) ||
+        component?.identityKind !==
+          (MACOS_PACKAGED_APP_PAYLOAD_SPECS[index].requiresCodeSignature
+            ? 'codesign-cdhash'
+            : 'sha256') ||
+        !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(component?.identity ?? '') ||
+        (component.identityKind === 'sha256' && component.identity !== component.sha256)
+    )
+  ) {
+    return null
+  }
+  const identityManifest = components.map(({ relativePath, identityKind, identity }) => ({
+    relativePath,
+    identityKind,
+    identity
+  }))
+  return createHash('sha256')
+    .update(
+      stableJson({
+        algorithm: 'sha256-packaged-code-manifest-v1',
+        components: identityManifest
+      })
+    )
+    .digest('hex')
+}
+
+async function macosCodeDirectoryHash(path) {
+  if (platform() !== 'darwin') return null
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      '/usr/bin/codesign',
+      ['--display', '--verbose=4', path],
+      { encoding: 'utf8' }
+    )
+    const output = `${stdout}\n${stderr}`
+    return (
+      /^CDHashFull=([0-9a-f]{64})$/im.exec(output)?.[1]?.toLowerCase() ??
+      /^CDHash=([0-9a-f]{40,64})$/im.exec(output)?.[1]?.toLowerCase() ??
+      null
+    )
+  } catch {
+    return null
+  }
 }
 
 export function createPerformanceReport({ scenario, mode, metadata, timing, metrics, checks }) {
@@ -612,6 +744,17 @@ function jsonArray(value) {
   } catch {
     return []
   }
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value)
 }
 
 async function sha256FileOrNull(path) {

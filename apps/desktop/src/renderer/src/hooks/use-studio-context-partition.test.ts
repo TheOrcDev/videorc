@@ -5,6 +5,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { describe, expect, it } from 'vitest'
 
 import {
+  capSessionDetailBuffer,
+  SESSION_DETAIL_BUFFER_LIMIT,
   StudioContextProviders,
   useStudioCore,
   useStudioPreview,
@@ -88,6 +90,11 @@ function installNullRenderDom(): { container: Element; restore: () => void } {
 }
 
 describe('studio context invalidation boundaries', () => {
+  it('caps selected-session live detail buffers to the rendered history window', () => {
+    const entries = Array.from({ length: SESSION_DETAIL_BUFFER_LIMIT + 5 }, (_, index) => index)
+
+    expect(capSessionDetailBuffer(entries)).toEqual(entries.slice(-SESSION_DETAIL_BUFFER_LIMIT))
+  })
   it('keeps high-frequency media state out of the core context memo', () => {
     const source = readFileSync(new URL('./use-studio.tsx', import.meta.url), 'utf8')
     const coreStart = source.indexOf('const value = useMemo<StudioCoreContextValue>')
@@ -107,6 +114,33 @@ describe('studio context invalidation boundaries', () => {
     expect(coreMemo).not.toMatch(/\bpreviewLiveStatus\b/)
     expect(coreMemo).not.toMatch(/\bpreviewCameraStatus\b/)
     expect(coreMemo).not.toMatch(/\bpreviewScreenStatus\b/)
+  })
+
+  it('keeps the microphone analyser runtime behind a demand-loaded boundary', () => {
+    const provider = readFileSync(new URL('./use-studio-mic-visual.tsx', import.meta.url), 'utf8')
+    const eagerConsumers = [
+      '../components/studio/audio-mixer.tsx',
+      '../components/studio/session-mic-sliver.tsx',
+      '../components/ui/live-waveform.tsx'
+    ].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8'))
+
+    expect(provider).toContain("import('@/lib/browser-mic-visual-pipeline')")
+    expect(provider).not.toMatch(/import\s*\{[^}]*createMicVisualPipeline[^}]*\}\s*from/)
+    for (const consumer of eagerConsumers) {
+      expect(consumer).not.toContain("from '@/lib/mic-visual-pipeline'")
+    }
+  })
+
+  it('keeps below-the-fold Studio editors out of the launch chunk', () => {
+    const source = readFileSync(
+      new URL('../components/tabs/studio-tab.tsx', import.meta.url),
+      'utf8'
+    )
+
+    expect(source).toContain("await import('@/components/studio/studio-dashboard-bottom-row')")
+    expect(source).not.toContain("from '@/components/studio/audio-mixer'")
+    expect(source).not.toContain("from '@/components/studio/scenes-gallery'")
+    expect(source).toMatch(/<Suspense fallback=\{<StudioDashboardBottomRowFallback \/>\}>/)
   })
 
   it('preserves core provider identity across elapsed-time and preview telemetry updates', async () => {

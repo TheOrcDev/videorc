@@ -35,6 +35,11 @@ type PendingRequest = {
 
 type EventHandler = (payload: unknown) => void
 
+type ConnectAttempt = {
+  generation: number
+  reject: (error: Error) => void
+}
+
 export interface BackendRequestOptions {
   timeoutMs?: number
   signal?: AbortSignal
@@ -74,6 +79,9 @@ export function backendRequestTimeoutMs(method: string): number {
 export class BackendClient {
   private ws: WebSocket | null = null
   private connectPromise: Promise<void> | null = null
+  private connectAttempt: ConnectAttempt | null = null
+  private connectionGeneration = 0
+  private closed = false
   private pending = new Map<string, PendingRequest>()
   private handlers = new Map<string, Set<EventHandler>>()
   private requestCounter = 0
@@ -89,20 +97,29 @@ export class BackendClient {
   }
 
   connect(): Promise<void> {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      return Promise.resolve()
+    if (this.closed) {
+      return Promise.reject(new Error('Backend client is closed.'))
     }
     if (this.connectPromise) {
       return this.connectPromise
     }
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      return Promise.resolve()
+    }
 
-    const attempt = this.connectAfterContractLoad()
+    const generation = ++this.connectionGeneration
+    let rejectAttempt!: (error: Error) => void
+    const attempt = new Promise<void>((resolve, reject) => {
+      rejectAttempt = reject
+      void this.connectAfterContractLoad(generation).then(resolve, reject)
+    })
+    this.connectAttempt = { generation, reject: rejectAttempt }
     this.connectPromise = attempt.then(
       () => {
-        if (this.connectPromise === trackedAttempt) this.connectPromise = null
+        this.finishConnectAttempt(generation, trackedAttempt)
       },
       (error: unknown) => {
-        if (this.connectPromise === trackedAttempt) this.connectPromise = null
+        this.finishConnectAttempt(generation, trackedAttempt)
         throw error
       }
     )
@@ -110,11 +127,17 @@ export class BackendClient {
     return trackedAttempt
   }
 
-  private async connectAfterContractLoad(): Promise<void> {
+  private async connectAfterContractLoad(generation: number): Promise<void> {
     try {
       await loadBackendContractRuntime()
     } catch {
+      if (!this.isConnectAttemptCurrent(generation)) {
+        throw this.inactiveConnectError()
+      }
       throw new Error('Backend protocol validator could not load.')
+    }
+    if (!this.isConnectAttemptCurrent(generation)) {
+      throw this.inactiveConnectError()
     }
     if (this.ws?.readyState === WebSocket.OPEN) {
       return
@@ -125,29 +148,71 @@ export class BackendClient {
         this.connection.token
       )}`
       const ws = new WebSocket(url)
-      this.ws = ws
+      let opened = false
 
-      ws.onopen = () => resolve()
-      ws.onerror = () => reject(new Error('Could not connect to the Rust backend.'))
-      ws.onmessage = (event) => void this.handleMessage(event.data, ws)
+      ws.onopen = () => {
+        if (!this.isSocketCurrent(ws, generation)) {
+          reject(this.inactiveConnectError())
+          ws.close()
+          return
+        }
+        opened = true
+        resolve()
+      }
+      ws.onerror = () => {
+        const error = new Error('Could not connect to the Rust backend.')
+        if (!opened && this.isSocketCurrent(ws, generation)) {
+          this.ws = null
+          this.connectionGeneration += 1
+          reject(error)
+          ws.close()
+          return
+        }
+        reject(error)
+      }
+      ws.onmessage = (event) => {
+        if (this.isSocketCurrent(ws, generation)) {
+          void this.handleMessage(event.data, ws)
+        }
+      }
       ws.onclose = () => {
         this.rejectPendingForSocket(ws, new Error('Backend connection closed.'))
-        if (this.ws === ws) {
+        reject(new Error('Backend connection closed.'))
+        const wasCurrent = this.ws === ws
+        if (wasCurrent) {
           this.ws = null
+          this.emit('connection.closed', null)
         }
-        this.emit('connection.closed', null)
       }
+
+      if (!this.isConnectAttemptCurrent(generation)) {
+        reject(this.inactiveConnectError())
+        ws.close()
+        return
+      }
+
+      this.ws = ws
     })
   }
 
   close(): void {
+    if (this.closed) {
+      return
+    }
+    this.closed = true
+    this.connectionGeneration += 1
+    const connectAttempt = this.connectAttempt
+    this.connectAttempt = null
+    connectAttempt?.reject(new Error('Backend client is closed.'))
+
     const ws = this.ws
+    this.ws = null
     if (!ws) {
       return
     }
     this.rejectPendingForSocket(ws, new Error('Backend connection closed.'))
     ws.close()
-    this.ws = null
+    this.emit('connection.closed', null)
   }
 
   request<TPayload>(
@@ -313,6 +378,29 @@ export class BackendClient {
       pending.cleanup()
       pending.reject(error)
     }
+  }
+
+  private finishConnectAttempt(generation: number, attempt: Promise<void>): void {
+    if (this.connectPromise === attempt) {
+      this.connectPromise = null
+    }
+    if (this.connectAttempt?.generation === generation) {
+      this.connectAttempt = null
+    }
+  }
+
+  private isConnectAttemptCurrent(generation: number): boolean {
+    return !this.closed && this.connectionGeneration === generation
+  }
+
+  private isSocketCurrent(socket: WebSocket, generation: number): boolean {
+    return this.isConnectAttemptCurrent(generation) && this.ws === socket
+  }
+
+  private inactiveConnectError(): Error {
+    return this.closed
+      ? new Error('Backend client is closed.')
+      : new Error('Backend connection attempt was superseded.')
   }
 
   private emit(event: string, payload: unknown): void {

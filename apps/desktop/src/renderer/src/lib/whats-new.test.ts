@@ -1,16 +1,22 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  changelogPlatformForRuntime,
   fetchChangelogEntries,
+  filterChangelogEntriesByPlatform,
   formatChangelogVersion,
   parseChangelogEntries,
   resolveWhatsNewAction
 } from './whats-new'
 
-const entry = (version: string): Record<string, unknown> => ({
+const entry = (
+  version: string,
+  platforms?: Array<'macos' | 'windows'>
+): Record<string, unknown> => ({
   version,
   date: '2026-07-01',
   channel: 'beta',
+  ...(platforms ? { platforms } : {}),
   title: `Title ${version}`,
   summary: `Summary ${version}.`,
   highlights: [`Highlight ${version}.`],
@@ -45,6 +51,24 @@ describe('parseChangelogEntries', () => {
 
     expect(parsed.map((item) => item.version)).toEqual(['0.9.2-beta.1'])
     expect(parsed[0]).not.toHaveProperty('body')
+    expect(parsed[0]?.platforms).toEqual(['macos'])
+  })
+
+  it('preserves valid platform metadata and drops invalid platform lists', () => {
+    const parsed = parseChangelogEntries({
+      entries: [
+        entry('0.10.0-alpha.1', ['windows']),
+        entry('0.10.0-alpha.2', ['macos', 'windows']),
+        { ...entry('0.10.0-alpha.3'), platforms: [] },
+        { ...entry('0.10.0-alpha.4'), platforms: ['linux'] },
+        { ...entry('0.10.0-alpha.5'), platforms: ['windows', 'windows'] }
+      ]
+    })
+
+    expect(parsed.map(({ version, platforms }) => ({ version, platforms }))).toEqual([
+      { version: '0.10.0-alpha.1', platforms: ['windows'] },
+      { version: '0.10.0-alpha.2', platforms: ['macos', 'windows'] }
+    ])
   })
 
   it('returns [] for non-document payloads', () => {
@@ -54,28 +78,36 @@ describe('parseChangelogEntries', () => {
 })
 
 describe('fetchChangelogEntries', () => {
-  it('passes since through and parses the payload', async () => {
+  it('passes since through and keeps only entries for the requested platform', async () => {
     let requestedUrl: string | null = null
     const entries = await fetchChangelogEntries({
+      platform: 'windows',
       since: '0.9.1',
       fetchImpl: (async (input: RequestInfo | URL) => {
         requestedUrl = String(input)
-        return new Response(JSON.stringify({ entries: [entry('0.9.2-beta.1')] }), { status: 200 })
+        return new Response(
+          JSON.stringify({
+            entries: [entry('0.10.0-alpha.1', ['windows']), entry('0.9.2-beta.1', ['macos'])]
+          }),
+          { status: 200 }
+        )
       }) as typeof fetch
     })
 
-    expect(entries?.map((item) => item.version)).toEqual(['0.9.2-beta.1'])
+    expect(entries?.map((item) => item.version)).toEqual(['0.10.0-alpha.1'])
     expect(requestedUrl).toContain('/api/changelog?since=0.9.1')
   })
 
   it('returns null (retry later) on HTTP errors and network failures', async () => {
     expect(
       await fetchChangelogEntries({
+        platform: 'macos',
         fetchImpl: (async () => new Response('nope', { status: 503 })) as typeof fetch
       })
     ).toBeNull()
     expect(
       await fetchChangelogEntries({
+        platform: 'macos',
         fetchImpl: (async () => {
           throw new Error('offline')
         }) as typeof fetch
@@ -86,10 +118,40 @@ describe('fetchChangelogEntries', () => {
   it('distinguishes a good empty answer from a failure', async () => {
     expect(
       await fetchChangelogEntries({
+        platform: 'macos',
         fetchImpl: (async () =>
           new Response(JSON.stringify({ entries: [] }), { status: 200 })) as typeof fetch
       })
     ).toEqual([])
+  })
+})
+
+describe('platform filtering', () => {
+  const entries = parseChangelogEntries({
+    entries: [
+      entry('0.10.0-alpha.1', ['windows']),
+      entry('0.9.2-beta.1', ['macos']),
+      entry('0.9.3-beta.1', ['macos', 'windows']),
+      entry('0.9.1-beta.1')
+    ]
+  })
+
+  it('maps Electron runtime platform identifiers to changelog identifiers', () => {
+    expect(changelogPlatformForRuntime('darwin')).toBe('macos')
+    expect(changelogPlatformForRuntime('win32')).toBe('windows')
+    expect(changelogPlatformForRuntime('linux')).toBeNull()
+    expect(changelogPlatformForRuntime(undefined)).toBeNull()
+  })
+
+  it('never returns Windows-only notes on macOS or macOS-only notes on Windows', () => {
+    expect(filterChangelogEntriesByPlatform(entries, 'macos').map((item) => item.version)).toEqual([
+      '0.9.2-beta.1',
+      '0.9.3-beta.1',
+      '0.9.1-beta.1'
+    ])
+    expect(
+      filterChangelogEntriesByPlatform(entries, 'windows').map((item) => item.version)
+    ).toEqual(['0.10.0-alpha.1', '0.9.3-beta.1'])
   })
 })
 

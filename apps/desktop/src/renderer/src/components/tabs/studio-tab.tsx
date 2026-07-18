@@ -1,5 +1,5 @@
 import { ArrowSquareOut, PushPinSimple, WarningCircle } from '@phosphor-icons/react'
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
 import { LiveChatRail } from '@/components/live-chat-rail'
@@ -8,9 +8,7 @@ import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
 import { StatusBadge } from '@/components/status-badge'
-import { AudioMixer } from '@/components/studio/audio-mixer'
 import { QuickSettings } from '@/components/studio/quick-settings'
-import { ScenesGallery } from '@/components/studio/scenes-gallery'
 import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
 import { SessionPanel } from '@/components/studio/session-panel'
 import { Button } from '@/components/ui/button'
@@ -32,6 +30,11 @@ import {
   sessionStatusLabel,
   sessionStatusTone
 } from '@/lib/studio-session-view'
+
+const StudioDashboardBottomRow = lazy(async () => ({
+  default: (await import('@/components/studio/studio-dashboard-bottom-row'))
+    .StudioDashboardBottomRow
+}))
 
 export function StudioTab(): ReactElement {
   const studio = useStudioCore()
@@ -183,14 +186,26 @@ export function StudioTab(): ReactElement {
 
           {/* Scenes + Audio mixer — the dashboard's bottom row. Collapses to a
               single column below lg. */}
-          <div className="grid gap-5 lg:grid-cols-2">
-            <ScenesGallery />
-            <AudioMixer />
-          </div>
+          <Suspense fallback={<StudioDashboardBottomRowFallback />}>
+            <StudioDashboardBottomRow />
+          </Suspense>
         </PageStack>
       </div>
 
       <StudioLiveChatRail />
+    </div>
+  )
+}
+
+function StudioDashboardBottomRowFallback(): ReactElement {
+  return (
+    <div className="grid gap-5 lg:grid-cols-2" aria-label="Loading Studio controls">
+      <PanelSection title="Scenes">
+        <div className="h-24 rounded-row border bg-muted/20" />
+      </PanelSection>
+      <PanelSection title="Audio mixer">
+        <div className="h-24 rounded-row border bg-muted/20" />
+      </PanelSection>
     </div>
   )
 }
@@ -200,7 +215,6 @@ function StudioPreviewPanel(): ReactElement {
     captureConfig,
     nativePreviewSurfaceEnabled,
     handleSystemPermission,
-    mediaAccess,
     openPreviewWindow,
     previewWindow,
     refreshPreview,
@@ -227,7 +241,6 @@ function StudioPreviewPanel(): ReactElement {
       <SessionMicSliver
         deviceName={selectedMicrophone?.name}
         muted={captureConfig.audio.microphoneMuted}
-        permissionStatus={mediaAccess?.microphone}
         sessionActive={active}
       />
       <span data-videorc-session-status>

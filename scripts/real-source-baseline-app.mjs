@@ -109,6 +109,13 @@ import {
   writePerformanceReport
 } from './lib/performance-contract.mjs'
 import { performanceSamplingInvariants } from './lib/performance-sampling-schedule.mjs'
+import {
+  activePerformanceBudgetRequest,
+  evaluateActivePerformanceBudget,
+  preflightActivePerformanceBudget,
+  readActivePerformanceBudget,
+  selectActivePerformanceBudget
+} from './lib/performance-budget.mjs'
 
 const config = {
   recordingMs: Number(process.env.VIDEORC_BASELINE_RECORDING_MS ?? 60000),
@@ -195,6 +202,46 @@ if (config.packagedExecutable && !existsSync(config.packagedExecutable)) {
   throw new Error(`Packaged app executable not found: ${config.packagedExecutable}`)
 }
 
+const performanceReportScenario =
+  process.env.VIDEORC_PERF_SCENARIO ??
+  (config.streamEnabled ? 'record-4k-stream-1080p' : 'record-4k')
+const performanceReportMetadata = config.performanceReportRequested
+  ? await collectPerformanceMetadata({ cwd: repoRoot })
+  : null
+const activeBudgetRequest = config.performanceReportRequested
+  ? activePerformanceBudgetRequest()
+  : null
+let activeBudget = null
+if (activeBudgetRequest) {
+  const validatedBudget = await readActivePerformanceBudget({
+    path: resolve(repoRoot, activeBudgetRequest.path)
+  })
+  const budgetContext = {
+    scenario: performanceReportScenario,
+    profileClass: performanceReportMetadata.profileClass,
+    appVersion: performanceReportMetadata.appVersion,
+    machineModel: performanceReportMetadata.machineModel,
+    hardwareClass: performanceReportMetadata.hardwareClass,
+    buildMode: performanceReportMetadata.buildMode,
+    packagePayloadSha256: performanceReportMetadata.packagePayload?.sha256,
+    operatingSystem: performanceReportMetadata.operatingSystem,
+    timing: performanceReportMetadata.performanceWindow
+  }
+  preflightActivePerformanceBudget({
+    budget: validatedBudget,
+    profileId: activeBudgetRequest.profileId,
+    context: budgetContext
+  })
+  activeBudget = selectActivePerformanceBudget({
+    budget: validatedBudget,
+    profileId: activeBudgetRequest.profileId,
+    context: {
+      ...budgetContext,
+      displayScaleFactor: performanceReportMetadata.displayScaleFactor
+    }
+  })
+}
+
 const NATIVE_PREFIX = {
   screen: 'screen:screencapturekit:',
   camera: 'camera:avfoundation-native:',
@@ -258,6 +305,19 @@ if (process.env.VIDEORC_PERF_REPORT_PATH) {
     const measurementMs = Math.max(0, config.recordingMs - config.warmupMs)
     const samplingInvariants = performanceSamplingInvariants(measurementMs, config.sampleIntervalMs)
     const minimumSamples = Math.max(2, samplingInvariants.minSamples)
+    const detailedMetrics = performanceEnduranceMetrics({
+      evidence: processEndurance,
+      teardown: teardownEvidence,
+      pipeline: performancePipeline,
+      thresholds: activeBudget?.profile?.thresholds ?? {}
+    })
+    const activeBudgetEvaluation = activeBudget
+      ? evaluateActivePerformanceBudget({
+          profile: activeBudget.profile,
+          metrics: detailedMetrics,
+          metricContract: 'recording'
+        })
+      : null
     const enduranceFailures = [
       ...(processEnduranceError
         ? [`process endurance collection failed: ${processEnduranceError}`]
@@ -266,26 +326,31 @@ if (process.env.VIDEORC_PERF_REPORT_PATH) {
         minimumSamples,
         minimumDurationMs: samplingInvariants.minDurationMs
       }),
-      ...evaluateOwnedTeardown(teardownEvidence)
+      ...evaluateOwnedTeardown(teardownEvidence),
+      ...(activeBudgetEvaluation?.metricFailures ?? []),
+      ...(activeBudgetEvaluation?.thresholdFailures ?? [])
     ]
     const enforcedEnduranceFailures = config.gate ? enduranceFailures : []
     const performanceReport = createPerformanceReport({
-      scenario:
-        process.env.VIDEORC_PERF_SCENARIO ??
-        (config.streamEnabled ? 'record-4k-stream-1080p' : 'record-4k'),
+      scenario: performanceReportScenario,
       mode: config.gate ? 'gate' : 'report-only',
-      metadata: await collectPerformanceMetadata(),
+      metadata: performanceReportMetadata,
       timing: {
         warmupMs: config.warmupMs,
         measurementMs,
         sampleIntervalMs: config.sampleIntervalMs
       },
       metrics: {
-        ...performanceEnduranceMetrics({
-          evidence: processEndurance,
-          teardown: teardownEvidence,
-          pipeline: performancePipeline
-        }),
+        ...detailedMetrics,
+        activeBudget: activeBudget
+          ? {
+              path: activeBudget.path,
+              profileId: activeBudget.profile.id,
+              scope: activeBudget.profile.scope,
+              evidence: activeBudget.profile.evidence
+            }
+          : null,
+        activeBudgetEvaluation,
         requestedOutput: {
           width: config.width,
           height: config.height,
@@ -3609,6 +3674,7 @@ async function teardownPerformanceApp() {
 
   try {
     const smoke = launched?.connections?.['preview-motion-ready']
+    let gracefulQuitCompleted = false
     if (smoke) {
       try {
         result.gracefulQuitRequested = true
@@ -3617,13 +3683,14 @@ async function teardownPerformanceApp() {
           ledgerPaths: performanceLedgerPaths,
           pgid,
           timeoutMs: 10_000
-        }).catch(() => undefined)
+        })
+        gracefulQuitCompleted = true
       } catch (error) {
         result.gracefulQuitError = error?.message ?? String(error)
       }
     }
 
-    result.stopResult = await launched.stop()
+    if (!gracefulQuitCompleted) result.stopResult = await launched.stop()
     result.stoppedCensus = await waitForNoLiveProcessState({
       ledgerPaths: performanceLedgerPaths,
       pgid,

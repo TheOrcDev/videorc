@@ -180,6 +180,9 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
       tab: 'studio',
       waitFor: '[data-videorc-preview-card]'
     })
+    if (usePackagedWindowsScreen) {
+      await applyPackagedWindowsScreenLayout(ws)
+    }
     const bootstrap = await smokeCommand(smoke, 'inspect-native-preview-bootstrap')
     assertNativeBootstrap(bootstrap)
     await smokeCommand(smoke, 'preview-window-open')
@@ -250,6 +253,28 @@ async function startPackagedWindowsScreenPreview(ws) {
   throw new Error(
     `No real Windows screen source could feed packaged preview polling: ${failures.join('; ') || 'no candidates'}`
   )
+}
+
+async function applyPackagedWindowsScreenLayout(ws) {
+  const scenario = visibleScenarios[0]
+  const params = sessionParams(scenario)
+  const intentId = Date.now()
+  const status = await request(ws, timeoutMs, 'scene.layout.apply_preview', {
+    intentId,
+    sources: params.sources,
+    layout: params.layout,
+    video: params.output.video,
+    background: null,
+    protectedOverlayWindowIds: []
+  })
+  if (
+    status?.intentId !== intentId ||
+    status?.compositorStatus?.sceneLayout?.layoutPreset !== 'screen-only'
+  ) {
+    throw new Error(
+      `Packaged Windows preview did not commit ScreenOnly layout intent ${intentId}: ${JSON.stringify(status)}`
+    )
+  }
 }
 
 async function runNativePreviewRecordingScenario(

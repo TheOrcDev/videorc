@@ -1,17 +1,20 @@
 import { Microphone, SpeakerHigh, SpeakerSlash, WaveSine } from '@phosphor-icons/react'
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement, type RefObject } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
-import { BarVisualizer } from '@/components/ui/bar-visualizer'
+import { BarVisualizer, paintBarVisualizer } from '@/components/ui/bar-visualizer'
 import { Button } from '@/components/ui/button'
 import { useWorkspaceNav } from '@/components/workspace-nav'
-import { useDocumentVisible } from '@/hooks/use-document-visible'
-import { useMicLevelMeter } from '@/hooks/use-mic-level-meter'
-import { useMicStream } from '@/hooks/use-mic-stream'
 import { useStudioAudio, useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
+import {
+  useStudioMicVisualLifecycle,
+  useStudioMicVisualPainter,
+  useStudioMicVisualPeakDb
+} from '@/hooks/use-studio-mic-visual'
 import type { AudioMeterStatus } from '@/lib/backend'
 import { formatDb } from '@/lib/format'
+import { resampleMicVisualLevelsInto } from '@/lib/mic-visual-frame'
 import { advanceClipHoldDeadline, fallbackBandLevels } from '@/lib/mic-meter'
 import { systemAccessAction, systemAccessRows, type SystemAccessAction } from '@/lib/system-access'
 import { cn } from '@/lib/utils'
@@ -28,11 +31,19 @@ export function audioMixerNotice(
   return deviceIssue ? 'device-issue' : null
 }
 
+export function audioMixerSignalLive(
+  muted: boolean,
+  rendererActive: boolean,
+  backendLiveLevel: number | null
+): boolean {
+  return !muted && (rendererActive || backendLiveLevel !== null)
+}
+
 /**
  * Audio mixer (SD4 + post-0.9.4 fix F7 + 2026-07-10 live-meter fix + Studio
  * audio ElevenLabs rework S3). The VISUAL is a multi-band bar visualizer over
- * the shared renderer mic stream (use-mic-stream) at display rate, with the
- * WebAudio ballistics meter kept for the peak-dB label and clip hold. The
+ * the shared renderer mic pipeline at display rate. The provider's WebAudio
+ * frame also supplies the peak-dB label and clip hold. The
  * backend stays the capture/health authority: its 1 Hz `micLiveLevel` and the
  * on-demand 700 ms "Check level" sample drive a deterministic coarse-band
  * fallback whenever the analyser cannot open the selected device. The stream
@@ -56,27 +67,18 @@ export function AudioMixer(): ReactElement {
   const { openStudioPanel } = useWorkspaceNav()
 
   const muted = captureConfig.audio.microphoneMuted
-  const documentVisible = useDocumentVisible()
-  const micStream = useMicStream({
-    deviceName: selectedMicrophone?.name,
-    permissionStatus: mediaAccess?.microphone,
-    enabled: Boolean(selectedMicrophone) && documentVisible
-  })
-  const micMeter = useMicLevelMeter({ stream: micStream.stream, muted })
-  const clipping = useClipIndicator(micMeter.peakDb)
+  const micVisual = useStudioMicVisualLifecycle()
 
   const liveLevel =
     typeof diagnosticStats?.micLiveLevel === 'number' ? diagnosticStats.micLiveLevel : null
   const hasReading = audioMeter !== null && typeof audioMeter.level === 'number'
   const level = liveLevel ?? (hasReading ? (audioMeter?.level ?? 0) : 0)
-  const dbLabel =
-    micMeter.active && micMeter.peakDb !== null
-      ? formatDb(micMeter.peakDb)
-      : liveLevel !== null && typeof diagnosticStats?.micLivePeakDb === 'number'
-        ? formatDb(diagnosticStats.micLivePeakDb)
-        : audioMeter && typeof audioMeter.peakDb === 'number'
-          ? formatDb(audioMeter.peakDb)
-          : formatDb(captureConfig.audio.microphoneGainDb)
+  const fallbackDbLabel =
+    liveLevel !== null && typeof diagnosticStats?.micLivePeakDb === 'number'
+      ? formatDb(diagnosticStats.micLivePeakDb)
+      : audioMeter && typeof audioMeter.peakDb === 'number'
+        ? formatDb(audioMeter.peakDb)
+        : formatDb(captureConfig.audio.microphoneGainDb)
   const systemAudio = deviceList.devices.find((device) => device.kind === 'system-audio')
 
   // Explicit visual state map (plan S3) — every path states what drives it:
@@ -87,7 +89,7 @@ export function AudioMixer(): ReactElement {
   //   center-weighted bands from the real level;
   // - silent/no-frames: warning tone over whatever level path is active;
   // - no mic: flat dim bars.
-  const meterStatus = micMeter.active || liveLevel !== null ? 'ready' : audioMeter?.status
+  const meterStatus = micVisual.active || liveLevel !== null ? 'ready' : audioMeter?.status
   const microphoneAccess = systemAccessRows({
     deviceList,
     audioMeter,
@@ -105,10 +107,12 @@ export function AudioMixer(): ReactElement {
     meterStatus,
     microphoneAccess?.state === 'device-issue'
   )
-  const analyserDriven = micStream.active && !muted
-  const visualLevels = analyserDriven
-    ? undefined
-    : fallbackBandLevels(muted || !selectedMicrophone ? 0 : level, MIXER_BAR_COUNT)
+  const analyserDriven = micVisual.active && !muted
+  const signalLive = audioMixerSignalLive(muted, micVisual.active, liveLevel)
+  const fallbackLevels = fallbackBandLevels(
+    muted || !selectedMicrophone ? 0 : level,
+    MIXER_BAR_COUNT
+  )
   const meterTone =
     muted || !selectedMicrophone
       ? 'text-muted-foreground/50'
@@ -137,19 +141,7 @@ export function AudioMixer(): ReactElement {
             </span>
           </span>
           <span className="flex shrink-0 items-center gap-1.5">
-            {/* Clip hold keeps its width reserved so the label row never shifts. */}
-            <span
-              aria-hidden={!clipping}
-              className={cn(
-                'flex items-center gap-1 text-xs font-medium text-warning transition-opacity duration-150',
-                clipping ? 'opacity-100' : 'opacity-0'
-              )}
-              data-videorc-mic-clip={clipping || undefined}
-            >
-              <span className="size-1.5 rounded-full bg-warning" />
-              Clip
-            </span>
-            <span className="text-xs tabular-nums text-muted-foreground">{dbLabel}</span>
+            <MicSignalReadout fallbackLabel={fallbackDbLabel} muted={muted} />
             {selectedMicrophone ? (
               <Button
                 aria-label={muted ? 'Unmute microphone' : 'Mute microphone'}
@@ -174,17 +166,12 @@ export function AudioMixer(): ReactElement {
           </span>
         </div>
         <div className="flex items-center gap-3">
-          <BarVisualizer
-            centerAlign
-            barCount={MIXER_BAR_COUNT}
-            className={cn('h-12 min-w-0 flex-1', meterTone)}
-            data-videorc-mic-visualizer
-            levels={visualLevels}
-            mediaStream={micStream.stream}
-            minHeight={8}
-            state="speaking"
+          <AudioMixerBars
+            analyserDriven={analyserDriven}
+            fallbackLevels={fallbackLevels}
+            meterTone={meterTone}
           />
-          {micMeter.active || liveLevel !== null ? (
+          {signalLive ? (
             <span className="shrink-0 text-xs text-muted-foreground">Live</span>
           ) : (
             <Button
@@ -238,6 +225,110 @@ export function AudioMixer(): ReactElement {
         </div>
       ) : null}
     </PanelSection>
+  )
+}
+
+function AudioMixerBars({
+  analyserDriven,
+  fallbackLevels,
+  meterTone
+}: {
+  analyserDriven: boolean
+  fallbackLevels: number[]
+  meterTone: string
+}): ReactElement {
+  if (analyserDriven) {
+    return <LiveAudioMixerBars meterTone={meterTone} />
+  }
+
+  return (
+    <BarVisualizer
+      centerAlign
+      barCount={MIXER_BAR_COUNT}
+      className={cn('h-12 min-w-0 flex-1', meterTone)}
+      data-videorc-mic-visualizer
+      levels={fallbackLevels}
+      minHeight={8}
+      state="speaking"
+    />
+  )
+}
+
+function LiveAudioMixerBars({ meterTone }: { meterTone: string }): ReactElement {
+  const visualizerRef = useRef<HTMLDivElement>(null)
+  useAudioMixerFramePainter(visualizerRef)
+
+  return (
+    <BarVisualizer
+      ref={visualizerRef}
+      centerAlign
+      barCount={MIXER_BAR_COUNT}
+      className={cn('h-12 min-w-0 flex-1', meterTone)}
+      data-videorc-mic-visualizer
+      levels={fallbackBandLevels(0, MIXER_BAR_COUNT)}
+      minHeight={8}
+      state="speaking"
+    />
+  )
+}
+
+/** Shared by the real mixer surface and the provider integration regression. */
+export function useAudioMixerFramePainter(visualizerRef: RefObject<HTMLDivElement | null>): void {
+  const levelsRef = useRef<number[] | null>(null)
+  if (!levelsRef.current) levelsRef.current = new Array<number>(MIXER_BAR_COUNT).fill(0)
+  useStudioMicVisualPainter((frame) => {
+    const levels = levelsRef.current
+    if (!levels) return
+    resampleMicVisualLevelsInto(frame.bands, levels)
+    paintBarVisualizer(visualizerRef.current, levels, { minHeight: 8 })
+  })
+}
+
+function MicSignalReadout({
+  fallbackLabel,
+  muted
+}: {
+  fallbackLabel: string
+  muted: boolean
+}): ReactElement {
+  if (muted) {
+    return <MicSignalReadoutValue fallbackLabel={fallbackLabel} peakDb={null} />
+  }
+
+  return <LiveMicSignalReadout fallbackLabel={fallbackLabel} />
+}
+
+function LiveMicSignalReadout({ fallbackLabel }: { fallbackLabel: string }): ReactElement {
+  const peakDb = useStudioMicVisualPeakDb()
+  return <MicSignalReadoutValue fallbackLabel={fallbackLabel} peakDb={peakDb} />
+}
+
+function MicSignalReadoutValue({
+  fallbackLabel,
+  peakDb
+}: {
+  fallbackLabel: string
+  peakDb: number | null
+}): ReactElement {
+  const clipping = useClipIndicator(peakDb)
+  const dbLabel = peakDb === null ? fallbackLabel : formatDb(peakDb)
+
+  return (
+    <>
+      {/* Clip hold keeps its width reserved so the label row never shifts. */}
+      <span
+        aria-hidden={!clipping}
+        className={cn(
+          'flex items-center gap-1 text-xs font-medium text-warning transition-opacity duration-150',
+          clipping ? 'opacity-100' : 'opacity-0'
+        )}
+        data-videorc-mic-clip={clipping || undefined}
+      >
+        <span className="size-1.5 rounded-full bg-warning" />
+        Clip
+      </span>
+      <span className="text-xs tabular-nums text-muted-foreground">{dbLabel}</span>
+    </>
   )
 }
 

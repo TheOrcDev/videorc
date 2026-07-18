@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
 
 import {
@@ -14,6 +14,8 @@ import {
   evaluateSeriesGate,
   macosCaffeinatePowerAssertionVerified,
   observationCheck,
+  packagedAppPayloadIdentity,
+  packagedAppPayloadManifestSha256,
   performanceBuildMode,
   performanceHardwareClass,
   performanceMetadataWithObservedDisplayScale,
@@ -364,6 +366,7 @@ describe('evaluateChildPerformanceRun', () => {
 describe('packaged performance provenance', () => {
   const commit = 'a'.repeat(40)
   const executableSha256 = 'b'.repeat(64)
+  const packagePayloadSha256 = 'c'.repeat(64)
   const expected = {
     commit,
     dirty: false,
@@ -373,7 +376,8 @@ describe('packaged performance provenance', () => {
     hardwareClass: 'github-hosted-macos-15-arm64-standard',
     powerAssertion: 'caffeinate:-d,-i,-s',
     powerAssertionVerified: false,
-    executable: { sha256: executableSha256 }
+    executable: { sha256: executableSha256 },
+    packagePayload: { sha256: packagePayloadSha256 }
   }
 
   it('accepts only the same packaged bytes, nonce, and clean commit', () => {
@@ -396,7 +400,8 @@ describe('packaged performance provenance', () => {
         hardwareClass: 'wrong-hardware',
         powerAssertion: null,
         powerAssertionVerified: false,
-        executable: { sha256: 'd'.repeat(64) }
+        executable: { sha256: 'd'.repeat(64) },
+        packagePayload: { sha256: 'e'.repeat(64) }
       },
       expected,
       requireCleanProvenance: true
@@ -410,6 +415,7 @@ describe('packaged performance provenance', () => {
     assert.ok(failures.some((failure) => /did not match wrapper commit/.test(failure)))
     assert.ok(failures.some((failure) => /child commit provenance was dirty/.test(failure)))
     assert.ok(failures.some((failure) => /SHA-256 did not match/.test(failure)))
+    assert.ok(failures.some((failure) => /app payload SHA-256 did not match/.test(failure)))
   })
 
   it('hashes the exact executable bytes recorded by packaged reports', async () => {
@@ -424,6 +430,101 @@ describe('packaged performance provenance', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  it('binds every performance-critical packaged executable into one signed payload identity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'videorc-performance-payload-'))
+    const executable = join(root, 'Videorc.app', 'Contents', 'MacOS', 'Videorc')
+    const resources = join(root, 'Videorc.app', 'Contents', 'Resources')
+    const framework = join(
+      root,
+      'Videorc.app',
+      'Contents',
+      'Frameworks',
+      'Electron Framework.framework',
+      'Versions',
+      'A',
+      'Electron Framework'
+    )
+    try {
+      await mkdir(join(root, 'Videorc.app', 'Contents', 'MacOS'), { recursive: true })
+      await mkdir(join(resources, 'ffmpeg', 'bin'), { recursive: true })
+      await mkdir(dirname(framework), { recursive: true })
+      await writeFile(executable, 'generic electron launcher')
+      await Promise.all([
+        writeFile(join(resources, 'app.asar'), 'renderer and main bytes'),
+        writeFile(join(resources, 'videorc-backend'), 'backend bytes'),
+        writeFile(join(resources, 'native_preview_host_helper'), 'helper bytes'),
+        writeFile(join(resources, 'videorc_native_preview.node'), 'native addon bytes'),
+        writeFile(join(resources, 'ffmpeg', 'bin', 'ffmpeg'), 'ffmpeg bytes'),
+        writeFile(join(resources, 'ffmpeg', 'bin', 'ffprobe'), 'ffprobe bytes'),
+        writeFile(framework, 'electron framework bytes')
+      ])
+
+      const signedIdentity = async (path) => (await sha256File(path)).slice(0, 40)
+      const first = await packagedAppPayloadIdentity(executable, {
+        codeDirectoryHash: signedIdentity
+      })
+      await writeFile(join(resources, 'videorc-backend'), 'changed backend bytes')
+      const second = await packagedAppPayloadIdentity(executable, {
+        codeDirectoryHash: signedIdentity
+      })
+
+      assert.match(first.sha256, /^[0-9a-f]{64}$/)
+      assert.notEqual(second.sha256, first.sha256)
+      assert.deepEqual(
+        first.components.map((component) => component.relativePath),
+        [
+          'MacOS/Videorc',
+          'Resources/app.asar',
+          'Resources/videorc-backend',
+          'Resources/native_preview_host_helper',
+          'Resources/videorc_native_preview.node',
+          'Resources/ffmpeg/bin/ffmpeg',
+          'Resources/ffmpeg/bin/ffprobe',
+          'Frameworks/Electron Framework.framework/Versions/A/Electron Framework'
+        ]
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails closed when a packaged Mach-O component is unsigned', async () => {
+    const identity = await packagedAppPayloadIdentity('/tmp/Videorc.app/Contents/MacOS/Videorc', {
+      sha256: async () => 'a'.repeat(64),
+      codeDirectoryHash: async (path) => (path.endsWith('ffprobe') ? null : 'b'.repeat(40))
+    })
+
+    assert.equal(identity.sha256, null)
+    assert.deepEqual(identity.unsignedComponents, ['Resources/ffmpeg/bin/ffprobe'])
+  })
+
+  it('uses Code Directory identity instead of signature-bearing raw bytes', () => {
+    const components = [
+      ['MacOS/Videorc', 'codesign-cdhash'],
+      ['Resources/app.asar', 'sha256'],
+      ['Resources/videorc-backend', 'codesign-cdhash'],
+      ['Resources/native_preview_host_helper', 'codesign-cdhash'],
+      ['Resources/videorc_native_preview.node', 'codesign-cdhash'],
+      ['Resources/ffmpeg/bin/ffmpeg', 'codesign-cdhash'],
+      ['Resources/ffmpeg/bin/ffprobe', 'codesign-cdhash'],
+      ['Frameworks/Electron Framework.framework/Versions/A/Electron Framework', 'codesign-cdhash']
+    ].map(([relativePath, identityKind], index) => ({
+      relativePath,
+      identityKind,
+      identity: String(index + 1).repeat(identityKind === 'sha256' ? 64 : 40),
+      sha256: String(index + 5).repeat(64)
+    }))
+    const resigned = components.map((component, index) => ({
+      ...component,
+      sha256: component.identityKind === 'sha256' ? component.sha256 : String(index + 1).repeat(64)
+    }))
+
+    assert.equal(
+      packagedAppPayloadManifestSha256(resigned),
+      packagedAppPayloadManifestSha256(components)
+    )
   })
 })
 

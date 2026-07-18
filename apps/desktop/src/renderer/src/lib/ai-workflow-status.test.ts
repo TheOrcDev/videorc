@@ -5,22 +5,24 @@ import {
   aiRunButtonAction,
   latestAiProblemArtifact
 } from './ai-workflow-status'
-import type { AiArtifact, HealthEvent, SessionSummary } from './backend'
+import type { AiArtifact, HealthEvent, SessionWithDetails } from './backend'
 
-function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
+function session(overrides: Partial<SessionWithDetails> = {}): SessionWithDetails {
   return {
     aiArtifacts: [],
+    aiArtifactCount: 0,
     healthEvents: [],
+    healthEventCount: 0,
     id: 'session-1',
-    layout: {},
     mode: 'record',
     sessionLogs: [],
-    sources: {},
+    sessionLogCount: 0,
     startedAt: '2026-07-01T00:00:00.000Z',
     status: 'completed',
     title: 'Session',
+    commentCount: 0,
     ...overrides
-  } as SessionSummary
+  }
 }
 
 function artifact(overrides: Partial<AiArtifact>): AiArtifact {

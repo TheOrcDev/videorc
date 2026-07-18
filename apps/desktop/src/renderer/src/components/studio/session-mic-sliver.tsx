@@ -1,9 +1,8 @@
-import type { ReactElement } from 'react'
+import { useRef, type ReactElement, type RefObject } from 'react'
 
-import { BarVisualizer } from '@/components/ui/bar-visualizer'
-import { useDocumentVisible } from '@/hooks/use-document-visible'
-import { useMicStream } from '@/hooks/use-mic-stream'
-import type { MediaAccessStatus } from '@/lib/backend'
+import { BarVisualizer, paintBarVisualizer } from '@/components/ui/bar-visualizer'
+import { useStudioMicVisualPainter } from '@/hooks/use-studio-mic-visual'
+import { resampleMicVisualLevelsInto } from '@/lib/mic-visual-frame'
 import { fallbackBandLevels } from '@/lib/mic-meter'
 import { cn } from '@/lib/utils'
 
@@ -16,27 +15,62 @@ const SLIVER_BAR_COUNT = 5
  * frame's control row). Visible only while a session runs with a mic
  * selected; its width is reserved for the whole session so mute toggles never
  * shift layout (muted shows flat dim bars). No click target — the mixer owns
- * the controls. The stream releases while the document is hidden.
+ * the controls. The workspace provider owns visibility cleanup and analysis.
  */
 export function SessionMicSliver({
   sessionActive,
   deviceName,
-  muted,
-  permissionStatus
+  muted
 }: {
   sessionActive: boolean
   deviceName: string | undefined
   muted: boolean
-  permissionStatus: MediaAccessStatus | undefined
 }): ReactElement | null {
-  const documentVisible = useDocumentVisible()
-  const enabled = sessionActive && Boolean(deviceName) && !muted && documentVisible
-  const micStream = useMicStream({ deviceName, enabled, permissionStatus })
-
   if (!sessionActive || !deviceName) {
     return null
   }
 
+  return muted ? (
+    <SessionMicSliverBars levels={fallbackBandLevels(0, SLIVER_BAR_COUNT)} muted />
+  ) : (
+    <ActiveSessionMicSliver />
+  )
+}
+
+function ActiveSessionMicSliver(): ReactElement {
+  const visualizerRef = useRef<HTMLDivElement>(null)
+  useSessionMicFramePainter(visualizerRef)
+
+  return (
+    <SessionMicSliverBars
+      levels={fallbackBandLevels(0, SLIVER_BAR_COUNT)}
+      muted={false}
+      visualizerRef={visualizerRef}
+    />
+  )
+}
+
+/** Shared by the real session sliver and the provider integration regression. */
+export function useSessionMicFramePainter(visualizerRef: RefObject<HTMLDivElement | null>): void {
+  const levelsRef = useRef<number[] | null>(null)
+  if (!levelsRef.current) levelsRef.current = new Array<number>(SLIVER_BAR_COUNT).fill(0)
+  useStudioMicVisualPainter((frame) => {
+    const levels = levelsRef.current
+    if (!levels) return
+    resampleMicVisualLevelsInto(frame.bands, levels)
+    paintBarVisualizer(visualizerRef.current, levels, { minHeight: 12 })
+  })
+}
+
+function SessionMicSliverBars({
+  levels,
+  muted,
+  visualizerRef
+}: {
+  levels: number[]
+  muted: boolean
+  visualizerRef?: RefObject<HTMLDivElement | null>
+}): ReactElement {
   return (
     <span
       className="flex w-9 shrink-0 items-center"
@@ -44,14 +78,14 @@ export function SessionMicSliver({
       title={muted ? 'Microphone muted' : 'Live microphone signal'}
     >
       <BarVisualizer
+        ref={visualizerRef}
         centerAlign
         barCount={SLIVER_BAR_COUNT}
         className={cn(
           'h-4 w-full gap-0.5',
           muted ? 'text-muted-foreground/50' : 'text-foreground/70'
         )}
-        levels={muted || !micStream.active ? fallbackBandLevels(0, SLIVER_BAR_COUNT) : undefined}
-        mediaStream={micStream.stream}
+        levels={levels}
         minHeight={12}
         state="speaking"
       />

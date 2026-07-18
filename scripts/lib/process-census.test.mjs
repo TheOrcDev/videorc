@@ -14,7 +14,8 @@ import {
   parseWindowsProcessTable,
   pruneDeadOwnedProcessRecords,
   readOwnedProcessLedgers,
-  summarizeRows
+  summarizeRows,
+  verifyCleanProcessStateBeforeRecovery
 } from './process-census.mjs'
 
 test('ownedProcessLedgerPaths mirrors the desktop owned-process ledger locations', () => {
@@ -126,6 +127,47 @@ test('classifyProcess uses the exact argv executable when macOS truncates comm',
       args: '"/repo/build/native_preview_host_helper" --stdio'
     }),
     'native-preview-helper'
+  )
+})
+
+test('classifyProcess counts electron-vite under the Videorc workspace as tooling', () => {
+  assert.equal(
+    classifyProcess({
+      command: '/opt/homebrew/bin/node',
+      args: '/Users/orcdev/projects/videorc/node_modules/electron-vite/bin/electron-vite.js dev'
+    }),
+    'tooling'
+  )
+})
+
+test('classifyProcess counts an esbuild service under the Videorc workspace as tooling', () => {
+  assert.equal(
+    classifyProcess({
+      command: '/Users/orcdev/projects/videorc/node_modules/@esbuild/darwin-arm64/bin/esbuild',
+      args: '/Users/orcdev/projects/videorc/node_modules/@esbuild/darwin-arm64/bin/esbuild --service=0.25.6 --ping'
+    }),
+    'tooling'
+  )
+})
+
+test('classifyProcess still counts the Electron app executable as electron-main', () => {
+  assert.equal(
+    classifyProcess({
+      command:
+        '/Users/orcdev/projects/videorc/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron',
+      args: '/Users/orcdev/projects/videorc/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron .'
+    }),
+    'electron-main'
+  )
+})
+
+test('classifyProcess does not count arbitrary Videorc workspace descendants as electron-main', () => {
+  assert.equal(
+    classifyProcess({
+      command: '/opt/homebrew/bin/node',
+      args: '/Users/orcdev/projects/videorc/scripts/preview-lifecycle-probe.mjs'
+    }),
+    'other'
   )
 })
 
@@ -576,6 +618,53 @@ test('pruneDeadOwnedProcessRecords removes only records whose pids are gone', as
   assert.deepEqual(JSON.parse(files.get('/tmp/global.json')), [
     { pid: 111, label: 'videorc-backend', startedAt: '2026-06-20T10:00:00.000Z' }
   ])
+})
+
+test('verifyCleanProcessStateBeforeRecovery preserves the original failure before pruning', async () => {
+  const expected = new Error('ledger was not empty')
+  const calls = []
+
+  await assert.rejects(
+    verifyCleanProcessStateBeforeRecovery({
+      verify: async () => {
+        calls.push('verify')
+        throw expected
+      },
+      recover: async () => {
+        calls.push('recover')
+      }
+    }),
+    (error) => error === expected
+  )
+  assert.deepEqual(calls, ['verify', 'recover'])
+})
+
+test('verifyCleanProcessStateBeforeRecovery reports recovery failure without replacing verification failure', async () => {
+  const verificationFailure = new Error('ledger was not empty')
+  const verificationStack = verificationFailure.stack
+  const recoveryFailure = new Error('could not rewrite ledger')
+  const calls = []
+
+  await assert.rejects(
+    verifyCleanProcessStateBeforeRecovery({
+      verify: async () => {
+        calls.push('verify')
+        throw verificationFailure
+      },
+      recover: async () => {
+        calls.push('recover')
+        throw recoveryFailure
+      }
+    }),
+    (error) => {
+      assert.equal(error, verificationFailure)
+      assert.equal(error.message, 'ledger was not empty')
+      assert.equal(error.stack, verificationStack)
+      assert.equal(error.recoveryError, recoveryFailure)
+      return true
+    }
+  )
+  assert.deepEqual(calls, ['verify', 'recover'])
 })
 
 function completeResourceCheckpoint(rows) {

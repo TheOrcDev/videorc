@@ -1,27 +1,17 @@
 import assert from 'node:assert/strict'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { compileCaptureModule } from './lib/compile-capture-module.mjs'
+
 const require = createRequire(import.meta.url)
-const ts = require('../apps/desktop/node_modules/typescript')
 
-const sourcePath = join(process.cwd(), 'apps/desktop/src/renderer/src/lib/capture.ts')
 const tempDir = join(tmpdir(), `videorc-start-labels-${Date.now()}`)
-const tempModule = join(tempDir, 'capture.cjs')
 
-await mkdir(tempDir, { recursive: true })
 try {
-  const source = await readFile(sourcePath, 'utf8')
-  const transpiled = ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2022,
-      esModuleInterop: true
-    }
-  })
-  await writeFile(tempModule, transpiled.outputText)
+  const tempModule = await compileCaptureModule(tempDir)
 
   const {
     areEnabledStreamTargetsStartReady,
@@ -66,7 +56,7 @@ try {
     'Start Livestream'
   )
 
-  const youtubeOauthPaused = bridgeStreamingToLegacy({
+  const youtubeOauthReady = bridgeStreamingToLegacy({
     ...defaultCaptureConfig,
     recordEnabled: false,
     streaming: {
@@ -88,8 +78,8 @@ try {
       )
     }
   })
-  assert.equal(youtubeOauthPaused.streamEnabled, false)
-  assert.equal(areEnabledStreamTargetsStartReady(youtubeOauthPaused.streaming), false)
+  assert.equal(youtubeOauthReady.streamEnabled, true)
+  assert.equal(areEnabledStreamTargetsStartReady(youtubeOauthReady.streaming), true)
 
   const manualMissingKey = bridgeStreamingToLegacy({
     ...defaultCaptureConfig,

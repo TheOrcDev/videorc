@@ -13,10 +13,12 @@ vi.mock('sonner', () => ({ toast: toastSpies }))
 
 import type {
   AccountCallbackEnvelope,
+  AiArtifact,
   AudioMeterResult,
   BackendConnection,
   CompositorStatus,
   DeviceList,
+  HealthEvent,
   LayoutSettings,
   NoiseCleanupJob,
   OAuthCallbackEnvelope,
@@ -24,6 +26,7 @@ import type {
   PreviewSurfaceStatus,
   PreviewWindowState,
   Scene,
+  SessionLogEntry,
   SessionSummary,
   VideorcApi
 } from '../../../shared/backend'
@@ -74,6 +77,21 @@ function cleanupJob(overrides: Partial<NoiseCleanupJob> = {}): NoiseCleanupJob {
     preset: 'speech-v1',
     createdAt: now,
     updatedAt: now,
+    ...overrides
+  }
+}
+
+function sessionSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
+  return {
+    id: 'session-1',
+    title: 'Session 1',
+    startedAt: now,
+    status: 'completed',
+    mode: 'recording',
+    healthEventCount: 0,
+    sessionLogCount: 0,
+    aiArtifactCount: 0,
+    commentCount: 0,
     ...overrides
   }
 }
@@ -255,6 +273,21 @@ class StudioBackend {
   audioProcessingReasonCode: 'session-ended' | null = null
   deviceListFailuresRemaining = 0
   audioMeterFailuresRemaining = 0
+  sessionDetailFailuresRemaining = 0
+  sessionSummaries: SessionSummary[] = []
+  sessionListNextCursor: string | undefined
+  sessionHealthEvents: HealthEvent[] = []
+  sessionLogs: SessionLogEntry[] = []
+  sessionAiArtifacts: AiArtifact[] = []
+  private readonly deferredResponses = new Map<
+    string,
+    Array<{
+      payload: unknown
+      ready: Promise<void>
+      release: () => void
+      matches?: (command: BackendCommand) => boolean
+    }>
+  >()
   deviceList: DeviceList = {
     devices: [
       {
@@ -271,6 +304,41 @@ class StudioBackend {
     warnings: []
   }
   audioMeterResult: AudioMeterResult = { status: 'ready', level: 0.4 }
+
+  deferResponse(
+    method: string,
+    payload: unknown,
+    matches?: (command: BackendCommand) => boolean
+  ): () => void {
+    let release!: () => void
+    const ready = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const pending = this.deferredResponses.get(method) ?? []
+    pending.push({ payload, ready, release, matches })
+    this.deferredResponses.set(method, pending)
+    return release
+  }
+
+  takeDeferredResponse(
+    method: string,
+    command: BackendCommand
+  ):
+    | {
+        payload: unknown
+        ready: Promise<void>
+        release: () => void
+        matches?: (command: BackendCommand) => boolean
+      }
+    | undefined {
+    const pending = this.deferredResponses.get(method)
+    const index = pending?.findIndex((candidate) => candidate.matches?.(command) ?? true) ?? -1
+    const next = index >= 0 ? pending?.splice(index, 1)[0] : undefined
+    if (pending?.length === 0) {
+      this.deferredResponses.delete(method)
+    }
+    return next
+  }
 
   invalidateCompletedNoiseCleanup(message: string): void {
     this.sourceMutationRevision += 1
@@ -445,7 +513,17 @@ class StudioBackend {
       case 'streamTargets.metadata.validate':
         return { valid: true, issues: [] }
       case 'sessions.list':
-        return []
+        return { items: this.sessionSummaries, nextCursor: this.sessionListNextCursor }
+      case 'sessions.healthEvents.list':
+        if (this.sessionDetailFailuresRemaining > 0) {
+          this.sessionDetailFailuresRemaining -= 1
+          throw new Error('Session detail history is temporarily unavailable.')
+        }
+        return { events: this.sessionHealthEvents }
+      case 'sessions.logs.list':
+        return { entries: this.sessionLogs }
+      case 'sessions.aiArtifacts.list':
+        return { artifacts: this.sessionAiArtifacts }
       case 'sessions.delete': {
         const deletedSessionIds = new Set(params.sessionIds as string[])
         this.noiseCleanupJobs = this.noiseCleanupJobs.map((job) =>
@@ -607,6 +685,7 @@ class TestWebSocket {
     }
     const command = JSON.parse(raw) as BackendCommand
     this.backend.sentCommands.push(command)
+    const deferredResponse = this.backend.takeDeferredResponse(command.method, command)
     if (command.method === 'session.start' && this.backend.emitRecordingStatusBeforeStartResponse) {
       queueMicrotask(() => {
         this.onmessage?.({
@@ -622,16 +701,19 @@ class TestWebSocket {
         })
       })
     }
-    const respond = (): void => {
+    const respond = (payloadOverride?: unknown): void => {
       if (this.readyState !== TestWebSocket.OPEN) {
         return
       }
       try {
+        if (deferredResponse) {
+          this.backend.commands.push(command)
+        }
         this.onmessage?.({
           data: JSON.stringify({
             id: command.id,
             ok: true,
-            payload: this.backend.response(command)
+            payload: deferredResponse ? payloadOverride : this.backend.response(command)
           })
         })
       } catch (error) {
@@ -660,7 +742,9 @@ class TestWebSocket {
         : command.method === 'audio.processing.update'
           ? this.backend.audioProcessingResponseDelayMs
           : 0
-    if (responseDelayMs > 0) {
+    if (deferredResponse) {
+      void deferredResponse.ready.then(() => respond(deferredResponse.payload))
+    } else if (responseDelayMs > 0) {
       setTimeout(respond, responseDelayMs)
     } else {
       queueMicrotask(respond)
@@ -702,6 +786,695 @@ describe('real StudioProvider lifecycle', () => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
     vi.useRealTimers()
+  })
+
+  it('coalesces duplicate session-detail refreshes and settles a retryable error', async () => {
+    const backend = new StudioBackend()
+    backend.sessionSummaries = [sessionSummary()]
+    backend.sessionDetailFailuresRemaining = 1
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () => latest()?.core.wsStatus === 'connected' && latest()?.core.sessions.length === 1
+    )
+
+    await act(async () => {
+      const first = latest()!.core.loadSessionDetails('session-1')
+      const duplicate = latest()!.core.loadSessionDetails('session-1')
+      await expect(Promise.all([first, duplicate])).resolves.toEqual([undefined, undefined])
+    })
+    await waitForObservation(() => latest()?.core.sessionDetailError?.sessionId === 'session-1')
+
+    expect(latest()?.core.sessionDetailsLoading.has('session-1')).toBe(false)
+    expect(latest()?.core.sessionDetailError?.message).toContain(
+      'Session detail history is temporarily unavailable.'
+    )
+    expect(latest()?.core.lastError).toContain('Session detail history is temporarily unavailable.')
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method.startsWith('sessions.') &&
+          command.method !== 'sessions.list' &&
+          command.method !== 'sessions.storage'
+      )
+    ).toHaveLength(3)
+  })
+
+  it('ignores a stale load-more response after the first Library page refreshes', async () => {
+    const backend = new StudioBackend()
+    backend.sessionSummaries = [
+      sessionSummary({ id: 'session-3', title: 'Session 3' }),
+      sessionSummary({ id: 'session-2', title: 'Session 2' })
+    ]
+    backend.sessionListNextCursor = 'cursor-old'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.sessionsNextCursor === 'cursor-old'
+    )
+
+    const releaseStalePage = backend.deferResponse('sessions.list', {
+      items: [sessionSummary({ id: 'session-1', title: 'Session 1' })],
+      nextCursor: 'cursor-stale-tail'
+    })
+    let staleLoadMore!: Promise<void>
+    await act(async () => {
+      staleLoadMore = latest()!.core.loadMoreSessions()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() =>
+      expect(
+        backend.sentCommands.some(
+          (command) =>
+            command.method === 'sessions.list' &&
+            (command.params as { cursor?: string } | undefined)?.cursor === 'cursor-old'
+        )
+      ).toBe(true)
+    )
+
+    backend.sessionSummaries = [
+      sessionSummary({ id: 'session-4', title: 'Session 4' }),
+      sessionSummary({ id: 'session-3', title: 'Session 3' })
+    ]
+    backend.sessionListNextCursor = 'cursor-fresh'
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: { state: 'idle', message: 'Ready.' }
+        })
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () =>
+        latest()
+          ?.core.sessions.map((session) => session.id)
+          .join(',') === 'session-4,session-3' &&
+        latest()?.core.sessionsNextCursor === 'cursor-fresh'
+    )
+
+    await act(async () => {
+      releaseStalePage()
+      await staleLoadMore
+    })
+
+    expect(latest()?.core.sessions.map((session) => session.id)).toEqual(['session-4', 'session-3'])
+    expect(latest()?.core.sessionsNextCursor).toBe('cursor-fresh')
+    expect(latest()?.core.sessionsLoadingMore).toBe(false)
+  })
+
+  it('does not let a stale focus refresh replace a newer Library first page', async () => {
+    const backend = new StudioBackend()
+    backend.sessionSummaries = [
+      sessionSummary({ id: 'session-3', title: 'Session 3' }),
+      sessionSummary({ id: 'session-2', title: 'Session 2' })
+    ]
+    backend.sessionListNextCursor = 'cursor-old'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.sessionsNextCursor === 'cursor-old'
+    )
+
+    const releaseStaleFocusPage = backend.deferResponse('sessions.list', {
+      items: [sessionSummary({ id: 'session-1', title: 'Session 1' })],
+      nextCursor: 'cursor-stale'
+    })
+    let staleFocusRefresh!: Promise<void>
+    await act(async () => {
+      staleFocusRefresh = latest()!.core.refreshBackend()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() =>
+      expect(
+        backend.sentCommands.filter((command) => command.method === 'sessions.list')
+      ).toHaveLength(2)
+    )
+
+    backend.sessionSummaries = [
+      sessionSummary({ id: 'session-4', title: 'Session 4' }),
+      sessionSummary({ id: 'session-3', title: 'Session 3' })
+    ]
+    backend.sessionListNextCursor = 'cursor-fresh'
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: { state: 'idle', message: 'Ready.' }
+        })
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () =>
+        latest()
+          ?.core.sessions.map((session) => session.id)
+          .join(',') === 'session-4,session-3' &&
+        latest()?.core.sessionsNextCursor === 'cursor-fresh'
+    )
+
+    await act(async () => {
+      releaseStaleFocusPage()
+      await staleFocusRefresh
+    })
+
+    expect(latest()?.core.sessions.map((session) => session.id)).toEqual(['session-4', 'session-3'])
+    expect(latest()?.core.sessionsNextCursor).toBe('cursor-fresh')
+  })
+
+  it('merges health and log events during detail load without another RPC batch', async () => {
+    const backend = new StudioBackend()
+    backend.sessionSummaries = [sessionSummary()]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () => latest()?.core.wsStatus === 'connected' && latest()?.core.sessions.length === 1
+    )
+
+    const releaseHealth = backend.deferResponse('sessions.healthEvents.list', { events: [] })
+    const releaseLogs = backend.deferResponse('sessions.logs.list', { entries: [] })
+    const releaseArtifacts = backend.deferResponse('sessions.aiArtifacts.list', { artifacts: [] })
+    let detailLoad!: Promise<void>
+    await act(async () => {
+      detailLoad = latest()!.core.loadSessionDetails('session-1')
+      await Promise.resolve()
+    })
+    await vi.waitFor(() =>
+      expect(
+        backend.sentCommands.filter((command) =>
+          [
+            'sessions.healthEvents.list',
+            'sessions.logs.list',
+            'sessions.aiArtifacts.list'
+          ].includes(command.method)
+        )
+      ).toHaveLength(3)
+    )
+
+    const healthEvent: HealthEvent = {
+      id: 'health-live',
+      sessionId: 'session-1',
+      level: 'warn',
+      code: 'live-health',
+      message: 'Health arrived while details were loading.',
+      permissionPane: null,
+      createdAt: '2026-07-12T00:00:01.000Z'
+    }
+    const logEntry: SessionLogEntry = {
+      id: 'log-live',
+      sessionId: 'session-1',
+      level: 'info',
+      code: 'live-log',
+      message: 'Log arrived while details were loading.',
+      sourceId: null,
+      permissionPane: null,
+      createdAt: '2026-07-12T00:00:01.000Z'
+    }
+    backend.sessionHealthEvents = [healthEvent]
+    backend.sessionLogs = [logEntry]
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({ event: 'health.event', payload: healthEvent })
+        })
+        socket.onmessage?.({
+          data: JSON.stringify({ event: 'session.log', payload: logEntry })
+        })
+      }
+      await Promise.resolve()
+    })
+    expect(latest()?.core.sessions[0]?.healthEventCount).toBe(1)
+    expect(latest()?.core.sessions[0]?.sessionLogCount).toBe(1)
+
+    await act(async () => {
+      releaseHealth()
+      releaseLogs()
+      releaseArtifacts()
+      await detailLoad
+    })
+
+    expect(latest()?.core.sessionDetails['session-1']?.healthEvents).toEqual([healthEvent])
+    expect(latest()?.core.sessionDetails['session-1']?.sessionLogs).toEqual([logEntry])
+    expect(
+      backend.sentCommands.filter((command) =>
+        ['sessions.healthEvents.list', 'sessions.logs.list', 'sessions.aiArtifacts.list'].includes(
+          command.method
+        )
+      )
+    ).toHaveLength(3)
+  })
+
+  it('runs one trailing detail refresh when AI artifacts change during a load', async () => {
+    const backend = new StudioBackend()
+    backend.sessionSummaries = [sessionSummary()]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () => latest()?.core.wsStatus === 'connected' && latest()?.core.sessions.length === 1
+    )
+    await act(async () => latest()!.core.loadSessionDetails('session-1'))
+
+    const releaseHealth = backend.deferResponse('sessions.healthEvents.list', { events: [] })
+    const releaseLogs = backend.deferResponse('sessions.logs.list', { entries: [] })
+    const releaseArtifacts = backend.deferResponse('sessions.aiArtifacts.list', { artifacts: [] })
+    let detailReload!: Promise<void>
+    await act(async () => {
+      detailReload = latest()!.core.loadSessionDetails('session-1')
+      await Promise.resolve()
+    })
+    await vi.waitFor(() =>
+      expect(
+        backend.sentCommands.filter((command) =>
+          [
+            'sessions.healthEvents.list',
+            'sessions.logs.list',
+            'sessions.aiArtifacts.list'
+          ].includes(command.method)
+        )
+      ).toHaveLength(6)
+    )
+
+    const artifact: AiArtifact = {
+      id: 'artifact-live',
+      sessionId: 'session-1',
+      kind: 'summary',
+      status: 'ready',
+      content: { text: 'Fresh summary' },
+      filePath: null,
+      createdAt: '2026-07-12T00:00:02.000Z'
+    }
+    backend.sessionAiArtifacts = [artifact]
+    backend.sessionSummaries = [sessionSummary({ aiArtifactCount: 1 })]
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'ai.artifacts.changed',
+            payload: { sessionId: 'session-1' }
+          })
+        })
+      }
+      await Promise.resolve()
+    })
+
+    const releaseTrailingHealth = backend.deferResponse('sessions.healthEvents.list', {
+      events: []
+    })
+    const releaseTrailingLogs = backend.deferResponse('sessions.logs.list', { entries: [] })
+    const releaseTrailingArtifacts = backend.deferResponse('sessions.aiArtifacts.list', {
+      artifacts: [artifact]
+    })
+    await act(async () => {
+      releaseHealth()
+      releaseLogs()
+      releaseArtifacts()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() =>
+      expect(
+        backend.sentCommands.filter((command) =>
+          [
+            'sessions.healthEvents.list',
+            'sessions.logs.list',
+            'sessions.aiArtifacts.list'
+          ].includes(command.method)
+        )
+      ).toHaveLength(9)
+    )
+
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'ai.artifacts.changed',
+            payload: { sessionId: 'session-1' }
+          })
+        })
+      }
+      await Promise.resolve()
+    })
+    await act(async () => {
+      releaseTrailingHealth()
+      releaseTrailingLogs()
+      releaseTrailingArtifacts()
+      await detailReload
+    })
+
+    expect(latest()?.core.sessionDetails['session-1']?.aiArtifacts).toEqual([artifact])
+    expect(
+      backend.sentCommands.filter((command) =>
+        ['sessions.healthEvents.list', 'sessions.logs.list', 'sessions.aiArtifacts.list'].includes(
+          command.method
+        )
+      )
+    ).toHaveLength(9)
+  })
+
+  it('keeps replacement detail buffers when an invalidated request settles late', async () => {
+    const backend = new StudioBackend()
+    backend.sessionSummaries = [sessionSummary()]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () => latest()?.core.wsStatus === 'connected' && latest()?.core.sessions.length === 1
+    )
+    await act(async () => latest()!.core.loadSessionDetails('session-1'))
+
+    const matchesSessionOne = (command: BackendCommand): boolean =>
+      (command.params as { sessionId?: string } | undefined)?.sessionId === 'session-1'
+    const detailCommandCount = (): number =>
+      backend.sentCommands.filter(
+        (command) =>
+          matchesSessionOne(command) &&
+          [
+            'sessions.healthEvents.list',
+            'sessions.logs.list',
+            'sessions.aiArtifacts.list'
+          ].includes(command.method)
+      ).length
+
+    const releaseOldHealth = backend.deferResponse(
+      'sessions.healthEvents.list',
+      { events: [] },
+      matchesSessionOne
+    )
+    const releaseOldLogs = backend.deferResponse(
+      'sessions.logs.list',
+      { entries: [] },
+      matchesSessionOne
+    )
+    const releaseOldArtifacts = backend.deferResponse(
+      'sessions.aiArtifacts.list',
+      { artifacts: [] },
+      matchesSessionOne
+    )
+    let invalidatedLoad!: Promise<void>
+    await act(async () => {
+      invalidatedLoad = latest()!.core.loadSessionDetails('session-1')
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(detailCommandCount()).toBe(6))
+
+    // Fill the bounded detail LRU through the public provider API. Committing
+    // session 9 evicts session 1 and invalidates its still-pending request.
+    for (let session = 2; session <= 9; session += 1) {
+      await act(async () => latest()!.core.loadSessionDetails(`session-${session}`))
+    }
+    expect(latest()?.core.sessionDetails['session-1']).toBeUndefined()
+
+    const releaseNewHealth = backend.deferResponse(
+      'sessions.healthEvents.list',
+      { events: [] },
+      matchesSessionOne
+    )
+    const releaseNewLogs = backend.deferResponse(
+      'sessions.logs.list',
+      { entries: [] },
+      matchesSessionOne
+    )
+    const releaseNewArtifacts = backend.deferResponse(
+      'sessions.aiArtifacts.list',
+      { artifacts: [] },
+      matchesSessionOne
+    )
+    let replacementLoad!: Promise<void>
+    await act(async () => {
+      replacementLoad = latest()!.core.loadSessionDetails('session-1')
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(detailCommandCount()).toBe(9))
+
+    const healthEvent: HealthEvent = {
+      id: 'health-replacement',
+      sessionId: 'session-1',
+      level: 'warn',
+      code: 'replacement-health',
+      message: 'Health arrived for the replacement request.',
+      permissionPane: null,
+      createdAt: '2026-07-12T00:00:03.000Z'
+    }
+    const logEntry: SessionLogEntry = {
+      id: 'log-replacement',
+      sessionId: 'session-1',
+      level: 'info',
+      code: 'replacement-log',
+      message: 'Log arrived for the replacement request.',
+      sourceId: null,
+      permissionPane: null,
+      createdAt: '2026-07-12T00:00:03.000Z'
+    }
+    const artifact: AiArtifact = {
+      id: 'artifact-replacement',
+      sessionId: 'session-1',
+      kind: 'summary',
+      status: 'ready',
+      content: { text: 'Replacement summary' },
+      filePath: null,
+      createdAt: '2026-07-12T00:00:03.000Z'
+    }
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'health.event', payload: healthEvent })
+      })
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'session.log', payload: logEntry })
+      })
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'ai.artifacts.changed',
+          payload: { sessionId: 'session-1' }
+        })
+      })
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      releaseOldHealth()
+      releaseOldLogs()
+      releaseOldArtifacts()
+      await invalidatedLoad
+    })
+
+    const releaseTrailingHealth = backend.deferResponse(
+      'sessions.healthEvents.list',
+      { events: [healthEvent] },
+      matchesSessionOne
+    )
+    const releaseTrailingLogs = backend.deferResponse(
+      'sessions.logs.list',
+      { entries: [logEntry] },
+      matchesSessionOne
+    )
+    const releaseTrailingArtifacts = backend.deferResponse(
+      'sessions.aiArtifacts.list',
+      { artifacts: [artifact] },
+      matchesSessionOne
+    )
+    await act(async () => {
+      releaseNewHealth()
+      releaseNewLogs()
+      releaseNewArtifacts()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(detailCommandCount()).toBe(12))
+
+    await act(async () => {
+      releaseTrailingHealth()
+      releaseTrailingLogs()
+      releaseTrailingArtifacts()
+      await replacementLoad
+    })
+
+    expect(latest()?.core.sessionDetails['session-1']).toEqual({
+      healthEvents: [healthEvent],
+      sessionLogs: [logEntry],
+      aiArtifacts: [artifact]
+    })
   })
 
   it('requests fresh macOS camera access, then routes a denial to System Settings', async () => {

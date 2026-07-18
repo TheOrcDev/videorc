@@ -6,8 +6,8 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
-  buildChangelogJson,
   loadChangelogEntries,
+  mergeChangelogDocuments,
   requireChangelogEntryForRelease
 } from './lib/changelog.mjs'
 import {
@@ -15,6 +15,7 @@ import {
   buildSignedS3Request,
   getReleaseUploadS3Config
 } from './lib/release-upload-s3.mjs'
+import { readRemoteTextObject } from './lib/windows-release-publication.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const defaultReleaseDir = join(repoRoot, 'apps', 'desktop', 'release')
@@ -26,7 +27,7 @@ async function main() {
   const releaseDir = resolve(process.env.VIDEORC_RELEASE_DIR ?? dirname(manifestPath))
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
   const config = getReleaseUploadS3Config()
-  const changelogJsonPath = await prepareChangelogUpload(manifest.releaseId)
+  const changelogJsonPath = await prepareChangelogUpload(manifest.releaseId, config)
   const plan = await buildReleaseUploadPlan({
     changelogJsonPath,
     manifest,
@@ -58,7 +59,7 @@ async function main() {
 // Fail-closed: a release cannot ship without a user-facing changelog entry for
 // its releaseId. VIDEORC_RELEASE_SKIP_CHANGELOG=1 is the emergency escape — it
 // warns loudly and still publishes whatever entries DO validate.
-async function prepareChangelogUpload(releaseId) {
+async function prepareChangelogUpload(releaseId, config) {
   const skip = envFlag(process.env.VIDEORC_RELEASE_SKIP_CHANGELOG)
   let entries
   try {
@@ -81,13 +82,30 @@ async function prepareChangelogUpload(releaseId) {
   }
 
   const outPath = join(repoRoot, 'dist', 'changelog', 'changelog.json')
-  const document = buildChangelogJson(entries, { generatedAt: new Date().toISOString() })
+  const remoteText = await readRemoteTextObject({
+    config,
+    objectKey: 'changelog/changelog.json'
+  })
+  const document = mergeChangelogDocuments({
+    generatedAt: new Date().toISOString(),
+    localEntries: entries,
+    remoteDocument: parseRemoteChangelog(remoteText)
+  })
   await mkdir(dirname(outPath), { recursive: true })
   await writeFile(outPath, `${JSON.stringify(document, null, 2)}\n`)
   console.log(
     `macos-beta-release-upload: changelog compiled (${entries.length} entries, latest ${entries[0].version})`
   )
   return outPath
+}
+
+function parseRemoteChangelog(text) {
+  if (text === null) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error('Published changelog/changelog.json is not valid JSON.')
+  }
 }
 
 async function uploadArtifact({ artifact, config }) {

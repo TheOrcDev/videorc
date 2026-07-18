@@ -5,6 +5,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { successfulLiveCommandReplies } from './lib/live-audio-control-protocol.mjs'
+
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const productionStatsPeriodSeconds = 2
 const productionReplyTimeoutMs = 5000
@@ -18,12 +20,19 @@ const liveCommands = [
   { label: 'mute', command: 'Cvolume@videorc_live_mic -1 volume 0\n' },
   { label: 'unmute', command: 'Cvolume@videorc_live_mic -1 volume 1\n' }
 ]
-const probeDurationSeconds = 16
-const processTimeoutMs = 30000
 const audibleMaxVolumeDb = -40
 const mutedMaxVolumeDb = -80
 const gainDeltaDb = 6
 const amplitudeToleranceDb = 0.75
+const artifactAnalysisWindowSeconds = artifactApplicationSettleSeconds + 0.75
+// Allow a full production reply deadline for startup and for every command,
+// then retain enough audio to inspect the final unmuted state. Hosted Windows
+// runners can otherwise exhaust a fixed 16s source before scheduling command 3.
+const probeDurationSeconds = Math.ceil(
+  ((liveCommands.length + 1) * productionReplyTimeoutMs) / 1000 +
+    artifactAnalysisWindowSeconds
+)
+const processTimeoutMs = 30000
 const outputDirectory = await mkdtemp(join(tmpdir(), 'videorc-live-audio-controls-'))
 const artifacts = [
   join(outputDirectory, 'recording-output.wav'),
@@ -42,7 +51,7 @@ try {
   )
   const { stderr, acknowledgements } = await runLiveAudioControlProbe()
   const acknowledgementLatencyMs = acknowledgements.map(({ latencyMs }) => latencyMs)
-  const successfulReplies = stderr.match(/Command reply for stream [^\r\n]*ret:0/g) ?? []
+  const successfulReplies = successfulLiveCommandReplies(stderr)
   assert.equal(
     successfulReplies.length,
     artifacts.length * liveCommands.length,
@@ -227,7 +236,7 @@ function runLiveAudioControlProbe() {
     }
 
     const processProtocolLine = (line) => {
-      const successfulReplies = line.match(/Command reply for stream [^\r\n]*ret:0/g) ?? []
+      const successfulReplies = successfulLiveCommandReplies(line)
       for (const _reply of successfulReplies) {
         successfulRepliesSeen += 1
         if (successfulRepliesSeen % artifacts.length !== 0) continue

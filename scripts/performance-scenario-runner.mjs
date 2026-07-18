@@ -35,6 +35,23 @@ if (!args.scenario) {
 const mode = performanceMode()
 const warmupSeconds = positiveNumber(args.warmupSeconds, 60)
 const measurementSeconds = positiveNumber(args.measurementSeconds, 600)
+const sampleIntervalMs = positiveInteger(args.sampleIntervalMs, 1_000)
+const profileClass =
+  args.profileClass ?? (measurementSeconds >= 600 ? 'endurance' : 'short-sentinel')
+if (!['short-sentinel', 'endurance'].includes(profileClass)) {
+  throw new Error(`Invalid performance profile class: ${profileClass}.`)
+}
+if (profileClass === 'endurance' && measurementSeconds < 600) {
+  throw new Error('Endurance performance profiles require at least 600 measurement seconds.')
+}
+if (profileClass === 'short-sentinel' && measurementSeconds >= 600) {
+  throw new Error('Short-sentinel performance profiles must remain below 600 measurement seconds.')
+}
+const appManifest = await readJson('apps/desktop/package.json')
+const appVersion = process.env.VIDEORC_PERF_APP_VERSION ?? appManifest?.version
+if (typeof appVersion !== 'string' || !appVersion.trim()) {
+  throw new Error('Could not determine the Videorc app version for performance profile identity.')
+}
 const runNonce = randomUUID()
 const expectedBuildMode = process.env.VIDEORC_PERF_EXPECT_BUILD_MODE ?? performanceBuildMode()
 if (!['development', 'packaged'].includes(expectedBuildMode)) {
@@ -52,7 +69,10 @@ const scenario = buildPerformanceScenario({
   measurementSeconds,
   childReportPath: paths.child,
   runNonce,
-  expectedBuildMode
+  expectedBuildMode,
+  profileClass,
+  appVersion,
+  sampleIntervalMs
 })
 const launch = performanceScenarioLaunchSpec(scenario)
 const provenanceEnvironment = {
@@ -64,7 +84,7 @@ const provenanceEnvironment = {
 const metadata = await collectPerformanceMetadata({ env: provenanceEnvironment })
 
 console.log(
-  `Performance scenario ${args.scenario} (${mode}): ${launch.command} ${launch.args.join(' ')}`
+  `Performance scenario ${args.scenario} (${mode}, ${profileClass}): ${launch.command} ${launch.args.join(' ')}`
 )
 if (launch.powerAssertion) {
   console.log(
@@ -106,6 +126,8 @@ const report = createPerformanceReport({
     : {
         warmupMs: warmupSeconds * 1000,
         measurementMs: measurementSeconds * 1000,
+        intervalMs: sampleIntervalMs,
+        profileClass,
         elapsedMs: Date.now() - startedAt
       },
   metrics: {
@@ -174,6 +196,12 @@ function parseArgs(argv) {
     else if (arg.startsWith('--measurement-seconds=')) {
       parsed.measurementSeconds = arg.slice('--measurement-seconds='.length)
     } else if (arg === '--measurement-seconds') parsed.measurementSeconds = argv[++index]
+    else if (arg.startsWith('--sample-interval-ms=')) {
+      parsed.sampleIntervalMs = arg.slice('--sample-interval-ms='.length)
+    } else if (arg === '--sample-interval-ms') parsed.sampleIntervalMs = argv[++index]
+    else if (arg.startsWith('--profile-class=')) {
+      parsed.profileClass = arg.slice('--profile-class='.length)
+    } else if (arg === '--profile-class') parsed.profileClass = argv[++index]
     else if (arg.startsWith('--output=')) parsed.output = arg.slice('--output='.length)
     else if (arg === '--output') parsed.output = argv[++index]
     else throw new Error(`Unknown argument: ${arg}`)
@@ -184,4 +212,9 @@ function parseArgs(argv) {
 function positiveNumber(value, fallback) {
   const number = Number(value)
   return Number.isFinite(number) && number > 0 ? number : fallback
+}
+
+function positiveInteger(value, fallback) {
+  const number = Number(value)
+  return Number.isInteger(number) && number > 0 ? number : fallback
 }

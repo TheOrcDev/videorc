@@ -318,6 +318,35 @@ export async function waitForNoLiveProcessState({
   throw new Error(`Timed out waiting for live owned processes to exit.\n${details}`)
 }
 
+/**
+ * Assert teardown truth before performing best-effort recovery. Recovery may
+ * make a dirty host usable again, but it must never turn the original failure
+ * into a passing lifecycle smoke. A recovery rejection is exposed as the
+ * original error's `recoveryError` diagnostic without replacing that error.
+ */
+export async function verifyCleanProcessStateBeforeRecovery({ verify, recover }) {
+  try {
+    return await verify()
+  } catch (error) {
+    try {
+      await recover()
+    } catch (recoveryError) {
+      if (error !== null && (typeof error === 'object' || typeof error === 'function')) {
+        try {
+          Reflect.defineProperty(error, 'recoveryError', {
+            configurable: true,
+            enumerable: true,
+            value: recoveryError
+          })
+        } catch {
+          // Diagnostic attachment must never replace the original verification failure.
+        }
+      }
+    }
+    throw error
+  }
+}
+
 export async function pruneDeadOwnedProcessRecords({
   ledgerPaths,
   readFile = readFileSync,
@@ -445,9 +474,10 @@ export function classifyProcess(row) {
     return 'electron-child'
   }
   if (
-    /electron\.app\/contents\/macos\/electron/.test(lowerText) ||
-    /\/videorc(?:\.app)?\//.test(lowerText) ||
-    commandName === 'videorc.exe'
+    (executableNames.has('electron') &&
+      /electron\.app\/contents\/macos\/electron/.test(lowerText)) ||
+    executableNames.has('videorc') ||
+    executableNames.has('videorc.exe')
   ) {
     return 'electron-main'
   }

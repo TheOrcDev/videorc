@@ -1,102 +1,264 @@
 ---
 name: videorc-release
-description: Cut and publish a new signed + notarized macOS release of the Videorc desktop app so installed users auto-update — bump version, build, sign, notarize, upload to R2, verify the electron-updater feed. Use when the user wants to cut/ship/publish a new release or version, deploy the desktop app, or make an update available to users. Covers macOS + the videorc-web feed dependency; docs/releases/release-runbook.md has the full detail.
+description: Cut and publish coordinated Videorc desktop releases for the signed and notarized macOS Beta and the signed Windows 11 x64 Alpha, including version/changelog preparation, protected Windows candidate and promotion workflows, R2 publication, updater verification, and release records. Use when the user asks to cut, ship, publish, deploy, or make a new Videorc desktop release or update. Target both macOS and Windows by default unless the user explicitly narrows the platform.
 ---
 
 # Videorc release
 
-Ship a new macOS version so existing users auto-update. This is the **executable
-procedure**; `docs/releases/release-runbook.md` (in the videorc repo) is the
-source of truth — read it for the versioning model, rollback, and the "why".
-Keep this skill thin: point there, don't duplicate it.
+Ship one new numeric desktop version on both supported tracks:
 
-## Prerequisites — verify before starting
+- macOS arm64 Beta: `<version>-beta.<N>`;
+- Windows 11 x64 Alpha: `<version>-alpha.1`.
 
-- `~/.videorc-release.env` holds `APPLE_ID` + `APPLE_APP_SPECIFIC_PASSWORD` (an
-  app-specific password from appleid.apple.com). If it's missing, ask the user to
-  create it — notarization cannot run without it, and you must not fabricate it
-  or ship an un-notarized build.
-- `~/.videorc-release.env` also holds `VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET` —
-  compiled into videorc-backend at build time (the secret is NOT in source since
-  the repo went public). `release:validate:macos` fails closed if the built
-  binary lacks it.
-- `~/.videorc-release.env` also holds `VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY` +
-  `VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET` — the allow-listed X Livestream
-  app's OAuth 1.0a consumer pair, compiled into videorc-backend at build time.
-  Without them, users see "Credentials needed" instead of Authorize X Live and
-  native X live is dead in the release.
-- Developer ID cert in the keychain (`security find-identity -v -p codesigning`
-  → "Uros Miric (C2PA37RB58)"). It signs directly; no `CSC_LINK` needed.
-- R2 write creds in `~/projects/videorcweb/.env` (`VIDEORC_DOWNLOAD_S3_*`).
+Target both platforms unless the user explicitly requests a platform-only
+release. Do not silently skip Windows because macOS can be released locally.
 
-## Steps
+Before acting, read both sources of truth in full:
 
-### 1. Bump the version + write the changelog entry — commit + push
-electron-updater compares `apps/desktop/package.json` `version` against the
-installed app, so a strictly higher version is what triggers the update. Bump it
-(e.g. 0.9.0 → 0.9.1).
+- `docs/releases/release-runbook.md` for macOS, shared versioning, and rollback;
+- `docs/releases/windows-alpha-runbook.md` for Windows signing, candidate,
+  physical acceptance, pilot, public promotion, and rollback.
 
-Write `changelog/<releaseId>.md` (user-facing entry; format + voice rules in
-`changelog/README.md`) and run `pnpm changelog:check`. Both
-`release:validate:macos` and `release:upload:macos` **fail closed without it**
-(emergency escape: `VIDEORC_RELEASE_SKIP_CHANGELOG=1`). The upload publishes the
-compiled changelog to R2 `changelog/changelog.json` for the website and in-app
-"What's new". Commit, push.
+Keep this skill as the executable coordinator. Do not weaken or duplicate the
+runbooks' detailed gates.
 
-### 2–5. Build → validate → upload → verify (run in the background)
-The build (Rust backend + electron-builder + **notarization**) is long and
-unpredictable — run it in the background. It bypasses `release:preflight:macos`
-on purpose: that gate demands `CSC_LINK`, which local builds don't have (the
-keychain cert signs instead).
+## Completion contract
+
+- Prepare both release IDs from one strictly higher three-part numeric package
+  version. Record the exact macOS source commit and the later Windows candidate
+  source commit separately. If a rejected Windows candidate must roll forward
+  after macOS is live, allow the platform versions to diverge rather than
+  republishing macOS merely for version parity.
+- Publish and verify the macOS Beta independently of the Windows Alpha gates.
+- Build Windows only from current protected `main`; never release a PR artifact,
+  locally signed substitute, or rebuilt post-acceptance installer.
+- Call the coordinated release complete only after macOS is live and verified
+  and the exact Windows candidate has passed physical acceptance, pilot, public
+  promotion, and production smoke.
+- If an external Windows gate cannot be completed, preserve the candidate and
+  report the release as partial with the exact missing gate. Never describe a
+  private candidate or pilot pointer as a public Windows release.
+- Keep the web Windows state `disabled` until public promotion and production
+  smoke succeed. Never change macOS availability while gating Windows.
+
+## Prerequisites
+
+### Shared
+
+- Use a clean checkout based on current protected `main`.
+- Confirm GitHub access can dispatch and inspect Actions workflows.
+- Confirm R2 credentials are scoped to the documented platform prefixes. Never
+  run the local macOS upload concurrently with Windows public promotion because
+  both may update the merged global changelog. After merging a pending Windows
+  Alpha changelog entry, do not run another macOS upload until that Windows
+  release is public or the release owner explicitly resolves the held entry.
+- Name release, Windows acceptance, support, and rollback owners before starting.
+
+### macOS
+
+- Load `APPLE_ID` and `APPLE_APP_SPECIFIC_PASSWORD` from
+  `~/.videorc-release.env`.
+- Load the allow-listed X OAuth consumer key and secret required by the packaged
+  backend from the same file. Do not reintroduce the paused YouTube OAuth secret
+  unless the runbook explicitly restores that requirement.
+- Verify the Developer ID identity `Uros Miric (C2PA37RB58)` is available in the
+  keychain, or provide the documented `CSC_LINK` alternative.
+- Load `VIDEORC_DOWNLOAD_S3_*` from `~/projects/videorcweb/.env` and normalize
+  the upload endpoint to the bucket-less R2 account host.
+
+### Windows
+
+- Verify the protected `windows-alpha-release` environment, required reviewers,
+  protected-main deployment rule, GitHub OIDC federation, Azure Trusted Signing
+  publisher/profile values, and least-privilege candidate/promotion R2
+  credentials are configured.
+- Verify a named operator has clean physical Windows 11 x64 hardware, private
+  candidate-read access, a release secret channel, and the acceptance template.
+- Verify the web pilot bearer secret and the disabled/pilot/public release-state
+  values are ready. Do not place Windows signing or storage credentials in a
+  local release env file.
+
+## 1. Freeze the numeric version and macOS source
+
+1. Bump `apps/desktop/package.json` to a strictly higher numeric version.
+2. Choose the macOS Beta number and derive `<version>-beta.<N>`.
+3. Derive the Windows release ID as exactly `<version>-alpha.1`. A correction
+   requires another numeric version bump; never issue same-version `alpha.2`.
+4. Write `changelog/<version>-beta.<N>.md` with `channel: beta` and
+   `platforms: [macos]`.
+5. Run `pnpm changelog:check`, commit the version and macOS entry, push through a
+   reviewed PR, and merge to protected `main`.
+
+Record the full lowercase 40-character macOS source commit. Do not add the
+Windows Alpha changelog entry yet: `release:upload:macos` publishes every
+committed changelog entry, so adding it now would disclose the held Windows
+release before physical acceptance.
+
+## 2. Publish and verify macOS Beta
+
+Follow `docs/releases/release-runbook.md`. For the established local keychain
+path, load release secrets, set `APPLE_TEAM_ID=C2PA37RB58`, set the exact Beta
+number, and normalize the R2 endpoint before running:
 
 ```sh
-cd ~/projects/videorc
-set -a
-. ~/.videorc-release.env
-. <(grep -E '^[[:space:]]*VIDEORC_DOWNLOAD_S3_' ~/projects/videorcweb/.env)
-set +a
-export APPLE_TEAM_ID=C2PA37RB58
-# bucket-less endpoint (the .env one includes /videorc-releases → keys would double):
-export VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL="https://$(printf '%s' "$VIDEORC_DOWNLOAD_S3_ENDPOINT_URL" | sed -E 's#^https?://([^/]+).*#\1#')"
-export PATH=/opt/homebrew/bin:$PATH
-pnpm package:backend:macos && pnpm ffmpeg:build:macos && pnpm package:preflight:macos \
-  && pnpm --filter @videorc/desktop dist:release && pnpm release:manifest:macos \
-  && pnpm release:validate:macos && pnpm release:upload:macos
+pnpm package:backend:macos && pnpm ffmpeg:build:macos \
+  && pnpm package:preflight:macos \
+  && pnpm --filter @videorc/desktop dist:release \
+  && pnpm release:manifest:macos \
+  && pnpm release:validate:macos
 ```
 
-Verify the feed serves the new version (follow the redirect to R2):
+This local path intentionally bypasses `release:preflight:macos`, whose
+`CSC_LINK` requirement does not apply to the keychain identity. Do not bypass
+artifact validation, signing, notarization, stapling, changelog, or upload
+preflight behavior.
+
+Complete the macOS clean-machine acceptance template, required real-device
+screen/camera/microphone gates, installed-app checks, and strict provider
+readiness with an overall `PASS`. Only then publish:
 
 ```sh
-curl -sL https://videorc-web.vercel.app/api/updates/latest-mac.yml | head   # -> version: <new>
+pnpm release:upload:preflight:macos && pnpm release:upload:macos
 ```
 
-**Also verify the web download/admin page shows the new version** (ask the
-owner to check the signed-in download page). The upload publishes the manifest
-to the STABLE key `releases/macos/latest/release.json`, so the page follows
-each release automatically — IF videorc-web's Vercel env is set to it
-(one-time): `VIDEORC_DOWNLOAD_MANIFEST_OBJECT_KEY=releases/macos/latest/release.json`.
-If admin still shows an old version (it sat on "0.9.0 beta 1" for three
-releases), that env is pinned to a versioned key — fix the env + redeploy,
-never hand-edit per release.
+Follow the redirects and verify:
 
-### 6. Commit the release note
-Update `docs/releases/<version>.md` (check off build/upload/verify), commit + push.
+```sh
+curl -sL https://www.videorc.com/api/updates/latest-mac.yml | head
+curl -s -o /dev/null -w '%{http_code}\n' -L \
+  https://www.videorc.com/api/updates/Videorc-<version>-mac-arm64.zip
+```
 
-## Gotchas (each cost real debugging)
+Also verify the signed-in macOS download page shows the exact new version and
+checksum. The stable manifest must remain
+`releases/macos/latest/release.json`; never pin the web environment to one
+versioned object.
 
-- **Bucket-less S3 endpoint** — the path-style client appends the bucket, so an
-  endpoint ending in `/videorc-releases` DOUBLES it; objects silently land where
-  nothing reads them while the upload still prints PASS. The command above strips
-  it. Always verify by *following the 302 to R2*, not by the 302 alone.
-- **Bypass `release:preflight:macos`** for local builds — it requires `CSC_LINK`;
-  the keychain cert signs without it. (Do not use `pnpm dist:desktop:release`
-  as-is locally; it starts with that preflight.)
-- **Feed = `package.json` `version`, not releaseId** — bump `version` to ship an
-  update; the `-beta.N` suffix only names the download archive.
-- **Feed URL is the Vercel host** — `videorc.com` is a teaser until launch; the
-  app's baked `publish.url` (electron-builder.yml) and `videorc-web-links.ts`
-  point at `videorc-web.vercel.app`. Flip both to videorc.com at launch.
-- **Never cache the presigned redirect** — videorc-web `/api/updates/*` uses
-  `max-age=60`; a long / `immutable` cache serves an expired 403.
-- **Notarization is a network round-trip to Apple** — the build sits for minutes
-  near the end; that's normal, not a hang.
+## 3. Build the private Windows Alpha candidate
+
+After the macOS upload and verification succeed:
+
+1. Add `changelog/<version>-alpha.1.md` with `channel: alpha` and
+   `platforms: [windows]` on top of current `main`.
+2. State only Windows capabilities that the acceptance plan can prove. Keep
+   internal gate details out of the public entry.
+3. Run `pnpm changelog:check`, push through a reviewed PR, and merge to protected
+   `main` without changing the numeric package version.
+4. Record this new full lowercase 40-character Windows candidate source commit.
+
+Do not run another macOS upload while this unpromoted Windows entry is committed,
+because the macOS uploader would publish it in the global changelog. From the
+current protected-main Windows source commit, dispatch the exact release ID:
+
+```sh
+gh workflow run release-windows-alpha.yml --ref main \
+  -f release_id=<version>-alpha.1
+```
+
+Wait for both trust-separated jobs. The unprivileged job builds and hashes the
+unsigned handoff; only the protected OIDC job may sign, validate, and upload the
+immutable private candidate. Record the workflow URL, release ID, source commit,
+installer SHA-256, exact publisher, and candidate prefix.
+
+Any stale-main, signing, timestamp, publisher, manifest, feed, checksum, or
+immutable-object failure blocks the release. A transient retry may reuse the
+same release ID only when the source commit and all candidate bytes are
+unchanged. Any source or candidate correction must remove the abandoned,
+unpublished Windows changelog entry from current `main`, bump the numeric
+package version, add the replacement `<new-version>-alpha.1` entry, and begin a
+new candidate. Keep the already-published macOS release; do not republish it
+merely to restore version parity. Never mutate or bless failed bytes.
+
+If the rejected candidate reached pilot, keep the web state `disabled`, rotate
+the pilot bearer token immediately, and use the named release-owner rollback
+procedure to restore the last accepted pilot pointer only when that recovery is
+supported and verified. Otherwise, including the first pilot, leave the rejected
+immutable objects preserved but make the pilot route inaccessible until a
+replacement is authorized.
+
+If an out-of-order upload already exposed the abandoned Windows changelog entry,
+stop and treat it as a content incident. The normal macOS and Windows uploaders
+merge remote entries additively, so deleting the file from Git does not retract
+the published entry. Preserve the current object/version, use a release-owner
+approved full-document recovery path to replace `changelog/changelog.json`, and
+verify the website and installed-app changelog before continuing. Never use an
+ad-hoc unvalidated object edit or the changelog skip escape as a purge mechanism.
+
+## 4. Accept and promote Windows
+
+Follow every command and evidence rule in
+`docs/releases/windows-alpha-runbook.md`:
+
+1. Download and verify the exact private candidate on clean physical Windows 11
+   x64 hardware.
+2. Strip all storage, signing, and Azure authority before launching candidate
+   code.
+3. Run installed-app acceptance with the expected executable hash and complete
+   every required install, sign-in, capture, recording, GPU, process-cleanup,
+   Defender, signature, timestamp, updater, and uninstall row.
+4. Promote the exact identity to the isolated pilot lane:
+
+   ```sh
+   gh workflow run promote-windows-alpha.yml --ref main \
+     -f release_id=<releaseId> \
+     -f source_commit=<40-character-source-commit> \
+     -f installer_sha256=<64-character-installer-sha256> \
+     -f stage=pilot
+   ```
+
+5. Verify the authenticated account download and bearer-protected pilot updater
+   round trip. Clear the pilot token from the operator environment afterward.
+6. Commit the strict sanitized PASS record at
+   `docs/acceptance/windows-alpha/<releaseId>.json`. Use a commit-pinned GitHub
+   URL; never publish private evidence.
+7. Promote the same candidate identity to public:
+
+   ```sh
+   gh workflow run promote-windows-alpha.yml --ref main \
+     -f release_id=<releaseId> \
+     -f source_commit=<40-character-source-commit> \
+     -f installer_sha256=<64-character-installer-sha256> \
+     -f stage=public \
+     -f acceptance_record_url=<commit-pinned-github-record-url>
+   ```
+
+Never rebuild between acceptance and either promotion. Never substitute CI,
+VM-only, file-size, branch URL, or mutable-tag evidence for the exact physical
+record.
+
+## 5. Verify the coordinated production release
+
+- Verify the signed-in Windows download returns the accepted installer and
+  visible SHA-256.
+- Verify the Windows public `latest.yml`, installer, and blockmap resolve through
+  the production updater route and update the prior accepted Alpha.
+- Recheck the Windows Authenticode publisher, valid status, timestamp, and
+  downloaded SHA-256.
+- Verify the macOS DMG, checksum, `latest-mac.yml`, zip, and blockmap still point
+  to the macOS release prepared above.
+- Authorize the web Windows `public` state only after those checks pass, deploy,
+  and rerun the two-platform smoke matrix.
+- Update `docs/releases/<version>.md` with both platform outcomes, workflow and
+  evidence links, rollback status, and any explicitly incomplete external gate.
+- Render/send announcements from the exact platform changelog entry only after
+  that platform is live. Preview with
+  `pnpm release:notify:discord <releaseId> --dry-run`, then send with
+  `pnpm release:notify:discord <releaseId>`. Hold all Windows announcements
+  until public promotion.
+
+## Hard-won rules
+
+- Use a bucket-less R2 endpoint. A bucket suffix causes doubled keys that upload
+  successfully and then 404.
+- Do not source process substitution under macOS Bash 3.2; write filtered env
+  lines to a temporary file and source that file, or run the documented command
+  under zsh.
+- Follow every web redirect to the final R2 response; a `302` alone is not proof.
+- Keep presigned updater redirects short-lived; never restore immutable caching.
+- macOS updater order uses the numeric package version, not the Beta release ID.
+- Windows updater order also uses the numeric package version; this is why every
+  Alpha correction must bump it and return to `alpha.1`.
+- Keep all macOS and Windows release, updater, pilot, and candidate prefixes
+  isolated. A Windows action must never move a macOS pointer.
+- Roll forward installed clients with a higher numeric version. Disable or
+  restore web pointers for rollback; never overwrite immutable release bytes.

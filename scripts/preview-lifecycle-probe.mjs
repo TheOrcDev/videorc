@@ -8,7 +8,7 @@
 import { mkdirSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import {
   launchDevApp,
@@ -17,11 +17,19 @@ import {
   stopProcess
 } from './lib/app-launcher.mjs'
 import {
+  activePerformanceBudgetRequest,
+  evaluateActivePerformanceBudget,
+  preflightActivePerformanceBudget,
+  readActivePerformanceBudget,
+  selectActivePerformanceBudget
+} from './lib/performance-budget.mjs'
+import {
   collectPerformanceMetadata,
   createPerformanceReport,
   failingChecks,
   observationCheck,
   passingCheck,
+  performanceMetadataWithObservedDisplayScale,
   performanceMode,
   writePerformanceReport
 } from './lib/performance-contract.mjs'
@@ -32,15 +40,21 @@ import {
   waitForCleanProcessState,
   waitForNoLiveProcessState
 } from './lib/process-census.mjs'
+import { collectProcessEndurance, evaluateOwnedTeardown } from './lib/process-endurance.mjs'
 import {
   evaluateProcessMemoryGate,
   formatProcessMemorySummary,
+  requiredProcessMemoryTrendThresholdFailures,
   summarizeProcessMemory
 } from './lib/process-memory-gate.mjs'
 import { requestSmokeCommandWithRetry } from './lib/smoke-command-client.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const mode = performanceMode()
+const reportScenario = process.env.VIDEORC_PERF_SCENARIO ?? 'preview-lifecycle'
+const requiresReviewedTrendThresholds = mode === 'gate' && reportScenario === 'lifecycle-churn'
+const calibrationMode = process.env.VIDEORC_PERF_CALIBRATION === '1'
+const fullLifecycleEndurance = reportScenario === 'lifecycle-churn'
 const cycles = positiveInteger(process.env.VIDEORC_PREVIEW_LIFECYCLE_CYCLES, 100)
 const outputDirectory =
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
@@ -71,15 +85,37 @@ const memoryThresholds = {
   maxRoleSecondHalfSlopeMbPerMinute: lifecycleRoleThresholds('SECOND_HALF_SLOPE_MB_MIN'),
   maxRolePlateauGrowthMb: lifecycleRoleThresholds('PLATEAU_GROWTH_MB')
 }
+const reportMetadata = await collectPerformanceMetadata({ cwd: repoRoot })
+let reportMetadataWithDisplayScale = reportMetadata
+const performanceBudgetStaticContext = {
+  scenario: reportScenario,
+  profileClass: reportMetadata.profileClass,
+  appVersion: reportMetadata.appVersion,
+  machineModel: reportMetadata.machineModel,
+  hardwareClass: reportMetadata.hardwareClass,
+  buildMode: reportMetadata.buildMode,
+  commit: reportMetadata.commit,
+  executableSha256: reportMetadata.executable?.sha256,
+  packagePayloadSha256: reportMetadata.packagePayload?.sha256,
+  operatingSystem: reportMetadata.operatingSystem,
+  timing: reportMetadata.performanceWindow
+}
 
 let launched
 let smoke
+let budgetRequest = null
+let validatedActiveBudget = null
+let activeBudget = null
+let thresholdConfigurationFailures = []
 let lastState = null
 let lastSupervisorGeneration = 0
 let exitCode = 0
 let failureMessage = null
 let teardownClean = false
+let teardownEvidence = null
 let teardownRecovery = null
+let processEndurance = null
+let activeBudgetEvaluation = null
 const memoryCheckpoints = []
 
 try {
@@ -94,6 +130,7 @@ try {
 } finally {
   if (launched) {
     let gracefulQuitCompleted = false
+    let gracefulQuitError = null
     if (smoke) {
       try {
         await requestSmokeCommandWithRetry(
@@ -109,25 +146,38 @@ try {
           timeoutMs: 10000
         })
         gracefulQuitCompleted = true
-      } catch {
-        // The launcher fallback below still reaps the isolated process group.
+      } catch (error) {
+        gracefulQuitError = error?.message ?? String(error)
       }
     }
     try {
+      let stopResult = null
       if (!gracefulQuitCompleted) {
-        await stopProcess(launched.process)
+        stopResult = await stopProcess(launched.process)
       }
       await waitForNoLiveProcessState({
         ledgerPaths,
         pgid: launched.process.pid,
         timeoutMs: 10000
       })
-      const clean = await waitForCleanProcessState({
+      const finalCensus = await waitForCleanProcessState({
         ledgerPaths,
         pgid: launched.process.pid,
         timeoutMs: 1000
       })
-      teardownClean = clean.records.length === 0 && clean.processGroupRows.length === 0
+      teardownEvidence = {
+        clean: finalCensus.records.length === 0 && finalCensus.processGroupRows.length === 0,
+        gracefulQuitRequested: Boolean(smoke),
+        gracefulQuitError,
+        stopResult,
+        finalCensus
+      }
+      const teardownFailures = evaluateOwnedTeardown(teardownEvidence)
+      teardownClean = teardownFailures.length === 0
+      if (teardownFailures.length > 0) {
+        failureMessage = `Lifecycle teardown failed:\n${teardownFailures.join('\n')}`
+        exitCode = 2
+      }
     } catch (error) {
       failureMessage = `Lifecycle teardown failed: ${error?.message ?? error}`
       exitCode = 2
@@ -140,16 +190,50 @@ try {
   }
 }
 
-const memorySummary = summarizeProcessMemory(memoryCheckpoints, {
-  tailWindowMs: Number(process.env.VIDEORC_LIFECYCLE_MEMORY_TAIL_WINDOW_MS ?? 120000)
-})
+const memorySummary =
+  processEndurance?.memory?.summary ??
+  summarizeProcessMemory(memoryCheckpoints, {
+    tailWindowMs: Number(process.env.VIDEORC_LIFECYCLE_MEMORY_TAIL_WINDOW_MS ?? 120000)
+  })
 const memoryFailures = evaluateProcessMemoryGate(memorySummary, memoryThresholds)
+const cpuAveragePercentByRole = Object.fromEntries(
+  Object.entries(processEndurance?.cpu?.summary?.byRole ?? {}).map(([role, summary]) => [
+    role,
+    summary.averagePercent
+  ])
+)
+const cpuP95PercentByRole = Object.fromEntries(
+  Object.entries(processEndurance?.cpu?.summary?.byRole ?? {}).map(([role, summary]) => [
+    role,
+    summary.p95Percent
+  ])
+)
+if (activeBudget) {
+  activeBudgetEvaluation = evaluateActivePerformanceBudget({
+    profile: activeBudget.profile,
+    metricContract: 'lifecycle',
+    metrics: {
+      memory: memorySummary,
+      cpuAveragePercentByRole,
+      cpuP95PercentByRole,
+      resourceCheckpoints: processEndurance?.resourceCheckpoints,
+      teardownClean
+    }
+  })
+}
+const activeBudgetFailures = [
+  ...(activeBudgetEvaluation?.metricFailures ?? []),
+  ...(activeBudgetEvaluation?.thresholdFailures ?? [])
+]
 if (memoryCheckpoints.length > 0) {
   console.log('\n=== Preview lifecycle memory/process checkpoints ===')
   console.log(formatProcessMemorySummary(memorySummary))
 }
-if (mode === 'gate' && memoryFailures.length > 0) {
-  const memoryFailureMessage = `Lifecycle memory gate failed:\n${memoryFailures.join('\n')}`
+if (mode === 'gate' && (memoryFailures.length > 0 || activeBudgetFailures.length > 0)) {
+  const memoryFailureMessage = `Lifecycle performance gate failed:\n${[
+    ...memoryFailures,
+    ...activeBudgetFailures
+  ].join('\n')}`
   failureMessage = failureMessage
     ? `${failureMessage}\n${memoryFailureMessage}`
     : memoryFailureMessage
@@ -161,15 +245,30 @@ if (!teardownClean) {
 }
 
 const report = createPerformanceReport({
-  scenario: process.env.VIDEORC_PERF_SCENARIO ?? 'preview-lifecycle',
+  scenario: reportScenario,
   mode,
-  metadata: await collectPerformanceMetadata({ cwd: repoRoot }),
-  timing: { cycles },
+  metadata: reportMetadataWithDisplayScale,
+  timing: fullLifecycleEndurance ? { ...reportMetadata.performanceWindow, cycles } : { cycles },
   metrics: {
     memory: memorySummary,
-    thresholds: memoryThresholds,
-    budgetFailures: memoryFailures,
+    sampling: processEndurance?.sampling ?? null,
+    cpuAveragePercentByRole,
+    cpuP95PercentByRole,
+    resourceCheckpoints: processEndurance?.resourceCheckpoints ?? null,
+    thresholds: activeBudget?.profile?.thresholds ?? memoryThresholds,
+    thresholdConfigurationFailures,
+    activeBudget: activeBudget
+      ? {
+          path: activeBudget.path,
+          profileId: activeBudget.profile.id,
+          scope: activeBudget.profile.scope,
+          evidence: activeBudget.profile.evidence
+        }
+      : null,
+    activeBudgetEvaluation,
+    budgetFailures: [...memoryFailures, ...activeBudgetFailures],
     teardownClean,
+    teardownEvidence,
     teardownRecovery,
     scratchDirectory: outputDirectory
   },
@@ -178,7 +277,9 @@ const report = createPerformanceReport({
       ? [passingCheck(`${cycles} lifecycle cycles and exact teardown completed`)]
       : failingChecks([failureMessage ?? 'preview lifecycle probe failed'])),
     ...(mode === 'report-only'
-      ? memoryFailures.map((failure) => observationCheck(`report-only observation: ${failure}`))
+      ? [...memoryFailures, ...activeBudgetFailures].map((failure) =>
+          observationCheck(`report-only observation: ${failure}`)
+        )
       : [])
   ]
 })
@@ -193,6 +294,23 @@ if (exitCode === 0 && process.env.VIDEORC_PERF_RETAIN_ARTIFACTS !== '1') {
 process.exit(exitCode)
 
 async function main() {
+  budgetRequest = activePerformanceBudgetRequest()
+  if (requiresReviewedTrendThresholds && !calibrationMode && !budgetRequest) {
+    throw new Error(
+      'Lifecycle-churn gate requires a reviewed active performance budget; set VIDEORC_PERF_ACTIVE_BUDGET_PATH.'
+    )
+  }
+  if (budgetRequest) {
+    validatedActiveBudget = await readActivePerformanceBudget({
+      path: resolve(repoRoot, budgetRequest.path)
+    })
+    preflightActivePerformanceBudget({
+      budget: validatedActiveBudget,
+      profileId: budgetRequest.profileId,
+      context: performanceBudgetStaticContext
+    })
+  }
+
   console.log(`Launching dev app for preview lifecycle probe (${cycles} cycles)...`)
   launched = await launchDevApp({
     spawnSpec: performanceAppSpawnSpec(),
@@ -211,6 +329,41 @@ async function main() {
   smoke = launched.connections['preview-motion-ready']
 
   const initialState = await ensureClosed('initial close')
+  reportMetadataWithDisplayScale = performanceMetadataWithObservedDisplayScale(
+    reportMetadata,
+    initialState?.scaleFactor
+  )
+  if (validatedActiveBudget) {
+    activeBudget = selectActivePerformanceBudget({
+      budget: validatedActiveBudget,
+      profileId: budgetRequest.profileId,
+      context: {
+        ...performanceBudgetStaticContext,
+        displayScaleFactor: reportMetadataWithDisplayScale.displayScaleFactor
+      }
+    })
+    Object.assign(memoryThresholds, activeBudget.probeConfig.memory)
+  }
+  if (requiresReviewedTrendThresholds) {
+    if (!calibrationMode) {
+      thresholdConfigurationFailures = requiredProcessMemoryTrendThresholdFailures(memoryThresholds)
+      assertProbe(
+        thresholdConfigurationFailures.length === 0,
+        'lifecycle-churn gate has reviewed owned and per-role trend thresholds',
+        thresholdConfigurationFailures
+      )
+    }
+  }
+  const enduranceStartedAtMs = Date.now()
+  const endurancePromise = fullLifecycleEndurance
+    ? collectProcessEndurance({
+        ledgerPaths,
+        pgid: launched.process.pid,
+        warmupMs: reportMetadata.performanceWindow.warmupMs,
+        measurementMs: reportMetadata.performanceWindow.measurementMs,
+        intervalMs: reportMetadata.performanceWindow.intervalMs
+      })
+    : null
   await captureMemoryCheckpoint('initial')
   lastSupervisorGeneration = supervisorGeneration(initialState)
   const quitAttempt = await smokeCommand('preview-lifecycle-attempt-app-quit')
@@ -226,6 +379,13 @@ async function main() {
     afterQuitAttempt
   )
 
+  if (fullLifecycleEndurance) {
+    const warmupRemainingMs =
+      reportMetadata.performanceWindow.warmupMs - (Date.now() - enduranceStartedAtMs)
+    if (warmupRemainingMs > 0) await sleep(warmupRemainingMs)
+  }
+  const lifecycleMeasurementStartedAtMs = Date.now()
+
   for (let cycle = 1; cycle <= cycles; cycle += 1) {
     await toggleOpen(`cycle ${cycle}: toggle open`)
     await setPreviewMode('docked', `cycle ${cycle}: dock`)
@@ -239,6 +399,11 @@ async function main() {
       await captureMemoryCheckpoint(`cycle-${cycle}`)
       console.log(`OK   completed ${cycle}/${cycles} preview lifecycle cycles`)
     }
+    if (fullLifecycleEndurance) {
+      const targetElapsedMs = (reportMetadata.performanceWindow.measurementMs * cycle) / cycles
+      const remainingMs = targetElapsedMs - (Date.now() - lifecycleMeasurementStartedAtMs)
+      if (remainingMs > 0) await sleep(remainingMs)
+    }
   }
 
   await toggleOpen('os close path: toggle open')
@@ -249,6 +414,7 @@ async function main() {
   await toggleOpen('final reopen')
   await toggleClosed('final close')
   await captureMemoryCheckpoint('final')
+  if (endurancePromise) processEndurance = await endurancePromise
 
   console.log('\n=== Preview lifecycle probe summary ===')
   console.log(

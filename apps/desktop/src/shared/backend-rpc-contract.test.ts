@@ -4,8 +4,12 @@ import type {
   OAuthCallbackResult,
   OAuthCompleteParams,
   NoiseCleanupJob,
+  SessionAiArtifactsPage,
   SessionCommentsPage,
-  SessionDeletionOperation
+  SessionDeletionOperation,
+  SessionHealthEventsPage,
+  SessionListPage,
+  SessionLogsPage
 } from './backend'
 import {
   parseBackendWireMessage,
@@ -275,6 +279,102 @@ describe('backend RPC contract', () => {
         limit: 1001
       })
     ).toThrow('less than or equal to 1000')
+  })
+
+  it('keeps Library summaries slim and types each paginated detail collection', () => {
+    expectTypeOf<BackendRpcResult<'sessions.list'>>().toEqualTypeOf<SessionListPage>()
+    expectTypeOf<
+      BackendRpcResult<'sessions.healthEvents.list'>
+    >().toEqualTypeOf<SessionHealthEventsPage>()
+    expectTypeOf<BackendRpcResult<'sessions.logs.list'>>().toEqualTypeOf<SessionLogsPage>()
+    expectTypeOf<
+      BackendRpcResult<'sessions.aiArtifacts.list'>
+    >().toEqualTypeOf<SessionAiArtifactsPage>()
+
+    const item = {
+      id: 'session-1',
+      title: 'Session 1',
+      startedAt: '2026-07-18T10:00:00Z',
+      status: 'completed',
+      mode: 'record',
+      mp4Path: '/recordings/session-1.mp4',
+      container: 'mkv',
+      durationMs: 1_000,
+      fileSizeBytes: 2_048,
+      sceneLabel: 'Screen only',
+      healthEventCount: 1,
+      sessionLogCount: 1,
+      aiArtifactCount: 1,
+      readyAiArtifactKinds: ['transcript'],
+      commentCount: 0
+    }
+    expect(validateBackendRpcResult('sessions.list', { items: [item] })).toEqual({
+      items: [item]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.list', {
+        items: [{ ...item, healthEvents: [] }]
+      })
+    ).toThrow('healthEvents must be a known field')
+
+    const params = { sessionId: 'session-1', cursor: 'created\nid', limit: 120 }
+    for (const method of [
+      'sessions.healthEvents.list',
+      'sessions.logs.list',
+      'sessions.aiArtifacts.list'
+    ] as const) {
+      expect(validateBackendRpcParams(method, params)).toEqual(params)
+      expect(() => validateBackendRpcParams(method, { ...params, limit: 121 })).toThrow(
+        'less than or equal to 120'
+      )
+    }
+
+    expect(
+      validateBackendRpcResult('sessions.healthEvents.list', {
+        events: [
+          {
+            id: 'health-1',
+            sessionId: 'session-1',
+            level: 'warn',
+            code: 'fixture-health',
+            message: 'Fixture health event.',
+            permissionPane: null,
+            createdAt: '2026-07-18T10:00:01Z'
+          }
+        ]
+      })
+    ).toMatchObject({ events: [{ id: 'health-1' }] })
+    expect(
+      validateBackendRpcResult('sessions.logs.list', {
+        entries: [
+          {
+            id: 'log-1',
+            sessionId: 'session-1',
+            level: 'info',
+            code: 'fixture-log',
+            message: 'Fixture log.',
+            sourceId: null,
+            permissionPane: null,
+            createdAt: '2026-07-18T10:00:02Z'
+          }
+        ]
+      })
+    ).toMatchObject({ entries: [{ id: 'log-1' }] })
+    expect(
+      validateBackendRpcResult('sessions.aiArtifacts.list', {
+        artifacts: [
+          {
+            id: 'artifact-1',
+            sessionId: 'session-1',
+            kind: 'transcript',
+            status: 'ready',
+            content: { text: 'hello' },
+            filePath: null,
+            createdAt: '2026-07-18T10:00:03Z'
+          }
+        ]
+      })
+    ).toMatchObject({ artifacts: [{ id: 'artifact-1' }] })
   })
 
   it('validates every destructive contract named in the runtime registry', () => {

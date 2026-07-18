@@ -36,6 +36,7 @@ export interface NativePreviewHelperProcessDriverOptions {
   onLog?: (level: 'info' | 'warn' | 'error', message: string) => void
   onProcessStarted?: (pid: number, label: string) => void
   onProcessExited?: (pid: number) => void
+  terminateProcess?: (pid: number, signal: NodeJS.Signals) => boolean
 }
 
 interface PendingRequest {
@@ -112,6 +113,7 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
   private stdoutBuffer = ''
   private readonly pending = new Map<string, PendingRequest>()
   private readonly spawnProcess: HelperSpawn
+  private readonly terminateProcess: (pid: number, signal: NodeJS.Signals) => boolean
   private readonly now: () => string
   private readonly nowMs: () => number
   private readonly iosurfaceImportRetryDelayMs: number
@@ -120,6 +122,7 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
   private consecutiveIosurfaceImportFailures = 0
   private lastPresentFailureKey: string | null = null
   private readonly ownedProcessPids = new Set<number>()
+  private terminalOwnershipError: Error | null = null
   private suppressedPresentFailureCount = 0
   private presentTimestampsMs: number[] = []
   private presentIntervalsMs: number[] = []
@@ -134,6 +137,7 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
       options.spawnProcess ??
       ((command, args, spawnOptions) =>
         spawn(command, args, spawnOptions) as ChildProcessWithoutNullStreams)
+    this.terminateProcess = options.terminateProcess ?? ((pid, signal) => process.kill(pid, signal))
     this.now = options.now ?? (() => new Date().toISOString())
     this.nowMs = options.nowMs ?? (() => Date.now())
     this.iosurfaceImportRetryDelayMs = options.iosurfaceImportRetryDelayMs ?? 8
@@ -405,6 +409,9 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
   }
 
   private ensureChild(): HelperChildProcess {
+    if (this.terminalOwnershipError) {
+      throw this.terminalOwnershipError
+    }
     if (this.child) {
       return this.child
     }
@@ -416,7 +423,6 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
     })
     const pid = child.pid
     this.child = child
-    this.recordProcess(pid, this.wrapperProcessLabel())
     child.stdout.on('data', (chunk: Buffer | string) => this.handleStdout(String(chunk)))
     child.stderr.on('data', (chunk: Buffer | string) => this.handleStderr(String(chunk)))
     // A killed helper's pipes error asynchronously; without listeners a single
@@ -438,11 +444,14 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
         this.options.onProcessExited?.(ownedPid)
       }
       this.ownedProcessPids.clear()
-      this.child = null
+      if (this.child === child) {
+        this.child = null
+      }
       this.rejectAll(
         `Native preview host helper exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`
       )
     })
+    this.recordProcess(pid, this.wrapperProcessLabel())
     this.options.onLog?.('info', `Started native preview host helper: ${this.options.command}`)
     return child
   }
@@ -485,8 +494,48 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
     if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 1) {
       return
     }
+    try {
+      this.options.onProcessStarted?.(pid, label)
+    } catch (ownershipError) {
+      throw this.failClosedOwnership(pid, ownershipError)
+    }
     this.ownedProcessPids.add(pid)
-    this.options.onProcessStarted?.(pid, label)
+  }
+
+  private failClosedOwnership(pid: number, ownershipError: unknown): Error {
+    const child = this.child
+    const failures: unknown[] = [ownershipError]
+    if (pid !== child?.pid) {
+      try {
+        if (!this.terminateProcess(pid, 'SIGKILL')) {
+          failures.push(new Error(`Native preview helper process ${pid} rejected SIGKILL.`))
+        }
+      } catch (error) {
+        if (processErrorCode(error) !== 'ESRCH') {
+          failures.push(error)
+        }
+      }
+    }
+    if (child) {
+      try {
+        if (!child.kill('SIGKILL')) {
+          failures.push(new Error('Native preview helper wrapper rejected SIGKILL.'))
+        }
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+    this.child = null
+    const error =
+      failures.length === 1 && ownershipError instanceof Error
+        ? ownershipError
+        : new AggregateError(
+            failures,
+            'Native preview helper ownership failed and termination was not fully accepted.'
+          )
+    this.terminalOwnershipError = error
+    this.rejectAll(`Native preview helper ownership failed: ${errorMessage(error)}`)
+    return error
   }
 
   private handleEvent(message: HelperEvent): boolean {
@@ -494,7 +543,15 @@ class NativePreviewHelperProcessDriver implements NativePreviewRealSurfaceDriver
       return false
     }
     const payload = (message.payload ?? {}) as HelperReadyPayload
-    this.recordProcess(payload.pid, 'native-preview-helper')
+    try {
+      this.recordProcess(payload.pid, 'native-preview-helper')
+    } catch (error) {
+      this.options.onLog?.(
+        'error',
+        `Native preview helper ownership failed: ${errorMessage(error)}`
+      )
+      return true
+    }
     const parent =
       typeof payload.parentPid === 'number' && Number.isInteger(payload.parentPid)
         ? ` parentPid=${payload.parentPid}`
@@ -675,6 +732,12 @@ function formatHostCommand(command: NativePreviewHostCommand): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function processErrorCode(error: unknown): string | undefined {
+  return error && typeof error === 'object' && 'code' in error
+    ? (error as { code?: string }).code
+    : undefined
 }
 
 function delay(ms: number): Promise<void> {

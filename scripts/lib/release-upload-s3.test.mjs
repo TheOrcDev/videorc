@@ -98,14 +98,22 @@ describe('release S3 upload config', () => {
   })
 
   it('rejects invalid S3 endpoints', () => {
-    assert.throws(
-      () =>
-        getReleaseUploadS3Config({
-          ...env,
-          VIDEORC_DOWNLOAD_S3_ENDPOINT_URL: 'ftp://r2.example.test'
-        }),
-      (error) => error instanceof ReleaseUploadConfigError && error.code === 'invalid-endpoint-url'
-    )
+    for (const endpoint of [
+      'ftp://r2.example.test',
+      'http://r2.example.test',
+      'https://user:password@r2.example.test',
+      'https://r2.example.test?redirect=attacker'
+    ]) {
+      assert.throws(
+        () =>
+          getReleaseUploadS3Config({
+            ...env,
+            VIDEORC_DOWNLOAD_S3_ENDPOINT_URL: endpoint
+          }),
+        (error) =>
+          error instanceof ReleaseUploadConfigError && error.code === 'invalid-endpoint-url'
+      )
+    }
   })
 })
 
@@ -193,16 +201,13 @@ describe('release S3 upload plan', () => {
       releaseDir
     })
 
-    assert.deepEqual(
-      plan.artifacts.at(-1),
-      {
-        contentType: 'application/json',
-        label: 'changelog',
-        objectKey: 'changelog/changelog.json',
-        path: changelogJsonPath,
-        sizeBytes: Buffer.byteLength('{"entries":[]}')
-      }
-    )
+    assert.deepEqual(plan.artifacts.at(-1), {
+      contentType: 'application/json',
+      label: 'changelog',
+      objectKey: 'changelog/changelog.json',
+      path: changelogJsonPath,
+      sizeBytes: Buffer.byteLength('{"entries":[]}')
+    })
 
     const prefixed = await buildReleaseUploadPlan({
       changelogJsonPath,
@@ -305,5 +310,47 @@ describe('release S3 request signing', () => {
     assert.equal(put.headers.Authorization.includes('download-secret'), false)
     assert.match(put.headers.Authorization, /^AWS4-HMAC-SHA256 Credential=VIDEORCTEST\//)
     assert.equal(head.headers['X-Amz-Content-Sha256'], 'UNSIGNED-PAYLOAD')
+  })
+
+  it('canonicalizes and signs additional x-amz metadata headers', () => {
+    const config = getReleaseUploadS3Config(env)
+    const request = buildSignedS3Request({
+      additionalHeaders: {
+        'X-Amz-Meta-Sha256': `  ${'a'.repeat(64)}  `,
+        'x-amz-meta-source': 'candidate   workflow'
+      },
+      config,
+      method: 'PUT',
+      objectKey: 'candidates/windows/0.10.0-alpha.1/release.json'
+    })
+
+    assert.equal(request.headers['x-amz-meta-sha256'], 'a'.repeat(64))
+    assert.equal(request.headers['x-amz-meta-source'], 'candidate workflow')
+    assert.match(
+      request.headers.Authorization,
+      /SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-meta-sha256;x-amz-meta-source/
+    )
+  })
+
+  it('rejects host/reserved overrides and unsafe additional signed headers', () => {
+    const config = getReleaseUploadS3Config(env)
+    for (const additionalHeaders of [
+      { Host: 'attacker.example.test' },
+      { Authorization: 'replacement' },
+      { 'X-Amz-Date': 'replacement' },
+      { 'x-amz-meta-test': 'line one\nline two' },
+      { 'invalid header': 'value' }
+    ]) {
+      assert.throws(
+        () =>
+          buildSignedS3Request({
+            additionalHeaders,
+            config,
+            method: 'PUT',
+            objectKey: 'candidate'
+          }),
+        ReleaseUploadConfigError
+      )
+    }
   })
 })

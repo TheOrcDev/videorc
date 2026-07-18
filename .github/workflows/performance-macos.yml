@@ -11,27 +11,139 @@ on:
         description: 'Measurement/endurance window'
         required: false
         default: '600'
+      packaged_app_executable:
+        description: 'Pre-staged Developer ID-signed Videorc executable on the authorized runner'
+        required: false
+        default: ''
+      packaged_app_commit:
+        description: 'Exact git commit from which the pre-staged signed app was built'
+        required: false
+        default: ''
+      calibration_mode:
+        description: 'Collect unenforced three-run calibration candidates instead of enforcing reviewed profiles'
+        required: false
+        type: boolean
+        default: false
+      active_budget_path:
+        description: 'Reviewed active budget set; required unless calibration mode is explicitly selected'
+        required: false
+        default: ''
   schedule:
     - cron: '17 3 * * 1'
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: macos-performance-endurance
   cancel-in-progress: false
 
 jobs:
+  performance-contract:
+    name: Validate synthetic performance contracts
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Hosted runners have neither a stable hardware identity nor the logged-in
+      # Screen Recording/Camera/Microphone grants required for trustworthy
+      # measurements. They may validate only synthetic/structural contracts.
+      - name: Run synthetic performance contract tests
+        run: >-
+          node --test
+          scripts/lib/performance-budget-preflight.test.mjs
+          scripts/lib/performance-budget.test.mjs
+          scripts/lib/performance-calibration.test.mjs
+          scripts/lib/performance-contract.test.mjs
+          scripts/lib/performance-scenarios.test.mjs
+          scripts/lib/performance-workflow.test.mjs
+          scripts/lib/process-endurance.test.mjs
+          scripts/lib/process-memory-gate.test.mjs
+
+  runner-availability:
+    name: Require online performance runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail when the authorized macOS runner is unavailable
+        uses: actions/github-script@v8
+        env:
+          RUNNER_MONITOR_TOKEN: ${{ secrets.VIDEORC_RUNNER_MONITOR_TOKEN }}
+        with:
+          # Listing repository runners requires Administration (read), which
+          # the default GITHUB_TOKEN cannot grant. A missing monitor token is
+          # an explicit operational failure, never a silently skipped probe.
+          github-token: ${{ secrets.VIDEORC_RUNNER_MONITOR_TOKEN }}
+          script: |
+            if (!process.env.RUNNER_MONITOR_TOKEN) {
+              core.setFailed(
+                'VIDEORC_RUNNER_MONITOR_TOKEN is required with repository Administration (read) permission'
+              )
+              return
+            }
+            const { data } = await github.rest.actions.listSelfHostedRunnersForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100
+            })
+            const requiredLabels = ['self-hosted', 'macOS', 'videorc-performance']
+            const matching = data.runners.filter((runner) => {
+              const labels = new Set(runner.labels.map((label) => label.name))
+              return requiredLabels.every((label) => labels.has(label))
+            })
+            if (matching.length === 0) {
+              core.setFailed(`No runner has all required labels: ${requiredLabels.join(', ')}`)
+              return
+            }
+            const available = matching.filter(
+              (runner) => runner.status === 'online' && runner.busy !== true
+            )
+            if (available.length === 0) {
+              core.setFailed(
+                `Videorc performance runner is unavailable: ${matching
+                  .map((runner) => `${runner.name}=${runner.status}${runner.busy ? '/busy' : ''}`)
+                  .join(', ')}`
+              )
+              return
+            }
+            core.info(
+              `Performance runner available: ${available.map((runner) => runner.name).join(', ')}`
+            )
+
   endurance:
     name: Native preview and real-device endurance
+    needs: runner-availability
     # This runner must be a logged-in macOS session with Screen Recording,
     # Camera, and Microphone permission already granted to the harness/app.
     runs-on: [self-hosted, macOS, videorc-performance]
-    timeout-minutes: 240
+    timeout-minutes: 360
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       VIDEORC_PERF_ARTIFACT_DIR: docs/acceptance/artifacts/performance/endurance
-      VIDEORC_PERF_APP_EXECUTABLE: apps/desktop/release/mac-arm64/Videorc.app/Contents/MacOS/Videorc
+      VIDEORC_PERF_APP_EXECUTABLE: ${{ inputs.packaged_app_executable || vars.VIDEORC_PERF_SCHEDULED_APP_EXECUTABLE }}
+      VIDEORC_PERF_APP_COMMIT: ${{ inputs.packaged_app_commit || vars.VIDEORC_PERF_SCHEDULED_APP_COMMIT }}
+      VIDEORC_PERF_CALIBRATION: ${{ github.event_name == 'workflow_dispatch' && inputs.calibration_mode && '1' || '0' }}
+      VIDEORC_PERF_REQUESTED_ACTIVE_BUDGET_PATH: ${{ inputs.active_budget_path || vars.VIDEORC_PERF_SCHEDULED_ACTIVE_BUDGET_PATH }}
       WARMUP_SECONDS: ${{ inputs.warmup_seconds || '60' }}
       MEASUREMENT_SECONDS: ${{ inputs.measurement_seconds || '600' }}
 
@@ -66,14 +178,58 @@ jobs:
           ffmpeg -version | head -n 1
           ffprobe -version | head -n 1
 
-      - name: Build packaged app
-        run: pnpm package:desktop
+      - name: Require a signed package for the checked-out commit
+        run: |
+          if [[ -z "$VIDEORC_PERF_APP_EXECUTABLE" ]]; then
+            echo "No pre-staged signed performance app was configured. Set both VIDEORC_PERF_SCHEDULED_APP_EXECUTABLE and VIDEORC_PERF_SCHEDULED_APP_COMMIT repository variables for scheduled runs, or provide both workflow-dispatch inputs." >&2
+            exit 1
+          fi
+          if [[ -z "$VIDEORC_PERF_APP_COMMIT" ]]; then
+            echo "The pre-staged signed performance app is missing its source commit contract." >&2
+            exit 1
+          fi
+          if [[ "$VIDEORC_PERF_APP_COMMIT" != "$GITHUB_SHA" ]]; then
+            echo "Pre-staged app commit $VIDEORC_PERF_APP_COMMIT does not match checked-out commit $GITHUB_SHA." >&2
+            exit 1
+          fi
+
+      - name: Verify signed packaged app
+        run: |
+          test -x "$VIDEORC_PERF_APP_EXECUTABLE"
+          app_bundle="${VIDEORC_PERF_APP_EXECUTABLE%%/Contents/MacOS/*}"
+          test -d "$app_bundle"
+          codesign --verify --deep --strict "$app_bundle"
+          signature_details="$(codesign --display --verbose=4 "$app_bundle" 2>&1)"
+          if ! grep -q '^Authority=Developer ID Application:' <<< "$signature_details"; then
+            echo "Performance evidence requires a Developer ID Application signature; ad-hoc or unsigned packages are rejected." >&2
+            exit 1
+          fi
+
+      - name: Configure reviewed budget enforcement
+        run: |
+          if [[ "$VIDEORC_PERF_CALIBRATION" == "1" ]]; then
+            echo "Explicit calibration bypass selected; reviewed thresholds will not be enforced."
+            echo "VIDEORC_PERF_GATE_ACTIVE_BUDGET_PATH=" >> "$GITHUB_ENV"
+            echo "VIDEORC_PERF_GATE_REQUIRE_ACTIVE_BUDGET=0" >> "$GITHUB_ENV"
+          else
+            if [[ -z "$VIDEORC_PERF_REQUESTED_ACTIVE_BUDGET_PATH" ]]; then
+              echo "Scheduled and enforcement performance runs require a reviewed active budget set. Configure VIDEORC_PERF_SCHEDULED_ACTIVE_BUDGET_PATH or provide active_budget_path; use the explicit calibration_mode input only when collecting candidates." >&2
+              exit 1
+            fi
+            if [[ ! -f "$VIDEORC_PERF_REQUESTED_ACTIVE_BUDGET_PATH" ]]; then
+              echo "Reviewed active budget set was not found: $VIDEORC_PERF_REQUESTED_ACTIVE_BUDGET_PATH" >&2
+              exit 1
+            fi
+            echo "VIDEORC_PERF_GATE_ACTIVE_BUDGET_PATH=$VIDEORC_PERF_REQUESTED_ACTIVE_BUDGET_PATH" >> "$GITHUB_ENV"
+            echo "VIDEORC_PERF_GATE_REQUIRE_ACTIVE_BUDGET=1" >> "$GITHUB_ENV"
+          fi
 
       # Prime macOS capture, Electron, and GPU caches outside the three-run
       # calibration set. This keeps cold-host initialization out of run 1.
-      - name: Prime detached native-preview workload
+      - name: Prime detached-native-preview workload
         run: >-
           pnpm perf:scenario --scenario detached-native-preview --report-only
+          --profile-class short-sentinel
           --warmup-seconds 60
           --measurement-seconds 120
           --output "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-primer.json"
@@ -81,13 +237,49 @@ jobs:
           VIDEORC_PERF_MIN_PRESENT_FPS: '58'
           VIDEORC_PERF_MAX_INTERVAL_P95_MS: '30'
 
+      - name: Authorized packaged native-preview short sentinel
+        id: short_sentinel
+        continue-on-error: true
+        run: |
+          failed=0
+          for calibration_run in 1 2 3; do
+            VIDEORC_PERF_ACTIVE_BUDGET_PATH="$VIDEORC_PERF_GATE_ACTIVE_BUDGET_PATH" \
+              VIDEORC_PERF_REQUIRE_ACTIVE_BUDGET="$VIDEORC_PERF_GATE_REQUIRE_ACTIVE_BUDGET" \
+              pnpm perf:scenario --scenario detached-native-preview --gate \
+              --profile-class short-sentinel \
+              --warmup-seconds 60 \
+              --measurement-seconds 120 \
+              --sample-interval-ms 1000 \
+              --output "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-short-run-${calibration_run}.json" \
+              || failed=1
+          done
+          exit "$failed"
+        env:
+          VIDEORC_PERF_MIN_PRESENT_FPS: '58'
+          VIDEORC_PERF_MAX_INTERVAL_P95_MS: '30'
+
+      - name: Aggregate authorized short-sentinel calibration
+        id: short_sentinel_calibration
+        if: always() && steps.short_sentinel.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          pnpm perf:calibrate
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-short-calibration.json"
+          --budget-output "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-short-budget-candidate.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-short-run-1.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-short-run-2.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-short-run-3.child.json"
+
       - name: Detached native-preview endurance
         id: native_preview
         continue-on-error: true
         run: |
           failed=0
           for calibration_run in 1 2 3; do
-            pnpm perf:scenario --scenario detached-native-preview --gate \
+            VIDEORC_PERF_ACTIVE_BUDGET_PATH="$VIDEORC_PERF_GATE_ACTIVE_BUDGET_PATH" \
+              VIDEORC_PERF_REQUIRE_ACTIVE_BUDGET="$VIDEORC_PERF_GATE_REQUIRE_ACTIVE_BUDGET" \
+              pnpm perf:scenario --scenario detached-native-preview --gate \
+              --profile-class endurance \
               --warmup-seconds "$WARMUP_SECONDS" \
               --measurement-seconds "$MEASUREMENT_SECONDS" \
               --output "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-run-${calibration_run}.json" \
@@ -115,9 +307,20 @@ jobs:
         continue-on-error: true
         run: >-
           pnpm perf:scenario --scenario preview-lifecycle --gate
+          --profile-class endurance
           --output "$VIDEORC_PERF_ARTIFACT_DIR/preview-lifecycle.json"
         env:
           VIDEORC_PREVIEW_LIFECYCLE_CYCLES: '100'
+
+      - name: Prime record-4k workload
+        run: |
+          VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-4k-media/primer" \
+            pnpm perf:scenario --scenario record-4k --report-only \
+              --profile-class short-sentinel \
+              --warmup-seconds 60 \
+              --measurement-seconds 120 \
+              --sample-interval-ms 1000 \
+              --output "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-primer.json"
 
       - name: Real 4K recording endurance
         id: record_4k
@@ -126,7 +329,10 @@ jobs:
           failed=0
           for calibration_run in 1 2 3; do
             VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-4k-media/run-${calibration_run}" \
+              VIDEORC_PERF_ACTIVE_BUDGET_PATH="$VIDEORC_PERF_GATE_ACTIVE_BUDGET_PATH" \
+              VIDEORC_PERF_REQUIRE_ACTIVE_BUDGET="$VIDEORC_PERF_GATE_REQUIRE_ACTIVE_BUDGET" \
               pnpm perf:scenario --scenario record-4k --gate \
+                --profile-class endurance \
                 --warmup-seconds "$WARMUP_SECONDS" \
                 --measurement-seconds "$MEASUREMENT_SECONDS" \
                 --output "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-run-${calibration_run}.json" \
@@ -146,6 +352,16 @@ jobs:
           "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-run-2.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-run-3.child.json"
 
+      - name: Prime record-4k-stream-1080p workload
+        run: |
+          VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-stream-media/primer" \
+            pnpm perf:scenario --scenario record-4k-stream-1080p --report-only \
+              --profile-class short-sentinel \
+              --warmup-seconds 60 \
+              --measurement-seconds 120 \
+              --sample-interval-ms 1000 \
+              --output "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-primer.json"
+
       - name: Real 4K record plus 1080p stream endurance
         id: record_stream
         continue-on-error: true
@@ -153,7 +369,10 @@ jobs:
           failed=0
           for calibration_run in 1 2 3; do
             VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-stream-media/run-${calibration_run}" \
+              VIDEORC_PERF_ACTIVE_BUDGET_PATH="$VIDEORC_PERF_GATE_ACTIVE_BUDGET_PATH" \
+              VIDEORC_PERF_REQUIRE_ACTIVE_BUDGET="$VIDEORC_PERF_GATE_REQUIRE_ACTIVE_BUDGET" \
               pnpm perf:scenario --scenario record-4k-stream-1080p --gate \
+                --profile-class endurance \
                 --warmup-seconds "$WARMUP_SECONDS" \
                 --measurement-seconds "$MEASUREMENT_SECONDS" \
                 --output "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-run-${calibration_run}.json" \
@@ -173,6 +392,16 @@ jobs:
           "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-run-2.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-run-3.child.json"
 
+      - name: Prime real-devices-1080p workload
+        run: |
+          VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/real-device-media/primer" \
+            pnpm perf:scenario --scenario real-devices-1080p --report-only \
+              --profile-class short-sentinel \
+              --warmup-seconds 60 \
+              --measurement-seconds 120 \
+              --sample-interval-ms 1000 \
+              --output "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-primer.json"
+
       - name: Real screen, camera, and microphone artifact endurance
         id: native_devices
         continue-on-error: true
@@ -180,7 +409,10 @@ jobs:
           failed=0
           for calibration_run in 1 2 3; do
             VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/real-device-media/run-${calibration_run}" \
+              VIDEORC_PERF_ACTIVE_BUDGET_PATH="$VIDEORC_PERF_GATE_ACTIVE_BUDGET_PATH" \
+              VIDEORC_PERF_REQUIRE_ACTIVE_BUDGET="$VIDEORC_PERF_GATE_REQUIRE_ACTIVE_BUDGET" \
               pnpm perf:scenario --scenario real-devices-1080p --gate \
+                --profile-class endurance \
                 --warmup-seconds "$WARMUP_SECONDS" \
                 --measurement-seconds "$MEASUREMENT_SECONDS" \
                 --output "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-run-${calibration_run}.json" \
@@ -199,6 +431,183 @@ jobs:
           "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-run-1.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-run-2.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-run-3.child.json"
+
+      - name: Prime record-1080p60 workload
+        run: |
+          VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-media/primer" \
+            pnpm perf:scenario --scenario record-1080p60 --report-only \
+              --profile-class short-sentinel \
+              --warmup-seconds 60 \
+              --measurement-seconds 120 \
+              --sample-interval-ms 1000 \
+              --output "$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-primer.json"
+
+      - name: Real 1080p60 recording endurance
+        id: record_1080p60
+        continue-on-error: true
+        run: |
+          failed=0
+          for calibration_run in 1 2 3; do
+            VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-media/run-${calibration_run}" \
+              VIDEORC_PERF_ACTIVE_BUDGET_PATH="$VIDEORC_PERF_GATE_ACTIVE_BUDGET_PATH" \
+              VIDEORC_PERF_REQUIRE_ACTIVE_BUDGET="$VIDEORC_PERF_GATE_REQUIRE_ACTIVE_BUDGET" \
+              pnpm perf:scenario --scenario record-1080p60 --profile-class endurance --gate \
+                --warmup-seconds "$WARMUP_SECONDS" \
+                --measurement-seconds "$MEASUREMENT_SECONDS" \
+                --output "$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-run-${calibration_run}.json" \
+              || failed=1
+          done
+          exit "$failed"
+
+      - name: Aggregate packaged 1080p60 recording calibration
+        id: record_1080p60_calibration
+        if: always() && steps.record_1080p60.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          pnpm perf:calibrate
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-calibration.json"
+          --budget-output "$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-budget-candidate.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-run-1.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-run-2.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-run-3.child.json"
+
+      - name: Prime record-vertical-4k30 workload
+        run: |
+          VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-media/primer" \
+            pnpm perf:scenario --scenario record-vertical-4k30 --report-only \
+              --profile-class short-sentinel \
+              --warmup-seconds 60 \
+              --measurement-seconds 120 \
+              --sample-interval-ms 1000 \
+              --output "$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-primer.json"
+
+      - name: Real vertical 4K30 recording endurance
+        id: record_vertical_4k30
+        continue-on-error: true
+        run: |
+          failed=0
+          for calibration_run in 1 2 3; do
+            VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-media/run-${calibration_run}" \
+              VIDEORC_PERF_ACTIVE_BUDGET_PATH="$VIDEORC_PERF_GATE_ACTIVE_BUDGET_PATH" \
+              VIDEORC_PERF_REQUIRE_ACTIVE_BUDGET="$VIDEORC_PERF_GATE_REQUIRE_ACTIVE_BUDGET" \
+              pnpm perf:scenario --scenario record-vertical-4k30 --profile-class endurance --gate \
+                --warmup-seconds "$WARMUP_SECONDS" \
+                --measurement-seconds "$MEASUREMENT_SECONDS" \
+                --output "$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-run-${calibration_run}.json" \
+              || failed=1
+          done
+          exit "$failed"
+
+      - name: Aggregate packaged vertical 4K30 recording calibration
+        id: record_vertical_4k30_calibration
+        if: always() && steps.record_vertical_4k30.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          pnpm perf:calibrate
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-calibration.json"
+          --budget-output "$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-budget-candidate.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-run-1.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-run-2.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-run-3.child.json"
+
+      - name: Prime studio-live-mic-visuals workload
+        run: >-
+          pnpm perf:scenario --scenario studio-live-mic-visuals --report-only
+          --profile-class short-sentinel
+          --warmup-seconds 60
+          --measurement-seconds 120
+          --sample-interval-ms 1000
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/studio-live-mic-visuals-primer.json"
+
+      - name: Studio live microphone visuals endurance
+        id: studio_mic_visuals
+        continue-on-error: true
+        run: |
+          failed=0
+          for calibration_run in 1 2 3; do
+            VIDEORC_PERF_ACTIVE_BUDGET_PATH="$VIDEORC_PERF_GATE_ACTIVE_BUDGET_PATH" \
+              VIDEORC_PERF_REQUIRE_ACTIVE_BUDGET="$VIDEORC_PERF_GATE_REQUIRE_ACTIVE_BUDGET" \
+              pnpm perf:scenario --scenario studio-live-mic-visuals --profile-class endurance --gate \
+              --warmup-seconds "$WARMUP_SECONDS" \
+              --measurement-seconds "$MEASUREMENT_SECONDS" \
+              --output "$VIDEORC_PERF_ARTIFACT_DIR/studio-live-mic-visuals-run-${calibration_run}.json" \
+              || failed=1
+          done
+          exit "$failed"
+
+      - name: Aggregate packaged Studio mic-visual calibration
+        id: studio_mic_visuals_calibration
+        if: always() && steps.studio_mic_visuals.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          pnpm perf:calibrate
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/studio-live-mic-visuals-calibration.json"
+          --budget-output "$VIDEORC_PERF_ARTIFACT_DIR/studio-live-mic-visuals-budget-candidate.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/studio-live-mic-visuals-run-1.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/studio-live-mic-visuals-run-2.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/studio-live-mic-visuals-run-3.child.json"
+
+      - name: Prime lifecycle-churn workload
+        run: >-
+          pnpm perf:scenario --scenario lifecycle-churn --profile-class short-sentinel --report-only
+          --warmup-seconds 60
+          --measurement-seconds 120
+          --sample-interval-ms 1000
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/lifecycle-churn-primer.json"
+        env:
+          VIDEORC_PREVIEW_LIFECYCLE_CYCLES: '40'
+
+      - name: Explicit lifecycle churn endurance
+        id: lifecycle_churn
+        continue-on-error: true
+        run: |
+          failed=0
+          for calibration_run in 1 2 3; do
+            VIDEORC_PERF_ACTIVE_BUDGET_PATH="$VIDEORC_PERF_GATE_ACTIVE_BUDGET_PATH" \
+              VIDEORC_PERF_REQUIRE_ACTIVE_BUDGET="$VIDEORC_PERF_GATE_REQUIRE_ACTIVE_BUDGET" \
+              pnpm perf:scenario --scenario lifecycle-churn --profile-class endurance --gate \
+              --warmup-seconds "$WARMUP_SECONDS" \
+              --measurement-seconds "$MEASUREMENT_SECONDS" \
+              --sample-interval-ms 1000 \
+              --output "$VIDEORC_PERF_ARTIFACT_DIR/lifecycle-churn-run-${calibration_run}.json" \
+              || failed=1
+          done
+          exit "$failed"
+        env:
+          VIDEORC_PREVIEW_LIFECYCLE_CYCLES: '200'
+
+      - name: Aggregate packaged lifecycle-churn calibration
+        id: lifecycle_churn_calibration
+        if: always() && steps.lifecycle_churn.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          pnpm perf:calibrate
+          --output "$VIDEORC_PERF_ARTIFACT_DIR/lifecycle-churn-calibration.json"
+          --budget-output "$VIDEORC_PERF_ARTIFACT_DIR/lifecycle-churn-budget-candidate.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/lifecycle-churn-run-1.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/lifecycle-churn-run-2.child.json"
+          "$VIDEORC_PERF_ARTIFACT_DIR/lifecycle-churn-run-3.child.json"
+
+      - name: Periodic or failure-triggered allocator attribution
+        id: allocator_attribution
+        if: >-
+          always() &&
+          (github.event_name == 'schedule' ||
+           steps.short_sentinel.outcome == 'failure' ||
+           steps.native_preview.outcome == 'failure' ||
+           steps.record_4k.outcome == 'failure' ||
+           steps.record_stream.outcome == 'failure' ||
+           steps.native_devices.outcome == 'failure' ||
+           steps.record_1080p60.outcome == 'failure' ||
+           steps.record_vertical_4k30.outcome == 'failure' ||
+           steps.studio_mic_visuals.outcome == 'failure')
+        continue-on-error: true
+        run: node scripts/perf-memory-probe.mjs --report-only
+        env:
+          VIDEORC_PERF_MODE: report-only
+          VIDEORC_PERF_REPORT_PATH: docs/acceptance/artifacts/performance/endurance/allocator-attribution.json
+          VIDEORC_PERF_LEAK_WINDOW_SECONDS: '120'
+          VIDEORC_PERF_RETAIN_ARTIFACTS: '1'
 
       - name: Upload performance JSON and media evidence
         if: always()
@@ -219,6 +628,8 @@ jobs:
         if: always()
         run: |
           outcomes=(
+            "short-sentinel=${{ steps.short_sentinel.outcome }}"
+            "short-sentinel-calibration=${{ steps.short_sentinel_calibration.outcome }}"
             "native-preview=${{ steps.native_preview.outcome }}"
             "native-preview-calibration=${{ steps.native_preview_calibration.outcome }}"
             "preview-lifecycle=${{ steps.preview_lifecycle.outcome }}"
@@ -228,7 +639,18 @@ jobs:
             "record-stream-calibration=${{ steps.record_stream_calibration.outcome }}"
             "native-devices=${{ steps.native_devices.outcome }}"
             "native-devices-calibration=${{ steps.native_devices_calibration.outcome }}"
+            "record-1080p60=${{ steps.record_1080p60.outcome }}"
+            "record-1080p60-calibration=${{ steps.record_1080p60_calibration.outcome }}"
+            "record-vertical-4k30=${{ steps.record_vertical_4k30.outcome }}"
+            "record-vertical-4k30-calibration=${{ steps.record_vertical_4k30_calibration.outcome }}"
+            "studio-mic-visuals=${{ steps.studio_mic_visuals.outcome }}"
+            "studio-mic-visuals-calibration=${{ steps.studio_mic_visuals_calibration.outcome }}"
+            "lifecycle-churn=${{ steps.lifecycle_churn.outcome }}"
+            "lifecycle-churn-calibration=${{ steps.lifecycle_churn_calibration.outcome }}"
           )
+          if [[ "${{ steps.allocator_attribution.outcome }}" != "skipped" ]]; then
+            outcomes+=("allocator-attribution=${{ steps.allocator_attribution.outcome }}")
+          fi
           failed=0
           for outcome in "${outcomes[@]}"; do
             echo "$outcome"

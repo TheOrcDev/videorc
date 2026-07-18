@@ -1,0 +1,160 @@
+name: Windows Alpha bug
+description: Report a reproducible problem in the Windows 11 x64 Alpha without exposing private data.
+title: '[Windows Alpha]: '
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Videorc on Windows. GitHub issues and their attachments are public.
+
+        Do not paste or attach support bundles, recordings, screenshots containing private content, stream URLs or keys, OAuth tokens, API keys, email addresses, presigned download URLs, device IDs, usernames, or local file paths. If maintainers need private evidence, they will provide a private transfer path.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before submitting
+      options:
+        - label: I reproduced this on Windows 11 x64, not an unsupported Windows version.
+          required: true
+        - label: I checked the Windows Alpha guide and known issues for this problem.
+          required: true
+        - label: I removed credentials, personal content, device identifiers, and local paths from this report.
+          required: true
+
+  - type: input
+    id: app_version
+    attributes:
+      label: Videorc version
+      description: Copy only the app version shown in Settings; do not include account details.
+      placeholder: 0.9.45 alpha 1
+    validations:
+      required: true
+
+  - type: input
+    id: windows_build
+    attributes:
+      label: Windows version and build
+      description: Run `winver` and provide the edition, version, and OS build. Do not include the device or user name.
+      placeholder: Windows 11 Pro, 24H2, OS build 26100.x
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_source
+    attributes:
+      label: Installer source
+      description: Select how this exact build was obtained.
+      options:
+        - videorc.com Windows Alpha download
+        - Maintainer-provided private candidate
+        - GitHub Actions tester artifact
+        - Local source build
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Install, signing, SmartScreen, or uninstall
+        - Launch or update
+        - Screen capture
+        - Camera or microphone
+        - Preview
+        - Recording or exported file
+        - Livestreaming
+        - Captions or AI
+        - Window controls, shortcuts, or layout
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Use the smallest repeatable sequence. Replace private names and paths with neutral placeholders.
+      placeholder: |
+        1. Launch Videorc.
+        2. Select a screen and microphone.
+        3. Start recording.
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Quote only the minimal error text after removing paths, account data, URLs, and identifiers.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: Frequency
+      options:
+        - Every time
+        - Often
+        - Intermittent
+        - Once
+    validations:
+      required: true
+
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU model (optional)
+      description: Vendor and model only; omit serial numbers, device IDs, machine names, and user names.
+      placeholder: Intel Core i7-1360P, AMD Ryzen 7 7840U
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU model (optional)
+      description: Vendor and model only; omit serial numbers, device IDs, machine names, and driver-install paths.
+      placeholder: NVIDIA RTX 4060, Intel Arc, AMD Radeon 780M
+
+  - type: input
+    id: safe_diagnostics
+    attributes:
+      label: Safe diagnostics summary (optional)
+      description: Provide only non-sensitive labels shown by Videorc, such as capture backend, encoder backend, or preview fallback reason. Do not paste JSON.
+      placeholder: DXGI capture; software OpenH264; electron-proof-surface
+
+  - type: dropdown
+    id: support_bundle_verdict
+    attributes:
+      label: Strict support-bundle verifier result
+      description: If you generated a bundle, report only the verifier result. Do not attach the bundle or paste its path.
+      options:
+        - Not generated
+        - PASS with --windows-acceptance
+        - FAIL with --windows-acceptance
+        - BLOCKED
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional sanitized context (optional)
+      description: Do not attach media or logs unless a maintainer asks and provides a private transfer path.
+
+  - type: checkboxes
+    id: privacy_confirmation
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I understand this report is public and contains no support bundle, recording, credential, private URL, device identifier, or local user path.
+          required: true

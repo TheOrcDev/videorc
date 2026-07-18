@@ -14,7 +14,7 @@ on:
       release_notes_url:
         description: 'Public release notes URL written to release.json'
         required: false
-        default: 'https://videorc.app/releases/0.9.0-beta.1'
+        default: 'https://www.videorc.com/releases/0.9.0-beta.1'
   push:
     tags:
       - 'v*'
@@ -23,7 +23,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-macos-${{ github.ref }}
+  # Prevent an older changelog or latest pointer from racing another platform.
+  group: release-publication
   cancel-in-progress: false
 
 env:
@@ -110,22 +111,24 @@ jobs:
       - name: Validate signed macOS artifact
         run: pnpm release:validate:macos
 
-      - name: Short packaged native-preview performance sentinel
-        run: pnpm smoke:packaged:native-preview:performance
+      - name: Preflight active packaged performance budget
+        run: >-
+          pnpm perf:budget:preflight
+          --artifact-only
+          --scenario detached-native-preview
+          --profile-class short-sentinel
+          --warmup-seconds 60
+          --measurement-seconds 120
+          --sample-interval-ms 1000
         env:
           VIDEORC_PERF_ACTIVE_BUDGET_PATH: config/performance-budgets/v1/active/macos-release.json
-          VIDEORC_PERF_HARDWARE_CLASS: github-hosted-macos-15-arm64-standard
+          VIDEORC_PERF_ACTIVE_BUDGET_PROFILE: ${{ vars.VIDEORC_PERF_RELEASE_BUDGET_PROFILE }}
+          VIDEORC_PERF_APP_EXECUTABLE: apps/desktop/release/mac-arm64/Videorc.app/Contents/MacOS/Videorc
 
-      - name: Upload packaged performance evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: videorc-macos-performance-${{ github.run_id }}
-          path: |
-            docs/acceptance/artifacts/performance/release/packaged-native-preview.json
-            docs/acceptance/artifacts/performance/release/packaged-native-preview.child.json
-          if-no-files-found: error
-          retention-days: 90
+      # Generic hosted macOS lacks the stable hardware and TCC grants required
+      # for a truthful ScreenCaptureKit run. The signed payload is checked here
+      # against reviewed evidence; runtime calibration stays on the authorized
+      # self-hosted performance runner.
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
