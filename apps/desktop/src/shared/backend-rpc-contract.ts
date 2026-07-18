@@ -23,9 +23,14 @@ import type {
   ServerResponse,
   SessionCommentsListParams,
   SessionCommentsPage,
+  SessionAiArtifactsPage,
   SessionDeletionOperation,
+  SessionDetailListParams,
+  SessionHealthEventsPage,
+  SessionListPage,
+  SessionListParams,
+  SessionLogsPage,
   SessionStorageTotals,
-  SessionSummary,
   StartSessionParams,
   VideorcAccountSnapshot
 } from './backend'
@@ -95,7 +100,13 @@ export interface BackendRpcMethodMap {
   'preview.camera.status': BackendRpcDefinition<undefined, PreviewCameraStatus>
   'preview.screen.status': BackendRpcDefinition<undefined, PreviewScreenStatus>
   'diagnostics.stats': BackendRpcDefinition<undefined, DiagnosticStats>
-  'sessions.list': BackendRpcDefinition<{ limit?: number } | undefined, SessionSummary[]>
+  'sessions.list': BackendRpcDefinition<SessionListParams, SessionListPage>
+  'sessions.healthEvents.list': BackendRpcDefinition<
+    SessionDetailListParams,
+    SessionHealthEventsPage
+  >
+  'sessions.logs.list': BackendRpcDefinition<SessionDetailListParams, SessionLogsPage>
+  'sessions.aiArtifacts.list': BackendRpcDefinition<SessionDetailListParams, SessionAiArtifactsPage>
   'sessions.storage': BackendRpcDefinition<undefined, SessionStorageTotals>
   'sessions.comments.list': BackendRpcDefinition<SessionCommentsListParams, SessionCommentsPage>
   'sessions.delete': BackendRpcDefinition<{ sessionIds: string[] }, SessionDeletionOperation[]>
@@ -552,16 +563,121 @@ const sessionSummarySchema = boundedSemanticValue(
       id: boundedString,
       title: stringSchema({ maxLength: 16_384 }),
       startedAt: timestamp,
+      endedAt: optionalSchema(timestamp),
       status: boundedString,
       mode: boundedString,
+      outputPath: optionalSchema(boundedPath),
+      mp4Path: optionalSchema(boundedPath),
+      streamPreset: optionalSchema(stringSchema({ maxLength: 1024 })),
+      container: optionalSchema(enumSchema(['none', 'mkv', 'flv', 'tee'])),
+      durationMs: optionalSchema(nonNegativeInteger),
+      fileSizeBytes: optionalSchema(nonNegativeInteger),
+      sceneLabel: optionalSchema(stringSchema({ maxLength: 1024 })),
+      qualityStatus: optionalSchema(boundedBackendPayloadSchema),
+      healthEventCount: nonNegativeInteger,
+      sessionLogCount: nonNegativeInteger,
+      aiArtifactCount: nonNegativeInteger,
+      readyAiArtifactKinds: optionalSchema(
+        arraySchema(
+          enumSchema([
+            'audio-extract',
+            'transcript',
+            'title-description',
+            'summary',
+            'chapters',
+            'highlights',
+            'social-posts',
+            'smart-zoom',
+            'noise-cleanup',
+            'silence-removal',
+            'health-assistant'
+          ]),
+          { maxLength: 11 }
+        )
+      ),
       commentCount: nonNegativeInteger,
       derivedFromSessionId: optionalSchema(boundedString),
       sourceTitle: optionalSchema(stringSchema({ maxLength: 16_384 })),
       processingKind: optionalSchema(literalSchema('noise-cleanup'))
     },
-    { allowUnknown: true }
+    { allowUnknown: false }
   )
 )
+
+const sessionListParamsSchema = objectSchema(
+  {
+    cursor: optionalSchema(stringSchema({ minLength: 1, maxLength: 4096 })),
+    limit: optionalSchema(numberSchema({ integer: true, min: 1, max: 200 }))
+  },
+  { allowUnknown: false }
+)
+
+const sessionDetailListParamsSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    cursor: optionalSchema(stringSchema({ minLength: 1, maxLength: 4096 })),
+    limit: optionalSchema(numberSchema({ integer: true, min: 1, max: 120 }))
+  },
+  { allowUnknown: false }
+)
+
+const healthEventSchema = objectSchema(
+  {
+    id: boundedString,
+    sessionId: nullableSchema(boundedString),
+    level: enumSchema(['info', 'warn', 'error']),
+    code: boundedString,
+    message: stringSchema({ maxLength: 16_384 }),
+    permissionPane: nullableSchema(
+      enumSchema(['privacy', 'screen-recording', 'camera', 'microphone'])
+    ),
+    createdAt: timestamp
+  },
+  { allowUnknown: false }
+)
+
+const sessionLogEntrySchema = objectSchema(
+  {
+    id: boundedString,
+    sessionId: boundedString,
+    level: enumSchema(['info', 'warn', 'error']),
+    code: boundedString,
+    message: stringSchema({ maxLength: 16_384 }),
+    sourceId: nullableSchema(stringSchema({ maxLength: 16_384 })),
+    permissionPane: nullableSchema(
+      enumSchema(['privacy', 'screen-recording', 'camera', 'microphone'])
+    ),
+    createdAt: timestamp
+  },
+  { allowUnknown: false }
+)
+
+const aiArtifactSchema = objectSchema(
+  {
+    id: boundedString,
+    sessionId: boundedString,
+    kind: enumSchema([
+      'audio-extract',
+      'transcript',
+      'title-description',
+      'summary',
+      'chapters',
+      'highlights',
+      'social-posts',
+      'smart-zoom',
+      'noise-cleanup',
+      'silence-removal',
+      'health-assistant'
+    ]),
+    status: enumSchema(['ready', 'pending-consent', 'failed']),
+    content: boundedBackendPayloadSchema,
+    filePath: nullableSchema(boundedPath),
+    createdAt: timestamp
+  },
+  { allowUnknown: false }
+)
+
+const nextCursorSchema = optionalSchema(stringSchema({ minLength: 1, maxLength: 4096 }))
 
 const sessionDeletionOperationSchema: RuntimeSchema<SessionDeletionOperation> = objectSchema(
   {
@@ -761,14 +877,44 @@ const runtimeContracts = {
   'preview.screen.status': { params: undefinedSchema, result: previewScreenStatusSchema },
   'diagnostics.stats': { params: undefinedSchema, result: diagnosticStatsSchema },
   'sessions.list': {
-    params: unionSchema([
-      undefinedSchema,
-      objectSchema(
-        { limit: optionalSchema(numberSchema({ integer: true, min: 1, max: 1000 })) },
-        { allowUnknown: false }
-      )
-    ]),
-    result: arraySchema(sessionSummarySchema, { maxLength: 1000 })
+    params: sessionListParamsSchema,
+    result: objectSchema(
+      {
+        items: arraySchema(sessionSummarySchema, { maxLength: 200 }),
+        nextCursor: nextCursorSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  'sessions.healthEvents.list': {
+    params: sessionDetailListParamsSchema,
+    result: objectSchema(
+      {
+        events: arraySchema(healthEventSchema, { maxLength: 120 }),
+        nextCursor: nextCursorSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  'sessions.logs.list': {
+    params: sessionDetailListParamsSchema,
+    result: objectSchema(
+      {
+        entries: arraySchema(sessionLogEntrySchema, { maxLength: 120 }),
+        nextCursor: nextCursorSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  'sessions.aiArtifacts.list': {
+    params: sessionDetailListParamsSchema,
+    result: objectSchema(
+      {
+        artifacts: arraySchema(aiArtifactSchema, { maxLength: 120 }),
+        nextCursor: nextCursorSchema
+      },
+      { allowUnknown: false }
+    )
   },
   'sessions.storage': {
     params: undefinedSchema,

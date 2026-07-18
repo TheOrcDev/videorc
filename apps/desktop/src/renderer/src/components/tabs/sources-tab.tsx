@@ -409,10 +409,7 @@ export function SourcesTab(): ReactElement {
         />
         {/* See-before-you-pick: live waveform of the selected mic (shared with
             the Quick Settings popover). */}
-        <MicPickerPreview
-          deviceName={selectedMicrophone?.name}
-          permissionStatus={mediaAccess?.microphone}
-        />
+        <MicPickerPreview deviceName={selectedMicrophone?.name} />
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           {captureConfig.audio.microphoneMuted ? (
             <SpeakerSlash className="size-4" weight="duotone" />

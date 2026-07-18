@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   createMicStreamController,
@@ -104,14 +104,35 @@ describe('createMicStreamController', () => {
         })
     })
     const pending = racing.open(undefined)
-    racing.close()
     // Let open() progress past device enumeration to the getUserMedia call.
     await Promise.resolve()
+    racing.close()
     resolveSecond?.(second.stream)
     await expect(pending).resolves.toBeNull()
     expect(second.stopped).toEqual([0, 1])
 
     // A closed controller refuses further opens.
     await expect(racing.open(undefined)).resolves.toBeNull()
+  })
+
+  it('does not request a stream after close wins a deferred device enumeration', async () => {
+    let resolveDevices:
+      | ((devices: Array<{ kind: string; deviceId: string; label: string }>) => void)
+      | undefined
+    const getUserMedia = vi.fn(async () => fakeStream().stream)
+    const controller = createMicStreamController({
+      enumerateDevices: () =>
+        new Promise((resolve) => {
+          resolveDevices = resolve
+        }),
+      getUserMedia
+    })
+
+    const pending = controller.open('Studio microphone')
+    controller.close()
+    resolveDevices?.([{ kind: 'audioinput', deviceId: 'mic-1', label: 'Studio microphone' }])
+
+    await expect(pending).resolves.toBeNull()
+    expect(getUserMedia).not.toHaveBeenCalled()
   })
 })

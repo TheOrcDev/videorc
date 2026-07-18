@@ -50,7 +50,14 @@ import {
   ownedProcessLedgerPath,
   ownedProcessStartupLockPath
 } from './backend-owned-processes'
-import { stopBackendProcess } from './backend-process-shutdown'
+import { stopBackendProcess, type BackendShutdownResult } from './backend-process-shutdown'
+import {
+  BackendRuntimeOwner,
+  claimDurableBackendPid,
+  requestBackendRuntimeTermination,
+  settleBackendRuntimeExit,
+  type OwnedBackendRuntime
+} from './backend-runtime-owner'
 import {
   acquireBackendInterruptionLease,
   type BackendInterruptionLease
@@ -94,6 +101,12 @@ import { NativePreviewRunAuthority } from './native-preview-run-authority'
 import { loadNativePreviewRealSurfaceDriver } from './native-preview-real-surface-loader'
 import { compositorSceneConflictsWithCommitted } from '../shared/native-preview-scene-authority'
 import { applyCommentsSnapshotDelta } from '../shared/comments-snapshot-delta'
+import {
+  CommentsHistoryCache,
+  CommentsViewSelection,
+  prepareAndSelectCommentsView,
+  type HistoryCommentsView
+} from './comments-history-cache'
 import { compositorStatusFromFrameReady } from '../shared/compositor-frame-ready'
 import {
   validateWindowsLiveAudioSmokeRequest,
@@ -293,6 +306,7 @@ import type {
   CompositorStatus,
   LayoutSettings,
   LiveChatSnapshot,
+  LiveChatMessage,
   NativePreviewHostCommand,
   NotesDocument,
   NotesFontScale,
@@ -315,6 +329,7 @@ import type {
   StreamScreen,
   SystemPermissionPane,
   RuntimeInfo,
+  SessionCommentsPage,
   VideorcAccountSnapshot,
   ViewerSample
 } from '../shared/backend'
@@ -336,10 +351,9 @@ let commentsWindowClosing = false
 let commentsWindowContentProtected = false
 let latestCommentHighlightState: CommentHighlightState = { generation: 0, phase: 'idle' }
 let latestLiveCommentsSnapshot: LiveChatSnapshot | null = null
-const commentsHistorySnapshots = new Map<string, LiveChatSnapshot>()
-let commentsViewMode: CommentsViewMode = { kind: 'live' }
+const commentsHistoryCache = new CommentsHistoryCache()
+const commentsViewSelection = new CommentsViewSelection({ kind: 'live' })
 let latestLiveCommentsSendOperation: CommentsSendOperation | undefined
-const commentsHistorySendOperations = new Map<string, CommentsSendOperation>()
 const commentsCommandBroker = new CommentsCommandBroker()
 type CommentsSmokeCommandFixture =
   | {
@@ -420,7 +434,8 @@ let backendProcess: ChildProcessWithoutNullStreams | null = null
 let backendQuitComplete = false
 let backendQuitInProgress = false
 let backendRestartInProgress: Promise<void> | null = null
-let backendOwnedProcessPids = new Set<number>()
+const backendRuntimeOwner = new BackendRuntimeOwner<ChildProcessWithoutNullStreams>()
+type BackendRuntime = OwnedBackendRuntime<ChildProcessWithoutNullStreams>
 let backendPermissionTargetPath: string | null = null
 let ownedProcessRegistry: OwnedProcessRegistry | null = null
 let ownedProcessRegistryLockDepth = 0
@@ -439,7 +454,6 @@ let nativePreviewCommittedCompositorRunId: string | undefined
 const nativePreviewCompositorRunAuthority = new NativePreviewRunAuthority()
 let nativePreviewPendingSceneRevision: number | null = null
 let nativePreviewSurfaceSceneRevisionGuardUntilMs = 0
-let stdoutBuffer = ''
 let appIsQuitting = false
 let appIcon: NativeImage | null | undefined
 const backendLogs: BackendLogEvent[] = []
@@ -2279,9 +2293,10 @@ function commentsWindowState(message?: string): CommentsWindowState {
 }
 
 function currentCommentsView(): CommentsViewSnapshot | null {
-  if (commentsViewMode.kind === 'live') {
+  const mode = commentsViewSelection.current()
+  if (mode.kind === 'live') {
     return {
-      mode: commentsViewMode,
+      mode,
       snapshot: latestLiveCommentsSnapshot ?? {
         providers: [],
         messages: [],
@@ -2291,20 +2306,14 @@ function currentCommentsView(): CommentsViewSnapshot | null {
       latestSendOperation: latestLiveCommentsSendOperation
     }
   }
-  const snapshot = commentsHistorySnapshots.get(commentsViewMode.sessionId) ?? null
-  return snapshot
-    ? {
-        mode: commentsViewMode,
-        snapshot,
-        latestSendOperation: commentsHistorySendOperations.get(commentsViewMode.sessionId)
-      }
-    : null
+  const cached = commentsHistoryCache.get(mode.sessionId)
+  return cached ? { ...cached, mode } : null
 }
 
 function assertLiveCommentsCommandSession(sessionId: unknown): asserts sessionId is string {
   if (
     !liveCommentsCommandAllowed({
-      mode: commentsViewMode,
+      mode: commentsViewSelection.current(),
       liveSessionId: latestLiveCommentsSnapshot?.sessionId,
       commandSessionId: typeof sessionId === 'string' ? sessionId : undefined
     })
@@ -2334,18 +2343,18 @@ function cacheCommentsView(view: CommentsViewSnapshot): void {
         : undefined
     }
   } else {
-    commentsHistorySnapshots.set(view.mode.sessionId, view.snapshot)
-    if (view.latestSendOperation) {
-      commentsHistorySendOperations.set(
-        view.mode.sessionId,
-        reconcileCommentsSendOperation(
-          commentsHistorySendOperations.get(view.mode.sessionId),
-          view.latestSendOperation
-        )
-      )
-    } else {
-      commentsHistorySendOperations.delete(view.mode.sessionId)
-    }
+    const existing = commentsHistoryCache.peek(view.mode.sessionId)
+    const selectedMode = commentsViewSelection.current()
+    commentsHistoryCache.put(
+      {
+        ...view,
+        mode: view.mode,
+        latestSendOperation: view.latestSendOperation
+          ? reconcileCommentsSendOperation(existing?.latestSendOperation, view.latestSendOperation)
+          : undefined
+      },
+      selectedMode.kind === 'history' ? selectedMode.sessionId : undefined
+    )
   }
 }
 
@@ -2357,14 +2366,58 @@ function cacheCommentsSendResult(operation: CommentsSendOperation): 'live' | 'hi
     )
     return 'live'
   }
-  commentsHistorySendOperations.set(
-    operation.sessionId,
-    reconcileCommentsSendOperation(
-      commentsHistorySendOperations.get(operation.sessionId),
-      operation
+  const history = commentsHistoryCache.peek(operation.sessionId)
+  if (history) {
+    const selectedMode = commentsViewSelection.current()
+    commentsHistoryCache.put(
+      {
+        ...history,
+        latestSendOperation: reconcileCommentsSendOperation(history.latestSendOperation, operation)
+      },
+      selectedMode.kind === 'history' ? selectedMode.sessionId : undefined
     )
-  )
+  }
   return 'history'
+}
+
+async function loadCommentsHistoryView(mode: Extract<CommentsViewMode, { kind: 'history' }>) {
+  const maxMessages = 500
+  let messages: LiveChatMessage[] = []
+  let cursor: string | undefined
+  do {
+    const page = await requestBackendAdmin<SessionCommentsPage>('sessions.comments.list', {
+      sessionId: mode.sessionId,
+      cursor,
+      limit: Math.min(200, maxMessages - messages.length)
+    })
+    messages = [...page.messages, ...messages].slice(-maxMessages)
+    cursor = page.nextCursor
+  } while (cursor && messages.length < maxMessages)
+
+  const latestSendOperation = await requestBackendAdmin<CommentsSendOperation | null>(
+    'liveChat.sendOperations.latest',
+    { sessionId: mode.sessionId }
+  ).catch(() => null)
+  return {
+    mode,
+    snapshot: {
+      sessionId: mode.sessionId,
+      providers: [],
+      messages,
+      unreadCount: messages.length,
+      updatedAt: new Date().toISOString()
+    },
+    latestSendOperation: latestSendOperation ?? undefined
+  } satisfies HistoryCommentsView
+}
+
+async function selectCommentsViewMode(mode: CommentsViewMode): Promise<boolean> {
+  return prepareAndSelectCommentsView(
+    commentsViewSelection,
+    commentsHistoryCache,
+    mode,
+    loadCommentsHistoryView
+  )
 }
 
 function emitCommentsView(): void {
@@ -6782,11 +6835,16 @@ function withProcessRegistryLock<T>(operation: () => T): T {
   }
 }
 
+function persistOwnedProcess(pid: number, label: string): void {
+  withProcessRegistryLock(() => processRegistry().record(pid, label))
+}
+
 function recordOwnedProcess(pid: number, label: string): void {
   try {
-    withProcessRegistryLock(() => processRegistry().record(pid, label))
+    persistOwnedProcess(pid, label)
   } catch (error) {
-    logBackend('warn', `Could not record ${label} process ${pid}: ${errorMessage(error)}`)
+    logBackend('error', `Could not record ${label} process ${pid}: ${errorMessage(error)}`)
+    throw error
   }
 }
 
@@ -6822,26 +6880,61 @@ function shouldDisableBackendReap(): boolean {
   )
 }
 
-function recordBackendOwnedProcess(pid: unknown, label: string): void {
+function recordBackendOwnedProcess(runtime: BackendRuntime, pid: unknown, label: string): void {
   if (!validOwnedProcessPid(pid)) {
     return
   }
-  backendOwnedProcessPids.add(pid)
-  recordOwnedProcess(pid, label)
+  claimDurableBackendPid(backendRuntimeOwner, runtime, pid, {
+    persist: () => persistOwnedProcess(pid, label),
+    terminate: () => terminateBackendRuntimeAfterOwnershipFailure(runtime, pid)
+  })
 }
 
-function removeBackendOwnedProcesses(): void {
-  for (const pid of backendOwnedProcessPids) {
-    removeOwnedProcess(pid)
+function terminateBackendRuntimeAfterOwnershipFailure(runtime: BackendRuntime, pid: number): void {
+  if (backendRuntimeOwner.isCurrent(runtime)) {
+    clearBackendConnectionState()
+    sendToWindows('backend:lifecycle', { state: 'lost' })
   }
-  backendOwnedProcessPids.clear()
+  requestBackendRuntimeTermination(runtime, pid, {
+    runtimePid: runtime.process.pid,
+    signalExactPid: (exactPid) => {
+      try {
+        process.kill(exactPid, 'SIGKILL')
+        return true
+      } catch (error) {
+        if (processErrorCode(error) === 'ESRCH') {
+          return true
+        }
+        throw error
+      }
+    },
+    signalRuntimeProcess: (child) => child.kill('SIGKILL')
+  })
 }
 
-function recordBackendRuntimeProcess(connection: BackendConnection): void {
+function processErrorCode(error: unknown): string | undefined {
+  return error && typeof error === 'object' && 'code' in error
+    ? (error as { code?: string }).code
+    : undefined
+}
+
+function recordedBackendProcessMayStillBeOwned(pid: number): boolean {
+  try {
+    return withProcessRegistryLock(() => processRegistry().probeRecordedOwnership(pid) !== 'gone')
+  } catch (error) {
+    logBackend(
+      'warn',
+      `Could not reconcile durable identity for backend pid ${pid}; retaining ownership: ${errorMessage(error)}`
+    )
+    return true
+  }
+}
+
+function recordBackendRuntimeProcess(runtime: BackendRuntime, connection: BackendConnection): void {
   if (!validOwnedProcessPid(connection.pid)) {
     return
   }
-  recordBackendOwnedProcess(connection.pid, 'videorc-backend')
+  recordBackendOwnedProcess(runtime, connection.pid, 'videorc-backend')
   const parent = validProcessPid(connection.parentPid) ? ` parentPid=${connection.parentPid}` : ''
   logBackend('info', `Backend runtime pid=${connection.pid}${parent}`)
 }
@@ -6903,7 +6996,7 @@ function resolvePackagedFfmpegBinDir(): string | null {
 // Single-backend policy: reap only children a previous Videorc launch recorded.
 // Never scan command lines; substring process matching can kill cargo builds,
 // editors, or unrelated processes.
-function reapStaleBackendProcesses(): void {
+function reapStaleBackendProcesses(): boolean {
   let stale: ReturnType<OwnedProcessRegistry['reapStale']>
   try {
     stale = withProcessRegistryLock(() =>
@@ -6913,18 +7006,68 @@ function reapStaleBackendProcesses(): void {
     )
   } catch (error) {
     logBackend('warn', `Could not reap stale owned backend processes: ${errorMessage(error)}`)
-    return
+    return false
   }
-  if (stale.length > 0) {
+  if (stale.attempted.length > 0) {
     logBackend(
       'warn',
-      `Reaping ${stale.length} stale owned backend process(es): ${stale.map((record) => `${record.label}:${record.pid}`).join(', ')}`
+      `Confirmed ${stale.confirmedDead.length} stale owned process record(s) dead after reaping ${stale.attempted.length} live pid(s): ${stale.attempted.map((record) => `${record.label}:${record.pid}`).join(', ')}`
     )
   }
+  if (stale.identityMismatches.length > 0) {
+    logBackend(
+      'warn',
+      `Pruned ${stale.identityMismatches.length} stale owned process record(s) whose pid now belongs to a different process without signaling the current occupant: ${stale.identityMismatches.map((record) => `${record.label}:${record.pid}`).join(', ')}`
+    )
+  }
+  if (stale.unconfirmed.length > 0) {
+    logBackend(
+      'error',
+      `Refusing backend startup because owned pid(s) ${stale.unconfirmed.map((record) => record.pid).join(', ')} remain live or unprobeable.`
+    )
+    sendToWindows('backend:lifecycle', { state: 'lost' })
+    return false
+  }
+  return true
+}
+
+function reconcileUnconfirmedBackendRuntime(): boolean {
+  const runtime = backendRuntimeOwner.current()
+  if (!runtime || runtime.state !== 'shutdown-unconfirmed') {
+    return runtime === null
+  }
+
+  const settlement = settleBackendRuntimeExit(
+    backendRuntimeOwner,
+    runtime,
+    undefined,
+    recordedBackendProcessMayStillBeOwned
+  )
+  for (const pid of settlement.confirmedDead) {
+    removeOwnedProcess(pid)
+  }
+  if (!settlement.completed) {
+    logBackend(
+      'error',
+      `Refusing backend startup because generation ${runtime.generation} still owns live or unprobeable pid(s) ${settlement.stillLive.join(', ')}.`
+    )
+    sendToWindows('backend:lifecycle', { state: 'lost' })
+    return false
+  }
+
+  if (backendProcess === runtime.process) {
+    backendProcess = null
+  }
+  clearBackendConnectionState()
+  logBackend('info', `Backend generation ${runtime.generation} death is now exactly confirmed.`)
+  return true
 }
 
 function startBackend(): void {
-  if (backendProcess) {
+  if (backendRuntimeOwner.current()?.state === 'shutdown-unconfirmed') {
+    reconcileUnconfirmedBackendRuntime()
+  }
+  if (backendProcess || backendRuntimeOwner.current()) {
     return
   }
 
@@ -6987,13 +7130,67 @@ function cancelBackendRestart(): void {
   }
 }
 
-function startBackendWithRegistryLock(): void {
-  if (backendProcess) {
+function clearBackendConnectionState(): void {
+  backendConnection = null
+  backendAdminConnection = null
+  backendAuthorityReady = Promise.resolve()
+  mainResourceCapabilities.clear()
+  disconnectBackendEventSocket()
+}
+
+function finalizeBackendRuntimeExit(
+  runtime: BackendRuntime,
+  code: number | null,
+  signal: NodeJS.Signals | null
+): void {
+  const settlement = settleBackendRuntimeExit(
+    backendRuntimeOwner,
+    runtime,
+    validOwnedProcessPid(runtime.process.pid) ? runtime.process.pid : undefined,
+    recordedBackendProcessMayStillBeOwned
+  )
+  for (const pid of settlement.confirmedDead) {
+    removeOwnedProcess(pid)
+  }
+  if (settlement.stillLive.length > 0) {
+    logBackend(
+      settlement.completed ? 'warn' : 'error',
+      `Backend generation ${runtime.generation} exited while owned pid(s) ${settlement.stillLive.join(', ')} remain live; retaining exact ownership${settlement.completed ? ' ledger evidence for reaping' : ' and refusing replacement startup'}.`
+    )
+  }
+  if (!settlement.completed) {
+    if (backendProcess === runtime.process) {
+      backendProcess = null
+    }
+    clearBackendConnectionState()
+    sendToWindows('backend:lifecycle', { state: 'lost' })
     return
   }
-  backendOwnedProcessPids = new Set()
+  if (!settlement.wasCurrent) {
+    return
+  }
 
-  reapStaleBackendProcesses()
+  logBackend(
+    'warn',
+    `Backend generation ${runtime.generation} exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`
+  )
+  if (backendProcess === runtime.process) {
+    backendProcess = null
+  }
+  clearBackendConnectionState()
+  if (!settlement.wasIntentional) {
+    scheduleBackendRestart(code, signal)
+  }
+}
+
+function startBackendWithRegistryLock(): void {
+  if (backendProcess || backendRuntimeOwner.current()) {
+    return
+  }
+
+  if (!reapStaleBackendProcesses()) {
+    return
+  }
 
   const root = workspaceRoot()
   const cargoBinDir = join(homedir(), '.cargo', 'bin')
@@ -7010,7 +7207,7 @@ function startBackendWithRegistryLock(): void {
     logBackend('info', `Using bundled FFmpeg from ${ffmpegBinDir}`)
   }
   backendLastStartAt = Date.now()
-  backendProcess = spawn(command, args, {
+  const child = spawn(command, args, {
     cwd: root,
     env: {
       ...process.env,
@@ -7035,34 +7232,30 @@ function startBackendWithRegistryLock(): void {
       RUST_LOG: process.env.RUST_LOG ?? 'videorc_backend=info'
     }
   })
-  const backendPid = backendProcess.pid
-  recordBackendOwnedProcess(
-    backendPid,
-    app.isPackaged ? 'videorc-backend' : 'cargo-run-videorc-backend'
-  )
-
-  backendProcess.stdout.on('data', (chunk: Buffer) => handleBackendStdout(chunk.toString()))
-  backendProcess.stderr.on('data', (chunk: Buffer) => {
+  backendProcess = child
+  const runtime = backendRuntimeOwner.start(child)
+  let runtimeStdoutBuffer = ''
+  child.stdout.on('data', (chunk: Buffer) => {
+    runtimeStdoutBuffer = handleBackendStdout(chunk.toString(), runtime, runtimeStdoutBuffer)
+  })
+  child.stderr.on('data', (chunk: Buffer) => {
     for (const line of chunk.toString().split(/\r?\n/)) {
       if (line.trim()) {
         logBackend(inferBackendLogLevel(line), line.trim())
       }
     }
   })
-  backendProcess.on('error', (error) => {
+  child.on('error', (error) => {
     logBackend('error', `Backend process error: ${error.message}`)
   })
-  backendProcess.on('close', (code, signal) => {
-    removeBackendOwnedProcesses()
-    logBackend('warn', `Backend exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`)
-    backendProcess = null
-    backendConnection = null
-    backendAdminConnection = null
-    backendAuthorityReady = Promise.resolve()
-    mainResourceCapabilities.clear()
-    disconnectBackendEventSocket()
-    scheduleBackendRestart(code, signal)
+  child.on('close', (code, signal) => {
+    finalizeBackendRuntimeExit(runtime, code, signal)
   })
+  recordBackendOwnedProcess(
+    runtime,
+    child.pid,
+    app.isPackaged ? 'videorc-backend' : 'cargo-run-videorc-backend'
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -7326,8 +7519,10 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.admin.resolve_screen_path',
   'resource.admin.resolve_background_path',
   'preview.surface.take_native_host_commands',
+  'sessions.comments.list',
   'sessions.delete.resolve',
-  'sessions.delete.complete'
+  'sessions.delete.complete',
+  'liveChat.sendOperations.latest'
 ])
 
 async function requestBackendAdmin<T>(
@@ -7545,10 +7740,13 @@ function errorMessageText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function handleBackendStdout(text: string): void {
-  stdoutBuffer += text
-  const lines = stdoutBuffer.split(/\r?\n/)
-  stdoutBuffer = lines.pop() ?? ''
+function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText: string): string {
+  const lines = `${bufferedText}${text}`.split(/\r?\n/)
+  const remaining = lines.pop() ?? ''
+
+  if (!backendRuntimeOwner.isCurrent(runtime) || runtime.state !== 'active') {
+    return remaining
+  }
 
   for (const line of lines) {
     const trimmed = line.trim()
@@ -7562,7 +7760,7 @@ function handleBackendStdout(text: string): void {
         backendConnection = bootstrap.renderer
         backendAdminConnection = bootstrap.admin
         logBackend('info', `Backend ready on ${backendConnection.host}:${backendConnection.port}`)
-        recordBackendRuntimeProcess(backendConnection)
+        recordBackendRuntimeProcess(runtime, backendConnection)
         if (process.env.VIDEORC_SMOKE_PRINT_BACKEND_READY === '1') {
           // The admin credential is private bootstrap authority. Even debug
           // smoke output receives only the renderer-scoped connection.
@@ -7579,6 +7777,8 @@ function handleBackendStdout(text: string): void {
         })
         void backendAuthorityReady.then(() => {
           if (
+            backendRuntimeOwner.isCurrent(runtime) &&
+            runtime.state === 'active' &&
             backendConnection === rendererConnection &&
             backendAdminConnection === adminConnection
           ) {
@@ -7595,6 +7795,8 @@ function handleBackendStdout(text: string): void {
 
     logBackend('info', trimmed)
   }
+
+  return remaining
 }
 
 function logBackend(level: BackendLogEvent['level'], message: string): void {
@@ -8383,7 +8585,7 @@ async function runSmokePreviewMotionCommand(
       snapshot,
       latestSendOperation: params.latestSendOperation as CommentsSendOperation | undefined
     })
-    commentsViewMode = mode
+    commentsViewSelection.set(mode)
     emitCommentsView()
     return currentCommentsView()
   }
@@ -8393,8 +8595,9 @@ async function runSmokePreviewMotionCommand(
     if (!mode || (mode.kind !== 'live' && mode.kind !== 'history')) {
       throw new Error('Comments view mode must be live or history.')
     }
-    commentsViewMode = mode
-    emitCommentsView()
+    if (await selectCommentsViewMode(mode)) {
+      emitCommentsView()
+    }
     return currentCommentsView()
   }
 
@@ -8443,7 +8646,7 @@ async function runSmokePreviewMotionCommand(
       routedTo,
       currentView: currentCommentsView(),
       liveOperation: latestLiveCommentsSendOperation,
-      historyOperation: commentsHistorySendOperations.get(operation.sessionId)
+      historyOperation: commentsHistoryCache.peek(operation.sessionId)?.latestSendOperation
     }
   }
 
@@ -9735,28 +9938,31 @@ function inferBackendLogLevel(line: string): BackendLogEvent['level'] {
   return 'info'
 }
 
-async function stopBackend(): Promise<void> {
+async function stopBackend(): Promise<BackendShutdownResult> {
   destroyNativePreviewSurface()
   smokePreviewMotionServer?.close()
   smokePreviewMotionServer = null
   const child = backendProcess
-  if (!child) {
-    return
+  const runtime = backendRuntimeOwner.current()
+  if (!child || !runtime || runtime.process !== child) {
+    return 'skipped'
   }
 
+  backendRuntimeOwner.beginShutdown(runtime)
   const result = await stopBackendProcess(child)
   if (result === 'timed-out') {
-    logBackend('warn', 'Backend shutdown timed out; continuing app quit after SIGKILL.')
+    backendRuntimeOwner.markShutdownUnconfirmed(runtime)
+    clearBackendConnectionState()
+    logBackend(
+      'error',
+      `Backend generation ${runtime.generation} shutdown timed out after SIGKILL; retaining exact ownership and refusing replacement startup.`
+    )
+    sendToWindows('backend:lifecycle', { state: 'lost' })
+    return result
   }
-  if (backendProcess === child) {
-    removeBackendOwnedProcesses()
-    backendProcess = null
-    backendConnection = null
-    backendAdminConnection = null
-    backendAuthorityReady = Promise.resolve()
-    mainResourceCapabilities.clear()
-    disconnectBackendEventSocket()
-  }
+
+  finalizeBackendRuntimeExit(runtime, child.exitCode, child.signalCode)
+  return result
 }
 
 async function openSystemPermissions(pane: SystemPermissionPane = 'privacy'): Promise<void> {
@@ -9827,7 +10033,10 @@ async function restartBackend(reason: string): Promise<void> {
 
   backendRestartInProgress = (async () => {
     logBackend('info', reason)
-    await stopBackend()
+    const result = await stopBackend()
+    if (result === 'timed-out') {
+      throw new Error('Backend restart was refused because shutdown could not be confirmed.')
+    }
     if (!appIsQuitting) {
       startBackend()
     }
@@ -10028,6 +10237,14 @@ async function trashSessionDeletion(operationId: unknown): Promise<{
     operationId,
     failedPaths
   })
+  if (completion.deleted) {
+    commentsHistoryCache.delete(operation.sessionId)
+    const selectedMode = commentsViewSelection.current()
+    if (selectedMode.kind === 'history' && selectedMode.sessionId === operation.sessionId) {
+      commentsViewSelection.set({ kind: 'live' })
+      emitCommentsView()
+    }
+  }
   return { deleted: completion.deleted, failedCount: failedPaths.length }
 }
 
@@ -10818,10 +11035,11 @@ app.whenReady().then(async () => {
       return currentCommentsView()
     }
     cacheCommentsView(view)
-    if (commentsViewMode.kind === view.mode.kind) {
+    const selectedMode = commentsViewSelection.current()
+    if (selectedMode.kind === view.mode.kind) {
       if (
         view.mode.kind === 'live' ||
-        (commentsViewMode.kind === 'history' && commentsViewMode.sessionId === view.mode.sessionId)
+        (selectedMode.kind === 'history' && selectedMode.sessionId === view.mode.sessionId)
       ) {
         emitCommentsView()
       }
@@ -10829,7 +11047,7 @@ app.whenReady().then(async () => {
     return view
   })
   secureIpcHandle('comments-window:get-snapshot', () => currentCommentsView())
-  secureIpcHandle('comments-window:set-view-mode', (event, value: unknown) => {
+  secureIpcHandle('comments-window:set-view-mode', async (event, value: unknown) => {
     const mode = parseCommentsViewMode(value)
     if (!mode) {
       throw new Error('Comments view mode must be live or a complete history selection.')
@@ -10844,14 +11062,9 @@ app.whenReady().then(async () => {
     ) {
       throw new Error('This window cannot change the Comments view mode.')
     }
-    if (
-      mode.kind === 'history' &&
-      commentsHistorySnapshots.get(mode.sessionId)?.sessionId !== mode.sessionId
-    ) {
-      throw new Error('The requested Comments history snapshot is unavailable.')
+    if (await selectCommentsViewMode(mode)) {
+      emitCommentsView()
     }
-    commentsViewMode = mode
-    emitCommentsView()
     return currentCommentsView()
   })
   secureIpcHandle('comments-window:push-delta', (event, delta: CommentsSnapshotDelta) => {
@@ -10874,7 +11087,7 @@ app.whenReady().then(async () => {
     }
     latestLiveCommentsSnapshot = next
     if (
-      commentsViewMode.kind === 'live' &&
+      commentsViewSelection.current().kind === 'live' &&
       commentsWindow &&
       !commentsWindow.webContents.isDestroyed()
     ) {

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
 import {
@@ -10,6 +10,7 @@ import {
   formatCensus,
   ownedProcessLedgerPaths,
   pruneDeadOwnedProcessRecords,
+  verifyCleanProcessStateBeforeRecovery,
   waitForCleanProcessState,
   waitForNoLiveProcessState
 } from './lib/process-census.mjs'
@@ -23,6 +24,7 @@ const ledgerPaths = ownedProcessLedgerPaths({
   userDataDir,
   workspaceRoot: repoRoot
 })
+const injectStaleLedger = process.env.VIDEORC_SMOKE_INJECT_STALE_LEDGER === '1'
 
 let launched
 
@@ -68,22 +70,48 @@ try {
   })
   console.log(formatCensus(stopped))
 
-  const pruned = await pruneDeadOwnedProcessRecords({ ledgerPaths })
-  for (const entry of pruned) {
-    console.log(
-      `pruned ${entry.removed.length} dead owned process record(s) from ${entry.ledgerPath}`
+  if (injectStaleLedger) {
+    const ledgerPath = ledgerPaths[0]
+    await mkdir(dirname(ledgerPath), { recursive: true })
+    await writeFile(
+      ledgerPath,
+      `${JSON.stringify(
+        [
+          {
+            pid: 2_147_483_647,
+            label: 'injected-dead-process-record',
+            startedAt: '2000-01-01T00:00:00.000Z'
+          }
+        ],
+        null,
+        2
+      )}\n`
     )
+    console.log(`Injected an isolated stale ledger record at ${ledgerPath}`)
   }
 
-  const clean = await waitForCleanProcessState({
-    ledgerPaths,
-    pgid: launched?.process?.pid,
-    timeoutMs: 1000
-  })
-  console.log('\n=== clean process census ===')
-  console.log(formatCensus(clean))
-
-  await rm(stateRoot, { recursive: true, force: true })
+  try {
+    const clean = await verifyCleanProcessStateBeforeRecovery({
+      verify: () =>
+        waitForCleanProcessState({
+          ledgerPaths,
+          pgid: launched?.process?.pid,
+          timeoutMs: 1000
+        }),
+      recover: async () => {
+        const pruned = await pruneDeadOwnedProcessRecords({ ledgerPaths })
+        for (const entry of pruned) {
+          console.log(
+            `recovery pruned ${entry.removed.length} dead owned process record(s) from ${entry.ledgerPath}`
+          )
+        }
+      }
+    })
+    console.log('\n=== clean process census ===')
+    console.log(formatCensus(clean))
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true })
+  }
 }
 
 console.log('Process lifecycle smoke OK - owned process records and process group cleaned up.')

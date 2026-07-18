@@ -5515,18 +5515,75 @@ async fn handle_text_message_with_role(
             }
         }
         "sessions.list" => {
-            // Library rewrite L1: the manager wants the whole library, not the
-            // dashboard's last-20 slice; the limit is caller-chosen, bounded.
-            let limit = command
-                .params
-                .get("limit")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(20)
-                .clamp(1, 500) as usize;
-            match state.database.list_sessions(limit) {
-                Ok(sessions) => ServerResponse::ok(command.id, sessions),
+            match serde_json::from_value::<protocol::SessionListParams>(command.params) {
+                Ok(params) => match state
+                    .database
+                    .list_session_items_page(params.cursor.as_deref(), params.limit)
+                {
+                    Ok(page) => ServerResponse::ok(command.id, page),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "sessions-list-failed", error.to_string())
+                    }
+                },
                 Err(error) => {
-                    ServerResponse::error(command.id, "sessions-list-failed", error.to_string())
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sessions.healthEvents.list" => {
+            match serde_json::from_value::<protocol::SessionDetailListParams>(command.params) {
+                Ok(params) => match state.database.list_health_events_page(
+                    &params.session_id,
+                    params.cursor.as_deref(),
+                    params.limit,
+                ) {
+                    Ok(page) => ServerResponse::ok(command.id, page),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "session-health-events-list-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sessions.logs.list" => {
+            match serde_json::from_value::<protocol::SessionDetailListParams>(command.params) {
+                Ok(params) => match state.database.list_session_logs_page(
+                    &params.session_id,
+                    params.cursor.as_deref(),
+                    params.limit,
+                ) {
+                    Ok(page) => ServerResponse::ok(command.id, page),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "session-logs-list-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sessions.aiArtifacts.list" => {
+            match serde_json::from_value::<protocol::SessionDetailListParams>(command.params) {
+                Ok(params) => match state.database.list_ai_artifacts_page(
+                    &params.session_id,
+                    params.cursor.as_deref(),
+                    params.limit,
+                ) {
+                    Ok(page) => ServerResponse::ok(command.id, page),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "session-ai-artifacts-list-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
         }
@@ -5859,6 +5916,25 @@ async fn handle_text_message_with_role(
                     Err(error) => ServerResponse::error(
                         command.id,
                         "live-chat-send-operations-list-failed",
+                        error.to_string(),
+                    ),
+                }
+            }
+        }
+        "liveChat.sendOperations.latest" => {
+            let session_id = command
+                .params
+                .get("sessionId")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            if session_id.is_empty() {
+                ServerResponse::error(command.id, "invalid-params", "sessionId is required.")
+            } else {
+                match state.database.latest_chat_send_operation(session_id) {
+                    Ok(operation) => ServerResponse::ok(command.id, operation),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "live-chat-send-operation-latest-failed",
                         error.to_string(),
                     ),
                 }

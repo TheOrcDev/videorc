@@ -14,7 +14,8 @@ import {
   parseWindowsProcessTable,
   pruneDeadOwnedProcessRecords,
   readOwnedProcessLedgers,
-  summarizeRows
+  summarizeRows,
+  verifyCleanProcessStateBeforeRecovery
 } from './process-census.mjs'
 
 test('ownedProcessLedgerPaths mirrors the desktop owned-process ledger locations', () => {
@@ -576,6 +577,53 @@ test('pruneDeadOwnedProcessRecords removes only records whose pids are gone', as
   assert.deepEqual(JSON.parse(files.get('/tmp/global.json')), [
     { pid: 111, label: 'videorc-backend', startedAt: '2026-06-20T10:00:00.000Z' }
   ])
+})
+
+test('verifyCleanProcessStateBeforeRecovery preserves the original failure before pruning', async () => {
+  const expected = new Error('ledger was not empty')
+  const calls = []
+
+  await assert.rejects(
+    verifyCleanProcessStateBeforeRecovery({
+      verify: async () => {
+        calls.push('verify')
+        throw expected
+      },
+      recover: async () => {
+        calls.push('recover')
+      }
+    }),
+    (error) => error === expected
+  )
+  assert.deepEqual(calls, ['verify', 'recover'])
+})
+
+test('verifyCleanProcessStateBeforeRecovery reports recovery failure without replacing verification failure', async () => {
+  const verificationFailure = new Error('ledger was not empty')
+  const verificationStack = verificationFailure.stack
+  const recoveryFailure = new Error('could not rewrite ledger')
+  const calls = []
+
+  await assert.rejects(
+    verifyCleanProcessStateBeforeRecovery({
+      verify: async () => {
+        calls.push('verify')
+        throw verificationFailure
+      },
+      recover: async () => {
+        calls.push('recover')
+        throw recoveryFailure
+      }
+    }),
+    (error) => {
+      assert.equal(error, verificationFailure)
+      assert.equal(error.message, 'ledger was not empty')
+      assert.equal(error.stack, verificationStack)
+      assert.equal(error.recoveryError, recoveryFailure)
+      return true
+    }
+  )
+  assert.deepEqual(calls, ['verify', 'recover'])
 })
 
 function completeResourceCheckpoint(rows) {

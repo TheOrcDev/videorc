@@ -20,6 +20,7 @@ import {
 } from '@/components/workspace-nav'
 import { WhatsNewDialog } from '@/components/whats-new-dialog'
 import { useStudioAudio, useStudioCore, useStudioShell } from '@/hooks/use-studio'
+import { StudioMicVisualProvider } from '@/hooks/use-studio-mic-visual'
 import { useWhatsNew } from '@/hooks/use-whats-new'
 import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from '@/lib/capture'
 import { displayKeyGlyph } from '@/lib/platform'
@@ -344,29 +345,31 @@ export function AppShell(): ReactElement {
                 active === 'library' ? 'flex min-h-0 flex-1 flex-col pb-4' : 'pb-8'
               )}
             >
-              <Suspense fallback={<WorkspaceTabFallback />}>
-                {active === 'studio' ? <StudioTab /> : null}
-                {active === 'sources' ? <SourcesTab /> : null}
-                {active === 'layouts' ? <LayoutTab /> : null}
-                {active === 'assets' ? <AssetsTab /> : null}
-                {active === 'live' ? <StreamingTab /> : null}
-                {active === 'captions' ? <CaptionsTab /> : null}
-                {active === 'recording' ? <RecordingTab /> : null}
-                {active === 'library' ? <LibraryTab onOpenInAi={openInAi} /> : null}
-                {active === 'ai' ? (
-                  <AiTab
-                    selectedSessionId={selectedSessionId}
-                    setSelectedSessionId={setSelectedSessionId}
-                  />
-                ) : null}
-                {active === 'diagnostics' ? <DiagnosticsTab /> : null}
-                {active === 'settings' ? (
-                  <SettingsTab
-                    onOpenPermissionsSetup={openPermissionsSetup}
-                    onShowWhatsNew={whatsNew.showLatest}
-                  />
-                ) : null}
-              </Suspense>
+              <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
+                <Suspense fallback={<WorkspaceTabFallback />}>
+                  {active === 'studio' ? <StudioTab /> : null}
+                  {active === 'sources' ? <SourcesTab /> : null}
+                  {active === 'layouts' ? <LayoutTab /> : null}
+                  {active === 'assets' ? <AssetsTab /> : null}
+                  {active === 'live' ? <StreamingTab /> : null}
+                  {active === 'captions' ? <CaptionsTab /> : null}
+                  {active === 'recording' ? <RecordingTab /> : null}
+                  {active === 'library' ? <LibraryTab onOpenInAi={openInAi} /> : null}
+                  {active === 'ai' ? (
+                    <AiTab
+                      selectedSessionId={selectedSessionId}
+                      setSelectedSessionId={setSelectedSessionId}
+                    />
+                  ) : null}
+                  {active === 'diagnostics' ? <DiagnosticsTab /> : null}
+                  {active === 'settings' ? (
+                    <SettingsTab
+                      onOpenPermissionsSetup={openPermissionsSetup}
+                      onShowWhatsNew={whatsNew.showLatest}
+                    />
+                  ) : null}
+                </Suspense>
+              </StudioMicVisualProvider>
             </div>
           </div>
           {/* Global footer action bar: the shell's real shortcuts, always

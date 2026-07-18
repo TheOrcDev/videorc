@@ -1,5 +1,5 @@
 import type { CloudAiReadinessState } from './ai-readiness'
-import type { AiArtifact, HealthEvent, SessionSummary } from './backend'
+import type { AiArtifact, HealthEvent, SessionWithDetails } from './backend'
 
 export interface AiWorkflowStatus {
   description: string
@@ -52,7 +52,7 @@ export function aiRunButtonAction(params: {
   return { kind: 'run', label: 'Generate publish pack' }
 }
 
-export function activeAiWorkflowStatus(session: SessionSummary): AiWorkflowStatus {
+export function activeAiWorkflowStatus(session: SessionWithDetails): AiWorkflowStatus {
   const latestEvent = latestAiEvent(session.healthEvents)
   if (latestEvent) {
     return statusForHealthEvent(latestEvent)
@@ -76,7 +76,7 @@ export function activeAiWorkflowStatus(session: SessionSummary): AiWorkflowStatu
       }
 }
 
-export function latestAiProblemArtifact(session: SessionSummary): AiArtifact | null {
+export function latestAiProblemArtifact(session: SessionWithDetails): AiArtifact | null {
   return (
     session.aiArtifacts
       .filter((artifact) => artifact.status === 'failed' || artifact.status === 'pending-consent')

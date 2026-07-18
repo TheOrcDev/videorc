@@ -33,7 +33,12 @@ import {
   aiRunButtonAction,
   latestAiProblemArtifact
 } from '@/lib/ai-workflow-status'
-import type { AiArtifact, AiCapabilities, ClipSuggestResult, SessionSummary } from '@/lib/backend'
+import type {
+  AiArtifact,
+  AiCapabilities,
+  ClipSuggestResult,
+  SessionWithDetails
+} from '@/lib/backend'
 import {
   artifactChapters,
   artifactField,
@@ -60,6 +65,10 @@ export function AiTab({
 }): ReactElement {
   const {
     sessions,
+    sessionDetails,
+    sessionDetailsLoading,
+    sessionDetailError,
+    loadSessionDetails,
     aiConsent,
     setAiConsent,
     runAiWorkflow,
@@ -88,7 +97,22 @@ export function AiTab({
     }
   }, [selectedSessionId, sessions, setSelectedSessionId])
 
-  const selected = sessions.find((session) => session.id === selectedSessionId) ?? null
+  const selectedSummary = sessions.find((session) => session.id === selectedSessionId) ?? null
+  const selectedSummaryId = selectedSummary?.id
+  const selectedSummaryAiArtifactCount = selectedSummary?.aiArtifactCount
+  const selectedDetails = selectedSessionId ? sessionDetails[selectedSessionId] : undefined
+  const selectedDetailsError =
+    selectedSessionId && sessionDetailError?.sessionId === selectedSessionId
+      ? sessionDetailError.message
+      : null
+  const selected: SessionWithDetails | null =
+    selectedSummary && selectedDetails ? { ...selectedSummary, ...selectedDetails } : null
+
+  useEffect(() => {
+    if (selectedSummaryId) {
+      void loadSessionDetails(selectedSummaryId)
+    }
+  }, [loadSessionDetails, selectedSummaryAiArtifactCount, selectedSummaryId])
 
   if (sessions.length === 0) {
     return (
@@ -133,11 +157,7 @@ export function AiTab({
               {sessions.map((session) => {
                 const selectedRow = session.id === selectedSessionId
                 const failed = session.status === 'failed'
-                const readyKinds = new Set(
-                  session.aiArtifacts
-                    .filter((artifact) => artifact.status === 'ready')
-                    .map((artifact) => artifact.kind)
-                )
+                const readyKinds = new Set(session.readyAiArtifactKinds ?? [])
                 return (
                   <button
                     key={session.id}
@@ -180,6 +200,11 @@ export function AiTab({
             </div>
 
             {selected ? <SessionActions session={selected} /> : null}
+            {selectedDetailsError ? (
+              <p className="text-xs text-destructive">{selectedDetailsError}</p>
+            ) : !selected && selectedSessionId && sessionDetailsLoading.has(selectedSessionId) ? (
+              <p className="text-xs text-muted-foreground">Loading session details…</p>
+            ) : null}
           </PanelSection>
 
           {/* D3: consent + quota as pipeline step 0 — one state-aware card with
@@ -247,6 +272,15 @@ export function AiTab({
               onRun={() => runAiWorkflow(selected.id)}
               onRunOutputs={(outputs, tone) => runAiWorkflow(selected.id, { outputs, tone })}
             />
+          ) : selectedSessionId && sessionDetailsLoading.has(selectedSessionId) ? (
+            <Empty className="border-0 py-6">
+              <EmptyTitle>Loading session details…</EmptyTitle>
+            </Empty>
+          ) : selectedDetailsError ? (
+            <Empty className="border-0 py-6">
+              <EmptyTitle>Session details unavailable</EmptyTitle>
+              <EmptyDescription>{selectedDetailsError}</EmptyDescription>
+            </Empty>
           ) : (
             <Empty className="border-0 py-6">
               <EmptyTitle>No session selected</EmptyTitle>
@@ -269,7 +303,7 @@ export function AiTab({
     )
   }
 
-  function SessionActions({ session }: { session: SessionSummary }): ReactElement {
+  function SessionActions({ session }: { session: SessionWithDetails }): ReactElement {
     const { signIn } = useVideorcAccount()
     const canRunAi = Boolean(
       session.status === 'completed' && (session.mp4Path || session.outputPath)
@@ -381,7 +415,7 @@ function ArtifactView({
   onRun,
   onRunOutputs
 }: {
-  session: SessionSummary
+  session: SessionWithDetails
   running: boolean
   cloudReady: boolean
   workflow: AiCapabilities['workflow'] | null
@@ -842,7 +876,7 @@ function SocialPostsSection({
   running,
   onGenerate
 }: {
-  session: SessionSummary
+  session: SessionWithDetails
   available: boolean
   running: boolean
   onGenerate: () => void
@@ -937,7 +971,7 @@ function ClipsSection({
   session,
   highlightItems
 }: {
-  session: SessionSummary
+  session: SessionWithDetails
   highlightItems: Array<Record<string, unknown>>
 }): ReactElement {
   const { suggestClips, exportClip } = useStudioCore()

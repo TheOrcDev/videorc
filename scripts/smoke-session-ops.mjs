@@ -61,7 +61,7 @@ try {
   assert.ok(existsSync(importedFile), 'import should copy the file into the output directory')
   assert.ok(existsSync(sourcePath), 'import must copy, never move, the source file')
 
-  let sessions = await rpc('sessions.list', { limit: 200 })
+  let sessions = (await rpc('sessions.list', { limit: 200 })).items
   let row = sessions.find((session) => session.id === importedId)
   assert.ok(row, 'imported session should appear in sessions.list')
   assert.equal(row.mode, 'imported')
@@ -76,7 +76,7 @@ try {
   })
   assert.equal(badRename.code, 'session-rename-invalid')
   await rpc('sessions.rename', { sessionId: importedId, title: 'Renamed by smoke' })
-  sessions = await rpc('sessions.list', { limit: 200 })
+  sessions = (await rpc('sessions.list', { limit: 200 })).items
   assert.equal(
     sessions.find((session) => session.id === importedId)?.title,
     'Renamed by smoke',
@@ -89,7 +89,7 @@ try {
   assert.ok(duplicateId && duplicateId !== importedId, 'duplicate should mint a new id')
   const copyFile = join(outputDir, 'Session Ops Smoke (copy).mp4')
   assert.ok(existsSync(copyFile), 'duplicate should write the " (copy)" file')
-  sessions = await rpc('sessions.list', { limit: 200 })
+  sessions = (await rpc('sessions.list', { limit: 200 })).items
   const copyRow = sessions.find((session) => session.id === duplicateId)
   assert.ok(copyRow, 'duplicated session should appear in sessions.list')
   assert.equal(copyRow.title, 'Renamed by smoke (copy)')
@@ -125,7 +125,7 @@ try {
     ),
     'pending delete should not expose private path authority to the renderer'
   )
-  sessions = await rpc('sessions.list', { limit: 200 })
+  sessions = (await rpc('sessions.list', { limit: 200 })).items
   assert.equal(sessions.length, 0, 'prepared sessions should be hidden immediately')
   assert.ok(!existsSync(importedFile), 'prepare should quarantine the recording file')
   assert.ok(!existsSync(copyFile), 'prepare should quarantine the duplicated file')

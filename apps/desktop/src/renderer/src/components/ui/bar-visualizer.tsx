@@ -13,141 +13,9 @@ import { cn } from '@/lib/utils'
  * - `useBarAnimator` no longer runs a rAF loop for single-frame sequences
  *   (the `speaking`/undefined states used by the mixer), keeping idle CPU at
  *   baseline; multi-frame state animations still animate.
- * The caller owns the MediaStream lifecycle (see use-mic-stream).
+ * Audio analysis is intentionally absent: StudioMicVisualProvider owns the
+ * sole analyser and callers pass normalized levels.
  */
-
-export interface AudioAnalyserOptions {
-  fftSize?: number
-  smoothingTimeConstant?: number
-  minDecibels?: number
-  maxDecibels?: number
-}
-
-function createAudioAnalyser(
-  mediaStream: MediaStream,
-  options: AudioAnalyserOptions = {}
-): { analyser: AnalyserNode; audioContext: AudioContext; cleanup: () => void } {
-  const audioContext = new AudioContext()
-  const source = audioContext.createMediaStreamSource(mediaStream)
-  const analyser = audioContext.createAnalyser()
-
-  if (options.fftSize) analyser.fftSize = options.fftSize
-  if (options.smoothingTimeConstant !== undefined) {
-    analyser.smoothingTimeConstant = options.smoothingTimeConstant
-  }
-  if (options.minDecibels !== undefined) analyser.minDecibels = options.minDecibels
-  if (options.maxDecibels !== undefined) analyser.maxDecibels = options.maxDecibels
-
-  source.connect(analyser)
-
-  const cleanup = (): void => {
-    source.disconnect()
-    void audioContext.close().catch(() => undefined)
-  }
-
-  return { analyser, audioContext, cleanup }
-}
-
-export interface MultiBandVolumeOptions {
-  bands?: number
-  loPass?: number
-  hiPass?: number
-  updateInterval?: number
-  analyserOptions?: AudioAnalyserOptions
-}
-
-const multibandDefaults: Required<Omit<MultiBandVolumeOptions, 'analyserOptions'>> & {
-  analyserOptions: AudioAnalyserOptions
-} = {
-  bands: 5,
-  loPass: 100,
-  hiPass: 600,
-  updateInterval: 32,
-  analyserOptions: { fftSize: 2048 }
-}
-
-function normalizeDb(value: number): number {
-  if (value === -Infinity) return 0
-  const minDb = -100
-  const maxDb = -10
-  const db = 1 - (Math.max(minDb, Math.min(maxDb, value)) * -1) / 100
-  return Math.sqrt(db)
-}
-
-/** Track volume across multiple frequency bands of a MediaStream (0-1 each). */
-export function useMultibandVolume(
-  mediaStream?: MediaStream | null,
-  options: MultiBandVolumeOptions = {}
-): number[] {
-  const { bands, loPass, hiPass, updateInterval, analyserOptions } = {
-    ...multibandDefaults,
-    ...options
-  }
-  const fftSize = analyserOptions.fftSize
-  const smoothing = analyserOptions.smoothingTimeConstant
-
-  const [frequencyBands, setFrequencyBands] = useState<number[]>(() => new Array(bands).fill(0))
-  const bandsRef = useRef<number[]>(new Array(bands).fill(0))
-
-  useEffect(() => {
-    if (!mediaStream) {
-      const emptyBands = new Array(bands).fill(0)
-      setFrequencyBands(emptyBands)
-      bandsRef.current = emptyBands
-      return
-    }
-
-    const { analyser, cleanup } = createAudioAnalyser(mediaStream, {
-      fftSize,
-      smoothingTimeConstant: smoothing
-    })
-
-    const dataArray = new Float32Array(analyser.frequencyBinCount)
-    const sliceStart = loPass
-    const sliceEnd = hiPass
-    const chunkSize = Math.ceil((sliceEnd - sliceStart) / bands)
-
-    let frameId = 0
-    let lastUpdate = 0
-
-    const updateVolume = (timestamp: number): void => {
-      if (timestamp - lastUpdate >= updateInterval) {
-        analyser.getFloatFrequencyData(dataArray)
-
-        const chunks = new Array<number>(bands)
-        for (let i = 0; i < bands; i++) {
-          let sum = 0
-          let count = 0
-          const startIdx = sliceStart + i * chunkSize
-          const endIdx = Math.min(sliceStart + (i + 1) * chunkSize, sliceEnd)
-          for (let j = startIdx; j < endIdx; j++) {
-            sum += normalizeDb(dataArray[j])
-            count++
-          }
-          chunks[i] = count > 0 ? sum / count : 0
-        }
-
-        // Only commit React state when a band moved visibly.
-        const changed = chunks.some((chunk, i) => Math.abs(chunk - bandsRef.current[i]) > 0.01)
-        if (changed) {
-          bandsRef.current = chunks
-          setFrequencyBands(chunks)
-        }
-        lastUpdate = timestamp
-      }
-      frameId = requestAnimationFrame(updateVolume)
-    }
-
-    frameId = requestAnimationFrame(updateVolume)
-
-    return () => {
-      cleanup()
-      cancelAnimationFrame(frameId)
-    }
-  }, [mediaStream, bands, loPass, hiPass, updateInterval, fftSize, smoothing])
-
-  return frequencyBands
-}
 
 export type AgentState = 'connecting' | 'initializing' | 'listening' | 'speaking' | 'thinking'
 
@@ -219,15 +87,8 @@ export interface BarVisualizerProps extends HTMLAttributes<HTMLDivElement> {
   state?: AgentState
   /** Number of bars to display. */
   barCount?: number
-  /** Audio source; the caller owns its lifecycle. */
-  mediaStream?: MediaStream | null
-  /**
-   * Explicit band levels (0-1). Overrides stream analysis — the honest way to
-   * render coarse fallback readings (backend 1 Hz level) without fake data.
-   */
+  /** Explicit normalized levels from a central analyser or honest fallback. */
   levels?: number[]
-  /** Band update interval in ms; slower saves renderer CPU. Default 48. */
-  updateInterval?: number
   /** Min/max bar height as a percentage of the container. */
   minHeight?: number
   maxHeight?: number
@@ -235,14 +96,29 @@ export interface BarVisualizerProps extends HTMLAttributes<HTMLDivElement> {
   centerAlign?: boolean
 }
 
+/** Paint levels without routing analyser frames through React reconciliation. */
+export function paintBarVisualizer(
+  element: HTMLDivElement | null,
+  levels: readonly number[],
+  options: { minHeight?: number; maxHeight?: number } = {}
+): void {
+  if (!element) return
+  const minHeight = options.minHeight ?? 20
+  const maxHeight = options.maxHeight ?? 100
+  for (let index = 0; index < element.children.length; index += 1) {
+    const bar = element.children.item(index)
+    if (!(bar instanceof HTMLElement)) continue
+    const level = levels[index] ?? 0
+    bar.style.height = `${Math.min(maxHeight, Math.max(minHeight, level * 100 + 5))}%`
+  }
+}
+
 const BarVisualizerComponent = forwardRef<HTMLDivElement, BarVisualizerProps>(
   (
     {
       state,
       barCount = 15,
-      mediaStream,
       levels,
-      updateInterval = 48,
       minHeight = 20,
       maxHeight = 100,
       centerAlign = false,
@@ -251,13 +127,10 @@ const BarVisualizerComponent = forwardRef<HTMLDivElement, BarVisualizerProps>(
     },
     ref
   ) => {
-    const streamBands = useMultibandVolume(levels ? null : mediaStream, {
-      bands: barCount,
-      loPass: 100,
-      hiPass: 200,
-      updateInterval
-    })
-    const volumeBands = levels ?? streamBands
+    const volumeBands = useMemo(
+      () => levels ?? new Array<number>(barCount).fill(0),
+      [barCount, levels]
+    )
 
     const highlightedIndices = useBarAnimator(
       state,

@@ -132,6 +132,56 @@ describe('native-preview-helper-process-driver', () => {
     expect(exited).toEqual([7654])
   })
 
+  it('kills the helper wrapper when durable process registration fails', async () => {
+    const child = new FakeChild()
+    const driver = createNativePreviewHelperProcessDriver({
+      command: 'helper',
+      spawnProcess: () => child as never,
+      onProcessStarted: () => {
+        throw new Error('exact process identity is unavailable')
+      }
+    })
+
+    await expect(
+      driver.applyHostCommands([{ kind: 'create', bounds: surfaceBounds() }])
+    ).rejects.toThrow('exact process identity is unavailable')
+    expect(child.killed).toBe(true)
+  })
+
+  it('kills the direct helper and wrapper when ready-pid registration fails', async () => {
+    const child = new FakeChild()
+    const terminated: number[] = []
+    const driver = createNativePreviewHelperProcessDriver({
+      command: 'cargo',
+      args: ['run', '--quiet', '-p', 'videorc-backend', '--bin', 'native_preview_host_helper'],
+      spawnProcess: () => child as never,
+      onProcessStarted: (pid) => {
+        if (pid === 8765) {
+          throw new Error('exact process identity is unavailable')
+        }
+      },
+      terminateProcess: (pid) => {
+        terminated.push(pid)
+        return true
+      }
+    })
+
+    const pending = driver.applyHostCommands([{ kind: 'create', bounds: surfaceBounds() }])
+    expect(() =>
+      child.stdout.emit(
+        'data',
+        `${JSON.stringify({
+          event: 'helper.ready',
+          payload: { pid: 8765, parentPid: 7654 }
+        })}\n`
+      )
+    ).not.toThrow()
+
+    await expect(pending).rejects.toThrow('exact process identity is unavailable')
+    expect(terminated).toEqual([8765])
+    expect(child.killed).toBe(true)
+  })
+
   it('records cargo wrapper and real helper pids separately when helper.ready arrives', async () => {
     const child = new FakeChild()
     const started: Array<{ pid: number; label: string }> = []

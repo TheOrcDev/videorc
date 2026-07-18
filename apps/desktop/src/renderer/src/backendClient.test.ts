@@ -5,10 +5,13 @@ import type { RecordingStatus, VideorcAccountSnapshot } from '../../shared/backe
 import { BackendClient, BackendRequestError, backendRequestTimeoutMs } from './backendClient'
 
 class FakeWebSocket {
+  static readonly CONNECTING = 0
   static readonly OPEN = 1
+  static readonly CLOSED = 3
   static instances: FakeWebSocket[] = []
+  static onConstruct: ((socket: FakeWebSocket) => void) | null = null
 
-  readyState = FakeWebSocket.OPEN
+  readyState = FakeWebSocket.CONNECTING
   onopen: (() => void) | null = null
   onerror: (() => void) | null = null
   onmessage: ((event: { data: string }) => void) | null = null
@@ -18,6 +21,7 @@ class FakeWebSocket {
 
   constructor(readonly url: string) {
     FakeWebSocket.instances.push(this)
+    FakeWebSocket.onConstruct?.(this)
   }
 
   send(value: string): void {
@@ -28,11 +32,12 @@ class FakeWebSocket {
   }
 
   close(): void {
-    this.readyState = 3
+    this.readyState = FakeWebSocket.CLOSED
     this.onclose?.()
   }
 
   open(): void {
+    this.readyState = FakeWebSocket.OPEN
     this.onopen?.()
   }
 
@@ -44,6 +49,7 @@ class FakeWebSocket {
 describe('BackendClient request lifetime', () => {
   beforeEach(() => {
     FakeWebSocket.instances = []
+    FakeWebSocket.onConstruct = null
     vi.stubGlobal('WebSocket', FakeWebSocket)
   })
 
@@ -64,6 +70,122 @@ describe('BackendClient request lifetime', () => {
     const socket = FakeWebSocket.instances[0]!
     socket.open()
     await expect(firstConnect).resolves.toBeUndefined()
+  })
+
+  it('stays closed without constructing a socket when closed before contract loading finishes', async () => {
+    const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
+    const connecting = client.connect()
+
+    client.close()
+
+    await expect(connecting).rejects.toThrow('Backend client is closed.')
+    await expect(client.connect()).rejects.toThrow('Backend client is closed.')
+    expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+
+  it('rejects an in-flight connection when closed while the socket is connecting', async () => {
+    const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
+    const connecting = client.connect()
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+
+    client.close()
+
+    await expect(connecting).rejects.toThrow('Backend client is closed.')
+    expect(client.connected).toBe(false)
+  })
+
+  it('ignores a stale open callback after the client has closed', async () => {
+    const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
+    const statuses: RecordingStatus[] = []
+    client.on('recording.status', (status) => statuses.push(status))
+    const connecting = client.connect()
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+
+    client.close()
+    await expect(connecting).rejects.toThrow('Backend client is closed.')
+    socket.open()
+    socket.respond({ event: 'recording.status', payload: { state: 'recording', durationMs: 10 } })
+
+    expect(client.connected).toBe(false)
+    expect(statuses).toEqual([])
+    await expect(client.connect()).rejects.toThrow('Backend client is closed.')
+    expect(FakeWebSocket.instances).toHaveLength(1)
+  })
+
+  it('closes a socket that becomes stale during construction', async () => {
+    const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
+    FakeWebSocket.onConstruct = () => client.close()
+
+    const connecting = client.connect()
+
+    await expect(connecting).rejects.toThrow('Backend client is closed.')
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    expect(FakeWebSocket.instances[0]!.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(client.connected).toBe(false)
+  })
+
+  it('does not revive a failed connection attempt through a late open callback', async () => {
+    const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
+    const connecting = client.connect()
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+
+    socket.onerror?.()
+    await expect(connecting).rejects.toThrow('Could not connect to the Rust backend.')
+    socket.open()
+
+    expect(client.connected).toBe(false)
+  })
+
+  it('rejects a connecting attempt when the socket closes itself', async () => {
+    const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
+    const connecting = client.connect()
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+
+    FakeWebSocket.instances[0]!.close()
+
+    await expect(connecting).rejects.toThrow('Backend connection closed.')
+    expect(client.connected).toBe(false)
+  })
+
+  it('deduplicates connect calls while the socket is connecting', async () => {
+    const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
+    const firstConnect = client.connect()
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+
+    const duplicateConnect = client.connect()
+
+    expect(duplicateConnect).toBe(firstConnect)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    FakeWebSocket.instances[0]!.open()
+    await expect(firstConnect).resolves.toBeUndefined()
+  })
+
+  it('deduplicates until the original connect promise has settled', async () => {
+    const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
+    const firstConnect = client.connect()
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+
+    FakeWebSocket.instances[0]!.open()
+    const duplicateConnect = client.connect()
+
+    expect(duplicateConnect).toBe(firstConnect)
+    await expect(firstConnect).resolves.toBeUndefined()
+  })
+
+  it('closes idempotently and emits one connection closure', async () => {
+    const { client, socket } = await connectedClient()
+    const closures: unknown[] = []
+    client.on('connection.closed', (payload) => closures.push(payload))
+
+    client.close()
+    client.close()
+
+    expect(socket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(client.connected).toBe(false)
+    expect(closures).toEqual([null])
+    await expect(client.connect()).rejects.toThrow('Backend client is closed.')
   })
 
   it('times out a missing response and removes the pending entry', async () => {

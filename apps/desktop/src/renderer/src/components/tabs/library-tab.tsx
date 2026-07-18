@@ -95,6 +95,9 @@ export function LibraryTab({
 }): ReactElement {
   const {
     sessions,
+    sessionsNextCursor,
+    sessionsLoadingMore,
+    loadMoreSessions,
     sessionStorageTotals,
     settings,
     importRecording,
@@ -383,13 +386,27 @@ export function LibraryTab({
             )}
           </div>
           {/* Honest storage footer: real totals + real free space, no quota bar. */}
-          {sessionStorageTotals ? (
-            <div className="border-t px-4 py-2 text-xs text-muted-foreground">
-              {libraryStorageLabel({
-                count: sessionStorageTotals.count,
-                totalBytes: sessionStorageTotals.totalBytes,
-                freeBytes
-              })}
+          {sessionStorageTotals || sessionsNextCursor ? (
+            <div className="flex items-center justify-between gap-3 border-t px-4 py-2 text-xs text-muted-foreground">
+              <span>
+                {sessionStorageTotals
+                  ? libraryStorageLabel({
+                      count: sessionStorageTotals.count,
+                      totalBytes: sessionStorageTotals.totalBytes,
+                      freeBytes
+                    })
+                  : `${sessions.length} sessions loaded`}
+              </span>
+              {sessionsNextCursor ? (
+                <Button
+                  disabled={sessionsLoadingMore}
+                  size="xs"
+                  variant="ghost"
+                  onClick={() => void loadMoreSessions()}
+                >
+                  {sessionsLoadingMore ? 'Loading…' : 'Load more'}
+                </Button>
+              ) : null}
             </div>
           ) : null}
         </div>

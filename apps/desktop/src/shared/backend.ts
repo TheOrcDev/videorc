@@ -273,7 +273,7 @@ export interface ResourceSelection {
 }
 
 export interface BackendLifecycleEvent {
-  state: 'running' | 'restarting' | 'failed'
+  state: 'running' | 'restarting' | 'failed' | 'lost'
   code?: number | null
   signal?: string | null
   attempt?: number
@@ -2141,11 +2141,11 @@ export interface MediaAccessSnapshot {
 
 export interface HealthEvent {
   id: string
-  sessionId?: string
+  sessionId?: string | null
   level: HealthLevel
   code: string
   message: string
-  permissionPane?: SystemPermissionPane
+  permissionPane?: SystemPermissionPane | null
   createdAt: string
 }
 
@@ -2155,8 +2155,8 @@ export interface SessionLogEntry {
   level: HealthLevel
   code: string
   message: string
-  sourceId?: string
-  permissionPane?: SystemPermissionPane
+  sourceId?: string | null
+  permissionPane?: SystemPermissionPane | null
   createdAt: string
 }
 
@@ -2405,7 +2405,7 @@ export interface AiArtifact {
   createdAt: string
 }
 
-export interface SessionSummary {
+export interface SessionListItem {
   id: string
   title: string
   startedAt: string
@@ -2422,18 +2422,59 @@ export interface SessionSummary {
   /** "Screen + Camera" etc. (derived layout preset; stream preset when stream-only). */
   sceneLabel?: string
   qualityStatus?: GateStatus | null
-  finalDiagnostics?: DiagnosticStats | null
-  layout: LayoutSettings
-  sources: SourceSelection
-  healthEvents: HealthEvent[]
-  sessionLogs: SessionLogEntry[]
-  aiArtifacts: AiArtifact[]
+  healthEventCount: number
+  sessionLogCount: number
+  aiArtifactCount: number
+  readyAiArtifactKinds?: AiArtifactKind[]
   commentCount: number
   /** Present only for managed derivatives created from another Library session. */
   derivedFromSessionId?: string
   sourceTitle?: string
   processingKind?: 'noise-cleanup'
 }
+
+/** Backwards-compatible name for renderer consumers while the Library model
+ * remains a summary. It intentionally has no history arrays. */
+export type SessionSummary = SessionListItem
+
+export interface SessionListParams {
+  cursor?: string
+  limit?: number
+}
+
+export interface SessionListPage {
+  items: SessionListItem[]
+  nextCursor?: string
+}
+
+export interface SessionDetailListParams {
+  sessionId: string
+  cursor?: string
+  limit?: number
+}
+
+export interface SessionHealthEventsPage {
+  events: HealthEvent[]
+  nextCursor?: string
+}
+
+export interface SessionLogsPage {
+  entries: SessionLogEntry[]
+  nextCursor?: string
+}
+
+export interface SessionAiArtifactsPage {
+  artifacts: AiArtifact[]
+  nextCursor?: string
+}
+
+export interface SessionDetails {
+  healthEvents: HealthEvent[]
+  sessionLogs: SessionLogEntry[]
+  aiArtifacts: AiArtifact[]
+}
+
+export type SessionWithDetails = SessionListItem & SessionDetails
 
 export interface SessionStorageTotals {
   count: number

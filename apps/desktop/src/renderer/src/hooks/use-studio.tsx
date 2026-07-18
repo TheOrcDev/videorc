@@ -85,6 +85,11 @@ import {
 import { providerOAuthRetryDelayMs } from '@/lib/provider-oauth-retry'
 import { accountCallbackRetryDelayMs } from '@/lib/account-callback-retry'
 import {
+  LatestRequestByKey,
+  SingleFlightByKey,
+  SingleFlightGeneration
+} from '@/lib/single-flight-generation'
+import {
   latestLayoutTransactionCommit,
   layoutTransactionBackendSnapshotIsStable,
   layoutTransactionFailureReconciliation,
@@ -171,6 +176,8 @@ import type {
   SceneConfigParams,
   SessionCommentsPage,
   SessionDeletionOperation,
+  SessionDetails,
+  SessionListPage,
   SessionLogEntry,
   SessionSummary,
   SourceSelection,
@@ -362,6 +369,34 @@ function openLibraryFromQualityToast(sessionId?: string): void {
 const TELEMETRY_UI_COMMIT_INTERVAL_MS = 1000
 const SIGNED_IN_ENTITLEMENT_REFRESH_INTERVAL_MS = 5 * 60_000
 const LIVE_CHAT_RECOVERY_RETRY_DELAY_MS = 250
+const SESSION_LIST_PAGE_LIMIT = 50
+export const SESSION_DETAIL_BUFFER_LIMIT = 120
+const SESSION_DETAIL_CACHE_LIMIT = 8
+
+export function capSessionDetailBuffer<T>(entries: T[]): T[] {
+  return entries.slice(-SESSION_DETAIL_BUFFER_LIMIT)
+}
+
+function mergeSessionDetailEntries<TEntry extends { id: string; createdAt: string }>(
+  ...collections: TEntry[][]
+): TEntry[] {
+  const byId = new Map<string, TEntry>()
+  for (const collection of collections) {
+    for (const entry of collection) byId.set(entry.id, entry)
+  }
+  return capSessionDetailBuffer(
+    [...byId.values()].sort(
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
+    )
+  )
+}
+
+function appendBoundedSessionDetailEntry<TEntry>(entries: TEntry[], entry: TEntry): void {
+  entries.push(entry)
+  const overflow = entries.length - SESSION_DETAIL_BUFFER_LIMIT
+  if (overflow > 0) entries.splice(0, overflow)
+}
 
 async function requestLiveChatSendOperations(
   request: () => Promise<CommentsSendOperation[]>
@@ -591,6 +626,11 @@ export type StudioContextValue = {
   streamTargets: StreamTargetRuntime[]
   diagnosticStats: DiagnosticStats
   sessions: SessionSummary[]
+  sessionsNextCursor: string | null
+  sessionsLoadingMore: boolean
+  sessionDetails: Readonly<Record<string, SessionDetails>>
+  sessionDetailsLoading: ReadonlySet<string>
+  sessionDetailError: { sessionId: string; message: string } | null
   screens: StreamScreen[]
   activeScreen: StreamScreen | null
   platformAccounts: PlatformAccount[]
@@ -708,6 +748,8 @@ export type StudioContextValue = {
   runtimeInfo: RuntimeInfo | null
   // actions
   refreshBackend: () => Promise<void>
+  loadMoreSessions: () => Promise<void>
+  loadSessionDetails: (sessionId: string) => Promise<void>
   refreshEntitlements: () => Promise<void>
   refreshPlatformAccounts: () => Promise<void>
   validatePlatformAccounts: () => Promise<PlatformAccountValidation[]>
@@ -1327,6 +1369,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const providerOAuthCallbacksInFlightRef = useRef<Set<string>>(new Set())
   const providerOAuthCallbacksCompletedRef = useRef<Set<string>>(new Set())
   const bootstrapGenerationRef = useRef(0)
+  const focusRefreshCoordinatorRef = useRef(new SingleFlightGeneration())
   const [wsStatus, setWsStatus] = useState<WsStatus>('waiting')
   const wsStatusRef = useRef<WsStatus>('waiting')
   clientRef.current = client
@@ -1357,6 +1400,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [streamTargets, setStreamTargets] = useState<StreamTargetRuntime[]>([])
   const [diagnosticStats, setDiagnosticStats] = useState<DiagnosticStats>(idleDiagnosticStats)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
+  const [sessionsNextCursor, setSessionsNextCursor] = useState<string | null>(null)
+  const [sessionsLoadingMore, setSessionsLoadingMore] = useState(false)
+  const sessionListGenerationRef = useRef(0)
+  const sessionListRefreshRequestRef = useRef(new LatestRequestByKey<'first-page'>())
+  const sessionListMoreSingleFlightRef = useRef(new SingleFlightByKey<'next-page', BackendClient>())
+  const [sessionDetails, setSessionDetails] = useState<Record<string, SessionDetails>>({})
+  const [sessionDetailsLoading, setSessionDetailsLoading] = useState<Set<string>>(() => new Set())
+  const [sessionDetailError, setSessionDetailError] = useState<{
+    sessionId: string
+    message: string
+  } | null>(null)
+  const sessionDetailsRef = useRef(sessionDetails)
+  sessionDetailsRef.current = sessionDetails
+  const sessionDetailRecencyRef = useRef<string[]>([])
+  const sessionDetailRequestRef = useRef(new LatestRequestByKey<string>())
+  const sessionDetailSingleFlightRef = useRef(new SingleFlightByKey<string, BackendClient>())
+  const sessionDetailAiDirtyRef = useRef(new Set<string>())
+  const sessionDetailLiveEntriesRef = useRef(
+    new Map<string, { healthEvents: HealthEvent[]; sessionLogs: SessionLogEntry[] }>()
+  )
   const [sessionStorageTotals, setSessionStorageTotals] = useState<SessionStorageTotals | null>(
     null
   )
@@ -2329,7 +2392,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
 
   const refreshAiReadinessForClient = useCallback(
-    async (activeClient: BackendClient | null, accountSnapshot: VideorcAccountSnapshot | null) => {
+    async (
+      activeClient: BackendClient | null,
+      accountSnapshot: VideorcAccountSnapshot | null,
+      isCurrent: () => boolean = () => true
+    ) => {
+      if (!isCurrent()) {
+        return
+      }
       if (!activeClient || accountSnapshot?.status !== 'signed-in') {
         setAiCapabilities(null)
         setAiQuota(null)
@@ -2344,15 +2414,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           activeClient.request<AiCapabilities>('ai.capabilities.get'),
           activeClient.request<AiQuotaStatus>('ai.quota.get')
         ])
+        if (!isCurrent()) {
+          return
+        }
         setAiCapabilities(nextCapabilities)
         setAiQuota(nextQuota)
         setAiReadinessError(null)
       } catch (error) {
+        if (!isCurrent()) {
+          return
+        }
         setAiCapabilities(null)
         setAiQuota(null)
         setAiReadinessError(error instanceof Error ? error.message : String(error))
       } finally {
-        setAiReadinessLoading(false)
+        if (isCurrent()) {
+          setAiReadinessLoading(false)
+        }
       }
     },
     []
@@ -2927,15 +3005,202 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
 
-      await resumePendingSessionDeletions(activeClient)
-      const [nextSessions, nextTotals] = await Promise.all([
-        activeClient.request<SessionSummary[]>('sessions.list', { limit: 200 }),
-        activeClient.request<SessionStorageTotals>('sessions.storage')
-      ])
-      setSessions(nextSessions)
-      setSessionStorageTotals(nextTotals)
+      const refreshRequests = sessionListRefreshRequestRef.current
+      const requestToken = refreshRequests.begin('first-page')
+      sessionListGenerationRef.current += 1
+      sessionListMoreSingleFlightRef.current.invalidate('next-page')
+      setSessionsLoadingMore(false)
+      try {
+        await resumePendingSessionDeletions(activeClient)
+        const [nextPage, nextTotals] = await Promise.all([
+          activeClient.requestTyped('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
+          activeClient.request<SessionStorageTotals>('sessions.storage')
+        ])
+        if (
+          clientRef.current !== activeClient ||
+          !refreshRequests.isCurrent('first-page', requestToken)
+        ) {
+          return
+        }
+        // A next-page request can start while this refresh is in flight using
+        // the old cursor. Advancing again at commit prevents it from appending
+        // that stale page after the new first page becomes authoritative.
+        sessionListGenerationRef.current += 1
+        setSessions(nextPage.items)
+        setSessionsNextCursor(nextPage.nextCursor ?? null)
+        setSessionStorageTotals(nextTotals)
+      } finally {
+        refreshRequests.finish('first-page', requestToken)
+      }
     },
     [resumePendingSessionDeletions]
+  )
+
+  const loadMoreSessions = useCallback(async (): Promise<void> => {
+    const activeClient = clientRef.current
+    const cursor = sessionsNextCursor
+    if (!activeClient || !cursor) {
+      return
+    }
+
+    await sessionListMoreSingleFlightRef.current.run('next-page', activeClient, async () => {
+      const generation = sessionListGenerationRef.current
+      setSessionsLoadingMore(true)
+      try {
+        const page = await activeClient.requestTyped('sessions.list', {
+          cursor,
+          limit: SESSION_LIST_PAGE_LIMIT
+        })
+        if (clientRef.current !== activeClient || sessionListGenerationRef.current !== generation) {
+          return
+        }
+        setSessions((current) => {
+          const seen = new Set(current.map((session) => session.id))
+          return [...current, ...page.items.filter((session) => !seen.has(session.id))]
+        })
+        setSessionsNextCursor(page.nextCursor ?? null)
+      } finally {
+        if (clientRef.current === activeClient && sessionListGenerationRef.current === generation) {
+          setSessionsLoadingMore(false)
+        }
+      }
+    })
+  }, [sessionsNextCursor])
+
+  const loadSessionDetailsForClient = useCallback(
+    (activeClient: BackendClient, sessionId: string): Promise<void> =>
+      sessionDetailSingleFlightRef.current.run(sessionId, activeClient, async () => {
+        const requestCoordinator = sessionDetailRequestRef.current
+        const requestToken = requestCoordinator.begin(sessionId)
+        setSessionDetailsLoading((current) => new Set(current).add(sessionId))
+        setSessionDetailError((current) => (current?.sessionId === sessionId ? null : current))
+        try {
+          sessionDetailAiDirtyRef.current.delete(sessionId)
+          sessionDetailLiveEntriesRef.current.delete(sessionId)
+          const loadAndCommitBatch = async (): Promise<boolean> => {
+            const [healthPage, logsPage, artifactsPage] = await Promise.all([
+              activeClient.requestTyped('sessions.healthEvents.list', {
+                sessionId,
+                limit: SESSION_DETAIL_BUFFER_LIMIT
+              }),
+              activeClient.requestTyped('sessions.logs.list', {
+                sessionId,
+                limit: SESSION_DETAIL_BUFFER_LIMIT
+              }),
+              activeClient.requestTyped('sessions.aiArtifacts.list', {
+                sessionId,
+                limit: SESSION_DETAIL_BUFFER_LIMIT
+              })
+            ])
+            if (
+              clientRef.current !== activeClient ||
+              !requestCoordinator.isCurrent(sessionId, requestToken)
+            ) {
+              return false
+            }
+            const liveEntries = sessionDetailLiveEntriesRef.current.get(sessionId)
+            sessionDetailLiveEntriesRef.current.delete(sessionId)
+            const loadedDetails: SessionDetails = {
+              healthEvents: capSessionDetailBuffer(healthPage.events),
+              sessionLogs: capSessionDetailBuffer(logsPage.entries),
+              aiArtifacts: capSessionDetailBuffer(artifactsPage.artifacts)
+            }
+            const recency = [
+              ...sessionDetailRecencyRef.current.filter((candidate) => candidate !== sessionId),
+              sessionId
+            ]
+            const evicted = recency.slice(
+              0,
+              Math.max(0, recency.length - SESSION_DETAIL_CACHE_LIMIT)
+            )
+            sessionDetailRecencyRef.current = recency.slice(-SESSION_DETAIL_CACHE_LIMIT)
+            for (const evictedId of evicted) {
+              requestCoordinator.invalidate(evictedId)
+              sessionDetailSingleFlightRef.current.invalidate(evictedId)
+              sessionDetailAiDirtyRef.current.delete(evictedId)
+              sessionDetailLiveEntriesRef.current.delete(evictedId)
+            }
+            setSessionDetails((current) => {
+              const currentDetails = current[sessionId]
+              const details: SessionDetails = liveEntries
+                ? {
+                    healthEvents: mergeSessionDetailEntries(
+                      loadedDetails.healthEvents,
+                      currentDetails?.healthEvents ?? [],
+                      liveEntries.healthEvents
+                    ),
+                    sessionLogs: mergeSessionDetailEntries(
+                      loadedDetails.sessionLogs,
+                      currentDetails?.sessionLogs ?? [],
+                      liveEntries.sessionLogs
+                    ),
+                    aiArtifacts: loadedDetails.aiArtifacts
+                  }
+                : loadedDetails
+              const next = { ...current, [sessionId]: details }
+              for (const evictedId of evicted) {
+                delete next[evictedId]
+              }
+              return next
+            })
+            if (evicted.length > 0) {
+              const evictedIds = new Set(evicted)
+              setSessionDetailsLoading((current) => {
+                const next = new Set(current)
+                for (const evictedId of evictedIds) {
+                  next.delete(evictedId)
+                }
+                return next
+              })
+              setSessionDetailError((current) =>
+                current && evictedIds.has(current.sessionId) ? null : current
+              )
+            }
+            return true
+          }
+
+          const firstBatchCommitted = await loadAndCommitBatch()
+          // Changes are coalesced into one bounded trailing pass. Continuous
+          // event traffic must never keep a detail request alive indefinitely.
+          if (firstBatchCommitted && sessionDetailAiDirtyRef.current.delete(sessionId)) {
+            await loadAndCommitBatch()
+          }
+        } catch (error) {
+          if (
+            clientRef.current === activeClient &&
+            requestCoordinator.isCurrent(sessionId, requestToken)
+          ) {
+            const message = error instanceof Error ? error.message : String(error)
+            setSessionDetailError({ sessionId, message })
+            reportError(error)
+          }
+        } finally {
+          if (requestCoordinator.finish(sessionId, requestToken)) {
+            // These buffers belong to the latest request token for this
+            // session. A stale request can settle after eviction/replacement;
+            // it must not erase events buffered by its successor.
+            sessionDetailAiDirtyRef.current.delete(sessionId)
+            sessionDetailLiveEntriesRef.current.delete(sessionId)
+            setSessionDetailsLoading((current) => {
+              const next = new Set(current)
+              next.delete(sessionId)
+              return next
+            })
+          }
+        }
+      }),
+    [reportError]
+  )
+
+  const loadSessionDetails = useCallback(
+    async (sessionId: string): Promise<void> => {
+      const activeClient = clientRef.current
+      if (!activeClient || wsStatusRef.current !== 'connected') {
+        return
+      }
+      await loadSessionDetailsForClient(activeClient, sessionId)
+    },
+    [loadSessionDetailsForClient]
   )
 
   const refreshNoiseCleanupJobs = useCallback(async (activeClient: BackendClient | null) => {
@@ -3345,6 +3610,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           description: 'Automatic restarts stopped. Restart Videorc to recover.',
           duration: Infinity
         })
+      } else if (event.state === 'lost') {
+        toast.error('Backend shutdown could not be confirmed', {
+          id: 'backend-lifecycle',
+          description: 'A replacement was not started. Quit and reopen Videorc to recover safely.',
+          duration: Infinity
+        })
       } else if (event.state === 'running') {
         toast.dismiss('backend-lifecycle')
       }
@@ -3407,6 +3678,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     let disposed = false
     const generation = bootstrapGenerationRef.current + 1
     bootstrapGenerationRef.current = generation
+    const focusRefreshCoordinator = focusRefreshCoordinatorRef.current
+    const sessionListRefreshRequests = sessionListRefreshRequestRef.current
+    const sessionListMoreSingleFlight = sessionListMoreSingleFlightRef.current
+    const sessionDetailRequests = sessionDetailRequestRef.current
+    const sessionDetailSingleFlight = sessionDetailSingleFlightRef.current
+    const sessionDetailAiDirty = sessionDetailAiDirtyRef.current
+    const sessionDetailLiveEntries = sessionDetailLiveEntriesRef.current
+    focusRefreshCoordinator.invalidate()
+    sessionListRefreshRequests.clear()
+    sessionListMoreSingleFlight.clear()
+    sessionListGenerationRef.current += 1
+    setSessionsLoadingMore(false)
+    sessionDetailRequests.clear()
+    sessionDetailSingleFlight.clear()
+    sessionDetailAiDirty.clear()
+    sessionDetailLiveEntries.clear()
+    sessionDetailRecencyRef.current = []
+    setSessionDetails({})
+    setSessionDetailsLoading(new Set())
+    setSessionDetailError(null)
     const bootstrapAbort = new AbortController()
     const generationIsCurrent = (): boolean =>
       !disposed && bootstrapGenerationRef.current === generation
@@ -3727,13 +4018,35 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bootstrapGuard.mark('sessions')
         const event = payload as HealthEvent
         setHealthEvents((current) => [event, ...current].slice(0, 40))
-        setSessions((current) =>
-          current.map((session) =>
-            session.id === event.sessionId
-              ? { ...session, healthEvents: [...session.healthEvents, event] }
-              : session
+        if (event.sessionId) {
+          if (sessionDetailRequestRef.current.isActive(event.sessionId)) {
+            const liveEntries = sessionDetailLiveEntriesRef.current.get(event.sessionId) ?? {
+              healthEvents: [],
+              sessionLogs: []
+            }
+            appendBoundedSessionDetailEntry(liveEntries.healthEvents, event)
+            sessionDetailLiveEntriesRef.current.set(event.sessionId, liveEntries)
+          }
+          setSessions((current) =>
+            current.map((session) =>
+              session.id === event.sessionId
+                ? { ...session, healthEventCount: session.healthEventCount + 1 }
+                : session
+            )
           )
-        )
+          setSessionDetails((current) => {
+            const details = current[event.sessionId!]
+            return details
+              ? {
+                  ...current,
+                  [event.sessionId!]: {
+                    ...details,
+                    healthEvents: capSessionDetailBuffer([...details.healthEvents, event])
+                  }
+                }
+              : current
+          })
+        }
         if (isRecordingQualityEvent(event.code)) {
           void refreshSessions(nextClient)
         }
@@ -3750,7 +4063,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               duration: 15000,
               action: {
                 label: 'Open Library',
-                onClick: () => openLibraryFromQualityToast(event.sessionId)
+                onClick: () => openLibraryFromQualityToast(event.sessionId ?? undefined)
               }
             })
           }
@@ -3774,13 +4087,33 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('session.log', (payload) => {
         bootstrapGuard.mark('sessions')
         const entry = payload as SessionLogEntry
+        if (sessionDetailRequestRef.current.isActive(entry.sessionId)) {
+          const liveEntries = sessionDetailLiveEntriesRef.current.get(entry.sessionId) ?? {
+            healthEvents: [],
+            sessionLogs: []
+          }
+          appendBoundedSessionDetailEntry(liveEntries.sessionLogs, entry)
+          sessionDetailLiveEntriesRef.current.set(entry.sessionId, liveEntries)
+        }
         setSessions((current) =>
           current.map((session) =>
             session.id === entry.sessionId
-              ? { ...session, sessionLogs: [...session.sessionLogs, entry] }
+              ? { ...session, sessionLogCount: session.sessionLogCount + 1 }
               : session
           )
         )
+        setSessionDetails((current) => {
+          const details = current[entry.sessionId]
+          return details
+            ? {
+                ...current,
+                [entry.sessionId]: {
+                  ...details,
+                  sessionLogs: capSessionDetailBuffer([...details.sessionLogs, entry])
+                }
+              }
+            : current
+        })
       }),
       nextClient.on('stream.health', (payload) => {
         setStreamHealth((current) => mergeStreamHealth(current, payload as StreamHealth))
@@ -4064,9 +4397,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         }
       }),
-      nextClient.on('ai.artifacts.changed', () => {
+      nextClient.on('ai.artifacts.changed', (payload) => {
         bootstrapGuard.mark('sessions')
         void refreshSessions(nextClient)
+        const sessionId =
+          typeof payload === 'object' && payload !== null && 'sessionId' in payload
+            ? String(payload.sessionId)
+            : null
+        const detailRequestActive = sessionId
+          ? sessionDetailRequestRef.current.isActive(sessionId)
+          : false
+        if (sessionId && detailRequestActive) {
+          sessionDetailAiDirtyRef.current.add(sessionId)
+        }
+        if (sessionId && (detailRequestActive || sessionDetailsRef.current[sessionId])) {
+          void loadSessionDetailsForClient(nextClient, sessionId)
+        }
       }),
       nextClient.on('log', (payload) => appendLog(payload as BackendLogEvent)),
       nextClient.on('error', (payload) => {
@@ -4127,7 +4473,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           bootstrapRequest<StreamScreen[]>('screens.list'),
           bootstrapRequest<StreamScreen | null>('screens.active'),
           bootstrapRequest<StreamMetadataDraft>('streamTargets.metadata.get'),
-          bootstrapRequest<SessionSummary[]>('sessions.list', { limit: 200 }),
+          bootstrapRequest<SessionListPage>('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
           bootstrapRequest<SessionStorageTotals>('sessions.storage'),
           bootstrapRequest<NoiseCleanupJob[]>('noiseCleanup.list')
         ])
@@ -4176,7 +4522,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           setStreamMetadataDraft(nextStreamMetadataDraft)
         }
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'sessions')) {
-          setSessions(nextSessions)
+          sessionListGenerationRef.current += 1
+          sessionListMoreSingleFlight.invalidate('next-page')
+          setSessionsLoadingMore(false)
+          setSessions(nextSessions.items)
+          setSessionsNextCursor(nextSessions.nextCursor ?? null)
           setSessionStorageTotals(nextSessionStorage)
         } else {
           void refreshSessions(nextClient)
@@ -4315,6 +4665,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
     return () => {
       disposed = true
+      focusRefreshCoordinator.invalidate()
+      sessionListRefreshRequests.clear()
+      sessionListMoreSingleFlight.clear()
+      sessionListGenerationRef.current += 1
+      setSessionsLoadingMore(false)
+      sessionDetailRequests.clear()
+      sessionDetailSingleFlight.clear()
+      sessionDetailAiDirty.clear()
+      sessionDetailLiveEntries.clear()
       cancelCaptionCueRender()
       bootstrapAbort.abort()
       liveChatMessageBatcher.dispose()
@@ -4447,85 +4806,105 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [patchLayout]
   )
 
-  const refreshBackend = useCallback(async () => {
-    await refreshMediaAccess()
-    // S1 (plan 024): the two window `focus` listeners fire refreshBackend on
-    // TCC-prompt focus-return, and at grant/restart time `client` is still the
-    // OLD object (setClient(null) is deferred to effect cleanup), so a bare
-    // `if (!client)` guard let ~13 requests fan out into a closed socket. Gate
-    // on the live connection status too, so the restart window fans out nothing
-    // doomed. The focus listeners themselves stay (plan-021 re-kick recovery).
-    if (!client || wsStatusRef.current !== 'connected') {
-      return
-    }
+  const refreshBackend = useCallback(
+    (): Promise<void> =>
+      focusRefreshCoordinatorRef.current.run(async (generationIsCurrent) => {
+        await refreshMediaAccess()
+        const activeClient = clientRef.current
+        // Multiple focus listeners intentionally share this one coordinator.
+        // During backend replacement, the connection generation invalidates
+        // this work before any response can commit into the new client state.
+        if (!activeClient || wsStatusRef.current !== 'connected' || !generationIsCurrent()) {
+          return
+        }
 
-    try {
-      setLastError(null)
-      const [
-        nextHealth,
-        nextEntitlements,
-        nextAccount,
-        nextDevices,
-        nextSessions,
-        nextSessionStorage,
-        nextDiagnostics,
-        nextScreens,
-        nextActiveScreen,
-        nextPlatformAccounts,
-        nextOauthProviderCredentials,
-        nextPlatformAccountValidations,
-        nextStreamMetadataDraft,
-        nextNoiseCleanupJobs
-      ] = await Promise.all([
-        client.request<BackendHealth>('health.ping'),
-        refreshEntitlementsForClient(client),
-        client.request<VideorcAccountSnapshot>('account.get'),
-        client.request<DeviceList>('devices.list'),
-        client.request<SessionSummary[]>('sessions.list', { limit: 200 }),
-        client.request<SessionStorageTotals>('sessions.storage'),
-        client.request<DiagnosticStats>('diagnostics.stats'),
-        client.request<StreamScreen[]>('screens.list'),
-        client.request<StreamScreen | null>('screens.active'),
-        client.request<PlatformAccount[]>('platformAccounts.list'),
-        client.request<OAuthProviderCredentialStatus[]>(
-          'platformAccounts.oauth.providerCredentials'
-        ),
-        client.request<PlatformAccountValidation[]>('platformAccounts.validate'),
-        client.request<StreamMetadataDraft>('streamTargets.metadata.get'),
-        client.requestTyped('noiseCleanup.list', undefined)
-      ])
-      setAccount(nextAccount)
-      await refreshAiReadinessForClient(client, nextAccount)
-      const nextStreamMetadataValidation = await client.request<StreamMetadataValidation>(
-        'streamTargets.metadata.validate',
-        nextStreamMetadataDraft
-      )
-      setHealth(nextHealth)
-      setEntitlements(nextEntitlements)
-      setDeviceList(nextDevices)
-      setSessions(nextSessions)
-      setSessionStorageTotals(nextSessionStorage)
-      setDiagnosticStats(nextDiagnostics)
-      setScreens(nextScreens)
-      setActiveScreen(nextActiveScreen)
-      setPlatformAccounts(nextPlatformAccounts)
-      setOauthProviderCredentials(nextOauthProviderCredentials)
-      setPlatformAccountValidations(nextPlatformAccountValidations)
-      setStreamMetadataDraft(nextStreamMetadataDraft)
-      setStreamMetadataValidation(nextStreamMetadataValidation)
-      setNoiseCleanupJobs((current) =>
-        nextNoiseCleanupJobs.reduce((jobs, job) => upsertNoiseCleanupJob(jobs, job), current)
-      )
-    } catch (error) {
-      reportError(error)
-    }
-  }, [
-    client,
-    refreshAiReadinessForClient,
-    refreshEntitlementsForClient,
-    refreshMediaAccess,
-    reportError
-  ])
+        const refreshIsCurrent = (): boolean =>
+          generationIsCurrent() && clientRef.current === activeClient
+        const sessionListRefreshRequests = sessionListRefreshRequestRef.current
+        const sessionListRequestToken = sessionListRefreshRequests.begin('first-page')
+        sessionListGenerationRef.current += 1
+        sessionListMoreSingleFlightRef.current.invalidate('next-page')
+        setSessionsLoadingMore(false)
+        try {
+          setLastError(null)
+          const [
+            nextHealth,
+            nextEntitlements,
+            nextAccount,
+            nextDevices,
+            nextSessions,
+            nextSessionStorage,
+            nextDiagnostics,
+            nextScreens,
+            nextActiveScreen,
+            nextPlatformAccounts,
+            nextOauthProviderCredentials,
+            nextPlatformAccountValidations,
+            nextStreamMetadataDraft,
+            nextNoiseCleanupJobs
+          ] = await Promise.all([
+            activeClient.request<BackendHealth>('health.ping'),
+            refreshEntitlementsForClient(activeClient),
+            activeClient.request<VideorcAccountSnapshot>('account.get'),
+            activeClient.request<DeviceList>('devices.list'),
+            activeClient.requestTyped('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
+            activeClient.request<SessionStorageTotals>('sessions.storage'),
+            activeClient.request<DiagnosticStats>('diagnostics.stats'),
+            activeClient.request<StreamScreen[]>('screens.list'),
+            activeClient.request<StreamScreen | null>('screens.active'),
+            activeClient.request<PlatformAccount[]>('platformAccounts.list'),
+            activeClient.request<OAuthProviderCredentialStatus[]>(
+              'platformAccounts.oauth.providerCredentials'
+            ),
+            activeClient.request<PlatformAccountValidation[]>('platformAccounts.validate'),
+            activeClient.request<StreamMetadataDraft>('streamTargets.metadata.get'),
+            activeClient.requestTyped('noiseCleanup.list', undefined)
+          ])
+          if (!refreshIsCurrent()) {
+            return
+          }
+          setAccount(nextAccount)
+          await refreshAiReadinessForClient(activeClient, nextAccount, refreshIsCurrent)
+          if (!refreshIsCurrent()) {
+            return
+          }
+          const nextStreamMetadataValidation = await activeClient.request<StreamMetadataValidation>(
+            'streamTargets.metadata.validate',
+            nextStreamMetadataDraft
+          )
+          if (!refreshIsCurrent()) {
+            return
+          }
+          setHealth(nextHealth)
+          setEntitlements(nextEntitlements)
+          setDeviceList(nextDevices)
+          if (sessionListRefreshRequests.isCurrent('first-page', sessionListRequestToken)) {
+            sessionListGenerationRef.current += 1
+            setSessions(nextSessions.items)
+            setSessionsNextCursor(nextSessions.nextCursor ?? null)
+            setSessionStorageTotals(nextSessionStorage)
+          }
+          setDiagnosticStats(nextDiagnostics)
+          setScreens(nextScreens)
+          setActiveScreen(nextActiveScreen)
+          setPlatformAccounts(nextPlatformAccounts)
+          setOauthProviderCredentials(nextOauthProviderCredentials)
+          setPlatformAccountValidations(nextPlatformAccountValidations)
+          setStreamMetadataDraft(nextStreamMetadataDraft)
+          setStreamMetadataValidation(nextStreamMetadataValidation)
+          setNoiseCleanupJobs((current) =>
+            nextNoiseCleanupJobs.reduce((jobs, job) => upsertNoiseCleanupJob(jobs, job), current)
+          )
+        } catch (error) {
+          if (refreshIsCurrent()) {
+            reportError(error)
+          }
+        } finally {
+          sessionListRefreshRequests.finish('first-page', sessionListRequestToken)
+        }
+      }),
+    [refreshAiReadinessForClient, refreshEntitlementsForClient, refreshMediaAccess, reportError]
+  )
 
   const refreshEntitlements = useCallback(async (): Promise<void> => {
     if (!client || wsStatusRef.current !== 'connected') {
@@ -9096,6 +9475,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       deviceList: visibleDeviceList,
       streamTargets,
       sessions,
+      sessionsNextCursor,
+      sessionsLoadingMore,
+      sessionDetails,
+      sessionDetailsLoading,
+      sessionDetailError,
       screens,
       activeScreen,
       platformAccounts,
@@ -9182,6 +9566,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       lastError,
       runtimeInfo,
       refreshBackend,
+      loadMoreSessions,
+      loadSessionDetails,
       refreshEntitlements,
       refreshPlatformAccounts,
       validatePlatformAccounts,
@@ -9268,6 +9654,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       visibleDeviceList,
       streamTargets,
       sessions,
+      sessionsNextCursor,
+      sessionsLoadingMore,
+      sessionDetails,
+      sessionDetailsLoading,
+      sessionDetailError,
       screens,
       activeScreen,
       platformAccounts,
@@ -9354,6 +9745,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       lastError,
       runtimeInfo,
       refreshBackend,
+      loadMoreSessions,
+      loadSessionDetails,
       refreshEntitlements,
       refreshPlatformAccounts,
       validatePlatformAccounts,

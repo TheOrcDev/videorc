@@ -5,6 +5,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { describe, expect, it } from 'vitest'
 
 import {
+  capSessionDetailBuffer,
+  SESSION_DETAIL_BUFFER_LIMIT,
   StudioContextProviders,
   useStudioCore,
   useStudioPreview,
@@ -88,6 +90,11 @@ function installNullRenderDom(): { container: Element; restore: () => void } {
 }
 
 describe('studio context invalidation boundaries', () => {
+  it('caps selected-session live detail buffers to the rendered history window', () => {
+    const entries = Array.from({ length: SESSION_DETAIL_BUFFER_LIMIT + 5 }, (_, index) => index)
+
+    expect(capSessionDetailBuffer(entries)).toEqual(entries.slice(-SESSION_DETAIL_BUFFER_LIMIT))
+  })
   it('keeps high-frequency media state out of the core context memo', () => {
     const source = readFileSync(new URL('./use-studio.tsx', import.meta.url), 'utf8')
     const coreStart = source.indexOf('const value = useMemo<StudioCoreContextValue>')

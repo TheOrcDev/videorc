@@ -8,7 +8,7 @@ import {
   WarningCircle,
   X
 } from '@phosphor-icons/react'
-import { useMemo, useState, type ReactElement, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
@@ -44,6 +44,10 @@ export function DiagnosticsTab(): ReactElement {
   const {
     handleSystemPermission,
     sessions,
+    sessionDetails,
+    sessionDetailsLoading,
+    sessionDetailError,
+    loadSessionDetails,
     streamTargets,
     nativePreviewSurfaceEnabled,
     captureConfig,
@@ -59,8 +63,18 @@ export function DiagnosticsTab(): ReactElement {
   const { diagnosticStats, healthEvents, logs, previewSurfaceStatus, streamHealth } =
     useStudioDiagnostics()
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
-  const activeSession =
+  const activeSessionSummary =
     sessions.find((session) => session.id === recording.sessionId) ?? sessions[0] ?? null
+  const activeSessionId = activeSessionSummary?.id
+  const activeSessionDetails = activeSessionSummary
+    ? sessionDetails[activeSessionSummary.id]
+    : undefined
+
+  useEffect(() => {
+    if (activeSessionId) {
+      void loadSessionDetails(activeSessionId)
+    }
+  }, [activeSessionId, loadSessionDetails])
   const accessRows = systemAccessRows({
     deviceList,
     audioMeter,
@@ -83,7 +97,14 @@ export function DiagnosticsTab(): ReactElement {
       !dismissed.has(event.id) &&
       permissionAction(event.permissionPane) !== null
   )
-  const sessionLogs = activeSession?.sessionLogs ?? []
+  const sessionLogs = activeSessionDetails?.sessionLogs ?? []
+  const sessionLogsError =
+    activeSessionId && sessionDetailError?.sessionId === activeSessionId
+      ? sessionDetailError.message
+      : null
+  const sessionLogsLoading = Boolean(
+    activeSessionSummary && sessionDetailsLoading.has(activeSessionSummary.id)
+  )
 
   const bottleneck = useMemo(
     () => bottleneckCopy(diagnosticStats.bottleneck),
@@ -615,7 +636,15 @@ export function DiagnosticsTab(): ReactElement {
 
         <PanelSection icon={TerminalWindow} title="Session logs">
           <ScrollArea className="h-64 pr-3">
-            <LogList entries={sessionLogs} />
+            {sessionLogsLoading && sessionLogs.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Loading session logs…</p>
+            ) : sessionLogsError && sessionLogs.length === 0 ? (
+              <p className="text-sm text-destructive">
+                Session logs unavailable: {sessionLogsError}
+              </p>
+            ) : (
+              <LogList entries={sessionLogs} />
+            )}
           </ScrollArea>
         </PanelSection>
 
@@ -731,7 +760,7 @@ function LogList({ entries }: { entries: SessionLogEntry[] }): ReactElement {
           createdAt={entry.createdAt}
           level={entry.level}
           message={entry.message}
-          sourceId={entry.sourceId}
+          sourceId={entry.sourceId ?? undefined}
         />
       ))}
     </div>

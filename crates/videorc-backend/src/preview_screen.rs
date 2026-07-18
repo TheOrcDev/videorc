@@ -1845,6 +1845,7 @@ mod windows {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::ptr::NonNull;
     use std::slice;
 
     use block2::RcBlock;
@@ -1869,6 +1870,135 @@ mod macos {
     };
 
     use super::*;
+
+    struct RetainedTransfer<T> {
+        raw: Option<NonNull<T>>,
+        release: unsafe fn(NonNull<T>),
+    }
+
+    impl<T> RetainedTransfer<T> {
+        unsafe fn new(raw: NonNull<T>, release: unsafe fn(NonNull<T>)) -> Self {
+            Self {
+                raw: Some(raw),
+                release,
+            }
+        }
+
+        fn consume(mut self) -> NonNull<T> {
+            self.raw
+                .take()
+                .expect("retained transfer must own a value until consumed")
+        }
+    }
+
+    impl<T> Drop for RetainedTransfer<T> {
+        fn drop(&mut self) {
+            if let Some(raw) = self.raw.take() {
+                unsafe { (self.release)(raw) };
+            }
+        }
+    }
+
+    struct ShareableContentTransfer(RetainedTransfer<SCShareableContent>);
+
+    // SAFETY: the token never dereferences the ScreenCaptureKit object. It only
+    // transfers one retained owner to the receiver or releases that owner when
+    // the channel discards the value. This is the same cross-thread ownership
+    // transfer performed by ScreenCaptureKit's asynchronous completion API,
+    // now kept behind an RAII boundary instead of an unowned integer.
+    unsafe impl Send for ShareableContentTransfer {}
+
+    impl ShareableContentTransfer {
+        fn new(content: Retained<SCShareableContent>) -> Self {
+            let raw = NonNull::new(Retained::into_raw(content))
+                .expect("a retained ScreenCaptureKit object must be non-null");
+            Self(unsafe { RetainedTransfer::new(raw, release_shareable_content) })
+        }
+
+        fn consume(self) -> Option<Retained<SCShareableContent>> {
+            let raw = self.0.consume();
+            unsafe { Retained::from_raw(raw.as_ptr()) }
+        }
+    }
+
+    unsafe fn release_shareable_content(raw: NonNull<SCShareableContent>) {
+        drop(unsafe { Retained::from_raw(raw.as_ptr()) });
+    }
+
+    #[cfg(test)]
+    mod retained_transfer_tests {
+        use std::ptr::NonNull;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use super::RetainedTransfer;
+
+        struct DropProbe {
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        unsafe fn release_probe(raw: NonNull<DropProbe>) {
+            drop(unsafe { Box::from_raw(raw.as_ptr()) });
+        }
+
+        fn retained_probe(drops: &Arc<AtomicUsize>) -> RetainedTransfer<DropProbe> {
+            let raw = NonNull::from(Box::leak(Box::new(DropProbe {
+                drops: Arc::clone(drops),
+            })));
+            unsafe { RetainedTransfer::new(raw, release_probe) }
+        }
+
+        #[test]
+        fn successful_receive_and_consume_transfers_the_retained_owner() {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            tx.send(retained_probe(&drops))
+                .expect("receiver should accept the retained owner");
+            let raw = rx
+                .recv()
+                .expect("receiver should receive the retained owner")
+                .consume();
+
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            drop(unsafe { Box::from_raw(raw.as_ptr()) });
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn failed_send_after_receiver_drop_releases_the_retained_owner() {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (tx, rx) = std::sync::mpsc::channel();
+            drop(rx);
+
+            let error = tx
+                .send(retained_probe(&drops))
+                .expect_err("send should fail after the receiver is dropped");
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            drop(error);
+
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn unread_receiver_drop_releases_the_enqueued_retained_owner() {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            tx.send(retained_probe(&drops))
+                .expect("receiver should accept the retained owner");
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            drop(rx);
+
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
 
     struct ScreenDelegateIvars {
         shared: Arc<StdMutex<PreviewScreenShared>>,
@@ -2235,7 +2365,7 @@ mod macos {
         query: ShareableContentQuery,
     ) -> Result<Retained<SCShareableContent>, NativeScreenStartup> {
         enum ShareableContentResult {
-            Content(usize),
+            Content(ShareableContentTransfer),
             Error(String),
         }
 
@@ -2249,7 +2379,7 @@ mod macos {
                         "ScreenCaptureKit returned no shareable content.".to_string(),
                     )
                 } else if let Some(retained) = unsafe { Retained::retain(content) } {
-                    ShareableContentResult::Content(Retained::into_raw(retained) as usize)
+                    ShareableContentResult::Content(ShareableContentTransfer::new(retained))
                 } else {
                     ShareableContentResult::Error(
                         "ScreenCaptureKit shareable content could not be retained.".to_string(),
@@ -2275,13 +2405,12 @@ mod macos {
         }
 
         match rx.recv_timeout(SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT) {
-            Ok(ShareableContentResult::Content(raw)) => {
-                let content = unsafe { Retained::from_raw(raw as *mut SCShareableContent) }
-                    .ok_or_else(|| {
-                        NativeScreenStartup::Failed(
-                            "ScreenCaptureKit shareable content pointer was invalid.".to_string(),
-                        )
-                    })?;
+            Ok(ShareableContentResult::Content(content)) => {
+                let content = content.consume().ok_or_else(|| {
+                    NativeScreenStartup::Failed(
+                        "ScreenCaptureKit shareable content pointer was invalid.".to_string(),
+                    )
+                })?;
                 Ok(content)
             }
             Ok(ShareableContentResult::Error(error)) => {

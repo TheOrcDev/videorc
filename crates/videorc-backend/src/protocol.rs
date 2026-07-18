@@ -2484,6 +2484,112 @@ pub struct SessionSummary {
     pub processing_kind: Option<String>,
 }
 
+/// Bounded, renderer-facing Library row. Histories intentionally live behind
+/// their cursor-paginated detail methods so refreshing the Library never
+/// serializes every event, log line, or AI payload for every session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionListItem {
+    pub id: String,
+    pub title: String,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    pub status: String,
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mp4_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_preset: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_size_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_status: Option<GateStatus>,
+    pub health_event_count: u64,
+    pub session_log_count: u64,
+    pub ai_artifact_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ready_ai_artifact_kinds: Vec<AiArtifactKind>,
+    pub comment_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_from_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processing_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionListPage {
+    pub items: Vec<SessionListItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default = "default_session_list_page_limit")]
+    pub limit: usize,
+}
+
+pub const DEFAULT_SESSION_LIST_PAGE_LIMIT: usize = 50;
+
+fn default_session_list_page_limit() -> usize {
+    DEFAULT_SESSION_LIST_PAGE_LIMIT
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionDetailListParams {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default = "default_session_detail_page_limit")]
+    pub limit: usize,
+}
+
+pub const DEFAULT_SESSION_DETAIL_PAGE_LIMIT: usize = 120;
+
+fn default_session_detail_page_limit() -> usize {
+    DEFAULT_SESSION_DETAIL_PAGE_LIMIT
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionHealthEventsPage {
+    pub events: Vec<HealthEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLogsPage {
+    pub entries: Vec<SessionLogEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionAiArtifactsPage {
+    pub artifacts: Vec<AiArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum NoiseCleanupJobStatus {

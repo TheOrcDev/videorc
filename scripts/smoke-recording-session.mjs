@@ -360,7 +360,7 @@ async function recordAssetBackgroundScenario({
  * the token-authenticated HTTP server. */
 async function assertSessionPoster({ ws, connection, timeoutMs, ffmpegPath, label }) {
   const sessions = await request(ws, timeoutMs, 'sessions.list', { limit: 1 })
-  const latest = sessions?.[0]
+  const latest = sessions?.items?.[0]
   if (!latest) {
     throw new Error('Poster assert: no session found after the recording scenarios.')
   }
