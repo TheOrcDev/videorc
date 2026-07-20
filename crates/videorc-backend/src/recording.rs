@@ -6610,7 +6610,7 @@ async fn select_windows_media_foundation_encoder(
             .unwrap_or("tee-backed hardware probe was rejected");
         state.emit_log(
             "warn",
-            &format!("Using the OpenH264 software H.264 fallback: {reason}"),
+            format!("Using the OpenH264 software H.264 fallback: {reason}"),
         );
     }
 }
