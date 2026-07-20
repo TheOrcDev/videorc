@@ -22,6 +22,13 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 
+import {
+  cadenceMismatch,
+  classifyFrameRate,
+  corroborateFreezes,
+  longestSegmentSeconds
+} from './frame-cadence.mjs'
+
 /**
  * Strict OBS-quality gates. All thresholds come from the root-fix plan's
  * "Final recording gate" / "Audio gate" sections.
@@ -55,7 +62,17 @@ export const DEFAULT_GATES = Object.freeze({
   keyframeMaxIntervalSeconds: null,
   // Max A/V stream tail mismatch in ms (stop drain); null keeps the combined
   // avSkew gates as the only sync check.
-  maxTailMismatchMs: null
+  maxTailMismatchMs: null,
+  // 2026-07 lesson (the "4K feels laggy" incident): freezedetect similarity hits
+  // on a person holding still are NOT pipeline freezes. When true, a freeze only
+  // hard-fails if exact decoded-frame repeats (framemd5) overlap it; similarity-only
+  // segments downgrade to warnings. Set false to restore the raw freezedetect gate.
+  freezeRequireCorroboration: true,
+  // Container cadence vs intended fps: fail when the file's real rate deviates
+  // beyond this from an EXPLICITLY intended rate (e.g. a 23.976p file from a 24p
+  // camera HDMI feed against a 30fps session). Only applies when the caller
+  // passes intendedFps; the NTSC offset (29.97 vs 30) counts as matching.
+  cadenceMismatchTolerancePct: 2
 })
 
 // H.264 High-profile level table (label ×10 as ffprobe reports `level`),
@@ -438,10 +455,23 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
   // Freeze segments. This is a hard gate only when the caller expects visible motion.
   // Real screen/camera baselines can be intentionally static, so they should use the
   // exact repeated-frame and pacing gates for artifact proof while keeping this as evidence.
-  if (metrics.longestFreezeMs != null && metrics.longestFreezeMs > gates.maxFreezeMs) {
+  //
+  // With freezeRequireCorroboration (default), only freezes overlapping exact
+  // decoded-frame repeats count as pipeline freezes; similarity-only segments are
+  // still content (a person holding still) and warn instead. Callers whose metrics
+  // predate the corroboration fields keep the raw freezedetect behavior.
+  const corroborationAvailable =
+    gates.freezeRequireCorroboration !== false && metrics.longestCorroboratedFreezeMs != null
+  const gatedFreezeMs = corroborationAvailable
+    ? metrics.longestCorroboratedFreezeMs
+    : metrics.longestFreezeMs
+  const gatedFreezeCount = corroborationAvailable
+    ? metrics.corroboratedFreezeCount
+    : metrics.freezeCount
+  if (gatedFreezeMs != null && gatedFreezeMs > gates.maxFreezeMs) {
     const message =
-      `freeze segment ${metrics.longestFreezeMs.toFixed(0)}ms exceeds ${gates.maxFreezeMs}ms ` +
-      `(${metrics.freezeCount} segment(s))`
+      `freeze segment ${gatedFreezeMs.toFixed(0)}ms exceeds ${gates.maxFreezeMs}ms ` +
+      `(${gatedFreezeCount} segment(s)${corroborationAvailable ? ', exact-repeat corroborated' : ''})`
     if (gates.requireMotion === false) {
       warnings.push(
         `${message} — motion not required for this run; inspect repeated-frame and pacing gates`
@@ -449,6 +479,29 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
     } else {
       failures.push(message)
     }
+  }
+  if (
+    corroborationAvailable &&
+    metrics.similarityOnlyFreezeCount > 0 &&
+    metrics.longestSimilarityOnlyFreezeMs > gates.maxFreezeMs
+  ) {
+    warnings.push(
+      `${metrics.similarityOnlyFreezeCount} similarity-only low-motion segment(s) ` +
+        `(longest ${metrics.longestSimilarityOnlyFreezeMs.toFixed(0)}ms) with zero exact ` +
+        `frame repeats — likely a still subject or static content, not a pipeline freeze`
+    )
+  }
+
+  // Container cadence vs explicitly intended rate (e.g. a 23.976p file produced by
+  // a 24p camera HDMI feed while the session intended 30fps). Names the actionable
+  // cause instead of leaving it implied by the frame-count percentage.
+  if (metrics.cadenceMismatchPct != null) {
+    failures.push(
+      `container cadence ${fmt(metrics.cadenceFps, 3)}fps` +
+        `${metrics.cadenceLabel ? ` (${metrics.cadenceLabel})` : ''} does not match intended ` +
+        `${fmt(metrics.cadenceIntendedFps, 2)}fps (${metrics.cadenceMismatchPct.toFixed(1)}% off) — ` +
+        `the source device is likely delivering that rate (check camera HDMI/movie output settings)`
+    )
   }
 
   // Repeated-frame bursts (exact decoded-frame duplicates). Like freezedetect,
@@ -860,6 +913,16 @@ export async function analyzeRecording(filePath, options = {}) {
   const repeated = maxConsecutiveRun(frameHashes, gates.maxRepeatedFrameRun)
   const longestFreeze = freezes.reduce((max, f) => Math.max(max, f.duration), 0)
   const longestSilence = silences.reduce((max, s) => Math.max(max, s.duration), 0)
+  const containerFps =
+    probe.video?.avgFps ?? probe.video?.nominalFps ?? pacing.observedFps ?? null
+  const cadence = classifyFrameRate(containerFps)
+  const explicitIntendedFps = Number.isFinite(options.intendedFps) ? options.intendedFps : null
+  const mismatch = cadenceMismatch(
+    containerFps,
+    explicitIntendedFps,
+    gates.cadenceMismatchTolerancePct
+  )
+  const freezeEvidence = corroborateFreezes(freezes, repeated.bursts, containerFps)
   const audioGaps = audioPtsGaps(audioPackets)
   const skew = avSkewMs(probe)
   const skewComponents = avSkewComponents(probe)
@@ -915,6 +978,18 @@ export async function analyzeRecording(filePath, options = {}) {
     durationStretchRatio,
     freezeCount: freezes.length,
     longestFreezeMs: hasVideo ? longestFreeze * 1000 : null,
+    corroboratedFreezeCount: hasVideo ? freezeEvidence.corroborated.length : null,
+    longestCorroboratedFreezeMs: hasVideo
+      ? longestSegmentSeconds(freezeEvidence.corroborated) * 1000
+      : null,
+    similarityOnlyFreezeCount: hasVideo ? freezeEvidence.similarityOnly.length : null,
+    longestSimilarityOnlyFreezeMs: hasVideo
+      ? longestSegmentSeconds(freezeEvidence.similarityOnly) * 1000
+      : null,
+    cadenceFps: containerFps,
+    cadenceLabel: cadence?.label ?? null,
+    cadenceIntendedFps: explicitIntendedFps,
+    cadenceMismatchPct: mismatch?.deviationPct ?? null,
     maxRepeatedFrameRun: hasVideo ? repeated.maxRun : null,
     repeatedBurstCount: repeated.bursts.length,
     maxAudioGapMs: hasAudio ? audioGaps.maxGapMs : null,
@@ -1011,6 +1086,12 @@ export function renderMarkdownReport(report) {
     `- FPS: intended ${fmt(m.intendedFps, 2)} | avg ${fmt(m.avgFps, 2)} | nominal ${fmt(m.nominalFps, 2)} | observed ${fmt(m.observedFps, 2)}`
   )
   lines.push(
+    `- Cadence: ${m.cadenceLabel ?? `${fmt(m.cadenceFps, 3)}fps (non-standard/unstable)`}` +
+      (m.cadenceMismatchPct != null
+        ? ` — MISMATCH vs intended ${fmt(m.cadenceIntendedFps, 2)}fps (${fmt(m.cadenceMismatchPct, 1)}% off)`
+        : '')
+  )
+  lines.push(
     `- Frames: observed ${m.observedFrames ?? 'n/a'} | expected ~${m.expectedFrames ?? 'n/a'}`
   )
   lines.push(
@@ -1020,6 +1101,14 @@ export function renderMarkdownReport(report) {
     `- Frame pacing: mean ${fmt(m.meanIntervalMs)}ms | max gap ${fmt(m.maxFrameGapMs)}ms | jitter ${fmt(m.frameJitterMs)}ms`
   )
   lines.push(`- Freeze: longest ${fmt(m.longestFreezeMs)}ms across ${m.freezeCount} segment(s)`)
+  if (m.corroboratedFreezeCount != null) {
+    lines.push(
+      `- Freeze evidence: ${m.corroboratedFreezeCount} exact-repeat corroborated ` +
+        `(longest ${fmt(m.longestCorroboratedFreezeMs)}ms) | ` +
+        `${m.similarityOnlyFreezeCount} similarity-only (longest ${fmt(m.longestSimilarityOnlyFreezeMs)}ms, ` +
+        `likely still content)`
+    )
+  }
   lines.push(
     `- Repeated frames: max run ${m.maxRepeatedFrameRun ?? 'n/a'} across ${m.repeatedBurstCount} burst(s)`
   )
@@ -1089,9 +1178,9 @@ export function renderMarkdownReport(report) {
   lines.push('## Caveats')
   lines.push('')
   lines.push(
-    '- `freezedetect` flags any near-identical run, including legitimately static screen content. ' +
-      'For real-source acceptance the composite includes a moving camera, so a true pipeline freeze ' +
-      'freezes everything; static screen + moving camera will not trip it.'
+    '- `freezedetect` flags any near-identical run, including legitimately static screen content ' +
+      'and a person holding still. The freeze gate therefore only hard-fails segments corroborated ' +
+      'by exact decoded-frame repeats (framemd5); similarity-only segments surface as warnings.'
   )
   lines.push(
     '- Audio A/V skew here is a container start/duration delta, not measured lip-sync. ' +

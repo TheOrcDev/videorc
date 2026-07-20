@@ -359,8 +359,16 @@ pub enum QualityIssue {
     OneSidedAudio {
         silent_channel: usize,
     },
-    /// One or more user-visible long freezes (repeated/frozen frames).
+    /// One or more user-visible long freezes (repeated/frozen frames), corroborated
+    /// by exact decoded-frame repeats — a real pipeline defect.
     FrozenSegments {
+        count: usize,
+        longest_seconds: f64,
+    },
+    /// freezedetect similarity hits with zero exact frame repeats: legitimately
+    /// still content (a person holding still, a static screen), NOT a pipeline
+    /// freeze. Informational only — never affects the verdict, never repaired.
+    LowMotionSegments {
         count: usize,
         longest_seconds: f64,
     },
@@ -674,10 +682,20 @@ pub fn parse_framemd5_hashes(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// One run of consecutive byte-identical decoded frames (frame indices).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepeatedFrameBurst {
+    pub start_index: usize,
+    pub run: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepeatedFrameSummary {
     pub max_run: usize,
     pub bursts: usize,
+    /// The positions of every burst over the threshold, so freeze segments can be
+    /// corroborated against exact-repeat evidence (see [`corroborated_freezes`]).
+    pub burst_runs: Vec<RepeatedFrameBurst>,
 }
 
 pub fn repeated_frame_summary(hashes: &[String], threshold: usize) -> RepeatedFrameSummary {
@@ -685,29 +703,95 @@ pub fn repeated_frame_summary(hashes: &[String], threshold: usize) -> RepeatedFr
         return RepeatedFrameSummary {
             max_run: 0,
             bursts: 0,
+            burst_runs: Vec::new(),
         };
     }
 
     let mut max_run = 1;
     let mut current_run = 1;
-    let mut bursts = 0;
+    let mut run_start = 0;
+    let mut burst_runs = Vec::new();
     for index in 1..hashes.len() {
         if hashes[index] == hashes[index - 1] {
             current_run += 1;
         } else {
             if current_run > threshold {
-                bursts += 1;
+                burst_runs.push(RepeatedFrameBurst {
+                    start_index: run_start,
+                    run: current_run,
+                });
             }
             max_run = max_run.max(current_run);
+            run_start = index;
             current_run = 1;
         }
     }
     if current_run > threshold {
-        bursts += 1;
+        burst_runs.push(RepeatedFrameBurst {
+            start_index: run_start,
+            run: current_run,
+        });
     }
     max_run = max_run.max(current_run);
 
-    RepeatedFrameSummary { max_run, bursts }
+    RepeatedFrameSummary {
+        max_run,
+        bursts: burst_runs.len(),
+        burst_runs,
+    }
+}
+
+/// Splits freezedetect segments into pipeline-proven and similarity-only.
+///
+/// A freeze segment only proves a *pipeline* freeze when a run of byte-identical
+/// decoded frames (framemd5) overlaps it — a live camera or screen source never
+/// produces exact repeats on its own. Similarity-only segments are characteristic
+/// of legitimately still content (a person holding still, a static screen, flat
+/// walls denoised by the encoder) and must not be treated as defects.
+///
+/// Returns `(corroborated, similarity_only)`. Burst windows get one frame
+/// interval of slack on each side. Without a usable fps the bursts cannot be
+/// placed in time, so every freeze is conservatively similarity-only.
+///
+/// 2026-07 lesson: the "4K feels laggy" incident file was a technically perfect
+/// 23.976p transfer — 465 freezedetect hits, zero exact repeats — yet the gate
+/// called it "not 100%" and planned an interpolation repair.
+pub fn corroborated_freezes(
+    freezes: &[FreezeSegment],
+    bursts: &[RepeatedFrameBurst],
+    fps: Option<f64>,
+) -> (Vec<FreezeSegment>, Vec<FreezeSegment>) {
+    let Some(fps) = fps.filter(|fps| fps.is_finite() && *fps > 0.0) else {
+        return (Vec::new(), freezes.to_vec());
+    };
+    if bursts.is_empty() {
+        return (Vec::new(), freezes.to_vec());
+    }
+    let frame_interval = 1.0 / fps;
+    let windows: Vec<(f64, f64)> = bursts
+        .iter()
+        .map(|burst| {
+            (
+                burst.start_index as f64 * frame_interval - frame_interval,
+                (burst.start_index + burst.run) as f64 * frame_interval + frame_interval,
+            )
+        })
+        .collect();
+    let mut corroborated = Vec::new();
+    let mut similarity_only = Vec::new();
+    for freeze in freezes {
+        let start = freeze.start;
+        let end = freeze.start + freeze.duration;
+        if windows
+            .iter()
+            .any(|(window_start, window_end)| *window_start <= end && *window_end >= start)
+        {
+            corroborated.push(*freeze);
+        } else {
+            similarity_only.push(*freeze);
+        }
+    }
+    (corroborated, similarity_only)
 }
 
 pub fn detect_repeated_frames_cancellable(
@@ -1077,10 +1161,12 @@ pub fn select_repair_plan(
                 }
                 repairable = true;
             }
-            // FFmpeg-only repair cannot synthesise a missing stream.
+            // FFmpeg-only repair cannot synthesise a missing stream, and still
+            // content (low motion) is not a defect to repair.
             QualityIssue::MissingVideo
             | QualityIssue::MissingAudio
-            | QualityIssue::AudioGap { .. } => {}
+            | QualityIssue::AudioGap { .. }
+            | QualityIssue::LowMotionSegments { .. } => {}
         }
     }
 
@@ -1266,10 +1352,16 @@ const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "mov", "m4v"];
 /// Recomputes a verdict from a full issue list. Missing streams and audio packet
 /// gaps need review; video cadence issues and one-sided audio are repairable.
 fn verdict_for(issues: &[QualityIssue]) -> QualityVerdict {
-    if issues.is_empty() {
+    // Low-motion segments are informational (still content, not a defect) and
+    // never move the verdict away from Clean.
+    let significant: Vec<&QualityIssue> = issues
+        .iter()
+        .filter(|issue| !matches!(issue, QualityIssue::LowMotionSegments { .. }))
+        .collect();
+    if significant.is_empty() {
         return QualityVerdict::Clean;
     }
-    let needs_review = issues.iter().any(|issue| {
+    let needs_review = significant.iter().any(|issue| {
         matches!(
             issue,
             QualityIssue::MissingVideo | QualityIssue::MissingAudio | QualityIssue::AudioGap { .. }
@@ -1287,7 +1379,8 @@ fn verdict_for(issues: &[QualityIssue]) -> QualityVerdict {
 pub fn combine_report(
     mut base: QualityReport,
     one_sided_silent_channel: Option<usize>,
-    long_freeze_segments: &[FreezeSegment],
+    corroborated_freeze_segments: &[FreezeSegment],
+    similarity_only_freeze_segments: &[FreezeSegment],
     repeated_frames: Option<RepeatedFrameSummary>,
     audio_gaps: Option<AudioGapSummary>,
     thresholds: &QualityThresholds,
@@ -1296,13 +1389,23 @@ pub fn combine_report(
         base.issues
             .push(QualityIssue::OneSidedAudio { silent_channel });
     }
-    if !long_freeze_segments.is_empty() {
-        let longest = long_freeze_segments
+    if !corroborated_freeze_segments.is_empty() {
+        let longest = corroborated_freeze_segments
             .iter()
             .map(|segment| segment.duration)
             .fold(0.0_f64, f64::max);
         base.issues.push(QualityIssue::FrozenSegments {
-            count: long_freeze_segments.len(),
+            count: corroborated_freeze_segments.len(),
+            longest_seconds: longest,
+        });
+    }
+    if !similarity_only_freeze_segments.is_empty() {
+        let longest = similarity_only_freeze_segments
+            .iter()
+            .map(|segment| segment.duration)
+            .fold(0.0_f64, f64::max);
+        base.issues.push(QualityIssue::LowMotionSegments {
+            count: similarity_only_freeze_segments.len(),
             longest_seconds: longest,
         });
     }
@@ -1430,10 +1533,26 @@ pub fn analyze_recording_cancellable(
         None
     };
 
+    // A freezedetect hit only counts as a pipeline freeze when exact decoded-frame
+    // repeats overlap it; the rest is still content (see corroborated_freezes).
+    let container_fps = probe
+        .video
+        .as_ref()
+        .and_then(|video| video.avg_fps.or(video.nominal_fps));
+    let (corroborated, similarity_only) = corroborated_freezes(
+        &freezes,
+        repeated_frames
+            .as_ref()
+            .map(|summary| summary.burst_runs.as_slice())
+            .unwrap_or(&[]),
+        container_fps,
+    );
+
     let report = combine_report(
         base,
         one_sided,
-        &freezes,
+        &corroborated,
+        &similarity_only,
         repeated_frames,
         audio_gaps,
         thresholds,
@@ -1746,6 +1865,13 @@ fn describe_issue(issue: &QualityIssue) -> String {
             count,
             longest_seconds,
         } => format!("{count} long freeze segment(s), longest {longest_seconds:.1}s"),
+        QualityIssue::LowMotionSegments {
+            count,
+            longest_seconds,
+        } => format!(
+            "{count} low-motion segment(s), longest {longest_seconds:.1}s — no exact frame \
+             repeats, likely a still subject (not a pipeline freeze)"
+        ),
         QualityIssue::RepeatedFrames { bursts, max_run } => {
             format!("{bursts} repeated-frame burst(s), max run {max_run}")
         }
@@ -2421,7 +2547,7 @@ mod tests {
             start: 0.5,
             duration: 1.6,
         }];
-        let report = combine_report(base, None, &freezes, None, None, &thresholds());
+        let report = combine_report(base, None, &freezes, &[], None, None, &thresholds());
 
         assert_eq!(report.verdict, QualityVerdict::Repairable);
         assert!(report.issues.iter().any(|issue| matches!(
@@ -2431,6 +2557,68 @@ mod tests {
                 longest_seconds
             } if (*longest_seconds - 1.6).abs() < 0.001
         )));
+    }
+
+    #[test]
+    fn similarity_only_freezes_stay_informational_and_clean() {
+        // The 2026-07 incident shape: freezedetect hits, zero exact repeats — a
+        // still subject, not a pipeline freeze. Verdict stays Clean, no repair.
+        let base = QualityReport {
+            verdict: QualityVerdict::Clean,
+            issues: vec![],
+        };
+        let similarity_only = [FreezeSegment {
+            start: 55.1,
+            duration: 2.1,
+        }];
+        let report = combine_report(base, None, &[], &similarity_only, None, None, &thresholds());
+
+        assert_eq!(report.verdict, QualityVerdict::Clean);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| matches!(issue, QualityIssue::LowMotionSegments { count: 1, .. }))
+        );
+        let plan = select_repair_plan(
+            &report,
+            &probe_for_strategy(),
+            &QualityExpectations::default(),
+            Some(RepairVideoEncoder::Libx264),
+        );
+        assert!(plan.is_none(), "still content must never be repaired");
+    }
+
+    #[test]
+    fn corroborated_freezes_split_on_exact_repeat_overlap() {
+        let freezes = [
+            FreezeSegment {
+                start: 10.0,
+                duration: 0.5,
+            },
+            FreezeSegment {
+                start: 42.0,
+                duration: 1.0,
+            },
+        ];
+        // 30fps: frames 300..315 span 10.0s..10.5s — overlaps the first freeze only.
+        let bursts = [RepeatedFrameBurst {
+            start_index: 300,
+            run: 15,
+        }];
+        let (corroborated, similarity_only) = corroborated_freezes(&freezes, &bursts, Some(30.0));
+        assert_eq!(corroborated, vec![freezes[0]]);
+        assert_eq!(similarity_only, vec![freezes[1]]);
+
+        // No exact repeats at all -> everything is similarity-only.
+        let (corroborated, similarity_only) = corroborated_freezes(&freezes, &[], Some(30.0));
+        assert!(corroborated.is_empty());
+        assert_eq!(similarity_only.len(), 2);
+
+        // Without a usable fps the bursts cannot be placed in time.
+        let (corroborated, similarity_only) = corroborated_freezes(&freezes, &bursts, None);
+        assert!(corroborated.is_empty());
+        assert_eq!(similarity_only.len(), 2);
     }
 
     #[test]
@@ -2446,7 +2634,11 @@ mod tests {
             repeated_frame_summary(&hashes, STRICT_MAX_REPEATED_FRAME_RUN),
             RepeatedFrameSummary {
                 max_run: 3,
-                bursts: 1
+                bursts: 1,
+                burst_runs: vec![RepeatedFrameBurst {
+                    start_index: 0,
+                    run: 3
+                }]
             }
         );
     }
@@ -2867,7 +3059,7 @@ mod tests {
             start: 5.0,
             duration: 3.5,
         }];
-        let report = combine_report(base, Some(2), &freezes, None, None, &thresholds());
+        let report = combine_report(base, Some(2), &freezes, &[], None, None, &thresholds());
         assert_eq!(report.verdict, QualityVerdict::Repairable);
         assert!(
             report
@@ -2889,7 +3081,7 @@ mod tests {
             verdict: QualityVerdict::Clean,
             issues: vec![],
         };
-        let report = combine_report(base, None, &[], None, None, &thresholds());
+        let report = combine_report(base, None, &[], &[], None, None, &thresholds());
         assert_eq!(report.verdict, QualityVerdict::Clean);
         assert!(report.issues.is_empty());
     }
@@ -2904,9 +3096,14 @@ mod tests {
             base,
             None,
             &[],
+            &[],
             Some(RepeatedFrameSummary {
                 max_run: 7,
                 bursts: 1,
+                burst_runs: vec![RepeatedFrameBurst {
+                    start_index: 10,
+                    run: 7,
+                }],
             }),
             Some(AudioGapSummary {
                 count: 1,

@@ -298,6 +298,68 @@ describe('evaluateGates', () => {
     assert.match(v.failures[0], /repeated-frame burst of 7/)
   })
 
+  it('gates on corroborated freezes when corroboration metrics are present', () => {
+    const v = evaluateGates({
+      ...clean,
+      longestFreezeMs: 900,
+      freezeCount: 3,
+      corroboratedFreezeCount: 1,
+      longestCorroboratedFreezeMs: 400,
+      similarityOnlyFreezeCount: 2,
+      longestSimilarityOnlyFreezeMs: 900
+    })
+    assert.equal(v.pass, false)
+    assert.match(v.failures[0], /freeze segment 400ms .*exact-repeat corroborated/)
+  })
+
+  it('passes with warnings when every freeze is similarity-only (still subject)', () => {
+    // The 2026-07 incident shape: a technically perfect 23.976p file, 465
+    // freezedetect hits, zero exact frame repeats.
+    const v = evaluateGates({
+      ...clean,
+      longestFreezeMs: 2085,
+      freezeCount: 465,
+      corroboratedFreezeCount: 0,
+      longestCorroboratedFreezeMs: 0,
+      similarityOnlyFreezeCount: 465,
+      longestSimilarityOnlyFreezeMs: 2085
+    })
+    assert.equal(v.pass, true)
+    assert.match(v.warnings[0], /similarity-only .* not a pipeline freeze/)
+  })
+
+  it('keeps the raw freezedetect gate when freezeRequireCorroboration is false', () => {
+    const v = evaluateGates(
+      {
+        ...clean,
+        longestFreezeMs: 2085,
+        freezeCount: 465,
+        corroboratedFreezeCount: 0,
+        longestCorroboratedFreezeMs: 0,
+        similarityOnlyFreezeCount: 465,
+        longestSimilarityOnlyFreezeMs: 2085
+      },
+      { ...DEFAULT_GATES, freezeRequireCorroboration: false }
+    )
+    assert.equal(v.pass, false)
+    assert.match(v.failures[0], /freeze segment 2085ms/)
+  })
+
+  it('fails a container cadence mismatch with an actionable message', () => {
+    const v = evaluateGates({
+      ...clean,
+      cadenceFps: 24000 / 1001,
+      cadenceLabel: '23.976p (NTSC film)',
+      cadenceIntendedFps: 30,
+      cadenceMismatchPct: 20.1
+    })
+    assert.equal(v.pass, false)
+    assert.ok(
+      v.failures.some((f) => /container cadence 23\.976fps/.test(f) && /camera HDMI/.test(f)),
+      `failures: ${v.failures.join('; ')}`
+    )
+  })
+
   it('warns on repeated-frame bursts when visible motion is not required', () => {
     const v = evaluateGates(
       { ...clean, maxRepeatedFrameRun: 7, repeatedBurstCount: 1 },

@@ -4131,6 +4131,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               }
             })
           }
+        } else if (event.code === 'camera-cadence-mismatch') {
+          // The camera is healthy but delivering a different rate than the session
+          // (e.g. a 24p HDMI feed into a 30fps session): the recording will stutter.
+          // Actionable at record start — the user can stop and fix the camera output.
+          toast.warning('Camera frame rate mismatch', {
+            description: event.message,
+            duration: 15000
+          })
         } else if (event.code === 'mic-silent') {
           // Plan 021 F3: the user must hear about a silent mic from the app,
           // not from playing the file back. Warn = mid-session (stopping and

@@ -6089,12 +6089,13 @@ async fn await_recording_camera_cadence_ready(
     let threshold_ms = camera_cadence_ready_threshold_ms(target_fps);
 
     loop {
-        let (sample_pts_gap_p95_ms, callback_gap_p95_ms, frame_age_ms) = {
+        let (sample_pts_gap_p95_ms, callback_gap_p95_ms, frame_age_ms, camera_source_fps) = {
             let diagnostics = state.diagnostics.lock().await;
             (
                 diagnostics.preview_camera_sample_pts_gap_p95_ms,
                 diagnostics.preview_camera_capture_gap_p95_ms,
                 diagnostics.preview_camera_frame_age_ms,
+                diagnostics.preview_camera_source_fps,
             )
         };
 
@@ -6110,13 +6111,29 @@ async fn await_recording_camera_cadence_ready(
                 HealthLevel::Info,
                 "recording-camera-cadence-ready",
                 &format!(
-                    "Camera cadence settled before recording start: sample PTS p95 {} (threshold {:.0}ms), callback p95 {}, frame age {}.",
+                    "Camera cadence settled before recording start: sample PTS p95 {} (threshold {:.0}ms), callback p95 {}, frame age {}, measured delivery {}.",
                     optional_ms(sample_pts_gap_p95_ms),
                     threshold_ms,
                     optional_ms(callback_gap_p95_ms),
-                    optional_u64_ms(frame_age_ms)
+                    optional_u64_ms(frame_age_ms),
+                    camera_source_fps
+                        .filter(|fps| fps.is_finite())
+                        .map(|fps| format!("{fps:.2}fps"))
+                        .unwrap_or_else(|| "n/a".to_string())
                 ),
             );
+            // A settled cadence can still be the WRONG cadence (camera feeding 24p
+            // into a 30fps session). Warn — loudly enough to toast — but never block:
+            // the recording is still usable, just not smooth.
+            if let Some(warning) = camera_cadence_mismatch_warning(camera_source_fps, target_fps) {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Warn,
+                    "camera-cadence-mismatch",
+                    &warning,
+                );
+            }
             return Ok(());
         }
 
@@ -6173,6 +6190,38 @@ fn camera_cadence_ready(
 
 fn camera_cadence_ready_threshold_ms(target_fps: u32) -> f64 {
     1000.0 / f64::from(target_fps.max(1)) * RECORDING_CAMERA_CADENCE_FRAME_INTERVAL_FACTOR
+}
+
+/// The camera can be healthy (steady cadence, fresh frames) yet deliver a DIFFERENT
+/// rate than the session targets — e.g. an HDMI capture card relaying a mirrorless
+/// set to 24p into a 30fps session. The pipeline then repeats the stale camera frame
+/// on ~every fifth tick and recorded motion visibly stutters, with no error anywhere.
+/// (Found in the 2026-07 "4K feels laggy" incident: Cam Link 4K delivering 23.976
+/// while everything intended 30.)
+///
+/// Returns an actionable warning when the measured delivery rate deviates more than
+/// `CAMERA_CADENCE_MISMATCH_TOLERANCE_PCT` from the session rate. The NTSC offset
+/// (29.97 vs 30) stays within tolerance by construction.
+const CAMERA_CADENCE_MISMATCH_TOLERANCE_PCT: f64 = 2.0;
+
+fn camera_cadence_mismatch_warning(measured_fps: Option<f64>, target_fps: u32) -> Option<String> {
+    let measured = measured_fps.filter(|fps| fps.is_finite() && *fps > 0.0)?;
+    let target = f64::from(target_fps.max(1));
+    let deviation_pct = (measured - target).abs() / target * 100.0;
+    if deviation_pct <= CAMERA_CADENCE_MISMATCH_TOLERANCE_PCT {
+        return None;
+    }
+    let per_second = (target - measured).abs().round() as u64;
+    let effect = if measured < target {
+        format!("~{per_second} repeated (stuttering) frame(s) per second in the recording")
+    } else {
+        format!("~{per_second} camera frame(s) per second will be dropped")
+    };
+    Some(format!(
+        "Camera is delivering ~{measured:.2} fps but the session is set to {target_fps} fps — \
+         expect {effect}. Set the camera/HDMI output to {target_fps}p, or match the session \
+         frame rate to the camera."
+    ))
 }
 
 fn recording_startup_frame_gap_budget(target_fps: u32) -> Duration {
@@ -14585,6 +14634,36 @@ mod tests {
         // No frames and no callback cadence at all is not ready.
         assert!(!camera_cadence_ready(None, None, Some(40), threshold));
         assert!(!camera_cadence_ready(None, Some(76.9), None, threshold));
+    }
+
+    #[test]
+    fn camera_cadence_mismatch_warns_on_wrong_delivery_rate() {
+        // The 2026-07 incident shape: Cam Link 4K relaying a 24p mirrorless into a
+        // 30fps session. ~23.98 measured vs 30 target -> warn with the repeat count.
+        let warning = camera_cadence_mismatch_warning(Some(23.976), 30)
+            .expect("24p into a 30fps session must warn");
+        assert!(warning.contains("23.98 fps"), "{warning}");
+        assert!(warning.contains("~6 repeated"), "{warning}");
+        assert!(warning.contains("30p"), "{warning}");
+
+        // A camera faster than the session drops frames instead.
+        let warning = camera_cadence_mismatch_warning(Some(59.94), 30)
+            .expect("60p into a 30fps session must warn");
+        assert!(warning.contains("dropped"), "{warning}");
+    }
+
+    #[test]
+    fn camera_cadence_mismatch_accepts_matching_and_ntsc_rates() {
+        // Exact and NTSC-offset rates are within the 2% tolerance.
+        assert!(camera_cadence_mismatch_warning(Some(30.0), 30).is_none());
+        assert!(camera_cadence_mismatch_warning(Some(29.97), 30).is_none());
+        assert!(camera_cadence_mismatch_warning(Some(59.94), 60).is_none());
+        // Measurement decay within tolerance stays quiet.
+        assert!(camera_cadence_mismatch_warning(Some(29.5), 30).is_none());
+        // Missing or garbage measurements never warn.
+        assert!(camera_cadence_mismatch_warning(None, 30).is_none());
+        assert!(camera_cadence_mismatch_warning(Some(0.0), 30).is_none());
+        assert!(camera_cadence_mismatch_warning(Some(f64::NAN), 30).is_none());
     }
 
     #[test]
