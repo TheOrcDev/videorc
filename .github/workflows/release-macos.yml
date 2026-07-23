@@ -33,7 +33,7 @@ env:
 jobs:
   macos:
     name: Build signed macOS artifact
-    runs-on: macos-15
+    runs-on: tenki-macos-latest-mini
     timeout-minutes: 60
 
     steps:
@@ -125,11 +125,11 @@ jobs:
           VIDEORC_PERF_ACTIVE_BUDGET_PROFILE: ${{ vars.VIDEORC_PERF_RELEASE_BUDGET_PROFILE }}
           VIDEORC_PERF_APP_EXECUTABLE: apps/desktop/release/mac-arm64/Videorc.app/Contents/MacOS/Videorc
 
+
       # Generic hosted macOS lacks the stable hardware and TCC grants required
       # for a truthful ScreenCaptureKit run. The signed payload is checked here
       # against reviewed evidence; runtime calibration stays on the authorized
       # self-hosted performance runner.
-
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:

@@ -39,7 +39,7 @@ permissions:
 jobs:
   promote:
     name: Promote exact private candidate to ${{ inputs.stage }}
-    runs-on: windows-latest
+    runs-on: tenki-standard-medium-4c-8g
     timeout-minutes: 45
     environment: windows-alpha-release
     steps:
