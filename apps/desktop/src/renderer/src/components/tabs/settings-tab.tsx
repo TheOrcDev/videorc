@@ -34,8 +34,9 @@ import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioAudio, useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import type { RemoteControlStatus } from '@/lib/backend'
 import { useUpdater } from '@/hooks/use-updater'
-import type { DirectoryFacts, UpdateStatus } from '@/lib/backend'
+import type { DirectoryFacts, RuntimeInfo, UpdateStatus } from '@/lib/backend'
 import { isActiveRecordingState } from '@/lib/format'
+import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
 import { recordingQuality, streamingSummary } from '@/lib/studio-session-view'
 import { shortcutsByGroup } from '@/lib/shortcuts'
 import { displayKeyGlyphs, osSettingsName } from '@/lib/platform'
@@ -64,6 +65,7 @@ export function SettingsTab({
     handleSystemPermission,
     openSystemPermissionSettings,
     exportSupportBundle,
+    scheduleHardwareAccelerationRetry,
     supportBundleExportPending,
     runtimeInfo,
     remoteControl
@@ -473,19 +475,50 @@ export function SettingsTab({
             icon={PaintBrush}
             title="Appearance & behavior"
           >
-            <Field>
-              <FieldLabel>Theme</FieldLabel>
-              <ToggleGroup
-                type="single"
-                value={theme ?? 'system'}
-                variant="outline"
-                onValueChange={(value) => value && setTheme(value)}
-              >
-                <ToggleGroupItem value="light">Light</ToggleGroupItem>
-                <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
-                <ToggleGroupItem value="system">System</ToggleGroupItem>
-              </ToggleGroup>
-            </Field>
+            <FieldGroup>
+              <Field>
+                <FieldLabel>Theme</FieldLabel>
+                <ToggleGroup
+                  type="single"
+                  value={theme ?? 'system'}
+                  variant="outline"
+                  onValueChange={(value) => value && setTheme(value)}
+                >
+                  <ToggleGroupItem value="light">Light</ToggleGroupItem>
+                  <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
+                  <ToggleGroupItem value="system">System</ToggleGroupItem>
+                </ToggleGroup>
+              </Field>
+              {runtimeInfo?.platform === 'win32' ? (
+                <Field>
+                  <div className="flex items-center justify-between gap-3">
+                    <FieldLabel>Graphics acceleration</FieldLabel>
+                    <StatusBadge
+                      tone={runtimeInfo.hardwareAccelerationDisabled ? 'warn' : 'good'}
+                      value={gpuRenderingLabel(runtimeInfo)}
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {graphicsAccelerationDescription(runtimeInfo)}
+                  </p>
+                  {runtimeInfo.hardwareAccelerationDisabled &&
+                  runtimeInfo.gpuFallback.source !== 'env' ? (
+                    <Button
+                      className="w-fit"
+                      disabled={runtimeInfo.gpuFallback.retryScheduled}
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void scheduleHardwareAccelerationRetry()}
+                    >
+                      <ArrowClockwise data-icon="inline-start" />
+                      {runtimeInfo.gpuFallback.retryScheduled
+                        ? 'Retry scheduled'
+                        : 'Retry on next launch'}
+                    </Button>
+                  ) : null}
+                </Field>
+              ) : null}
+            </FieldGroup>
           </PanelSection>
 
           <PanelSection
@@ -590,6 +623,25 @@ function AboutAndUpdates({ onShowWhatsNew }: { onShowWhatsNew: () => void }): Re
       </div>
     </PanelSection>
   )
+}
+
+function graphicsAccelerationDescription(runtimeInfo: RuntimeInfo): string {
+  const age = gpuFallbackAge(runtimeInfo.gpuFallback.updatedAt)
+  const fallbackAge = age ? ` ${age}` : ''
+
+  if (runtimeInfo.gpuFallback.source === 'retry') {
+    return `This launch is testing hardware acceleration after a fallback${fallbackAge}. Two GPU-process crashes restore software rendering automatically; a stable minute clears the fallback.`
+  }
+  if (runtimeInfo.gpuFallback.source === 'env') {
+    return 'Software rendering was requested with VIDEORC_DISABLE_GPU. Remove that environment override and reopen Videorc to use hardware acceleration.'
+  }
+  if (runtimeInfo.hardwareAccelerationDisabled) {
+    if (runtimeInfo.gpuFallback.retryScheduled) {
+      return `The GPU fallback began${fallbackAge}. Hardware acceleration will be retried after you quit and reopen Videorc; this launch stays in software rendering mode.`
+    }
+    return `Videorc switched to software rendering${fallbackAge} after ${runtimeInfo.gpuFallback.crashCount} GPU-process crashes. A retry affects only the next launch, and repeated crashes restore this safe mode.`
+  }
+  return 'Chromium hardware acceleration is active. Repeated GPU-process crashes still fall back to software rendering on the next launch.'
 }
 
 function UpdateControl({

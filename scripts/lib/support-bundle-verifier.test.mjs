@@ -249,6 +249,53 @@ describe('validateSupportBundle', () => {
     assert.equal(result.ok, true)
   })
 
+  it('accepts visible persisted software rendering with recovery evidence', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    bundle.rendererDiagnostics.runtimeInfo.hardwareAccelerationDisabled = true
+    bundle.rendererDiagnostics.runtimeInfo.gpuFallback = {
+      source: 'persisted',
+      reason: 'gpu-process-crashes',
+      crashCount: 2,
+      updatedAt: '2026-07-20T00:00:00.000Z',
+      retryScheduled: true,
+      retryAttempts: 1
+    }
+
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+
+    assert.equal(result.ok, true)
+  })
+
+  it('rejects Windows acceptance without an explicit graphics fallback status', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    delete bundle.rendererDiagnostics.runtimeInfo.hardwareAccelerationDisabled
+    delete bundle.rendererDiagnostics.runtimeInfo.gpuFallback
+
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /hardwareAccelerationDisabled/)
+    assert.match(result.failures.join('\n'), /gpuFallback/)
+  })
+
+  it('rejects software rendering without its persisted reason', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    bundle.rendererDiagnostics.runtimeInfo.hardwareAccelerationDisabled = true
+    bundle.rendererDiagnostics.runtimeInfo.gpuFallback = {
+      source: 'persisted',
+      reason: null,
+      crashCount: 2,
+      updatedAt: '2026-07-20T00:00:00.000Z',
+      retryScheduled: false,
+      retryAttempts: 0
+    }
+
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /fallback reason/)
+  })
+
   it('rejects Windows acceptance bundles without packaged Windows runtime proof', () => {
     const bundle = validWindowsAcceptanceBundle({
       app: {
@@ -346,12 +393,20 @@ function validWindowsAcceptanceBundle(overrides = {}) {
             description: 'NVIDIA RTX'
           }
         ],
+        hardwareAccelerationDisabled: false,
+        gpuFallback: {
+          source: 'none',
+          reason: null,
+          crashCount: 0,
+          updatedAt: null,
+          retryScheduled: false,
+          retryAttempts: 0
+        },
         isPackaged: true,
         permissionTargetName: 'Videorc',
         permissionTargetPath: 'C:\\Program Files\\Videorc\\Videorc.exe',
         capturePermissionTargetName: 'videorc-backend.exe',
-        capturePermissionTargetPath:
-          'C:\\Program Files\\Videorc\\resources\\videorc-backend.exe',
+        capturePermissionTargetPath: 'C:\\Program Files\\Videorc\\resources\\videorc-backend.exe',
         nativePreviewSurfaceProofEnabled: true
       }
     },

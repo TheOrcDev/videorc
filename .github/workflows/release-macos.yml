@@ -58,7 +58,13 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        # Fetch the prebuilt binary from GitHub releases instead of building it
+        # from source. `cargo install cargo-audit --locked` compiles the whole
+        # tool on every cache miss (minutes); the release binary lands in
+        # seconds and does not depend on the crates.io registry being reachable.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -129,7 +135,6 @@ jobs:
       # for a truthful ScreenCaptureKit run. The signed payload is checked here
       # against reviewed evidence; runtime calibration stays on the authorized
       # self-hosted performance runner.
-
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:

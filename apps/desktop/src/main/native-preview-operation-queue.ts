@@ -100,6 +100,7 @@ export class NativePreviewMutationQueue {
   private tail: Promise<void> = Promise.resolve()
   private queuedCount = 0
   private operationActive = false
+  private activeLabel: string | null = null
   private acceptedCount = 0
   private rejectedCount = 0
   private maxDepth = 0
@@ -116,6 +117,10 @@ export class NativePreviewMutationQueue {
 
   get activeCount(): number {
     return Number(this.operationActive)
+  }
+
+  get activeOperationLabel(): string | null {
+    return this.activeLabel
   }
 
   /** Work waiting behind the operation that already owns the host. */
@@ -135,7 +140,7 @@ export class NativePreviewMutationQueue {
     }
   }
 
-  run<Result>(operation: () => Result | Promise<Result>): Promise<Result> {
+  run<Result>(operation: () => Result | Promise<Result>, label = 'unlabeled'): Promise<Result> {
     if (this.queuedCount >= this.capacity) {
       this.rejectedCount += 1
       return Promise.reject(
@@ -151,10 +156,12 @@ export class NativePreviewMutationQueue {
     this.maxDepth = Math.max(this.maxDepth, this.queuedCount)
     const invoke = async (): Promise<Result> => {
       this.operationActive = true
+      this.activeLabel = label
       try {
         return await operation()
       } finally {
         this.operationActive = false
+        this.activeLabel = null
         this.queuedCount = Math.max(0, this.queuedCount - 1)
       }
     }
@@ -178,6 +185,7 @@ export class NativePreviewMutationQueue {
 }
 
 export interface PreparedNativePreviewMutation<Prepared, Result> {
+  label?: string
   canApply: () => boolean
   prepare: () => Prepared | Promise<Prepared>
   apply: (prepared: Prepared) => Result | Promise<Result>
@@ -197,7 +205,7 @@ export function runPreparedNativePreviewMutation<Prepared, Result>(
       return mutation.rejected()
     }
     return mutation.apply(prepared)
-  })
+  }, mutation.label)
 }
 
 export interface NativePreviewPlacementRequest {

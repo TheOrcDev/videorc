@@ -178,6 +178,43 @@ function inspectWindowsAcceptance(bundle, failures, warnings) {
         }
       })
     }
+    if (typeof runtimeInfo.hardwareAccelerationDisabled !== 'boolean') {
+      failures.push(
+        'windows acceptance requires rendererDiagnostics.runtimeInfo.hardwareAccelerationDisabled.'
+      )
+    }
+    if (!isPlainObject(runtimeInfo.gpuFallback)) {
+      failures.push('windows acceptance requires rendererDiagnostics.runtimeInfo.gpuFallback.')
+    } else {
+      const validSources = new Set(['env', 'persisted', 'retry', 'none'])
+      if (!validSources.has(runtimeInfo.gpuFallback.source)) {
+        failures.push(
+          'rendererDiagnostics.runtimeInfo.gpuFallback.source must identify env, persisted, retry, or none.'
+        )
+      }
+      if (typeof runtimeInfo.gpuFallback.retryScheduled !== 'boolean') {
+        failures.push(
+          'rendererDiagnostics.runtimeInfo.gpuFallback.retryScheduled must be a boolean.'
+        )
+      }
+      if (
+        !Number.isInteger(runtimeInfo.gpuFallback.retryAttempts) ||
+        runtimeInfo.gpuFallback.retryAttempts < 0
+      ) {
+        failures.push(
+          'rendererDiagnostics.runtimeInfo.gpuFallback.retryAttempts must be a non-negative integer.'
+        )
+      }
+      if (
+        runtimeInfo.hardwareAccelerationDisabled === true &&
+        (typeof runtimeInfo.gpuFallback.reason !== 'string' ||
+          !runtimeInfo.gpuFallback.reason.trim())
+      ) {
+        failures.push(
+          'windows acceptance requires a GPU fallback reason while software rendering is active.'
+        )
+      }
+    }
   }
 
   const devices = Array.isArray(bundle.devices?.devices) ? bundle.devices.devices : []
@@ -194,7 +231,9 @@ function inspectWindowsAcceptance(bundle, failures, warnings) {
 
   const diagnostics = diagnosticSnapshots(bundle)
   if (!diagnostics.some((snapshot) => typeof snapshot.encodeBackend === 'string')) {
-    failures.push('windows acceptance requires encodeBackend in diagnostics or session finalDiagnostics.')
+    failures.push(
+      'windows acceptance requires encodeBackend in diagnostics or session finalDiagnostics.'
+    )
   }
   if (
     !diagnostics.some(
@@ -234,7 +273,9 @@ function inspectScalar(value, path, failures, warnings) {
   const location = path.join('.')
 
   if (isAiArtifactBody(path, normalizedKey) && !isRedacted(value)) {
-    failures.push(`${location} contains an AI artifact body; support bundles must keep only artifact metadata.`)
+    failures.push(
+      `${location} contains an AI artifact body; support bundles must keep only artifact metadata.`
+    )
   }
 
   if (isSecretKey(normalizedKey) && !isRedactedSecret(value)) {
@@ -270,7 +311,9 @@ function requireString(root, path, expected, failures, prefix) {
   const value = valueAt(root, path)
   const location = prefix ? `${prefix}.${path.join('.')}` : path.join('.')
   if (value !== expected) {
-    failures.push(`${location} must be ${JSON.stringify(expected)}; found ${JSON.stringify(value)}.`)
+    failures.push(
+      `${location} must be ${JSON.stringify(expected)}; found ${JSON.stringify(value)}.`
+    )
   }
 }
 
@@ -347,9 +390,7 @@ function isPlainObject(value) {
 }
 
 function normalizeKey(key) {
-  return String(key)
-    .replace(/[_-]/g, '')
-    .toLowerCase()
+  return String(key).replace(/[_-]/g, '').toLowerCase()
 }
 
 function isSecretKey(key) {

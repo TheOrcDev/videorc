@@ -2568,6 +2568,15 @@ export interface RuntimeInfo {
    * VIDEORC_DISABLE_GPU=1 or the persisted GPU-crash fallback. Surfaced so
    * support bundles name the active graphics mode. */
   hardwareAccelerationDisabled: boolean
+  /** Launch-time graphics policy plus persisted recovery evidence. */
+  gpuFallback: {
+    source: 'env' | 'persisted' | 'retry' | 'none'
+    reason: string | null
+    crashCount: number
+    updatedAt: string | null
+    retryScheduled: boolean
+    retryAttempts: number
+  }
   isPackaged: boolean
   permissionTargetName: string
   permissionTargetPath: string
@@ -2869,6 +2878,7 @@ export interface VideorcApi {
   getBackendConnection: () => Promise<BackendConnection | null>
   getBackendLogs: () => Promise<BackendLogEvent[]>
   getRuntimeInfo: () => Promise<RuntimeInfo>
+  retryHardwareAcceleration: () => Promise<RuntimeInfo>
   pickScreenImage: () => Promise<ResourceSelection | null>
   pickFile: () => Promise<ResourceSelection | null>
   pickDirectory: () => Promise<ResourceSelection | null>

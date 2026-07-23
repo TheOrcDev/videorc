@@ -18,11 +18,18 @@ import { dirname, join } from 'node:path'
  * genuinely unreliable on this machine. */
 export const GPU_CRASH_PERSIST_THRESHOLD = 2
 
+/** A retry that keeps its GPU process alive for this long is considered
+ * recovered and the persisted fallback is removed. */
+export const GPU_RETRY_STABILITY_MS = 60_000
+
 export interface GpuFallbackState {
   disableHardwareAcceleration: boolean
   reason: string
   crashCount: number
   updatedAt: string
+  retryRequestedAt?: string
+  retryStartedAt?: string
+  retryAttempts?: number
 }
 
 export function gpuFallbackStatePath(userDataDir: string): string {
@@ -51,7 +58,7 @@ export function isGpuCrashReason(reason: string): boolean {
 export interface GpuFallbackDecision {
   disable: boolean
   /** Human-readable source of the decision, for logs / runtime info. */
-  source: 'env' | 'persisted' | 'none'
+  source: 'env' | 'persisted' | 'retry' | 'none'
   /** True when VIDEORC_FORCE_GPU=1 asked us to clear a persisted fallback. */
   clearPersisted: boolean
 }
@@ -72,7 +79,35 @@ export function decideGpuFallback({
   if (persisted?.disableHardwareAcceleration) {
     return { disable: true, source: 'persisted', clearPersisted: false }
   }
+  if (persisted?.retryRequestedAt && !persisted.retryStartedAt) {
+    return { disable: false, source: 'retry', clearPersisted: false }
+  }
+  if (persisted?.retryStartedAt) {
+    return { disable: true, source: 'persisted', clearPersisted: false }
+  }
   return { disable: false, source: 'none', clearPersisted: false }
+}
+
+/** Preserve the original failure evidence while arming one explicit accelerated
+ * launch. If that launch crashes twice, index.ts disables acceleration again. */
+export function scheduleGpuFallbackRetry(
+  state: GpuFallbackState,
+  requestedAt: string
+): GpuFallbackState {
+  const { retryStartedAt: _previousRetryStartedAt, ...preserved } = state
+  return {
+    ...preserved,
+    disableHardwareAcceleration: false,
+    retryRequestedAt: requestedAt,
+    retryAttempts: (state.retryAttempts ?? 0) + 1
+  }
+}
+
+export function startGpuFallbackRetry(
+  state: GpuFallbackState,
+  startedAt: string
+): GpuFallbackState {
+  return { ...state, retryStartedAt: startedAt }
 }
 
 export interface GpuFallbackStore {
@@ -98,7 +133,16 @@ export function readGpuFallbackState(
         disableHardwareAcceleration: state.disableHardwareAcceleration === true,
         reason: typeof state.reason === 'string' ? state.reason : 'unknown',
         crashCount: typeof state.crashCount === 'number' ? state.crashCount : 0,
-        updatedAt: typeof state.updatedAt === 'string' ? state.updatedAt : ''
+        updatedAt: typeof state.updatedAt === 'string' ? state.updatedAt : '',
+        ...(typeof state.retryRequestedAt === 'string'
+          ? { retryRequestedAt: state.retryRequestedAt }
+          : {}),
+        ...(typeof state.retryStartedAt === 'string'
+          ? { retryStartedAt: state.retryStartedAt }
+          : {}),
+        ...(typeof state.retryAttempts === 'number' && Number.isInteger(state.retryAttempts)
+          ? { retryAttempts: Math.max(0, state.retryAttempts) }
+          : {})
       }
     }
     return null

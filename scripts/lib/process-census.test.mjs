@@ -114,6 +114,25 @@ test('classifyProcess does not count launcher wrappers as backend or preview hel
   )
 })
 
+test('classifyProcess identifies auxiliary Electron renderers independently', () => {
+  for (const role of ['notes', 'comments', 'captions']) {
+    assert.equal(
+      classifyProcess({
+        command: 'C:\\Program Files\\Videorc\\Videorc.exe',
+        args: `--type=renderer --videorc-renderer-role=${role}`
+      }),
+      `electron-renderer-${role}`
+    )
+  }
+  assert.equal(
+    classifyProcess({
+      command: 'C:\\Program Files\\Videorc\\Videorc.exe',
+      args: '--type=renderer --videorc-renderer-role=main'
+    }),
+    'electron-renderer'
+  )
+})
+
 test('classifyProcess uses the exact argv executable when macOS truncates comm', () => {
   assert.equal(
     classifyProcess({
@@ -157,6 +176,13 @@ test('classifyProcess still counts the Electron app executable as electron-main'
       command:
         '/Users/orcdev/projects/videorc/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron',
       args: '/Users/orcdev/projects/videorc/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron .'
+    }),
+    'electron-main'
+  )
+  assert.equal(
+    classifyProcess({
+      command: 'C:\\repo\\node_modules\\electron\\dist\\electron.exe',
+      args: '"C:\\repo\\node_modules\\electron\\dist\\electron.exe" .'
     }),
     'electron-main'
   )

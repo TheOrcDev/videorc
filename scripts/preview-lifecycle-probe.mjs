@@ -142,7 +142,7 @@ try {
         await requestSmokeCommandWithRetry(smoke, 'app-quit', {}, { timeoutMs: 1000 })
         await waitForNoLiveProcessState({
           ledgerPaths,
-          pgid: launched.process.pid,
+          ...processOwnershipScope(launched.process.pid),
           timeoutMs: 10000
         })
         gracefulQuitCompleted = true
@@ -157,12 +157,12 @@ try {
       }
       await waitForNoLiveProcessState({
         ledgerPaths,
-        pgid: launched.process.pid,
+        ...processOwnershipScope(launched.process.pid),
         timeoutMs: 10000
       })
       const finalCensus = await waitForCleanProcessState({
         ledgerPaths,
-        pgid: launched.process.pid,
+        ...processOwnershipScope(launched.process.pid),
         timeoutMs: 1000
       })
       teardownEvidence = {
@@ -609,7 +609,10 @@ async function waitUntilClosed(label) {
       candidate.supervisor?.windowOpen === false &&
       candidate.supervisor?.surfaceRequested === false &&
       candidate.supervisor?.surfaceActive === false &&
-      candidate.framePollingSuppressedFlag === true,
+      candidate.framePollingSuppressedFlag === true &&
+      candidate.nativePreviewMutationQueueDepth === 0 &&
+      candidate.nativePreviewMutationQueuePendingCount === 0 &&
+      candidate.nativePreviewMutationQueueRejectedCount === 0,
     8000
   )
   assertProbe(state.ok, label, state.last)
@@ -681,11 +684,15 @@ function expectedMemoryCheckpointCount(cycleCount) {
 async function captureMemoryCheckpoint(label) {
   const census = await collectProcessCensus({
     ledgerPaths,
-    pgid: launched?.process?.pid
+    ...processOwnershipScope(launched?.process?.pid)
   })
   census.sampledAtMs = Date.now()
   census.checkpoint = label
   memoryCheckpoints.push(census)
+}
+
+function processOwnershipScope(pid) {
+  return process.platform === 'win32' ? { rootPid: pid } : { pgid: pid }
 }
 
 function lifecycleRoleThresholds(suffix) {

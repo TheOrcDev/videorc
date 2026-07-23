@@ -311,6 +311,7 @@ export function compareProcessResourceCheckpoints(first, last) {
 export async function waitForCleanProcessState({
   ledgerPaths,
   pgid,
+  rootPid,
   timeoutMs = 10000,
   intervalMs = 250,
   readFile = readFileSync,
@@ -322,6 +323,7 @@ export async function waitForCleanProcessState({
     lastCensus = await collectProcessCensus({
       ledgerPaths,
       pgid,
+      rootPid,
       readFile,
       readProcessTable
     })
@@ -338,6 +340,7 @@ export async function waitForCleanProcessState({
 export async function waitForNoLiveProcessState({
   ledgerPaths,
   pgid,
+  rootPid,
   timeoutMs = 10000,
   intervalMs = 250,
   readFile = readFileSync,
@@ -349,6 +352,7 @@ export async function waitForNoLiveProcessState({
     lastCensus = await collectProcessCensus({
       ledgerPaths,
       pgid,
+      rootPid,
       readFile,
       readProcessTable
     })
@@ -508,6 +512,11 @@ export function classifyProcess(row) {
   if (lowerText.includes('ffprobe')) {
     return 'ffprobe'
   }
+  for (const role of ['notes', 'comments', 'captions']) {
+    if (lowerText.includes(`--videorc-renderer-role=${role}`)) {
+      return `electron-renderer-${role}`
+    }
+  }
   if (lowerText.includes('--type=renderer')) {
     return 'electron-renderer'
   }
@@ -520,6 +529,7 @@ export function classifyProcess(row) {
   if (
     (executableNames.has('electron') &&
       /electron\.app\/contents\/macos\/electron/.test(lowerText)) ||
+    executableNames.has('electron.exe') ||
     executableNames.has('videorc') ||
     executableNames.has('videorc.exe')
   ) {

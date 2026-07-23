@@ -816,6 +816,7 @@ export type StudioContextValue = {
   handleSystemPermission: (pane: SystemPermissionPane) => Promise<void>
   openSystemPermissionSettings: (pane: SystemPermissionPane) => Promise<void>
   revealPermissionTarget: () => Promise<void>
+  scheduleHardwareAccelerationRetry: () => Promise<void>
   exportSupportBundle: () => Promise<void>
   registerPreviewSurfaceResize: () => void
   syncNativePreviewSurfaceBounds: (
@@ -6572,6 +6573,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [client, reportError, runtimeInfo, supportBundleExportPending])
 
+  const scheduleHardwareAccelerationRetry = useCallback(async () => {
+    if (!window.videorc?.retryHardwareAcceleration) {
+      toast.error('Graphics recovery is unavailable outside Electron.')
+      return
+    }
+
+    try {
+      const nextRuntimeInfo = await window.videorc.retryHardwareAcceleration()
+      setRuntimeInfo(nextRuntimeInfo)
+      toast.success('Hardware acceleration retry scheduled.', {
+        description: 'Quit and reopen Videorc when you are ready. This launch stays unchanged.'
+      })
+    } catch (error) {
+      reportError(error)
+    }
+  }, [reportError])
+
   const sampleAudioMeter = useCallback(async () => {
     if (!client) {
       // F-011: this used to be a silent no-op — the button appeared dead.
@@ -9860,6 +9878,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       handleSystemPermission,
       openSystemPermissionSettings,
       revealPermissionTarget,
+      scheduleHardwareAccelerationRetry,
       exportSupportBundle,
       registerPreviewSurfaceResize,
       syncNativePreviewSurfaceBounds,
@@ -10040,6 +10059,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       handleSystemPermission,
       openSystemPermissionSettings,
       revealPermissionTarget,
+      scheduleHardwareAccelerationRetry,
       exportSupportBundle,
       registerPreviewSurfaceResize,
       syncNativePreviewSurfaceBounds,

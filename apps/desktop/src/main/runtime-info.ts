@@ -28,6 +28,7 @@ export interface RuntimeInfoInput {
   osRelease?: string
   gpuInfo?: unknown
   hardwareAccelerationDisabled?: boolean
+  gpuFallback?: RuntimeInfo['gpuFallback']
   env: Partial<
     Pick<
       NodeJS.ProcessEnv,
@@ -88,6 +89,14 @@ export function buildRuntimeInfo({
   osRelease = release(),
   gpuInfo,
   hardwareAccelerationDisabled = false,
+  gpuFallback = {
+    source: 'none',
+    reason: null,
+    crashCount: 0,
+    updatedAt: null,
+    retryScheduled: false,
+    retryAttempts: 0
+  },
   env
 }: RuntimeInfoInput): RuntimeInfo {
   const targetPath = permissionTargetPath(execPath)
@@ -101,6 +110,7 @@ export function buildRuntimeInfo({
     osRelease,
     gpuDevices: normalizeRuntimeGpuDevices(gpuInfo),
     hardwareAccelerationDisabled,
+    gpuFallback,
     isPackaged,
     permissionTargetName: isPackaged ? 'Videorc' : 'Electron',
     permissionTargetPath: targetPath,
