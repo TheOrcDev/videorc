@@ -11,7 +11,6 @@ on:
   push:
     branches: [main]
   pull_request:
-
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -19,7 +18,7 @@ concurrency:
 jobs:
   rust:
     name: Rust (test + clippy + fmt)
-    runs-on: macos-15
+    runs-on: tenki-macos-latest-mini
     timeout-minutes: 30
     steps:
       - name: Check out repository
@@ -79,7 +78,7 @@ jobs:
 
   js:
     name: JS (format + lint + tests)
-    runs-on: ubuntu-latest
+    runs-on: tenki-standard-medium-4c-8g
     timeout-minutes: 15
     steps:
       - name: Check out repository

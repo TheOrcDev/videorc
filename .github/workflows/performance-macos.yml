@@ -42,7 +42,7 @@ concurrency:
 jobs:
   performance-contract:
     name: Validate synthetic performance contracts
-    runs-on: macos-15
+    runs-on: tenki-macos-latest-mini
     timeout-minutes: 20
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -79,10 +79,9 @@ jobs:
           scripts/lib/performance-workflow.test.mjs
           scripts/lib/process-endurance.test.mjs
           scripts/lib/process-memory-gate.test.mjs
-
   runner-availability:
     name: Require online performance runner
-    runs-on: ubuntu-latest
+    runs-on: tenki-standard-medium-4c-8g
     timeout-minutes: 5
     steps:
       - name: Fail when the authorized macOS runner is unavailable
@@ -135,7 +134,9 @@ jobs:
     needs: runner-availability
     # This runner must be a logged-in macOS session with Screen Recording,
     # Camera, and Microphone permission already granted to the harness/app.
-    runs-on: [self-hosted, macOS, videorc-performance]
+    runs-on:
+             - self-hosted
+             - tenki-macos-latest-mini
     timeout-minutes: 360
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -269,7 +270,6 @@ jobs:
           "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-short-run-1.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-short-run-2.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-short-run-3.child.json"
-
       - name: Detached native-preview endurance
         id: native_preview
         continue-on-error: true
@@ -301,7 +301,6 @@ jobs:
           "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-run-1.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-run-2.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/detached-native-preview-run-3.child.json"
-
       - name: Preview lifecycle endurance
         id: preview_lifecycle
         continue-on-error: true
@@ -351,7 +350,6 @@ jobs:
           "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-run-1.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-run-2.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-run-3.child.json"
-
       - name: Prime record-4k-stream-1080p workload
         run: |
           VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-stream-media/primer" \
@@ -391,7 +389,6 @@ jobs:
           "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-run-1.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-run-2.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/record-4k-stream-1080p-run-3.child.json"
-
       - name: Prime real-devices-1080p workload
         run: |
           VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/real-device-media/primer" \
@@ -431,7 +428,6 @@ jobs:
           "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-run-1.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-run-2.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/real-devices-1080p-run-3.child.json"
-
       - name: Prime record-1080p60 workload
         run: |
           VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-media/primer" \
@@ -470,7 +466,6 @@ jobs:
           "$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-run-1.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-run-2.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/record-1080p60-run-3.child.json"
-
       - name: Prime record-vertical-4k30 workload
         run: |
           VIDEORC_SMOKE_OUTPUT_DIR="$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-media/primer" \
@@ -509,7 +504,6 @@ jobs:
           "$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-run-1.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-run-2.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/record-vertical-4k30-run-3.child.json"
-
       - name: Prime studio-live-mic-visuals workload
         run: >-
           pnpm perf:scenario --scenario studio-live-mic-visuals --report-only
@@ -518,7 +512,6 @@ jobs:
           --measurement-seconds 120
           --sample-interval-ms 1000
           --output "$VIDEORC_PERF_ARTIFACT_DIR/studio-live-mic-visuals-primer.json"
-
       - name: Studio live microphone visuals endurance
         id: studio_mic_visuals
         continue-on-error: true
@@ -546,7 +539,6 @@ jobs:
           "$VIDEORC_PERF_ARTIFACT_DIR/studio-live-mic-visuals-run-1.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/studio-live-mic-visuals-run-2.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/studio-live-mic-visuals-run-3.child.json"
-
       - name: Prime lifecycle-churn workload
         run: >-
           pnpm perf:scenario --scenario lifecycle-churn --profile-class short-sentinel --report-only
@@ -587,7 +579,6 @@ jobs:
           "$VIDEORC_PERF_ARTIFACT_DIR/lifecycle-churn-run-1.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/lifecycle-churn-run-2.child.json"
           "$VIDEORC_PERF_ARTIFACT_DIR/lifecycle-churn-run-3.child.json"
-
       - name: Periodic or failure-triggered allocator attribution
         id: allocator_attribution
         if: >-
