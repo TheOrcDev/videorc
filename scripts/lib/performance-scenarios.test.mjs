@@ -158,6 +158,26 @@ describe('buildPerformanceScenario', () => {
     assert.equal(fourK.env.VIDEORC_SMOKE_VIDEO_BITRATE_KBPS, '30000')
   })
 
+  it('defines an occluded auxiliary-window CPU comparison workload', () => {
+    const scenario = buildPerformanceScenario({
+      scenario: 'windows-occluded-aux-windows',
+      mode: 'report-only',
+      warmupSeconds: 60,
+      measurementSeconds: 600,
+      childReportPath: '/tmp/windows-aux.json',
+      node: 'node'
+    })
+
+    assert.deepEqual(scenario.args, ['scripts/smoke-windows-native-screen-app.mjs'])
+    assert.equal(scenario.env.VIDEORC_PERF_OCCLUDED_AUX_WINDOWS, '1')
+    assert.equal(
+      scenario.env.VIDEORC_PERF_APP_ROLE,
+      'windows-occluded-notes-comments-captions-recording'
+    )
+    assert.equal(scenario.env.VIDEORC_SMOKE_VIDEO_WIDTH, '1920')
+    assert.equal(scenario.deviceRequired, true)
+  })
+
   it('defines live Studio mic visuals and explicit lifecycle-churn workloads', () => {
     const mic = buildPerformanceScenario({
       scenario: 'studio-live-mic-visuals',

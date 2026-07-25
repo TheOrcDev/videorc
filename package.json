@@ -20,7 +20,7 @@
     "format": "prettier --write \"apps/desktop/**/*.{ts,tsx,css,json,html}\" \"*.{json,js,cjs,mjs}\" \".github/workflows/*.yml\"",
     "format:check": "node scripts/check-text-files.mjs && prettier --check \"apps/desktop/**/*.{ts,tsx,css,json,html}\" \"*.{json,js,cjs,mjs}\" \".github/workflows/*.yml\"",
     "audit:js": "pnpm audit --prod --audit-level high",
-    "audit:rust": "cargo audit --deny warnings",
+    "audit:rust": "node scripts/audit-rust.mjs",
     "audit:deps": "pnpm audit:js && pnpm audit:rust",
     "changelog:build": "node scripts/build-changelog.mjs",
     "changelog:check": "node scripts/build-changelog.mjs --check",

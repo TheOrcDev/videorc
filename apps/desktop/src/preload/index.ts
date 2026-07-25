@@ -38,6 +38,7 @@ const api: VideorcApi = {
   getBackendConnection: () => invoke('backend:get-connection'),
   getBackendLogs: () => invoke('backend:get-logs'),
   getRuntimeInfo: () => invoke('app:get-runtime-info'),
+  retryHardwareAcceleration: () => invoke('app:retry-hardware-acceleration'),
   pickScreenImage: () => invoke('screens:pick-image'),
   importBackgroundImage: () => invoke('backgrounds:import-image'),
   backgroundAssetExists: (assetId) => invoke('backgrounds:asset-exists', assetId),

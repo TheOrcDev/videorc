@@ -169,6 +169,42 @@ describe('runtime info helpers', () => {
         description: 'NVIDIA RTX'
       }
     ])
+    expect(info.gpuFallback).toEqual({
+      source: 'none',
+      reason: null,
+      crashCount: 0,
+      updatedAt: null,
+      retryScheduled: false,
+      retryAttempts: 0
+    })
+  })
+
+  it('surfaces graphics fallback evidence and recovery state', () => {
+    const info = buildRuntimeInfo({
+      appVersion: '1.2.3',
+      execPath: 'C:\\Program Files\\Videorc\\Videorc.exe',
+      platform: 'win32',
+      hardwareAccelerationDisabled: true,
+      gpuFallback: {
+        source: 'persisted',
+        reason: 'gpu-process-crashes',
+        crashCount: 2,
+        updatedAt: '2026-07-20T00:00:00.000Z',
+        retryScheduled: true,
+        retryAttempts: 1
+      },
+      env: {}
+    })
+
+    expect(info).toMatchObject({
+      hardwareAccelerationDisabled: true,
+      gpuFallback: {
+        source: 'persisted',
+        reason: 'gpu-process-crashes',
+        retryScheduled: true,
+        retryAttempts: 1
+      }
+    })
   })
 
   it('drops malformed GPU entries from runtime diagnostics', () => {

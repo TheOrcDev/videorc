@@ -11,7 +11,6 @@ on:
   push:
     branches: [main]
   pull_request:
-
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -33,11 +32,33 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        # Fetch the prebuilt binary from GitHub releases instead of building it
+        # from source. `cargo install cargo-audit --locked` compiles the whole
+        # tool on every cache miss (minutes); the release binary lands in
+        # seconds and does not depend on the crates.io registry being reachable.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
 
       - name: Rust advisory audit
-        run: cargo audit --deny warnings
+        # audit-rust.mjs fetches the RustSec advisory DB with system Git and
+        # runs `cargo audit --no-fetch`, so the audit does not depend on
+        # cargo-audit's own network fetch (which can be blocked on restricted
+        # runners). See scripts/audit-rust.mjs.
+        run: node scripts/audit-rust.mjs
 
       - name: Format check
         run: cargo fmt --check --all
@@ -49,18 +70,6 @@ jobs:
         # ffmpeg-spawning tests are #[ignore]d, so the default run needs no
         # ffmpeg binary and no capture devices.
         run: cargo test -p videorc-backend
-
-      - name: Set up pnpm for process/memory sentinel
-        uses: pnpm/action-setup@v4
-        with:
-          version: 11.0.9
-          run_install: false
-
-      - name: Set up Node for process/memory sentinel
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24.6.0'
-          cache: pnpm
 
       - name: Install dependencies for process/memory sentinel
         run: pnpm install --frozen-lockfile

@@ -124,8 +124,15 @@ $env:VIDEORC_PERF_HARDWARE_CLASS = 'win11-x64-<reviewed-device-class>'
 
 pnpm perf:scenario --scenario windows-proof-recording-1080p --report-only --profile-class endurance --warmup-seconds 60 --measurement-seconds 600 --sample-interval-ms 1000
 pnpm perf:scenario --scenario windows-proof-recording-4k --report-only --profile-class endurance --warmup-seconds 60 --measurement-seconds 600 --sample-interval-ms 1000
+pnpm perf:scenario --scenario windows-occluded-aux-windows --report-only --profile-class endurance --warmup-seconds 60 --measurement-seconds 600 --sample-interval-ms 1000
 ```
 
+Pair each `windows-occluded-aux-windows` report with a same-device
+`windows-proof-recording-1080p` report. The auxiliary run opens Notes, Comments,
+and Captions behind the main window and reports their renderers separately as
+`electron-renderer-notes`, `electron-renderer-comments`, and
+`electron-renderer-captions`; compare their average and p95 CPU with the base
+run before accepting a background-policy change.
 Keep the three reports for a profile together and calibrate a reviewed budget
 only from comparable runs on that exact hardware class. Until a reviewed Windows
 budget is active, `--gate` intentionally fails after writing its evidence report.
