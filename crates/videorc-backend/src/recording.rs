@@ -54,6 +54,8 @@ use crate::entitlements;
 use crate::ffmpeg::{ffprobe_path_for, resolve_ffmpeg_path};
 use crate::ffmpeg_work::{CapturePermit, MaintenanceCancelToken};
 use crate::h264_profile::{h264_high_level_label, quality_posture_canvas_envelope};
+#[cfg(target_os = "windows")]
+use crate::mpeg_ts::{MpegTsH264Writer, timing_to_90khz};
 use crate::pipeline::{RecordingPipeline, container_for_outputs, container_key};
 use crate::preview_camera::{
     preview_camera_latest_frame_info, reset_preview_camera_capture_timings,
@@ -105,6 +107,10 @@ use crate::streaming::{
     StreamAuthMode, StreamPlatform, StreamTargetRuntime, StreamTargetSettings, StreamTargetState,
     StreamTargetsSnapshot, StreamUrlMode, StreamingSettings, stream_platform_from_preset,
     stream_platform_id, stream_platform_label,
+};
+#[cfg(target_os = "windows")]
+use crate::windows_media_foundation_encoder::{
+    MediaFoundationEncoderConfig, MediaFoundationInputSubtype, probe_hardware_encoder,
 };
 
 const PREVIEW_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1242,7 +1248,6 @@ pub async fn start_session(
     }
 
     let ffmpeg_path = resolve_ffmpeg_path(params.output.ffmpeg_path.clone());
-    select_windows_media_foundation_encoder(&state, &ffmpeg_path, &params.output.video).await;
     let output_dir = resolve_output_directory(params.output.output_directory.as_deref())?;
 
     if params.output.record_enabled {
@@ -1474,7 +1479,7 @@ pub async fn start_session(
     } else {
         None
     };
-    let encoder_bridge_video_output = if use_encoder_bridge {
+    let requested_encoder_bridge_video_output = if use_encoder_bridge {
         recording_encoder_bridge_video_output(
             params.output.record_enabled,
             params.output.stream_enabled,
@@ -1482,6 +1487,39 @@ pub async fn start_session(
     } else {
         EncoderBridgeVideoOutput::RawYuv420p
     };
+    let windows_encoded_bridge_decision = resolve_windows_encoded_bridge_decision(
+        &ffmpeg_path,
+        &params,
+        requested_encoder_bridge_video_output,
+    )
+    .await?;
+    let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
+    if let Some(reason) = windows_encoded_bridge_decision.fallback_reason.as_deref() {
+        state.emit_log(
+            "warn",
+            format!(
+                "Using the OpenH264 software H.264 fallback after the requested Media Foundation encoded bridge was rejected: {reason}"
+            ),
+        );
+    } else if matches!(
+        encoder_bridge_video_output,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) {
+        state.emit_log(
+            "info",
+            format!(
+                "Native Media Foundation encoded bridge selected (encoder={}, input={}).",
+                windows_encoded_bridge_decision
+                    .encoder_identity
+                    .as_deref()
+                    .unwrap_or("<unknown>"),
+                windows_encoded_bridge_decision
+                    .input_subtype
+                    .as_deref()
+                    .unwrap_or("<unknown>")
+            ),
+        );
+    }
     let encoder_bridge_stream_output = if use_encoder_bridge {
         recording_compositor_stream_output(&params, encoder_bridge_video_output)?
     } else {
@@ -1565,7 +1603,36 @@ pub async fn start_session(
     // Both the shared-compositor bridge and the legacy path request the platform H.264
     // encoder. The bridge is the protected consumer of the compositor output, paced by
     // the output clock; the legacy path captures via FFmpeg.
-    initial_diagnostics.encode_backend = Some(default_h264_encode_backend());
+    initial_diagnostics.encode_backend = Some(
+        if matches!(
+            encoder_bridge_video_output,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        ) {
+            EncodeBackend::HardwareMediaFoundation
+        } else {
+            default_h264_encode_backend()
+        },
+    );
+    initial_diagnostics.encoder_bridge_requested_video_output = Some(
+        encoder_bridge_video_output_label(windows_encoded_bridge_decision.requested).to_string(),
+    );
+    initial_diagnostics.encoder_bridge_effective_video_output = Some(
+        encoder_bridge_video_output_label(windows_encoded_bridge_decision.effective).to_string(),
+    );
+    initial_diagnostics.encoder_bridge_encoded_output_backend = match encoder_bridge_video_output {
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => Some("videotoolbox".to_string()),
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
+            Some("media-foundation".to_string())
+        }
+        EncoderBridgeVideoOutput::RawYuv420p => None,
+    };
+    initial_diagnostics.encoder_bridge_encoded_output_encoder_identity =
+        windows_encoded_bridge_decision.encoder_identity.clone();
+    initial_diagnostics.encoder_bridge_encoded_output_input_subtype =
+        windows_encoded_bridge_decision.input_subtype.clone();
+    initial_diagnostics.encoder_bridge_encoded_output_fallback_reason =
+        windows_encoded_bridge_decision.fallback_reason.clone();
     initial_diagnostics.recording_protected = use_encoder_bridge;
     {
         let mut diagnostics = state.diagnostics.lock().await;
@@ -1598,6 +1665,11 @@ pub async fn start_session(
                     EncoderBridgeVideoOutput::RawYuv420p
                 ) {
                     CompositorFrameConsumer::RawYuvEncoder
+                } else if matches!(
+                    encoder_bridge_video_output,
+                    EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+                ) {
+                    CompositorFrameConsumer::MediaFoundationEncoder
                 } else {
                     CompositorFrameConsumer::VideoToolboxEncoder
                 },
@@ -6357,8 +6429,6 @@ enum FfmpegH264Platform {
     Other,
 }
 
-#[cfg(target_os = "windows")]
-static WINDOWS_MEDIA_FOUNDATION_HARDWARE_SELECTED: AtomicBool = AtomicBool::new(false);
 #[cfg(any(test, target_os = "windows"))]
 static WINDOWS_MEDIA_FOUNDATION_PROBE_CACHE: std::sync::OnceLock<
     StdMutex<
@@ -6505,11 +6575,10 @@ fn current_ffmpeg_h264_platform() -> FfmpegH264Platform {
     }
     #[cfg(target_os = "windows")]
     {
-        if WINDOWS_MEDIA_FOUNDATION_HARDWARE_SELECTED.load(Ordering::Relaxed) {
-            FfmpegH264Platform::WindowsHardware
-        } else {
-            FfmpegH264Platform::WindowsSoftware
-        }
+        // Native Media Foundation bridge selection is per-session. The raw
+        // developer/fallback path remains truthfully OpenH264 and never reads a
+        // process-global hardware verdict from another session.
+        FfmpegH264Platform::WindowsSoftware
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
@@ -6594,113 +6663,6 @@ fn windows_media_foundation_hardware_probe_args(video: &VideoSettings) -> Vec<St
 }
 #[cfg(target_os = "windows")]
 const WINDOWS_MEDIA_FOUNDATION_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Per-session, capability-keyed hardware selection (Plan 035 / issue #156).
-/// The hardware Media Foundation encoder is chosen only after the tee-backed
-/// probe proved the production headers, rate control, and output topology on
-/// this exact FFmpeg binary and output profile; anything else selects the
-/// OpenH264 fallback and logs the exact reason. Verdicts are cached by
-/// capability key, so one probe covers every later session with the same
-/// binary + profile and a changed binary or profile re-proves itself.
-#[cfg(target_os = "windows")]
-async fn select_windows_media_foundation_encoder(
-    state: &AppState,
-    ffmpeg_path: &str,
-    video: &VideoSettings,
-) {
-    let key = windows_media_foundation_probe_key(ffmpeg_path, video);
-    let (outcome, freshly_probed) = match windows_media_foundation_cached_outcome(&key) {
-        Some(outcome) => (outcome, false),
-        None => {
-            let outcome = run_windows_media_foundation_hardware_probe(ffmpeg_path, video).await;
-            windows_media_foundation_store_outcome(key, outcome.clone());
-            (outcome, true)
-        }
-    };
-    WINDOWS_MEDIA_FOUNDATION_HARDWARE_SELECTED.store(outcome.accepted, Ordering::Relaxed);
-    if outcome.accepted {
-        if freshly_probed {
-            state.emit_log(
-                "info",
-                "Hardware Media Foundation H.264 selected: the tee-backed probe proved production headers, rate control, and tee topology.",
-            );
-        }
-    } else {
-        let reason = outcome
-            .reason
-            .as_deref()
-            .unwrap_or("tee-backed hardware probe was rejected");
-        state.emit_log(
-            "warn",
-            format!("Using the OpenH264 software H.264 fallback: {reason}"),
-        );
-    }
-}
-
-#[cfg(target_os = "windows")]
-async fn run_windows_media_foundation_hardware_probe(
-    ffmpeg_path: &str,
-    video: &VideoSettings,
-) -> WindowsMediaFoundationProbeOutcome {
-    let args = windows_media_foundation_hardware_probe_args(video);
-    let mut command = Command::new(ffmpeg_path);
-    command
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    command.kill_on_drop(true);
-    let spawned = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            return WindowsMediaFoundationProbeOutcome {
-                accepted: false,
-                reason: Some(format!(
-                    "tee-backed hardware probe could not start FFmpeg: {error}"
-                )),
-            };
-        }
-    };
-    match timeout(
-        WINDOWS_MEDIA_FOUNDATION_PROBE_TIMEOUT,
-        spawned.wait_with_output(),
-    )
-    .await
-    {
-        Ok(Ok(output)) => {
-            if output.status.success() {
-                WindowsMediaFoundationProbeOutcome {
-                    accepted: true,
-                    reason: None,
-                }
-            } else {
-                WindowsMediaFoundationProbeOutcome {
-                    accepted: false,
-                    reason: Some(windows_media_foundation_fallback_reason(
-                        output.status.code(),
-                        &String::from_utf8_lossy(&output.stderr),
-                        false,
-                    )),
-                }
-            }
-        }
-        Ok(Err(error)) => WindowsMediaFoundationProbeOutcome {
-            accepted: false,
-            reason: Some(format!("tee-backed hardware probe failed to run: {error}")),
-        },
-        Err(_) => WindowsMediaFoundationProbeOutcome {
-            accepted: false,
-            reason: Some(windows_media_foundation_fallback_reason(None, "", true)),
-        },
-    }
-}
-#[cfg(not(target_os = "windows"))]
-async fn select_windows_media_foundation_encoder(
-    _state: &AppState,
-    _ffmpeg_path: &str,
-    _video: &VideoSettings,
-) {
-}
 
 fn default_h264_encode_backend() -> EncodeBackend {
     ffmpeg_h264_encoder(current_ffmpeg_h264_platform()).backend
@@ -7232,6 +7194,285 @@ fn recording_encoder_bridge_video_output(
     )
 }
 
+#[derive(Debug, Clone)]
+struct WindowsEncodedBridgeDecision {
+    requested: EncoderBridgeVideoOutput,
+    effective: EncoderBridgeVideoOutput,
+    encoder_identity: Option<String>,
+    input_subtype: Option<String>,
+    fallback_reason: Option<String>,
+}
+
+impl WindowsEncodedBridgeDecision {
+    fn unchanged(output: EncoderBridgeVideoOutput) -> Self {
+        Self {
+            requested: output,
+            effective: output,
+            encoder_identity: None,
+            input_subtype: None,
+            fallback_reason: None,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn resolve_windows_encoded_bridge_decision(
+    ffmpeg_path: &str,
+    params: &StartSessionParams,
+    requested: EncoderBridgeVideoOutput,
+) -> Result<WindowsEncodedBridgeDecision> {
+    if !matches!(
+        requested,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) {
+        return Ok(WindowsEncodedBridgeDecision::unchanged(requested));
+    }
+    let mut profiles = vec![params.output.video.clone()];
+    if params.output.record_enabled && params.output.stream_enabled {
+        for profile in companion_stream_outputs_for_recording(params, &params.output.video)? {
+            if !profiles
+                .iter()
+                .any(|existing| same_video_profile(existing, &profile))
+            {
+                profiles.push(profile);
+            }
+        }
+    }
+    let split = profiles.len() > 1;
+    let mut identity = None;
+    let mut input_subtype = None;
+    for (index, profile) in profiles.iter().enumerate() {
+        let topology = if split {
+            if index == 0 {
+                "split-recording"
+            } else {
+                "split-stream"
+            }
+        } else {
+            "shared"
+        };
+        match probe_windows_native_encoded_bridge(ffmpeg_path, profile, topology).await {
+            Ok(probe) => {
+                identity.get_or_insert(probe.encoder_identity);
+                input_subtype.get_or_insert(probe.input_subtype.label().to_string());
+            }
+            Err(error) if split => {
+                bail!(
+                    "Split encoded output requires every Media Foundation encoder probe to pass; {} failed: {error}",
+                    profile_label(profile)
+                );
+            }
+            Err(error) => {
+                return Ok(WindowsEncodedBridgeDecision {
+                    requested,
+                    effective: EncoderBridgeVideoOutput::RawYuv420p,
+                    encoder_identity: None,
+                    input_subtype: None,
+                    fallback_reason: Some(error.to_string()),
+                });
+            }
+        }
+    }
+    Ok(WindowsEncodedBridgeDecision {
+        requested,
+        effective: requested,
+        encoder_identity: identity,
+        input_subtype,
+        fallback_reason: None,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn resolve_windows_encoded_bridge_decision(
+    _ffmpeg_path: &str,
+    _params: &StartSessionParams,
+    requested: EncoderBridgeVideoOutput,
+) -> Result<WindowsEncodedBridgeDecision> {
+    if matches!(
+        requested,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) {
+        Ok(WindowsEncodedBridgeDecision {
+            requested,
+            effective: EncoderBridgeVideoOutput::RawYuv420p,
+            encoder_identity: None,
+            input_subtype: None,
+            fallback_reason: Some(
+                "Media Foundation encoded output is available only on Windows".to_string(),
+            ),
+        })
+    } else {
+        Ok(WindowsEncodedBridgeDecision::unchanged(requested))
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WindowsNativeEncodedProbeKey {
+    ffmpeg_path: PathBuf,
+    ffmpeg_len: Option<u64>,
+    ffmpeg_modified_ms: Option<u128>,
+    encoder_identity: String,
+    input_subtype: MediaFoundationInputSubtype,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+    topology: &'static str,
+}
+
+#[cfg(target_os = "windows")]
+static WINDOWS_NATIVE_ENCODED_PROBE_CACHE: std::sync::OnceLock<
+    StdMutex<std::collections::HashMap<WindowsNativeEncodedProbeKey, Option<String>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "windows")]
+async fn probe_windows_native_encoded_bridge(
+    ffmpeg_path: &str,
+    video: &VideoSettings,
+    topology: &'static str,
+) -> Result<crate::windows_media_foundation_encoder::MediaFoundationProbe> {
+    let config = MediaFoundationEncoderConfig {
+        width: video.width,
+        height: video.height,
+        fps: video.fps,
+        bitrate_kbps: video.bitrate_kbps,
+        low_latency: true,
+    };
+    let probe = tokio::task::spawn_blocking(move || probe_hardware_encoder(config))
+        .await
+        .context("Media Foundation hardware probe thread panicked")??;
+    let path = PathBuf::from(ffmpeg_path);
+    let metadata = std::fs::metadata(&path).ok();
+    let key = WindowsNativeEncodedProbeKey {
+        ffmpeg_path: std::fs::canonicalize(&path).unwrap_or(path),
+        ffmpeg_len: metadata.as_ref().map(std::fs::Metadata::len),
+        ffmpeg_modified_ms: metadata.and_then(|metadata| {
+            metadata
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_millis())
+        }),
+        encoder_identity: probe.encoder_identity.clone(),
+        input_subtype: probe.input_subtype,
+        width: video.width,
+        height: video.height,
+        fps: video.fps,
+        bitrate_kbps: video.bitrate_kbps,
+        topology,
+    };
+    if let Some(cached) = WINDOWS_NATIVE_ENCODED_PROBE_CACHE
+        .get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned())
+    {
+        return match cached {
+            None => Ok(probe),
+            Some(reason) => bail!("{reason}"),
+        };
+    }
+    let mut mpeg_ts = Vec::new();
+    let mut writer = MpegTsH264Writer::new();
+    for frame in &probe.frames {
+        let pts = timing_to_90khz(frame.pts_100ns, 10_000_000)
+            .context("Media Foundation probe output had an invalid MPEG-TS timestamp")?;
+        writer.write_h264_access_unit(&mut mpeg_ts, pts, &frame.bytes)?;
+    }
+
+    let null_device = "NUL";
+    let mut command = Command::new(ffmpeg_path);
+    command
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "mpegts",
+            "-i",
+            "pipe:0",
+            "-map",
+            "0:v",
+            "-c:v",
+            "copy",
+            "-f",
+            "matroska",
+            null_device,
+            "-map",
+            "0:v",
+            "-c:v",
+            "copy",
+            "-tag:v",
+            "7",
+            "-flvflags",
+            "no_duration_filesize",
+            "-f",
+            "flv",
+            null_device,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .context("native encoded bridge probe could not start FFmpeg")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("native encoded bridge probe FFmpeg stdin was unavailable")?;
+    stdin
+        .write_all(&mpeg_ts)
+        .await
+        .context("native encoded bridge probe could not write MPEG-TS to FFmpeg")?;
+    stdin.shutdown().await?;
+    drop(stdin);
+    let output = timeout(
+        WINDOWS_MEDIA_FOUNDATION_PROBE_TIMEOUT,
+        child.wait_with_output(),
+    )
+    .await
+    .context("native encoded bridge copy-topology probe timed out")??;
+    let outcome = ensure_probe_status(output.status, &output.stderr)
+        .err()
+        .map(|error| error.to_string());
+    if let Ok(mut cache) = WINDOWS_NATIVE_ENCODED_PROBE_CACHE
+        .get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+        .lock()
+    {
+        cache.insert(key, outcome.clone());
+    }
+    if let Some(reason) = outcome {
+        bail!("{reason}");
+    }
+    Ok(probe)
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_probe_status(status: ExitStatus, stderr: &[u8]) -> Result<()> {
+    if status.success() {
+        return Ok(());
+    }
+    bail!(
+        "{}",
+        windows_media_foundation_fallback_reason(
+            status.code(),
+            &String::from_utf8_lossy(stderr),
+            false
+        )
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn profile_label(video: &VideoSettings) -> String {
+    format!(
+        "{}x{}@{} {}kbps",
+        video.width, video.height, video.fps, video.bitrate_kbps
+    )
+}
+
 fn select_encoder_bridge_video_output(
     setting: Option<&str>,
     record_enabled: bool,
@@ -7260,7 +7501,21 @@ fn parse_encoder_bridge_video_output(
         "videotoolbox-h264-mpegts" | "h264-mpegts" | "mpegts" | "mpeg-ts" => {
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
         }
+        "windows-media-foundation-h264-mpegts"
+        | "media-foundation-h264-mpegts"
+        | "mf-h264-mpegts" => EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
         _ => default_output,
+    }
+}
+
+const fn encoder_bridge_video_output_label(output: EncoderBridgeVideoOutput) -> &'static str {
+    match output {
+        EncoderBridgeVideoOutput::RawYuv420p => "raw-yuv420p",
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB => "videotoolbox-h264-annex-b",
+        EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => "videotoolbox-h264-mpegts",
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
+            "windows-media-foundation-h264-mpegts"
+        }
     }
 }
 
@@ -7375,6 +7630,7 @@ fn bridge_compositor_ffmpeg_args(
         video_output,
         EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     ) && !stream_targets.is_empty();
     if !copy_stream_fanout {
         match video_output {
@@ -7390,7 +7646,8 @@ fn bridge_compositor_ffmpeg_args(
                 ]);
             }
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => {
+            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
                 args.extend([
                     "-map".to_string(),
                     format!("{}:v", input_layout.video_input_index),
@@ -7407,7 +7664,8 @@ fn bridge_compositor_ffmpeg_args(
                 );
             }
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => {
+            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
                 args.extend(["-c:v".to_string(), "copy".to_string()]);
             }
         }
@@ -7638,6 +7896,7 @@ fn ensure_encoded_bridge_video_output(video_output: EncoderBridgeVideoOutput) ->
         video_output,
         EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     ) {
         Ok(())
     } else {
@@ -7657,6 +7916,7 @@ fn append_bridge_recording_input_args(
         video_output,
         EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     );
     let mut next_input_index = 0;
     let mut audio_inputs = Vec::new();
@@ -7701,7 +7961,8 @@ fn append_bridge_recording_input_args(
                 fifo_path.display().to_string(),
             ]);
         }
-        EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => {
+        EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+        | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
             // Minimal probing ONLY when streaming: default (~5MB) probing on a
             // low-bitrate FIFO delays first bytes by many seconds, which
             // starves RTMP targets (LVF2 "no bytes", plan 023 L1). Record-only
@@ -7766,7 +8027,8 @@ fn append_bridge_encoded_video_input_args(
                 fifo_path.display().to_string(),
             ]);
         }
-        EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => {
+        EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+        | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
             args.extend([
                 "-thread_queue_size".to_string(),
                 thread_queue_packets.max(1).to_string(),
@@ -9691,6 +9953,7 @@ fn recording_compositor_stream_output(
         video_output,
         EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     ) {
         return Ok(None);
     }
@@ -9705,7 +9968,7 @@ fn recording_compositor_stream_output(
             return Ok(Some(CompositorAuxiliaryOutput {
                 width: recording.width,
                 height: recording.height,
-                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                frame_consumer: encoded_compositor_frame_consumer(video_output),
             }));
         }
         return Ok(None);
@@ -9719,8 +9982,21 @@ fn recording_compositor_stream_output(
     Ok(Some(CompositorAuxiliaryOutput {
         width: stream.width,
         height: stream.height,
-        frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+        frame_consumer: encoded_compositor_frame_consumer(video_output),
     }))
+}
+
+fn encoded_compositor_frame_consumer(
+    video_output: EncoderBridgeVideoOutput,
+) -> CompositorFrameConsumer {
+    if matches!(
+        video_output,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) {
+        CompositorFrameConsumer::MediaFoundationEncoder
+    } else {
+        CompositorFrameConsumer::VideoToolboxEncoder
+    }
 }
 
 fn companion_stream_outputs_for_recording(
@@ -9814,11 +10090,26 @@ fn encoder_bridge_diagnostics_context(
     } else {
         0
     };
+    let active_encoded_output_encoders = if matches!(
+        video_output,
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) {
+        if separate_output_encoders_active {
+            2
+        } else {
+            1
+        }
+    } else {
+        0
+    };
     EncoderBridgeDiagnosticsContext {
         role,
         recording_output: recording_output.map(encoder_bridge_output_profile),
         stream_output: stream_output.map(encoder_bridge_output_profile),
         active_video_toolbox_output_encoders,
+        active_encoded_output_encoders,
         separate_output_encoders_active,
     }
 }
@@ -14389,6 +14680,13 @@ mod tests {
         assert_eq!(
             parse_encoder_bridge_video_output(Some(" mpeg-ts "), default_output),
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+        );
+        assert_eq!(
+            parse_encoder_bridge_video_output(
+                Some("windows-media-foundation-h264-mpegts"),
+                default_output
+            ),
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
         );
         // Plan 023 L1: record+stream defaults to MpegTs — the Annex-B
         // stopgap is env-opt-in only.

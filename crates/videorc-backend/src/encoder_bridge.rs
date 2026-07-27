@@ -36,6 +36,11 @@ use crate::video_toolbox_encoder::{
     VideoToolboxFrameTiming, VideoToolboxH264AnnexBFrame, VideoToolboxH264AsyncAnnexBFrame,
     VideoToolboxH264Session,
 };
+#[cfg(target_os = "windows")]
+use crate::windows_media_foundation_encoder::{
+    DRAIN_TIMEOUT as MEDIA_FOUNDATION_DRAIN_TIMEOUT, MediaFoundationEncodedFrame,
+    MediaFoundationEncoderConfig, MediaFoundationH264Encoder,
+};
 
 const ENCODER_BRIDGE_DIAGNOSTIC_WINDOW: Duration = Duration::from_secs(2);
 const ENCODER_BRIDGE_DEADLINE_LAG_THRESHOLD: Duration = Duration::from_millis(1);
@@ -81,6 +86,8 @@ const FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
 // hatch, but give a progressing Windows recording enough time to recover.
 #[cfg(target_os = "windows")]
 const RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(target_os = "windows")]
+const MEDIA_FOUNDATION_FIFO_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(not(target_os = "windows"))]
 const RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = FIFO_FRAME_WRITE_HARD_TIMEOUT;
 // The raw writer's NO-PROGRESS tolerance is a PLATFORM contract, decoupled
@@ -109,6 +116,7 @@ pub enum EncoderBridgeVideoOutput {
     RawYuv420p,
     VideoToolboxH264AnnexB,
     VideoToolboxH264MpegTs,
+    WindowsMediaFoundationH264MpegTs,
 }
 
 impl EncoderBridgeVideoOutput {
@@ -117,6 +125,14 @@ impl EncoderBridgeVideoOutput {
             self,
             Self::VideoToolboxH264AnnexB | Self::VideoToolboxH264MpegTs
         )
+    }
+
+    const fn uses_media_foundation(self) -> bool {
+        matches!(self, Self::WindowsMediaFoundationH264MpegTs)
+    }
+
+    const fn uses_encoded_h264(self) -> bool {
+        self.uses_video_toolbox() || self.uses_media_foundation()
     }
 }
 
@@ -295,6 +311,7 @@ pub struct EncoderBridgeDiagnosticsContext {
     pub recording_output: Option<EncoderBridgeOutputProfile>,
     pub stream_output: Option<EncoderBridgeOutputProfile>,
     pub active_video_toolbox_output_encoders: u64,
+    pub active_encoded_output_encoders: u64,
     pub separate_output_encoders_active: bool,
 }
 
@@ -305,6 +322,7 @@ impl EncoderBridgeDiagnosticsContext {
             recording_output: None,
             stream_output: None,
             active_video_toolbox_output_encoders: 0,
+            active_encoded_output_encoders: 0,
             separate_output_encoders_active: false,
         }
     }
@@ -495,7 +513,7 @@ fn compositor_frame_wait_budget(
     consecutive_repeated_frames: u64,
     frame_interval: Duration,
 ) -> Duration {
-    if video_output.uses_video_toolbox() {
+    if video_output.uses_encoded_h264() {
         // Wait for a fresh compositor target, but never spend the whole CFR interval.
         // VideoToolbox encoding and FIFO writes must keep a little headroom or the bridge
         // falls behind real time and starts feeding visible duplicates.
@@ -1110,7 +1128,59 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             None,
         )
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    let (
+        mut raw_fifo_writer,
+        mut media_foundation_encoder,
+        mut media_foundation_fifo,
+        mut media_foundation_ts_writer,
+    ) = if video_output.uses_media_foundation() {
+        let config = MediaFoundationEncoderConfig {
+            width,
+            height,
+            fps: target_fps.max(1),
+            bitrate_kbps: bitrate_kbps.unwrap_or(6_000),
+            low_latency,
+        };
+        let encoder = match MediaFoundationH264Encoder::new(config) {
+            Ok(encoder) => encoder,
+            Err(error) => {
+                let error = record_encoder_bridge_terminal_failure(
+                    &terminal_failure,
+                    format!("Could not prepare Media Foundation encoder bridge output: {error}"),
+                );
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
+                emit_encoder_bridge_diagnostics_from_thread(
+                    &diagnostics_tx,
+                    session_id.clone(),
+                    target_fps,
+                    EncoderBridgeRuntimeStats::default(),
+                    diagnostics_context,
+                    Some(error),
+                );
+                return;
+            }
+        };
+        (
+            None,
+            Some(encoder),
+            Some(fifo),
+            Some(MpegTsH264Writer::new()),
+        )
+    } else {
+        (
+            Some(RawVideoFifoWriter::start(
+                fifo,
+                output_queue_policy,
+                stop.clone(),
+                terminal_failure.clone(),
+            )),
+            None,
+            None,
+            None,
+        )
+    };
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     let mut raw_fifo_writer = Some(RawVideoFifoWriter::start(
         fifo,
         output_queue_policy,
@@ -1566,12 +1636,23 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         #[cfg(not(target_os = "macos"))]
         let mut pipeline_error: Option<io::Error> = None;
 
-        queue_depth = if video_output.uses_video_toolbox() {
+        queue_depth = if video_output.uses_media_foundation() {
+            #[cfg(target_os = "windows")]
+            {
+                media_foundation_encoder
+                    .as_ref()
+                    .map_or(0, |encoder| encoder.pending_frame_count() as u64)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                0
+            }
+        } else if video_output.uses_video_toolbox() {
             pending_video_toolbox_output_frames.saturating_add(pending_video_toolbox_fifo_frames)
         } else {
             pending_raw_fifo_frames
         };
-        let admission = if pipeline_error.is_some() || !video_output.uses_video_toolbox() {
+        let admission = if pipeline_error.is_some() || !video_output.uses_encoded_h264() {
             EncoderBridgePreEncodeAdmission::Submit
         } else {
             encoder_bridge_pre_encode_admission(
@@ -1693,7 +1774,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 byte_len,
             ),
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => {
+            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
                 next_compositor_frame(frame_store.as_ref(), previous_sequence, wait_budget)
             }
         };
@@ -1704,7 +1786,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             BridgeFrameSource::SyntheticFallback => {
                 synthetic_fallback_frames = synthetic_fallback_frames.saturating_add(1);
                 consecutive_repeated_frames = 0;
-                if video_output.uses_video_toolbox() {
+                if video_output.uses_encoded_h264() {
                     emit_encoder_bridge_diagnostics_from_thread(
                         &diagnostics_tx,
                         session_id.clone(),
@@ -1821,7 +1903,18 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             }
         }
 
-        queue_depth = if video_output.uses_video_toolbox() {
+        queue_depth = if video_output.uses_media_foundation() {
+            #[cfg(target_os = "windows")]
+            {
+                media_foundation_encoder
+                    .as_ref()
+                    .map_or(0, |encoder| encoder.pending_frame_count() as u64)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                0
+            }
+        } else if video_output.uses_video_toolbox() {
             pending_video_toolbox_output_frames.saturating_add(pending_video_toolbox_fifo_frames)
         } else {
             pending_raw_fifo_frames
@@ -1935,6 +2028,58 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     {
                         Err(io::Error::other(
                             "VideoToolbox encoder bridge output is only available on macOS",
+                        ))
+                    }
+                }
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
+                    #[cfg(target_os = "windows")]
+                    {
+                        match fed.as_ref() {
+                            Some(frame) => {
+                                let encode_started_at = Instant::now();
+                                match media_foundation_encoder
+                                    .as_mut()
+                                    .expect("Media Foundation encoder must be prepared")
+                                    .encode_frame(&frame.frame.bytes, sequence.saturating_sub(1))
+                                {
+                                    Ok(frames) => {
+                                        let encode_elapsed = encode_started_at.elapsed();
+                                        video_toolbox_submit_times_ms
+                                            .push(encode_elapsed.as_secs_f64() * 1000.0);
+                                        let encode_ms = encode_elapsed.as_millis() as u64;
+                                        max_video_toolbox_output_encode_ms = Some(
+                                            max_video_toolbox_output_encode_ms
+                                                .map_or(encode_ms, |current| {
+                                                    current.max(encode_ms)
+                                                }),
+                                        );
+                                        write_media_foundation_frames(
+                                            frames,
+                                            media_foundation_fifo
+                                                .as_mut()
+                                                .expect("Media Foundation FIFO must be prepared"),
+                                            media_foundation_ts_writer.as_mut().expect(
+                                                "Media Foundation MPEG-TS writer must be prepared",
+                                            ),
+                                            &stop,
+                                            &mut zero_copy_frames,
+                                            &mut video_toolbox_output_frames,
+                                            &mut video_toolbox_output_bytes,
+                                            &mut video_toolbox_fifo_write_times_ms,
+                                        )
+                                    }
+                                    Err(error) => Err(io::Error::other(error.to_string())),
+                                }
+                            }
+                            None => Err(io::Error::other(
+                                "Media Foundation encoder bridge had no compositor frame",
+                            )),
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        Err(io::Error::other(
+                            "Media Foundation encoder bridge output is only available on Windows",
                         ))
                     }
                 }
@@ -2134,7 +2279,18 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             );
             break;
         }
-        queue_depth = if video_output.uses_video_toolbox() {
+        queue_depth = if video_output.uses_media_foundation() {
+            #[cfg(target_os = "windows")]
+            {
+                media_foundation_encoder
+                    .as_ref()
+                    .map_or(0, |encoder| encoder.pending_frame_count() as u64)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                0
+            }
+        } else if video_output.uses_video_toolbox() {
             pending_video_toolbox_output_frames.saturating_add(pending_video_toolbox_fifo_frames)
         } else {
             pending_raw_fifo_frames
@@ -2217,7 +2373,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     }
 
     #[cfg(target_os = "macos")]
-    if video_output.uses_video_toolbox() {
+    if video_output.uses_encoded_h264() {
         if video_toolbox_probe.complete_pending().is_err() {
             video_toolbox_probe_errors = video_toolbox_probe_errors.saturating_add(1);
         }
@@ -2274,6 +2430,42 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         }
         queue_depth =
             pending_video_toolbox_output_frames.saturating_add(pending_video_toolbox_fifo_frames);
+    }
+
+    #[cfg(target_os = "windows")]
+    if video_output.uses_media_foundation()
+        && let (Some(encoder), Some(fifo), Some(ts_writer)) = (
+            media_foundation_encoder.as_mut(),
+            media_foundation_fifo.as_mut(),
+            media_foundation_ts_writer.as_mut(),
+        )
+    {
+        match encoder
+            .drain(MEDIA_FOUNDATION_DRAIN_TIMEOUT)
+            .and_then(|frames| {
+                write_media_foundation_frames(
+                    frames,
+                    fifo,
+                    ts_writer,
+                    &stop,
+                    &mut zero_copy_frames,
+                    &mut video_toolbox_output_frames,
+                    &mut video_toolbox_output_bytes,
+                    &mut video_toolbox_fifo_write_times_ms,
+                )
+                .map_err(anyhow::Error::from)
+            }) {
+            Ok(()) => {
+                queue_depth = encoder.pending_frame_count() as u64;
+            }
+            Err(error) => {
+                let error = record_encoder_bridge_terminal_failure(
+                    &terminal_failure,
+                    format!("Media Foundation encoder drain failed: {error}"),
+                );
+                terminal_writer_error = Some(error);
+            }
+        }
     }
 
     if let Some(writer) = raw_fifo_writer.as_mut() {
@@ -3305,6 +3497,42 @@ fn write_all_until<W: StdWrite>(
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn write_media_foundation_frames<W: StdWrite>(
+    frames: Vec<MediaFoundationEncodedFrame>,
+    sink: &mut W,
+    ts_writer: &mut MpegTsH264Writer,
+    stop: &AtomicBool,
+    zero_copy_frames: &mut u64,
+    output_frames: &mut u64,
+    output_bytes: &mut u64,
+    fifo_write_times_ms: &mut Vec<f64>,
+) -> io::Result<()> {
+    for frame in frames {
+        let pts_90khz = timing_to_90khz(frame.pts_100ns, 10_000_000).ok_or_else(|| {
+            io::Error::other("Media Foundation frame timing cannot be mapped to MPEG-TS PTS")
+        })?;
+        let mut packetized = Vec::with_capacity(frame.bytes.len().saturating_add(564));
+        ts_writer.write_h264_access_unit(&mut packetized, pts_90khz, &frame.bytes)?;
+        let write_started_at = Instant::now();
+        write_all_until(
+            sink,
+            &packetized,
+            stop,
+            Instant::now() + MEDIA_FOUNDATION_FIFO_WRITE_HARD_TIMEOUT,
+            MEDIA_FOUNDATION_FIFO_WRITE_HARD_TIMEOUT,
+            MEDIA_FOUNDATION_FIFO_WRITE_HARD_TIMEOUT,
+            false,
+        )?;
+        fifo_write_times_ms.push(write_started_at.elapsed().as_secs_f64() * 1000.0);
+        *zero_copy_frames = zero_copy_frames.saturating_add(1);
+        *output_frames = output_frames.saturating_add(1);
+        *output_bytes = output_bytes.saturating_add(frame.bytes.len() as u64);
+    }
+    Ok(())
+}
+
 fn wait_for_fifo_write_progress(consecutive_no_progress: u32, deadline: Instant) {
     // A 1080p YUV420 frame is 3.11 MiB, while Unix FIFOs commonly accept only
     // a few KiB per nonblocking write. Sleeping milliseconds after every full
@@ -3492,7 +3720,7 @@ fn initial_bridge_wait_sequence(
     video_output: EncoderBridgeVideoOutput,
     frame_store: Option<&CompositorFrameStore>,
 ) -> Option<u64> {
-    if video_output.uses_video_toolbox() {
+    if video_output.uses_encoded_h264() {
         return None;
     }
     latest_compositor_frame(frame_store).map(|frame| frame.sequence)
@@ -4064,6 +4292,7 @@ async fn emit_encoder_bridge_diagnostics(
                 stream_output_bitrate_kbps: stream_output.map(|output| output.bitrate_kbps),
                 active_video_toolbox_output_encoders: diagnostics_context
                     .active_video_toolbox_output_encoders,
+                active_encoded_output_encoders: diagnostics_context.active_encoded_output_encoders,
                 recording_video_toolbox_output_frames: recording_output_frames,
                 recording_video_toolbox_output_bytes: recording_output_bytes,
                 stream_video_toolbox_output_frames: stream_output_frames,

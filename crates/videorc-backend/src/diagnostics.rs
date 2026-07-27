@@ -181,6 +181,22 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         encoder_bridge_video_toolbox_output_frames: 0,
         encoder_bridge_video_toolbox_output_bytes: 0,
         encoder_bridge_video_toolbox_output_encode_ms: None,
+        encoder_bridge_encoded_output_backend: None,
+        encoder_bridge_requested_video_output: None,
+        encoder_bridge_effective_video_output: None,
+        encoder_bridge_encoded_output_encoder_identity: None,
+        encoder_bridge_encoded_output_input_subtype: None,
+        encoder_bridge_encoded_output_fallback_reason: None,
+        encoder_bridge_encoded_output_frames: 0,
+        encoder_bridge_encoded_output_bytes: 0,
+        encoder_bridge_encoded_output_errors: 0,
+        encoder_bridge_encoded_submit_p95_ms: None,
+        encoder_bridge_encoded_fifo_write_p95_ms: None,
+        encoder_bridge_active_encoded_output_encoders: 0,
+        encoder_bridge_recording_encoded_output_frames: 0,
+        encoder_bridge_recording_encoded_output_bytes: 0,
+        encoder_bridge_stream_encoded_output_frames: 0,
+        encoder_bridge_stream_encoded_output_bytes: 0,
         recording_output_width: None,
         recording_output_height: None,
         recording_output_fps: None,
@@ -787,6 +803,7 @@ pub struct EncoderBridgeDiagnosticSnapshot {
     pub stream_output_fps: Option<u32>,
     pub stream_output_bitrate_kbps: Option<u32>,
     pub active_video_toolbox_output_encoders: u64,
+    pub active_encoded_output_encoders: u64,
     pub recording_video_toolbox_output_frames: u64,
     pub recording_video_toolbox_output_bytes: u64,
     pub stream_video_toolbox_output_frames: u64,
@@ -867,6 +884,18 @@ pub fn apply_encoder_bridge_stats(
     stats.stream_output_bitrate_kbps = bridge.stream_output_bitrate_kbps;
     stats.encoder_bridge_active_video_toolbox_output_encoders =
         bridge.active_video_toolbox_output_encoders;
+    stats.encoder_bridge_active_encoded_output_encoders = bridge.active_encoded_output_encoders;
+    stats.encoder_bridge_encoded_output_frames = bridge.video_toolbox_output_frames;
+    stats.encoder_bridge_encoded_output_bytes = bridge.video_toolbox_output_bytes;
+    stats.encoder_bridge_encoded_output_errors = bridge.video_toolbox_probe_errors;
+    stats.encoder_bridge_encoded_submit_p95_ms = bridge.video_toolbox_submit_p95_ms;
+    stats.encoder_bridge_encoded_fifo_write_p95_ms = bridge.video_toolbox_fifo_write_p95_ms;
+    stats.encoder_bridge_recording_encoded_output_frames =
+        bridge.recording_video_toolbox_output_frames;
+    stats.encoder_bridge_recording_encoded_output_bytes =
+        bridge.recording_video_toolbox_output_bytes;
+    stats.encoder_bridge_stream_encoded_output_frames = bridge.stream_video_toolbox_output_frames;
+    stats.encoder_bridge_stream_encoded_output_bytes = bridge.stream_video_toolbox_output_bytes;
     stats.encoder_bridge_recording_video_toolbox_output_frames =
         bridge.recording_video_toolbox_output_frames;
     stats.encoder_bridge_recording_video_toolbox_output_bytes =
@@ -2270,6 +2299,7 @@ mod tests {
                 stream_output_fps: None,
                 stream_output_bitrate_kbps: None,
                 active_video_toolbox_output_encoders: 0,
+                active_encoded_output_encoders: 0,
                 recording_video_toolbox_output_frames: 0,
                 recording_video_toolbox_output_bytes: 0,
                 stream_video_toolbox_output_frames: 0,
@@ -2355,6 +2385,7 @@ mod tests {
                 stream_output_fps: Some(30),
                 stream_output_bitrate_kbps: Some(6000),
                 active_video_toolbox_output_encoders: 2,
+                active_encoded_output_encoders: 2,
                 recording_video_toolbox_output_frames: 10,
                 recording_video_toolbox_output_bytes: 8192,
                 stream_video_toolbox_output_frames: 8,

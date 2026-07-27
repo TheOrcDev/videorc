@@ -172,6 +172,7 @@ describe('buildWindowsLocalGateSteps', () => {
       'package desktop Windows dir',
       'packaged recording and bundled-background smoke',
       'native Windows ScreenOnly and BMP smoke',
+      'native Windows Media Foundation encoded-bridge matrix',
       'recording-time Windows proof-surface smoke',
       'physical Windows live microphone controls smoke',
       'strict Windows support-bundle verification'
@@ -188,7 +189,8 @@ describe('buildWindowsLocalGateSteps', () => {
       posixPath(packaged.env.VIDEORC_SMOKE_OUTPUT_DIR),
       /C:\/repo\/docs\/acceptance\/artifacts\/windows\/\d{4}-\d{2}-\d{2}$/
     )
-    assert.deepEqual(steps.at(-4).args, ['smoke:windows-native-screen'])
+    assert.deepEqual(steps.at(-5).args, ['smoke:windows-native-screen'])
+    assert.deepEqual(steps.at(-4).args, ['smoke:windows-encoded-bridge'])
     assert.deepEqual(steps.at(-3).args, ['smoke:recording-native-preview'])
     assert.deepEqual(steps.at(-2).args, ['smoke:windows-live-audio-controls'])
     assert.equal(steps.at(-2).blockedExitCode, 2)

@@ -5,10 +5,11 @@
 - **Priority**: P0
 - **Effort**: L
 - **Risk**: HIGH
-- **Depends on**: Plan 038 calibration instrumentation
+- **Depends on**: Plan 038 calibration instrumentation — satisfied by PR #160
 - **Category**: perf / bug
 - **Planned at**: commit `54229f8f`, 2026-07-18
 - **Issue**: https://github.com/TheOrcDev/videorc/issues/156
+- **Implementation base**: `b6686eb1`, 2026-07-26
 
 ## Why this matters
 
@@ -16,9 +17,26 @@ The non-macOS encoder bridge defaults to `RawYuv420p`, so a 4K30 frame stream mo
 
 ## Current state
 
-- `crates/videorc-backend/src/recording.rs:6950-7019` selects the raw bridge on every non-macOS platform.
-- `crates/videorc-backend/src/recording.rs:6328-6424` contains a Media Foundation encoder arm and basic probe argument builder, but session startup always disables it.
-- Existing comments document previous `h264_mf` header-creation failures; a simple codec-exists or null-output probe is insufficient.
+- PR #162 completed the tee-backed FFmpeg probe/cache characterization foundation,
+  including binary/profile invalidation and exact fallback reasons.
+- PR #160 completed Plan 038's per-role CPU/RSS and packaged-performance
+  instrumentation dependency.
+- The 1080p30 and 4K30 packaged baselines remain the acceptance controls;
+  matching 1080p60 and 4K60 characterization scenarios are now maintained.
+- The native Media Foundation bridge is implemented behind an explicit opt-in.
+  Packaged hardware acceptance and default promotion remain blocked until the
+  full supported-device matrix and natural second-device fallback records pass.
+
+## Completion checklist
+
+- [x] Tee-backed FFmpeg capability probe/cache foundation (PR #162).
+- [x] Plan 038 packaged performance instrumentation dependency (PR #160).
+- [x] 1080p60 and 4K60 Windows characterization scenario definitions.
+- [ ] Three reviewed raw-YUV runs for all four characterization profiles.
+- [x] Native hardware-only asynchronous Media Foundation adapter implemented behind the opt-in.
+- [ ] Packaged supported-device encoded bridge matrix passes.
+- [ ] Natural unsupported-device OpenH264 fallback record passes.
+- [ ] Windows default promoted from raw to probed encoded output.
 
 ## Scope
 

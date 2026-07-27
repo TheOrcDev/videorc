@@ -1365,6 +1365,40 @@ pub struct DiagnosticStats {
     /// Max inline VideoToolbox encode latency observed by the bridge writer.
     #[serde(default)]
     pub encoder_bridge_video_toolbox_output_encode_ms: Option<u64>,
+    /// Generic encoded-output backend selected for this session.
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_backend: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_requested_video_output: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_effective_video_output: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_encoder_identity: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_input_subtype: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_fallback_reason: Option<String>,
+    /// Cross-platform aliases populated by both VideoToolbox and Media Foundation.
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_bytes: u64,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_errors: u64,
+    #[serde(default)]
+    pub encoder_bridge_encoded_submit_p95_ms: Option<f64>,
+    #[serde(default)]
+    pub encoder_bridge_encoded_fifo_write_p95_ms: Option<f64>,
+    #[serde(default)]
+    pub encoder_bridge_active_encoded_output_encoders: u64,
+    #[serde(default)]
+    pub encoder_bridge_recording_encoded_output_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_recording_encoded_output_bytes: u64,
+    #[serde(default)]
+    pub encoder_bridge_stream_encoded_output_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_stream_encoded_output_bytes: u64,
     /// Local recording output profile used by split-output sessions.
     #[serde(default)]
     pub recording_output_width: Option<u32>,

@@ -57,6 +57,7 @@ const performanceMeasurementMs = Number(
 const performanceIntervalMs = Number(process.env.VIDEORC_PERF_SAMPLE_INTERVAL_MS ?? 1_000)
 const performanceReportRequested = Boolean(process.env.VIDEORC_PERF_REPORT_PATH)
 const measureOccludedAuxWindows = process.env.VIDEORC_PERF_OCCLUDED_AUX_WINDOWS === '1'
+const requireEncodedBridge = process.env.VIDEORC_WINDOWS_REQUIRE_ENCODED_BRIDGE === '1'
 const performanceEvaluationRequested = performanceReportRequested || performanceModeValue === 'gate'
 const video = {
   preset: 'custom',
@@ -131,6 +132,9 @@ try {
   }
   const recordingStartedAt = Date.now()
   const activeRecording = await waitForActiveNativeScreenRecording(ws, screen.id)
+  if (requireEncodedBridge) {
+    assertEncodedBridgeDiagnostics(activeRecording.diagnostics, { requireOutput: false })
+  }
   if (!nativeWindowsCompositorUsesScreen(activeRecording.compositor, screen.id)) {
     throw new Error(
       `Recording compositor did not retain selected native screen ${screen.id}: ${JSON.stringify(activeRecording)}`
@@ -172,6 +176,10 @@ try {
   }
   if (collectorFailed && !performanceEvaluationRequested) throw collectorFailure
   const stopRequestedAt = Date.now()
+  if (requireEncodedBridge) {
+    const diagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
+    assertEncodedBridgeDiagnostics(diagnostics, { requireOutput: true })
+  }
   const stopped = await request(ws, timeoutMs, 'session.stop')
   const outputPath = stopped?.outputPath ?? started?.outputPath
   if (!outputPath || !existsSync(outputPath) || statSync(outputPath).size <= 0) {
@@ -544,6 +552,41 @@ function screenOnlySessionParams(sources) {
       microphoneMuted: true,
       microphoneSyncOffsetMs: 0
     }
+  }
+}
+
+function assertEncodedBridgeDiagnostics(diagnostics, { requireOutput }) {
+  const failures = []
+  if (diagnostics?.encodeBackend !== 'hardware-media-foundation') {
+    failures.push(`encodeBackend=${diagnostics?.encodeBackend ?? 'missing'}`)
+  }
+  if (diagnostics?.encoderBridgeEncodedOutputBackend !== 'media-foundation') {
+    failures.push(
+      `encodedOutputBackend=${diagnostics?.encoderBridgeEncodedOutputBackend ?? 'missing'}`
+    )
+  }
+  if (
+    diagnostics?.encoderBridgeEffectiveVideoOutput !==
+    'windows-media-foundation-h264-mpegts'
+  ) {
+    failures.push(
+      `effectiveOutput=${diagnostics?.encoderBridgeEffectiveVideoOutput ?? 'missing'}`
+    )
+  }
+  if ((diagnostics?.encoderBridgeRawVideoCopiedFrames ?? 0) !== 0) {
+    failures.push(`rawFifoCopiedFrames=${diagnostics.encoderBridgeRawVideoCopiedFrames}`)
+  }
+  if ((diagnostics?.encoderBridgeEncodedOutputErrors ?? 0) !== 0) {
+    failures.push(`encodedOutputErrors=${diagnostics.encoderBridgeEncodedOutputErrors}`)
+  }
+  if (requireOutput && !(diagnostics?.encoderBridgeEncodedOutputFrames > 0)) {
+    failures.push(`encodedOutputFrames=${diagnostics?.encoderBridgeEncodedOutputFrames ?? 0}`)
+  }
+  if (requireOutput && !(diagnostics?.encoderBridgeEncodedOutputBytes > 0)) {
+    failures.push(`encodedOutputBytes=${diagnostics?.encoderBridgeEncodedOutputBytes ?? 0}`)
+  }
+  if (failures.length > 0) {
+    throw new Error(`Windows encoded bridge diagnostics failed: ${failures.join('; ')}`)
   }
 }
 
