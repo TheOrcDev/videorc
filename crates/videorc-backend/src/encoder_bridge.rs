@@ -3362,7 +3362,8 @@ enum VideoToolboxH264PipeWriter {
 impl VideoToolboxH264PipeWriter {
     fn for_output(video_output: EncoderBridgeVideoOutput) -> Self {
         match video_output {
-            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => Self::MpegTs {
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => Self::MpegTs {
                 writer: MpegTsH264Writer::new(),
                 access_unit_buffer: Vec::new(),
                 base_pts_90khz: None,
