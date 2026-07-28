@@ -218,6 +218,7 @@ fn unpack_render_dimensions(packed: u64) -> (u32, u32) {
 pub enum CompositorFrameConsumer {
     NativePreview,
     VideoToolboxEncoder,
+    MediaFoundationEncoder,
     RawYuvEncoder,
     #[allow(dead_code)] // Reserved for the explicit JPEG debug/fallback attachment path.
     JpegFallback,
@@ -225,7 +226,10 @@ pub enum CompositorFrameConsumer {
 
 impl CompositorFrameConsumer {
     const fn publishes_cpu_yuv(self) -> bool {
-        matches!(self, Self::RawYuvEncoder | Self::JpegFallback)
+        matches!(
+            self,
+            Self::MediaFoundationEncoder | Self::RawYuvEncoder | Self::JpegFallback
+        )
     }
 
     const fn requires_cpu_fallback(self) -> bool {
@@ -236,6 +240,7 @@ impl CompositorFrameConsumer {
         match self {
             Self::NativePreview => "native-preview",
             Self::VideoToolboxEncoder => "videotoolbox-encoder",
+            Self::MediaFoundationEncoder => "media-foundation-encoder",
             Self::RawYuvEncoder => "raw-yuv-encoder",
             Self::JpegFallback => "jpeg-fallback",
         }
@@ -3327,10 +3332,12 @@ async fn publish_compositor_frame(
                     let _ = reason;
                 }
                 if frame_consumer.requires_cpu_fallback() {
-                    let mut store = frame_store
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    bytes = store.checkout_buffer(raw_yuv420p_len(width, height));
+                    bytes = {
+                        let mut store = frame_store
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        store.checkout_buffer(raw_yuv420p_len(width, height))
+                    };
                     render_compositor_yuv420p_frame(inputs, &mut bytes);
                 } else {
                     bytes = Vec::new();

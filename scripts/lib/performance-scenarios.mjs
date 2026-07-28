@@ -10,7 +10,9 @@ export const PERFORMANCE_SCENARIOS = [
   'record-1080p60',
   'record-vertical-4k30',
   'windows-proof-recording-1080p',
+  'windows-proof-recording-1080p60',
   'windows-proof-recording-4k',
+  'windows-proof-recording-4k60',
   'windows-occluded-aux-windows',
   'studio-live-mic-visuals',
   'lifecycle-churn',
@@ -102,11 +104,17 @@ export function buildPerformanceScenario({
     }
   }
 
-  if (scenario === 'windows-proof-recording-1080p' || scenario === 'windows-proof-recording-4k') {
-    const fourK = scenario === 'windows-proof-recording-4k'
+  if (
+    scenario === 'windows-proof-recording-1080p' ||
+    scenario === 'windows-proof-recording-1080p60' ||
+    scenario === 'windows-proof-recording-4k' ||
+    scenario === 'windows-proof-recording-4k60'
+  ) {
+    const fourK = scenario.includes('-4k')
+    const sixtyFps = scenario.endsWith('60')
     const width = fourK ? 3840 : 1920
     const height = fourK ? 2160 : 1080
-    const fps = 30
+    const fps = sixtyFps ? 60 : 30
     return {
       command: node,
       args: ['scripts/smoke-windows-native-screen-app.mjs'],
@@ -127,13 +135,16 @@ export function buildPerformanceScenario({
 
   if (
     scenario === 'windows-proof-recording-1080p' ||
+    scenario === 'windows-proof-recording-1080p60' ||
     scenario === 'windows-proof-recording-4k' ||
+    scenario === 'windows-proof-recording-4k60' ||
     scenario === 'windows-occluded-aux-windows'
   ) {
-    const fourK = scenario === 'windows-proof-recording-4k'
+    const fourK = scenario.includes('-4k')
+    const sixtyFps = scenario.endsWith('60')
     const width = fourK ? 3840 : 1920
     const height = fourK ? 2160 : 1080
-    const fps = 30
+    const fps = sixtyFps ? 60 : 30
     return {
       command: node,
       args: ['scripts/smoke-windows-native-screen-app.mjs'],
@@ -309,10 +320,13 @@ function scenarioMetadataEnvironment(scenario) {
   }
   if (
     scenario === 'windows-proof-recording-1080p' ||
+    scenario === 'windows-proof-recording-1080p60' ||
     scenario === 'windows-proof-recording-4k' ||
+    scenario === 'windows-proof-recording-4k60' ||
     scenario === 'windows-occluded-aux-windows'
   ) {
-    const fourK = scenario === 'windows-proof-recording-4k'
+    const fourK = scenario.includes('-4k')
+    const fps = scenario.endsWith('60') ? 60 : 30
     return {
       VIDEORC_PERF_APP_ROLE:
         scenario === 'windows-occluded-aux-windows'
@@ -320,9 +334,9 @@ function scenarioMetadataEnvironment(scenario) {
           : 'windows-proof-surface-recording',
       VIDEORC_PERF_SOURCE_WIDTH: fourK ? '3840' : '1920',
       VIDEORC_PERF_SOURCE_HEIGHT: fourK ? '2160' : '1080',
-      VIDEORC_PERF_SOURCE_FPS: '30',
+      VIDEORC_PERF_SOURCE_FPS: String(fps),
       VIDEORC_PERF_OUTPUTS_JSON: JSON.stringify([
-        { role: 'recording', width: fourK ? 3840 : 1920, height: fourK ? 2160 : 1080, fps: 30 }
+        { role: 'recording', width: fourK ? 3840 : 1920, height: fourK ? 2160 : 1080, fps }
       ])
     }
   }

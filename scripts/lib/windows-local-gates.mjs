@@ -249,6 +249,19 @@ export function buildWindowsLocalGateSteps({
       }
     },
     {
+      label: 'native Windows Media Foundation encoded-bridge matrix',
+      command: 'pnpm',
+      args: ['smoke:windows-encoded-bridge'],
+      env: {
+        VIDEORC_PERF_APP_EXECUTABLE: executable,
+        VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'encoded-bridge'),
+        VIDEORC_SMOKE_FFMPEG_PATH: packagedFfmpeg,
+        VIDEORC_SMOKE_FFPROBE_PATH: packagedFfprobe,
+        VIDEORC_SMOKE_TIMEOUT_MS: '240000',
+        VIDEORC_WINDOWS_ENCODED_BRIDGE_RECORDING_MS: '8000'
+      }
+    },
+    {
       label: 'recording-time Windows proof-surface smoke',
       command: 'pnpm',
       args: ['smoke:recording-native-preview'],

@@ -146,6 +146,22 @@ describe('buildPerformanceScenario', () => {
       childReportPath: '/tmp/windows-4k.json',
       node: 'node'
     })
+    const fullHd60 = buildPerformanceScenario({
+      scenario: 'windows-proof-recording-1080p60',
+      mode: 'report-only',
+      warmupSeconds: 60,
+      measurementSeconds: 600,
+      childReportPath: '/tmp/windows-1080p60.json',
+      node: 'node'
+    })
+    const fourK60 = buildPerformanceScenario({
+      scenario: 'windows-proof-recording-4k60',
+      mode: 'report-only',
+      warmupSeconds: 60,
+      measurementSeconds: 600,
+      childReportPath: '/tmp/windows-4k60.json',
+      node: 'node'
+    })
 
     assert.equal(fullHd.deviceRequired, true)
     assert.deepEqual(fullHd.args, ['scripts/smoke-windows-native-screen-app.mjs'])
@@ -156,6 +172,13 @@ describe('buildPerformanceScenario', () => {
     assert.equal(fourK.env.VIDEORC_SMOKE_VIDEO_WIDTH, '3840')
     assert.equal(fourK.env.VIDEORC_SMOKE_VIDEO_HEIGHT, '2160')
     assert.equal(fourK.env.VIDEORC_SMOKE_VIDEO_BITRATE_KBPS, '30000')
+    assert.equal(fullHd60.env.VIDEORC_SMOKE_VIDEO_FPS, '60')
+    assert.equal(fullHd60.env.VIDEORC_PERF_SOURCE_FPS, '60')
+    assert.equal(fourK60.env.VIDEORC_SMOKE_VIDEO_FPS, '60')
+    assert.equal(fourK60.env.VIDEORC_SMOKE_VIDEO_WIDTH, '3840')
+    assert.deepEqual(JSON.parse(fourK60.env.VIDEORC_PERF_OUTPUTS_JSON), [
+      { role: 'recording', width: 3840, height: 2160, fps: 60 }
+    ])
   })
 
   it('defines an occluded auxiliary-window CPU comparison workload', () => {

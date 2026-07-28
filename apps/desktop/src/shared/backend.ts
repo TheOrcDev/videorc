@@ -1838,6 +1838,23 @@ export interface DiagnosticStats {
   encoderBridgeVideoToolboxOutputBytes: number
   /** Max inline VideoToolbox encode latency observed by the bridge writer. */
   encoderBridgeVideoToolboxOutputEncodeMs?: number
+  /** Generic encoded-output diagnostics populated by VideoToolbox and Media Foundation. */
+  encoderBridgeEncodedOutputBackend?: string
+  encoderBridgeRequestedVideoOutput?: string
+  encoderBridgeEffectiveVideoOutput?: string
+  encoderBridgeEncodedOutputEncoderIdentity?: string
+  encoderBridgeEncodedOutputInputSubtype?: string
+  encoderBridgeEncodedOutputFallbackReason?: string
+  encoderBridgeEncodedOutputFrames?: number
+  encoderBridgeEncodedOutputBytes?: number
+  encoderBridgeEncodedOutputErrors?: number
+  encoderBridgeEncodedSubmitP95Ms?: number
+  encoderBridgeEncodedFifoWriteP95Ms?: number
+  encoderBridgeActiveEncodedOutputEncoders?: number
+  encoderBridgeRecordingEncodedOutputFrames?: number
+  encoderBridgeRecordingEncodedOutputBytes?: number
+  encoderBridgeStreamEncodedOutputFrames?: number
+  encoderBridgeStreamEncodedOutputBytes?: number
   /** Local recording output profile used by split-output sessions. */
   recordingOutputWidth?: number
   recordingOutputHeight?: number
