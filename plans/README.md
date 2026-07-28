@@ -52,8 +52,8 @@ row when done.
 | 034 | 4K pipeline headroom: async GPU completion, O(retain) camera callback, phase-keeping compositor tick, evidence-gated 4K quality posture | P1 | L | 2026-07 incident fixes (corroborated freezes + cadence mismatch) on main | TODO (2026-07-20; U1–U4 sliced, each gated by the recording matrix hard-content pass) |
 | 035 | Replace the Windows raw-video bottleneck with a verified encoded path | P0 | L | 038 | TODO ([#156](https://github.com/TheOrcDev/videorc/issues/156)) |
 | 036 | Bound Windows proof-surface transport and presentation work | P1 | M | 038 | TODO ([#157](https://github.com/TheOrcDev/videorc/issues/157)) |
-| 037 | Make Windows Electron fallback and background work recoverable and scoped | P1 | M | 038 | TODO ([#158](https://github.com/TheOrcDev/videorc/issues/158)) |
-| 038 | Establish an enforceable Windows packaged-performance baseline | P0 | M | Plan 019 physical Windows acceptance evidence | TODO ([#155](https://github.com/TheOrcDev/videorc/issues/155)) |
+| 037 | Make Windows Electron fallback and background work recoverable and scoped | P1 | M | 038 | DONE (2026-07-28; implementation [#167](https://github.com/TheOrcDev/videorc/pull/167), physical Windows A/B and recovery acceptance recorded; closes [#158](https://github.com/TheOrcDev/videorc/issues/158)) |
+| 038 | Establish an enforceable Windows packaged-performance baseline | P0 | M | Plan 019 physical Windows acceptance evidence | DONE (2026-07-23; implementation [#160](https://github.com/TheOrcDev/videorc/pull/160), [#155](https://github.com/TheOrcDev/videorc/issues/155) closed) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) |
 REJECTED (with one-line rationale).
