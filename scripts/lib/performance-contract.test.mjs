@@ -17,6 +17,7 @@ import {
   packagedAppPayloadIdentity,
   packagedAppPayloadManifestSha256,
   performanceBuildMode,
+  performanceElectronBackgroundPolicy,
   performanceHardwareClass,
   performanceMetadataWithObservedDisplayScale,
   performanceMode,
@@ -24,6 +25,24 @@ import {
   sha256File,
   summarizeNumericSeries
 } from './performance-contract.mjs'
+
+describe('performanceElectronBackgroundPolicy', () => {
+  it('records the effective scoped or legacy characterization policy', () => {
+    assert.equal(performanceElectronBackgroundPolicy({}), 'scoped')
+    assert.equal(
+      performanceElectronBackgroundPolicy({
+        VIDEORC_ELECTRON_BACKGROUND_POLICY: 'legacy-unthrottled'
+      }),
+      'legacy-unthrottled'
+    )
+    assert.equal(
+      performanceElectronBackgroundPolicy({
+        VIDEORC_ELECTRON_BACKGROUND_POLICY: 'unsupported'
+      }),
+      'scoped'
+    )
+  })
+})
 
 describe('macOS caffeinate assertion verification', () => {
   const assertions = `
@@ -374,6 +393,7 @@ describe('packaged performance provenance', () => {
     expectedBuildMode: 'packaged',
     runNonce: 'run-1234567890',
     hardwareClass: 'github-hosted-macos-15-arm64-standard',
+    electronBackgroundPolicy: 'scoped',
     powerAssertion: 'caffeinate:-d,-i,-s',
     powerAssertionVerified: false,
     executable: { sha256: executableSha256 },
@@ -398,6 +418,7 @@ describe('packaged performance provenance', () => {
         expectedBuildMode: 'development',
         runNonce: 'wrong-run',
         hardwareClass: 'wrong-hardware',
+        electronBackgroundPolicy: 'legacy-unthrottled',
         powerAssertion: null,
         powerAssertionVerified: false,
         executable: { sha256: 'd'.repeat(64) },
@@ -411,6 +432,7 @@ describe('packaged performance provenance', () => {
     assert.ok(failures.some((failure) => /child build mode/.test(failure)))
     assert.ok(failures.some((failure) => /run nonce/.test(failure)))
     assert.ok(failures.some((failure) => /hardware class/.test(failure)))
+    assert.ok(failures.some((failure) => /Electron background policy/.test(failure)))
     assert.ok(failures.some((failure) => /power assertion/.test(failure)))
     assert.ok(failures.some((failure) => /did not match wrapper commit/.test(failure)))
     assert.ok(failures.some((failure) => /child commit provenance was dirty/.test(failure)))

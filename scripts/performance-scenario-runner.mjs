@@ -97,7 +97,9 @@ if (scenario.timing) {
   console.log(`Warm-up ${warmupSeconds}s; measurement ${measurementSeconds}s`)
 }
 if (scenario.deviceRequired) {
-  console.log('This scenario requires an authorized macOS screen/camera/microphone host.')
+  const deviceHost =
+    process.platform === 'win32' ? 'Windows screen-capture' : 'macOS screen/camera/microphone'
+  console.log(`This scenario requires an authorized ${deviceHost} host.`)
 }
 
 const startedAt = Date.now()
