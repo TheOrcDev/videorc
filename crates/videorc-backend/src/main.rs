@@ -1,3 +1,8 @@
+#![cfg_attr(
+    target_os = "windows",
+    allow(dead_code, unused_imports, unused_mut, unused_variables)
+)]
+
 mod account;
 mod ai;
 mod atomic_file;
