@@ -13,14 +13,15 @@ use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVEncCommonLowLatency, CODECAPI_AVEncCommonMeanBitRate,
     CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncCommonRealTime,
-    CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize, ICodecAPI, IMFActivate,
-    IMFMediaBuffer, IMFMediaEventGenerator, IMFSample, IMFTransform, METransformDrainComplete,
-    METransformHaveOutput, METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE, MF_EVENT_FLAG_NO_WAIT,
-    MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES,
-    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-    MF_MT_MAX_KEYFRAME_SPACING, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
-    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup,
+    CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize, ICodecAPI, IMF2DBuffer2,
+    IMFActivate, IMFMediaBuffer, IMFMediaEventGenerator, IMFSample, IMFTransform,
+    METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
+    MF_E_NO_EVENTS_AVAILABLE, MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
+    MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING, MF_MT_MPEG_SEQUENCE_HEADER,
+    MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+    MF2DBuffer_LockFlags_Write, MFCreate2DMediaBuffer, MFCreateMediaType, MFCreateMemoryBuffer,
+    MFCreateSample, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup,
     MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
     MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
@@ -121,7 +122,6 @@ pub struct MediaFoundationH264Encoder {
     events: ManuallyDrop<IMFMediaEventGenerator>,
     identity: String,
     input_subtype: MediaFoundationInputSubtype,
-    nv12_scratch: Vec<u8>,
     sequence_header: Vec<u8>,
     submitted_pts: VecDeque<i64>,
     last_output_pts: Option<i64>,
@@ -322,7 +322,6 @@ impl MediaFoundationH264Encoder {
             events: ManuallyDrop::new(events),
             identity,
             input_subtype,
-            nv12_scratch: Vec::new(),
             sequence_header,
             submitted_pts: VecDeque::new(),
             last_output_pts: None,
@@ -366,19 +365,15 @@ impl MediaFoundationH264Encoder {
         let mut output = self.wait_for_input_credit(EVENT_TIMEOUT)?;
         let pts = scheduled_time_100ns(frame_index, self.config.fps)?;
         let duration = scheduled_duration_100ns(frame_index, self.config.fps)?;
-        let sample_bytes = match self.input_subtype {
-            MediaFoundationInputSubtype::I420 => i420,
-            MediaFoundationInputSubtype::Nv12 => {
-                i420_to_nv12(
-                    i420,
-                    self.config.width,
-                    self.config.height,
-                    &mut self.nv12_scratch,
-                )?;
-                &self.nv12_scratch
-            }
-        };
-        let sample = create_input_sample(sample_bytes, pts, duration).map_err(|error| {
+        let sample = create_input_sample(
+            i420,
+            self.input_subtype,
+            self.config.width,
+            self.config.height,
+            pts,
+            duration,
+        )
+        .map_err(|error| {
             anyhow!(
                 "Media Foundation probe stage=create-input-sample encoder={:?} input={} profile={}: {error}",
                 self.identity,
@@ -897,8 +892,29 @@ fn create_video_type(
     Ok(media_type)
 }
 
-fn create_input_sample(bytes: &[u8], pts: i64, duration: i64) -> Result<IMFSample> {
-    let len = u32::try_from(bytes.len()).context("Media Foundation input frame exceeded u32")?;
+fn create_input_sample(
+    i420: &[u8],
+    input_subtype: MediaFoundationInputSubtype,
+    width: u32,
+    height: u32,
+    pts: i64,
+    duration: i64,
+) -> Result<IMFSample> {
+    let buffer = match input_subtype {
+        MediaFoundationInputSubtype::I420 => create_i420_input_buffer(i420)?,
+        MediaFoundationInputSubtype::Nv12 => create_nv12_input_buffer(i420, width, height)?,
+    };
+    let sample = unsafe { MFCreateSample() }?;
+    unsafe {
+        sample.AddBuffer(&buffer)?;
+        sample.SetSampleTime(pts)?;
+        sample.SetSampleDuration(duration)?;
+    }
+    Ok(sample)
+}
+
+fn create_i420_input_buffer(i420: &[u8]) -> Result<IMFMediaBuffer> {
+    let len = u32::try_from(i420.len()).context("Media Foundation input frame exceeded u32")?;
     let buffer = unsafe { MFCreateMemoryBuffer(len) }?;
     let mut target = ptr::null_mut();
     let mut max_len = 0_u32;
@@ -908,17 +924,61 @@ fn create_input_sample(bytes: &[u8], pts: i64, duration: i64) -> Result<IMFSampl
             let _ = buffer.Unlock();
             bail!("Media Foundation input buffer was smaller than requested");
         }
-        ptr::copy_nonoverlapping(bytes.as_ptr(), target, bytes.len());
+        std::slice::from_raw_parts_mut(target, i420.len()).copy_from_slice(i420);
         buffer.Unlock()?;
         buffer.SetCurrentLength(len)?;
     }
-    let sample = unsafe { MFCreateSample() }?;
+    Ok(buffer)
+}
+
+fn create_nv12_input_buffer(i420: &[u8], width: u32, height: u32) -> Result<IMFMediaBuffer> {
+    ensure!(
+        width.is_multiple_of(2) && height.is_multiple_of(2),
+        "NV12 input requires even dimensions"
+    );
+    let buffer = unsafe { MFCreate2DMediaBuffer(width, height, MFVideoFormat_NV12.data1, false) }?;
+    let buffer_2d: IMF2DBuffer2 = buffer.cast()?;
+    let mut scanline = ptr::null_mut();
+    let mut pitch = 0_i32;
+    let mut buffer_start = ptr::null_mut();
+    let mut buffer_len = 0_u32;
     unsafe {
-        sample.AddBuffer(&buffer)?;
-        sample.SetSampleTime(pts)?;
-        sample.SetSampleDuration(duration)?;
+        buffer_2d.Lock2DSize(
+            MF2DBuffer_LockFlags_Write,
+            &mut scanline,
+            &mut pitch,
+            &mut buffer_start,
+            &mut buffer_len,
+        )?;
+        let write_result = (|| {
+            ensure!(
+                pitch > 0,
+                "NV12 input buffer returned non-positive pitch {pitch}"
+            );
+            ensure!(
+                scanline == buffer_start,
+                "NV12 input buffer returned an unexpected top-row offset"
+            );
+            let pitch = usize::try_from(pitch)?;
+            let height = usize::try_from(height)?;
+            let required_len = pitch
+                .checked_mul(height + height / 2)
+                .context("NV12 strided input buffer size overflowed")?;
+            ensure!(
+                required_len <= buffer_len as usize,
+                "NV12 input buffer length {buffer_len} was smaller than required {required_len}"
+            );
+            let target = std::slice::from_raw_parts_mut(buffer_start, required_len);
+            i420_to_nv12_strided(i420, width, height as u32, pitch, target)
+        })();
+        if let Err(error) = write_result {
+            let _ = buffer_2d.Unlock2D();
+            return Err(error);
+        }
+        buffer_2d.Unlock2D()?;
+        buffer.SetCurrentLength(buffer_2d.GetContiguousLength()?)?;
     }
-    Ok(sample)
+    Ok(buffer)
 }
 
 fn copy_media_buffer(buffer: &IMFMediaBuffer) -> Result<Vec<u8>> {
@@ -964,7 +1024,13 @@ fn frame_index_from_100ns(pts: i64, fps: u32) -> Result<u64> {
     u64::try_from(value).context("Media Foundation frame index exceeded u64")
 }
 
-fn i420_to_nv12(i420: &[u8], width: u32, height: u32, output: &mut Vec<u8>) -> Result<()> {
+fn i420_to_nv12_strided(
+    i420: &[u8],
+    width: u32,
+    height: u32,
+    pitch: usize,
+    output: &mut [u8],
+) -> Result<()> {
     ensure!(
         width.is_multiple_of(2) && height.is_multiple_of(2),
         "NV12 conversion requires even dimensions"
@@ -975,13 +1041,36 @@ fn i420_to_nv12(i420: &[u8], width: u32, height: u32, output: &mut Vec<u8>) -> R
         i420.len() == y_len + chroma_len * 2,
         "I420/NV12 conversion input length mismatch"
     );
-    output.resize(i420.len(), 0);
-    output[..y_len].copy_from_slice(&i420[..y_len]);
+    let width = usize::try_from(width)?;
+    let height = usize::try_from(height)?;
+    ensure!(
+        pitch >= width,
+        "I420/NV12 conversion pitch {pitch} was smaller than width {width}"
+    );
+    let output_len = pitch
+        .checked_mul(height + height / 2)
+        .context("I420/NV12 conversion output size overflowed")?;
+    ensure!(
+        output.len() == output_len,
+        "I420/NV12 conversion output length mismatch"
+    );
+    for row in 0..height {
+        let source_start = row * width;
+        let target_start = row * pitch;
+        output[target_start..target_start + width]
+            .copy_from_slice(&i420[source_start..source_start + width]);
+    }
     let u = &i420[y_len..y_len + chroma_len];
     let v = &i420[y_len + chroma_len..];
-    for index in 0..chroma_len {
-        output[y_len + index * 2] = u[index];
-        output[y_len + index * 2 + 1] = v[index];
+    let chroma_width = width / 2;
+    let uv_offset = pitch * height;
+    for row in 0..height / 2 {
+        let source_start = row * chroma_width;
+        let target_start = uv_offset + row * pitch;
+        for column in 0..chroma_width {
+            output[target_start + column * 2] = u[source_start + column];
+            output[target_start + column * 2 + 1] = v[source_start + column];
+        }
     }
     Ok(())
 }
@@ -1081,9 +1170,27 @@ mod tests {
     #[test]
     fn converts_i420_chroma_to_nv12_interleaving() {
         let input = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 20, 21];
-        let mut output = Vec::new();
-        i420_to_nv12(&input, 4, 2, &mut output).unwrap();
+        let mut output = [0; 12];
+        i420_to_nv12_strided(&input, 4, 2, 4, &mut output).unwrap();
         assert_eq!(output, [1, 2, 3, 4, 5, 6, 7, 8, 10, 20, 11, 21]);
+    }
+
+    #[test]
+    fn converts_i420_into_strided_nv12_rows_without_touching_padding() {
+        let input = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 20, 21];
+        let mut output = [0xff; 24];
+        i420_to_nv12_strided(&input, 4, 2, 8, &mut output).unwrap();
+        assert_eq!(&output[..8], &[1, 2, 3, 4, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(&output[8..16], &[5, 6, 7, 8, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(&output[16..], &[10, 20, 11, 21, 0xff, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn rejects_an_incorrect_strided_nv12_output_length() {
+        let input = [1, 2, 3, 4, 5, 6];
+        let mut output = [0; 11];
+        let error = i420_to_nv12_strided(&input, 2, 2, 4, &mut output).unwrap_err();
+        assert!(error.to_string().contains("output length mismatch"));
     }
 
     #[test]
