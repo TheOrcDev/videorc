@@ -33,7 +33,7 @@ env:
 jobs:
   macos:
     name: Build signed macOS artifact
-    runs-on: macos-15
+    runs-on: tenki-macos-latest-mini
     timeout-minutes: 60
 
     steps:
