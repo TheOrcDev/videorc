@@ -20,7 +20,7 @@ concurrency:
 jobs:
   gates:
     name: Windows gates (Rust + JS tests)
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: windows-latest
     timeout-minutes: 45
     steps:
       - name: Check out repository
@@ -74,7 +74,7 @@ jobs:
 
   installer:
     name: Windows installer artifact
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: windows-latest
     timeout-minutes: 60
     steps:
       - name: Check out repository

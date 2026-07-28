@@ -18,7 +18,7 @@ permissions:
 jobs:
   unsigned:
     name: Build and test unsigned candidate payload
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: windows-latest
     timeout-minutes: 180
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
@@ -154,7 +154,7 @@ jobs:
   sign:
     name: OIDC-sign, validate, and store exact candidate
     needs: unsigned
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: windows-latest
     timeout-minutes: 120
     environment: windows-alpha-release
     permissions:
