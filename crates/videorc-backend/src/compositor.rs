@@ -5066,6 +5066,7 @@ mod tests {
             bytes: vec![0, 0, 0, 255],
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -5084,6 +5085,7 @@ mod tests {
             bytes: vec![0, 0, 0, 255],
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now()
                 - COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_AFTER
@@ -5107,6 +5109,7 @@ mod tests {
             bytes: vec![0, 0, 0, 255],
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now()
                 - COMPOSITOR_LIVE_SOURCE_STALE_RECOVERY_AFTER
@@ -5793,6 +5796,7 @@ mod tests {
             bytes: [255, 0, 0, 255].repeat(16),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -5805,6 +5809,7 @@ mod tests {
             bytes: [0, 0, 255, 255].repeat(16),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -5899,6 +5904,7 @@ mod tests {
             bytes: [255, 0, 0, 255].repeat(100 * 100),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -8026,6 +8032,7 @@ mod tests {
             bytes: [255, 0, 0, 255].repeat(100 * 100),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -8101,6 +8108,7 @@ mod tests {
             bytes: [0, 0, 255, 255].repeat(160 * 90),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -8113,6 +8121,7 @@ mod tests {
             bytes: [255, 0, 0, 255].repeat(160 * 90),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -8312,6 +8321,7 @@ mod tests {
             bytes: [0, 0, 255, 255].repeat(16),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -8493,6 +8503,7 @@ mod tests {
             bytes: [0, 0, 255, 255].repeat(16),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: camera_captured_at,
         });

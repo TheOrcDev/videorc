@@ -8,6 +8,12 @@ const WINDOWS_DXGI_SCREEN_PREFIX: &str = "screen:dxgi:";
 const WINDOWS_GDIGRAB_DESKTOP_ID: &str = "screen:gdigrab:desktop";
 const SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowsDxgiSourceId {
+    pub adapter_luid: u64,
+    pub output_index: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeCaptureSources {
     pub devices: Vec<Device>,
@@ -23,12 +29,19 @@ pub fn parse_screencapturekit_window_id(id: &str) -> Option<u32> {
 }
 
 pub fn parse_windows_dxgi_output_index(id: &str) -> Option<u32> {
+    parse_windows_dxgi_source_id(id).map(|source| source.output_index)
+}
+
+pub fn parse_windows_dxgi_source_id(id: &str) -> Option<WindowsDxgiSourceId> {
     let value = id.strip_prefix(WINDOWS_DXGI_SCREEN_PREFIX)?;
     let (adapter_luid, output_index) = value.rsplit_once(':')?;
-    if adapter_luid.is_empty() {
+    if adapter_luid.len() != 16 {
         return None;
     }
-    output_index.parse().ok()
+    Some(WindowsDxgiSourceId {
+        adapter_luid: u64::from_str_radix(adapter_luid, 16).ok()?,
+        output_index: output_index.parse().ok()?,
+    })
 }
 
 pub fn is_windows_gdigrab_desktop_screen_id(id: &str) -> bool {
@@ -618,10 +631,21 @@ mod tests {
     #[test]
     fn parses_windows_screen_source_ids() {
         assert_eq!(
+            parse_windows_dxgi_source_id("screen:dxgi:00000000000003f1:2"),
+            Some(WindowsDxgiSourceId {
+                adapter_luid: 0x3f1,
+                output_index: 2,
+            })
+        );
+        assert_eq!(
             parse_windows_dxgi_output_index("screen:dxgi:00000000000003f1:2"),
             Some(2)
         );
         assert_eq!(parse_windows_dxgi_output_index("screen:dxgi::2"), None);
+        assert_eq!(
+            parse_windows_dxgi_output_index("screen:dxgi:not-a-luid-value:2"),
+            None
+        );
         assert_eq!(
             parse_windows_dxgi_output_index("screen:screencapturekit:2"),
             None

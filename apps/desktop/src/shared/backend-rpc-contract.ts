@@ -502,6 +502,7 @@ const previewScreenStatusSchema = boundedSemanticValue(
       framesCaptured: nonNegativeInteger,
       droppedFrames: nonNegativeInteger,
       frameAgeMs: optionalSchema(nonNegativeInteger),
+      d3d11TextureAvailable: optionalSchema(booleanSchema),
       includeCursor: booleanSchema,
       excludeCurrentProcessWindows: booleanSchema,
       updatedAt: timestamp

@@ -1662,6 +1662,7 @@ export interface PreviewScreenStatus {
   actualWidth?: number
   actualHeight?: number
   iosurfaceAvailable?: boolean
+  d3d11TextureAvailable?: boolean
   sourceFps?: number
   frameAgeMs?: number
   framesCaptured: number
@@ -2111,6 +2112,8 @@ export interface DiagnosticStats {
   previewScreenActualHeight?: number
   /** Whether the latest ScreenCaptureKit frame retained a zero-copy source handle. */
   previewScreenIosurfaceAvailable?: boolean
+  /** Whether the latest Windows Graphics Capture frame retained its D3D11 source texture. */
+  previewScreenD3d11TextureAvailable?: boolean
   /** P95 interval between ScreenCaptureKit screen sample callbacks. */
   previewScreenCaptureGapP95Ms?: number
   /** Max interval between ScreenCaptureKit screen sample callbacks. */

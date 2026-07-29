@@ -68,6 +68,26 @@ export function nativeWindowsCompositorUsesScreen(compositor, sourceId) {
   )
 }
 
+export function assertWindowsGraphicsCaptureTexture(status) {
+  if (status?.state !== 'live' || status?.d3d11TextureAvailable !== true) {
+    throw new Error(
+      `Windows Graphics Capture did not retain a D3D11 source texture: ${JSON.stringify(status)}`
+    )
+  }
+  if (
+    !Number.isSafeInteger(status.framesCaptured) ||
+    status.framesCaptured < 1 ||
+    !Number.isSafeInteger(status.actualWidth) ||
+    status.actualWidth < 1 ||
+    !Number.isSafeInteger(status.actualHeight) ||
+    status.actualHeight < 1
+  ) {
+    throw new Error(
+      `Windows Graphics Capture texture evidence is incomplete: ${JSON.stringify(status)}`
+    )
+  }
+}
+
 export function assertBmpHeaders(headers, status) {
   if (
     headers['x-videorc-frame-transport'] !== 'latest-bgra-bmp' ||

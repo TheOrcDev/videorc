@@ -1800,6 +1800,9 @@ pub struct DiagnosticStats {
     /// Whether the latest ScreenCaptureKit frame retained a zero-copy source handle.
     #[serde(default)]
     pub preview_screen_iosurface_available: Option<bool>,
+    /// Whether the latest Windows Graphics Capture frame retained its D3D11 source texture.
+    #[serde(default)]
+    pub preview_screen_d3d11_texture_available: Option<bool>,
     /// P95 interval between ScreenCaptureKit screen sample callbacks.
     #[serde(default)]
     pub preview_screen_capture_gap_p95_ms: Option<f64>,
@@ -2421,6 +2424,8 @@ pub struct PreviewScreenStatus {
     pub actual_height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iosurface_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub d3d11_texture_available: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_fps: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
