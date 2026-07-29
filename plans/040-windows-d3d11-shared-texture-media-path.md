@@ -10,7 +10,7 @@
 > **Drift check (run first)**:
 >
 > ```powershell
-> git diff --stat 2b675488..HEAD -- crates/videorc-backend/Cargo.toml crates/videorc-backend/src apps/desktop/src/main apps/desktop/src/shared apps/desktop/src/renderer/src scripts docs/adr docs/acceptance docs/windows-dev-loop.md docs/windows-port-plan.md package.json plans
+> git diff --stat 1fc1355b964d5690bf3b5992ddcb08131f0c58b6..HEAD -- crates/videorc-backend/Cargo.toml crates/videorc-backend/src apps/desktop/src/main apps/desktop/src/shared apps/desktop/src/renderer/src scripts docs/adr docs/acceptance docs/windows-dev-loop.md docs/windows-port-plan.md package.json plans
 > ```
 >
 > The command scans containing directories so it also catches new neighboring
@@ -27,17 +27,43 @@
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: HIGH
-- **Depends on**: Plan 039 Steps 1-5 (observability, RTMP harness,
+- **Depends on**: Plan 039 Steps 1-5 at commit
+  `1fc1355b964d5690bf3b5992ddcb08131f0c58b6` (observability, RTMP harness,
   self-capture exclusion, MF topology/fallback, entitlement and provider
   profiles); Plan 039 may remain BLOCKED on 1080p60 performance acceptance
 - **Category**: perf / direction / migration
-- **Planned at**: commit `2b675488`, 2026-07-28
+- **Planned at**: commit `1fc1355b964d5690bf3b5992ddcb08131f0c58b6`,
+  reconciled 2026-07-30
 
-The planned-at SHA is the diagnosis baseline, before Plan 039. Do not dispatch
-implementation while the drift command/status still point to that
-pre-dependency baseline after Plan 039 Steps 1-5 land. The executor must first
-complete Step 0, update the SHA and excerpts to the actual dependency commit,
-and commit that plan-only reconciliation.
+Step 0 reconciled this plan against the exact Plan 039 Steps 1-5 dependency
+commit above. The implementation branch starts from that commit plus this
+plan-only reconciliation; any later unexplained in-scope drift remains a STOP
+condition.
+
+### Post-Plan-039 reconciliation
+
+- Plan 039 landed authoritative stream-target snapshots and topology
+  observability, exact Videorc-window content protection, payload-bound
+  performance gates, provider-aware profiles, and the protected physical
+  Windows runner. It intentionally did not change the CPU/raw/BMP media path,
+  so the architectural diagnosis below remains current.
+- `PreviewSurfaceBounds` is already a non-`Copy` owned protocol type. Its
+  `NativePreviewHostBounds`, host-command, and helper mirrors still derive
+  `Copy`; adding the opaque Windows HWND removes those remaining derives and
+  requires explicit clones at their boundaries.
+- `CompositorFrameExportHandle` is currently a struct with an optional
+  process-local Metal target, not an enum. The D3D implementation must extend
+  that owner with a mutually exclusive process-local D3D export variant/field
+  and path-aware consumer selection; it must not serialize or pretend an enum
+  variant already exists.
+- Preview surface requests currently have no generation-bound trusted HWND.
+  Add a privileged Electron-main-to-backend request carrying the validated
+  HWND plus preview generation. Keep ordinary renderer-visible window state,
+  preview status, and events free of HWNDs and process IDs.
+- Plan 039's acceptance record/history helpers are now part of the final
+  evidence chain. The Step 6 acceptance-note validation work therefore names
+  those existing files explicitly in Scope instead of relying on an
+  unspecified future validator.
 
 ## Why this matters
 
@@ -79,13 +105,16 @@ CPU/raw path.
 ### Composition is CPU-only on Windows
 
 - `crates/videorc-backend/src/compositor.rs:3271-3342` treats
-  `CompositorBackend::Cpu` as the expected non-macOS backend.
+  `CompositorBackend::Cpu` as the expected non-macOS backend. That comment and
+  selection must become fallback-specific once D3D11 is supported.
 - `compositor.rs:3610-3648` converts BGRA screen pixels into a CPU YUV420p
   output via `blit_rgba_to_yuv420p`.
 - The compositor protocol already has platform-neutral concepts for backend,
   pixel format, export handle, source-import counters, and primary/auxiliary
-  outputs. Extend these concepts with Windows-specific variants; do not create
-  a parallel scene graph.
+  outputs. Its export handle is a struct with an optional Metal target, not an
+  enum. Extend that owner with a mutually exclusive, process-local Windows
+  export and make downstream consumer selection explicit/path-aware; do not
+  create a parallel scene graph.
 
 ### The encoded bridge still receives system-memory I420
 
@@ -102,6 +131,9 @@ CPU/raw path.
   input type. If the selected hardware MFT cannot accept that production
   topology, report a capability failure; do not stage through I420 while
   claiming zero-copy.
+- Plan 039 added selected-MFT/topology/fallback diagnostics and provider-aware
+  profiles. Preserve those contracts and add GPU-input attribution to them
+  instead of introducing another encoder-selection surface.
 
 ### Preview is a temporary BMP proof surface
 
@@ -117,6 +149,10 @@ CPU/raw path.
   first-frame contracts are already maintained by Electron/main/backend. The
   new presenter must satisfy those contracts before changing the reported
   transport/backing identifiers.
+- Ordinary renderer-visible window state deliberately omits native HWNDs and
+  process IDs. The D3D presenter receives its generation-bound HWND only over
+  a new privileged Electron-main-to-backend request; public status/events stay
+  sanitized.
 
 ### Windows bindings exist but need graphics features
 
@@ -279,6 +315,11 @@ packaged candidate.
 - `scripts/lib/windows-gpu-sampler.test.mjs`
 - `scripts/lib/windows-performance-budget.mjs`
 - `scripts/lib/windows-performance-budget.test.mjs`
+- `scripts/lib/windows-acceptance-history.mjs`
+- `scripts/lib/windows-acceptance-history.test.mjs`
+- `scripts/lib/windows-acceptance-record.mjs`
+- `scripts/lib/windows-acceptance-record.test.mjs`
+- `scripts/windows-acceptance-record-resolve.mjs`
 - `scripts/lib/native-preview-claim.mjs`
 - `scripts/lib/native-preview-claim.test.mjs`
 - `scripts/lib/native-preview-diagnostics.mjs`
@@ -300,7 +341,7 @@ packaged candidate.
 - `docs/windows-dev-loop.md`
 - `docs/acceptance/windows-app-acceptance-template.md`
 - `docs/acceptance/windows-d3d11-performance-budget.json` (create)
-- `docs/acceptance/2026-07-28-windows-d3d11-media.md` (create)
+- `docs/acceptance/2026-07-30-windows-d3d11-media.md` (create)
 - `plans/040-windows-d3d11-shared-texture-media-path.md`
 - `plans/README.md`
 
@@ -401,9 +442,11 @@ packaged candidate.
 4. Extend the existing compositor/wire types rather than replacing them:
    - `CompositorBackend::D3d11`;
    - D3D11 BGRA/NV12 `CompositorPixelFormat` variants;
-   - a process-local `CompositorFrameExportHandle::D3d11` owner carrying the
-     texture lease, adapter LUID, dimensions, format, sequence, and
-     synchronization token;
+   - extend the current `CompositorFrameExportHandle` struct with a mutually
+     exclusive process-local D3D11 export owner carrying the texture lease,
+     adapter LUID, dimensions, format, sequence, and synchronization token.
+     Downstream consumers select by backend/export kind and reject a
+     mismatched path;
    - `PreviewTransport::D3d11SharedTexture` serialized as
      `d3d11-shared-texture`;
    - `PreviewSurfaceBacking::DirectCompositionSwapChain` serialized as
@@ -423,16 +466,20 @@ packaged candidate.
    reuse macOS's `orderAboveWindowId: u32`. Preserve this field through
    `native-preview-bounds.ts`, `electron-ipc-contract.ts`,
    `native_preview_host.rs`, and the helper's mirrored bounds structure.
-   Because the owned string makes the Rust bounds type non-`Copy`, remove that
-   derive and clone/move explicitly at every existing boundary rather than
-   weakening the handle representation.
-6. Mirror every protocol field in `apps/desktop/src/shared/backend.ts`. Add Rust
-   and TypeScript RPC/normalization/serialization tests proving every enum and
-   field survives its intended trust boundary: `orderAboveWindowId`,
-   `orderAboveWindowHandle`, and `elevated` survive the trusted
-   main-to-backend request, while `orderAboveWindowHandle` is always absent
-   from renderer-facing status/events. This is required for every
-   preview/export-handle change.
+   `PreviewSurfaceBounds` is already non-`Copy`; remove `Copy` from the
+   remaining `NativePreviewHostBounds`, host-command, and helper mirrors and
+   clone/move explicitly at every existing boundary rather than weakening the
+   handle representation.
+6. Mirror every protocol field in `apps/desktop/src/shared/backend.ts`. Define
+   a privileged Electron-main-to-backend presenter request carrying
+   `previewGeneration` and the trusted `orderAboveWindowHandle`; renderer code
+   cannot invoke that shape directly. Add Rust and TypeScript
+   RPC/normalization/serialization tests proving every enum and field survives
+   its intended trust boundary: `orderAboveWindowId`,
+   `orderAboveWindowHandle`, and `elevated` survive the trusted main request,
+   while `orderAboveWindowHandle`, raw texture handles, and process IDs are
+   always absent from renderer-facing status/events. This is required for
+   every preview/export-handle change.
 7. Create `apps/desktop/src/shared/native-preview-capability.ts` as the
    canonical platform-aware UI/main predicate:
    - macOS native means `native-surface` + `cametal-layer`;
@@ -1090,7 +1137,7 @@ packaged candidate.
     the same capability probe, not a vendor string. Retain the named Plan 039
     fallback for at least one release train. Update the ADR and Windows port
     plan plus
-    `docs/acceptance/2026-07-28-windows-d3d11-media.md` with both comparison
+    `docs/acceptance/2026-07-30-windows-d3d11-media.md` with both comparison
     hashes, active D3D budget hash, all three host-manifest hashes, aggregate
     hash, candidate identity, commands, and PASS/BLOCKED state. Raw/BMP removal
     is a later plan.
