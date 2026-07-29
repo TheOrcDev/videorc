@@ -5,6 +5,10 @@
 - **Priority**: P0
 - **Effort**: M
 - **Risk**: MED
+- **Execution status**: IN PROGRESS — PR #160 landed the Windows measurement
+  and budget infrastructure; Plan 039 owns the missing RTMP workload and active
+  release budget, with Plan 040 allowed to derive D3D-specific profiles from
+  the same machinery if the raw/CPU path misses acceptance.
 - **Depends on**: Plan 019 physical Windows acceptance evidence
 - **Category**: perf / tests
 - **Planned at**: commit `54229f8f`, 2026-07-18
@@ -16,10 +20,18 @@ Windows functional smokes prove recording artifacts and proof-surface liveness, 
 
 ## Current state
 
-- `scripts/lib/performance-scenarios.mjs` defines the packaged performance scenarios; native-preview scenarios target the macOS CAMetalLayer contract through `scripts/perf-idle-probe.mjs`.
-- `scripts/lib/windows-local-gates.mjs` runs 6–8 second Windows functional smokes but no calibrated resource budget.
-- `.github/workflows/windows.yml` runs 1080p and 720p short functional coverage only.
-- `config/performance-budgets/v1/` is macOS-specific: its active profile requires the `caffeinate` evidence contract.
+- PR #160 added packaged Windows performance scenarios, per-role process
+  CPU/RSS and memory-slope measurement, proof-surface measurements, a
+  Windows-specific budget schema, three-run calibration support, tests, and
+  developer-loop documentation.
+- `scripts/smoke-windows-native-screen-app.mjs` and
+  `scripts/lib/windows-performance-budget.mjs` now produce the measurement
+  payload required by Plans 035 and 036.
+- The Windows budget remains report-only until a reviewed hardware-class
+  profile is activated. Hosted runners remain functional-only.
+- `scripts/lib/windows-local-gates.mjs` still has no real RTMP hard-motion
+  performance scenario, so a candidate can pass while live cadence feels poor.
+  Plan 039 supplies that workload and activates the release budget.
 
 ## Scope
 
@@ -47,4 +59,10 @@ Stop if the metrics cannot identify Electron main, renderer, GPU, backend, and F
 
 ## Maintenance notes
 
-Every future Windows preview, capture, encoder, or Electron scheduling change must run the matching scenario. Treat CI runners and user hardware as distinct classes; never copy one class's observed maximum directly into another class's limit.
+Every future Windows preview, capture, encoder, or Electron scheduling change
+must run the matching scenario. Treat CI runners and user hardware as distinct
+classes; never copy one class's observed maximum directly into another class's
+limit. Complete the protected RTMP workload and OBS-relative activation through
+Plan 039 rather than creating a competing harness. If Plan 040 is invoked, its
+candidate-bound D3D schema kind and zero-BMP profiles must extend the same
+budget/OBS machinery; they do not reactivate a Plan 039 raw-path budget.
