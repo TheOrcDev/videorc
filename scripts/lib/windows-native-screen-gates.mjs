@@ -25,6 +25,22 @@ export function nativeWindowsScreenCandidates(devices) {
   ]
 }
 
+export function windowsNativeScreenPerformanceBudgetContext({
+  metadata,
+  scenario = 'windows-proof-recording',
+  timing
+} = {}) {
+  return {
+    scenario,
+    hardwareClass: metadata?.hardwareClass ?? null,
+    profileClass: metadata?.profileClass ?? null,
+    buildMode: metadata?.buildMode ?? null,
+    operatingSystem: metadata?.operatingSystem ?? null,
+    timing: timing ?? null,
+    candidatePayloadSha256: metadata?.packagePayload?.sha256 ?? null
+  }
+}
+
 export function nativeWindowsScreenRecordingActive(evidence, sourceId) {
   const { diagnostics, compositor, recording } = evidence ?? {}
   const sourceEntry = diagnostics?.sourceRegistry?.entries?.find(

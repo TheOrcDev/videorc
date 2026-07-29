@@ -140,8 +140,11 @@ Activate a reviewed profile with `VIDEORC_WINDOWS_PERF_BUDGET_PATH` (and, when a
 file contains more than one profile, `VIDEORC_WINDOWS_PERF_BUDGET_PROFILE`). The
 budget binds the scenario, explicit hardware class, Windows architecture, packaged
 build mode, exact timing, three retained calibration reports, CPU/RSS trend
-thresholds for Electron/backend/FFmpeg roles, and BMP polling cadence. Hosted CI
-remains functional-only and is not calibration evidence.
+thresholds for Electron/backend/FFmpeg roles, BMP polling cadence, and the exact
+five-file packaged payload (`Videorc.exe`, `app.asar`, backend, FFmpeg, and
+FFprobe). The runner derives that payload identity from the executable path; a
+free-form environment digest is not budget evidence. Hosted CI remains
+functional-only and is not calibration evidence.
 
 Full Windows merge gate (release build + package + packaged smoke; slow):
 
@@ -151,7 +154,10 @@ pnpm smoke:local-gates:windows
 ```
 
 The gate writes `windows-local-gates.manifest.json` under the selected
-acceptance directory. After the physical live-microphone smoke creates
+acceptance directory. Before each candidate-bound smoke, the parent gate hashes
+the actual packaged payload and passes that verified digest to the child; it
+removes inherited expected-digest values so callers cannot substitute an
+unverified payload identity. After the physical live-microphone smoke creates
 `support-bundle.json`, the final step invokes the strict verifier:
 
 ```powershell

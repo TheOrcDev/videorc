@@ -246,6 +246,51 @@ function inspectWindowsAcceptance(bundle, failures, warnings) {
       'windows acceptance bundle does not include compositor backend/fallback diagnostics; device backend proof is still required.'
     )
   }
+  inspectWindowsStreamDiagnostics(diagnostics, failures)
+}
+
+function inspectWindowsStreamDiagnostics(diagnostics, failures) {
+  const streamSnapshots = diagnostics.filter(
+    (snapshot) =>
+      typeof snapshot?.activeOutputMode === 'string' && snapshot.activeOutputMode.includes('stream')
+  )
+  if (streamSnapshots.length === 0) {
+    return
+  }
+
+  for (const [index, snapshot] of streamSnapshots.entries()) {
+    const label = `windows stream diagnostics ${index + 1}`
+    for (const field of [
+      'streamMeasuredBitrateKbps',
+      'streamMeasuredBitrateMinKbps',
+      'streamMeasuredBitrateMaxKbps'
+    ]) {
+      if (!Number.isFinite(snapshot[field]) || snapshot[field] <= 0) {
+        failures.push(`${label} requires positive ${field}.`)
+      }
+    }
+    for (const field of ['streamOutputTotalBytes', 'streamDuplicatedFrames']) {
+      if (!Number.isInteger(snapshot[field]) || snapshot[field] < 0) {
+        failures.push(`${label} requires non-negative integer ${field}.`)
+      }
+    }
+    for (const field of [
+      'encoderBridgeRequestedVideoOutput',
+      'encoderBridgeEffectiveVideoOutput',
+      'encoderBridgeEncodedOutputBackend'
+    ]) {
+      if (typeof snapshot[field] !== 'string' || !snapshot[field].trim()) {
+        failures.push(`${label} requires ${field}.`)
+      }
+    }
+    if (
+      snapshot.encoderBridgeRequestedVideoOutput !== snapshot.encoderBridgeEffectiveVideoOutput &&
+      (typeof snapshot.encoderBridgeEncodedOutputFallbackReason !== 'string' ||
+        !snapshot.encoderBridgeEncodedOutputFallbackReason.trim())
+    ) {
+      failures.push(`${label} requires a fallback reason for a requested/effective mismatch.`)
+    }
+  }
 }
 
 function inspectValue(value, path, failures, warnings) {

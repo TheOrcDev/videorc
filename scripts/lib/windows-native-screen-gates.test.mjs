@@ -9,7 +9,8 @@ import {
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive,
   requiredBmpPreviewAdvances,
-  selectNativeWindowsScreen
+  selectNativeWindowsScreen,
+  windowsNativeScreenPerformanceBudgetContext
 } from './windows-native-screen-gates.mjs'
 
 test('Windows Graphics Capture gate requires a live retained D3D11 texture', () => {
@@ -57,6 +58,40 @@ test('BMP preview liveness threshold is relaxed only for the hosted software ren
   assert.equal(requiredBmpPreviewAdvances({ detail: 'Microsoft Basic Render Driver' }), 3)
   assert.equal(requiredBmpPreviewAdvances({ detail: 'NVIDIA GeForce GTX 1650 SUPER' }), 5)
   assert.equal(requiredBmpPreviewAdvances({}), 5)
+})
+
+test('native Windows budget context binds the actual packaged payload digest', () => {
+  const timing = { warmupMs: 60_000, measurementMs: 600_000, intervalMs: 1_000 }
+  assert.deepEqual(
+    windowsNativeScreenPerformanceBudgetContext({
+      metadata: {
+        hardwareClass: 'win11-lab-a',
+        profileClass: 'endurance',
+        buildMode: 'packaged',
+        operatingSystem: {
+          platform: 'win32',
+          arch: 'x64',
+          release: '10.0.26100'
+        },
+        packagePayload: { sha256: 'a'.repeat(64) }
+      },
+      scenario: 'windows-proof-recording-1080p60',
+      timing
+    }),
+    {
+      scenario: 'windows-proof-recording-1080p60',
+      hardwareClass: 'win11-lab-a',
+      profileClass: 'endurance',
+      buildMode: 'packaged',
+      operatingSystem: {
+        platform: 'win32',
+        arch: 'x64',
+        release: '10.0.26100'
+      },
+      timing,
+      candidatePayloadSha256: 'a'.repeat(64)
+    }
+  )
 })
 
 test('native ScreenOnly recording proof joins recording, compositor, and source authority', () => {

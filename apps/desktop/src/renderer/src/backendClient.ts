@@ -63,6 +63,7 @@ const METHOD_REQUEST_TIMEOUT_MS: Readonly<Record<string, number>> = {
   'compositor.status': 10_000,
   'diagnostics.stats': 10_000,
   'devices.list': 30_000,
+  'stream.output.topology.probe': 120_000,
   'session.start': 120_000,
   'session.stop': 120_000,
   'session.remux_mp4': 10 * 60_000,

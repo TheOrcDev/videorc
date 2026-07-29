@@ -5,14 +5,19 @@ import { isAbsolute, relative, resolve } from 'node:path'
 
 import {
   assertInstalledWindowsCandidateIdentity,
+  assertWindowsCandidateBindingUnchanged,
+  assertWindowsCandidatePayloadIdentity,
   buildWindowsLocalGateSteps,
   classifyWindowsLocalGateStepExit,
   createWindowsLocalGateManifest,
   evaluateWindowsLocalGateHost,
   formatWindowsLocalGatePlan,
   sanitizeWindowsLocalGateChildEnvironment,
+  windowsCandidateBoundEnvironment,
+  windowsLocalGateStepCandidateExecutable,
   windowsLocalGateOutputDir
 } from './lib/windows-local-gates.mjs'
+import { packagedAppPayloadIdentity } from './lib/performance-contract.mjs'
 import { sha256File } from './lib/windows-alpha-release.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
@@ -29,6 +34,7 @@ const host = evaluateWindowsLocalGateHost({
   requireKnownBuild: requireInstalledCandidate
 })
 let candidateIdentity = null
+let candidateBinding = null
 if (requireInstalledCandidate && !installedCandidateExecutable) {
   host.ok = false
   host.failures.push(
@@ -44,6 +50,11 @@ if (installedCandidateExecutable && !requireInstalledCandidate) {
 if (requireInstalledCandidate && installedCandidateExecutable) {
   try {
     candidateIdentity = await inspectInstalledCandidateIdentity(installedCandidateExecutable)
+    candidateBinding = {
+      executablePath: candidateIdentity.executablePath,
+      executableSha256: candidateIdentity.actualAppSha256,
+      packagePayload: candidateIdentity.packagePayload
+    }
   } catch (error) {
     host.ok = false
     host.failures.push(
@@ -97,6 +108,7 @@ for (const [index, step] of steps.entries()) {
   await writeManifest()
 
   try {
+    await bindCandidateStep(step, manifestStep)
     manifestStep.status = await runStep(step)
     if (manifestStep.status === 'blocked') {
       blockedStep = step
@@ -193,18 +205,72 @@ async function inspectInstalledCandidateIdentity(executablePath) {
     throw new Error('release staging files cannot substitute for an NSIS-installed candidate')
   }
   const facts = readInstalledExecutableFacts(executablePath)
-  return assertInstalledWindowsCandidateIdentity({
+  const [actualAppSha256, packagePayload] = await Promise.all([
+    sha256File(executablePath),
+    packagedAppPayloadIdentity(executablePath, { osPlatform: 'win32' })
+  ])
+  const verifiedIdentity = assertInstalledWindowsCandidateIdentity({
     executablePath,
     releaseId: requiredEnv('VIDEORC_RELEASE_ID'),
     sourceCommit: requiredEnv('VIDEORC_RELEASE_SOURCE_COMMIT'),
     installerSha256: requiredEnv('VIDEORC_RELEASE_EXPECTED_SHA256'),
     expectedAppSha256: requiredEnv('VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256'),
-    actualAppSha256: await sha256File(executablePath),
+    actualAppSha256,
     expectedPublisher: requiredEnv('VIDEORC_WINDOWS_PUBLISHER_NAME'),
     signature: facts.signature,
     productVersion: facts.productVersion,
     registration: facts.registration
   })
+  return {
+    ...verifiedIdentity,
+    executablePath: resolvedExecutable,
+    packagePayload: assertWindowsCandidatePayloadIdentity(packagePayload)
+  }
+}
+
+async function bindCandidateStep(step, manifestStep) {
+  const executablePath = windowsLocalGateStepCandidateExecutable(step)
+  if (!executablePath) return
+
+  const resolvedExecutable = resolve(executablePath)
+  const observedBinding = await inspectPackagedCandidateBinding(resolvedExecutable)
+  if (candidateBinding) {
+    if (candidateBinding.executablePath !== resolvedExecutable) {
+      throw new Error('Windows local gates cannot mix packaged candidate directories.')
+    }
+    assertWindowsCandidateBindingUnchanged(candidateBinding, observedBinding)
+  } else {
+    candidateBinding = observedBinding
+    candidateIdentity = {
+      payloadVerified: true,
+      executablePath: resolvedExecutable,
+      actualAppSha256: candidateBinding.executableSha256,
+      packagePayload: candidateBinding.packagePayload
+    }
+  }
+  const trustedEnvironment = windowsCandidateBoundEnvironment(candidateBinding)
+  step.env = {
+    ...step.env,
+    ...trustedEnvironment
+  }
+  manifestStep.env = {
+    ...manifestStep.env,
+    ...trustedEnvironment
+  }
+  manifest.candidateIdentity = candidateIdentity
+  await writeManifest()
+}
+
+async function inspectPackagedCandidateBinding(executablePath) {
+  const [executableSha256, packagePayload] = await Promise.all([
+    sha256File(executablePath),
+    packagedAppPayloadIdentity(executablePath, { osPlatform: 'win32' })
+  ])
+  return {
+    executablePath: resolve(executablePath),
+    executableSha256,
+    packagePayload: assertWindowsCandidatePayloadIdentity(packagePayload)
+  }
 }
 
 function readInstalledExecutableFacts(executablePath) {

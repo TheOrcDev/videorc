@@ -4,16 +4,24 @@ import { describe, it } from 'node:test'
 
 import {
   assertInstalledWindowsCandidateIdentity,
+  assertWindowsCandidateBindingUnchanged,
+  assertWindowsCandidatePayloadIdentity,
   buildWindowsLocalGateSteps,
   classifyWindowsLocalGateStepExit,
   createWindowsLocalGateManifest,
   evaluateWindowsLocalGateHost,
   formatWindowsLocalGatePlan,
   sanitizeWindowsLocalGateChildEnvironment,
+  windowsCandidateBoundEnvironment,
+  windowsLocalGateStepCandidateExecutable,
   windowsSupportBundleVerifierCommand,
   windowsLocalGateManifestPath,
   windowsLocalGateOutputDir
 } from './windows-local-gates.mjs'
+import {
+  packagedAppPayloadManifestSha256,
+  WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS
+} from './performance-contract.mjs'
 
 // resolve() emits platform separators, so path assertions must not hardcode
 // '/' — these tests run on both macOS and Windows boxes.
@@ -69,10 +77,119 @@ describe('sanitizeWindowsLocalGateChildEnvironment', () => {
         VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID: 'secret',
         VIDEORC_WINDOWS_PILOT_UPDATE_TOKEN: 'secret',
         VIDEORC_WINDOWS_SIGNING_ACCOUNT_NAME: 'secret',
+        VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256: 'untrusted-app-digest',
+        VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256: 'untrusted-payload-digest',
         VIDEORC_RELEASE_ID: '0.9.45-alpha.1',
         PATH: 'safe'
       }),
       { VIDEORC_RELEASE_ID: '0.9.45-alpha.1', PATH: 'safe' }
+    )
+  })
+})
+
+describe('Windows candidate payload binding', () => {
+  const executableSha256 = 'a'.repeat(64)
+  const components = WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS.map((relativePath, index) => {
+    const sha256 = index === 0 ? executableSha256 : String(index + 1).repeat(64)
+    return {
+      relativePath,
+      sha256,
+      identityKind: 'sha256',
+      identity: sha256
+    }
+  })
+  const payloadSpecs = WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS.map((relativePath) => ({
+    relativePath,
+    requiresCodeSignature: false
+  }))
+  const packagePayload = {
+    root: 'C:/Program Files/Videorc',
+    algorithm: 'sha256-packaged-code-manifest-v1',
+    sha256: packagedAppPayloadManifestSha256(components, { payloadSpecs }),
+    components,
+    unsignedComponents: []
+  }
+
+  it('creates child digest inputs only from a complete verified packaged payload', () => {
+    assert.equal(assertWindowsCandidatePayloadIdentity(packagePayload), packagePayload)
+    assert.deepEqual(windowsCandidateBoundEnvironment({ executableSha256, packagePayload }), {
+      VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256: executableSha256,
+      VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256: packagePayload.sha256
+    })
+  })
+
+  it('rejects missing components, mixed executable identity, and uppercase digests', () => {
+    assert.throws(
+      () =>
+        assertWindowsCandidatePayloadIdentity({
+          ...packagePayload,
+          components: packagePayload.components.slice(0, -1)
+        }),
+      /every required file/
+    )
+    assert.throws(
+      () =>
+        windowsCandidateBoundEnvironment({
+          executableSha256: 'b'.repeat(64),
+          packagePayload
+        }),
+      /did not match the executable/
+    )
+    assert.throws(
+      () =>
+        assertWindowsCandidatePayloadIdentity({
+          ...packagePayload,
+          sha256: packagePayload.sha256.toUpperCase()
+        }),
+      /valid lowercase/
+    )
+  })
+
+  it('rejects a candidate payload that changes between parent-gate steps', () => {
+    const expected = { executableSha256, packagePayload }
+    assert.equal(
+      assertWindowsCandidateBindingUnchanged(expected, {
+        executableSha256,
+        packagePayload
+      }),
+      expected
+    )
+
+    const changedComponents = packagePayload.components.map((component, index) => {
+      if (index !== 1) return component
+      const sha256 = 'e'.repeat(64)
+      return { ...component, sha256, identity: sha256 }
+    })
+    const changedPackagePayload = {
+      ...packagePayload,
+      components: changedComponents,
+      sha256: packagedAppPayloadManifestSha256(changedComponents, { payloadSpecs })
+    }
+    assert.throws(
+      () =>
+        assertWindowsCandidateBindingUnchanged(expected, {
+          executableSha256,
+          packagePayload: changedPackagePayload
+        }),
+      /payload changed/
+    )
+  })
+
+  it('locates only candidate-bound local-gate steps', () => {
+    const steps = buildWindowsLocalGateSteps({ repoRoot: 'C:/repo' })
+    assert.match(
+      posixPath(
+        windowsLocalGateStepCandidateExecutable(
+          steps.find((step) => step.label === 'protected physical Windows RTMP performance matrix')
+        )
+      ),
+      /win-unpacked\/Videorc\.exe$/
+    )
+    assert.equal(
+      windowsLocalGateStepCandidateExecutable(
+        steps.find((step) => step.label === 'strict Windows support-bundle verification')
+      ),
+      null
     )
   })
 })
@@ -174,6 +291,7 @@ describe('buildWindowsLocalGateSteps', () => {
       'native Windows ScreenOnly and BMP smoke',
       'native Windows Media Foundation encoded-bridge matrix',
       'recording-time Windows proof-surface smoke',
+      'protected physical Windows RTMP performance matrix',
       'physical Windows live microphone controls smoke',
       'strict Windows support-bundle verification'
     ])
@@ -189,9 +307,36 @@ describe('buildWindowsLocalGateSteps', () => {
       posixPath(packaged.env.VIDEORC_SMOKE_OUTPUT_DIR),
       /C:\/repo\/docs\/acceptance\/artifacts\/windows\/\d{4}-\d{2}-\d{2}$/
     )
-    assert.deepEqual(steps.at(-5).args, ['smoke:windows-native-screen'])
-    assert.deepEqual(steps.at(-4).args, ['smoke:windows-encoded-bridge'])
-    assert.deepEqual(steps.at(-3).args, ['smoke:recording-native-preview'])
+    assert.deepEqual(
+      steps.find((step) => step.label === 'native Windows ScreenOnly and BMP smoke').args,
+      ['smoke:windows-native-screen']
+    )
+    assert.deepEqual(
+      steps.find((step) => step.label === 'native Windows Media Foundation encoded-bridge matrix')
+        .args,
+      ['smoke:windows-encoded-bridge', '--', '--profiles', '1080p30,1080p60']
+    )
+    assert.deepEqual(
+      steps.find((step) => step.label === 'recording-time Windows proof-surface smoke').args,
+      ['smoke:recording-native-preview']
+    )
+    const streamPerformance = steps.find(
+      (step) => step.label === 'protected physical Windows RTMP performance matrix'
+    )
+    assert.deepEqual(streamPerformance.args, [
+      'smoke:windows-stream-performance',
+      '--',
+      '--gate',
+      '--bridge',
+      'mf',
+      '--require-bridge'
+    ])
+    assert.equal(streamPerformance.blockedExitCode, 2)
+    assert.match(
+      posixPath(streamPerformance.blockedReportPath),
+      /stream-performance\/aggregate\.json$/
+    )
+    assert.match(posixPath(streamPerformance.env.VIDEORC_SMOKE_OUTPUT_DIR), /stream-performance$/)
     assert.deepEqual(steps.at(-2).args, ['smoke:windows-live-audio-controls'])
     assert.equal(steps.at(-2).blockedExitCode, 2)
     assert.match(
@@ -282,6 +427,7 @@ describe('buildWindowsLocalGateSteps', () => {
     assert.match(report, /package:preflight:windows/)
     assert.match(report, /smoke:packaged:bundled/)
     assert.match(report, /smoke:windows-native-screen/)
+    assert.match(report, /smoke:windows-stream-performance/)
     assert.match(report, /smoke:recording-native-preview/)
     assert.match(report, /smoke:windows-live-audio-controls/)
     assert.match(report, /strict Windows support-bundle verification/)

@@ -199,6 +199,11 @@ import {
 } from './avatar-cache'
 import { DARK_WINDOW_PALETTE, windowPalette } from './window-palette'
 import {
+  applyVideorcWindowCaptureProtection,
+  type VideorcWindowRole,
+  WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS
+} from './window-capture-protection'
+import {
   assessProofPresentationWatch,
   assessProofSourceFrame,
   assessFirstFrame,
@@ -568,6 +573,77 @@ const isMac = process.platform === 'darwin'
 const isWindows = process.platform === 'win32'
 
 installWebContentsSecurity(app)
+
+function installCaptureProtectionSmokeMarker(window: BrowserWindow, role: VideorcWindowRole): void {
+  if (!isWindows || !notesWindowSmokeMarkerEnabled) {
+    return
+  }
+  captureProtectionMarkerStates.set(window, false)
+  const color = WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS[role]
+  window.webContents.on('did-finish-load', () => {
+    if (window.isDestroyed() || window.webContents.isDestroyed()) {
+      return
+    }
+    captureProtectionMarkerStates.set(window, false)
+    const markerId = `videorc-capture-protection-marker-${role}`
+    void window.webContents
+      .executeJavaScript(
+        `(() => {
+          const markerId = ${JSON.stringify(markerId)};
+          const role = ${JSON.stringify(role)};
+          const color = ${JSON.stringify(color)};
+          let marker = document.getElementById(markerId);
+          if (!marker) {
+            marker = document.createElement('div');
+            marker.id = markerId;
+            document.documentElement.appendChild(marker);
+          }
+          marker.dataset.videorcCaptureProtectionRole = role;
+          marker.style.cssText =
+            'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;background:' +
+            color;
+          return { role, color, installed: true };
+        })()`,
+        true
+      )
+      .then((result) => {
+        captureProtectionMarkerStates.set(
+          window,
+          result?.installed === true && result?.role === role && result?.color === color
+        )
+      })
+      .catch((error) => {
+        captureProtectionMarkerStates.set(window, false)
+        safeConsole.warn(`Capture-protection marker could not be installed for ${role}:`, error)
+      })
+  })
+}
+
+const captureProtectionMarkerStates = new WeakMap<BrowserWindow, boolean>()
+
+function captureProtectionMarkerInstalled(window: BrowserWindow | null): boolean {
+  return Boolean(window && !window.isDestroyed() && captureProtectionMarkerStates.get(window))
+}
+
+function smokeNativeWindowIdentity(window: BrowserWindow | null): {
+  nativeWindowHandle: string | null
+  processId: number | null
+} {
+  if (process.platform !== 'win32' || !window || window.isDestroyed()) {
+    return { nativeWindowHandle: null, processId: null }
+  }
+  try {
+    const handle = window.getNativeWindowHandle()
+    const value = handle.length >= 8 ? handle.readBigUInt64LE(0) : BigInt(handle.readUInt32LE(0))
+    return {
+      nativeWindowHandle: `0x${value.toString(16).padStart(16, '0')}`,
+      processId: process.pid
+    }
+  } catch {
+    return { nativeWindowHandle: null, processId: null }
+  }
+}
+
 const glassVibrancyEnabled = process.env.VIDEORC_GLASS_VIBRANCY !== '0'
 const glassVibrancyRaw = process.env.VIDEORC_GLASS_VIBRANCY
 const glassVibrancyMaterial: GlassVibrancyMaterial =
@@ -1442,6 +1518,11 @@ function createWindow(): void {
       backgroundThrottling: backgroundThrottlingFor('main', electronBackgroundPolicy)
     }
   })
+  applyVideorcWindowCaptureProtection(mainWindow, 'main', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Main window content protection could not be enabled: ${reason}`)
+  })
+  installCaptureProtectionSmokeMarker(mainWindow, 'main')
   registerRendererWindow(mainWindow, 'main')
 
   let mainWindowShown = false
@@ -1878,6 +1959,7 @@ function notesWindowState(message?: string): NotesWindowState {
     windowId: notesWindowGlobalId(),
     alwaysOnTop: notesWindowAlwaysOnTop,
     protected: notesWindowContentProtected,
+    captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     enabled: notesWindowFeatureEnabled,
     message:
       message ??
@@ -2216,13 +2298,11 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   notesWindow = window
   attachAuxWindowShortcuts(window)
   notesWindowAlwaysOnTop = notesWindowAlwaysOnTopPreference(prefs)
-  notesWindowContentProtected = false
-  try {
-    window.setContentProtection(true)
-    notesWindowContentProtected = true
-  } catch (error) {
-    safeConsole.warn('Notes window content protection could not be enabled:', error)
-  }
+  notesWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'notes', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Notes window content protection could not be enabled: ${reason}`)
+  }).protected
+  installCaptureProtectionSmokeMarker(window, 'notes')
   if (notesWindowAlwaysOnTop) {
     applyNotesWindowAlwaysOnTop(window, true)
   }
@@ -2399,6 +2479,7 @@ function commentsWindowState(message?: string): CommentsWindowState {
     windowId: commentsWindowGlobalId(),
     alwaysOnTop: commentsWindowAlwaysOnTop,
     protected: open ? commentsWindowContentProtected : false,
+    captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     enabled: commentsWindowFeatureEnabled,
     message:
       message ??
@@ -2759,13 +2840,11 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
   commentsWindowClosing = false
   commentsWindow = window
   attachAuxWindowShortcuts(window)
-  commentsWindowContentProtected = false
-  try {
-    window.setContentProtection(true)
-    commentsWindowContentProtected = true
-  } catch (error) {
-    safeConsole.warn('Comments window content protection could not be enabled:', error)
-  }
+  commentsWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'comments', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Comments window content protection could not be enabled: ${reason}`)
+  }).protected
+  installCaptureProtectionSmokeMarker(window, 'comments')
   commentsWindowAlwaysOnTop = commentsWindowAlwaysOnTopPreference(prefs)
   if (commentsWindowAlwaysOnTop) {
     applyNotesWindowAlwaysOnTop(window, true)
@@ -2911,6 +2990,7 @@ function captionsWindowState(message?: string): CaptionsWindowState {
     bounds: open ? window!.getBounds() : null,
     windowId: captionsWindowGlobalId(),
     alwaysOnTop: captionsWindowAlwaysOnTop,
+    captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     enabled: captionsWindowFeatureEnabled,
     message:
       message ??
@@ -2976,6 +3056,11 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
       backgroundThrottling: backgroundThrottlingFor('captions', electronBackgroundPolicy)
     }
   })
+  applyVideorcWindowCaptureProtection(window, 'captions', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Captions window content protection could not be enabled: ${reason}`)
+  })
+  installCaptureProtectionSmokeMarker(window, 'captions')
   registerRendererWindow(window, 'captions')
   captionsWindowClosing = false
   captionsWindow = window
@@ -3089,7 +3174,9 @@ function previewSurfacePresentationAllowed(generation = previewWindowSurfaceGene
 type PreviewWindowState = {
   open: boolean
   visible: boolean
+  bounds: Electron.Rectangle | null
   contentBounds: Electron.Rectangle | null
+  captureProtectionMarkerInstalled: boolean
   scaleFactor: number
   // Primary display height: the native helper needs it to flip top-left screen
   // coordinates into AppKit's bottom-left-origin global space.
@@ -3114,7 +3201,9 @@ function previewWindowState(): PreviewWindowState {
   return {
     open,
     visible: open ? window!.isVisible() && !window!.isMinimized() : false,
+    bounds: open ? window!.getBounds() : null,
     contentBounds,
+    captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     scaleFactor: contentBounds ? screen.getDisplayMatching(contentBounds).scaleFactor : 1,
     screenHeight: screen.getPrimaryDisplay().bounds.height,
     alwaysOnTop: previewWindowAlwaysOnTop,
@@ -3405,6 +3494,11 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
       backgroundThrottling: backgroundThrottlingFor('preview', electronBackgroundPolicy)
     }
   })
+  applyVideorcWindowCaptureProtection(window, 'preview', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Preview window content protection could not be enabled: ${reason}`)
+  })
+  installCaptureProtectionSmokeMarker(window, 'preview')
   previewWindowClosing = false
   previewWindow = window
   previewWindowFloatingFrame = frame
@@ -4867,6 +4961,11 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
         backgroundThrottling: backgroundThrottlingFor('proof-surface', electronBackgroundPolicy)
       }
     })
+    applyVideorcWindowCaptureProtection(surfaceWindow, 'proof-surface', {
+      onFailure: (reason) =>
+        safeConsole.warn(`Proof-surface content protection could not be enabled: ${reason}`)
+    })
+    installCaptureProtectionSmokeMarker(surfaceWindow, 'proof-surface')
     nativePreviewSurfaceWindow = surfaceWindow
     surfaceWindow.setIgnoreMouseEvents(true)
     // Geometry changes re-derive the DPR-aware frame width cap; moving across
@@ -8628,6 +8727,11 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
+    previewWindow.show()
+    previewWindow.moveTop()
+    if (nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed()) {
+      nativePreviewSurfaceWindow.moveTop()
+    }
     // macOS does not reliably emit 'move' for programmatic position-only
     // setBounds, so push placement and state explicitly.
     pushPreviewWindowPlacement()
@@ -8660,6 +8764,8 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
+    mainWindow.show()
+    mainWindow.moveTop()
     // Position-only programmatic setBounds does not reliably emit 'move' on
     // macOS; kick the docked follower directly like preview-window-set-bounds.
     if (currentPreviewWindowMode() === 'docked') {
@@ -8731,13 +8837,29 @@ async function runSmokePreviewMotionCommand(
   }
 
   if (command === 'main-window-state') {
+    const displays = screen.getAllDisplays().map((display) => ({
+      id: String(display.id),
+      bounds: display.bounds,
+      scaleFactor: display.scaleFactor
+    }))
     if (!mainWindow || mainWindow.isDestroyed()) {
-      return { open: false, bounds: null, contentBounds: null }
+      return {
+        open: false,
+        visible: false,
+        bounds: null,
+        contentBounds: null,
+        captureProtectionMarkerInstalled: false,
+        displays
+      }
     }
     return {
       open: true,
+      visible: mainWindow.isVisible() && !mainWindow.isMinimized(),
       bounds: mainWindow.getBounds(),
-      contentBounds: mainWindow.getContentBounds()
+      ...smokeNativeWindowIdentity(mainWindow),
+      contentBounds: mainWindow.getContentBounds(),
+      captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(mainWindow),
+      displays
     }
   }
 
@@ -8746,10 +8868,13 @@ async function runSmokePreviewMotionCommand(
     const mutationQueue = nativePreviewSurfaceMutationQueue.metrics()
     return {
       ...previewWindowState(),
+      ...smokeNativeWindowIdentity(previewWindow),
       surface: {
         exists: Boolean(surface && !surface.isDestroyed()),
         visible: Boolean(surface && !surface.isDestroyed() && surface.isVisible()),
-        bounds: surface && !surface.isDestroyed() ? surface.getBounds() : null
+        bounds: surface && !surface.isDestroyed() ? surface.getBounds() : null,
+        ...smokeNativeWindowIdentity(surface),
+        captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(surface)
       },
       nativeOwnsPlacement: nativeSurfaceOwnsPlacement(),
       framePollingSuppressedFlag: nativePreviewSurfaceFramePollingSuppressed,
@@ -8791,12 +8916,16 @@ async function runSmokePreviewMotionCommand(
       height: typeof params.height === 'number' ? params.height : current.height
     })
     window.show()
+    window.moveTop()
     emitNotesWindowState()
     return notesWindowState()
   }
 
   if (command === 'notes-window-state') {
-    return notesWindowState()
+    return {
+      ...notesWindowState(),
+      ...smokeNativeWindowIdentity(notesWindow)
+    }
   }
 
   if (command === 'comments-window-open') {
@@ -8823,11 +8952,16 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
+    window.show()
+    window.moveTop()
     return captionsWindowState()
   }
 
   if (command === 'captions-window-state') {
-    return captionsWindowState()
+    return {
+      ...captionsWindowState(),
+      ...smokeNativeWindowIdentity(captionsWindow)
+    }
   }
 
   if (command === 'comments-window-close') {
@@ -8851,12 +8985,16 @@ async function runSmokePreviewMotionCommand(
       height: typeof params.height === 'number' ? params.height : current.height
     })
     window.show()
+    window.moveTop()
     emitCommentsWindowState()
     return commentsWindowState()
   }
 
   if (command === 'comments-window-state') {
-    return commentsWindowState()
+    return {
+      ...commentsWindowState(),
+      ...smokeNativeWindowIdentity(commentsWindow)
+    }
   }
 
   if (command === 'comments-window-push-snapshot') {

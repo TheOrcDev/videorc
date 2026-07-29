@@ -32,6 +32,10 @@ import type {
   SessionLogsPage,
   SessionStorageTotals,
   StartSessionParams,
+  StreamOutputTopologyProbeParams,
+  StreamOutputTopologyProbeResult,
+  StreamTargetsSnapshot,
+  VideoSettings,
   VideorcAccountSnapshot
 } from './backend'
 import { LAYOUT_PRESET_VALUES } from './backend'
@@ -45,6 +49,7 @@ import {
   numberSchema,
   objectSchema,
   optionalSchema,
+  RuntimeSchemaError,
   runtimeSchema,
   stringSchema,
   undefinedSchema,
@@ -82,6 +87,11 @@ export interface BackendRpcMethodMap {
   'platformAccounts.oauth.complete': BackendRpcDefinition<OAuthCompleteParams, OAuthCallbackResult>
   'devices.list': BackendRpcDefinition<{ ffmpegPath?: string } | undefined, DeviceList>
   'recording.status': BackendRpcDefinition<undefined, RecordingStatus>
+  'stream.output.topology.probe': BackendRpcDefinition<
+    StreamOutputTopologyProbeParams,
+    StreamOutputTopologyProbeResult
+  >
+  'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'session.stop': BackendRpcDefinition<undefined, RecordingStatus>
   'scene.get': BackendRpcDefinition<undefined, Scene>
@@ -134,6 +144,7 @@ export interface BackendEventMap {
   'noiseCleanup.status': NoiseCleanupJob
   'platformAccounts.oauth.callback': OAuthCallbackResult
   'recording.status': RecordingStatus
+  'stream.targets': StreamTargetsSnapshot
   'scene.changed': Scene
   'compositor.status': CompositorStatus
   'preview.live.status': PreviewLiveStatus
@@ -303,6 +314,219 @@ const recordingStatusSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<RecordingStatus>
+
+const videoSettingsSchema = objectSchema(
+  {
+    preset: enumSchema([
+      'tutorial-1080p30',
+      'tutorial-1440p30',
+      'record-4k30',
+      'record-4k60-experimental',
+      'stream-safe-1080p30',
+      'stream-safe-1080p60',
+      'stream-youtube-1080p30',
+      'stream-youtube-1080p60',
+      'stream-youtube-4k30',
+      'stream-1080p60',
+      'vertical-1080x1920',
+      'custom'
+    ]),
+    width: numberSchema({ integer: true, min: 1, max: 65_536 }),
+    height: numberSchema({ integer: true, min: 1, max: 65_536 }),
+    fps: numberSchema({ integer: true, min: 1, max: 1000 }),
+    bitrateKbps: numberSchema({ integer: true, min: 1, max: 1_000_000 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<VideoSettings>
+
+const streamOutputTopologyRoleSchema = enumSchema(['shared', 'recording', 'stream'])
+const streamOutputBridgeSchema = enumSchema([
+  'raw-yuv420p',
+  'videotoolbox-h264-annex-b',
+  'videotoolbox-h264-mpegts',
+  'windows-media-foundation-h264-mpegts'
+])
+const encodeBackendSchema = enumSchema([
+  'software-x264',
+  'hardware-videotoolbox',
+  'hardware-media-foundation',
+  'software-media-foundation',
+  'software-open-h264'
+])
+const streamOutputTopologyProbeStateSchema = enumSchema([
+  'not-required',
+  'passed',
+  'rejected',
+  'unsupported'
+])
+
+const streamOutputTopologyProbeParamsFields = objectSchema(
+  {
+    ffmpegPath: optionalSchema(boundedPath),
+    streamProfile: videoSettingsSchema,
+    recordingProfile: optionalSchema(videoSettingsSchema),
+    outputRoles: arraySchema(streamOutputTopologyRoleSchema, { maxLength: 2 })
+  },
+  { allowUnknown: false }
+)
+
+const streamOutputTopologyProbeParamsSchema = runtimeSchema<StreamOutputTopologyProbeParams>(
+  'a secret-free stream output topology probe',
+  (value, path) => {
+    const parsed = streamOutputTopologyProbeParamsFields.parse(
+      value,
+      path
+    ) as StreamOutputTopologyProbeParams
+    validateStreamOutputTopologyRoles(parsed, path, false)
+    return parsed
+  }
+)
+
+const streamOutputTopologyProbeResultFields = objectSchema(
+  {
+    capabilityKey: stringSchema({ minLength: 1, maxLength: 256 }),
+    streamProfile: videoSettingsSchema,
+    recordingProfile: optionalSchema(videoSettingsSchema),
+    outputRoles: arraySchema(streamOutputTopologyRoleSchema, { maxLength: 2 }),
+    requestedBridgeOutput: streamOutputBridgeSchema,
+    effectiveBridgeOutput: streamOutputBridgeSchema,
+    effectiveEncodeBackend: encodeBackendSchema,
+    probeState: streamOutputTopologyProbeStateSchema,
+    fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 480 }))
+  },
+  { allowUnknown: false }
+)
+
+const streamOutputTopologyProbeResultSchema = boundedSemanticValue(
+  'a completed stream output topology probe',
+  runtimeSchema<StreamOutputTopologyProbeResult>(
+    'a completed stream output topology probe',
+    (value, path) => {
+      const parsed = streamOutputTopologyProbeResultFields.parse(
+        value,
+        path
+      ) as StreamOutputTopologyProbeResult
+      validateStreamOutputTopologyRoles(parsed, path, true)
+      if (!/^stream-output-topology-v1:[0-9a-f]{64}$/.test(parsed.capabilityKey)) {
+        throw new RuntimeSchemaError(`${path}.capabilityKey`, 'a versioned SHA-256 capability key')
+      }
+      const fallbackVerdict =
+        parsed.probeState === 'rejected' || parsed.probeState === 'unsupported'
+      if (fallbackVerdict && !parsed.fallbackReason) {
+        throw new RuntimeSchemaError(
+          `${path}.fallbackReason`,
+          'a non-empty reason for a rejected or unsupported topology'
+        )
+      }
+      if (!fallbackVerdict && parsed.fallbackReason !== undefined) {
+        throw new RuntimeSchemaError(
+          `${path}.fallbackReason`,
+          'absent for a passed or not-required topology'
+        )
+      }
+      if (parsed.requestedBridgeOutput !== parsed.effectiveBridgeOutput && !parsed.fallbackReason) {
+        throw new RuntimeSchemaError(
+          `${path}.fallbackReason`,
+          'a non-empty reason when the effective bridge differs'
+        )
+      }
+      return parsed
+    }
+  )
+) as RuntimeSchema<StreamOutputTopologyProbeResult>
+
+const streamTargetRuntimeSchema = objectSchema(
+  {
+    targetId: boundedString,
+    platform: enumSchema(['youtube', 'twitch', 'x', 'custom']),
+    label: boundedString,
+    state: enumSchema([
+      'not-configured',
+      'ready',
+      'connecting',
+      'live',
+      'warning',
+      'failed',
+      'stopped'
+    ]),
+    message: optionalText,
+    redactedUrl: optionalText
+  },
+  { allowUnknown: false }
+)
+
+const streamTargetsSnapshotSchema = boundedSemanticValue(
+  'a secret-free authoritative stream-target snapshot',
+  runtimeSchema<StreamTargetsSnapshot>(
+    'a secret-free authoritative stream-target snapshot',
+    (value, path) => {
+      const parsed = objectSchema(
+        {
+          sessionId: boundedString,
+          targets: arraySchema(streamTargetRuntimeSchema, { maxLength: 16 })
+        },
+        { allowUnknown: false }
+      ).parse(value, path) as StreamTargetsSnapshot
+      const targetIds = parsed.targets.map((target) => target.targetId)
+      if (new Set(targetIds).size !== targetIds.length) {
+        throw new RuntimeSchemaError(`${path}.targets`, 'unique targetId values')
+      }
+      return parsed
+    }
+  )
+) as RuntimeSchema<StreamTargetsSnapshot>
+
+function validateStreamOutputTopologyRoles(
+  value: Pick<
+    StreamOutputTopologyProbeParams,
+    'streamProfile' | 'recordingProfile' | 'outputRoles'
+  >,
+  path: string,
+  requireCanonicalSplitOrder: boolean
+): void {
+  const roles = value.outputRoles
+  if (roles.length === 1 && roles[0] === 'shared') {
+    if (
+      value.recordingProfile &&
+      !sameVideoOutputProfile(value.recordingProfile, value.streamProfile)
+    ) {
+      throw new RuntimeSchemaError(
+        `${path}.recordingProfile`,
+        'the same effective profile as streamProfile for a shared topology'
+      )
+    }
+    return
+  }
+
+  const splitRoles =
+    roles.length === 2 &&
+    roles.includes('recording') &&
+    roles.includes('stream') &&
+    new Set(roles).size === 2
+  if (
+    !splitRoles ||
+    (requireCanonicalSplitOrder && (roles[0] !== 'recording' || roles[1] !== 'stream'))
+  ) {
+    throw new RuntimeSchemaError(
+      `${path}.outputRoles`,
+      requireCanonicalSplitOrder
+        ? '["shared"] or the canonical ["recording", "stream"] pair'
+        : '["shared"] or one recording/stream pair'
+    )
+  }
+  if (!value.recordingProfile) {
+    throw new RuntimeSchemaError(`${path}.recordingProfile`, 'present for a split output topology')
+  }
+}
+
+function sameVideoOutputProfile(left: VideoSettings, right: VideoSettings): boolean {
+  return (
+    left.width === right.width &&
+    left.height === right.height &&
+    left.fps === right.fps &&
+    left.bitrateKbps === right.bitrateKbps
+  )
+}
 
 const sourceSelectionSchema = objectSchema(
   {
@@ -856,6 +1080,14 @@ const runtimeContracts = {
   },
   'devices.list': { params: undefinedOrFfmpegPathSchema, result: deviceListSchema },
   'recording.status': { params: undefinedSchema, result: recordingStatusSchema },
+  'stream.output.topology.probe': {
+    params: streamOutputTopologyProbeParamsSchema,
+    result: streamOutputTopologyProbeResultSchema
+  },
+  'stream.targets.snapshot': {
+    params: undefinedSchema,
+    result: streamTargetsSnapshotSchema
+  },
   'session.start': { params: sessionStartParamsSchema, result: recordingStatusSchema },
   'session.stop': { params: undefinedSchema, result: recordingStatusSchema },
   'scene.get': { params: undefinedSchema, result: sceneSchema },
@@ -1019,6 +1251,7 @@ const runtimeEventSchemas = {
   'noiseCleanup.status': noiseCleanupJobSchema,
   'platformAccounts.oauth.callback': oauthCallbackResultSchema,
   'recording.status': recordingStatusSchema,
+  'stream.targets': streamTargetsSnapshotSchema,
   'scene.changed': sceneSchema,
   'compositor.status': compositorStatusSchema,
   'preview.live.status': previewLiveStatusSchema,

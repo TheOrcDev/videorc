@@ -447,6 +447,50 @@ export function DiagnosticsTab(): ReactElement {
               value={formatEncodeBackend(diagnosticStats.encodeBackend)}
             />
             <DiagnosticMetric
+              label="Requested output"
+              value={diagnosticStats.encoderBridgeRequestedVideoOutput ?? '--'}
+            />
+            <DiagnosticMetric
+              label="Effective output"
+              value={diagnosticStats.encoderBridgeEffectiveVideoOutput ?? '--'}
+            />
+            <DiagnosticMetric
+              label="Output fallback"
+              value={diagnosticStats.encoderBridgeEncodedOutputFallbackReason ?? 'None'}
+            />
+            <DiagnosticMetric
+              label="Stream bitrate"
+              value={formatKbps(diagnosticStats.streamMeasuredBitrateKbps)}
+            />
+            <DiagnosticMetric
+              label="Stream bitrate range"
+              value={`${formatKbps(
+                diagnosticStats.streamMeasuredBitrateMinKbps
+              )} / ${formatKbps(diagnosticStats.streamMeasuredBitrateMaxKbps)}`}
+            />
+            <DiagnosticMetric
+              label="Stream bytes"
+              value={formatBytes(diagnosticStats.streamOutputTotalBytes)}
+            />
+            <DiagnosticMetric
+              label="Stream duplicated"
+              value={formatOptionalCounter(diagnosticStats.streamDuplicatedFrames)}
+            />
+            <DiagnosticMetric
+              label="Stream dropped"
+              value={formatOptionalCounter(
+                streamHealth?.droppedFrames ?? diagnosticStats.droppedFrames
+              )}
+            />
+            <DiagnosticMetric
+              label="Stream coalesced"
+              value={formatOptionalCounter(
+                diagnosticStats.encoderBridgeSeparateOutputEncodersActive
+                  ? diagnosticStats.encoderBridgeStreamQueueDroppedFrames
+                  : diagnosticStats.encoderBridgeOutputQueueDroppedFrames
+              )}
+            />
+            <DiagnosticMetric
               label="Recording repeats"
               value={diagnosticStats.encoderBridgeRepeatedFrames.toString()}
             />
@@ -678,7 +722,7 @@ function DiagnosticMetric({ label, value }: { label: string; value: string }): R
   return (
     <div className="rounded-row border bg-muted/40 px-3 py-2">
       <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="text-base font-semibold tabular-nums">{value}</div>
+      <div className="break-words text-base font-semibold tabular-nums">{value}</div>
     </div>
   )
 }
@@ -1149,6 +1193,18 @@ function formatFfmpegWork(stats: DiagnosticStats): string {
 
 function formatMs(value?: number): string {
   return typeof value === 'number' ? `${value.toFixed(0)} ms` : '-- ms'
+}
+
+function formatKbps(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${Math.round(value).toLocaleString()} kbps`
+    : '-- kbps'
+}
+
+function formatOptionalCounter(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.round(value)).toLocaleString()
+    : '--'
 }
 
 function formatFrameLag(value?: number): string {

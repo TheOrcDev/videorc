@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
@@ -79,7 +80,9 @@ use crate::protocol::{
     PreviewSnapshot, PreviewSnapshotParams, PreviewSurfaceBacking, PreviewTransport,
     RecordingPipelineStage, RecordingState, RecordingStatus, RemuxSessionParams, RtmpPreset,
     RtmpSettings, Scene, SceneConfigParams, SceneSourceKind, SideBySideCameraSide,
-    StartSessionParams, StreamHealth, StreamScreen, VideoPreset, VideoSettings,
+    StartSessionParams, StreamHealth, StreamOutputBridge, StreamOutputTopologyProbeParams,
+    StreamOutputTopologyProbeResult, StreamOutputTopologyProbeState, StreamOutputTopologyRole,
+    StreamScreen, VideoPreset, VideoSettings,
 };
 use crate::repair::{
     GateStatus, MAINTENANCE_CANCELLED, QualityExpectations, QualityThresholds, QualityVerdict,
@@ -765,6 +768,7 @@ impl FfmpegLiveAudioSessionHandle {
 }
 
 type SharedFfmpegLiveAudioSession = Arc<FfmpegLiveAudioSessionHandle>;
+type SharedStreamTargetsSnapshot = Arc<StdMutex<StreamTargetsSnapshot>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FfmpegLiveAudioStopMode {
@@ -796,6 +800,11 @@ pub struct ActiveRecording {
     pub screen_overlay: Option<ScreenOverlaySession>,
     pub encoder_bridge: Option<EncoderBridgeRecordingSession>,
     pub encoder_bridge_stream: Option<EncoderBridgeRecordingSession>,
+    /// Authoritative, generation-scoped runtime state for this session's
+    /// destinations. The stderr monitor updates this exact snapshot before
+    /// publishing `stream.targets`, and polling RPCs clone it from the active
+    /// recording rather than reconstructing state from events.
+    stream_targets_snapshot: SharedStreamTargetsSnapshot,
     /// Frozen at session start from the Recording/Both caption selection.
     /// Finalization may render a non-destructive `(captioned)` copy only when
     /// this is true; the source recording itself always stays clean.
@@ -937,6 +946,24 @@ impl ActiveRecording {
             .as_ref()
             .and_then(EncoderBridgeRecordingSession::terminal_failure)
     }
+
+    fn stream_targets_snapshot(&self) -> StreamTargetsSnapshot {
+        self.stream_targets_snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+/// Returns the current session's authoritative per-destination runtime state.
+/// A missing active session is an error so polling acceptance harnesses cannot
+/// accidentally treat an empty/stale event cache as healthy evidence.
+pub async fn current_stream_targets_snapshot(state: &AppState) -> Result<StreamTargetsSnapshot> {
+    let recording = state.recording.lock().await;
+    let active = recording
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No active capture session has stream target state"))?;
+    Ok(active.stream_targets_snapshot())
 }
 
 /// Capture-relative media time used to seed a caption session that starts
@@ -1241,6 +1268,7 @@ pub async fn start_session(
     }
 
     hydrate_stream_key_secret_refs(&state, &mut params)?;
+    normalize_stream_only_output_video(&mut params)?;
     validate_session_entitlements(&params, &entitlements::current_entitlements())?;
 
     let capture_permit = state.ffmpeg_work.begin_capture_when_available().await;
@@ -1276,13 +1304,14 @@ pub async fn start_session(
             .filter(|streaming| streaming.enabled)
         {
             Some(streaming) => {
-                let resolution = resolve_stream_targets(streaming);
+                let mut resolution = resolve_stream_targets(streaming);
                 // validate_outputs() already guaranteed a ready target; re-check
                 // defensively so an empty set surfaces the actionable error rather
                 // than silently starting with no stream legs.
                 if resolution.ready.is_empty() {
                     stream_targets_from_streaming(streaming)?;
                 }
+                apply_provider_output_plan_to_ready_targets(&params, &mut resolution.ready)?;
                 resolution
             }
             None => StreamTargetResolution {
@@ -1467,7 +1496,7 @@ pub async fn start_session(
     if !use_encoder_bridge {
         state.emit_log(
             "warn",
-            "Session is using the legacy FFmpeg capture path (encoder bridge disabled by env, streaming above 30fps, or 4K60).",
+            "Session is using the legacy FFmpeg capture path (encoder bridge disabled by env, the profile is outside the proven 60fps bridge envelope, or 4K60 was selected).",
         );
     }
     // Shared session epoch (plan slice A2): the encoder bridge sets this at its first
@@ -1491,13 +1520,26 @@ pub async fn start_session(
     } else {
         EncoderBridgeVideoOutput::RawYuv420p
     };
+    let encoder_output_topology = encoder_output_topology_plan_from_session(&params)?;
     let windows_encoded_bridge_decision = resolve_windows_encoded_bridge_decision(
         &ffmpeg_path,
-        &params,
+        &encoder_output_topology,
         requested_encoder_bridge_video_output,
     )
-    .await?;
+    .await;
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
+    if params.output.stream_enabled {
+        let provider_plan = resolve_provider_stream_output_plan(&params)?;
+        if let Err(error) = validate_provider_plan_against_effective_bridge(
+            &provider_plan,
+            encoder_bridge_video_output,
+        ) {
+            if let Some(fifo_path) = encoder_bridge_fifo.as_ref() {
+                let _ = crate::fifo::cleanup(fifo_path);
+            }
+            return Err(error);
+        }
+    }
     if let Some(reason) = windows_encoded_bridge_decision.fallback_reason.as_deref() {
         state.emit_log(
             "warn",
@@ -1607,30 +1649,19 @@ pub async fn start_session(
     // Both the shared-compositor bridge and the legacy path request the platform H.264
     // encoder. The bridge is the protected consumer of the compositor output, paced by
     // the output clock; the legacy path captures via FFmpeg.
-    initial_diagnostics.encode_backend = Some(
-        if matches!(
-            encoder_bridge_video_output,
-            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
-        ) {
-            EncodeBackend::HardwareMediaFoundation
-        } else {
-            default_h264_encode_backend()
-        },
-    );
+    initial_diagnostics.encode_backend =
+        Some(windows_encoded_bridge_decision.effective_encode_backend);
     initial_diagnostics.encoder_bridge_requested_video_output = Some(
         encoder_bridge_video_output_label(windows_encoded_bridge_decision.requested).to_string(),
     );
     initial_diagnostics.encoder_bridge_effective_video_output = Some(
         encoder_bridge_video_output_label(windows_encoded_bridge_decision.effective).to_string(),
     );
-    initial_diagnostics.encoder_bridge_encoded_output_backend = match encoder_bridge_video_output {
-        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => Some("videotoolbox".to_string()),
-        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
-            Some("media-foundation".to_string())
-        }
-        EncoderBridgeVideoOutput::RawYuv420p => None,
-    };
+    initial_diagnostics.encoder_bridge_encoded_output_backend =
+        Some(encoder_bridge_encoded_output_backend_label(
+            encoder_bridge_video_output,
+            windows_encoded_bridge_decision.effective_encode_backend,
+        ));
     initial_diagnostics.encoder_bridge_encoded_output_encoder_identity =
         windows_encoded_bridge_decision.encoder_identity.clone();
     initial_diagnostics.encoder_bridge_encoded_output_input_subtype =
@@ -1775,7 +1806,14 @@ pub async fn start_session(
             // the full-frame BGRA -> I420 cost even though its output is unused.
             (None, None)
         } else if use_encoder_bridge {
-            let target_fps = recording_compositor_target_fps(&state, &params.output.video).await;
+            let target_fps = recording_compositor_target_fps(&state, &params.output.video)
+                .await
+                .max(
+                    encoder_bridge_resolved_stream_profile
+                        .as_ref()
+                        .map(|profile| profile.fps)
+                        .unwrap_or_default(),
+                );
             start_synthetic_compositor(
                 state.clone(),
                 CompositorStartParams {
@@ -2131,6 +2169,17 @@ pub async fn start_session(
     let gate_expect_audio = !audio_tracks.is_empty();
     let gate_intended_fps = (params.output.video.fps > 0).then_some(params.output.video.fps as f64);
     let (stop_intent_sender, stop_intent_receiver) = oneshot::channel();
+    let stream_tee_has_recording_leg =
+        output_path.is_some() && !(use_encoder_bridge && encoder_bridge_stream_profile.is_some());
+    let (stream_runtime, slave_positions, stream_url_positions) = build_stream_runtime(
+        &stream_targets,
+        &skipped_targets,
+        stream_tee_has_recording_leg,
+    );
+    let stream_targets_snapshot = Arc::new(StdMutex::new(StreamTargetsSnapshot {
+        session_id: session_id.clone(),
+        targets: stream_runtime,
+    }));
     let active = ActiveRecording {
         session_id: session_id.clone(),
         pid,
@@ -2157,6 +2206,7 @@ pub async fn start_session(
         },
         encoder_bridge,
         encoder_bridge_stream,
+        stream_targets_snapshot: stream_targets_snapshot.clone(),
         captioned_copy_requested: session_caption_plan.captioned_copy,
         keep_original_media: params.output.keep_original_mkv,
         comment_highlight_available: comment_highlight_available(&params, use_encoder_bridge),
@@ -2262,21 +2312,9 @@ pub async fn start_session(
         tokio::spawn(publish_preview_stdout(state.clone(), None, stdout));
     }
 
-    let stream_tee_has_recording_leg =
-        output_path.is_some() && !(use_encoder_bridge && encoder_bridge_stream_profile.is_some());
-    let (stream_runtime, slave_positions, stream_url_positions) = build_stream_runtime(
-        &stream_targets,
-        &skipped_targets,
-        stream_tee_has_recording_leg,
-    );
-    if !stream_runtime.is_empty() {
-        state.emit_event(
-            "stream.targets",
-            StreamTargetsSnapshot {
-                session_id: session_id.clone(),
-                targets: stream_runtime.clone(),
-            },
-        );
+    let initial_stream_targets_snapshot = stream_targets_snapshot_value(&stream_targets_snapshot);
+    if !initial_stream_targets_snapshot.targets.is_empty() {
+        state.emit_event("stream.targets", initial_stream_targets_snapshot);
     }
 
     if let Some(stderr) = stderr {
@@ -2286,9 +2324,14 @@ pub async fn start_session(
         let ffmpeg_audio_reply_sender = ffmpeg_audio_reply_sender;
         let ffmpeg_live_audio_session = ffmpeg_live_audio_stderr_session;
         tokio::spawn(async move {
-            let mut stream_runtime = stream_runtime;
             let mut capture_media_clock_logged = false;
             let mut first_fatal_ffmpeg_line_logged = false;
+            // This monitor owns exactly one FFmpeg process generation. A replacement
+            // process creates a fresh monitor/accumulator, while the explicit generation
+            // remains testable so future in-place restarts cannot inherit counters.
+            let process_generation = 0_u64;
+            let mut stream_health_accumulator =
+                StreamHealthAccumulator::new(&log_session_id, process_generation);
             let mut lines = BufReader::new(stderr).lines();
             let stderr_reached_eof = loop {
                 let line = match lines.next_line().await {
@@ -2377,7 +2420,9 @@ pub async fn start_session(
                 } else {
                     log_state.emit_log("warn", trimmed);
                 }
-                if let Some(stream_health) = parse_ffmpeg_stream_health(&log_session_id, trimmed) {
+                if let Some(delta) = parse_ffmpeg_stream_health(trimmed) {
+                    let stream_health =
+                        stream_health_accumulator.apply(&log_session_id, process_generation, delta);
                     let scene_revision = current_compositor_scene_revision(&log_state).await;
                     let diagnostic_stats = {
                         let mut diagnostics = log_state.diagnostics.lock().await;
@@ -2428,67 +2473,47 @@ pub async fn start_session(
                         .find(|(url, _)| *url == failure.url)
                         .map(|(_, position)| *position)
                 {
-                    let mut changed = false;
-                    if let Some(entry) = stream_runtime.get_mut(position)
-                        && entry.state != StreamTargetState::Failed
-                    {
-                        let reason = if failure.reason.is_empty() {
-                            "Stream connection failed".to_string()
-                        } else {
-                            failure.reason.clone()
-                        };
+                    let reason = if failure.reason.is_empty() {
+                        "Stream connection failed".to_string()
+                    } else {
+                        failure.reason.clone()
+                    };
+                    if let Some((label, snapshot)) = mark_stream_target_failed(
+                        &stream_targets_snapshot,
+                        position,
+                        reason.clone(),
+                    ) {
                         let _ = emit_health_event(
                             &log_state,
                             Some(&log_session_id),
                             HealthLevel::Warn,
                             "stream-target-failed",
-                            &format!("Streaming to {} stopped: {reason}", entry.label),
+                            &format!("Streaming to {label} stopped: {reason}"),
                         );
-                        entry.state = StreamTargetState::Failed;
-                        entry.message = Some(reason);
-                        changed = true;
-                    }
-                    if changed {
-                        log_state.emit_event(
-                            "stream.targets",
-                            StreamTargetsSnapshot {
-                                session_id: log_session_id.clone(),
-                                targets: stream_runtime.clone(),
-                            },
-                        );
+                        log_state.emit_event("stream.targets", snapshot);
                     }
                 }
                 if let Some(failure) = parse_tee_slave_failure(trimmed)
                     && let Some(Some(position)) = slave_positions.get(failure.slave_index).copied()
                 {
-                    let mut changed = false;
-                    if let Some(entry) = stream_runtime.get_mut(position)
-                        && entry.state != StreamTargetState::Failed
-                    {
-                        let reason = if failure.reason.is_empty() {
-                            "Stream connection failed".to_string()
-                        } else {
-                            failure.reason.clone()
-                        };
+                    let reason = if failure.reason.is_empty() {
+                        "Stream connection failed".to_string()
+                    } else {
+                        failure.reason.clone()
+                    };
+                    if let Some((label, snapshot)) = mark_stream_target_failed(
+                        &stream_targets_snapshot,
+                        position,
+                        reason.clone(),
+                    ) {
                         let _ = emit_health_event(
                             &log_state,
                             Some(&log_session_id),
                             HealthLevel::Warn,
                             "stream-target-failed",
-                            &format!("Streaming to {} stopped: {reason}", entry.label),
+                            &format!("Streaming to {label} stopped: {reason}"),
                         );
-                        entry.state = StreamTargetState::Failed;
-                        entry.message = Some(reason);
-                        changed = true;
-                    }
-                    if changed {
-                        log_state.emit_event(
-                            "stream.targets",
-                            StreamTargetsSnapshot {
-                                session_id: log_session_id.clone(),
-                                targets: stream_runtime.clone(),
-                            },
-                        );
+                        log_state.emit_event("stream.targets", snapshot);
                     }
                 }
             };
@@ -6954,6 +6979,24 @@ fn encode_backend_label(backend: Option<EncodeBackend>) -> &'static str {
     }
 }
 
+fn encoder_bridge_encoded_output_backend_label(
+    video_output: EncoderBridgeVideoOutput,
+    effective_encode_backend: EncodeBackend,
+) -> String {
+    match video_output {
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => "videotoolbox",
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => "media-foundation",
+        // Raw describes the compositor-to-FFmpeg transport, not the encoder
+        // FFmpeg uses after that transport. Keep diagnostics truthful about
+        // the established software/hardware backend selected for the session.
+        EncoderBridgeVideoOutput::RawYuv420p => {
+            encode_backend_label(Some(effective_encode_backend))
+        }
+    }
+    .to_string()
+}
+
 /// Build the structured preflight report from the live diagnostics snapshot and emit it as an
 /// error health event. The start path stays blocked and writes no file; this only enriches the
 /// failure surface (Diagnostics) so the failing owner is copyable.
@@ -7141,10 +7184,8 @@ fn tee_output_args(spec: String) -> Vec<String> {
 }
 
 /// Record-only 60fps recordings ride the encoder bridge up to 1440p (the
-/// perf-gated envelope): same compositor the preview shows, VideoToolbox
-/// session, epoch-trimmed start, and bounded stop. 4K60 (experimental) and
-/// any >30fps STREAMING profile keep the legacy path until they have their
-/// own perf evidence.
+/// perf-gated envelope): same compositor the preview shows, platform encoder,
+/// epoch-trimmed start, and bounded stop. 4K60 remains outside that envelope.
 fn record_only_bridge_60fps_eligible(params: &StartSessionParams) -> bool {
     if params.output.stream_enabled {
         return false;
@@ -7155,6 +7196,50 @@ fn record_only_bridge_60fps_eligible(params: &StartSessionParams) -> bool {
     let long_side = params.output.video.width.max(params.output.video.height);
     let short_side = params.output.video.width.min(params.output.video.height);
     long_side <= 2560 && short_side <= 1440
+}
+
+/// Livestreaming has a narrower proven 60fps bridge envelope than local
+/// recording. Every encoded role must stay at 1080p or below; this includes
+/// the local recording role because the compositor runs at the fastest role's
+/// cadence. A 4K30 recording plus a 1080p60 auxiliary stream would otherwise
+/// make the compositor render the 4K surface at 60fps.
+fn streaming_bridge_60fps_eligible(params: &StartSessionParams) -> bool {
+    if !params.output.stream_enabled {
+        return false;
+    }
+    let Ok(plan) = resolve_provider_stream_output_plan(params) else {
+        return false;
+    };
+    let mut profiles = plan
+        .targets
+        .into_iter()
+        .map(|target| target.video)
+        .collect::<Vec<_>>();
+    if params.output.record_enabled {
+        profiles.push(params.output.video.clone());
+    }
+    profiles.into_iter().all(|profile| {
+        profile.fps <= 60
+            && profile.width.max(profile.height) <= 1920
+            && profile.width.min(profile.height) <= 1080
+    })
+}
+
+fn requested_compositor_bridge_fps(params: &StartSessionParams) -> u32 {
+    let stream_fps = if params.output.stream_enabled {
+        resolve_provider_stream_output_plan(params)
+            .ok()
+            .and_then(|plan| {
+                plan.targets
+                    .into_iter()
+                    .map(|target| target.video.fps)
+                    .max()
+            })
+            .unwrap_or_default()
+    } else {
+        0
+    };
+    params.output.video.fps.max(stream_fps)
 }
 
 async fn should_use_compositor_encoder_bridge(
@@ -7172,12 +7257,13 @@ async fn should_use_compositor_encoder_bridge(
         // Explicit developer env override — the only sanctioned legacy escape hatch.
         return Ok(false);
     }
-    if params.output.video.fps > 30 && !record_only_bridge_60fps_eligible(params) {
-        // The bridge cap: >30fps rides the legacy path EXCEPT record-only
-        // sessions up to 1440p60, which now get the same WYSIWYG compositor +
-        // VideoToolbox + epoch-trim pipeline as 30fps (recording-quality plan
-        // Q2). Streaming >30fps and 4K60 keep the legacy path; not silent —
-        // the session log records it below at the call site.
+    let requested_fps = requested_compositor_bridge_fps(params);
+    if requested_fps > 30
+        && !(record_only_bridge_60fps_eligible(params) || streaming_bridge_60fps_eligible(params))
+    {
+        // The bridge cap: record-only runs to 1440p60; livestreaming runs to
+        // 1080p60 across every encoded role. Profiles outside those measured
+        // envelopes retain the legacy path, and the session log says so.
         return Ok(false);
     }
     let scene = params.scene.clone().unwrap_or_else(|| {
@@ -7314,18 +7400,31 @@ fn recording_encoder_bridge_video_output(
 
 #[derive(Debug, Clone)]
 struct WindowsEncodedBridgeDecision {
+    capability_key: String,
     requested: EncoderBridgeVideoOutput,
     effective: EncoderBridgeVideoOutput,
+    effective_encode_backend: EncodeBackend,
+    probe_state: StreamOutputTopologyProbeState,
     encoder_identity: Option<String>,
     input_subtype: Option<String>,
     fallback_reason: Option<String>,
 }
 
 impl WindowsEncodedBridgeDecision {
-    fn unchanged(output: EncoderBridgeVideoOutput) -> Self {
+    fn unchanged(
+        capability_key: String,
+        output: EncoderBridgeVideoOutput,
+        fallback_encode_backend: EncodeBackend,
+    ) -> Self {
         Self {
+            capability_key,
             requested: output,
             effective: output,
+            effective_encode_backend: encode_backend_for_bridge_output(
+                output,
+                fallback_encode_backend,
+            ),
+            probe_state: StreamOutputTopologyProbeState::NotRequired,
             encoder_identity: None,
             input_subtype: None,
             fallback_reason: None,
@@ -7333,110 +7432,676 @@ impl WindowsEncodedBridgeDecision {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncoderOutputTopologyProbeRole {
+    Shared,
+    Recording,
+    Stream,
+}
+
+impl EncoderOutputTopologyProbeRole {
+    const fn capability_label(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Recording => "split-recording",
+            Self::Stream => "split-stream",
+        }
+    }
+
+    #[cfg(any(test, target_os = "windows"))]
+    const fn fallback_label(self) -> &'static str {
+        match self {
+            Self::Shared => "shared output",
+            Self::Recording => "recording output",
+            Self::Stream => "stream output",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EncoderOutputTopologyProbeProfile {
+    role: EncoderOutputTopologyProbeRole,
+    video: VideoSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EncoderOutputTopologyPlan {
+    output_roles: Vec<StreamOutputTopologyRole>,
+    profiles: Vec<EncoderOutputTopologyProbeProfile>,
+}
+
+impl EncoderOutputTopologyPlan {
+    fn shared(video: VideoSettings) -> Self {
+        Self {
+            output_roles: vec![StreamOutputTopologyRole::Shared],
+            profiles: vec![EncoderOutputTopologyProbeProfile {
+                role: EncoderOutputTopologyProbeRole::Shared,
+                video,
+            }],
+        }
+    }
+
+    fn split(recording: VideoSettings, stream: VideoSettings) -> Self {
+        Self {
+            output_roles: vec![
+                StreamOutputTopologyRole::Recording,
+                StreamOutputTopologyRole::Stream,
+            ],
+            profiles: vec![
+                EncoderOutputTopologyProbeProfile {
+                    role: EncoderOutputTopologyProbeRole::Recording,
+                    video: recording,
+                },
+                EncoderOutputTopologyProbeProfile {
+                    role: EncoderOutputTopologyProbeRole::Stream,
+                    video: stream,
+                },
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MediaFoundationTopologyProbe {
+    #[cfg(any(test, target_os = "windows"))]
+    Passed {
+        encoder_identity: String,
+        input_subtype: String,
+    },
+    #[cfg(any(test, target_os = "windows"))]
+    Rejected { reason: String },
+    #[cfg(any(test, not(target_os = "windows")))]
+    Unsupported { reason: String },
+}
+
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MediaFoundationProfileProbe {
+    Passed {
+        encoder_identity: String,
+        input_subtype: String,
+    },
+    Rejected {
+        reason: String,
+    },
+}
+
+const STREAM_OUTPUT_TOPOLOGY_CAPABILITY_KEY_VERSION: &str = "stream-output-topology-v1";
+const STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES: usize = 480;
+
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct WindowsGraphicsAdapterDriverIdentity {
+    adapter_luid: u64,
+    vendor_id: u32,
+    device_id: u32,
+    subsystem_id: u32,
+    revision: u32,
+    driver_version: u64,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_graphics_adapter_driver_identity_material(
+    mut adapters: Vec<WindowsGraphicsAdapterDriverIdentity>,
+) -> Option<String> {
+    if adapters.is_empty() {
+        return None;
+    }
+    adapters.sort_unstable();
+    Some(
+        adapters
+            .into_iter()
+            .map(|adapter| {
+                format!(
+                    "luid={:016x};pci={:04x}:{:04x}:{:08x}:{:02x};d3d11-driver={:016x}",
+                    adapter.adapter_luid,
+                    adapter.vendor_id,
+                    adapter.device_id,
+                    adapter.subsystem_id,
+                    adapter.revision,
+                    adapter.driver_version,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|"),
+    )
+}
+
+/// Stable material for invalidating Windows encoder capability verdicts when
+/// the hardware adapter or its user-mode D3D11 driver changes. Failure is
+/// deliberately non-cacheable: reusing a verdict under an unknown driver is
+/// less safe than probing again.
 #[cfg(target_os = "windows")]
-async fn resolve_windows_encoded_bridge_decision(
-    ffmpeg_path: &str,
-    params: &StartSessionParams,
-    requested: EncoderBridgeVideoOutput,
-) -> Result<WindowsEncodedBridgeDecision> {
-    if !matches!(
-        requested,
-        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
-    ) {
-        return Ok(WindowsEncodedBridgeDecision::unchanged(requested));
-    }
-    let mut profiles = vec![params.output.video.clone()];
-    if params.output.record_enabled && params.output.stream_enabled {
-        for profile in companion_stream_outputs_for_recording(params, &params.output.video)? {
-            if !profiles
-                .iter()
-                .any(|existing| same_video_profile(existing, &profile))
-            {
-                profiles.push(profile);
-            }
-        }
-    }
-    let split = profiles.len() > 1;
-    let mut identity = None;
-    let mut input_subtype = None;
-    for (index, profile) in profiles.iter().enumerate() {
-        let topology = if split {
-            if index == 0 {
-                "split-recording"
-            } else {
-                "split-stream"
-            }
-        } else {
-            "shared"
-        };
-        match probe_windows_native_encoded_bridge(ffmpeg_path, profile, topology).await {
-            Ok(probe) => {
-                identity.get_or_insert(probe.encoder_identity);
-                input_subtype.get_or_insert(probe.input_subtype.label().to_string());
-            }
-            Err(error) if split => {
-                bail!(
-                    "Split encoded output requires every Media Foundation encoder probe to pass; {} failed: {error}",
-                    profile_label(profile)
-                );
-            }
-            Err(error) => {
-                return Ok(WindowsEncodedBridgeDecision {
-                    requested,
-                    effective: EncoderBridgeVideoOutput::RawYuv420p,
-                    encoder_identity: None,
-                    input_subtype: None,
-                    fallback_reason: Some(error.to_string()),
-                });
-            }
-        }
-    }
-    Ok(WindowsEncodedBridgeDecision {
-        requested,
-        effective: requested,
-        encoder_identity: identity,
-        input_subtype,
-        fallback_reason: None,
+fn graphics_adapter_driver_identity() -> String {
+    query_windows_graphics_adapter_driver_identity().unwrap_or_else(|reason| {
+        format!(
+            "windows-adapter-driver-unavailable:{reason}:{}",
+            Uuid::new_v4()
+        )
     })
 }
 
 #[cfg(not(target_os = "windows"))]
-async fn resolve_windows_encoded_bridge_decision(
-    _ffmpeg_path: &str,
-    _params: &StartSessionParams,
-    requested: EncoderBridgeVideoOutput,
-) -> Result<WindowsEncodedBridgeDecision> {
-    if matches!(
-        requested,
-        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
-    ) {
-        Ok(WindowsEncodedBridgeDecision {
-            requested,
-            effective: EncoderBridgeVideoOutput::RawYuv420p,
-            encoder_identity: None,
-            input_subtype: None,
-            fallback_reason: Some(
-                "Media Foundation encoded output is available only on Windows".to_string(),
-            ),
-        })
-    } else {
-        Ok(WindowsEncodedBridgeDecision::unchanged(requested))
-    }
+fn graphics_adapter_driver_identity() -> String {
+    format!(
+        "platform={};windows-adapter-driver=not-applicable",
+        std::env::consts::OS
+    )
 }
 
 #[cfg(target_os = "windows")]
+fn query_windows_graphics_adapter_driver_identity() -> Result<String, String> {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIFactory1,
+    };
+
+    // IID_ID3D11Device from d3d11.h. CheckInterfaceSupport only needs this
+    // GUID, so Plan 039 does not widen the windows crate feature set.
+    const IID_ID3D11_DEVICE: windows::core::GUID =
+        windows::core::GUID::from_u128(0xdb6f6ddb_ac77_4e88_8253_819df9bbf140);
+
+    let windows_error_code =
+        |error: windows::core::Error| format!("hresult-{:08x}", error.code().0 as u32);
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(windows_error_code)?;
+    let mut identities = Vec::new();
+    let mut adapter_index = 0;
+    loop {
+        let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
+            Ok(adapter) => adapter,
+            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(error) => return Err(windows_error_code(error)),
+        };
+        adapter_index += 1;
+
+        let description = unsafe { adapter.GetDesc1() }.map_err(windows_error_code)?;
+        if description.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+            continue;
+        }
+        let driver_version = unsafe { adapter.CheckInterfaceSupport(&IID_ID3D11_DEVICE) }
+            .map_err(windows_error_code)?;
+        identities.push(WindowsGraphicsAdapterDriverIdentity {
+            adapter_luid: (u64::from(description.AdapterLuid.HighPart as u32) << 32)
+                | u64::from(description.AdapterLuid.LowPart),
+            vendor_id: description.VendorId,
+            device_id: description.DeviceId,
+            subsystem_id: description.SubSysId,
+            revision: description.Revision,
+            driver_version: driver_version as u64,
+        });
+    }
+    windows_graphics_adapter_driver_identity_material(identities)
+        .ok_or_else(|| "no-hardware-dxgi-adapter".to_string())
+}
+
+fn normalize_stream_output_topology_probe_params(
+    mut params: StreamOutputTopologyProbeParams,
+) -> Result<StreamOutputTopologyProbeParams> {
+    validate_video_settings(&params.stream_profile)?;
+    validate_named_video_profile(&params.stream_profile)?;
+    if let Some(recording) = params.recording_profile.as_ref() {
+        validate_video_settings(recording)?;
+        validate_named_video_profile(recording)?;
+    }
+
+    params.ffmpeg_path.take_if(|path| path.trim().is_empty());
+    params.output_roles.sort_unstable();
+    if params.output_roles.is_empty() {
+        bail!("Output topology probe requires an output role.");
+    }
+    if params
+        .output_roles
+        .windows(2)
+        .any(|roles| roles[0] == roles[1])
+    {
+        bail!("Output topology probe roles must be unique.");
+    }
+
+    match params.output_roles.as_slice() {
+        [StreamOutputTopologyRole::Shared] => {
+            if let Some(recording) = params.recording_profile.as_ref()
+                && !same_video_profile(recording, &params.stream_profile)
+            {
+                bail!(
+                    "A shared output role requires matching recording and stream profiles; use recording and stream roles for a split topology."
+                );
+            }
+        }
+        [
+            StreamOutputTopologyRole::Recording,
+            StreamOutputTopologyRole::Stream,
+        ] => {
+            if params.recording_profile.is_none() {
+                bail!("A split output topology requires a recording profile.");
+            }
+        }
+        _ => {
+            bail!(
+                "Stream output topology roles must be either shared or the recording and stream pair."
+            );
+        }
+    }
+
+    Ok(params)
+}
+
+fn encoder_output_topology_plan_from_probe(
+    params: &StreamOutputTopologyProbeParams,
+) -> EncoderOutputTopologyPlan {
+    if params.output_roles == [StreamOutputTopologyRole::Shared] {
+        EncoderOutputTopologyPlan::shared(params.stream_profile.clone())
+    } else {
+        EncoderOutputTopologyPlan::split(
+            params
+                .recording_profile
+                .clone()
+                .expect("validated split topology has a recording profile"),
+            params.stream_profile.clone(),
+        )
+    }
+}
+
+fn encoder_output_topology_plan_from_session(
+    params: &StartSessionParams,
+) -> Result<EncoderOutputTopologyPlan> {
+    match (params.output.record_enabled, params.output.stream_enabled) {
+        (true, true) => {
+            let mut companion_outputs =
+                companion_stream_outputs_for_recording(params, &params.output.video)?;
+            if companion_outputs.len() > 1 {
+                bail!(
+                    "Mixed stream output currently supports one companion output profile beside the recording profile."
+                );
+            }
+            if let Some(stream) = companion_outputs.pop() {
+                return Ok(EncoderOutputTopologyPlan::split(
+                    params.output.video.clone(),
+                    stream,
+                ));
+            }
+            if caption_leg_plan(params).force_same_profile_split {
+                return Ok(EncoderOutputTopologyPlan::split(
+                    params.output.video.clone(),
+                    params.output.video.clone(),
+                ));
+            }
+            Ok(EncoderOutputTopologyPlan::shared(
+                params.output.video.clone(),
+            ))
+        }
+        (true, false) => Ok(EncoderOutputTopologyPlan::shared(
+            params.output.video.clone(),
+        )),
+        (false, true) => Ok(EncoderOutputTopologyPlan::shared(
+            resolve_stream_output_video(params)?,
+        )),
+        (false, false) => bail!("Output topology requires recording or streaming to be enabled."),
+    }
+}
+
+fn encode_backend_for_bridge_output(
+    output: EncoderBridgeVideoOutput,
+    fallback_encode_backend: EncodeBackend,
+) -> EncodeBackend {
+    match output {
+        EncoderBridgeVideoOutput::RawYuv420p => fallback_encode_backend,
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => EncodeBackend::HardwareVideotoolbox,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
+            EncodeBackend::HardwareMediaFoundation
+        }
+    }
+}
+
+fn stream_output_bridge(output: EncoderBridgeVideoOutput) -> StreamOutputBridge {
+    match output {
+        EncoderBridgeVideoOutput::RawYuv420p => StreamOutputBridge::RawYuv420p,
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB => {
+            StreamOutputBridge::VideoToolboxH264AnnexB
+        }
+        EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => {
+            StreamOutputBridge::VideoToolboxH264MpegTs
+        }
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
+            StreamOutputBridge::WindowsMediaFoundationH264MpegTs
+        }
+    }
+}
+
+fn bounded_stream_output_topology_fallback_reason(reason: &str) -> String {
+    let cleaned = reason
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleaned = if cleaned.is_empty() {
+        "Media Foundation output topology probe was rejected".to_string()
+    } else {
+        cleaned
+    };
+    if cleaned.len() <= STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES {
+        return cleaned;
+    }
+
+    const SUFFIX: &str = "...";
+    let mut end = STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES - SUFFIX.len();
+    while !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", cleaned[..end].trim_end(), SUFFIX)
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn summarize_media_foundation_topology_probes(
+    plan: &EncoderOutputTopologyPlan,
+    probes: &[MediaFoundationProfileProbe],
+) -> MediaFoundationTopologyProbe {
+    let mut identity = None;
+    let mut input_subtype = None;
+    for (index, profile) in plan.profiles.iter().enumerate() {
+        match probes.get(index) {
+            Some(MediaFoundationProfileProbe::Passed {
+                encoder_identity,
+                input_subtype: probe_input_subtype,
+            }) => {
+                identity.get_or_insert_with(|| encoder_identity.clone());
+                input_subtype.get_or_insert_with(|| probe_input_subtype.clone());
+            }
+            Some(MediaFoundationProfileProbe::Rejected { reason }) => {
+                return MediaFoundationTopologyProbe::Rejected {
+                    reason: format!(
+                        "Media Foundation {} probe rejected {}x{}@{} {}kbps: {reason}",
+                        profile.role.fallback_label(),
+                        profile.video.width,
+                        profile.video.height,
+                        profile.video.fps,
+                        profile.video.bitrate_kbps,
+                    ),
+                };
+            }
+            None => {
+                return MediaFoundationTopologyProbe::Rejected {
+                    reason: format!(
+                        "Media Foundation {} probe did not produce a verdict",
+                        profile.role.fallback_label(),
+                    ),
+                };
+            }
+        }
+    }
+    MediaFoundationTopologyProbe::Passed {
+        encoder_identity: identity.unwrap_or_else(|| "<unknown>".to_string()),
+        input_subtype: input_subtype.unwrap_or_else(|| "<unknown>".to_string()),
+    }
+}
+
+fn output_topology_capability_key(
+    ffmpeg_path: &str,
+    plan: &EncoderOutputTopologyPlan,
+    requested: EncoderBridgeVideoOutput,
+    graphics_adapter_driver_identity: &str,
+) -> String {
+    let path = PathBuf::from(ffmpeg_path);
+    let canonical_path = std::fs::canonicalize(&path).unwrap_or(path);
+    let metadata = std::fs::metadata(&canonical_path).ok();
+    let modified_ms = metadata.as_ref().and_then(|metadata| {
+        metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis())
+    });
+    let mut material = format!(
+        "version={STREAM_OUTPUT_TOPOLOGY_CAPABILITY_KEY_VERSION}\nos={}\ngraphics_adapter_driver={graphics_adapter_driver_identity}\nffmpeg={}\nffmpeg_len={:?}\nffmpeg_modified_ms={modified_ms:?}\nrequested={}\n",
+        std::env::consts::OS,
+        canonical_path.to_string_lossy(),
+        metadata.as_ref().map(std::fs::Metadata::len),
+        encoder_bridge_video_output_label(requested),
+    );
+    for role in &plan.output_roles {
+        material.push_str(&format!("output_role={role:?}\n"));
+    }
+    for profile in &plan.profiles {
+        material.push_str(&format!(
+            "profile_role={}\nprofile={}x{}@{}:{}\n",
+            profile.role.capability_label(),
+            profile.video.width,
+            profile.video.height,
+            profile.video.fps,
+            profile.video.bitrate_kbps,
+        ));
+    }
+    let digest = Sha256::digest(material.as_bytes());
+    format!("{STREAM_OUTPUT_TOPOLOGY_CAPABILITY_KEY_VERSION}:{digest:x}")
+}
+
+fn select_windows_encoded_bridge_decision(
+    requested: EncoderBridgeVideoOutput,
+    capability_key: String,
+    probe: Option<MediaFoundationTopologyProbe>,
+    fallback_encode_backend: EncodeBackend,
+) -> WindowsEncodedBridgeDecision {
+    if !matches!(
+        requested,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) {
+        return WindowsEncodedBridgeDecision::unchanged(
+            capability_key,
+            requested,
+            fallback_encode_backend,
+        );
+    }
+
+    match probe {
+        #[cfg(any(test, target_os = "windows"))]
+        Some(MediaFoundationTopologyProbe::Passed {
+            encoder_identity,
+            input_subtype,
+        }) => WindowsEncodedBridgeDecision {
+            capability_key,
+            requested,
+            effective: requested,
+            effective_encode_backend: EncodeBackend::HardwareMediaFoundation,
+            probe_state: StreamOutputTopologyProbeState::Passed,
+            encoder_identity: Some(encoder_identity),
+            input_subtype: Some(input_subtype),
+            fallback_reason: None,
+        },
+        #[cfg(any(test, target_os = "windows"))]
+        Some(MediaFoundationTopologyProbe::Rejected { reason }) => WindowsEncodedBridgeDecision {
+            capability_key,
+            requested,
+            effective: EncoderBridgeVideoOutput::RawYuv420p,
+            effective_encode_backend: fallback_encode_backend,
+            probe_state: StreamOutputTopologyProbeState::Rejected,
+            encoder_identity: None,
+            input_subtype: None,
+            fallback_reason: Some(bounded_stream_output_topology_fallback_reason(&reason)),
+        },
+        #[cfg(any(test, not(target_os = "windows")))]
+        Some(MediaFoundationTopologyProbe::Unsupported { reason }) => {
+            WindowsEncodedBridgeDecision {
+                capability_key,
+                requested,
+                effective: EncoderBridgeVideoOutput::RawYuv420p,
+                effective_encode_backend: fallback_encode_backend,
+                probe_state: StreamOutputTopologyProbeState::Unsupported,
+                encoder_identity: None,
+                input_subtype: None,
+                fallback_reason: Some(bounded_stream_output_topology_fallback_reason(&reason)),
+            }
+        }
+        None => WindowsEncodedBridgeDecision {
+            capability_key,
+            requested,
+            effective: EncoderBridgeVideoOutput::RawYuv420p,
+            effective_encode_backend: fallback_encode_backend,
+            probe_state: StreamOutputTopologyProbeState::Rejected,
+            encoder_identity: None,
+            input_subtype: None,
+            fallback_reason: Some(bounded_stream_output_topology_fallback_reason(
+                "Media Foundation output topology probe did not produce a verdict",
+            )),
+        },
+    }
+}
+
+async fn resolve_windows_encoded_bridge_decision(
+    ffmpeg_path: &str,
+    plan: &EncoderOutputTopologyPlan,
+    requested: EncoderBridgeVideoOutput,
+) -> WindowsEncodedBridgeDecision {
+    let graphics_adapter_driver_identity = graphics_adapter_driver_identity();
+    let capability_key = output_topology_capability_key(
+        ffmpeg_path,
+        plan,
+        requested,
+        &graphics_adapter_driver_identity,
+    );
+    let probe = if matches!(
+        requested,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) {
+        Some(
+            probe_windows_media_foundation_topology(
+                ffmpeg_path,
+                plan,
+                &graphics_adapter_driver_identity,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    select_windows_encoded_bridge_decision(
+        requested,
+        capability_key,
+        probe,
+        default_h264_encode_backend(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+async fn probe_windows_media_foundation_topology(
+    ffmpeg_path: &str,
+    plan: &EncoderOutputTopologyPlan,
+    graphics_adapter_driver_identity: &str,
+) -> MediaFoundationTopologyProbe {
+    let mut probes = Vec::with_capacity(plan.profiles.len());
+    for profile in &plan.profiles {
+        match probe_windows_native_encoded_bridge(
+            ffmpeg_path,
+            &profile.video,
+            profile.role.capability_label(),
+            graphics_adapter_driver_identity,
+        )
+        .await
+        {
+            Ok(probe) => {
+                probes.push(MediaFoundationProfileProbe::Passed {
+                    encoder_identity: probe.encoder_identity,
+                    input_subtype: probe.input_subtype.label().to_string(),
+                });
+            }
+            Err(error) => {
+                probes.push(MediaFoundationProfileProbe::Rejected {
+                    reason: error.to_string(),
+                });
+                break;
+            }
+        }
+    }
+    summarize_media_foundation_topology_probes(plan, &probes)
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn probe_windows_media_foundation_topology(
+    _ffmpeg_path: &str,
+    _plan: &EncoderOutputTopologyPlan,
+    _graphics_adapter_driver_identity: &str,
+) -> MediaFoundationTopologyProbe {
+    MediaFoundationTopologyProbe::Unsupported {
+        reason: "Media Foundation encoded output is available only on Windows".to_string(),
+    }
+}
+
+pub async fn probe_stream_output_topology(
+    params: StreamOutputTopologyProbeParams,
+) -> Result<StreamOutputTopologyProbeResult> {
+    let params = normalize_stream_output_topology_probe_params(params)?;
+    let plan = encoder_output_topology_plan_from_probe(&params);
+    let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path.clone());
+    let requested = recording_encoder_bridge_video_output(params.recording_profile.is_some(), true);
+    let decision = resolve_windows_encoded_bridge_decision(&ffmpeg_path, &plan, requested).await;
+
+    Ok(StreamOutputTopologyProbeResult {
+        capability_key: decision.capability_key,
+        stream_profile: params.stream_profile,
+        recording_profile: params.recording_profile,
+        output_roles: plan.output_roles,
+        requested_bridge_output: stream_output_bridge(decision.requested),
+        effective_bridge_output: stream_output_bridge(decision.effective),
+        effective_encode_backend: decision.effective_encode_backend,
+        probe_state: decision.probe_state,
+        fallback_reason: decision.fallback_reason,
+    })
+}
+
+#[cfg(any(test, target_os = "windows"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WindowsNativeEncodedProbeKey {
+    graphics_adapter_driver_identity: String,
     ffmpeg_path: PathBuf,
     ffmpeg_len: Option<u64>,
     ffmpeg_modified_ms: Option<u128>,
     encoder_identity: String,
-    input_subtype: MediaFoundationInputSubtype,
+    input_subtype: String,
     width: u32,
     height: u32,
     fps: u32,
     bitrate_kbps: u32,
     topology: &'static str,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_native_encoded_probe_key(
+    ffmpeg_path: &str,
+    graphics_adapter_driver_identity: &str,
+    encoder_identity: &str,
+    input_subtype: &str,
+    video: &VideoSettings,
+    topology: &'static str,
+) -> WindowsNativeEncodedProbeKey {
+    let path = PathBuf::from(ffmpeg_path);
+    let metadata = std::fs::metadata(&path).ok();
+    WindowsNativeEncodedProbeKey {
+        graphics_adapter_driver_identity: graphics_adapter_driver_identity.to_string(),
+        ffmpeg_path: std::fs::canonicalize(&path).unwrap_or(path),
+        ffmpeg_len: metadata.as_ref().map(std::fs::Metadata::len),
+        ffmpeg_modified_ms: metadata.and_then(|metadata| {
+            metadata
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_millis())
+        }),
+        encoder_identity: encoder_identity.to_string(),
+        input_subtype: input_subtype.to_string(),
+        width: video.width,
+        height: video.height,
+        fps: video.fps,
+        bitrate_kbps: video.bitrate_kbps,
+        topology,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -7449,6 +8114,7 @@ async fn probe_windows_native_encoded_bridge(
     ffmpeg_path: &str,
     video: &VideoSettings,
     topology: &'static str,
+    graphics_adapter_driver_identity: &str,
 ) -> Result<crate::windows_media_foundation_encoder::MediaFoundationProbe> {
     let config = MediaFoundationEncoderConfig {
         width: video.width,
@@ -7460,27 +8126,14 @@ async fn probe_windows_native_encoded_bridge(
     let probe = tokio::task::spawn_blocking(move || probe_hardware_encoder(config))
         .await
         .context("Media Foundation hardware probe thread panicked")??;
-    let path = PathBuf::from(ffmpeg_path);
-    let metadata = std::fs::metadata(&path).ok();
-    let key = WindowsNativeEncodedProbeKey {
-        ffmpeg_path: std::fs::canonicalize(&path).unwrap_or(path),
-        ffmpeg_len: metadata.as_ref().map(std::fs::Metadata::len),
-        ffmpeg_modified_ms: metadata.and_then(|metadata| {
-            metadata
-                .modified()
-                .ok()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|duration| duration.as_millis())
-        }),
-        encoder_identity: probe.encoder_identity.clone(),
-        input_subtype: probe.input_subtype,
-        width: video.width,
-        height: video.height,
-        fps: video.fps,
-        bitrate_kbps: video.bitrate_kbps,
+    let key = windows_native_encoded_probe_key(
+        ffmpeg_path,
+        graphics_adapter_driver_identity,
+        &probe.encoder_identity,
+        probe.input_subtype.label(),
+        video,
         topology,
-    };
+    );
     if let Some(cached) = WINDOWS_NATIVE_ENCODED_PROBE_CACHE
         .get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
         .lock()
@@ -7580,14 +8233,6 @@ fn ensure_probe_status(status: ExitStatus, stderr: &[u8]) -> Result<()> {
             &String::from_utf8_lossy(stderr),
             false
         )
-    )
-}
-
-#[cfg(target_os = "windows")]
-fn profile_label(video: &VideoSettings) -> String {
-    format!(
-        "{}x{}@{} {}kbps",
-        video.width, video.height, video.fps, video.bitrate_kbps
     )
 }
 
@@ -9811,23 +10456,24 @@ fn validate_session_entitlements(
                 destination_count
             );
         }
-        let stream_video = resolve_stream_output_video(params)?;
-        if stream_video.width > snapshot.limits.streaming.max_width
-            || stream_video.height > snapshot.limits.streaming.max_height
-            || stream_video.fps > snapshot.limits.streaming.max_fps
-            || stream_video.bitrate_kbps > snapshot.limits.streaming.max_bitrate_kbps
-        {
-            bail!(
-                "This plan allows livestreaming up to {}x{}@{}fps, {} kbps; selected stream output is {}x{}@{}fps, {} kbps.",
-                snapshot.limits.streaming.max_width,
-                snapshot.limits.streaming.max_height,
-                snapshot.limits.streaming.max_fps,
-                snapshot.limits.streaming.max_bitrate_kbps,
-                stream_video.width,
-                stream_video.height,
-                stream_video.fps,
-                stream_video.bitrate_kbps
-            );
+        for stream_video in resolved_enabled_stream_output_videos(params)? {
+            if stream_video.width > snapshot.limits.streaming.max_width
+                || stream_video.height > snapshot.limits.streaming.max_height
+                || stream_video.fps > snapshot.limits.streaming.max_fps
+                || stream_video.bitrate_kbps > snapshot.limits.streaming.max_bitrate_kbps
+            {
+                bail!(
+                    "This plan allows livestreaming up to {}x{}@{}fps, {} kbps; selected stream output is {}x{}@{}fps, {} kbps.",
+                    snapshot.limits.streaming.max_width,
+                    snapshot.limits.streaming.max_height,
+                    snapshot.limits.streaming.max_fps,
+                    snapshot.limits.streaming.max_bitrate_kbps,
+                    stream_video.width,
+                    stream_video.height,
+                    stream_video.fps,
+                    stream_video.bitrate_kbps
+                );
+            }
         }
     }
 
@@ -9965,6 +10611,19 @@ fn validate_video_profile_policy(params: &StartSessionParams) -> Result<()> {
     validate_named_video_profile(video)?;
 
     if params.output.stream_enabled {
+        let provider_plan = resolve_provider_stream_output_plan(params)?;
+        if params.output.record_enabled
+            && !provider_plan.separate_encoded_output_role
+            && !same_video_profile(video, &provider_plan.stream_video)
+        {
+            bail!(
+                "Local recording and livestream destinations share one encoder for this session. Select the strictest resolved stream profile ({}x{}@{}fps, {} kbps) for the recording too, or use a proven encoded split-output role.",
+                provider_plan.stream_video.width,
+                provider_plan.stream_video.height,
+                provider_plan.stream_video.fps,
+                provider_plan.stream_video.bitrate_kbps
+            );
+        }
         let has_explicit_stream_output_profile = params
             .streaming
             .as_ref()
@@ -9981,10 +10640,6 @@ fn validate_video_profile_policy(params: &StartSessionParams) -> Result<()> {
             .unwrap_or(&params.output.video);
         if is_true_4k_stream_output(stream_video) {
             validate_true_4k_stream_profile(params, stream_video)?;
-        } else if stream_video.bitrate_kbps > 6000 {
-            bail!(
-                "Streaming bitrate must be 6000 kbps or lower for the v1 platform-safe path. Select stream-safe-1080p30/60 or reduce the custom bitrate."
-            );
         }
         if video.width > 1920 || video.height > 1080 {
             if !params.output.record_enabled {
@@ -10183,23 +10838,384 @@ fn companion_stream_outputs_for_recording(
     Ok(outputs)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedStreamTargetVideo {
+    target_id: String,
+    platform: StreamPlatform,
+    video: VideoSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderStreamOutputPlan {
+    targets: Vec<ResolvedStreamTargetVideo>,
+    stream_video: VideoSettings,
+    separate_encoded_output_role: bool,
+}
+
+fn normalize_stream_only_output_video(params: &mut StartSessionParams) -> Result<()> {
+    if params.output.stream_enabled && !params.output.record_enabled {
+        // A stream-only session has exactly one encoder even when RTMP fans
+        // out to several providers. Make the session's compositor/FFmpeg
+        // profile equal the provider plan instead of leaving the recording
+        // preset as a second, fictitious source of truth.
+        params.output.video = resolve_provider_stream_output_plan(params)?.stream_video;
+    }
+    Ok(())
+}
+
+fn apply_provider_output_plan_to_ready_targets(
+    params: &StartSessionParams,
+    ready: &mut [StreamTarget],
+) -> Result<()> {
+    let plan = resolve_provider_stream_output_plan(params)?;
+    debug_assert!(
+        !plan.separate_encoded_output_role
+            || (params.output.record_enabled && params.output.stream_enabled)
+    );
+    for target in ready {
+        let resolved = plan
+            .targets
+            .iter()
+            .find(|resolved| resolved.target_id == target.target_id)
+            .with_context(|| {
+                format!(
+                    "No provider output profile was resolved for ready target {}.",
+                    target.label
+                )
+            })?;
+        debug_assert_eq!(resolved.platform, target.platform);
+        target.output_video = Some(resolved.video.clone());
+    }
+    Ok(())
+}
+
+fn validate_provider_plan_against_effective_bridge(
+    plan: &ProviderStreamOutputPlan,
+    effective_bridge: EncoderBridgeVideoOutput,
+) -> Result<()> {
+    if plan.separate_encoded_output_role
+        && matches!(effective_bridge, EncoderBridgeVideoOutput::RawYuv420p)
+    {
+        bail!(
+            "The encoder capability probe did not prove a separate encoded stream output. Use the shared provider-safe profile at 6000 kbps or lower for this session."
+        );
+    }
+    Ok(())
+}
+
+fn resolve_provider_stream_output_plan(
+    params: &StartSessionParams,
+) -> Result<ProviderStreamOutputPlan> {
+    resolve_provider_stream_output_plan_with_separate_roles(
+        params,
+        separate_encoded_provider_output_role_available(params),
+    )
+}
+
+fn resolve_provider_stream_output_plan_with_separate_roles(
+    params: &StartSessionParams,
+    separate_encoded_output_role_available: bool,
+) -> Result<ProviderStreamOutputPlan> {
+    if !params.output.stream_enabled {
+        bail!("A stream output profile requires streaming to be enabled.");
+    }
+
+    let Some(streaming) = params
+        .streaming
+        .as_ref()
+        .filter(|streaming| streaming.enabled)
+    else {
+        let platform = stream_platform_from_preset(&params.output.rtmp.preset);
+        validate_stream_profile_for_provider(platform, &params.output.video)?;
+        return Ok(ProviderStreamOutputPlan {
+            targets: vec![ResolvedStreamTargetVideo {
+                target_id: stream_platform_id(platform).to_string(),
+                platform,
+                video: params.output.video.clone(),
+            }],
+            stream_video: params.output.video.clone(),
+            separate_encoded_output_role: false,
+        });
+    };
+
+    let mut targets = Vec::new();
+    for target in streaming.targets.iter().filter(|target| target.enabled) {
+        // Incomplete destinations are surfaced as skipped at session start and
+        // do not constrain the encode that the ready destinations actually use.
+        if resolve_stream_target(streaming, target).is_err() {
+            continue;
+        }
+        let video = stream_target_output_video(streaming, target);
+        validate_stream_profile_for_provider(target.platform, &video)?;
+        targets.push(ResolvedStreamTargetVideo {
+            target_id: target.id.clone(),
+            platform: target.platform,
+            video,
+        });
+    }
+    if targets.is_empty() {
+        bail!("Enable at least one ready streaming destination.");
+    }
+
+    let targets_share_one_profile = targets
+        .iter()
+        .all(|target| same_video_profile(&target.video, &targets[0].video));
+    let recording_already_shares_target_profile = !params.output.record_enabled
+        || same_video_profile(&params.output.video, &targets[0].video);
+    if targets_share_one_profile && recording_already_shares_target_profile {
+        return Ok(ProviderStreamOutputPlan {
+            stream_video: targets[0].video.clone(),
+            targets,
+            separate_encoded_output_role: false,
+        });
+    }
+
+    if separate_encoded_output_role_available
+        && separate_provider_roles_fit_bridge_envelope(params, &targets)
+        && stream_targets_fit_recording_plus_one_companion(params, &targets)
+    {
+        // This is the only independent-output shape implemented today:
+        // recording is one encoded role and every stream target is routed from
+        // either that profile or one encoded companion role. Diagnostics then
+        // truthfully reports `separateOutputEncodersActive`.
+        let stream_video = targets
+            .iter()
+            .max_by_key(|target| stream_profile_strictness_key(&target.video))
+            .expect("non-empty stream target plan")
+            .video
+            .clone();
+        return Ok(ProviderStreamOutputPlan {
+            targets,
+            stream_video,
+            separate_encoded_output_role: true,
+        });
+    }
+
+    let youtube_only = targets
+        .iter()
+        .all(|target| target.platform == StreamPlatform::Youtube);
+    let mut shared_candidates = targets
+        .iter()
+        .map(|target| {
+            if youtube_only {
+                target.video.clone()
+            } else {
+                provider_safe_shared_profile(&target.video)
+            }
+        })
+        .collect::<Vec<_>>();
+    if params.output.record_enabled {
+        shared_candidates.push(provider_safe_shared_profile(&params.output.video));
+    }
+    let shared = strictest_shared_stream_profile(&shared_candidates)?;
+    for target in &mut targets {
+        target.video = shared.clone();
+    }
+
+    Ok(ProviderStreamOutputPlan {
+        targets,
+        stream_video: shared,
+        separate_encoded_output_role: false,
+    })
+}
+
+fn validate_stream_profile_for_provider(
+    platform: StreamPlatform,
+    video: &VideoSettings,
+) -> Result<()> {
+    validate_video_settings(video)?;
+    validate_named_video_profile(video)?;
+
+    if matches!(
+        video.preset,
+        VideoPreset::StreamYoutube1080p30
+            | VideoPreset::StreamYoutube1080p60
+            | VideoPreset::StreamYoutube4k30
+    ) && platform != StreamPlatform::Youtube
+    {
+        bail!(
+            "The {:?} stream profile is available only for YouTube destinations.",
+            video.preset
+        );
+    }
+
+    if is_true_4k_stream_output(video) {
+        if platform != StreamPlatform::Youtube
+            || !matches!(video.preset, VideoPreset::StreamYoutube4k30)
+        {
+            bail!("True 4K streaming requires the YouTube 4K30 stream profile.");
+        }
+        return require_video_profile(video, 3840, 2160, 30, 30_000);
+    }
+
+    if video.width > 1920 || video.height > 1080 {
+        bail!(
+            "Stream output for {:?} must be 1080p or lower unless it uses the exact YouTube 4K30 profile.",
+            platform
+        );
+    }
+
+    if video.bitrate_kbps > 6000
+        && !matches!(
+            (platform, &video.preset),
+            (
+                StreamPlatform::Youtube,
+                VideoPreset::StreamYoutube1080p30 | VideoPreset::StreamYoutube1080p60
+            )
+        )
+    {
+        bail!(
+            "Stream output for {:?} must be 6000 kbps or lower; YouTube rates above that limit require the exact YouTube 1080p30/60 profile.",
+            platform
+        );
+    }
+
+    Ok(())
+}
+
+fn separate_encoded_provider_output_role_available(params: &StartSessionParams) -> bool {
+    if !params.output.record_enabled
+        || !params.output.stream_enabled
+        || compositor_encoder_bridge_disabled(
+            params.output.record_enabled,
+            params.output.stream_enabled,
+        )
+    {
+        return false;
+    }
+    ensure_encoded_bridge_video_output(recording_encoder_bridge_video_output(
+        params.output.record_enabled,
+        params.output.stream_enabled,
+    ))
+    .is_ok()
+}
+
+fn separate_provider_roles_fit_bridge_envelope(
+    params: &StartSessionParams,
+    targets: &[ResolvedStreamTargetVideo],
+) -> bool {
+    let requested_fps = targets
+        .iter()
+        .map(|target| target.video.fps)
+        .max()
+        .unwrap_or_default()
+        .max(params.output.video.fps);
+    if requested_fps <= 30 {
+        return true;
+    }
+    std::iter::once(&params.output.video)
+        .chain(targets.iter().map(|target| &target.video))
+        .all(|profile| {
+            profile.fps <= 60
+                && profile.width.max(profile.height) <= 1920
+                && profile.width.min(profile.height) <= 1080
+        })
+}
+
+fn stream_targets_fit_recording_plus_one_companion(
+    params: &StartSessionParams,
+    targets: &[ResolvedStreamTargetVideo],
+) -> bool {
+    let mut companion: Option<&VideoSettings> = None;
+    for target in targets {
+        if same_video_profile(&target.video, &params.output.video) {
+            continue;
+        }
+        match companion {
+            Some(existing) if !same_video_profile(existing, &target.video) => return false,
+            None => companion = Some(&target.video),
+            _ => {}
+        }
+    }
+    companion.is_some()
+}
+
+fn provider_safe_shared_profile(video: &VideoSettings) -> VideoSettings {
+    match video.preset {
+        VideoPreset::StreamYoutube1080p30 | VideoPreset::StreamYoutube4k30 => {
+            video_preset_defaults(VideoPreset::StreamSafe1080p30)
+        }
+        VideoPreset::StreamYoutube1080p60 | VideoPreset::Stream1080p60 => {
+            video_preset_defaults(VideoPreset::StreamSafe1080p60)
+        }
+        _ if video.bitrate_kbps > 6000 => {
+            let mut safe = video.clone();
+            safe.preset = VideoPreset::Custom;
+            safe.bitrate_kbps = 6000;
+            safe
+        }
+        _ => video.clone(),
+    }
+}
+
+fn strictest_shared_stream_profile(candidates: &[VideoSettings]) -> Result<VideoSettings> {
+    let first = candidates
+        .first()
+        .context("A shared stream output requires at least one profile.")?;
+    if candidates
+        .iter()
+        .all(|candidate| same_video_profile(candidate, first))
+    {
+        return Ok(first.clone());
+    }
+
+    let smallest_canvas = candidates
+        .iter()
+        .min_by_key(|candidate| u64::from(candidate.width) * u64::from(candidate.height))
+        .expect("non-empty shared profile candidates");
+    let fps = candidates
+        .iter()
+        .map(|candidate| candidate.fps)
+        .min()
+        .expect("non-empty shared profile candidates");
+    let bitrate_kbps = candidates
+        .iter()
+        .map(|candidate| candidate.bitrate_kbps)
+        .min()
+        .expect("non-empty shared profile candidates");
+    let mut shared = VideoSettings {
+        preset: VideoPreset::Custom,
+        width: smallest_canvas.width,
+        height: smallest_canvas.height,
+        fps,
+        bitrate_kbps,
+    };
+    shared.preset = canonical_stream_preset_for_profile(&shared);
+    validate_video_settings(&shared)?;
+    validate_named_video_profile(&shared)?;
+    Ok(shared)
+}
+
+fn canonical_stream_preset_for_profile(video: &VideoSettings) -> VideoPreset {
+    match (video.width, video.height, video.fps, video.bitrate_kbps) {
+        (1920, 1080, 30, 6000) => VideoPreset::StreamSafe1080p30,
+        (1920, 1080, 60, 6000) => VideoPreset::StreamSafe1080p60,
+        (1920, 1080, 30, 10_000) => VideoPreset::StreamYoutube1080p30,
+        (1920, 1080, 60, 12_000) => VideoPreset::StreamYoutube1080p60,
+        (3840, 2160, 30, 30_000) => VideoPreset::StreamYoutube4k30,
+        _ => VideoPreset::Custom,
+    }
+}
+
+fn stream_profile_strictness_key(video: &VideoSettings) -> (u64, u32, u32) {
+    (
+        u64::from(video.width) * u64::from(video.height),
+        video.fps,
+        video.bitrate_kbps,
+    )
+}
+
 fn resolved_enabled_stream_output_videos(
     params: &StartSessionParams,
 ) -> Result<Vec<VideoSettings>> {
     if !params.output.stream_enabled {
         return Ok(Vec::new());
     }
-    if let Some(streaming) = params
-        .streaming
-        .as_ref()
-        .filter(|streaming| streaming.enabled)
-    {
-        return Ok(enabled_streaming_targets(params)
-            .into_iter()
-            .map(|target| stream_target_output_video(streaming, target))
-            .collect());
-    }
-    Ok(vec![params.output.video.clone()])
+    Ok(resolve_provider_stream_output_plan(params)?
+        .targets
+        .into_iter()
+        .map(|target| target.video)
+        .collect())
 }
 
 fn same_video_profile(left: &VideoSettings, right: &VideoSettings) -> bool {
@@ -10280,18 +11296,7 @@ fn encoder_bridge_diagnostics_context(
 }
 
 fn resolve_stream_output_video(params: &StartSessionParams) -> Result<VideoSettings> {
-    let stream_video = match params
-        .streaming
-        .as_ref()
-        .filter(|streaming| streaming.enabled)
-    {
-        Some(streaming) => {
-            let mut video = video_preset_defaults(streaming.default_output_preset.clone());
-            video.bitrate_kbps = streaming.default_bitrate_kbps;
-            video
-        }
-        None => params.output.video.clone(),
-    };
+    let stream_video = resolve_provider_stream_output_plan(params)?.stream_video;
 
     if is_true_4k_stream_output(&stream_video) {
         validate_true_4k_stream_profile(params, &stream_video)?;
@@ -10304,9 +11309,6 @@ fn resolve_stream_output_video(params: &StartSessionParams) -> Result<VideoSetti
             stream_video.width,
             stream_video.height
         );
-    }
-    if stream_video.bitrate_kbps > 6000 {
-        bail!("Stream output bitrate must be 6000 kbps or lower for the v1 platform-safe path.");
     }
 
     Ok(stream_video)
@@ -10438,6 +11440,20 @@ fn video_preset_defaults(preset: VideoPreset) -> VideoSettings {
             fps: 60,
             bitrate_kbps: 6000,
         },
+        VideoPreset::StreamYoutube1080p30 => VideoSettings {
+            preset,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 10_000,
+        },
+        VideoPreset::StreamYoutube1080p60 => VideoSettings {
+            preset,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: 12_000,
+        },
         VideoPreset::StreamYoutube4k30 => VideoSettings {
             preset,
             width: 3840,
@@ -10477,6 +11493,8 @@ fn validate_named_video_profile(video: &VideoSettings) -> Result<()> {
         VideoPreset::Record4k60Experimental => require_video_profile(video, 3840, 2160, 60, 50_000),
         VideoPreset::StreamSafe1080p30 => require_video_profile(video, 1920, 1080, 30, 6000),
         VideoPreset::StreamSafe1080p60 => require_video_profile(video, 1920, 1080, 60, 6000),
+        VideoPreset::StreamYoutube1080p30 => require_video_profile(video, 1920, 1080, 30, 10_000),
+        VideoPreset::StreamYoutube1080p60 => require_video_profile(video, 1920, 1080, 60, 12_000),
         VideoPreset::StreamYoutube4k30 => require_video_profile(video, 3840, 2160, 30, 30_000),
         _ => Ok(()),
     }
@@ -10698,13 +11716,18 @@ fn stream_target_output_video(
     target: &StreamTargetSettings,
 ) -> VideoSettings {
     let output_preset = target.output_preset.clone().unwrap_or_else(|| {
-        if streaming.default_output_preset == VideoPreset::StreamYoutube4k30
-            && target.platform != StreamPlatform::Youtube
-        {
-            VideoPreset::StreamSafe1080p30
-        } else {
-            streaming.default_output_preset.clone()
+        if target.platform != StreamPlatform::Youtube {
+            match &streaming.default_output_preset {
+                VideoPreset::StreamYoutube1080p30 | VideoPreset::StreamYoutube4k30 => {
+                    return VideoPreset::StreamSafe1080p30;
+                }
+                VideoPreset::StreamYoutube1080p60 => {
+                    return VideoPreset::StreamSafe1080p60;
+                }
+                _ => {}
+            }
         }
+        streaming.default_output_preset.clone()
     });
     let mut video = video_preset_defaults(output_preset.clone());
     video.bitrate_kbps = target.output_bitrate_kbps.unwrap_or_else(|| {
@@ -10761,6 +11784,34 @@ fn stream_targets_from_streaming(streaming: &StreamingSettings) -> Result<Vec<St
 /// its stream tee starts at slave #0 even though local recording is enabled.
 fn tee_slave_offset(stream_tee_has_recording_leg: bool) -> usize {
     usize::from(stream_tee_has_recording_leg)
+}
+
+fn stream_targets_snapshot_value(shared: &SharedStreamTargetsSnapshot) -> StreamTargetsSnapshot {
+    shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// Atomically transitions one destination and returns the full replacement
+/// snapshot that must be emitted. Returning the label alongside it keeps the
+/// health event and authoritative RPC state sourced from the same mutation.
+fn mark_stream_target_failed(
+    shared: &SharedStreamTargetsSnapshot,
+    position: usize,
+    reason: String,
+) -> Option<(String, StreamTargetsSnapshot)> {
+    let mut snapshot = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = snapshot.targets.get_mut(position)?;
+    if entry.state == StreamTargetState::Failed {
+        return None;
+    }
+    let label = entry.label.clone();
+    entry.state = StreamTargetState::Failed;
+    entry.message = Some(reason);
+    Some((label, snapshot.clone()))
 }
 
 /// Builds the initial per-target runtime snapshot — ready destinations as `Live`,
@@ -11172,23 +12223,96 @@ fn looks_like_ffmpeg_health_event(line: &str) -> bool {
         || normalized.contains("connection")
 }
 
-fn parse_ffmpeg_stream_health(session_id: &str, line: &str) -> Option<StreamHealth> {
-    let fps = parse_stat_f64(line, "fps=");
-    let dropped_frames =
-        parse_stat_u64(line, "drop_frames=").or_else(|| parse_stat_u64(line, "drop="));
-    let speed = parse_stat_f64(line, "speed=");
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ParsedStreamHealthDelta {
+    fps: Option<f64>,
+    dropped_frames: Option<u64>,
+    speed: Option<f64>,
+    bitrate_kbps: Option<f64>,
+    total_bytes: Option<u64>,
+    duplicated_frames: Option<u64>,
+}
 
-    if fps.is_none() && dropped_frames.is_none() && speed.is_none() {
+#[derive(Debug, Clone)]
+struct StreamHealthAccumulator {
+    session_id: String,
+    process_generation: u64,
+    fps: Option<f64>,
+    dropped_frames: Option<u64>,
+    speed: Option<f64>,
+    bitrate_kbps: Option<f64>,
+    total_bytes: Option<u64>,
+    duplicated_frames: Option<u64>,
+}
+
+impl StreamHealthAccumulator {
+    fn new(session_id: impl Into<String>, process_generation: u64) -> Self {
+        Self {
+            session_id: session_id.into(),
+            process_generation,
+            fps: None,
+            dropped_frames: None,
+            speed: None,
+            bitrate_kbps: None,
+            total_bytes: None,
+            duplicated_frames: None,
+        }
+    }
+
+    fn apply(
+        &mut self,
+        session_id: &str,
+        process_generation: u64,
+        delta: ParsedStreamHealthDelta,
+    ) -> StreamHealth {
+        if self.session_id != session_id || self.process_generation != process_generation {
+            *self = Self::new(session_id, process_generation);
+        }
+
+        self.fps = delta.fps.or(self.fps);
+        self.speed = delta.speed.or(self.speed);
+        self.bitrate_kbps = delta.bitrate_kbps.or(self.bitrate_kbps);
+        self.dropped_frames = monotonic_counter(self.dropped_frames, delta.dropped_frames);
+        self.total_bytes = monotonic_counter(self.total_bytes, delta.total_bytes);
+        self.duplicated_frames = monotonic_counter(self.duplicated_frames, delta.duplicated_frames);
+
+        StreamHealth {
+            session_id: self.session_id.clone(),
+            fps: self.fps,
+            dropped_frames: self.dropped_frames,
+            speed: self.speed,
+            bitrate_kbps: self.bitrate_kbps,
+            total_bytes: self.total_bytes,
+            duplicated_frames: self.duplicated_frames,
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+fn monotonic_counter(current: Option<u64>, update: Option<u64>) -> Option<u64> {
+    match (current, update) {
+        (Some(current), Some(update)) => Some(current.max(update)),
+        (current, update) => update.or(current),
+    }
+}
+
+fn parse_ffmpeg_stream_health(line: &str) -> Option<ParsedStreamHealthDelta> {
+    let delta = ParsedStreamHealthDelta {
+        fps: parse_stat_f64(line, "fps="),
+        dropped_frames: parse_stat_u64(line, "drop_frames=")
+            .or_else(|| parse_stat_u64(line, "drop=")),
+        speed: parse_stat_f64(line, "speed="),
+        bitrate_kbps: parse_stat_bitrate_kbps(line, "bitrate="),
+        total_bytes: parse_stat_u64(line, "total_size="),
+        duplicated_frames: parse_stat_u64(line, "dup_frames=")
+            .or_else(|| parse_stat_u64(line, "dup=")),
+    };
+
+    if delta == ParsedStreamHealthDelta::default() {
         return None;
     }
 
-    Some(StreamHealth {
-        session_id: session_id.to_string(),
-        fps,
-        dropped_frames,
-        speed,
-        created_at: Utc::now().to_rfc3339(),
-    })
+    Some(delta)
 }
 
 fn parse_stat_f64(line: &str, label: &str) -> Option<f64> {
@@ -11200,6 +12324,24 @@ fn parse_stat_f64(line: &str, label: &str) -> Option<f64> {
 
 fn parse_stat_u64(line: &str, label: &str) -> Option<u64> {
     stat_value(line, label)?.parse::<u64>().ok()
+}
+
+fn parse_stat_bitrate_kbps(line: &str, label: &str) -> Option<f64> {
+    let value = stat_value(line, label)?;
+    if value.eq_ignore_ascii_case("n/a") {
+        return None;
+    }
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("kbits/s") {
+        (number, 1.0)
+    } else if let Some(number) = value.strip_suffix("Mbits/s") {
+        (number, 1_000.0)
+    } else if let Some(number) = value.strip_suffix("bits/s") {
+        (number, 0.001)
+    } else {
+        (value, 1.0)
+    };
+    let bitrate = number.parse::<f64>().ok()? * multiplier;
+    bitrate.is_finite().then_some(bitrate)
 }
 
 fn stat_value<'a>(line: &'a str, label: &str) -> Option<&'a str> {
@@ -11625,6 +12767,20 @@ mod tests {
             "software-media-foundation"
         );
         assert_eq!(
+            encoder_bridge_encoded_output_backend_label(
+                EncoderBridgeVideoOutput::RawYuv420p,
+                EncodeBackend::SoftwareOpenH264,
+            ),
+            "software-open-h264"
+        );
+        assert_eq!(
+            encoder_bridge_encoded_output_backend_label(
+                EncoderBridgeVideoOutput::RawYuv420p,
+                EncodeBackend::SoftwareX264,
+            ),
+            "software-x264"
+        );
+        assert_eq!(
             encode_backend_label(Some(EncodeBackend::SoftwareX264)),
             "software-x264"
         );
@@ -11975,6 +13131,376 @@ mod tests {
     }
 
     #[test]
+    fn stream_output_topology_request_normalizes_roles_and_rejects_ambiguous_shapes() {
+        let recording = VideoSettings {
+            preset: VideoPreset::Record4k30,
+            width: 3840,
+            height: 2160,
+            fps: 30,
+            bitrate_kbps: 30_000,
+        };
+        let stream = VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+        };
+        let normalized =
+            normalize_stream_output_topology_probe_params(StreamOutputTopologyProbeParams {
+                ffmpeg_path: Some("".to_string()),
+                stream_profile: stream.clone(),
+                recording_profile: Some(recording.clone()),
+                output_roles: vec![
+                    StreamOutputTopologyRole::Stream,
+                    StreamOutputTopologyRole::Recording,
+                ],
+            })
+            .unwrap();
+        assert_eq!(normalized.ffmpeg_path, None);
+        assert_eq!(
+            normalized.output_roles,
+            vec![
+                StreamOutputTopologyRole::Recording,
+                StreamOutputTopologyRole::Stream,
+            ]
+        );
+
+        let duplicate =
+            normalize_stream_output_topology_probe_params(StreamOutputTopologyProbeParams {
+                ffmpeg_path: None,
+                stream_profile: stream.clone(),
+                recording_profile: Some(recording.clone()),
+                output_roles: vec![
+                    StreamOutputTopologyRole::Recording,
+                    StreamOutputTopologyRole::Stream,
+                    StreamOutputTopologyRole::Stream,
+                ],
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(duplicate.contains("unique"), "{duplicate}");
+
+        let mismatched_shared =
+            normalize_stream_output_topology_probe_params(StreamOutputTopologyProbeParams {
+                ffmpeg_path: None,
+                stream_profile: stream,
+                recording_profile: Some(recording),
+                output_roles: vec![StreamOutputTopologyRole::Shared],
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            mismatched_shared.contains("matching recording and stream profiles"),
+            "{mismatched_shared}"
+        );
+    }
+
+    #[test]
+    fn stream_output_topology_split_probe_rejection_selects_bounded_openh264_fallback() {
+        let plan = EncoderOutputTopologyPlan::split(
+            VideoSettings {
+                preset: VideoPreset::Record4k30,
+                width: 3840,
+                height: 2160,
+                fps: 30,
+                bitrate_kbps: 30_000,
+            },
+            VideoSettings {
+                preset: VideoPreset::StreamSafe1080p60,
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                bitrate_kbps: 6_000,
+            },
+        );
+        let probes = vec![
+            MediaFoundationProfileProbe::Passed {
+                encoder_identity: "hardware-encoder".to_string(),
+                input_subtype: "NV12".to_string(),
+            },
+            MediaFoundationProfileProbe::Rejected {
+                reason: format!("driver rejected stream profile\n{}", "x".repeat(1_000)),
+            },
+        ];
+        let summary = summarize_media_foundation_topology_probes(&plan, &probes);
+        let decision = select_windows_encoded_bridge_decision(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "stream-output-topology-v1:test".to_string(),
+            Some(summary),
+            EncodeBackend::SoftwareOpenH264,
+        );
+
+        assert_eq!(decision.effective, EncoderBridgeVideoOutput::RawYuv420p);
+        assert_eq!(
+            decision.effective_encode_backend,
+            EncodeBackend::SoftwareOpenH264
+        );
+        assert_eq!(
+            decision.probe_state,
+            StreamOutputTopologyProbeState::Rejected
+        );
+        let reason = decision.fallback_reason.unwrap();
+        assert!(reason.contains("stream output"), "{reason}");
+        assert!(reason.contains("1920x1080@60 6000kbps"), "{reason}");
+        assert!(!reason.contains('\n'), "{reason}");
+        assert!(
+            reason.len() <= STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES,
+            "{} > {}",
+            reason.len(),
+            STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn stream_output_topology_requires_every_split_role_to_pass() {
+        let video = VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+        };
+        let plan = EncoderOutputTopologyPlan::split(video.clone(), video);
+        let probes = vec![
+            MediaFoundationProfileProbe::Passed {
+                encoder_identity: "hardware-encoder".to_string(),
+                input_subtype: "NV12".to_string(),
+            },
+            MediaFoundationProfileProbe::Passed {
+                encoder_identity: "hardware-encoder".to_string(),
+                input_subtype: "NV12".to_string(),
+            },
+        ];
+        let decision = select_windows_encoded_bridge_decision(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "stream-output-topology-v1:test".to_string(),
+            Some(summarize_media_foundation_topology_probes(&plan, &probes)),
+            EncodeBackend::SoftwareOpenH264,
+        );
+
+        assert_eq!(
+            decision.effective,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        );
+        assert_eq!(
+            decision.effective_encode_backend,
+            EncodeBackend::HardwareMediaFoundation
+        );
+        assert_eq!(decision.probe_state, StreamOutputTopologyProbeState::Passed);
+        assert_eq!(
+            decision.encoder_identity.as_deref(),
+            Some("hardware-encoder")
+        );
+        assert_eq!(decision.input_subtype.as_deref(), Some("NV12"));
+        assert_eq!(decision.fallback_reason, None);
+    }
+
+    #[test]
+    fn stream_output_topology_capability_key_tracks_binary_profile_and_roles() {
+        let video = VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+        };
+        let shared = EncoderOutputTopologyPlan::shared(video.clone());
+        let split = EncoderOutputTopologyPlan::split(video.clone(), video.clone());
+        let binary = std::env::temp_dir().join(format!(
+            "videorc-stream-topology-key-{}.bin",
+            Uuid::new_v4()
+        ));
+        std::fs::write(&binary, b"first-build").unwrap();
+        let binary = binary.to_string_lossy().into_owned();
+        let first = output_topology_capability_key(
+            &binary,
+            &shared,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "adapter=8086:46a6;driver=1.2.3.4",
+        );
+        assert!(first.starts_with("stream-output-topology-v1:"));
+        assert_eq!(first.len(), "stream-output-topology-v1:".len() + 64);
+        assert_ne!(
+            first,
+            output_topology_capability_key(
+                &binary,
+                &split,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+                "adapter=8086:46a6;driver=1.2.3.4",
+            ),
+            "shared and split output roles require distinct verdicts"
+        );
+
+        let mut higher_fps = video;
+        higher_fps.fps = 60;
+        assert_ne!(
+            first,
+            output_topology_capability_key(
+                &binary,
+                &EncoderOutputTopologyPlan::shared(higher_fps),
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+                "adapter=8086:46a6;driver=1.2.3.4",
+            ),
+            "profile changes must invalidate a verdict"
+        );
+        assert_ne!(
+            first,
+            output_topology_capability_key(
+                &binary,
+                &shared,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+                "adapter=8086:46a6;driver=1.2.3.5",
+            ),
+            "adapter-driver changes must invalidate a topology verdict"
+        );
+
+        std::fs::write(&binary, b"second-build-with-different-length").unwrap();
+        let replaced = output_topology_capability_key(
+            &binary,
+            &shared,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "adapter=8086:46a6;driver=1.2.3.4",
+        );
+        let _ = std::fs::remove_file(&binary);
+        assert_ne!(
+            first, replaced,
+            "an in-place FFmpeg replacement must invalidate a verdict"
+        );
+    }
+
+    #[test]
+    fn windows_graphics_adapter_driver_identity_is_order_stable_and_driver_sensitive() {
+        let integrated = WindowsGraphicsAdapterDriverIdentity {
+            adapter_luid: 0x0000_0001_0000_0002,
+            vendor_id: 0x8086,
+            device_id: 0x46a6,
+            subsystem_id: 0x0000_0001,
+            revision: 3,
+            driver_version: 0x0001_0002_0003_0004,
+        };
+        let discrete = WindowsGraphicsAdapterDriverIdentity {
+            adapter_luid: 0x0000_0003_0000_0004,
+            vendor_id: 0x10de,
+            device_id: 0x2684,
+            subsystem_id: 0x0000_0002,
+            revision: 1,
+            driver_version: 0x0005_0006_0007_0008,
+        };
+        let first = windows_graphics_adapter_driver_identity_material(vec![
+            discrete.clone(),
+            integrated.clone(),
+        ])
+        .unwrap();
+        assert_eq!(
+            first,
+            windows_graphics_adapter_driver_identity_material(vec![
+                integrated.clone(),
+                discrete.clone()
+            ])
+            .unwrap(),
+            "DXGI enumeration order must not perturb a capability key"
+        );
+
+        let mut updated = discrete;
+        updated.driver_version += 1;
+        assert_ne!(
+            first,
+            windows_graphics_adapter_driver_identity_material(vec![integrated, updated]).unwrap(),
+            "a driver update must invalidate cached GPU capability verdicts"
+        );
+        assert_eq!(
+            windows_graphics_adapter_driver_identity_material(Vec::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn windows_native_encoded_probe_key_tracks_adapter_driver_identity() {
+        let video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        let binary =
+            std::env::temp_dir().join(format!("videorc-native-probe-key-{}.bin", Uuid::new_v4()));
+        std::fs::write(&binary, b"ffmpeg-build").unwrap();
+        let binary = binary.to_string_lossy().into_owned();
+        let first = windows_native_encoded_probe_key(
+            &binary,
+            "adapter=10de:2684;driver=31.0.15.5000",
+            "hardware-encoder",
+            "NV12",
+            &video,
+            "shared",
+        );
+        let updated_driver = windows_native_encoded_probe_key(
+            &binary,
+            "adapter=10de:2684;driver=32.0.15.6000",
+            "hardware-encoder",
+            "NV12",
+            &video,
+            "shared",
+        );
+        let replaced_adapter = windows_native_encoded_probe_key(
+            &binary,
+            "adapter=8086:46a6;driver=31.0.101.5000",
+            "hardware-encoder",
+            "NV12",
+            &video,
+            "shared",
+        );
+        let _ = std::fs::remove_file(&binary);
+
+        assert_ne!(
+            first, updated_driver,
+            "a driver update must bypass the native encoded-probe cache"
+        );
+        assert_ne!(
+            first, replaced_adapter,
+            "an adapter change must bypass the native encoded-probe cache"
+        );
+    }
+
+    #[test]
+    fn stream_output_topology_session_start_and_rpc_build_the_same_split_plan() {
+        let mut params = base_params(true, true);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Record4k30,
+            width: 3840,
+            height: 2160,
+            fps: 30,
+            bitrate_kbps: 30_000,
+        };
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "yt",
+        )]);
+        streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+        streaming.default_bitrate_kbps = 6_000;
+        params.streaming = Some(streaming);
+
+        let session_plan = encoder_output_topology_plan_from_session(&params).unwrap();
+        let normalized =
+            normalize_stream_output_topology_probe_params(StreamOutputTopologyProbeParams {
+                ffmpeg_path: None,
+                stream_profile: VideoSettings {
+                    preset: VideoPreset::StreamSafe1080p30,
+                    width: 1920,
+                    height: 1080,
+                    fps: 30,
+                    bitrate_kbps: 6_000,
+                },
+                recording_profile: Some(params.output.video.clone()),
+                output_roles: vec![
+                    StreamOutputTopologyRole::Recording,
+                    StreamOutputTopologyRole::Stream,
+                ],
+            })
+            .unwrap();
+        let preflight_plan = encoder_output_topology_plan_from_probe(&normalized);
+
+        assert_eq!(session_plan, preflight_plan);
+    }
+
+    #[test]
     fn recording_startup_frame_gap_budget_scales_with_target_fps() {
         #[cfg(target_os = "macos")]
         {
@@ -12169,6 +13695,37 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    fn test_active_recording_with_stream_targets(
+        snapshot: StreamTargetsSnapshot,
+    ) -> ActiveRecording {
+        ActiveRecording {
+            session_id: snapshot.session_id.clone(),
+            pid: 0,
+            stdin: None,
+            output_path: None,
+            stream_url: None,
+            ffmpeg_path: "test-ffmpeg".to_string(),
+            started_at: Utc::now().to_rfc3339(),
+            capture_epoch: Arc::new(std::sync::OnceLock::new()),
+            capture_started_fallback: Instant::now(),
+            mode: "stream".to_string(),
+            audio_tracks: Vec::new(),
+            pipeline: RecordingPipeline::new(false, true, &[]),
+            native_audio: None,
+            ffmpeg_live_audio_session: None,
+            screen_overlay: None,
+            encoder_bridge: None,
+            encoder_bridge_stream: None,
+            stream_targets_snapshot: Arc::new(StdMutex::new(snapshot)),
+            captioned_copy_requested: false,
+            keep_original_media: false,
+            comment_highlight_available: false,
+            _capture_permit: None,
+            stop_intent_sender: None,
+            stop_requested: false,
+        }
     }
 
     fn test_state_with_file_database(directory: &Path) -> AppState {
@@ -12800,6 +14357,262 @@ mod tests {
     }
 
     #[test]
+    fn youtube_1080p_stream_presets_have_fixed_provider_rates() {
+        let youtube_30 = video_preset_defaults(VideoPreset::StreamYoutube1080p30);
+        assert_eq!(
+            youtube_30,
+            VideoSettings {
+                preset: VideoPreset::StreamYoutube1080p30,
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate_kbps: 10_000,
+            }
+        );
+        let youtube_60 = video_preset_defaults(VideoPreset::StreamYoutube1080p60);
+        assert_eq!(
+            youtube_60,
+            VideoSettings {
+                preset: VideoPreset::StreamYoutube1080p60,
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                bitrate_kbps: 12_000,
+            }
+        );
+
+        let mut modified = youtube_60;
+        modified.bitrate_kbps = 11_999;
+        assert!(
+            validate_named_video_profile(&modified)
+                .unwrap_err()
+                .to_string()
+                .contains("12000kbps")
+        );
+    }
+
+    #[test]
+    fn youtube_only_uses_validated_1080p_provider_rate() {
+        for (preset, bitrate_kbps) in [
+            (VideoPreset::StreamYoutube1080p30, 10_000),
+            (VideoPreset::StreamYoutube1080p60, 12_000),
+        ] {
+            let mut params = base_params(false, true);
+            let mut streaming = streaming_for(&[(
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "youtube-key",
+            )]);
+            streaming.default_output_preset = preset.clone();
+            streaming.default_bitrate_kbps = bitrate_kbps;
+            params.streaming = Some(streaming);
+
+            let plan =
+                resolve_provider_stream_output_plan_with_separate_roles(&params, false).unwrap();
+            assert_eq!(plan.stream_video.preset, preset);
+            assert_eq!(plan.stream_video.bitrate_kbps, bitrate_kbps);
+            assert!(!plan.separate_encoded_output_role);
+
+            normalize_stream_only_output_video(&mut params).unwrap();
+            assert_eq!(params.output.video.bitrate_kbps, bitrate_kbps);
+            validate_outputs(&params).unwrap();
+        }
+    }
+
+    #[test]
+    fn youtube_1080p60_is_inside_the_streaming_compositor_bridge_envelope() {
+        let mut params = base_params(false, true);
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "youtube-key",
+        )]);
+        streaming.default_output_preset = VideoPreset::StreamYoutube1080p60;
+        streaming.default_bitrate_kbps = 12_000;
+        params.streaming = Some(streaming);
+        normalize_stream_only_output_video(&mut params).unwrap();
+
+        assert_eq!(requested_compositor_bridge_fps(&params), 60);
+        assert!(streaming_bridge_60fps_eligible(&params));
+
+        params.output.record_enabled = true;
+        params.output.video = video_preset_defaults(VideoPreset::Record4k30);
+        assert!(
+            !streaming_bridge_60fps_eligible(&params),
+            "driving a 4K recording surface at the stream's 60fps cadence is outside the proven envelope"
+        );
+    }
+
+    #[test]
+    fn mixed_providers_sharing_one_encode_use_strictest_safe_profile() {
+        let mut params = base_params(false, true);
+        let mut streaming = streaming_for(&[
+            (
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "youtube-key",
+            ),
+            (
+                StreamPlatform::Twitch,
+                "rtmp://live.twitch.tv/app",
+                "twitch-key",
+            ),
+        ]);
+        streaming.default_output_preset = VideoPreset::StreamYoutube1080p60;
+        streaming.default_bitrate_kbps = 12_000;
+        params.streaming = Some(streaming);
+
+        let plan = resolve_provider_stream_output_plan_with_separate_roles(&params, false).unwrap();
+
+        assert_eq!(
+            plan.stream_video,
+            video_preset_defaults(VideoPreset::StreamSafe1080p60)
+        );
+        assert!(
+            plan.targets
+                .iter()
+                .all(|target| target.video.bitrate_kbps == 6000)
+        );
+        assert!(!plan.separate_encoded_output_role);
+    }
+
+    #[test]
+    fn mixed_providers_keep_youtube_rate_only_with_proven_separate_role() {
+        let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        let mut streaming = streaming_for(&[
+            (
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "youtube-key",
+            ),
+            (
+                StreamPlatform::Twitch,
+                "rtmp://live.twitch.tv/app",
+                "twitch-key",
+            ),
+        ]);
+        streaming.default_output_preset = VideoPreset::StreamYoutube1080p30;
+        streaming.default_bitrate_kbps = 10_000;
+        params.streaming = Some(streaming);
+
+        let plan = resolve_provider_stream_output_plan_with_separate_roles(&params, true).unwrap();
+
+        assert!(plan.separate_encoded_output_role);
+        assert_eq!(plan.stream_video.bitrate_kbps, 10_000);
+        assert_eq!(
+            plan.targets
+                .iter()
+                .find(|target| target.platform == StreamPlatform::Youtube)
+                .unwrap()
+                .video
+                .bitrate_kbps,
+            10_000
+        );
+        assert_eq!(
+            plan.targets
+                .iter()
+                .find(|target| target.platform == StreamPlatform::Twitch)
+                .unwrap()
+                .video
+                .bitrate_kbps,
+            6000
+        );
+        assert!(
+            validate_provider_plan_against_effective_bridge(
+                &plan,
+                EncoderBridgeVideoOutput::RawYuv420p
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("did not prove a separate encoded stream output")
+        );
+        validate_provider_plan_against_effective_bridge(
+            &plan,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn non_youtube_target_rejects_explicit_youtube_profile() {
+        let mut params = base_params(false, true);
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Twitch,
+            "rtmp://live.twitch.tv/app",
+            "twitch-key",
+        )]);
+        let twitch = streaming
+            .targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Twitch)
+            .unwrap();
+        twitch.output_preset = Some(VideoPreset::StreamYoutube1080p30);
+        twitch.output_bitrate_kbps = Some(10_000);
+        params.streaming = Some(streaming);
+
+        let error = resolve_provider_stream_output_plan_with_separate_roles(&params, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("only for YouTube"), "{error}");
+    }
+
+    #[test]
+    fn youtube_1080p_provider_rates_follow_streaming_entitlements() {
+        for (preset, bitrate_kbps) in [
+            (VideoPreset::StreamYoutube1080p30, 10_000),
+            (VideoPreset::StreamYoutube1080p60, 12_000),
+        ] {
+            let mut params = base_params(false, true);
+            let mut streaming = streaming_for(&[(
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "youtube-key",
+            )]);
+            streaming.default_output_preset = preset;
+            streaming.default_bitrate_kbps = bitrate_kbps;
+            params.streaming = Some(streaming);
+
+            let basic_error =
+                validate_session_entitlements(&params, &entitlements::basic_entitlements())
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                basic_error.contains("allows livestreaming up to 1920x1080"),
+                "{basic_error}"
+            );
+            validate_session_entitlements(
+                &params,
+                &entitlements::premium_entitlements(EntitlementSource::Creem),
+            )
+            .unwrap();
+            validate_session_entitlements(&params, &entitlements::developer_test_entitlements())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn youtube_4k60_streaming_remains_unsupported() {
+        let mut params = base_params(false, true);
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "youtube-key",
+        )]);
+        streaming.default_output_preset = VideoPreset::Record4k60Experimental;
+        streaming.default_bitrate_kbps = 50_000;
+        params.streaming = Some(streaming);
+
+        let error = normalize_stream_only_output_video(&mut params)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("requires the YouTube 4K30 stream profile"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn resolves_single_ready_stream_target() {
         let streaming = streaming_for(&[(
             StreamPlatform::Twitch,
@@ -13320,6 +15133,78 @@ mod tests {
         assert!(twitch.message.is_some());
         // A skipped target never leaks a URL.
         assert!(twitch.redacted_url.is_none());
+    }
+
+    #[test]
+    fn stream_target_failure_updates_the_authoritative_full_snapshot_once() {
+        let shared = Arc::new(StdMutex::new(StreamTargetsSnapshot {
+            session_id: "stream-generation-a".to_string(),
+            targets: vec![StreamTargetRuntime {
+                target_id: "youtube".to_string(),
+                platform: StreamPlatform::Youtube,
+                label: "YouTube".to_string(),
+                state: StreamTargetState::Live,
+                message: None,
+                redacted_url: Some("rtmp://youtube.example/live/••••".to_string()),
+            }],
+        }));
+
+        let (label, emitted) =
+            mark_stream_target_failed(&shared, 0, "Connection refused".to_string())
+                .expect("live target must transition");
+        assert_eq!(label, "YouTube");
+        assert_eq!(emitted.session_id, "stream-generation-a");
+        assert_eq!(emitted.targets[0].state, StreamTargetState::Failed);
+        assert_eq!(
+            emitted.targets[0].message.as_deref(),
+            Some("Connection refused")
+        );
+        assert_eq!(stream_targets_snapshot_value(&shared), emitted);
+        assert!(
+            mark_stream_target_failed(&shared, 0, "later duplicate".to_string()).is_none(),
+            "duplicate stderr lines must not create a second transition"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_targets_snapshot_is_generation_scoped_and_missing_session_fails_closed() {
+        let state = test_state();
+        let missing = current_stream_targets_snapshot(&state)
+            .await
+            .expect_err("idle state must not look like an empty healthy snapshot");
+        assert!(missing.to_string().contains("No active capture session"));
+
+        let generation_a = StreamTargetsSnapshot {
+            session_id: "stream-generation-a".to_string(),
+            targets: vec![StreamTargetRuntime {
+                target_id: "youtube".to_string(),
+                platform: StreamPlatform::Youtube,
+                label: "YouTube".to_string(),
+                state: StreamTargetState::Live,
+                message: None,
+                redacted_url: Some("rtmp://youtube.example/live/••••".to_string()),
+            }],
+        };
+        *state.recording.lock().await = Some(test_active_recording_with_stream_targets(
+            generation_a.clone(),
+        ));
+        assert_eq!(
+            current_stream_targets_snapshot(&state).await.unwrap(),
+            generation_a
+        );
+
+        let generation_b = StreamTargetsSnapshot {
+            session_id: "stream-generation-b".to_string(),
+            targets: Vec::new(),
+        };
+        *state.recording.lock().await = Some(test_active_recording_with_stream_targets(
+            generation_b.clone(),
+        ));
+        assert_eq!(
+            current_stream_targets_snapshot(&state).await.unwrap(),
+            generation_b,
+            "a replacement ActiveRecording must never inherit the prior target snapshot"
+        );
     }
 
     #[test]
@@ -16010,6 +17895,10 @@ mod tests {
             screen_overlay: None,
             encoder_bridge: None,
             encoder_bridge_stream: None,
+            stream_targets_snapshot: Arc::new(StdMutex::new(StreamTargetsSnapshot {
+                session_id: "live-audio-lock-test".to_string(),
+                targets: Vec::new(),
+            })),
             captioned_copy_requested: false,
             keep_original_media: false,
             comment_highlight_available: false,
@@ -18064,6 +19953,7 @@ mod tests {
         // stream burn-in must force a separate stream leg so the recording stays clean.
         // No StreamingSettings → the stream output IS the recording profile.
         let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
         params.streaming = None;
 
         let without_burn_in = recording_compositor_stream_output(
@@ -18314,6 +20204,7 @@ mod tests {
     #[test]
     fn captioned_record_and_stream_rejects_multiple_target_profiles() {
         let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
         params.captions = Some(crate::protocol::CaptionsSessionParams {
             enabled: true,
             burn_target: crate::captions::CaptionBurnTarget::Stream,
@@ -18379,8 +20270,8 @@ mod tests {
         {
             let error = validate_outputs(&captions_off).unwrap_err().to_string();
             assert!(
-                error.contains("VideoToolbox"),
-                "captions-off must fail for the split-output platform reason, not captions: {error}"
+                error.contains("share one encoder"),
+                "captions-off must fail for the unproven split-output reason, not captions: {error}"
             );
         }
     }
@@ -18482,7 +20373,7 @@ mod tests {
             "rtmp://a.rtmp.youtube.com/live2",
             "yt",
         )]);
-        streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+        streaming.default_output_preset = VideoPreset::Custom;
         streaming.default_bitrate_kbps = 9000;
         params.streaming = Some(streaming);
 
@@ -18629,7 +20520,10 @@ mod tests {
             bitrate_kbps: 30_000,
         };
         let error = validate_outputs(&stream_only_4k).unwrap_err().to_string();
-        assert!(error.contains("4K livestreaming is not enabled"), "{error}");
+        assert!(
+            error.contains("requires the YouTube 4K30 stream profile"),
+            "{error}"
+        );
 
         let mut high_bitrate_stream = base_params(false, true);
         high_bitrate_stream.output.video = VideoSettings {
@@ -18804,11 +20698,14 @@ mod tests {
         };
 
         let error = validate_outputs(&params).unwrap_err().to_string();
-        assert!(error.contains("4K livestreaming is not enabled"), "{error}");
+        assert!(
+            error.contains("requires the YouTube 4K30 stream profile"),
+            "{error}"
+        );
     }
 
     #[test]
-    fn rejects_4k_record_with_stream_fps_above_recording_fps() {
+    fn rejects_4k_record_with_60fps_stream_without_proven_split_role() {
         let mut params = base_params(true, true);
         params.output.video = VideoSettings {
             preset: VideoPreset::Record4k30,
@@ -18827,7 +20724,7 @@ mod tests {
         params.streaming = Some(streaming);
 
         let error = validate_outputs(&params).unwrap_err().to_string();
-        assert!(error.contains("stream FPS no higher"), "{error}");
+        assert!(error.contains("share one encoder"), "{error}");
     }
 
     #[test]
@@ -18926,17 +20823,85 @@ mod tests {
 
     #[test]
     fn parses_ffmpeg_stream_health() {
-        let health = parse_ffmpeg_stream_health(
-            "session",
-            "frame=151 fps=29.97 q=-0.0 size=1024kB drop=3 speed=1.02x",
+        let delta = parse_ffmpeg_stream_health(
+            "frame=151 fps=29.97 q=-0.0 bitrate=12000.5kbits/s total_size=2048 dup=2 drop=3 speed=1.02x",
         )
         .unwrap();
 
-        assert_eq!(health.fps, Some(29.97));
-        assert_eq!(health.dropped_frames, Some(3));
-        assert_eq!(health.speed, Some(1.02));
+        assert_eq!(delta.fps, Some(29.97));
+        assert_eq!(delta.dropped_frames, Some(3));
+        assert_eq!(delta.speed, Some(1.02));
+        assert_eq!(delta.bitrate_kbps, Some(12_000.5));
+        assert_eq!(delta.total_bytes, Some(2048));
+        assert_eq!(delta.duplicated_frames, Some(2));
 
-        let progress_health = parse_ffmpeg_stream_health("session", "drop_frames=7").unwrap();
-        assert_eq!(progress_health.dropped_frames, Some(7));
+        let progress_delta = parse_ffmpeg_stream_health("drop_frames=7").unwrap();
+        assert_eq!(progress_delta.dropped_frames, Some(7));
+        assert_eq!(
+            parse_ffmpeg_stream_health("bitrate=N/A"),
+            None,
+            "unknown progress values remain sparse"
+        );
+        assert_eq!(
+            parse_ffmpeg_stream_health("total_size=broken"),
+            None,
+            "malformed counters do not create health updates"
+        );
+    }
+
+    #[test]
+    fn stream_health_accumulator_preserves_sparse_values_and_monotonic_counters() {
+        let mut accumulator = StreamHealthAccumulator::new("session", 7);
+        let first = accumulator.apply(
+            "session",
+            7,
+            parse_ffmpeg_stream_health(
+                "fps=60.0 bitrate=12.0Mbits/s total_size=4096 dup_frames=4 drop_frames=3 speed=1.01x",
+            )
+            .unwrap(),
+        );
+        let second = accumulator.apply(
+            "session",
+            7,
+            parse_ffmpeg_stream_health(
+                "bitrate=11900kbits/s total_size=2048 dup_frames=2 drop_frames=1",
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(second.fps, first.fps);
+        assert_eq!(second.speed, first.speed);
+        assert_eq!(second.bitrate_kbps, Some(11_900.0));
+        assert_eq!(second.total_bytes, Some(4096));
+        assert_eq!(second.duplicated_frames, Some(4));
+        assert_eq!(second.dropped_frames, Some(3));
+    }
+
+    #[test]
+    fn stream_health_accumulator_resets_for_process_or_session_generation() {
+        let mut accumulator = StreamHealthAccumulator::new("session-a", 1);
+        let _ = accumulator.apply(
+            "session-a",
+            1,
+            parse_ffmpeg_stream_health("fps=60 total_size=9000 dup_frames=8").unwrap(),
+        );
+
+        let restarted = accumulator.apply(
+            "session-a",
+            2,
+            parse_ffmpeg_stream_health("total_size=10 dup_frames=1").unwrap(),
+        );
+        assert_eq!(restarted.fps, None);
+        assert_eq!(restarted.total_bytes, Some(10));
+        assert_eq!(restarted.duplicated_frames, Some(1));
+
+        let new_session = accumulator.apply(
+            "session-b",
+            2,
+            parse_ffmpeg_stream_health("bitrate=5000kbits/s").unwrap(),
+        );
+        assert_eq!(new_session.session_id, "session-b");
+        assert_eq!(new_session.total_bytes, None);
+        assert_eq!(new_session.duplicated_frames, None);
     }
 }

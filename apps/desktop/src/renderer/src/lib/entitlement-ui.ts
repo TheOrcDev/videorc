@@ -4,6 +4,7 @@ import {
   entitlementDisabledReason,
   isFeatureEntitled
 } from './entitlements'
+import { streamVideoProfileValidationReason } from './capture'
 import { isPremiumUpgradeMessage, VIDEORC_PREMIUM_URL } from './premium-upgrade'
 
 export type EntitlementUiGate =
@@ -114,7 +115,9 @@ export function videoProfileEntitlementGate({
     (bitrateLimit !== undefined && video.bitrateKbps > bitrateLimit)
 
   if (!overLimit) {
-    return { allowed: true }
+    const unsupportedReason =
+      kind === 'streaming' ? streamVideoProfileValidationReason(video) : null
+    return unsupportedReason ? lockedGate(featureId, unsupportedReason, true) : { allowed: true }
   }
 
   const reason = shouldOfferPremiumForProfileLimit(entitlements)

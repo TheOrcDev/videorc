@@ -249,6 +249,25 @@ describe('validateSupportBundle', () => {
     assert.equal(result.ok, true)
   })
 
+  it('requires final and peak stream counters plus the effective encoder path', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    bundle.sessions[0].finalDiagnostics = validWindowsStreamDiagnostics()
+
+    assert.equal(validateSupportBundle(bundle, { windowsAcceptance: true }).ok, true)
+
+    delete bundle.sessions[0].finalDiagnostics.streamMeasuredBitrateMinKbps
+    delete bundle.sessions[0].finalDiagnostics.encoderBridgeEffectiveVideoOutput
+    bundle.sessions[0].finalDiagnostics.encoderBridgeRequestedVideoOutput =
+      'windows-media-foundation-h264-mpegts'
+    bundle.sessions[0].finalDiagnostics.encoderBridgeEffectiveVideoOutput = 'raw-yuv420p'
+    delete bundle.sessions[0].finalDiagnostics.encoderBridgeEncodedOutputFallbackReason
+
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /streamMeasuredBitrateMinKbps/)
+    assert.match(result.failures.join('\n'), /fallback reason/)
+  })
+
   it('accepts visible persisted software rendering with recovery evidence', () => {
     const bundle = validWindowsAcceptanceBundle()
     bundle.rendererDiagnostics.runtimeInfo.hardwareAccelerationDisabled = true
@@ -412,4 +431,20 @@ function validWindowsAcceptanceBundle(overrides = {}) {
     },
     ...overrides
   })
+}
+
+function validWindowsStreamDiagnostics() {
+  return {
+    activeOutputMode: 'stream',
+    encodeBackend: 'hardware-media-foundation',
+    compositorBackend: 'cpu',
+    streamMeasuredBitrateKbps: 11_980,
+    streamMeasuredBitrateMinKbps: 10_900,
+    streamMeasuredBitrateMaxKbps: 12_090,
+    streamOutputTotalBytes: 200_000_000,
+    streamDuplicatedFrames: 0,
+    encoderBridgeRequestedVideoOutput: 'windows-media-foundation-h264-mpegts',
+    encoderBridgeEffectiveVideoOutput: 'windows-media-foundation-h264-mpegts',
+    encoderBridgeEncodedOutputBackend: 'windows-media-foundation'
+  }
 }

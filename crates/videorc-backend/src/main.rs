@@ -112,10 +112,11 @@ use protocol::{
     ToolStatus,
 };
 use recording::{
-    create_preview_snapshot, idle_status, live_preview_status, preview_file_path, remux_session,
-    resume_pending_repair_jobs, shutdown_capture_processes, start_live_preview, start_session,
-    stop_live_preview, stop_recording, subscribe_live_preview_frames,
-    update_active_audio_processing, update_preview_frame_age,
+    create_preview_snapshot, current_stream_targets_snapshot, idle_status, live_preview_status,
+    preview_file_path, probe_stream_output_topology, remux_session, resume_pending_repair_jobs,
+    shutdown_capture_processes, start_live_preview, start_session, stop_live_preview,
+    stop_recording, subscribe_live_preview_frames, update_active_audio_processing,
+    update_preview_frame_age,
 };
 use scene::{
     nudge_source, reorder_sources, reset_source_transform, scene_from_capture_config,
@@ -5766,6 +5767,23 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "stream.output.topology.probe" => {
+            match serde_json::from_value::<protocol::StreamOutputTopologyProbeParams>(
+                command.params,
+            ) {
+                Ok(params) => match probe_stream_output_topology(params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "stream-output-topology-probe-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "session.start" => {
             let mut params_value = command.params;
             if let Err(error) = resolve_start_session_resources(state, &mut params_value, role) {
@@ -7126,6 +7144,24 @@ async fn handle_text_message_with_role(
             }
         },
         "recording.status" => ServerResponse::ok(command.id, current_recording_status(state).await),
+        "stream.targets.snapshot" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "stream.targets.snapshot does not accept parameters",
+                )
+            } else {
+                match current_stream_targets_snapshot(state).await {
+                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "stream-targets-unavailable",
+                        error.to_string(),
+                    ),
+                }
+            }
+        }
         method => ServerResponse::error(
             command.id,
             "unknown-method",
@@ -8590,6 +8626,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_targets_snapshot_rpc_fails_closed_without_an_active_session() {
+        let state = test_state();
+        let response = handle_text_message(
+            &state,
+            r#"{"id":"targets","method":"stream.targets.snapshot","params":{}}"#,
+        )
+        .await;
+
+        assert!(!response.ok);
+        let error = response.error.expect("idle snapshot error");
+        assert_eq!(error.code, "stream-targets-unavailable");
+        assert!(error.message.contains("No active capture session"));
+    }
+
+    #[tokio::test]
+    async fn stream_targets_snapshot_rpc_rejects_non_empty_parameters() {
+        let state = test_state();
+        let response = handle_text_message(
+            &state,
+            r#"{"id":"targets","method":"stream.targets.snapshot","params":{"sessionId":"stale"}}"#,
+        )
+        .await;
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.expect("parameter rejection").code,
+            "invalid-params"
+        );
+    }
+
+    #[tokio::test]
     async fn live_audio_processing_update_requires_an_active_matching_session() {
         let state = test_state();
         let response = handle_text_message(
@@ -9568,6 +9635,49 @@ mod tests {
             .to_string(),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn stream_output_topology_probe_rpc_returns_a_secret_free_typed_verdict() {
+        let state = test_state();
+        let response = request_for_test(
+            &state,
+            "topology-probe",
+            "stream.output.topology.probe",
+            json!({
+                "streamProfile": {
+                    "preset": "stream-safe-1080p30",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 30,
+                    "bitrateKbps": 6000
+                },
+                "outputRoles": ["shared"]
+            }),
+        )
+        .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let payload = response.payload.expect("topology probe payload");
+        assert_eq!(payload["streamProfile"]["width"], 1920);
+        assert_eq!(payload["outputRoles"], json!(["shared"]));
+        assert_eq!(
+            payload["requestedBridgeOutput"], payload["effectiveBridgeOutput"],
+            "the source default must not fabricate a probed fallback"
+        );
+        assert_eq!(payload["probeState"], "not-required");
+        let capability_key = payload["capabilityKey"]
+            .as_str()
+            .expect("hashed capability key");
+        assert!(capability_key.starts_with("stream-output-topology-v1:"));
+        assert_eq!(
+            capability_key.len(),
+            "stream-output-topology-v1:".len() + 64
+        );
+        let serialized = payload.to_string().to_ascii_lowercase();
+        assert!(!serialized.contains("streamkey"));
+        assert!(!serialized.contains("serverurl"));
+        assert!(!serialized.contains("accesstoken"));
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import type {
+  DiagnosticStats,
   OAuthCallbackResult,
   OAuthCompleteParams,
   NoiseCleanupJob,
@@ -9,7 +10,10 @@ import type {
   SessionDeletionOperation,
   SessionHealthEventsPage,
   SessionListPage,
-  SessionLogsPage
+  SessionLogsPage,
+  StreamOutputTopologyProbeParams,
+  StreamOutputTopologyProbeResult,
+  StreamTargetsSnapshot
 } from './backend'
 import {
   parseBackendWireMessage,
@@ -23,6 +27,149 @@ import {
 } from './backend-rpc-contract'
 
 describe('backend RPC contract', () => {
+  it('types role-authoritative encoder bridge process diagnostics', () => {
+    expectTypeOf<
+      DiagnosticStats['encoderBridgeRecordingRawVideoCopiedFrames']
+    >().toEqualTypeOf<number>()
+    expectTypeOf<
+      DiagnosticStats['encoderBridgeStreamRawVideoCopiedFrames']
+    >().toEqualTypeOf<number>()
+    expectTypeOf<DiagnosticStats['encoderBridgeRecordingDroppedFrames']>().toEqualTypeOf<number>()
+    expectTypeOf<DiagnosticStats['encoderBridgeStreamDroppedFrames']>().toEqualTypeOf<number>()
+    expectTypeOf<DiagnosticStats['encoderBridgeRecordingEncoderSpeed']>().toEqualTypeOf<
+      number | undefined
+    >()
+    expectTypeOf<DiagnosticStats['encoderBridgeStreamEncoderSpeed']>().toEqualTypeOf<
+      number | undefined
+    >()
+  })
+
+  it('types and exactly validates the secret-free stream output topology probe', () => {
+    expectTypeOf<
+      BackendRpcParams<'stream.output.topology.probe'>
+    >().toEqualTypeOf<StreamOutputTopologyProbeParams>()
+    expectTypeOf<
+      BackendRpcResult<'stream.output.topology.probe'>
+    >().toEqualTypeOf<StreamOutputTopologyProbeResult>()
+
+    const params: StreamOutputTopologyProbeParams = {
+      streamProfile: {
+        preset: 'stream-safe-1080p60',
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        bitrateKbps: 6000
+      },
+      recordingProfile: {
+        preset: 'tutorial-1080p30',
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        bitrateKbps: 6000
+      },
+      outputRoles: ['stream', 'recording']
+    }
+    expect(validateBackendRpcParams('stream.output.topology.probe', params)).toEqual(params)
+    expect(() =>
+      validateBackendRpcParams('stream.output.topology.probe', {
+        ...params,
+        streamKey: 'must-never-cross-this-contract'
+      })
+    ).toThrow('streamKey must be a known field')
+    expect(() =>
+      validateBackendRpcParams('stream.output.topology.probe', {
+        ...params,
+        recordingProfile: undefined,
+        outputRoles: ['recording', 'stream']
+      })
+    ).toThrow('recordingProfile')
+    expect(() =>
+      validateBackendRpcParams('stream.output.topology.probe', {
+        ...params,
+        outputRoles: ['stream', 'stream']
+      })
+    ).toThrow('outputRoles')
+
+    const result: StreamOutputTopologyProbeResult = {
+      capabilityKey: `stream-output-topology-v1:${'a'.repeat(64)}`,
+      streamProfile: params.streamProfile,
+      recordingProfile: params.recordingProfile,
+      outputRoles: ['recording', 'stream'],
+      requestedBridgeOutput: 'windows-media-foundation-h264-mpegts',
+      effectiveBridgeOutput: 'raw-yuv420p',
+      effectiveEncodeBackend: 'software-open-h264',
+      probeState: 'rejected',
+      fallbackReason: 'Media Foundation stream output probe rejected this profile.'
+    }
+    expect(validateBackendRpcResult('stream.output.topology.probe', result)).toEqual(result)
+    for (const malformed of [
+      { ...result, capabilityKey: 'not-a-capability-key' },
+      { ...result, fallbackReason: undefined },
+      { ...result, outputRoles: ['stream', 'recording'] },
+      { ...result, streamKey: 'must-never-come-back' }
+    ]) {
+      expect(() => validateBackendRpcResult('stream.output.topology.probe', malformed)).toThrow()
+    }
+  })
+
+  it('types and exactly validates authoritative secret-free stream-target snapshots', () => {
+    expectTypeOf<BackendRpcParams<'stream.targets.snapshot'>>().toEqualTypeOf<undefined>()
+    expectTypeOf<
+      BackendRpcResult<'stream.targets.snapshot'>
+    >().toEqualTypeOf<StreamTargetsSnapshot>()
+    expectTypeOf<BackendEventMap['stream.targets']>().toEqualTypeOf<StreamTargetsSnapshot>()
+
+    const snapshot: StreamTargetsSnapshot = {
+      sessionId: 'stream-generation-a',
+      targets: [
+        {
+          targetId: 'youtube',
+          platform: 'youtube',
+          label: 'YouTube',
+          state: 'live',
+          redactedUrl: 'rtmp://youtube.example/live/••••'
+        },
+        {
+          targetId: 'twitch',
+          platform: 'twitch',
+          label: 'Twitch',
+          state: 'failed',
+          message: 'Connection refused'
+        }
+      ]
+    }
+
+    expect(validateBackendRpcParams('stream.targets.snapshot', undefined)).toBeUndefined()
+    expect(validateBackendRpcResult('stream.targets.snapshot', snapshot)).toEqual(snapshot)
+    expect(validateBackendEventPayload('stream.targets', snapshot)).toEqual(snapshot)
+    expect(() => validateBackendRpcParams('stream.targets.snapshot', {})).toThrow(
+      'stream.targets.snapshot.params'
+    )
+
+    for (const malformed of [
+      {
+        ...snapshot,
+        targets: [{ ...snapshot.targets[0], streamKey: 'must-never-cross-this-contract' }]
+      },
+      {
+        ...snapshot,
+        targets: [{ ...snapshot.targets[0], url: 'rtmp://youtube.example/live/actual-secret' }]
+      },
+      {
+        ...snapshot,
+        targets: [snapshot.targets[0], { ...snapshot.targets[1], targetId: 'youtube' }]
+      },
+      {
+        ...snapshot,
+        targets: [{ ...snapshot.targets[0], state: 'healthy' }]
+      },
+      { ...snapshot, unexpected: true }
+    ]) {
+      expect(() => validateBackendRpcResult('stream.targets.snapshot', malformed)).toThrow()
+      expect(() => validateBackendEventPayload('stream.targets', malformed)).toThrow()
+    }
+  })
+
   it('types and strictly validates Noise Cleanup commands and status events', () => {
     expectTypeOf<BackendRpcParams<'noiseCleanup.start'>>().toEqualTypeOf<{ sessionId: string }>()
     expectTypeOf<BackendRpcParams<'noiseCleanup.cancel'>>().toEqualTypeOf<{ jobId: string }>()
@@ -382,6 +529,8 @@ describe('backend RPC contract', () => {
       expect.arrayContaining([
         'account.complete_sign_in',
         'platformAccounts.oauth.complete',
+        'stream.output.topology.probe',
+        'stream.targets.snapshot',
         'session.start',
         'session.stop',
         'scene.layout.apply_preview',

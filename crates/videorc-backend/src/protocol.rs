@@ -841,6 +841,10 @@ pub enum VideoPreset {
     StreamSafe1080p30,
     #[serde(rename = "stream-safe-1080p60")]
     StreamSafe1080p60,
+    #[serde(rename = "stream-youtube-1080p30")]
+    StreamYoutube1080p30,
+    #[serde(rename = "stream-youtube-1080p60")]
+    StreamYoutube1080p60,
     #[serde(rename = "stream-youtube-4k30")]
     StreamYoutube4k30,
     #[serde(rename = "stream-1080p60")]
@@ -1196,6 +1200,12 @@ pub struct StreamHealth {
     pub fps: Option<f64>,
     pub dropped_frames: Option<u64>,
     pub speed: Option<f64>,
+    #[serde(default)]
+    pub bitrate_kbps: Option<f64>,
+    #[serde(default)]
+    pub total_bytes: Option<u64>,
+    #[serde(default)]
+    pub duplicated_frames: Option<u64>,
     pub created_at: String,
 }
 
@@ -1217,6 +1227,74 @@ pub enum EncodeBackend {
     /// failed — software Media Foundation ran below realtime on real devices
     /// (issue #149).
     SoftwareOpenH264,
+}
+
+/// One production encoder role represented by an off-air stream topology probe.
+///
+/// `shared` means one encoded video output feeds every enabled output. A separate
+/// recording/stream pair is explicit so preflight probes the same two encoders
+/// that session start will create, even when both use the same video profile.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamOutputTopologyRole {
+    Shared,
+    Recording,
+    Stream,
+}
+
+/// Secret-free input for `stream.output.topology.probe`.
+///
+/// The renderer sends already-normalized effective video profiles, never RTMP
+/// URLs, stream keys, OAuth credentials, or a full `StartSessionParams`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StreamOutputTopologyProbeParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ffmpeg_path: Option<String>,
+    pub stream_profile: VideoSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_profile: Option<VideoSettings>,
+    pub output_roles: Vec<StreamOutputTopologyRole>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StreamOutputBridge {
+    #[serde(rename = "raw-yuv420p")]
+    RawYuv420p,
+    #[serde(rename = "videotoolbox-h264-annex-b")]
+    VideoToolboxH264AnnexB,
+    #[serde(rename = "videotoolbox-h264-mpegts")]
+    VideoToolboxH264MpegTs,
+    #[serde(rename = "windows-media-foundation-h264-mpegts")]
+    WindowsMediaFoundationH264MpegTs,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamOutputTopologyProbeState {
+    NotRequired,
+    Passed,
+    Rejected,
+    Unsupported,
+}
+
+/// Completed output-topology verdict. The capability key is a SHA-256 over the
+/// trusted FFmpeg identity, normalized profiles, roles, and requested bridge;
+/// it deliberately does not expose a local executable path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamOutputTopologyProbeResult {
+    pub capability_key: String,
+    pub stream_profile: VideoSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_profile: Option<VideoSettings>,
+    pub output_roles: Vec<StreamOutputTopologyRole>,
+    pub requested_bridge_output: StreamOutputBridge,
+    pub effective_bridge_output: StreamOutputBridge,
+    pub effective_encode_backend: EncodeBackend,
+    pub probe_state: StreamOutputTopologyProbeState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
 }
 
 /// Which compositor rendered the active shared-compositor frame.
@@ -1300,6 +1378,18 @@ pub struct DiagnosticStats {
     pub encoder_bridge_output_queue_dropped_frames: u64,
     pub encoder_bridge_input_fps: Option<f64>,
     pub encoder_bridge_dropped_frames: u64,
+    /// FFmpeg progress-reported drops attributable to the recording bridge.
+    #[serde(default)]
+    pub encoder_bridge_recording_dropped_frames: u64,
+    /// FFmpeg progress-reported drops attributable to the stream bridge.
+    #[serde(default)]
+    pub encoder_bridge_stream_dropped_frames: u64,
+    /// FFmpeg progress-reported encoder speed for the recording bridge.
+    #[serde(default)]
+    pub encoder_bridge_recording_encoder_speed: Option<f64>,
+    /// FFmpeg progress-reported encoder speed for the stream bridge.
+    #[serde(default)]
+    pub encoder_bridge_stream_encoder_speed: Option<f64>,
     /// Compositor frames re-fed to the encoder on under-run (duplicate frames in the
     /// final file). Honest signal for the recording repeated-frame gate.
     #[serde(default)]
@@ -1334,6 +1424,12 @@ pub struct DiagnosticStats {
     /// not zero-copy VideoToolbox submissions.
     #[serde(default)]
     pub encoder_bridge_raw_video_copied_frames: u64,
+    /// Raw-video FFmpeg writes attributable to the recording bridge.
+    #[serde(default)]
+    pub encoder_bridge_recording_raw_video_copied_frames: u64,
+    /// Raw-video FFmpeg writes attributable to the stream bridge.
+    #[serde(default)]
+    pub encoder_bridge_stream_raw_video_copied_frames: u64,
     /// Raw-video FFmpeg writes where the source frame also had an IOSurface-backed Metal
     /// target. This proves the current Metal-target path is still copied.
     #[serde(default)]
@@ -1417,6 +1513,21 @@ pub struct DiagnosticStats {
     pub stream_output_fps: Option<u32>,
     #[serde(default)]
     pub stream_output_bitrate_kbps: Option<u32>,
+    /// Latest measured FFmpeg output bitrate for the active stream.
+    #[serde(default)]
+    pub stream_measured_bitrate_kbps: Option<f64>,
+    /// Lowest non-zero measured output bitrate observed in this stream session.
+    #[serde(default)]
+    pub stream_measured_bitrate_min_kbps: Option<f64>,
+    /// Highest non-zero measured output bitrate observed in this stream session.
+    #[serde(default)]
+    pub stream_measured_bitrate_max_kbps: Option<f64>,
+    /// Cumulative bytes emitted by FFmpeg for this stream process generation.
+    #[serde(default)]
+    pub stream_output_total_bytes: u64,
+    /// Cumulative frames FFmpeg reports duplicating for this stream process generation.
+    #[serde(default)]
+    pub stream_duplicated_frames: u64,
     /// Number of distinct production VideoToolbox output encoders active for the session.
     #[serde(default)]
     pub encoder_bridge_active_video_toolbox_output_encoders: u64,
@@ -3641,6 +3752,14 @@ mod tests {
             serde_json::json!("stream-safe-1080p60")
         );
         assert_eq!(
+            serde_json::to_value(VideoPreset::StreamYoutube1080p30).unwrap(),
+            serde_json::json!("stream-youtube-1080p30")
+        );
+        assert_eq!(
+            serde_json::to_value(VideoPreset::StreamYoutube1080p60).unwrap(),
+            serde_json::json!("stream-youtube-1080p60")
+        );
+        assert_eq!(
             serde_json::to_value(VideoPreset::StreamYoutube4k30).unwrap(),
             serde_json::json!("stream-youtube-4k30")
         );
@@ -3847,5 +3966,84 @@ mod tests {
         let operation: SessionDeletionHandle =
             serde_json::from_value(operation_wire.clone()).unwrap();
         assert_eq!(serde_json::to_value(operation).unwrap(), operation_wire);
+    }
+
+    #[test]
+    fn stream_output_topology_probe_contract_is_secret_free_and_stable() {
+        let params: StreamOutputTopologyProbeParams = serde_json::from_value(serde_json::json!({
+            "streamProfile": {
+                "preset": "stream-safe-1080p60",
+                "width": 1920,
+                "height": 1080,
+                "fps": 60,
+                "bitrateKbps": 6000
+            },
+            "recordingProfile": {
+                "preset": "tutorial-1080p30",
+                "width": 1920,
+                "height": 1080,
+                "fps": 30,
+                "bitrateKbps": 6000
+            },
+            "outputRoles": ["recording", "stream"]
+        }))
+        .unwrap();
+        assert_eq!(
+            params.output_roles,
+            vec![
+                StreamOutputTopologyRole::Recording,
+                StreamOutputTopologyRole::Stream
+            ]
+        );
+
+        let result = StreamOutputTopologyProbeResult {
+            capability_key: format!("stream-output-topology-v1:{}", "a".repeat(64)),
+            stream_profile: params.stream_profile,
+            recording_profile: params.recording_profile,
+            output_roles: params.output_roles,
+            requested_bridge_output: StreamOutputBridge::WindowsMediaFoundationH264MpegTs,
+            effective_bridge_output: StreamOutputBridge::RawYuv420p,
+            effective_encode_backend: EncodeBackend::SoftwareOpenH264,
+            probe_state: StreamOutputTopologyProbeState::Rejected,
+            fallback_reason: Some("hardware profile rejected".to_string()),
+        };
+        let wire = serde_json::to_value(result).unwrap();
+        assert_eq!(
+            wire["requestedBridgeOutput"],
+            "windows-media-foundation-h264-mpegts"
+        );
+        assert_eq!(wire["effectiveBridgeOutput"], "raw-yuv420p");
+        assert_eq!(wire["effectiveEncodeBackend"], "software-open-h264");
+        assert_eq!(wire["probeState"], "rejected");
+        let serialized = wire.to_string().to_ascii_lowercase();
+        for forbidden in [
+            "serverurl",
+            "streamkey",
+            "accesstoken",
+            "refreshtoken",
+            "oauth",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "topology result exposed forbidden field {forbidden}"
+            );
+        }
+
+        let rejected =
+            serde_json::from_value::<StreamOutputTopologyProbeParams>(serde_json::json!({
+                "streamProfile": {
+                    "preset": "custom",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 30,
+                    "bitrateKbps": 6000
+                },
+                "outputRoles": ["shared"],
+                "streamKey": "must-not-enter-the-contract"
+            }));
+        assert!(
+            rejected.is_err(),
+            "unknown secret-bearing fields must be rejected"
+        );
     }
 }

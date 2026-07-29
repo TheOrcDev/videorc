@@ -64,6 +64,7 @@ import {
   readyStreamTargetLabels,
   reconcileSourceSelection,
   reconcileSourceSelectionForLayoutTransaction,
+  resolveProviderStreamOutputPlan,
   rtmpDefaults,
   smokePreviewCompositorCaptureConfig,
   sourceSelectionChangeEvents,
@@ -199,6 +200,8 @@ import type {
   StreamMetadataValidation,
   StreamScreen,
   StreamHealth,
+  StreamOutputTopologyProbeParams,
+  StreamOutputTopologyProbeResult,
   StoreManualStreamKeyResult,
   StreamingSettings,
   StreamTargetRuntime,
@@ -445,6 +448,150 @@ function streamingWithTargetPatch(
     enabledTargetIds
   }
 }
+
+export function resolvedStreamingProfileEntitlementGate(
+  captureConfig: Pick<CaptureConfig, 'video' | 'streaming'>,
+  entitlements: EntitlementsSnapshot | null
+): ReturnType<typeof videoProfileEntitlementGate> {
+  const providerPlan = resolveProviderStreamOutputPlan(
+    captureConfig.video,
+    captureConfig.streaming,
+    {
+      // Recording has its own entitlement gate. Resolve the profile actually
+      // destined for providers here so a retained YouTube default cannot
+      // accidentally gate a provider-safe Twitch/X output.
+      recordEnabled: false
+    }
+  )
+  return videoProfileEntitlementGate({
+    entitlements,
+    kind: 'streaming',
+    video: providerPlan.streamVideo
+  })
+}
+
+export type StreamOutputTopologyPreflight =
+  | { state: 'not-requested' }
+  | { state: 'pending'; requestKey: string }
+  | {
+      state: 'ready'
+      requestKey: string
+      result: StreamOutputTopologyProbeResult
+    }
+  | { state: 'failed'; requestKey: string; message: string }
+
+export function buildStreamOutputTopologyProbeParams(
+  captureConfig: CaptureConfig,
+  streaming: StreamingSettings = captureConfig.streaming,
+  suppressCaptionsForSession = false
+): StreamOutputTopologyProbeParams {
+  const recordingProfile = { ...captureConfig.video }
+  // Probe the highest topology the configured outputs would need. This is
+  // deliberately optimistic: the backend's production capability selector is
+  // the authority that proves or rejects the separate encoded role. Building
+  // this request from the unproved shared plan would make a high-rate YouTube
+  // record+stream session preflight one topology and start another.
+  const providerPlanOptions = {
+    recordEnabled: captureConfig.recordEnabled,
+    separateEncodedOutputRoleAvailable: true
+  }
+  const providerPlan = resolveProviderStreamOutputPlan(
+    recordingProfile,
+    streaming,
+    providerPlanOptions
+  )
+  const streamProfile = providerPlan.streamVideo
+  const streamProfiles = providerPlan.targets.map(({ video }) => video)
+  const captionOutputReadiness = captionSessionOutputReadiness({
+    burnTarget: captureConfig.captions.burnTarget,
+    recordEnabled: captureConfig.recordEnabled,
+    streamEnabled: true,
+    recordingVideo: recordingProfile,
+    streamVideos: streamProfiles
+  })
+  const burnsStream =
+    captureConfig.captions.burnTarget === 'stream' || captureConfig.captions.burnTarget === 'both'
+  const forceSameProfileSplit =
+    captureConfig.recordEnabled &&
+    !suppressCaptionsForSession &&
+    burnsStream &&
+    (captureConfig.captions.enabled || captionOutputReadiness.ready)
+  const split =
+    captureConfig.recordEnabled &&
+    (forceSameProfileSplit || !sameTopologyVideoProfile(recordingProfile, streamProfile))
+
+  return {
+    streamProfile: { ...streamProfile },
+    ...(captureConfig.recordEnabled ? { recordingProfile } : {}),
+    outputRoles: split ? ['recording', 'stream'] : ['shared']
+  }
+}
+
+export function streamOutputTopologyProbeRequestKey(
+  params: StreamOutputTopologyProbeParams
+): string {
+  return JSON.stringify({
+    streamProfile: params.streamProfile,
+    recordingProfile: params.recordingProfile,
+    outputRoles: params.outputRoles
+  })
+}
+
+export function streamOutputTopologyBlockReason(
+  preflight: StreamOutputTopologyPreflight,
+  requestKey: string
+): string | null {
+  if (preflight.state === 'ready' && preflight.requestKey === requestKey) {
+    if (
+      preflight.result.outputRoles.includes('stream') &&
+      preflight.result.effectiveBridgeOutput === 'raw-yuv420p'
+    ) {
+      return `A separate encoded livestream output is unavailable${
+        preflight.result.fallbackReason ? `: ${preflight.result.fallbackReason}` : '.'
+      } Use one shared provider-safe profile at 6000 kbps or lower before going live.`
+    }
+    return null
+  }
+  if (preflight.state === 'failed' && preflight.requestKey === requestKey) {
+    return `Livestream output check failed: ${preflight.message}`
+  }
+  return 'Checking the exact livestream output path before Go Live.'
+}
+
+function streamOutputTopologyResultMatchesRequest(
+  result: StreamOutputTopologyProbeResult,
+  params: StreamOutputTopologyProbeParams
+): boolean {
+  return (
+    sameExactVideoSettings(result.streamProfile, params.streamProfile) &&
+    sameOptionalVideoSettings(result.recordingProfile, params.recordingProfile) &&
+    result.outputRoles.length === params.outputRoles.length &&
+    result.outputRoles.every((role, index) => role === params.outputRoles[index])
+  )
+}
+
+function sameOptionalVideoSettings(
+  left: VideoSettings | undefined,
+  right: VideoSettings | undefined
+): boolean {
+  return left === undefined || right === undefined
+    ? left === right
+    : sameExactVideoSettings(left, right)
+}
+
+function sameExactVideoSettings(left: VideoSettings, right: VideoSettings): boolean {
+  return left.preset === right.preset && sameTopologyVideoProfile(left, right)
+}
+
+function sameTopologyVideoProfile(left: VideoSettings, right: VideoSettings): boolean {
+  return (
+    left.width === right.width &&
+    left.height === right.height &&
+    left.fps === right.fps &&
+    left.bitrateKbps === right.bitrateKbps
+  )
+}
+
 const NATIVE_PREVIEW_COMPOSITOR_POLL_INTERVAL_MS = 1000 / 60
 // Fallback-pump dedupe (issue #157): an unchanged compositor status carries no
 // new pixels, so resubmitting it at 60Hz only burns main-process present work.
@@ -641,6 +788,8 @@ export type StudioContextValue = {
   healthEvents: HealthEvent[]
   streamHealth: StreamHealth | null
   streamTargets: StreamTargetRuntime[]
+  streamOutputTopologyPreflight: StreamOutputTopologyPreflight
+  refreshStreamOutputTopology: () => Promise<void>
   diagnosticStats: DiagnosticStats
   sessions: SessionSummary[]
   sessionsNextCursor: string | null
@@ -944,6 +1093,10 @@ const idleDiagnosticStats = (): DiagnosticStats => ({
   encoderBridgeOutputQueueCapacityPressureEvents: 0,
   encoderBridgeOutputQueueDroppedFrames: 0,
   encoderBridgeDroppedFrames: 0,
+  encoderBridgeRecordingDroppedFrames: 0,
+  encoderBridgeStreamDroppedFrames: 0,
+  encoderBridgeRecordingEncoderSpeed: undefined,
+  encoderBridgeStreamEncoderSpeed: undefined,
   encoderBridgeRepeatedFrames: 0,
   encoderBridgeRepeatedFrameBursts: 0,
   encoderBridgeMaxRepeatedFrameRun: 0,
@@ -953,6 +1106,8 @@ const idleDiagnosticStats = (): DiagnosticStats => ({
   encoderBridgeRepeatedFrameAgeMaxMs: undefined,
   encoderBridgeMetalTargetFrames: 0,
   encoderBridgeRawVideoCopiedFrames: 0,
+  encoderBridgeRecordingRawVideoCopiedFrames: 0,
+  encoderBridgeStreamRawVideoCopiedFrames: 0,
   encoderBridgeMetalTargetCopiedFrames: 0,
   encoderBridgeMetalTargetHandleFrames: 0,
   encoderBridgeZeroCopyFrames: 0,
@@ -2089,6 +2244,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [streamMetadataDraft, setStreamMetadataDraft] = useState<StreamMetadataDraft | null>(null)
   const [streamMetadataValidation, setStreamMetadataValidation] =
     useState<StreamMetadataValidation | null>(null)
+  const [streamOutputTopologyPreflight, setStreamOutputTopologyPreflight] =
+    useState<StreamOutputTopologyPreflight>({ state: 'not-requested' })
+  const streamOutputTopologyPreflightRef = useRef<StreamOutputTopologyPreflight>({
+    state: 'not-requested'
+  })
+  const streamOutputTopologyProbeGenerationRef = useRef(0)
+  const streamOutputTopologyProbeInFlightRef = useRef<{
+    client: BackendClient
+    requestKey: string
+    controller: AbortController
+    promise: Promise<StreamOutputTopologyProbeResult>
+  } | null>(null)
+  const commitStreamOutputTopologyPreflight = useCallback((next: StreamOutputTopologyPreflight) => {
+    streamOutputTopologyPreflightRef.current = next
+    setStreamOutputTopologyPreflight(next)
+  }, [])
   const [goLivePreflight, setGoLivePreflight] = useState<GoLivePreflight | null>(null)
   const [goLiveConfirmationOpen, setGoLiveConfirmationOpen] = useState(false)
   const [goLiveConfirmationPending, setGoLiveConfirmationPending] = useState(false)
@@ -6654,14 +6825,150 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       })
     : { allowed: true as const }
   const streamingProfileEntitlement = captureConfig.streamEnabled
-    ? videoProfileEntitlementGate({
-        entitlements,
-        kind: 'streaming',
-        video: streamOutputVideoSettings(captureConfig.video, captureConfig.streaming)
-      })
+    ? resolvedStreamingProfileEntitlementGate(captureConfig, entitlements)
     : { allowed: true as const }
   const isSessionActive =
     isActiveRecordingState(recording.state) || startRequestPending || stopRequestPending
+
+  const currentStreamOutputTopologyRequest = useMemo(
+    () =>
+      captureConfig.streamEnabled
+        ? buildStreamOutputTopologyProbeParams(
+            captureConfig,
+            captureConfig.streaming,
+            suppressCaptionsForSession
+          )
+        : null,
+    [captureConfig, suppressCaptionsForSession]
+  )
+  const currentStreamOutputTopologyRequestKey = currentStreamOutputTopologyRequest
+    ? streamOutputTopologyProbeRequestKey(currentStreamOutputTopologyRequest)
+    : null
+
+  const probeStreamOutputTopology = useCallback(
+    (
+      params: StreamOutputTopologyProbeParams,
+      options: { force?: boolean } = {}
+    ): Promise<StreamOutputTopologyProbeResult> => {
+      if (!client || wsStatus !== 'connected') {
+        return Promise.reject(new Error('Backend socket is not connected.'))
+      }
+
+      const requestKey = streamOutputTopologyProbeRequestKey(params)
+      const current = streamOutputTopologyPreflightRef.current
+      if (!options.force && current.state === 'ready' && current.requestKey === requestKey) {
+        return Promise.resolve(current.result)
+      }
+      const currentFlight = streamOutputTopologyProbeInFlightRef.current
+      if (
+        !options.force &&
+        currentFlight?.client === client &&
+        currentFlight.requestKey === requestKey
+      ) {
+        return currentFlight.promise
+      }
+
+      streamOutputTopologyProbeGenerationRef.current += 1
+      const generation = streamOutputTopologyProbeGenerationRef.current
+      currentFlight?.controller.abort()
+      const controller = new AbortController()
+      commitStreamOutputTopologyPreflight({ state: 'pending', requestKey })
+
+      const promise = client
+        .requestTyped('stream.output.topology.probe', params, {
+          signal: controller.signal
+        })
+        .then((result) => {
+          if (!streamOutputTopologyResultMatchesRequest(result, params)) {
+            throw new Error(
+              'Backend returned a livestream output verdict for a different output configuration.'
+            )
+          }
+          if (
+            streamOutputTopologyProbeGenerationRef.current === generation &&
+            clientRef.current === client
+          ) {
+            commitStreamOutputTopologyPreflight({ state: 'ready', requestKey, result })
+          }
+          return result
+        })
+        .catch((error: unknown) => {
+          if (
+            streamOutputTopologyProbeGenerationRef.current === generation &&
+            clientRef.current === client &&
+            !(error instanceof DOMException && error.name === 'AbortError')
+          ) {
+            commitStreamOutputTopologyPreflight({
+              state: 'failed',
+              requestKey,
+              message:
+                error instanceof Error
+                  ? error.message
+                  : 'The livestream output path could not be verified.'
+            })
+          }
+          throw error
+        })
+        .finally(() => {
+          if (streamOutputTopologyProbeGenerationRef.current === generation) {
+            streamOutputTopologyProbeInFlightRef.current = null
+          }
+        })
+      streamOutputTopologyProbeInFlightRef.current = {
+        client,
+        requestKey,
+        controller,
+        promise
+      }
+      return promise
+    },
+    [client, commitStreamOutputTopologyPreflight, wsStatus]
+  )
+
+  useEffect(() => {
+    if (
+      !currentStreamOutputTopologyRequest ||
+      !client ||
+      wsStatus !== 'connected' ||
+      !health?.ffmpeg.available
+    ) {
+      streamOutputTopologyProbeGenerationRef.current += 1
+      streamOutputTopologyProbeInFlightRef.current?.controller.abort()
+      streamOutputTopologyProbeInFlightRef.current = null
+      if (streamOutputTopologyPreflightRef.current.state !== 'not-requested') {
+        commitStreamOutputTopologyPreflight({ state: 'not-requested' })
+      }
+      return
+    }
+    if (isSessionActive) {
+      return
+    }
+    void probeStreamOutputTopology(currentStreamOutputTopologyRequest).catch(() => {})
+  }, [
+    client,
+    commitStreamOutputTopologyPreflight,
+    currentStreamOutputTopologyRequest,
+    health?.ffmpeg.available,
+    isSessionActive,
+    probeStreamOutputTopology,
+    wsStatus
+  ])
+
+  useEffect(
+    () => () => {
+      streamOutputTopologyProbeGenerationRef.current += 1
+      streamOutputTopologyProbeInFlightRef.current?.controller.abort()
+      streamOutputTopologyProbeInFlightRef.current = null
+    },
+    []
+  )
+
+  const refreshStreamOutputTopology = useCallback(async () => {
+    if (!currentStreamOutputTopologyRequest) {
+      throw new Error('Enable livestreaming before checking the output path.')
+    }
+    await probeStreamOutputTopology(currentStreamOutputTopologyRequest, { force: true })
+  }, [currentStreamOutputTopologyRequest, probeStreamOutputTopology])
 
   // Every mic surface edits the same captureConfig. Mirror that one source of
   // truth into the active backend-owned native audio session, scoped by the
@@ -7765,6 +8072,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!health.ffmpeg.available) {
       return health.ffmpeg.message ?? 'FFmpeg is not available.'
     }
+    if (captureConfig.streamEnabled && currentStreamOutputTopologyRequestKey) {
+      const topologyReason = streamOutputTopologyBlockReason(
+        streamOutputTopologyPreflight,
+        currentStreamOutputTopologyRequestKey
+      )
+      if (topologyReason) {
+        return topologyReason
+      }
+    }
 
     return null
   })()
@@ -8159,10 +8475,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       let streamingForStart: StreamingSettings | null = null
       try {
         setLastError(null)
+        streamingForStart = streamingOverride ?? null
+        if (streamingForStart) {
+          await probeStreamOutputTopology(
+            buildStreamOutputTopologyProbeParams(
+              captureConfig,
+              streamingForStart,
+              suppressCaptionsForSession
+            )
+          )
+        }
         setStreamHealth(null)
         setStreamTargets([])
         setStartRequestPending(true)
-        streamingForStart = streamingOverride ?? null
         platformLifecycleStreamingRef.current = streamingForStart
         const lifecycleRunId = platformLifecycleRun.current + 1
         platformLifecycleRun.current = lifecycleRunId
@@ -8294,6 +8619,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       client,
       completePreparedPlatformBroadcasts,
       isSessionActive,
+      probeStreamOutputTopology,
       refreshSessions,
       reportError,
       sceneEditMode,
@@ -9746,6 +10072,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       signOutAccount,
       deviceList: visibleDeviceList,
       streamTargets,
+      streamOutputTopologyPreflight,
+      refreshStreamOutputTopology,
       sessions,
       sessionsNextCursor,
       sessionsLoadingMore,
@@ -9927,6 +10255,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       signOutAccount,
       visibleDeviceList,
       streamTargets,
+      streamOutputTopologyPreflight,
+      refreshStreamOutputTopology,
       sessions,
       sessionsNextCursor,
       sessionsLoadingMore,

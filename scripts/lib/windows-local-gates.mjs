@@ -1,6 +1,14 @@
 import { dirname, join, resolve } from 'node:path'
 
+import {
+  packagedAppPayloadManifestSha256,
+  WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS
+} from './performance-contract.mjs'
+
 export const WINDOWS_LOCAL_GATE_MANIFEST_NAME = 'windows-local-gates.manifest.json'
+const WINDOWS_PACKAGED_APP_PAYLOAD_SPECS = WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS.map(
+  (relativePath) => ({ relativePath, requiresCodeSignature: false })
+)
 
 export function evaluateWindowsLocalGateHost({
   platform = process.platform,
@@ -37,11 +45,102 @@ export function sanitizeWindowsLocalGateChildEnvironment(env) {
   const sensitiveName =
     /^(?:AZURE_|APPLE_|CSC_|WIN_CSC_|VIDEORC_(?:DOWNLOAD|RELEASE_UPLOAD)_S3_|VIDEORC_WINDOWS_(?:SIGNING_|PILOT_UPDATE_TOKEN$))/
   for (const name of Object.keys(sanitized)) {
-    if (sensitiveName.test(name)) {
+    if (
+      sensitiveName.test(name) ||
+      /^VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_(?:APP|PAYLOAD)_SHA256$/.test(name)
+    ) {
       delete sanitized[name]
     }
   }
   return sanitized
+}
+
+export function assertWindowsCandidatePayloadIdentity(packagePayload) {
+  if (
+    packagePayload?.algorithm !== 'sha256-packaged-code-manifest-v1' ||
+    !lowercaseSha256(packagePayload?.sha256)
+  ) {
+    throw new Error(
+      'Installed candidate packaged-app payload did not produce a valid lowercase SHA-256 identity.'
+    )
+  }
+  if (
+    !Array.isArray(packagePayload.components) ||
+    packagePayload.components.length !== WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS.length
+  ) {
+    throw new Error('Installed candidate packaged-app payload did not contain every required file.')
+  }
+  for (const [index, relativePath] of WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS.entries()) {
+    const component = packagePayload.components[index]
+    if (
+      component?.relativePath !== relativePath ||
+      component?.identityKind !== 'sha256' ||
+      !lowercaseSha256(component?.sha256) ||
+      component.identity !== component.sha256
+    ) {
+      throw new Error(
+        `Installed candidate packaged-app payload identity was invalid for ${relativePath}.`
+      )
+    }
+  }
+  if (
+    !Array.isArray(packagePayload.unsignedComponents) ||
+    packagePayload.unsignedComponents.length !== 0
+  ) {
+    throw new Error('Installed candidate packaged-app payload identity was incomplete.')
+  }
+  const canonicalSha256 = packagedAppPayloadManifestSha256(packagePayload.components, {
+    payloadSpecs: WINDOWS_PACKAGED_APP_PAYLOAD_SPECS
+  })
+  if (canonicalSha256 !== packagePayload.sha256) {
+    throw new Error(
+      'Installed candidate packaged-app payload SHA-256 did not match its canonical component manifest.'
+    )
+  }
+  return packagePayload
+}
+
+export function windowsCandidateBoundEnvironment({ executableSha256, packagePayload } = {}) {
+  if (!lowercaseSha256(executableSha256)) {
+    throw new Error('Installed Videorc.exe did not produce a valid lowercase SHA-256 digest.')
+  }
+  const verifiedPayload = assertWindowsCandidatePayloadIdentity(packagePayload)
+  const executableComponent = verifiedPayload.components.find(
+    (component) => component.relativePath === 'Videorc.exe'
+  )
+  if (executableComponent?.sha256 !== executableSha256) {
+    throw new Error(
+      'Installed Videorc.exe SHA-256 did not match the executable in the packaged-app payload.'
+    )
+  }
+  return {
+    VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256: executableSha256,
+    VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256: verifiedPayload.sha256
+  }
+}
+
+export function assertWindowsCandidateBindingUnchanged(expected, actual) {
+  const expectedEnvironment = windowsCandidateBoundEnvironment(expected)
+  const actualEnvironment = windowsCandidateBoundEnvironment(actual)
+  if (
+    expectedEnvironment.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256 !==
+    actualEnvironment.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256
+  ) {
+    throw new Error('Installed Videorc.exe changed after candidate identity verification.')
+  }
+  if (
+    expectedEnvironment.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256 !==
+    actualEnvironment.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256
+  ) {
+    throw new Error('Installed packaged-app payload changed after candidate identity verification.')
+  }
+  return expected
+}
+
+export function windowsLocalGateStepCandidateExecutable(step) {
+  return (
+    step?.env?.VIDEORC_PERF_APP_EXECUTABLE ?? step?.env?.VIDEORC_PACKAGED_APP_EXECUTABLE ?? null
+  )
 }
 
 export function assertInstalledWindowsCandidateIdentity({
@@ -251,7 +350,7 @@ export function buildWindowsLocalGateSteps({
     {
       label: 'native Windows Media Foundation encoded-bridge matrix',
       command: 'pnpm',
-      args: ['smoke:windows-encoded-bridge'],
+      args: ['smoke:windows-encoded-bridge', '--', '--profiles', '1080p30,1080p60'],
       env: {
         VIDEORC_PERF_APP_EXECUTABLE: executable,
         VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'encoded-bridge'),
@@ -277,6 +376,27 @@ export function buildWindowsLocalGateSteps({
         VIDEORC_EXPECT_NATIVE_METAL_PREVIEW: '0',
         VIDEORC_NATIVE_PREVIEW_EXERCISE_PROOF_POLLING: '1',
         VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'raw-yuv420p'
+      }
+    },
+    {
+      label: 'protected physical Windows RTMP performance matrix',
+      command: 'pnpm',
+      args: [
+        'smoke:windows-stream-performance',
+        '--',
+        '--gate',
+        '--bridge',
+        'mf',
+        '--require-bridge'
+      ],
+      blockedExitCode: 2,
+      blockedReportPath: join(outputDir, 'stream-performance', 'aggregate.json'),
+      env: {
+        VIDEORC_PERF_APP_EXECUTABLE: executable,
+        VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'stream-performance'),
+        VIDEORC_SMOKE_FFMPEG_PATH: packagedFfmpeg,
+        VIDEORC_SMOKE_FFPROBE_PATH: packagedFfprobe,
+        VIDEORC_SMOKE_TIMEOUT_MS: '420000'
       }
     },
     {
@@ -449,4 +569,8 @@ function toIsoString(value) {
     return value.toISOString()
   }
   return new Date(value).toISOString()
+}
+
+function lowercaseSha256(value) {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 }

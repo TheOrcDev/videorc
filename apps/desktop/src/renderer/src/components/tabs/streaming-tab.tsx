@@ -6,6 +6,7 @@ import {
   CheckCircle,
   FloppyDisk,
   Gauge,
+  Heartbeat,
   LinkSimple,
   LockSimple,
   MagnifyingGlass,
@@ -45,19 +46,24 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { useStudioCore } from '@/hooks/use-studio'
+import {
+  useStudioCore,
+  useStudioDiagnostics,
+  type StreamOutputTopologyPreflight
+} from '@/hooks/use-studio'
 import type {
+  DiagnosticStats,
   PlatformAccount,
   PlatformAccountValidation,
   OAuthProviderCredentialStatus,
   StreamAuthMode,
+  StreamHealth,
   StreamMetadataDraft,
   StreamMetadataValidation,
   StreamPlatform,
   StreamPrivacy,
   StreamTargetRuntime,
   StreamTargetSettings,
-  StreamingSettings,
   StreamUrlMode,
   VideoSettings,
   TwitchCategory,
@@ -67,13 +73,19 @@ import type {
 import {
   isStreamTargetReady,
   oauthUnavailableReason,
-  streamOutputVideoForTarget,
-  streamOutputVideoSettings,
+  resolveProviderStreamOutputPlan,
+  STREAM_OUTPUT_GOP_SECONDS,
+  streamVideoProfileValidationReason,
+  type ProviderStreamOutputPlan,
   videoProfileCompatibility
 } from '@/lib/capture'
 import { streamingDestinationEnableGate, type EntitlementUiGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { streamKeyPlatformMismatch, streamKeyTailHint } from '@/lib/stream-key-format'
+import {
+  classifyStreamHealthAttribution,
+  type StreamHealthAttribution
+} from '@/lib/stream-health-attribution'
 import { cn } from '@/lib/utils'
 import { VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 
@@ -111,6 +123,8 @@ export function StreamingTab(): ReactElement {
     streamMetadataSavePending,
     streamMetadataValidation,
     streamTargets,
+    streamOutputTopologyPreflight,
+    refreshStreamOutputTopology,
     twitchCategories,
     twitchCategorySearchPending,
     searchTwitchCategories,
@@ -120,17 +134,28 @@ export function StreamingTab(): ReactElement {
     authorizeXLive,
     stopSession
   } = useStudioCore()
+  const { diagnosticStats, streamHealth } = useStudioDiagnostics()
   const streaming = captureConfig.streaming
   const { video } = captureConfig
-  const streamVideo = streamOutputVideoSettings(
+  const preflightProvesSeparateOutput =
+    streamOutputTopologyPreflight.state === 'ready' &&
+    streamOutputTopologyPreflight.result.outputRoles.length === 2 &&
+    streamOutputTopologyPreflight.result.outputRoles[0] === 'recording' &&
+    streamOutputTopologyPreflight.result.outputRoles[1] === 'stream' &&
+    streamOutputTopologyPreflight.result.effectiveBridgeOutput !== 'raw-yuv420p' &&
+    (streamOutputTopologyPreflight.result.probeState === 'passed' ||
+      streamOutputTopologyPreflight.result.probeState === 'not-required')
+  const separateEncodedOutputRoleAvailable = isSessionActive
+    ? diagnosticStats.encoderBridgeSeparateOutputEncodersActive
+    : preflightProvesSeparateOutput
+  const providerPlan = resolveProviderStreamOutputPlan(
     video,
-    captureConfig.streamEnabled ? streaming : undefined
+    captureConfig.streamEnabled ? streaming : undefined,
+    {
+      recordEnabled: captureConfig.recordEnabled,
+      separateEncodedOutputRoleAvailable
+    }
   )
-  const splitOutputActive =
-    captureConfig.recordEnabled &&
-    captureConfig.streamEnabled &&
-    streaming.enabled &&
-    !sameVideoOutput(video, streamVideo)
   const compatibility = videoProfileCompatibility(captureConfig)
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
   const livestreamingEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
@@ -256,14 +281,22 @@ export function StreamingTab(): ReactElement {
             <span>{compatibilityMessage}</span>
           </div>
         ) : null}
+        <LiveOutputHealth
+          diagnosticStats={diagnosticStats}
+          isSessionActive={isSessionActive}
+          preflight={streamOutputTopologyPreflight}
+          providerPlan={providerPlan}
+          streamEnabled={captureConfig.streamEnabled && streaming.enabled}
+          streamHealth={streamHealth}
+          streamTargets={streamTargets}
+          onRetry={refreshStreamOutputTopology}
+        />
         <StreamingReadiness
           ffmpegReady={Boolean(health?.ffmpeg.available)}
           profileCompatible={!compatibility.blockingReason}
           recordEnabled={captureConfig.recordEnabled}
           recordingVideo={video}
-          splitOutputActive={splitOutputActive}
-          streaming={streaming}
-          streamVideo={streamVideo}
+          providerPlan={providerPlan}
           targets={streaming.targets}
         />
       </div>
@@ -1624,32 +1657,317 @@ function platformLabel(platform: StreamPlatform): string {
   }
 }
 
+function LiveOutputHealth({
+  diagnosticStats,
+  isSessionActive,
+  preflight,
+  providerPlan,
+  streamEnabled,
+  streamHealth,
+  streamTargets,
+  onRetry
+}: {
+  diagnosticStats: DiagnosticStats
+  isSessionActive: boolean
+  preflight: StreamOutputTopologyPreflight
+  providerPlan: ProviderStreamOutputPlan
+  streamEnabled: boolean
+  streamHealth: StreamHealth | null
+  streamTargets: StreamTargetRuntime[]
+  onRetry: () => Promise<void>
+}): ReactElement {
+  const liveOutputActive = isSessionActive && streamEnabled
+  const currentStreamHealth =
+    streamHealth &&
+    (!diagnosticStats.sessionId || diagnosticStats.sessionId === streamHealth.sessionId)
+      ? streamHealth
+      : null
+  const attribution = liveOutputActive
+    ? classifyStreamHealthAttribution(diagnosticStats, currentStreamHealth, streamTargets)
+    : preflightAttribution(preflight)
+  const badge = streamHealthBadge(attribution, liveOutputActive)
+  const probeResult = !liveOutputActive && preflight.state === 'ready' ? preflight.result : null
+  const requestedPath = liveOutputActive
+    ? diagnosticStats.encoderBridgeRequestedVideoOutput
+    : probeResult?.requestedBridgeOutput
+  const effectivePath = liveOutputActive
+    ? diagnosticStats.encoderBridgeEffectiveVideoOutput
+    : probeResult?.effectiveBridgeOutput
+  const effectiveEncoder = liveOutputActive
+    ? diagnosticStats.encodeBackend
+    : probeResult?.effectiveEncodeBackend
+  const fallbackReason = liveOutputActive
+    ? diagnosticStats.encoderBridgeEncodedOutputFallbackReason
+    : probeResult?.fallbackReason
+  const coalescedFrames = diagnosticStats.encoderBridgeSeparateOutputEncodersActive
+    ? diagnosticStats.encoderBridgeStreamQueueDroppedFrames
+    : diagnosticStats.encoderBridgeOutputQueueDroppedFrames
+  const effectiveProviders = [
+    ...new Set(
+      providerPlan.targets
+        .map(({ target }) => target?.platform)
+        .filter((platform): platform is StreamPlatform => Boolean(platform))
+        .map(platformLabel)
+    )
+  ].join(', ')
+  const effectiveProfiles = providerPlan.targets.length
+    ? providerPlan.targets
+        .map(({ target, video }) =>
+          target
+            ? `${platformLabel(target.platform)} ${formatEffectiveStreamProfile(video)}`
+            : formatEffectiveStreamProfile(video)
+        )
+        .join(' / ')
+    : formatEffectiveStreamProfile(providerPlan.streamVideo)
+
+  return (
+    <PanelSection
+      action={
+        !liveOutputActive && preflight.state === 'failed' ? (
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={() => {
+              void onRetry().catch(() => {})
+            }}
+          >
+            <ArrowsClockwise data-icon="inline-start" weight="bold" />
+            Retry
+          </Button>
+        ) : null
+      }
+      contentClassName="gap-3"
+      description={streamHealthDescription(attribution, liveOutputActive, preflight)}
+      icon={Heartbeat}
+      title="Live output health"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          Classified stage
+        </span>
+        <Badge variant={badge.tone}>{badge.label}</Badge>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        <OutputMetric
+          label="Delivered FPS"
+          value={liveOutputActive ? formatLiveFps(currentStreamHealth?.fps) : '—'}
+        />
+        <OutputMetric
+          label="Bitrate"
+          value={
+            liveOutputActive
+              ? formatLiveBitrate(
+                  currentStreamHealth?.bitrateKbps ?? diagnosticStats.streamMeasuredBitrateKbps
+                )
+              : '—'
+          }
+        />
+        <OutputMetric
+          label="Encoder speed"
+          value={
+            liveOutputActive
+              ? formatEncoderSpeed(currentStreamHealth?.speed ?? diagnosticStats.encoderSpeed)
+              : '—'
+          }
+        />
+        <OutputMetric
+          label="Duplicated"
+          value={
+            liveOutputActive
+              ? formatFrameCount(
+                  currentStreamHealth?.duplicatedFrames ?? diagnosticStats.streamDuplicatedFrames
+                )
+              : '—'
+          }
+        />
+        <OutputMetric
+          label="Dropped"
+          value={
+            liveOutputActive
+              ? formatFrameCount(
+                  currentStreamHealth?.droppedFrames ?? diagnosticStats.droppedFrames
+                )
+              : '—'
+          }
+        />
+        <OutputMetric
+          label="Coalesced"
+          value={liveOutputActive ? formatFrameCount(coalescedFrames) : '—'}
+        />
+      </div>
+
+      <div className="flex flex-col gap-2 rounded-row border border-border bg-muted/30 p-3">
+        <ExactOutputPath
+          label="Effective provider"
+          value={effectiveProviders || 'No enabled destination'}
+        />
+        <ExactOutputPath label="Effective profile" value={effectiveProfiles} />
+        <ExactOutputPath label="GOP" value={`${STREAM_OUTPUT_GOP_SECONDS} seconds`} />
+        <ExactOutputPath
+          label="Encode sharing"
+          value={
+            providerPlan.separateEncodedOutputRole
+              ? 'Separate recording + stream roles'
+              : 'Shared encode · strictest provider'
+          }
+        />
+        <ExactOutputPath label="Requested path" value={requestedPath} />
+        <ExactOutputPath label="Effective path" value={effectivePath} />
+        <ExactOutputPath label="Effective encoder" value={effectiveEncoder} />
+        {fallbackReason ? (
+          <p className="border-t border-border pt-2 text-xs text-warning">
+            Fallback reason: {fallbackReason}
+          </p>
+        ) : null}
+      </div>
+    </PanelSection>
+  )
+}
+
+function preflightAttribution(preflight: StreamOutputTopologyPreflight): StreamHealthAttribution {
+  if (preflight.state !== 'ready') {
+    return 'unknown'
+  }
+  const result = preflight.result
+  return result.fallbackReason ||
+    result.requestedBridgeOutput !== result.effectiveBridgeOutput ||
+    result.probeState === 'rejected' ||
+    result.probeState === 'unsupported'
+    ? 'fallback'
+    : 'healthy'
+}
+
+function streamHealthBadge(
+  attribution: StreamHealthAttribution,
+  liveOutputActive: boolean
+): { label: string; tone: BadgeTone } {
+  if (!liveOutputActive && attribution === 'healthy') {
+    return { label: 'Ready', tone: 'success' }
+  }
+  if (attribution === 'healthy') {
+    return { label: 'Healthy', tone: 'success' }
+  }
+  if (attribution === 'unknown') {
+    return { label: 'Unknown', tone: 'outline' }
+  }
+  if (attribution === 'fallback' || attribution === 'network' || attribution === 'preview') {
+    return {
+      label: attribution.charAt(0).toUpperCase() + attribution.slice(1),
+      tone: 'warning'
+    }
+  }
+  return {
+    label: attribution.charAt(0).toUpperCase() + attribution.slice(1),
+    tone: 'destructive'
+  }
+}
+
+function streamHealthDescription(
+  attribution: StreamHealthAttribution,
+  liveOutputActive: boolean,
+  preflight: StreamOutputTopologyPreflight
+): string {
+  if (!liveOutputActive) {
+    switch (preflight.state) {
+      case 'not-requested':
+        return 'The exact output path has not been checked. Go Live stays blocked.'
+      case 'pending':
+        return 'Checking the exact output path. Go Live stays blocked until it finishes.'
+      case 'failed':
+        return `Output path check failed: ${preflight.message}`
+      case 'ready':
+        return attribution === 'fallback'
+          ? 'The backend verified this fallback path for the selected output profile.'
+          : 'The backend verified the exact output path for the selected profile.'
+    }
+  }
+
+  switch (attribution) {
+    case 'device':
+      return 'A disconnected capture device is interrupting the livestream path.'
+    case 'audio':
+      return 'Audio capture is dropping data before the livestream encode.'
+    case 'capture':
+      return 'Capture is running below the target frame rate.'
+    case 'render':
+      return 'The compositor is running below the target frame rate.'
+    case 'encoder':
+      return 'The encoder or its bounded output queue is losing frames.'
+    case 'fallback':
+      return 'The livestream is using a backend-confirmed fallback output path.'
+    case 'network':
+      return 'Media stages are healthy, but delivery or a destination is degraded.'
+    case 'preview':
+      return 'Livestream media is healthy; only the local preview is degraded.'
+    case 'healthy':
+      return 'Backend evidence shows the livestream media and delivery path are healthy.'
+    default:
+      return 'Waiting for enough backend evidence to classify the active livestream.'
+  }
+}
+
+function OutputMetric({ label, value }: { label: string; value: string }): ReactElement {
+  return (
+    <div className="rounded-row border border-border bg-muted/30 px-2.5 py-2">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="text-sm font-medium tabular-nums">{value}</div>
+    </div>
+  )
+}
+
+function ExactOutputPath({ label, value }: { label: string; value?: string }): ReactElement {
+  return (
+    <div className="flex items-start justify-between gap-3 text-xs">
+      <span className="shrink-0 text-muted-foreground">{label}</span>
+      <code className="min-w-0 break-all text-right text-foreground">{value ?? 'unknown'}</code>
+    </div>
+  )
+}
+
+function formatLiveFps(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} fps` : '—'
+}
+
+function formatLiveBitrate(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${Math.round(value).toLocaleString()} kbps`
+    : '—'
+}
+
+function formatEncoderSpeed(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}×` : '—'
+}
+
+function formatFrameCount(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.round(value)).toLocaleString()
+    : '—'
+}
+
 function StreamingReadiness({
   targets,
   ffmpegReady,
   profileCompatible,
+  providerPlan,
   recordEnabled,
-  recordingVideo,
-  splitOutputActive,
-  streaming,
-  streamVideo
+  recordingVideo
 }: {
   targets: StreamTargetSettings[]
   ffmpegReady: boolean
   profileCompatible: boolean
+  providerPlan: ProviderStreamOutputPlan
   recordEnabled: boolean
   recordingVideo: VideoSettings
-  splitOutputActive: boolean
-  streaming: StreamingSettings
-  streamVideo: VideoSettings
 }): ReactElement {
   const enabled = targets.filter((target) => target.enabled)
   const readyCount = enabled.filter(isStreamTargetReady).length
   const allReady = enabled.length > 0 && readyCount === enabled.length
-  const targetOutputs = enabled.map((target) => ({
-    target,
-    video: streamOutputVideoForTarget(recordingVideo, streaming, target)
-  }))
+  const targetOutputs = providerPlan.targets.flatMap(({ target, video }) =>
+    target ? [{ target, video }] : []
+  )
+  const streamVideo = providerPlan.streamVideo
+  const splitOutputActive = providerPlan.separateEncodedOutputRole
   const outputVideos = targetOutputs.length
     ? targetOutputs.map((output) => output.video)
     : [streamVideo]
@@ -1661,12 +1979,7 @@ function StreamingReadiness({
     profileCompatible &&
     outputVideos.every((video, index) => {
       const target = targetOutputs[index]?.target
-      return (
-        video.bitrateKbps <= 6000 ||
-        (video.preset === 'stream-youtube-4k30' &&
-          target?.platform === 'youtube' &&
-          video.bitrateKbps === 30000)
-      )
+      return streamVideoProfileValidationReason(video, target?.platform) === null
     })
   const showRecordingOutput = recordEnabled && (splitOutputActive || true4kStreamActive)
   const compatibilityHint = true4kStreamActive
@@ -1742,17 +2055,12 @@ function StreamingReadiness({
   )
 }
 
-function sameVideoOutput(left: VideoSettings, right: VideoSettings): boolean {
-  return (
-    left.width === right.width &&
-    left.height === right.height &&
-    left.fps === right.fps &&
-    left.bitrateKbps === right.bitrateKbps
-  )
-}
-
 function formatVideoOutput(video: VideoSettings): string {
   return `${video.width}×${video.height} @ ${video.fps}`
+}
+
+function formatEffectiveStreamProfile(video: VideoSettings): string {
+  return `${formatVideoOutput(video)} fps · ${video.bitrateKbps.toLocaleString()} kbps CBR`
 }
 
 function formatTargetOutputSummary(

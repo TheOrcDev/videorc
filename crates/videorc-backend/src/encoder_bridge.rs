@@ -34,7 +34,9 @@ use crate::mpeg_ts::{MpegTsH264Writer, timing_to_90khz};
 use crate::preview_camera::PreviewCameraFrameSource;
 use crate::preview_screen::PreviewScreenD3D11FrameSource;
 use crate::process_job::spawn_owned_tokio;
-use crate::protocol::{EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult};
+use crate::protocol::{
+    DiagnosticStats, EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult,
+};
 #[cfg(target_os = "windows")]
 use crate::scene_geometry::{PixelRect, SceneCrop, SceneMask};
 use crate::state::AppState;
@@ -440,6 +442,90 @@ struct EncoderBridgeRuntimeStats {
     deadline_lag_max_ms: Option<f64>,
     late_deadline_ticks: u64,
     schedule_skipped_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EncoderBridgeRoleProcessDiagnostics {
+    raw_video_copied_frames: u64,
+    dropped_frames: u64,
+    encoder_speed: Option<f64>,
+    recording_raw_video_copied_frames: u64,
+    stream_raw_video_copied_frames: u64,
+    recording_dropped_frames: u64,
+    stream_dropped_frames: u64,
+    recording_encoder_speed: Option<f64>,
+    stream_encoder_speed: Option<f64>,
+}
+
+fn merge_encoder_bridge_role_process_diagnostics(
+    base: &DiagnosticStats,
+    runtime: EncoderBridgeRuntimeStats,
+    diagnostics_context: EncoderBridgeDiagnosticsContext,
+) -> EncoderBridgeRoleProcessDiagnostics {
+    let mut recording_raw_video_copied_frames =
+        base.encoder_bridge_recording_raw_video_copied_frames;
+    let mut stream_raw_video_copied_frames = base.encoder_bridge_stream_raw_video_copied_frames;
+    let mut recording_dropped_frames = base.encoder_bridge_recording_dropped_frames;
+    let mut stream_dropped_frames = base.encoder_bridge_stream_dropped_frames;
+    let mut recording_encoder_speed = base.encoder_bridge_recording_encoder_speed;
+    let mut stream_encoder_speed = base.encoder_bridge_stream_encoder_speed;
+
+    match effective_encoder_bridge_output_role(diagnostics_context) {
+        EncoderBridgeOutputRole::Recording => {
+            recording_raw_video_copied_frames = runtime.raw_video_copied_frames;
+            recording_dropped_frames = runtime.dropped_frames;
+            recording_encoder_speed = runtime.encoder_speed;
+        }
+        EncoderBridgeOutputRole::Stream => {
+            stream_raw_video_copied_frames = runtime.raw_video_copied_frames;
+            stream_dropped_frames = runtime.dropped_frames;
+            stream_encoder_speed = runtime.encoder_speed;
+        }
+        EncoderBridgeOutputRole::Shared => {
+            if diagnostics_context.recording_output.is_some() {
+                recording_raw_video_copied_frames = runtime.raw_video_copied_frames;
+                recording_dropped_frames = runtime.dropped_frames;
+                recording_encoder_speed = runtime.encoder_speed;
+            }
+            if diagnostics_context.stream_output.is_some() {
+                stream_raw_video_copied_frames = runtime.raw_video_copied_frames;
+                stream_dropped_frames = runtime.dropped_frames;
+                stream_encoder_speed = runtime.encoder_speed;
+            }
+        }
+    }
+
+    let slower_speed = |left: Option<f64>, right: Option<f64>| match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    };
+    let (raw_video_copied_frames, dropped_frames, encoder_speed) =
+        if diagnostics_context.separate_output_encoders_active {
+            (
+                recording_raw_video_copied_frames.saturating_add(stream_raw_video_copied_frames),
+                recording_dropped_frames.saturating_add(stream_dropped_frames),
+                slower_speed(recording_encoder_speed, stream_encoder_speed),
+            )
+        } else {
+            (
+                runtime.raw_video_copied_frames,
+                runtime.dropped_frames,
+                runtime.encoder_speed,
+            )
+        };
+
+    EncoderBridgeRoleProcessDiagnostics {
+        raw_video_copied_frames,
+        dropped_frames,
+        encoder_speed,
+        recording_raw_video_copied_frames,
+        stream_raw_video_copied_frames,
+        recording_dropped_frames,
+        stream_dropped_frames,
+        recording_encoder_speed,
+        stream_encoder_speed,
+    }
 }
 
 /// A compositor frame fed into the encoder FIFO on one tick.
@@ -4241,6 +4327,8 @@ async fn emit_encoder_bridge_diagnostics(
         };
         let recording_output = diagnostics_context.recording_output;
         let stream_output = diagnostics_context.stream_output;
+        let role_process_diagnostics =
+            merge_encoder_bridge_role_process_diagnostics(&base, runtime, diagnostics_context);
         let (
             recording_output_frames,
             recording_output_bytes,
@@ -4428,8 +4516,12 @@ async fn emit_encoder_bridge_diagnostics(
                 output_queue_capacity_pressure_events,
                 output_queue_dropped_frames,
                 input_fps: runtime.input_fps,
-                dropped_frames: runtime.dropped_frames,
-                encoder_speed: runtime.encoder_speed,
+                dropped_frames: role_process_diagnostics.dropped_frames,
+                encoder_speed: role_process_diagnostics.encoder_speed,
+                recording_dropped_frames: role_process_diagnostics.recording_dropped_frames,
+                stream_dropped_frames: role_process_diagnostics.stream_dropped_frames,
+                recording_encoder_speed: role_process_diagnostics.recording_encoder_speed,
+                stream_encoder_speed: role_process_diagnostics.stream_encoder_speed,
                 repeated_fed_frames: runtime.repeated_fed_frames,
                 repeated_frame_bursts: runtime.repeated_frame_bursts,
                 max_repeated_frame_run: runtime.max_repeated_frame_run,
@@ -4439,7 +4531,11 @@ async fn emit_encoder_bridge_diagnostics(
                 repeated_frame_age_p95_ms: runtime.repeated_frame_age_p95_ms,
                 repeated_frame_age_max_ms: runtime.repeated_frame_age_max_ms,
                 metal_target_frames: runtime.metal_target_frames,
-                raw_video_copied_frames: runtime.raw_video_copied_frames,
+                raw_video_copied_frames: role_process_diagnostics.raw_video_copied_frames,
+                recording_raw_video_copied_frames: role_process_diagnostics
+                    .recording_raw_video_copied_frames,
+                stream_raw_video_copied_frames: role_process_diagnostics
+                    .stream_raw_video_copied_frames,
                 metal_target_copied_frames: runtime.metal_target_copied_frames,
                 metal_target_handle_frames: runtime.metal_target_handle_frames,
                 zero_copy_frames: runtime.zero_copy_frames,
@@ -4551,6 +4647,7 @@ fn frame_count(duration_ms: u64, fps: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostics::idle_diagnostics;
 
     #[test]
     fn diagnostics_channel_is_latest_wins_without_losing_terminal_error() {
@@ -4780,6 +4877,90 @@ mod tests {
             encoder_bridge_pre_encode_admission(policy, 4, None),
             EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame
         );
+    }
+
+    #[test]
+    fn split_output_process_diagnostics_preserve_both_roles_and_use_conservative_aggregate() {
+        let mut base = idle_diagnostics();
+        base.encoder_bridge_recording_raw_video_copied_frames = 120;
+        base.encoder_bridge_recording_dropped_frames = 3;
+        base.encoder_bridge_recording_encoder_speed = Some(0.82);
+
+        let merged = merge_encoder_bridge_role_process_diagnostics(
+            &base,
+            EncoderBridgeRuntimeStats {
+                raw_video_copied_frames: 90,
+                dropped_frames: 1,
+                encoder_speed: Some(1.03),
+                ..Default::default()
+            },
+            EncoderBridgeDiagnosticsContext {
+                role: EncoderBridgeOutputRole::Stream,
+                recording_output: Some(EncoderBridgeOutputProfile {
+                    width: 3840,
+                    height: 2160,
+                    fps: 30,
+                    bitrate_kbps: 30_000,
+                }),
+                stream_output: Some(EncoderBridgeOutputProfile {
+                    width: 1920,
+                    height: 1080,
+                    fps: 30,
+                    bitrate_kbps: 6_000,
+                }),
+                separate_output_encoders_active: true,
+                ..EncoderBridgeDiagnosticsContext::default()
+            },
+        );
+
+        assert_eq!(merged.recording_raw_video_copied_frames, 120);
+        assert_eq!(merged.stream_raw_video_copied_frames, 90);
+        assert_eq!(merged.raw_video_copied_frames, 210);
+        assert_eq!(merged.recording_dropped_frames, 3);
+        assert_eq!(merged.stream_dropped_frames, 1);
+        assert_eq!(merged.dropped_frames, 4);
+        assert_eq!(merged.recording_encoder_speed, Some(0.82));
+        assert_eq!(merged.stream_encoder_speed, Some(1.03));
+        assert_eq!(merged.encoder_speed, Some(0.82));
+    }
+
+    #[test]
+    fn shared_output_attributes_runtime_to_each_active_role_without_double_counting() {
+        let merged = merge_encoder_bridge_role_process_diagnostics(
+            &idle_diagnostics(),
+            EncoderBridgeRuntimeStats {
+                raw_video_copied_frames: 60,
+                dropped_frames: 2,
+                encoder_speed: Some(0.91),
+                ..Default::default()
+            },
+            EncoderBridgeDiagnosticsContext {
+                role: EncoderBridgeOutputRole::Shared,
+                recording_output: Some(EncoderBridgeOutputProfile {
+                    width: 1920,
+                    height: 1080,
+                    fps: 30,
+                    bitrate_kbps: 8_000,
+                }),
+                stream_output: Some(EncoderBridgeOutputProfile {
+                    width: 1920,
+                    height: 1080,
+                    fps: 30,
+                    bitrate_kbps: 8_000,
+                }),
+                ..EncoderBridgeDiagnosticsContext::default()
+            },
+        );
+
+        assert_eq!(merged.recording_raw_video_copied_frames, 60);
+        assert_eq!(merged.stream_raw_video_copied_frames, 60);
+        assert_eq!(merged.raw_video_copied_frames, 60);
+        assert_eq!(merged.recording_dropped_frames, 2);
+        assert_eq!(merged.stream_dropped_frames, 2);
+        assert_eq!(merged.dropped_frames, 2);
+        assert_eq!(merged.recording_encoder_speed, Some(0.91));
+        assert_eq!(merged.stream_encoder_speed, Some(0.91));
+        assert_eq!(merged.encoder_speed, Some(0.91));
     }
 
     #[test]

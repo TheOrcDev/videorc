@@ -157,14 +157,18 @@ pnpm smoke:local-gates:windows
 
 Before any smoke runs, the gate hashes the installed `Videorc.exe` and requires
 an exact match with `VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256`. It also
-requires the candidate release ID, source commit, installer SHA-256, exact
-publisher, `Valid` Authenticode status, timestamp countersignature, and matching
-file ProductVersion. The sanitized binding is written to
-`windows-local-gates.manifest.json`; a mismatch blocks the run. The executable
-must resolve outside the repository release-staging tree and match exactly one
-HKCU/HKLM Videorc NSIS uninstall registration. The registered DisplayVersion
-and timestamped uninstaller signature are checked too, so the unpacked
-candidate cannot masquerade as an installed app.
+derives one canonical payload digest over that executable, `resources/app.asar`,
+the backend, FFmpeg, and FFprobe from the installed directory itself. The
+parent passes that verified payload digest to candidate-bound child gates and
+removes any inherited free-form expected payload digest. The gate also requires
+the candidate release ID, source commit, installer SHA-256, exact publisher,
+`Valid` Authenticode status, timestamp countersignature, and matching file
+ProductVersion. The sanitized binding and component payload identity are
+written to `windows-local-gates.manifest.json`; a mismatch blocks the run. The
+executable must resolve outside the repository release-staging tree and match
+exactly one HKCU/HKLM Videorc NSIS uninstall registration. The registered
+DisplayVersion and timestamped uninstaller signature are checked too, so the
+unpacked candidate cannot masquerade as an installed app.
 
 Private evidence may contain logs and hardware detail. It must not be committed.
 CI, file size, a VM-only run, or a similarly named local installer is not a

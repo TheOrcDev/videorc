@@ -1,4 +1,26 @@
-import type { EntitlementCapability, EntitlementsSnapshot, FeatureId } from './backend'
+import type {
+  EntitlementCapability,
+  EntitlementsSnapshot,
+  FeatureId,
+  StreamingEntitlementLimits
+} from './backend'
+
+export const BASIC_STREAMING_LIMITS: StreamingEntitlementLimits = {
+  maxWidth: 1920,
+  maxHeight: 1080,
+  maxFps: 30,
+  maxBitrateKbps: 6000,
+  maxDestinations: 1
+}
+
+/** Mirrors the backend's Premium and Developer streaming entitlement ceiling. */
+export const PREMIUM_STREAMING_LIMITS: StreamingEntitlementLimits = {
+  maxWidth: 3840,
+  maxHeight: 2160,
+  maxFps: 60,
+  maxBitrateKbps: 30000,
+  maxDestinations: 3
+}
 
 export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
   schemaVersion: 1,
@@ -37,13 +59,7 @@ export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
       maxHeight: 2160,
       maxFps: 60
     },
-    streaming: {
-      maxWidth: 1920,
-      maxHeight: 1080,
-      maxFps: 30,
-      maxBitrateKbps: 6000,
-      maxDestinations: 1
-    }
+    streaming: BASIC_STREAMING_LIMITS
   }
 }
 

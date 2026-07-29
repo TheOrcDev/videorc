@@ -1,6 +1,8 @@
 import { spawnSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 
+import { selectWindowsEncodedBridgeProfiles } from './lib/windows-encoded-bridge-profiles.mjs'
+
 if (process.platform !== 'win32') {
   throw new Error('The packaged Windows encoded-bridge smoke must run on Windows.')
 }
@@ -9,25 +11,15 @@ const repoRoot = resolve(import.meta.dirname, '..')
 const baseOutput = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? 'docs/acceptance/artifacts/windows/encoded-bridge'
 )
-const profiles = [
-  ['1080p30', 1920, 1080, 30, 6000],
-  ['1080p60', 1920, 1080, 60, 9000],
-  ['1440p30', 2560, 1440, 30, 12000],
-  ['1440p60', 2560, 1440, 60, 18000],
-  ['4k30', 3840, 2160, 30, 30000],
-  ['vertical-1080p30', 1080, 1920, 30, 6000],
-  ['vertical-1080p60', 1080, 1920, 60, 9000],
-  ['vertical-1440p30', 1440, 2560, 30, 12000],
-  ['vertical-1440p60', 1440, 2560, 60, 18000],
-  ['vertical-4k30', 2160, 3840, 30, 30000]
-]
+const profileArgs = process.argv.slice(2)
+const profiles = selectWindowsEncodedBridgeProfiles(profileArgs)
 const cameraProfiles = [
   ['screen-camera-1080p30', 1920, 1080, 30, 6000],
   ['screen-camera-1080p60', 1920, 1080, 60, 9000]
 ]
 
-for (const [label, width, height, fps, bitrateKbps] of profiles) {
-  console.log(`Windows encoded bridge: ${label}`)
+for (const { id, width, height, fps, bitrateKbps } of profiles) {
+  console.log(`Windows encoded bridge: ${id}`)
   const result = spawnSync('pnpm', ['smoke:windows-native-screen'], {
     cwd: repoRoot,
     encoding: 'utf8',
@@ -38,10 +30,10 @@ for (const [label, width, height, fps, bitrateKbps] of profiles) {
       VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts',
       VIDEORC_WINDOWS_REQUIRE_ENCODED_BRIDGE: '1',
       VIDEORC_WINDOWS_REQUIRE_GRAPHICS_CAPTURE: '1',
-      ...(label.startsWith('vertical-')
+      ...(id.startsWith('vertical-')
         ? {}
         : { VIDEORC_WINDOWS_REQUIRE_DIRECT_D3D11_RECORDING: '1' }),
-      VIDEORC_SMOKE_OUTPUT_DIR: join(baseOutput, label),
+      VIDEORC_SMOKE_OUTPUT_DIR: join(baseOutput, id),
       VIDEORC_SMOKE_VIDEO_WIDTH: String(width),
       VIDEORC_SMOKE_VIDEO_HEIGHT: String(height),
       VIDEORC_SMOKE_VIDEO_FPS: String(fps),
@@ -53,11 +45,13 @@ for (const [label, width, height, fps, bitrateKbps] of profiles) {
   })
   if (result.error) throw result.error
   if (result.status !== 0) {
-    throw new Error(`Windows encoded bridge ${label} failed with exit code ${result.status}.`)
+    throw new Error(`Windows encoded bridge ${id} failed with exit code ${result.status}.`)
   }
 }
 
-for (const [label, width, height, fps, bitrateKbps] of cameraProfiles) {
+for (const [label, width, height, fps, bitrateKbps] of profileArgs.length === 0
+  ? cameraProfiles
+  : []) {
   console.log(`Windows encoded bridge: ${label}`)
   const result = spawnSync('pnpm', ['smoke:windows-native-screen'], {
     cwd: repoRoot,
@@ -88,5 +82,7 @@ for (const [label, width, height, fps, bitrateKbps] of cameraProfiles) {
 }
 
 console.log(
-  `Windows encoded bridge PASS: ${profiles.length} screen profiles and ${cameraProfiles.length} screen+camera profiles.`
+  profileArgs.length === 0
+    ? `Windows encoded bridge PASS: ${profiles.length} screen profiles and ${cameraProfiles.length} screen+camera profiles.`
+    : `Windows encoded bridge PASS: ${profiles.length} selected packaged record-only profiles.`
 )

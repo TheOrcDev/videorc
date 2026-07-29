@@ -616,6 +616,8 @@ export type VideoPreset =
   | 'record-4k60-experimental'
   | 'stream-safe-1080p30'
   | 'stream-safe-1080p60'
+  | 'stream-youtube-1080p30'
+  | 'stream-youtube-1080p60'
   | 'stream-youtube-4k30'
   | 'stream-1080p60'
   | 'vertical-1080x1920'
@@ -1237,6 +1239,41 @@ export type EncodeBackend =
   // libopenh264 software fallback on Windows — software Media Foundation ran
   // below realtime on real devices (issue #149).
   | 'software-open-h264'
+
+export type StreamOutputTopologyRole = 'shared' | 'recording' | 'stream'
+
+export type StreamOutputBridge =
+  | 'raw-yuv420p'
+  | 'videotoolbox-h264-annex-b'
+  | 'videotoolbox-h264-mpegts'
+  | 'windows-media-foundation-h264-mpegts'
+
+export type StreamOutputTopologyProbeState = 'not-required' | 'passed' | 'rejected' | 'unsupported'
+
+/**
+ * Secret-free off-air probe input. Never add RTMP URLs, stream keys, OAuth
+ * credentials, or a full StartSessionParams to this contract.
+ */
+export interface StreamOutputTopologyProbeParams {
+  ffmpegPath?: string
+  streamProfile: VideoSettings
+  recordingProfile?: VideoSettings
+  outputRoles: StreamOutputTopologyRole[]
+}
+
+/** Exact output topology selected by the same production probe used at start. */
+export interface StreamOutputTopologyProbeResult {
+  capabilityKey: string
+  streamProfile: VideoSettings
+  recordingProfile?: VideoSettings
+  outputRoles: StreamOutputTopologyRole[]
+  requestedBridgeOutput: StreamOutputBridge
+  effectiveBridgeOutput: StreamOutputBridge
+  effectiveEncodeBackend: EncodeBackend
+  probeState: StreamOutputTopologyProbeState
+  fallbackReason?: string
+}
+
 export type CompositorBackend = 'metal' | 'cpu' | 'cpu-fallback'
 
 /** Cumulative request counts for the HTTP image-polling preview transports. A native
@@ -1730,6 +1767,9 @@ export interface StreamHealth {
   fps?: number
   droppedFrames?: number
   speed?: number
+  bitrateKbps?: number
+  totalBytes?: number
+  duplicatedFrames?: number
   createdAt: string
 }
 
@@ -1804,6 +1844,14 @@ export interface DiagnosticStats {
   encoderBridgeOutputQueueDroppedFrames: number
   encoderBridgeInputFps?: number
   encoderBridgeDroppedFrames: number
+  /** FFmpeg progress-reported drops attributable to the recording bridge. */
+  encoderBridgeRecordingDroppedFrames: number
+  /** FFmpeg progress-reported drops attributable to the stream bridge. */
+  encoderBridgeStreamDroppedFrames: number
+  /** FFmpeg progress-reported encoder speed for the recording bridge. */
+  encoderBridgeRecordingEncoderSpeed?: number
+  /** FFmpeg progress-reported encoder speed for the stream bridge. */
+  encoderBridgeStreamEncoderSpeed?: number
   /** Compositor frames re-fed to the encoder on under-run (duplicate frames in the final file). */
   encoderBridgeRepeatedFrames: number
   /** Distinct bridge under-run bursts; helps separate phase misses from clustered stalls. */
@@ -1824,6 +1872,10 @@ export interface DiagnosticStats {
   encoderBridgeMetalTargetFrames: number
   /** FIFO frames still written through raw-video FFmpeg stdin. */
   encoderBridgeRawVideoCopiedFrames: number
+  /** Raw-video FFmpeg writes attributable to the recording bridge. */
+  encoderBridgeRecordingRawVideoCopiedFrames: number
+  /** Raw-video FFmpeg writes attributable to the stream bridge. */
+  encoderBridgeStreamRawVideoCopiedFrames: number
   /** Raw-video writes where the source frame had an IOSurface-backed Metal target. */
   encoderBridgeMetalTargetCopiedFrames: number
   /** Raw-video writes where the bridge received the retained CoreVideo handle. */
@@ -1866,6 +1918,16 @@ export interface DiagnosticStats {
   streamOutputHeight?: number
   streamOutputFps?: number
   streamOutputBitrateKbps?: number
+  /** Latest measured FFmpeg output bitrate for the active stream. */
+  streamMeasuredBitrateKbps?: number
+  /** Lowest non-zero measured output bitrate observed in this stream session. */
+  streamMeasuredBitrateMinKbps?: number
+  /** Highest non-zero measured output bitrate observed in this stream session. */
+  streamMeasuredBitrateMaxKbps?: number
+  /** Cumulative bytes emitted by FFmpeg for this stream process generation. */
+  streamOutputTotalBytes?: number
+  /** Cumulative frames FFmpeg reports duplicating for this stream process generation. */
+  streamDuplicatedFrames?: number
   /** Number of distinct production VideoToolbox output encoders active for the session. */
   encoderBridgeActiveVideoToolboxOutputEncoders: number
   /** Frames/bytes produced by the local-recording VideoToolbox output encoder. */
@@ -2801,6 +2863,7 @@ export interface NotesWindowState {
   windowId?: number
   alwaysOnTop: boolean
   protected: boolean
+  captureProtectionMarkerInstalled?: boolean
   enabled: boolean
   message?: string
 }
@@ -2818,6 +2881,7 @@ export interface CommentsWindowState {
   windowId?: number
   alwaysOnTop: boolean
   protected: boolean
+  captureProtectionMarkerInstalled?: boolean
   enabled: boolean
   message?: string
 }
@@ -3295,6 +3359,7 @@ export interface CaptionsWindowState {
   bounds: { x: number; y: number; width: number; height: number } | null
   windowId?: number
   alwaysOnTop: boolean
+  captureProtectionMarkerInstalled?: boolean
   enabled: boolean
   message?: string
 }

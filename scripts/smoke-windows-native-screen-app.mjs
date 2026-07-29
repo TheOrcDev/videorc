@@ -28,7 +28,8 @@ import {
   nativeWindowsCompositorUsesScreen,
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive,
-  requiredBmpPreviewAdvances
+  requiredBmpPreviewAdvances,
+  windowsNativeScreenPerformanceBudgetContext
 } from './lib/windows-native-screen-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -359,18 +360,15 @@ if (performanceEvaluationRequested) {
       activeBudget = await loadWindowsPerformanceBudget({
         path: process.env.VIDEORC_WINDOWS_PERF_BUDGET_PATH,
         profileId: process.env.VIDEORC_WINDOWS_PERF_BUDGET_PROFILE,
-        context: {
+        context: windowsNativeScreenPerformanceBudgetContext({
+          metadata,
           scenario: process.env.VIDEORC_PERF_SCENARIO ?? 'windows-proof-recording',
-          hardwareClass: metadata.hardwareClass,
-          profileClass: metadata.profileClass,
-          buildMode: metadata.buildMode,
-          operatingSystem: metadata.operatingSystem,
           timing: {
             warmupMs: performanceWarmupMs,
             measurementMs: performanceMeasurementMs,
             intervalMs: performanceIntervalMs
           }
-        }
+        })
       })
       budgetFailures = evaluateWindowsPerformanceBudget(activeBudget.profile, {
         processTree: performanceTelemetry,
@@ -681,13 +679,8 @@ function assertEncodedBridgeDiagnostics(
       `encodedOutputBackend=${diagnostics?.encoderBridgeEncodedOutputBackend ?? 'missing'}`
     )
   }
-  if (
-    diagnostics?.encoderBridgeEffectiveVideoOutput !==
-    'windows-media-foundation-h264-mpegts'
-  ) {
-    failures.push(
-      `effectiveOutput=${diagnostics?.encoderBridgeEffectiveVideoOutput ?? 'missing'}`
-    )
+  if (diagnostics?.encoderBridgeEffectiveVideoOutput !== 'windows-media-foundation-h264-mpegts') {
+    failures.push(`effectiveOutput=${diagnostics?.encoderBridgeEffectiveVideoOutput ?? 'missing'}`)
   }
   if ((diagnostics?.encoderBridgeRawVideoCopiedFrames ?? 0) !== 0) {
     failures.push(`rawFifoCopiedFrames=${diagnostics.encoderBridgeRawVideoCopiedFrames}`)
