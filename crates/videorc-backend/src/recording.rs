@@ -15603,19 +15603,14 @@ mod tests {
         assert!(later_error.error.to_string().contains("state is unknown"));
     }
 
+    const TEST_LIVE_AUDIO_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+    const TEST_LIVE_AUDIO_PROMPT_TIMEOUT: Duration = Duration::from_secs(1);
+
     async fn spawn_test_stdin_sink() -> (tokio::process::Child, ChildStdin) {
         #[cfg(target_os = "windows")]
-        let mut command = {
-            let mut command = Command::new("cmd");
-            command.args(["/C", "more > NUL"]);
-            command
-        };
+        let mut command = Command::new("more.com");
         #[cfg(not(target_os = "windows"))]
-        let mut command = {
-            let mut command = Command::new("sh");
-            command.args(["-c", "cat >/dev/null"]);
-            command
-        };
+        let mut command = Command::new("cat");
         command
             .kill_on_drop(true)
             .stdin(Stdio::piped())
@@ -15624,6 +15619,23 @@ mod tests {
         let mut child = command.spawn().expect("spawn stdin sink");
         let stdin = child.stdin.take().expect("stdin sink pipe");
         (child, stdin)
+    }
+
+    async fn wait_for_test_stdin_sink(child: &mut tokio::process::Child) {
+        match timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, child.wait()).await {
+            Ok(result) => {
+                result.expect("wait for stdin sink");
+            }
+            Err(_) => {
+                let pid = child.id();
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                panic!(
+                    "closed command pipe did not reach EOF within {}ms (pid={pid:?})",
+                    TEST_LIVE_AUDIO_EVENT_TIMEOUT.as_millis()
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -15656,7 +15668,7 @@ mod tests {
         );
 
         assert!(session.mark_command_ready());
-        timeout(Duration::from_secs(1), async {
+        timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, async {
             loop {
                 if session.session.try_lock().is_err() {
                     break;
@@ -15667,7 +15679,7 @@ mod tests {
         .await
         .expect("ready update must enter the serialized command lane");
         assert_eq!(
-            timeout(Duration::from_secs(1), dispatches.recv())
+            timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, dispatches.recv())
                 .await
                 .expect("written command must publish dispatch evidence"),
             Some(())
@@ -15675,17 +15687,14 @@ mod tests {
         reply_sender
             .send(FfmpegFilterCommandReply { return_code: 0 })
             .unwrap();
-        timeout(Duration::from_secs(1), applying)
+        timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, applying)
             .await
             .expect("ready command must use the acknowledgement budget")
             .unwrap()
             .unwrap();
 
         session.close_stdin().await.unwrap();
-        timeout(Duration::from_secs(1), child.wait())
-            .await
-            .expect("closed command pipe should reach EOF")
-            .expect("wait for stdin sink");
+        wait_for_test_stdin_sink(&mut child).await;
     }
 
     #[tokio::test]
@@ -15729,19 +15738,18 @@ mod tests {
         assert!(!last_applied.muted);
 
         session.close_stdin().await.unwrap();
-        timeout(Duration::from_secs(1), child.wait())
-            .await
-            .expect("closed command pipe should reach EOF")
-            .expect("wait for stdin sink");
+        wait_for_test_stdin_sink(&mut child).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_terminal_interrupt_is_session_ended_not_unknown_audio_state() {
         let (mut child, stdin) = spawn_test_stdin_sink().await;
         let (_reply_sender, replies) = mpsc::unbounded_channel();
+        let (dispatch_sender, mut dispatches) = mpsc::unbounded_channel();
         let session = Arc::new(FfmpegLiveAudioSessionHandle::new(
             stdin,
-            FfmpegLiveAudioControl::new(1, replies, AudioProcessingSettings::default()),
+            FfmpegLiveAudioControl::new(1, replies, AudioProcessingSettings::default())
+                .with_dispatch_sender(dispatch_sender),
         ));
         session.mark_command_ready();
         let applying = {
@@ -15755,19 +15763,13 @@ mod tests {
                     .await
             })
         };
-        timeout(Duration::from_secs(1), async {
-            loop {
-                if session.session.try_lock().is_err() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("command must enter its acknowledgement wait");
+        timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, dispatches.recv())
+            .await
+            .expect("command must enter its acknowledgement wait")
+            .expect("command dispatch evidence");
 
         assert!(session.mark_terminal());
-        let failure = timeout(Duration::from_millis(100), applying)
+        let failure = timeout(TEST_LIVE_AUDIO_PROMPT_TIMEOUT, applying)
             .await
             .expect("terminal process state must interrupt acknowledgement promptly")
             .unwrap()
@@ -15777,10 +15779,7 @@ mod tests {
         assert!(failure.confirmed_settings.is_some());
 
         session.close_stdin().await.unwrap();
-        timeout(Duration::from_secs(1), child.wait())
-            .await
-            .expect("closed command pipe should reach EOF")
-            .expect("wait for stdin sink");
+        wait_for_test_stdin_sink(&mut child).await;
     }
 
     #[tokio::test]
@@ -15789,9 +15788,11 @@ mod tests {
         let mut events = state.events.subscribe();
         let (mut child, stdin) = spawn_test_stdin_sink().await;
         let (reply_sender, replies) = mpsc::unbounded_channel();
+        let (dispatch_sender, mut dispatches) = mpsc::unbounded_channel();
         let live_audio_session = Arc::new(FfmpegLiveAudioSessionHandle::new(
             stdin,
-            FfmpegLiveAudioControl::new(1, replies, AudioProcessingSettings::default()),
+            FfmpegLiveAudioControl::new(1, replies, AudioProcessingSettings::default())
+                .with_dispatch_sender(dispatch_sender),
         ));
         assert!(live_audio_session.mark_command_ready());
         let audio_tracks = vec![microphone_audio_track()];
@@ -15835,29 +15836,20 @@ mod tests {
             .await
         });
 
-        let session_waiting_for_reply = timeout(Duration::from_secs(1), async {
-            loop {
-                if live_audio_session.session.try_lock().is_err() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
-        assert!(
-            session_waiting_for_reply.is_ok(),
-            "live update never entered its session-scoped acknowledgement wait"
-        );
+        timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, dispatches.recv())
+            .await
+            .expect("live update never entered its session-scoped acknowledgement wait")
+            .expect("command dispatch evidence");
 
         let stop_state = state.clone();
         let stop = tokio::spawn(async move { stop_recording(stop_state).await });
 
-        timeout(Duration::from_millis(100), stop_intent_receiver)
+        timeout(TEST_LIVE_AUDIO_PROMPT_TIMEOUT, stop_intent_receiver)
             .await
             .expect("stop intent must not wait for FFmpeg acknowledgement")
             .expect("authoritative stop intent");
 
-        let stopping_event = timeout(Duration::from_secs(1), async {
+        let stopping_event = timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, async {
             loop {
                 let event = events.recv().await.expect("recording event");
                 if event.event == "recording.status" {
@@ -15873,7 +15865,7 @@ mod tests {
             "stop should be waiting behind the in-flight session command only after publication"
         );
 
-        let result = timeout(Duration::from_millis(100), update)
+        let result = timeout(TEST_LIVE_AUDIO_PROMPT_TIMEOUT, update)
             .await
             .expect("stop must interrupt an in-flight live-audio acknowledgement")
             .unwrap();
@@ -15892,10 +15884,7 @@ mod tests {
         assert_eq!(late_result.reason_code.as_deref(), Some("session-ended"));
         drop(reply_sender);
 
-        timeout(Duration::from_secs(1), child.wait())
-            .await
-            .expect("FFmpeg stdin sink should close after the acknowledgement")
-            .expect("wait for stdin sink");
+        wait_for_test_stdin_sink(&mut child).await;
         stop.abort();
         let _ = stop.await;
         state.recording.lock().await.take();
@@ -15945,10 +15934,7 @@ mod tests {
         assert!(sticky_error.confirmed_settings.is_none());
 
         live_audio_session.close_stdin().await.unwrap();
-        timeout(Duration::from_secs(1), child.wait())
-            .await
-            .expect("closed live command pipe should reach EOF")
-            .expect("wait for stdin sink");
+        wait_for_test_stdin_sink(&mut child).await;
     }
 
     #[test]

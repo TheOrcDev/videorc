@@ -57,11 +57,22 @@ jobs:
         # docs/windows-port-plan.md) — burn that down, then drop the allows.
         run: cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut
 
-      - name: Test
+      - name: Test (3 stability passes)
         # Executes the Windows-only unit tests (named pipes, process Job
         # Objects, dshow input builders) that `pnpm check:windows` can only
         # compile. ffmpeg-spawning tests are #[ignore]d, same as macOS CI.
-        run: cargo test -p videorc-backend
+        #
+        # Process and lifecycle races have previously passed once on a fork
+        # before failing on the identical upstream commit. Repeating the full
+        # suite makes the Windows gate evidence stronger than a lucky run.
+        run: |
+          for ($pass = 1; $pass -le 3; $pass++) {
+            Write-Host "Windows Rust test pass $pass/3"
+            cargo test -p videorc-backend
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
 
       - name: Tracked text integrity
         run: pnpm check:text-files
