@@ -27,7 +27,8 @@ import {
   assertWindowsGraphicsCaptureTexture,
   nativeWindowsCompositorUsesScreen,
   nativeWindowsScreenCandidates,
-  nativeWindowsScreenRecordingActive
+  nativeWindowsScreenRecordingActive,
+  requiredBmpPreviewAdvances
 } from './lib/windows-native-screen-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -131,6 +132,7 @@ try {
   }
   const screen = await startAvailableWindowsScreenPreview(ws, candidates)
   selectedScreen = screen
+  const minimumBmpPreviewAdvances = requiredBmpPreviewAdvances(screen)
   const camera = includeCamera
     ? (deviceList?.devices ?? []).find(
         (device) => device.kind === 'camera' && device.status === 'available'
@@ -210,7 +212,7 @@ try {
     : Promise.resolve(null)
   const [telemetryResult, bmpResult] = await Promise.allSettled([
     telemetryPromise,
-    pollBmpDuringRecording(connection, firstBmp.cursor, recordingMs)
+    pollBmpDuringRecording(connection, firstBmp.cursor, recordingMs, minimumBmpPreviewAdvances)
   ])
   if (telemetryResult.status === 'fulfilled') {
     performanceTelemetry = telemetryResult.value
@@ -557,7 +559,7 @@ async function waitForActiveNativeScreenRecording(ws, sourceId) {
   )
 }
 
-async function pollBmpDuringRecording(connection, initialCursor, durationMs) {
+async function pollBmpDuringRecording(connection, initialCursor, durationMs, minimumAdvances) {
   const deadline = Date.now() + durationMs
   let cursor = initialCursor
   let advancedFrames = 0
@@ -578,9 +580,10 @@ async function pollBmpDuringRecording(connection, initialCursor, durationMs) {
     }
     await sleep(100)
   }
-  if (advancedFrames < 5 || nonblankFrames !== advancedFrames) {
+  if (advancedFrames < minimumAdvances || nonblankFrames !== advancedFrames) {
     throw new Error(
-      `Native BMP preview did not stay live during recording: advanced=${advancedFrames}, nonblank=${nonblankFrames}.`
+      `Native BMP preview did not stay live during recording: advanced=${advancedFrames}, ` +
+        `required=${minimumAdvances}, nonblank=${nonblankFrames}.`
     )
   }
   const intervalsMs = observations

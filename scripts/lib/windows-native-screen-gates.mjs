@@ -153,3 +153,11 @@ export function assertNonblankBmp(bytes, headers) {
     )
   }
 }
+
+export function requiredBmpPreviewAdvances(screen) {
+  // GitHub-hosted Windows runners expose the Microsoft Basic Render Driver,
+  // which has no physical compositor/GPU cadence. Keep proving that the BMP
+  // surface advances through recording, but do not apply the physical-GPU
+  // five-frame expectation to this explicitly identified software renderer.
+  return /microsoft basic render driver/i.test(screen?.detail ?? '') ? 3 : 5
+}

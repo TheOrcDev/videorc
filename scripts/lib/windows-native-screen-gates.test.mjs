@@ -8,6 +8,7 @@ import {
   nativeWindowsCompositorUsesScreen,
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive,
+  requiredBmpPreviewAdvances,
   selectNativeWindowsScreen
 } from './windows-native-screen-gates.mjs'
 
@@ -50,6 +51,12 @@ test('native Windows screen selection prefers DXGI and falls back to gdigrab', (
     [dxgi.id, 'screen:gdigrab:desktop']
   )
   assert.deepEqual(nativeWindowsScreenCandidates([gdigrab]), [gdigrab])
+})
+
+test('BMP preview liveness threshold is relaxed only for the hosted software renderer', () => {
+  assert.equal(requiredBmpPreviewAdvances({ detail: 'Microsoft Basic Render Driver' }), 3)
+  assert.equal(requiredBmpPreviewAdvances({ detail: 'NVIDIA GeForce GTX 1650 SUPER' }), 5)
+  assert.equal(requiredBmpPreviewAdvances({}), 5)
 })
 
 test('native ScreenOnly recording proof joins recording, compositor, and source authority', () => {

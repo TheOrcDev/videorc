@@ -331,6 +331,7 @@ impl MediaFoundationH264Encoder {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn configure_transform(
         config: MediaFoundationEncoderConfig,
         activation: IMFActivate,

@@ -185,6 +185,7 @@ pub struct StoredFrame<P, M = ()> {
     pub source_pixel_buffer: Option<RetainedPixelBuffer>,
     /// Retained Windows capture texture for D3D11 composition or direct Media
     /// Foundation submission. `bytes` remains the explicit CPU fallback.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub source_d3d11_texture: Option<RetainedD3D11Texture>,
     #[doc(hidden)]
     pub(crate) recycle_pool: Option<Weak<StdMutex<FrameBufferPool>>>,

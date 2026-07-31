@@ -1095,7 +1095,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         mut startup_ready_tx,
         fifo_path,
         frame_store,
+        #[cfg(target_os = "windows")]
         direct_d3d11_source,
+        #[cfg(not(target_os = "windows"))]
+            direct_d3d11_source: _,
         #[cfg(target_os = "windows")]
         direct_d3d11_camera_overlay,
         video_output,
