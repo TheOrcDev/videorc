@@ -33,7 +33,8 @@ export function nativeWindowsScreenRecordingActive(evidence, sourceId) {
   return (
     diagnostics?.activeOutputMode === 'record' &&
     recording?.state === 'recording' &&
-    nativeWindowsCompositorUsesScreen(compositor, sourceId) &&
+    (nativeWindowsCompositorUsesScreen(compositor, sourceId) ||
+      diagnostics?.encoderBridgeEncodedOutputInputSubtype === 'NV12-D3D11') &&
     sourceEntry?.status === 'live'
   )
 }

@@ -3903,6 +3903,82 @@ struct RgbaSource<'a> {
     format: SourcePixelFormat,
 }
 
+/// Renders a camera source into a small, transparent BGRA overlay ready for
+/// upload to the Windows D3D11 video processor. The full-size screen remains a
+/// retained GPU texture; only the camera inset is sampled on the CPU.
+///
+/// Keeping this beside the CPU compositor's source-fit helpers makes the
+/// direct Windows path share the same crop, fit, mirror, and mask behavior.
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_camera_overlay_bgra(
+    source_bytes: &[u8],
+    source_width: u32,
+    source_height: u32,
+    overlay_width: u32,
+    overlay_height: u32,
+    crop: SceneCrop,
+    contain: bool,
+    mirror_x: bool,
+    mask: SceneMask,
+    output: &mut Vec<u8>,
+) -> bool {
+    let source = RgbaSource {
+        bytes: source_bytes,
+        width: source_width,
+        height: source_height,
+        format: SourcePixelFormat::Bgra,
+    };
+    if source.width == 0 || source.height == 0 || source.bytes.len() < source_pixel_len(&source) {
+        return false;
+    }
+    let rect = PixelRect {
+        x: 0,
+        y: 0,
+        width: overlay_width,
+        height: overlay_height,
+    };
+    let Some(fit) = source_fit(source_width, source_height, rect, contain, crop) else {
+        return false;
+    };
+    let Some(byte_len) = usize::try_from(overlay_width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(overlay_height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return false;
+    };
+    output.resize(byte_len, 0);
+    output.fill(0);
+    let row_len = overlay_width as usize * 4;
+    output
+        .par_chunks_mut(row_len)
+        .enumerate()
+        .for_each(|(dest_y, row)| {
+            for dest_x in 0..overlay_width as usize {
+                if !source_mask_allows(mask, dest_x, dest_y, &fit) {
+                    continue;
+                }
+                let Some((source_x, source_y)) =
+                    map_source_pixel(dest_x as u32, dest_y as u32, &source, &fit, mirror_x)
+                else {
+                    continue;
+                };
+                let (r, g, b, alpha) = read_source_rgba(&source, source_x, source_y);
+                let offset = dest_x * 4;
+                row[offset] = b;
+                row[offset + 1] = g;
+                row[offset + 2] = r;
+                row[offset + 3] = alpha;
+            }
+        });
+    true
+}
+
 fn cached_image_cpu_pixels(
     source: &CompositorImageSource,
 ) -> Option<(&[u8], (u32, u32), SourcePixelFormat)> {
@@ -5531,6 +5607,54 @@ mod tests {
         assert_eq!(
             rgba_to_bgra_bytes(&[10, 20, 30, 40, 50, 60, 70, 80]),
             vec![30, 20, 10, 40, 70, 60, 50, 80]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn direct_camera_overlay_preserves_bgra_mirror_and_circle_alpha() {
+        let source = [
+            10, 20, 30, 255, 40, 50, 60, 255, // row 0
+            70, 80, 90, 255, 100, 110, 120, 255, // row 1
+        ];
+        let mut mirrored = Vec::new();
+        assert!(render_camera_overlay_bgra(
+            &source,
+            2,
+            2,
+            2,
+            2,
+            SceneCrop::none(),
+            false,
+            true,
+            SceneMask::None,
+            &mut mirrored,
+        ));
+        assert_eq!(
+            mirrored,
+            vec![
+                40, 50, 60, 255, 10, 20, 30, 255, 100, 110, 120, 255, 70, 80, 90, 255,
+            ]
+        );
+
+        let mut circle = Vec::new();
+        assert!(render_camera_overlay_bgra(
+            &[255; 4 * 4 * 4],
+            4,
+            4,
+            4,
+            4,
+            SceneCrop::none(),
+            false,
+            false,
+            SceneMask::Circle,
+            &mut circle,
+        ));
+        assert_eq!(circle[3], 0, "top-left corner must be transparent");
+        assert_eq!(
+            circle[((1 * 4 + 1) * 4) + 3],
+            255,
+            "circle center must remain opaque"
         );
     }
 

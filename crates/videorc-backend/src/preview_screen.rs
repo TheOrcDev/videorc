@@ -194,11 +194,61 @@ impl PreviewScreenFrameSource {
             .frame_store
             .latest()
     }
+
+    #[cfg(target_os = "windows")]
+    pub fn begin_direct_d3d11_recording(&self) -> Option<PreviewScreenD3D11FrameSource> {
+        let mut guard = self
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.d3d11_frame_store.latest()?;
+        guard.direct_d3d11_consumers = guard.direct_d3d11_consumers.saturating_add(1);
+        drop(guard);
+        Some(PreviewScreenD3D11FrameSource {
+            shared: Arc::clone(&self.shared),
+        })
+    }
 }
+
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+pub struct PreviewScreenD3D11FrameSource {
+    shared: Arc<StdMutex<PreviewScreenShared>>,
+}
+
+#[cfg(target_os = "windows")]
+impl PreviewScreenD3D11FrameSource {
+    pub fn latest_frame(&self) -> Option<FrameHandle<PreviewScreenPixelFormat>> {
+        self.shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .d3d11_frame_store
+            .latest()
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for PreviewScreenD3D11FrameSource {
+    fn drop(&mut self) {
+        let mut guard = self
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.direct_d3d11_consumers = guard.direct_d3d11_consumers.saturating_sub(1);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug)]
+pub struct PreviewScreenD3D11FrameSource;
 
 #[derive(Debug, Default)]
 pub struct PreviewScreenShared {
     frame_store: FrameStore<PreviewScreenPixelFormat>,
+    #[cfg(target_os = "windows")]
+    d3d11_frame_store: FrameStore<PreviewScreenPixelFormat>,
+    #[cfg(target_os = "windows")]
+    direct_d3d11_consumers: usize,
     frames_captured: u64,
     dropped_frames: u64,
     frames_in_window: u64,
@@ -488,6 +538,7 @@ pub async fn start_preview_screen(
                     guard.dropped_frames,
                     guard.source_fps,
                     guard.frame_store.latest(),
+                    latest_d3d11_frame(&guard),
                 )
             };
             let mut status = PreviewScreenStatus {
@@ -525,10 +576,10 @@ pub async fn start_preview_screen(
                 status.actual_height = Some(frame.height);
                 status.iosurface_available =
                     Some(frame.source_iosurface.is_some() || frame.source_pixel_buffer.is_some());
-                status.d3d11_texture_available = Some(frame.source_d3d11_texture.is_some());
-                if frame.source_d3d11_texture.is_some() {
+                status.d3d11_texture_available = Some(initial_frame.4.is_some());
+                if initial_frame.4.is_some() {
                     status.message = Some(
-                        "Windows Graphics Capture retained a D3D11 source texture; CPU BGRA readback remains active for the current compositor fallback."
+                        "Windows Graphics Capture retained a D3D11 source texture for direct recording."
                             .to_string(),
                     );
                 }
@@ -1380,9 +1431,24 @@ fn screen_shared_snapshot(shared: &Arc<StdMutex<PreviewScreenShared>>) -> Screen
         dropped_frames: guard.dropped_frames,
         source_fps: guard.source_fps,
         latest_frame: guard.frame_store.latest(),
+        latest_d3d11_frame: latest_d3d11_frame(&guard),
         frame_store_stats: guard.frame_store.stats(),
         last_error: guard.last_error.clone(),
         capture_timings: guard.capture_timings.snapshot(),
+    }
+}
+
+fn latest_d3d11_frame(
+    shared: &PreviewScreenShared,
+) -> Option<FrameHandle<PreviewScreenPixelFormat>> {
+    #[cfg(target_os = "windows")]
+    {
+        shared.d3d11_frame_store.latest()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = shared;
+        None
     }
 }
 
@@ -1402,7 +1468,7 @@ fn apply_screen_snapshot_to_status(
         status.actual_height = Some(frame.height);
         status.iosurface_available =
             Some(frame.source_iosurface.is_some() || frame.source_pixel_buffer.is_some());
-        status.d3d11_texture_available = Some(frame.source_d3d11_texture.is_some());
+        status.d3d11_texture_available = Some(snapshot.latest_d3d11_frame.is_some());
         status.sequence = Some(frame.sequence);
         status.frame_age_ms = Some(frame.captured_at.elapsed().as_millis() as u64);
         match frame.pixel_format {
@@ -1459,6 +1525,7 @@ struct ScreenSharedSnapshot {
     dropped_frames: u64,
     source_fps: Option<f64>,
     latest_frame: Option<FrameHandle<PreviewScreenPixelFormat>>,
+    latest_d3d11_frame: Option<FrameHandle<PreviewScreenPixelFormat>>,
     frame_store_stats: FrameStoreStats,
     last_error: Option<String>,
     capture_timings: PreviewScreenCaptureTimingStats,
@@ -1659,7 +1726,7 @@ mod windows {
         startup_tx: std_mpsc::Sender<NativeScreenStartup>,
     ) {
         let mut graphics_capture_fallback_reason = None;
-        if crate::windows_graphics_capture::opt_in_enabled()
+        if crate::windows_graphics_capture::enabled()
             && parse_windows_dxgi_source_id(&config.source_id).is_some()
         {
             match run_graphics_capture_preview(&config, &shared, &stop_rx, &startup_tx) {
@@ -1668,7 +1735,7 @@ mod windows {
                     tracing::warn!(
                         error = %error,
                         source_id = %config.source_id,
-                        "Windows Graphics Capture opt-in failed; retaining the FFmpeg capture fallback"
+                        "Windows Graphics Capture failed; retaining the FFmpeg capture fallback"
                     );
                     graphics_capture_fallback_reason = Some(error);
                 }
@@ -1798,6 +1865,7 @@ mod windows {
         let mut startup_sent = false;
         let mut last_capture_drops = 0_u64;
         let mut buffer = Vec::new();
+        let mut last_cpu_readback_at: Option<Instant> = None;
 
         loop {
             match stop_rx.try_recv() {
@@ -1833,6 +1901,31 @@ mod windows {
                 guard.dropped_frames = guard.dropped_frames.saturating_add(1);
                 continue;
             }
+            let capture_drops = capture.dropped_frames();
+            if capture_drops > last_capture_drops {
+                let dropped = capture_drops - last_capture_drops;
+                let mut guard = shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.dropped_frames = guard.dropped_frames.saturating_add(dropped);
+                last_capture_drops = capture_drops;
+            }
+            let retained_texture = frame.retained_texture(capture.adapter_luid());
+            let sequence =
+                publish_d3d11_texture_frame(shared, frame.width, frame.height, retained_texture);
+            let direct_recording_active = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .direct_d3d11_consumers
+                > 0;
+            let cpu_readback_due = should_read_back_cpu_preview(
+                direct_recording_active,
+                startup_sent,
+                last_cpu_readback_at.map(|last| last.elapsed()),
+            );
+            if !cpu_readback_due {
+                continue;
+            }
             let expected_len = bgra_frame_len(frame.width, frame.height)
                 .ok_or_else(|| "Windows Graphics Capture dimensions are too large".to_string())?;
             if buffer.len() != expected_len {
@@ -1859,22 +1952,13 @@ mod windows {
                     return Ok(());
                 }
             };
-            let capture_drops = capture.dropped_frames();
-            if capture_drops > last_capture_drops {
-                let dropped = capture_drops - last_capture_drops;
-                let mut guard = shared
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                guard.dropped_frames = guard.dropped_frames.saturating_add(dropped);
-                last_capture_drops = capture_drops;
-            }
-            let retained_texture = frame.retained_texture(capture.adapter_luid());
-            buffer = publish_bgra_texture_frame(
+            last_cpu_readback_at = Some(Instant::now());
+            buffer = publish_bgra_readback_frame(
                 shared,
+                sequence,
                 frame.width,
                 frame.height,
                 buffer,
-                retained_texture,
                 readback_duration,
             );
             if !startup_sent {
@@ -2027,18 +2111,14 @@ mod windows {
         next_buffer
     }
 
-    fn publish_bgra_texture_frame(
+    fn publish_d3d11_texture_frame(
         shared: &Arc<StdMutex<PreviewScreenShared>>,
         width: u32,
         height: u32,
-        bytes: Vec<u8>,
         texture: crate::frame_store::RetainedD3D11Texture,
-        readback_duration: Duration,
-    ) -> Vec<u8> {
+    ) -> u64 {
         let callback_started_at = Instant::now();
         let publish_started_at = Instant::now();
-        let frame_len = bytes.len();
-        let frame_bytes = frame_len as u64;
         let mut guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2057,14 +2137,44 @@ mod windows {
             guard.window_started_at = Some(now);
         }
         let sequence = guard.frames_captured;
-        guard.frame_store.publish_with_d3d11_texture(
+        guard.d3d11_frame_store.publish_with_d3d11_texture(
             sequence,
             width,
             height,
             PreviewScreenPixelFormat::Bgra8,
             now,
-            bytes,
+            Vec::new(),
             texture,
+        );
+        let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
+        guard
+            .capture_timings
+            .record_valid_frame(0.0, 0.0, publish_ms, 0);
+        sequence
+    }
+
+    fn publish_bgra_readback_frame(
+        shared: &Arc<StdMutex<PreviewScreenShared>>,
+        sequence: u64,
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+        readback_duration: Duration,
+    ) -> Vec<u8> {
+        let publish_started_at = Instant::now();
+        let frame_len = bytes.len();
+        let frame_bytes = frame_len as u64;
+        let mut guard = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.frame_store.publish_with_metadata(
+            sequence,
+            width,
+            height,
+            PreviewScreenPixelFormat::Bgra8,
+            (),
+            Instant::now(),
+            bytes,
         );
         let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -2075,6 +2185,16 @@ mod windows {
             frame_bytes,
         );
         next_buffer
+    }
+
+    fn should_read_back_cpu_preview(
+        direct_recording_active: bool,
+        startup_sent: bool,
+        since_last_readback: Option<Duration>,
+    ) -> bool {
+        !direct_recording_active
+            || !startup_sent
+            || since_last_readback.is_none_or(|elapsed| elapsed >= Duration::from_millis(100))
     }
 
     fn stderr_suffix(stderr: &Arc<StdMutex<Vec<u8>>>) -> String {
@@ -2091,7 +2211,9 @@ mod windows {
 
     #[cfg(test)]
     mod tests {
-        use super::WindowsCaptureCadenceGate;
+        use std::time::Duration;
+
+        use super::{WindowsCaptureCadenceGate, should_read_back_cpu_preview};
 
         #[test]
         fn graphics_capture_cadence_gate_uses_source_timestamps() {
@@ -2101,6 +2223,31 @@ mod windows {
             assert!(!gate.admit(1_100_000));
             assert!(!gate.admit(900_000));
             assert!(gate.admit(1_333_333));
+        }
+
+        #[test]
+        fn direct_recording_caps_only_the_cpu_preview_readback() {
+            assert!(should_read_back_cpu_preview(
+                false,
+                true,
+                Some(Duration::ZERO)
+            ));
+            assert!(should_read_back_cpu_preview(
+                true,
+                false,
+                Some(Duration::ZERO)
+            ));
+            assert!(should_read_back_cpu_preview(true, true, None));
+            assert!(!should_read_back_cpu_preview(
+                true,
+                true,
+                Some(Duration::from_millis(99))
+            ));
+            assert!(should_read_back_cpu_preview(
+                true,
+                true,
+                Some(Duration::from_millis(100))
+            ));
         }
     }
 }

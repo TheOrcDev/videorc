@@ -1357,6 +1357,12 @@ fn selected_camera_source(camera_id: &str) -> Option<SelectedCameraSource> {
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_camera_preview_output_dimensions(config: &NativeCameraPreviewConfig) -> (u32, u32) {
+    if matches!(
+        config.layout.layout_preset,
+        LayoutPreset::ScreenCamera | LayoutPreset::VerticalScreenCamera
+    ) {
+        return camera_overlay_target_dimensions(&config.layout, &config.video);
+    }
     camera_capture_target_dimensions(&config.layout, &config.video)
 }
 
@@ -1378,16 +1384,30 @@ fn windows_camera_preview_ffmpeg_args_opts(
     fps: u32,
     request_fps: Option<u32>,
 ) -> Vec<String> {
+    windows_camera_preview_ffmpeg_args_mode(config, width, height, fps, request_fps, None)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_camera_preview_ffmpeg_args_mode(
+    config: &NativeCameraPreviewConfig,
+    width: u32,
+    height: u32,
+    fps: u32,
+    request_fps: Option<u32>,
+    mjpeg_capture_size: Option<(u32, u32)>,
+) -> Vec<String> {
     let mut args = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
         "-nostdin".to_string(),
     ];
-    crate::capture_input::append_windows_dshow_video_input_opts(
+    crate::capture_input::append_windows_dshow_video_input_mode_opts(
         &mut args,
         &config.unique_id,
         request_fps,
+        mjpeg_capture_size,
+        mjpeg_capture_size.map(|_| "mjpeg"),
     );
     let mut filters = Vec::with_capacity(3);
     if request_fps.is_none() {
@@ -1417,6 +1437,48 @@ fn windows_camera_preview_ffmpeg_args_opts(
     args
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_camera_mjpeg_capture_modes(width: u32, height: u32) -> Vec<(u32, u32)> {
+    const COMMON_MODES: &[(u32, u32)] = &[
+        (160, 90),
+        (160, 120),
+        (176, 144),
+        (320, 180),
+        (320, 240),
+        (352, 288),
+        (432, 240),
+        (640, 360),
+        (640, 480),
+        (800, 448),
+        (800, 600),
+        (864, 480),
+        (960, 720),
+        (1024, 576),
+        (1280, 720),
+        (1600, 896),
+        (1920, 1080),
+    ];
+    let target_width = u64::from(width.max(1));
+    let target_height = u64::from(height.max(1));
+    let target_pixels = target_width.saturating_mul(target_height);
+    let mut modes = COMMON_MODES.to_vec();
+    modes.sort_by_key(|&(mode_width, mode_height)| {
+        let mode_width = u64::from(mode_width);
+        let mode_height = u64::from(mode_height);
+        let mode_pixels = mode_width.saturating_mul(mode_height);
+        let undersized = u8::from(mode_width < target_width || mode_height < target_height);
+        let aspect_error = mode_width
+            .saturating_mul(target_height)
+            .abs_diff(target_width.saturating_mul(mode_height));
+        (
+            undersized,
+            aspect_error,
+            mode_pixels.abs_diff(target_pixels),
+        )
+    });
+    modes
+}
+
 fn camera_capture_target_dimensions(layout: &LayoutSettings, video: &VideoSettings) -> (u32, u32) {
     // Only the inset scenes (ScreenCamera + its vertical twin) render the
     // camera as a small overlay box; everywhere else the camera can span the
@@ -1428,7 +1490,20 @@ fn camera_capture_target_dimensions(layout: &LayoutSettings, video: &VideoSettin
         return (video.width, video.height);
     }
 
-    let (overlay_width, overlay_height) = if let (CameraTransformMode::Custom, Some(transform)) =
+    let (overlay_width, overlay_height) = camera_overlay_target_dimensions(layout, video);
+
+    (
+        overlay_width
+            .max(CAMERA_OVERLAY_CAPTURE_MIN_WIDTH)
+            .min(video.width.max(1)),
+        overlay_height
+            .max(CAMERA_OVERLAY_CAPTURE_MIN_HEIGHT)
+            .min(video.height.max(1)),
+    )
+}
+
+fn camera_overlay_target_dimensions(layout: &LayoutSettings, video: &VideoSettings) -> (u32, u32) {
+    if let (CameraTransformMode::Custom, Some(transform)) =
         (layout.camera_transform_mode, layout.camera_transform)
     {
         (
@@ -1446,16 +1521,7 @@ fn camera_capture_target_dimensions(layout: &LayoutSettings, video: &VideoSettin
             &layout.camera_aspect,
             video,
         )
-    };
-
-    (
-        overlay_width
-            .max(CAMERA_OVERLAY_CAPTURE_MIN_WIDTH)
-            .min(video.width.max(1)),
-        overlay_height
-            .max(CAMERA_OVERLAY_CAPTURE_MIN_HEIGHT)
-            .min(video.height.max(1)),
-    )
+    }
 }
 
 fn scaled_camera_box_size(
@@ -1577,17 +1643,21 @@ mod windows {
             });
         }
 
-        // Attempt with the requested framerate first; if the device never
-        // produces a frame (dshow can reject an exact `-framerate` a webcam
-        // does not offer), retry once letting dshow negotiate its default
-        // format. This is the second half of the zero-frames fix (the first is
-        // using the dshow friendly name rather than the MF symbolic link).
-        let attempts = [Some(fps), None];
-        for (attempt_index, request_fps) in attempts.into_iter().enumerate() {
+        // Prefer an explicit MJPEG mode. Consumer webcams commonly reserve
+        // 720p30 for MJPEG while their uncompressed DirectShow mode tops out
+        // at 5-10 fps. Retain the exact-rate and negotiated-default fallbacks
+        // for cameras that do not expose MJPEG.
+        let mut attempts = windows_camera_mjpeg_capture_modes(width, height)
+            .into_iter()
+            .map(|capture_size| (Some(fps), Some(capture_size)))
+            .collect::<Vec<_>>();
+        attempts.extend([(Some(fps), None), (None, None)]);
+        let attempt_count = attempts.len();
+        for (attempt_index, (request_fps, mjpeg_capture_size)) in attempts.into_iter().enumerate() {
             if stop_flag.load(Ordering::Acquire) {
                 return;
             }
-            let last_attempt = attempt_index + 1 == attempts.len();
+            let last_attempt = attempt_index + 1 == attempt_count;
             match run_windows_camera_preview_attempt(
                 &config,
                 &shared,
@@ -1598,6 +1668,7 @@ mod windows {
                 fps,
                 frame_len,
                 request_fps,
+                mjpeg_capture_size,
                 last_attempt,
             ) {
                 CameraPreviewAttempt::ProducedFrames | CameraPreviewAttempt::Stopped => return,
@@ -1626,9 +1697,17 @@ mod windows {
         fps: u32,
         frame_len: usize,
         request_fps: Option<u32>,
+        mjpeg_capture_size: Option<(u32, u32)>,
         last_attempt: bool,
     ) -> CameraPreviewAttempt {
-        let args = windows_camera_preview_ffmpeg_args_opts(config, width, height, fps, request_fps);
+        let args = windows_camera_preview_ffmpeg_args_mode(
+            config,
+            width,
+            height,
+            fps,
+            request_fps,
+            mjpeg_capture_size,
+        );
         let mut command = Command::new(&config.ffmpeg_path);
         command
             .args(&args)
@@ -1678,16 +1757,28 @@ mod windows {
                         let _ = startup_tx.send(NativeCameraStartup::Live {
                             requested_width: width,
                             requested_height: height,
-                            selected_format_width: width,
-                            selected_format_height: height,
+                            selected_format_width: mjpeg_capture_size
+                                .map_or(width, |size| size.0),
+                            selected_format_height: mjpeg_capture_size
+                                .map_or(height, |size| size.1),
                             selected_format_min_fps: fps as f64,
                             selected_format_max_fps: fps as f64,
                             width,
                             height,
                             selected_fps: fps as f64,
-                            message: Some(
-                                "Windows FFmpeg camera preview is using dshow.".to_string(),
-                            ),
+                            message: Some(if let Some((capture_width, capture_height)) =
+                                mjpeg_capture_size
+                            {
+                                format!(
+                                    "Windows FFmpeg camera preview is using explicit dshow MJPEG {capture_width}x{capture_height}@{fps}, scaled to {width}x{height}."
+                                )
+                            } else if request_fps.is_some() {
+                                "Windows FFmpeg camera preview is using an explicit dshow frame rate."
+                                    .to_string()
+                            } else {
+                                "Windows FFmpeg camera preview is using the negotiated dshow default."
+                                    .to_string()
+                            }),
                         });
                         startup_sent = true;
                         outcome = CameraPreviewAttempt::ProducedFrames;
@@ -2846,6 +2937,52 @@ mod tests {
     }
 
     #[test]
+    fn windows_camera_preview_prefers_explicit_mjpeg_device_mode() {
+        let config = NativeCameraPreviewConfig {
+            camera_id: "camera:windows-dshow:5553422043616d657261".to_string(),
+            unique_id: "USB Camera".to_string(),
+            ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
+            video: test_video(),
+            layout: test_layout(false),
+        };
+        let args = windows_camera_preview_ffmpeg_args_mode(
+            &config,
+            1280,
+            720,
+            30,
+            Some(30),
+            Some((1280, 720)),
+        );
+
+        let input_index = args
+            .iter()
+            .position(|arg| arg == "-i")
+            .expect("DirectShow input marker");
+        assert!(
+            args[..input_index]
+                .windows(2)
+                .any(|pair| { pair == ["-video_size", "1280x720"] })
+        );
+        assert!(
+            args[..input_index]
+                .windows(2)
+                .any(|pair| pair == ["-vcodec", "mjpeg"])
+        );
+        assert!(
+            args[..input_index]
+                .windows(2)
+                .any(|pair| pair == ["-framerate", "30"])
+        );
+    }
+
+    #[test]
+    fn windows_camera_overlay_uses_supported_mjpeg_capture_shape() {
+        let modes = windows_camera_mjpeg_capture_modes(360, 203);
+
+        assert_eq!(modes.first().copied(), Some((640, 360)));
+    }
+
+    #[test]
     fn windows_camera_default_format_retry_caps_high_fps_without_duplicating_low_fps() {
         fn selected_frame_count(source_fps: u32, target_fps: u32) -> usize {
             let mut previous_selected_t = None;
@@ -2961,6 +3098,26 @@ mod tests {
         assert_eq!(
             camera_capture_target_dimensions(&layout, &test_video()),
             (1280, 720)
+        );
+    }
+
+    #[test]
+    fn windows_screen_camera_preview_uses_overlay_sized_bgra_buffer() {
+        let mut layout = test_layout(false);
+        layout.layout_preset = LayoutPreset::ScreenCamera;
+        layout.camera_size = CameraSize::Medium;
+        layout.camera_shape = CameraShape::Rectangle;
+        let config = NativeCameraPreviewConfig {
+            camera_id: "camera:windows-dshow:5553422043616d657261".to_string(),
+            unique_id: "USB Camera".to_string(),
+            ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
+            video: test_video(),
+            layout,
+        };
+
+        assert_eq!(
+            windows_camera_preview_output_dimensions(&config),
+            (540, 305)
         );
     }
 

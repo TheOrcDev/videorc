@@ -40,19 +40,19 @@ use crate::screen_capture::WindowsDxgiSourceId;
 const CAPTURE_QUEUE_DEPTH: usize = 2;
 const CALLBACK_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
-pub fn opt_in_enabled() -> bool {
-    opt_in_value_enabled(
+pub fn enabled() -> bool {
+    graphics_capture_value_enabled(
         std::env::var("VIDEORC_WINDOWS_GRAPHICS_CAPTURE")
             .ok()
             .as_deref(),
     )
 }
 
-fn opt_in_value_enabled(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
+fn graphics_capture_value_enabled(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        !matches!(
             value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
+            "0" | "false" | "no" | "off" | "disabled"
         )
     })
 }
@@ -578,11 +578,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opt_in_parser_is_false_for_missing_or_unrecognized_values() {
-        assert!(!opt_in_value_enabled(None));
-        assert!(!opt_in_value_enabled(Some("disabled")));
-        assert!(opt_in_value_enabled(Some(" TRUE ")));
-        assert!(opt_in_value_enabled(Some("1")));
+    fn graphics_capture_is_default_with_an_explicit_escape_hatch() {
+        assert!(graphics_capture_value_enabled(None));
+        assert!(!graphics_capture_value_enabled(Some("disabled")));
+        assert!(!graphics_capture_value_enabled(Some(" 0 ")));
+        assert!(graphics_capture_value_enabled(Some(" TRUE ")));
+        assert!(graphics_capture_value_enabled(Some("1")));
     }
 
     #[test]

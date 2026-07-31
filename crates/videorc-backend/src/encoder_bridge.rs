@@ -19,6 +19,8 @@ use tokio::task::JoinHandle as TokioJoinHandle;
 use tokio::time::{Duration, MissedTickBehavior};
 use uuid::Uuid;
 
+#[cfg(target_os = "windows")]
+use crate::compositor::render_camera_overlay_bgra;
 use crate::compositor::{CompositorFrameExportHandle, CompositorFrameStore, CompositorPixelFormat};
 use crate::compositor_synthetic::{SyntheticCompositorFrame, SyntheticMovingSource};
 use crate::diagnostics::{
@@ -28,8 +30,13 @@ use crate::diagnostics::{
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::FrameHandle;
 use crate::mpeg_ts::{MpegTsH264Writer, timing_to_90khz};
+#[cfg(target_os = "windows")]
+use crate::preview_camera::PreviewCameraFrameSource;
+use crate::preview_screen::PreviewScreenD3D11FrameSource;
 use crate::process_job::spawn_owned_tokio;
 use crate::protocol::{EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult};
+#[cfg(target_os = "windows")]
+use crate::scene_geometry::{PixelRect, SceneCrop, SceneMask};
 use crate::state::AppState;
 #[cfg(target_os = "macos")]
 use crate::video_toolbox_encoder::{
@@ -38,11 +45,22 @@ use crate::video_toolbox_encoder::{
 };
 #[cfg(target_os = "windows")]
 use crate::windows_media_foundation_encoder::{
-    DRAIN_TIMEOUT as MEDIA_FOUNDATION_DRAIN_TIMEOUT, MediaFoundationEncodedFrame,
+    D3D11BgraOverlay, DRAIN_TIMEOUT as MEDIA_FOUNDATION_DRAIN_TIMEOUT, MediaFoundationEncodedFrame,
     MediaFoundationEncoderConfig, MediaFoundationH264Encoder,
 };
 
 const ENCODER_BRIDGE_DIAGNOSTIC_WINDOW: Duration = Duration::from_secs(2);
+
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+pub struct DirectD3D11CameraOverlay {
+    pub source: PreviewCameraFrameSource,
+    pub destination: PixelRect,
+    pub crop: SceneCrop,
+    pub contain: bool,
+    pub mirror_x: bool,
+    pub mask: SceneMask,
+}
 const ENCODER_BRIDGE_DEADLINE_LAG_THRESHOLD: Duration = Duration::from_millis(1);
 /// Diagnostics are emitted at most once per two-second window plus terminal
 /// events. A capacity-one watch channel keeps only the latest snapshot so a
@@ -794,6 +812,8 @@ pub fn start_synthetic_recording_bridge(
     height: u32,
     fifo_path: PathBuf,
     frame_store: Option<CompositorFrameStore>,
+    direct_d3d11_source: Option<PreviewScreenD3D11FrameSource>,
+    #[cfg(target_os = "windows")] direct_d3d11_camera_overlay: Option<DirectD3D11CameraOverlay>,
     video_output: EncoderBridgeVideoOutput,
     bitrate_kbps: Option<u32>,
     // True when a live leg consumes this output (streaming posture: speed over
@@ -842,6 +862,9 @@ pub fn start_synthetic_recording_bridge(
                 byte_len,
                 fifo_path: writer_fifo_path,
                 frame_store,
+                direct_d3d11_source,
+                #[cfg(target_os = "windows")]
+                direct_d3d11_camera_overlay,
                 video_output,
                 bitrate_kbps,
                 low_latency,
@@ -1040,6 +1063,9 @@ struct SyntheticRecordingWriterParams {
     startup_ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
     fifo_path: PathBuf,
     frame_store: Option<CompositorFrameStore>,
+    direct_d3d11_source: Option<PreviewScreenD3D11FrameSource>,
+    #[cfg(target_os = "windows")]
+    direct_d3d11_camera_overlay: Option<DirectD3D11CameraOverlay>,
     video_output: EncoderBridgeVideoOutput,
     bitrate_kbps: Option<u32>,
     low_latency: bool,
@@ -1069,6 +1095,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         mut startup_ready_tx,
         fifo_path,
         frame_store,
+        direct_d3d11_source,
+        #[cfg(target_os = "windows")]
+        direct_d3d11_camera_overlay,
         video_output,
         bitrate_kbps,
         low_latency,
@@ -1076,6 +1105,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         diagnostics_context,
         video_epoch,
     } = params;
+    #[cfg(target_os = "windows")]
+    let direct_d3d11_enabled = direct_d3d11_source.is_some();
+    #[cfg(not(target_os = "windows"))]
+    let direct_d3d11_enabled = false;
     let output_queue_policy = encoder_bridge_output_queue_policy(diagnostics_context);
     let fifo = match open_recording_fifo_writer(&fifo_path, &stop, true) {
         Ok(fifo) => fifo,
@@ -1142,7 +1175,18 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             bitrate_kbps: bitrate_kbps.unwrap_or(6_000),
             low_latency,
         };
-        let encoder = match MediaFoundationH264Encoder::new(config) {
+        let first_direct_texture = direct_d3d11_source
+            .as_ref()
+            .and_then(PreviewScreenD3D11FrameSource::latest_frame)
+            .and_then(|frame| frame.source_d3d11_texture.clone());
+        let encoder_result = match first_direct_texture.as_ref() {
+            Some(texture) => MediaFoundationH264Encoder::new_with_d3d11_texture(config, texture),
+            None if direct_d3d11_source.is_some() => Err(anyhow::anyhow!(
+                "direct D3D11 recording source had no retained capture texture"
+            )),
+            None => MediaFoundationH264Encoder::new(config),
+        };
+        let encoder = match encoder_result {
             Ok(encoder) => encoder,
             Err(error) => {
                 let error = record_encoder_bridge_terminal_failure(
@@ -1219,6 +1263,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // The raw queue is a zero-capacity rendezvous, so at most one synthetic
     // frame can be in flight. Retain at most one returned fallback allocation.
     let mut recycled_synthetic_buffer = None::<Vec<u8>>;
+    #[cfg(target_os = "windows")]
+    let mut direct_camera_overlay_bytes = Vec::new();
+    #[cfg(target_os = "windows")]
+    let mut direct_camera_overlay_sequence = None::<u64>;
     #[cfg(target_os = "macos")]
     let mut pending_video_toolbox_output_started_at = HashMap::<u64, Instant>::new();
     #[cfg(target_os = "macos")]
@@ -1766,22 +1814,39 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         };
         let previous_sequence = last_fed_sequence.or(startup_wait_sequence);
         let compositor_wait_started_at = Instant::now();
-        let fed = match video_output {
-            EncoderBridgeVideoOutput::RawYuv420p => next_raw_compositor_frame(
-                frame_store.as_ref(),
-                previous_sequence,
-                wait_budget,
-                byte_len,
-            ),
-            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
-            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
-                next_compositor_frame(frame_store.as_ref(), previous_sequence, wait_budget)
+        #[cfg(target_os = "windows")]
+        let direct_d3d11_frame = direct_d3d11_source
+            .as_ref()
+            .and_then(PreviewScreenD3D11FrameSource::latest_frame);
+        #[cfg(target_os = "windows")]
+        let direct_camera_frame = direct_d3d11_camera_overlay
+            .as_ref()
+            .and_then(|overlay| overlay.source.latest_frame_blocking())
+            .map(|(frame, _layout)| frame);
+        let fed = if direct_d3d11_enabled {
+            None
+        } else {
+            match video_output {
+                EncoderBridgeVideoOutput::RawYuv420p => next_raw_compositor_frame(
+                    frame_store.as_ref(),
+                    previous_sequence,
+                    wait_budget,
+                    byte_len,
+                ),
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+                | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+                | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
+                    next_compositor_frame(frame_store.as_ref(), previous_sequence, wait_budget)
+                }
             }
         };
         compositor_wait_times_ms.push(compositor_wait_started_at.elapsed().as_secs_f64() * 1000.0);
-        let frame_source =
-            classify_bridge_frame(last_fed_sequence, fed.as_ref().map(|frame| frame.sequence));
+        #[cfg(target_os = "windows")]
+        let direct_sequence = direct_d3d11_frame.as_ref().map(|frame| frame.sequence);
+        #[cfg(not(target_os = "windows"))]
+        let direct_sequence = None;
+        let current_sequence = direct_sequence.or_else(|| fed.as_ref().map(|frame| frame.sequence));
+        let frame_source = classify_bridge_frame(last_fed_sequence, current_sequence);
         match frame_source {
             BridgeFrameSource::SyntheticFallback => {
                 synthetic_fallback_frames = synthetic_fallback_frames.saturating_add(1);
@@ -1857,22 +1922,36 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 consecutive_repeated_frames = 0;
             }
         }
-        if let Some(frame) = fed.as_ref() {
+        #[cfg(target_os = "windows")]
+        let direct_frame_metadata = direct_d3d11_frame.as_ref().map(|frame| {
+            (
+                frame.sequence,
+                frame.captured_at,
+                frame.captured_at.elapsed().as_millis() as u64,
+            )
+        });
+        #[cfg(not(target_os = "windows"))]
+        let direct_frame_metadata: Option<(u64, Instant, u64)> = None;
+        let frame_metadata = direct_frame_metadata.or_else(|| {
+            fed.as_ref()
+                .map(|frame| (frame.sequence, frame.captured_at, frame.age_ms))
+        });
+        if let Some((frame_sequence, captured_at, frame_age_ms)) = frame_metadata {
             if last_fed_sequence.is_none() {
                 // First video content of the session: everything the audio writer
                 // captured before the composited frame's timestamp is pre-roll and
                 // must be trimmed. Using the encoder-observed instant here would
                 // bake source-to-encode latency into the finished recording.
-                let _ = video_epoch.set(frame.captured_at);
+                let _ = video_epoch.set(captured_at);
             }
-            last_fed_sequence = Some(frame.sequence);
+            last_fed_sequence = Some(frame_sequence);
             max_source_to_encode_age_ms =
-                Some(max_source_to_encode_age_ms.map_or(frame.age_ms, |age| age.max(frame.age_ms)));
-            source_to_encode_age_times_ms.push(frame.age_ms as f64);
+                Some(max_source_to_encode_age_ms.map_or(frame_age_ms, |age| age.max(frame_age_ms)));
+            source_to_encode_age_times_ms.push(frame_age_ms as f64);
             if frame_source == BridgeFrameSource::Repeated {
-                repeated_frame_age_times_ms.push(frame.age_ms as f64);
+                repeated_frame_age_times_ms.push(frame_age_ms as f64);
                 max_repeated_frame_age_ms = Some(
-                    max_repeated_frame_age_ms.map_or(frame.age_ms, |age| age.max(frame.age_ms)),
+                    max_repeated_frame_age_ms.map_or(frame_age_ms, |age| age.max(frame_age_ms)),
                 );
             }
         }
@@ -2034,8 +2113,91 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
                     #[cfg(target_os = "windows")]
                     {
-                        match fed.as_ref() {
-                            Some(frame) => {
+                        match (direct_d3d11_frame.as_ref(), fed.as_ref()) {
+                            (Some(frame), _) => {
+                                let encode_started_at = Instant::now();
+                                let texture = frame.source_d3d11_texture.as_ref().ok_or_else(|| {
+                                    io::Error::other(
+                                        "direct D3D11 recording frame lost its retained texture",
+                                    )
+                                });
+                                let overlay = direct_d3d11_camera_overlay
+                                    .as_ref()
+                                    .zip(direct_camera_frame.as_ref())
+                                    .map(|(config, camera_frame)| {
+                                        if direct_camera_overlay_sequence
+                                            != Some(camera_frame.sequence)
+                                        {
+                                            if !render_camera_overlay_bgra(
+                                                &camera_frame.bytes,
+                                                camera_frame.width,
+                                                camera_frame.height,
+                                                config.destination.width,
+                                                config.destination.height,
+                                                config.crop,
+                                                config.contain,
+                                                config.mirror_x,
+                                                config.mask,
+                                                &mut direct_camera_overlay_bytes,
+                                            ) {
+                                                return Err(io::Error::other(
+                                                    "could not render direct D3D11 camera overlay",
+                                                ));
+                                            }
+                                            direct_camera_overlay_sequence =
+                                                Some(camera_frame.sequence);
+                                        }
+                                        Ok(D3D11BgraOverlay {
+                                            bytes: &direct_camera_overlay_bytes,
+                                            width: config.destination.width,
+                                            height: config.destination.height,
+                                            sequence: camera_frame.sequence,
+                                            destination: config.destination,
+                                        })
+                                    })
+                                    .transpose();
+                                match texture.and_then(|texture| {
+                                    let overlay = overlay?;
+                                    media_foundation_encoder
+                                        .as_mut()
+                                        .expect("Media Foundation encoder must be prepared")
+                                        .encode_d3d11_texture_with_overlay(
+                                            texture,
+                                            overlay.as_ref(),
+                                            sequence.saturating_sub(1),
+                                        )
+                                        .map_err(|error| io::Error::other(error.to_string()))
+                                }) {
+                                    Ok(frames) => {
+                                        let encode_elapsed = encode_started_at.elapsed();
+                                        video_toolbox_submit_times_ms
+                                            .push(encode_elapsed.as_secs_f64() * 1000.0);
+                                        let encode_ms = encode_elapsed.as_millis() as u64;
+                                        max_video_toolbox_output_encode_ms = Some(
+                                            max_video_toolbox_output_encode_ms
+                                                .map_or(encode_ms, |current| {
+                                                    current.max(encode_ms)
+                                                }),
+                                        );
+                                        write_media_foundation_frames(
+                                            frames,
+                                            media_foundation_fifo
+                                                .as_mut()
+                                                .expect("Media Foundation FIFO must be prepared"),
+                                            media_foundation_ts_writer.as_mut().expect(
+                                                "Media Foundation MPEG-TS writer must be prepared",
+                                            ),
+                                            &stop,
+                                            &mut zero_copy_frames,
+                                            &mut video_toolbox_output_frames,
+                                            &mut video_toolbox_output_bytes,
+                                            &mut video_toolbox_fifo_write_times_ms,
+                                        )
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            (None, Some(frame)) => {
                                 let encode_started_at = Instant::now();
                                 match media_foundation_encoder
                                     .as_mut()
@@ -2071,7 +2233,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                     Err(error) => Err(io::Error::other(error.to_string())),
                                 }
                             }
-                            None => Err(io::Error::other(
+                            (None, None) => Err(io::Error::other(
                                 "Media Foundation encoder bridge had no compositor frame",
                             )),
                         }

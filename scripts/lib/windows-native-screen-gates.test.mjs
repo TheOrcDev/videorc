@@ -85,6 +85,20 @@ test('native ScreenOnly recording proof joins recording, compositor, and source 
     nativeWindowsScreenRecordingActive(
       {
         ...evidence,
+        diagnostics: {
+          ...evidence.diagnostics,
+          encoderBridgeEncodedOutputInputSubtype: 'NV12-D3D11'
+        },
+        compositor: { state: 'idle' }
+      },
+      sourceId
+    ),
+    true
+  )
+  assert.equal(
+    nativeWindowsScreenRecordingActive(
+      {
+        ...evidence,
         compositor: {
           ...evidence.compositor,
           sceneSources: [
