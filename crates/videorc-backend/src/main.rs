@@ -65,6 +65,8 @@ mod video_toolbox_encoder;
 mod videorc_api;
 mod viewer_stats;
 #[cfg(target_os = "windows")]
+mod windows_graphics_capture;
+#[cfg(target_os = "windows")]
 mod windows_media_foundation_encoder;
 mod x_chat;
 mod x_live;

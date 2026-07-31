@@ -1,6 +1,7 @@
-//! Hardware-only Windows Media Foundation H.264 encoder used by the compositor
-//! bridge. All COM and Media Foundation objects stay on the creating MTA
-//! thread; callers pass retained compositor bytes into `encode_frame`.
+//! Hardware-only Windows Media Foundation H.264 encoder used by the recording
+//! bridge. All COM, D3D11, and Media Foundation objects stay on the creating
+//! MTA thread. The legacy compositor path submits I420 bytes; the direct
+//! Windows capture path submits retained D3D11 textures without a CPU readback.
 
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
@@ -9,24 +10,51 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use windows::Win32::Foundation::VARIANT_BOOL;
+use windows::Win32::Foundation::{HMODULE, RECT, VARIANT_BOOL};
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VIDEO_ENCODER,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+    D3D11_VIDEO_PROCESSOR_CAPS, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ALPHA_STREAM, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+    D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D,
+    D3D11_VPOV_DIMENSION_TEXTURE2D, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
+    ID3D11Texture2D, ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor,
+    ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorOutputView,
+};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, DXGI_ERROR_NOT_FOUND, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1,
+};
 use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVEncCommonLowLatency, CODECAPI_AVEncCommonMeanBitRate,
     CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncCommonRealTime,
-    CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize, ICodecAPI, IMFActivate,
-    IMFMediaBuffer, IMFMediaEventGenerator, IMFSample, IMFTransform, METransformDrainComplete,
-    METransformHaveOutput, METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE, MF_EVENT_FLAG_NO_WAIT,
-    MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES,
-    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-    MF_MT_MAX_KEYFRAME_SPACING, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
-    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup,
-    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
-    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_I420, MFVideoFormat_NV12,
-    MFVideoInterlace_Progressive, eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_High,
+    CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize, ICodecAPI, IMF2DBuffer2,
+    IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFSample,
+    IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
+    MF_E_NO_EVENTS_AVAILABLE, MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
+    MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING, MF_MT_MPEG_SEQUENCE_HEADER,
+    MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
+    MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC,
+    MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MF2DBuffer_LockFlags_Write, MFCreate2DMediaBuffer,
+    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer,
+    MFCreateSample, MFMediaType_Video, MFNominalRange_16_235, MFSTARTUP_FULL, MFShutdown,
+    MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute,
+    MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264,
+    MFVideoFormat_I420, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709,
+    MFVideoTransFunc_709, MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR,
+    eAVEncH264VProfile_High,
 };
 use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -34,11 +62,14 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Variant::{
     VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_UI4,
 };
-use windows::core::Interface;
+use windows::core::{IUnknown, Interface};
+
+use crate::frame_store::RetainedD3D11Texture;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const EVENT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const D3D11_INPUT_SURFACE_COUNT: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MediaFoundationInputSubtype {
@@ -121,9 +152,11 @@ pub struct MediaFoundationH264Encoder {
     events: ManuallyDrop<IMFMediaEventGenerator>,
     identity: String,
     input_subtype: MediaFoundationInputSubtype,
-    nv12_scratch: Vec<u8>,
     sequence_header: Vec<u8>,
     submitted_pts: VecDeque<i64>,
+    submitted_surface_slots: VecDeque<Option<SubmittedSurfaceSlot>>,
+    d3d11_input: Option<D3D11SurfaceInput>,
+    d3d11_cpu_upload: Option<D3D11CpuUploadInput>,
     last_output_pts: Option<i64>,
     input_credits: usize,
     saw_first_idr: bool,
@@ -132,10 +165,93 @@ pub struct MediaFoundationH264Encoder {
     com_started: bool,
 }
 
+struct D3D11SurfaceSlot {
+    texture: ID3D11Texture2D,
+    output_view: ID3D11VideoProcessorOutputView,
+    in_use: bool,
+}
+
+#[derive(Clone, Copy)]
+enum SubmittedSurfaceSlot {
+    Direct(usize),
+    CpuUpload(usize),
+}
+
+struct D3D11CpuUploadSlot {
+    texture: ID3D11Texture2D,
+    nv12_bytes: Vec<u8>,
+    in_use: bool,
+}
+
+struct D3D11CpuUploadInput {
+    immediate_context: ID3D11DeviceContext,
+    device_manager: IMFDXGIDeviceManager,
+    width: u32,
+    height: u32,
+    surfaces: Vec<D3D11CpuUploadSlot>,
+}
+
+struct D3D11SurfaceInput {
+    device: ID3D11Device,
+    immediate_context: ID3D11DeviceContext,
+    video_device: ID3D11VideoDevice,
+    video_context: ID3D11VideoContext1,
+    device_manager: IMFDXGIDeviceManager,
+    processor_enumerator: ID3D11VideoProcessorEnumerator,
+    processor: ID3D11VideoProcessor,
+    source_width: u32,
+    source_height: u32,
+    output_width: u32,
+    output_height: u32,
+    fps: u32,
+    surfaces: Vec<D3D11SurfaceSlot>,
+    camera_overlay: Option<D3D11CameraOverlayTexture>,
+}
+
+struct D3D11CameraOverlayTexture {
+    texture: ID3D11Texture2D,
+    width: u32,
+    height: u32,
+    sequence: u64,
+}
+
+pub struct D3D11BgraOverlay<'a> {
+    pub bytes: &'a [u8],
+    pub width: u32,
+    pub height: u32,
+    pub sequence: u64,
+    pub destination: crate::scene_geometry::PixelRect,
+}
+
+#[derive(Clone, Copy)]
+struct D3D11ProcessorConfig {
+    source_width: u32,
+    source_height: u32,
+    output_width: u32,
+    output_height: u32,
+    fps: u32,
+}
+
 impl MediaFoundationH264Encoder {
     /// Creates and configures the highest-merit hardware H.264 MFT. Call this
     /// only from the dedicated encoder thread that will own the session.
     pub fn new(config: MediaFoundationEncoderConfig) -> Result<Self> {
+        Self::new_with_optional_d3d11_texture(config, None)
+    }
+
+    /// Creates a hardware H.264 MFT configured to accept NV12 surfaces owned by
+    /// the D3D11 device that produced `source_texture`.
+    pub fn new_with_d3d11_texture(
+        config: MediaFoundationEncoderConfig,
+        source_texture: &RetainedD3D11Texture,
+    ) -> Result<Self> {
+        Self::new_with_optional_d3d11_texture(config, Some(source_texture))
+    }
+
+    fn new_with_optional_d3d11_texture(
+        config: MediaFoundationEncoderConfig,
+        source_texture: Option<&RetainedD3D11Texture>,
+    ) -> Result<Self> {
         config.validate()?;
         let profile = config.profile_label();
         unsafe {
@@ -161,7 +277,7 @@ impl MediaFoundationH264Encoder {
             }
         }
 
-        let result = Self::create_after_startup(config.clone(), true, true);
+        let result = Self::create_after_startup(config.clone(), source_texture, true, true);
         if result.is_err() {
             unsafe {
                 let _ = MFShutdown();
@@ -173,6 +289,7 @@ impl MediaFoundationH264Encoder {
 
     fn create_after_startup(
         config: MediaFoundationEncoderConfig,
+        source_texture: Option<&RetainedD3D11Texture>,
         com_started: bool,
         mf_started: bool,
     ) -> Result<Self> {
@@ -182,6 +299,11 @@ impl MediaFoundationH264Encoder {
         for activation in activations {
             let identity = activation_name(&activation)
                 .unwrap_or_else(|_| "<unnamed hardware H.264 MFT>".to_string());
+            let adapter_luid = activation_adapter_luid(&activation).map_err(|error| {
+                anyhow!(
+                    "Media Foundation probe stage=activation-adapter encoder={identity:?} input=<unset> profile={profile}: {error}"
+                )
+            })?;
             match unsafe { activation.ActivateObject::<IMFTransform>() } {
                 Ok(transform) => {
                     match Self::configure_transform(
@@ -189,6 +311,8 @@ impl MediaFoundationH264Encoder {
                         activation,
                         transform,
                         identity.clone(),
+                        adapter_luid,
+                        source_texture,
                         com_started,
                         mf_started,
                     ) {
@@ -207,11 +331,14 @@ impl MediaFoundationH264Encoder {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn configure_transform(
         config: MediaFoundationEncoderConfig,
         activation: IMFActivate,
         transform: IMFTransform,
         identity: String,
+        adapter_luid: Option<u64>,
+        source_texture: Option<&RetainedD3D11Texture>,
         com_started: bool,
         mf_started: bool,
     ) -> Result<Self> {
@@ -232,6 +359,13 @@ impl MediaFoundationH264Encoder {
             asynchronous != 0,
             "Media Foundation probe stage=async-contract encoder={identity:?} input=<unset> profile={profile}: hardware activation did not advertise an asynchronous MFT"
         );
+        let d3d11_aware = unsafe { attributes.GetUINT32(&MF_SA_D3D11_AWARE) }.unwrap_or(0);
+        if source_texture.is_some() {
+            ensure!(
+                d3d11_aware != 0,
+                "Media Foundation probe stage=d3d11-awareness encoder={identity:?} input=NV12-D3D11 profile={profile}: hardware activation did not advertise MF_SA_D3D11_AWARE"
+            );
+        }
         unsafe {
             attributes
                 .SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)
@@ -239,6 +373,55 @@ impl MediaFoundationH264Encoder {
                     stage_windows_error("async-unlock", &error, &identity, None, &profile)
                 })?;
             let _ = attributes.SetUINT32(&MF_LOW_LATENCY, u32::from(config.low_latency));
+        }
+
+        let d3d11_input = source_texture
+            .map(|source_texture| {
+                D3D11SurfaceInput::new(&config, source_texture).map_err(|error| {
+                    anyhow!(
+                        "Media Foundation probe stage=d3d11-input-setup encoder={identity:?} input=NV12-D3D11 profile={profile}: {error}"
+                    )
+                })
+            })
+            .transpose()?;
+        let d3d11_cpu_upload = if source_texture.is_none() && d3d11_aware != 0 {
+            Some(
+                D3D11CpuUploadInput::new(&config, adapter_luid).map_err(|error| {
+                anyhow!(
+                    "Media Foundation probe stage=d3d11-cpu-upload-setup encoder={identity:?} input=NV12-D3D11 profile={profile}: {error}"
+                )
+                })?,
+            )
+        } else {
+            None
+        };
+        let device_manager = d3d11_input
+            .as_ref()
+            .map(|input| &input.device_manager)
+            .or_else(|| d3d11_cpu_upload.as_ref().map(|input| &input.device_manager));
+        if let Some(device_manager) = device_manager {
+            let manager: IUnknown = device_manager.cast().map_err(|error| {
+                stage_windows_error(
+                    "d3d-manager-interface",
+                    &error,
+                    &identity,
+                    Some(MediaFoundationInputSubtype::Nv12),
+                    &profile,
+                )
+            })?;
+            unsafe {
+                transform
+                    .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
+                    .map_err(|error| {
+                        stage_windows_error(
+                            "set-d3d-manager",
+                            &error,
+                            &identity,
+                            Some(MediaFoundationInputSubtype::Nv12),
+                            &profile,
+                        )
+                    })?;
+            }
         }
 
         let output_type = create_video_type(
@@ -257,10 +440,16 @@ impl MediaFoundationH264Encoder {
 
         let mut selected = None;
         let mut input_failures = Vec::new();
-        for (subtype, guid) in [
-            (MediaFoundationInputSubtype::I420, MFVideoFormat_I420),
-            (MediaFoundationInputSubtype::Nv12, MFVideoFormat_NV12),
-        ] {
+        let input_candidates: &[(MediaFoundationInputSubtype, windows::core::GUID)] =
+            if d3d11_input.is_some() {
+                &[(MediaFoundationInputSubtype::Nv12, MFVideoFormat_NV12)]
+            } else {
+                &[
+                    (MediaFoundationInputSubtype::I420, MFVideoFormat_I420),
+                    (MediaFoundationInputSubtype::Nv12, MFVideoFormat_NV12),
+                ]
+            };
+        for &(subtype, guid) in input_candidates {
             let input_type = create_video_type(&config, guid, None)?;
             match unsafe { transform.SetInputType(0, &input_type, 0) } {
                 Ok(()) => {
@@ -322,9 +511,11 @@ impl MediaFoundationH264Encoder {
             events: ManuallyDrop::new(events),
             identity,
             input_subtype,
-            nv12_scratch: Vec::new(),
             sequence_header,
             submitted_pts: VecDeque::new(),
+            submitted_surface_slots: VecDeque::new(),
+            d3d11_input,
+            d3d11_cpu_upload,
             last_output_pts: None,
             input_credits: 0,
             saw_first_idr: false,
@@ -364,42 +555,126 @@ impl MediaFoundationH264Encoder {
             i420.len()
         );
         let mut output = self.wait_for_input_credit(EVENT_TIMEOUT)?;
+        let use_d3d11_cpu_upload = self.input_subtype == MediaFoundationInputSubtype::Nv12
+            && self.d3d11_cpu_upload.is_some();
+        if use_d3d11_cpu_upload {
+            output.extend(self.wait_for_d3d11_cpu_upload_surface(EVENT_TIMEOUT)?);
+        }
         let pts = scheduled_time_100ns(frame_index, self.config.fps)?;
         let duration = scheduled_duration_100ns(frame_index, self.config.fps)?;
-        let sample_bytes = match self.input_subtype {
-            MediaFoundationInputSubtype::I420 => i420,
-            MediaFoundationInputSubtype::Nv12 => {
-                i420_to_nv12(
-                    i420,
-                    self.config.width,
-                    self.config.height,
-                    &mut self.nv12_scratch,
-                )?;
-                &self.nv12_scratch
-            }
-        };
-        let sample = create_input_sample(sample_bytes, pts, duration).map_err(|error| {
-            anyhow!(
-                "Media Foundation probe stage=create-input-sample encoder={:?} input={} profile={}: {error}",
-                self.identity,
-                self.input_subtype.label(),
-                self.config.profile_label()
-            )
-        })?;
-        unsafe {
-            self.transform
-                .ProcessInput(0, &sample, 0)
+        let (sample, submitted_surface_slot) = if use_d3d11_cpu_upload {
+            let (sample, surface_slot) = self
+                .d3d11_cpu_upload
+                .as_mut()
+                .context("D3D11 CPU upload input disappeared while encoding")?
+                .create_sample(i420, pts, duration)
                 .map_err(|error| {
-                    stage_windows_error(
-                        "process-input",
-                        &error,
-                        &self.identity,
-                        Some(self.input_subtype),
-                        &self.config.profile_label(),
+                    anyhow!(
+                        "Media Foundation probe stage=create-d3d11-cpu-upload-sample encoder={:?} input=NV12-D3D11 profile={}: {error}",
+                        self.identity,
+                        self.config.profile_label()
                     )
                 })?;
+            (sample, Some(SubmittedSurfaceSlot::CpuUpload(surface_slot)))
+        } else {
+            (
+                create_input_sample(
+                    i420,
+                    self.input_subtype,
+                    self.config.width,
+                    self.config.height,
+                    pts,
+                    duration,
+                )
+                .map_err(|error| {
+                    anyhow!(
+                        "Media Foundation probe stage=create-input-sample encoder={:?} input={} profile={}: {error}",
+                        self.identity,
+                        self.input_subtype.label(),
+                        self.config.profile_label()
+                    )
+                })?,
+                None,
+            )
+        };
+        if let Err(error) = unsafe { self.transform.ProcessInput(0, &sample, 0) } {
+            if let Some(SubmittedSurfaceSlot::CpuUpload(surface_slot)) = submitted_surface_slot
+                && let Some(d3d11_cpu_upload) = self.d3d11_cpu_upload.as_mut()
+            {
+                d3d11_cpu_upload.release_surface(surface_slot);
+            }
+            return Err(stage_windows_error(
+                "process-input",
+                &error,
+                &self.identity,
+                Some(self.input_subtype),
+                &self.config.profile_label(),
+            ));
         }
         self.submitted_pts.push_back(pts);
+        self.submitted_surface_slots
+            .push_back(submitted_surface_slot);
+        self.input_credits = self.input_credits.saturating_sub(1);
+        output.extend(self.collect_available_events()?);
+        Ok(output)
+    }
+
+    pub fn encode_d3d11_texture(
+        &mut self,
+        source_texture: &RetainedD3D11Texture,
+        frame_index: u64,
+    ) -> Result<Vec<MediaFoundationEncodedFrame>> {
+        self.encode_d3d11_texture_with_overlay(source_texture, None, frame_index)
+    }
+
+    pub fn encode_d3d11_texture_with_overlay(
+        &mut self,
+        source_texture: &RetainedD3D11Texture,
+        overlay: Option<&D3D11BgraOverlay<'_>>,
+        frame_index: u64,
+    ) -> Result<Vec<MediaFoundationEncodedFrame>> {
+        ensure!(
+            !self.drained,
+            "Media Foundation encoder {} was already drained",
+            self.identity
+        );
+        ensure!(
+            self.d3d11_input.is_some(),
+            "Media Foundation encoder {} was not configured for D3D11 texture input",
+            self.identity
+        );
+        let mut output = self.wait_for_input_credit(EVENT_TIMEOUT)?;
+        output.extend(self.wait_for_d3d11_surface(EVENT_TIMEOUT)?);
+        let pts = scheduled_time_100ns(frame_index, self.config.fps)?;
+        let duration = scheduled_duration_100ns(frame_index, self.config.fps)?;
+        let (sample, surface_slot) = self
+            .d3d11_input
+            .as_mut()
+            .context("D3D11 input disappeared while encoding")?
+            .create_sample(source_texture, overlay, pts, duration)
+            .map_err(|error| {
+                anyhow!(
+                    "Media Foundation probe stage=create-d3d11-input-sample encoder={:?} input=NV12-D3D11 profile={}: {error}",
+                    self.identity,
+                    self.config.profile_label()
+                )
+            })?;
+        let process_result = unsafe { self.transform.ProcessInput(0, &sample, 0) };
+        if let Err(error) = process_result {
+            if let Some(d3d11_input) = self.d3d11_input.as_mut() {
+                d3d11_input.release_surface(surface_slot);
+            }
+            return Err(stage_windows_error(
+                "process-d3d11-input",
+                &error,
+                &self.identity,
+                Some(MediaFoundationInputSubtype::Nv12),
+                &self.config.profile_label(),
+            ));
+        }
+        self.submitted_pts.push_back(pts);
+        self.submitted_surface_slots
+            .push_back(Some(SubmittedSurfaceSlot::Direct(surface_slot)));
         self.input_credits = self.input_credits.saturating_sub(1);
         output.extend(self.collect_available_events()?);
         Ok(output)
@@ -488,6 +763,86 @@ impl MediaFoundationH264Encoder {
             "Media Foundation probe stage=need-input encoder={:?} input={} profile={}: no input credit within {}ms",
             self.identity,
             self.input_subtype.label(),
+            self.config.profile_label(),
+            timeout.as_millis()
+        )
+    }
+
+    fn wait_for_d3d11_surface(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Vec<MediaFoundationEncodedFrame>> {
+        if self
+            .d3d11_input
+            .as_ref()
+            .is_some_and(D3D11SurfaceInput::has_available_surface)
+        {
+            return Ok(Vec::new());
+        }
+        let deadline = Instant::now() + timeout;
+        let mut output = Vec::new();
+        while Instant::now() < deadline {
+            match self.next_event()? {
+                Some(event_type) if event_type == METransformHaveOutput.0 as u32 => {
+                    output.push(self.process_one_output()?);
+                    if self
+                        .d3d11_input
+                        .as_ref()
+                        .is_some_and(D3D11SurfaceInput::has_available_surface)
+                    {
+                        return Ok(output);
+                    }
+                }
+                Some(event_type) if event_type == METransformNeedInput.0 as u32 => {
+                    self.input_credits = self.input_credits.saturating_add(1);
+                }
+                Some(_) => {}
+                None => thread::sleep(EVENT_POLL_INTERVAL),
+            }
+        }
+        bail!(
+            "Media Foundation probe stage=d3d11-surface-pool encoder={:?} input=NV12-D3D11 profile={}: no reusable surface within {}ms",
+            self.identity,
+            self.config.profile_label(),
+            timeout.as_millis()
+        )
+    }
+
+    fn wait_for_d3d11_cpu_upload_surface(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Vec<MediaFoundationEncodedFrame>> {
+        if self
+            .d3d11_cpu_upload
+            .as_ref()
+            .is_some_and(D3D11CpuUploadInput::has_available_surface)
+        {
+            return Ok(Vec::new());
+        }
+        let deadline = Instant::now() + timeout;
+        let mut output = Vec::new();
+        while Instant::now() < deadline {
+            match self.next_event()? {
+                Some(event_type) if event_type == METransformHaveOutput.0 as u32 => {
+                    output.push(self.process_one_output()?);
+                    if self
+                        .d3d11_cpu_upload
+                        .as_ref()
+                        .is_some_and(D3D11CpuUploadInput::has_available_surface)
+                    {
+                        return Ok(output);
+                    }
+                }
+                Some(event_type) if event_type == METransformNeedInput.0 as u32 => {
+                    self.input_credits = self.input_credits.saturating_add(1);
+                }
+                Some(_) => {}
+                None => thread::sleep(EVENT_POLL_INTERVAL),
+            }
+        }
+        bail!(
+            "Media Foundation probe stage=d3d11-cpu-upload-surface-pool encoder={:?} input=NV12-D3D11 profile={}: no reusable surface within {}ms",
+            self.identity,
             self.config.profile_label(),
             timeout.as_millis()
         )
@@ -610,6 +965,27 @@ impl MediaFoundationH264Encoder {
                 self.identity
             )
         })?;
+        let submitted_surface_slot =
+            self.submitted_surface_slots.pop_front().with_context(|| {
+                format!(
+                    "Media Foundation encoder {:?} lost its submitted-surface bookkeeping",
+                    self.identity
+                )
+            })?;
+        if let Some(submitted_surface_slot) = submitted_surface_slot {
+            match submitted_surface_slot {
+                SubmittedSurfaceSlot::Direct(surface_slot) => {
+                    if let Some(d3d11_input) = self.d3d11_input.as_mut() {
+                        d3d11_input.release_surface(surface_slot);
+                    }
+                }
+                SubmittedSurfaceSlot::CpuUpload(surface_slot) => {
+                    if let Some(d3d11_cpu_upload) = self.d3d11_cpu_upload.as_mut() {
+                        d3d11_cpu_upload.release_surface(surface_slot);
+                    }
+                }
+            }
+        }
         ensure!(
             pts == expected_pts,
             "Media Foundation probe stage=timestamp-order encoder={:?} input={} profile={}: expected PTS {}, got {} (reordered/B-frame-dependent output)",
@@ -666,6 +1042,658 @@ impl MediaFoundationH264Encoder {
             bytes,
         })
     }
+}
+
+impl D3D11CpuUploadInput {
+    fn new(config: &MediaFoundationEncoderConfig, adapter_luid: Option<u64>) -> Result<Self> {
+        let adapter = adapter_luid.map(dxgi_adapter_for_luid).transpose()?;
+        let adapter: Option<IDXGIAdapter> = adapter
+            .as_ref()
+            .map(|adapter| adapter.cast().context("cast selected DXGI adapter"))
+            .transpose()?;
+        let driver_type = if adapter.is_some() {
+            D3D_DRIVER_TYPE_UNKNOWN
+        } else {
+            D3D_DRIVER_TYPE_HARDWARE
+        };
+        let mut device = None;
+        let mut immediate_context = None;
+        unsafe {
+            D3D11CreateDevice(
+                adapter.as_ref(),
+                driver_type,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut immediate_context),
+            )
+        }
+        .context("create D3D11 device for reusable CPU frame uploads")?;
+        let device = device.context("D3D11CreateDevice returned no CPU upload device")?;
+        let immediate_context = immediate_context
+            .context("D3D11CreateDevice returned no CPU upload immediate context")?;
+
+        let mut reset_token = 0_u32;
+        let mut device_manager = None;
+        unsafe {
+            MFCreateDXGIDeviceManager(&mut reset_token, &mut device_manager)
+                .context("create MF DXGI device manager for CPU uploads")?;
+        }
+        let device_manager =
+            device_manager.context("MFCreateDXGIDeviceManager returned no CPU upload manager")?;
+        let device_unknown: IUnknown = device.cast().context("cast CPU upload D3D11 device")?;
+        unsafe {
+            device_manager
+                .ResetDevice(&device_unknown, reset_token)
+                .context("bind CPU upload D3D11 device to MF DXGI device manager")?;
+        }
+
+        let texture_desc = D3D11_TEXTURE2D_DESC {
+            Width: config.width,
+            Height: config.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_NV12,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_RENDER_TARGET
+                | D3D11_BIND_SHADER_RESOURCE
+                | D3D11_BIND_VIDEO_ENCODER)
+                .0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let nv12_len = config.i420_len()?;
+        let mut surfaces = Vec::with_capacity(D3D11_INPUT_SURFACE_COUNT);
+        for _ in 0..D3D11_INPUT_SURFACE_COUNT {
+            let mut texture = None;
+            unsafe {
+                device
+                    .CreateTexture2D(&texture_desc, None, Some(&mut texture))
+                    .context("create reusable D3D11 NV12 CPU-upload encoder texture")?;
+            }
+            surfaces.push(D3D11CpuUploadSlot {
+                texture: texture.context("CreateTexture2D returned no CPU-upload texture")?,
+                nv12_bytes: vec![0; nv12_len],
+                in_use: false,
+            });
+        }
+        Ok(Self {
+            immediate_context,
+            device_manager,
+            width: config.width,
+            height: config.height,
+            surfaces,
+        })
+    }
+
+    fn has_available_surface(&self) -> bool {
+        self.surfaces.iter().any(|surface| !surface.in_use)
+    }
+
+    fn create_sample(
+        &mut self,
+        i420: &[u8],
+        pts: i64,
+        duration: i64,
+    ) -> Result<(IMFSample, usize)> {
+        let surface_slot = self
+            .surfaces
+            .iter()
+            .position(|surface| !surface.in_use)
+            .context("D3D11 CPU-upload encoder surface pool was exhausted")?;
+        let surface = &mut self.surfaces[surface_slot];
+        let pitch = usize::try_from(self.width)?;
+        i420_to_nv12_strided(
+            i420,
+            self.width,
+            self.height,
+            pitch,
+            &mut surface.nv12_bytes,
+        )?;
+        unsafe {
+            self.immediate_context.UpdateSubresource(
+                &surface.texture,
+                0,
+                None,
+                surface.nv12_bytes.as_ptr().cast(),
+                self.width,
+                0,
+            );
+        }
+
+        let surface_unknown: IUnknown = surface
+            .texture
+            .cast()
+            .context("cast CPU-upload NV12 texture to IUnknown")?;
+        let buffer =
+            unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &surface_unknown, 0, false) }
+                .context("wrap CPU-upload NV12 texture in Media Foundation buffer")?;
+        let sample = unsafe { MFCreateSample() }.context("create CPU-upload D3D11 sample")?;
+        unsafe {
+            sample
+                .AddBuffer(&buffer)
+                .context("attach CPU-upload DXGI surface buffer to sample")?;
+            sample
+                .SetSampleTime(pts)
+                .context("set CPU-upload sample PTS")?;
+            sample
+                .SetSampleDuration(duration)
+                .context("set CPU-upload sample duration")?;
+        }
+        surface.in_use = true;
+        Ok((sample, surface_slot))
+    }
+
+    fn release_surface(&mut self, surface_slot: usize) {
+        if let Some(surface) = self.surfaces.get_mut(surface_slot) {
+            surface.in_use = false;
+        }
+    }
+}
+
+fn dxgi_adapter_for_luid(target_luid: u64) -> Result<IDXGIAdapter1> {
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.context("create DXGI factory for encoder adapter")?;
+    let mut adapter_index = 0_u32;
+    loop {
+        let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
+            Ok(adapter) => adapter,
+            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(error) => return Err(error).context("enumerate DXGI encoder adapters"),
+        };
+        let descriptor = unsafe { adapter.GetDesc1() }.context("describe DXGI encoder adapter")?;
+        let luid = (u64::from(descriptor.AdapterLuid.HighPart as u32) << 32)
+            | u64::from(descriptor.AdapterLuid.LowPart);
+        if luid == target_luid {
+            return Ok(adapter);
+        }
+        adapter_index = adapter_index.saturating_add(1);
+    }
+    bail!("MFT adapter LUID {target_luid:016x} was not available through DXGI")
+}
+
+impl D3D11SurfaceInput {
+    fn new(
+        config: &MediaFoundationEncoderConfig,
+        source_texture: &RetainedD3D11Texture,
+    ) -> Result<Self> {
+        let mut source_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            source_texture.texture().GetDesc(&mut source_desc);
+        }
+        ensure!(
+            source_desc.Width > 0 && source_desc.Height > 0,
+            "captured D3D11 texture had invalid dimensions {}x{}",
+            source_desc.Width,
+            source_desc.Height
+        );
+        ensure!(
+            source_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM,
+            "captured D3D11 texture format {:?} was not BGRA8",
+            source_desc.Format
+        );
+        let device =
+            unsafe { source_texture.texture().GetDevice() }.context("get D3D11 capture device")?;
+        let video_device: ID3D11VideoDevice = device.cast().context("query ID3D11VideoDevice")?;
+        let immediate_context =
+            unsafe { device.GetImmediateContext() }.context("get D3D11 immediate context")?;
+        let video_context: ID3D11VideoContext1 = immediate_context
+            .cast()
+            .context("query ID3D11VideoContext1")?;
+
+        let mut reset_token = 0_u32;
+        let mut device_manager = None;
+        unsafe {
+            MFCreateDXGIDeviceManager(&mut reset_token, &mut device_manager)
+                .context("create MF DXGI device manager")?;
+        }
+        let device_manager =
+            device_manager.context("MFCreateDXGIDeviceManager returned no manager")?;
+        let device_unknown: IUnknown = device.cast().context("cast D3D11 device to IUnknown")?;
+        unsafe {
+            device_manager
+                .ResetDevice(&device_unknown, reset_token)
+                .context("bind D3D11 device to MF DXGI device manager")?;
+        }
+
+        let (processor_enumerator, processor, surfaces) = Self::create_processor_resources(
+            &device,
+            &video_device,
+            &video_context,
+            D3D11ProcessorConfig {
+                source_width: source_desc.Width,
+                source_height: source_desc.Height,
+                output_width: config.width,
+                output_height: config.height,
+                fps: config.fps,
+            },
+        )?;
+        Ok(Self {
+            device,
+            immediate_context,
+            video_device,
+            video_context,
+            device_manager,
+            processor_enumerator,
+            processor,
+            source_width: source_desc.Width,
+            source_height: source_desc.Height,
+            output_width: config.width,
+            output_height: config.height,
+            fps: config.fps,
+            surfaces,
+            camera_overlay: None,
+        })
+    }
+
+    fn create_processor_resources(
+        device: &ID3D11Device,
+        video_device: &ID3D11VideoDevice,
+        video_context: &ID3D11VideoContext1,
+        config: D3D11ProcessorConfig,
+    ) -> Result<(
+        ID3D11VideoProcessorEnumerator,
+        ID3D11VideoProcessor,
+        Vec<D3D11SurfaceSlot>,
+    )> {
+        let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+            InputFrameRate: DXGI_RATIONAL {
+                Numerator: config.fps,
+                Denominator: 1,
+            },
+            InputWidth: config.source_width,
+            InputHeight: config.source_height,
+            OutputFrameRate: DXGI_RATIONAL {
+                Numerator: config.fps,
+                Denominator: 1,
+            },
+            OutputWidth: config.output_width,
+            OutputHeight: config.output_height,
+            Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
+        };
+        let processor_enumerator =
+            unsafe { video_device.CreateVideoProcessorEnumerator(&content_desc) }
+                .context("create D3D11 video processor enumerator")?;
+        let processor = unsafe { video_device.CreateVideoProcessor(&processor_enumerator, 0) }
+            .context("create D3D11 video processor")?;
+        unsafe {
+            video_context.VideoProcessorSetStreamColorSpace1(
+                &processor,
+                0,
+                DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+            );
+            video_context.VideoProcessorSetOutputColorSpace1(
+                &processor,
+                DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+            );
+        }
+
+        let texture_desc = D3D11_TEXTURE2D_DESC {
+            Width: config.output_width,
+            Height: config.output_height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_NV12,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_RENDER_TARGET
+                | D3D11_BIND_SHADER_RESOURCE
+                | D3D11_BIND_VIDEO_ENCODER)
+                .0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let output_view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+            ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+            },
+        };
+        let mut surfaces = Vec::with_capacity(D3D11_INPUT_SURFACE_COUNT);
+        for _ in 0..D3D11_INPUT_SURFACE_COUNT {
+            let mut texture = None;
+            unsafe {
+                device
+                    .CreateTexture2D(&texture_desc, None, Some(&mut texture))
+                    .context("create reusable D3D11 NV12 encoder texture")?;
+            }
+            let texture = texture.context("CreateTexture2D returned no NV12 texture")?;
+            let mut output_view = None;
+            unsafe {
+                video_device
+                    .CreateVideoProcessorOutputView(
+                        &texture,
+                        &processor_enumerator,
+                        &output_view_desc,
+                        Some(&mut output_view),
+                    )
+                    .context("create D3D11 NV12 processor output view")?;
+            }
+            surfaces.push(D3D11SurfaceSlot {
+                texture,
+                output_view: output_view
+                    .context("CreateVideoProcessorOutputView returned no view")?,
+                in_use: false,
+            });
+        }
+        Ok((processor_enumerator, processor, surfaces))
+    }
+
+    fn has_available_surface(&self) -> bool {
+        self.surfaces.iter().any(|surface| !surface.in_use)
+    }
+
+    fn create_sample(
+        &mut self,
+        source_texture: &RetainedD3D11Texture,
+        overlay: Option<&D3D11BgraOverlay<'_>>,
+        pts: i64,
+        duration: i64,
+    ) -> Result<(IMFSample, usize)> {
+        let source_device = unsafe { source_texture.texture().GetDevice() }
+            .context("get submitted texture device")?;
+        ensure!(
+            source_device.as_raw() == self.device.as_raw(),
+            "submitted D3D11 texture came from a different device"
+        );
+        let mut source_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            source_texture.texture().GetDesc(&mut source_desc);
+        }
+        ensure!(
+            source_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM,
+            "submitted D3D11 texture format {:?} was not BGRA8",
+            source_desc.Format
+        );
+        if source_desc.Width != self.source_width || source_desc.Height != self.source_height {
+            ensure!(
+                self.surfaces.iter().all(|surface| !surface.in_use),
+                "captured D3D11 texture resized while encoder surfaces were in flight"
+            );
+            let (processor_enumerator, processor, surfaces) = Self::create_processor_resources(
+                &self.device,
+                &self.video_device,
+                &self.video_context,
+                D3D11ProcessorConfig {
+                    source_width: source_desc.Width,
+                    source_height: source_desc.Height,
+                    output_width: self.output_width,
+                    output_height: self.output_height,
+                    fps: self.fps,
+                },
+            )?;
+            self.processor_enumerator = processor_enumerator;
+            self.processor = processor;
+            self.surfaces = surfaces;
+            self.source_width = source_desc.Width;
+            self.source_height = source_desc.Height;
+            self.camera_overlay = None;
+        }
+        let surface_slot = self
+            .surfaces
+            .iter()
+            .position(|surface| !surface.in_use)
+            .context("D3D11 encoder surface pool was exhausted")?;
+        let input_view_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+            FourCC: 0,
+            ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                Texture2D: D3D11_TEX2D_VPIV {
+                    MipSlice: 0,
+                    ArraySlice: 0,
+                },
+            },
+        };
+        let mut input_view = None;
+        unsafe {
+            self.video_device
+                .CreateVideoProcessorInputView(
+                    source_texture.texture(),
+                    &self.processor_enumerator,
+                    &input_view_desc,
+                    Some(&mut input_view),
+                )
+                .context("create D3D11 capture processor input view")?;
+        }
+        let input_view =
+            input_view.context("CreateVideoProcessorInputView returned no input view")?;
+        let output_view = self.surfaces[surface_slot].output_view.clone();
+        let screen_stream = D3D11_VIDEO_PROCESSOR_STREAM {
+            Enable: true.into(),
+            pInputSurface: ManuallyDrop::new(Some(input_view)),
+            ..Default::default()
+        };
+        let mut streams = vec![screen_stream];
+        if let Some(overlay) = overlay {
+            let overlay_texture = self.prepare_camera_overlay(overlay)?;
+            let mut overlay_input_view = None;
+            unsafe {
+                self.video_device
+                    .CreateVideoProcessorInputView(
+                        &overlay_texture,
+                        &self.processor_enumerator,
+                        &input_view_desc,
+                        Some(&mut overlay_input_view),
+                    )
+                    .context("create D3D11 camera overlay processor input view")?;
+            }
+            let overlay_input_view = overlay_input_view
+                .context("CreateVideoProcessorInputView returned no camera overlay view")?;
+            let source_rect = RECT {
+                left: 0,
+                top: 0,
+                right: i32::try_from(overlay.width).context("camera overlay width overflowed")?,
+                bottom: i32::try_from(overlay.height)
+                    .context("camera overlay height overflowed")?,
+            };
+            let destination_rect = pixel_rect_to_win32(overlay.destination)?;
+            unsafe {
+                self.video_context.VideoProcessorSetStreamColorSpace1(
+                    &self.processor,
+                    1,
+                    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+                );
+                self.video_context.VideoProcessorSetStreamSourceRect(
+                    &self.processor,
+                    1,
+                    true,
+                    Some(&source_rect),
+                );
+                self.video_context.VideoProcessorSetStreamDestRect(
+                    &self.processor,
+                    1,
+                    true,
+                    Some(&destination_rect),
+                );
+                self.video_context
+                    .VideoProcessorSetStreamAlpha(&self.processor, 1, true, 1.0);
+            }
+            streams.push(D3D11_VIDEO_PROCESSOR_STREAM {
+                Enable: true.into(),
+                pInputSurface: ManuallyDrop::new(Some(overlay_input_view)),
+                ..Default::default()
+            });
+        }
+        let blit_result = unsafe {
+            self.video_context
+                .VideoProcessorBlt(&self.processor, &output_view, 0, &streams)
+        };
+        for stream in &mut streams {
+            let retained_input_view = unsafe { ManuallyDrop::take(&mut stream.pInputSurface) };
+            drop(retained_input_view);
+        }
+        blit_result.context("compose captured BGRA textures into NV12")?;
+
+        let surface_unknown: IUnknown = self.surfaces[surface_slot]
+            .texture
+            .cast()
+            .context("cast NV12 texture to IUnknown")?;
+        let buffer =
+            unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &surface_unknown, 0, false) }
+                .context("wrap NV12 texture in Media Foundation buffer")?;
+        let sample = unsafe { MFCreateSample() }.context("create D3D11 input sample")?;
+        unsafe {
+            sample
+                .AddBuffer(&buffer)
+                .context("attach DXGI surface buffer to sample")?;
+            sample.SetSampleTime(pts).context("set D3D11 sample PTS")?;
+            sample
+                .SetSampleDuration(duration)
+                .context("set D3D11 sample duration")?;
+        }
+        self.surfaces[surface_slot].in_use = true;
+        Ok((sample, surface_slot))
+    }
+
+    fn prepare_camera_overlay(
+        &mut self,
+        overlay: &D3D11BgraOverlay<'_>,
+    ) -> Result<ID3D11Texture2D> {
+        ensure!(
+            overlay.width > 0 && overlay.height > 0,
+            "camera overlay had invalid dimensions {}x{}",
+            overlay.width,
+            overlay.height
+        );
+        let expected_len = usize::try_from(overlay.width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(overlay.height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(4))
+            .context("camera overlay byte length overflowed")?;
+        ensure!(
+            overlay.bytes.len() >= expected_len,
+            "camera overlay buffer was {} bytes; expected at least {expected_len}",
+            overlay.bytes.len()
+        );
+        ensure!(
+            overlay
+                .destination
+                .x
+                .saturating_add(overlay.destination.width)
+                <= self.output_width
+                && overlay
+                    .destination
+                    .y
+                    .saturating_add(overlay.destination.height)
+                    <= self.output_height,
+            "camera overlay destination {:?} exceeded {}x{} output",
+            overlay.destination,
+            self.output_width,
+            self.output_height
+        );
+
+        let recreate = self
+            .camera_overlay
+            .as_ref()
+            .is_none_or(|cached| cached.width != overlay.width || cached.height != overlay.height);
+        if recreate {
+            let mut caps = D3D11_VIDEO_PROCESSOR_CAPS::default();
+            unsafe {
+                self.processor_enumerator
+                    .GetVideoProcessorCaps(&mut caps)
+                    .context("query D3D11 video processor capabilities")?;
+            }
+            ensure!(
+                caps.MaxInputStreams >= 2,
+                "D3D11 video processor supports {} input stream(s); screen+camera needs 2",
+                caps.MaxInputStreams
+            );
+            ensure!(
+                caps.FeatureCaps & D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ALPHA_STREAM.0 as u32 != 0,
+                "D3D11 video processor does not support per-stream alpha"
+            );
+            let texture_desc = D3D11_TEXTURE2D_DESC {
+                Width: overlay.width,
+                Height: overlay.height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                // Video-processor input views accept DEFAULT textures with
+                // no bind flags. A shader-resource-only texture is not a
+                // valid video-processor input on the NVIDIA driver.
+                BindFlags: 0,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut texture = None;
+            unsafe {
+                self.device
+                    .CreateTexture2D(&texture_desc, None, Some(&mut texture))
+                    .context("create reusable D3D11 camera overlay texture")?;
+            }
+            self.camera_overlay = Some(D3D11CameraOverlayTexture {
+                texture: texture.context("CreateTexture2D returned no camera overlay texture")?,
+                width: overlay.width,
+                height: overlay.height,
+                sequence: u64::MAX,
+            });
+        }
+        let cached = self
+            .camera_overlay
+            .as_mut()
+            .context("camera overlay texture disappeared")?;
+        if cached.sequence != overlay.sequence {
+            let row_pitch = overlay
+                .width
+                .checked_mul(4)
+                .context("camera overlay row pitch overflowed")?;
+            unsafe {
+                self.immediate_context.UpdateSubresource(
+                    &cached.texture,
+                    0,
+                    None,
+                    overlay.bytes.as_ptr().cast(),
+                    row_pitch,
+                    0,
+                );
+            }
+            cached.sequence = overlay.sequence;
+        }
+        Ok(cached.texture.clone())
+    }
+
+    fn release_surface(&mut self, surface_slot: usize) {
+        if let Some(surface) = self.surfaces.get_mut(surface_slot) {
+            surface.in_use = false;
+        }
+    }
+}
+
+fn pixel_rect_to_win32(rect: crate::scene_geometry::PixelRect) -> Result<RECT> {
+    let right = rect
+        .x
+        .checked_add(rect.width)
+        .context("camera overlay right edge overflowed")?;
+    let bottom = rect
+        .y
+        .checked_add(rect.height)
+        .context("camera overlay bottom edge overflowed")?;
+    Ok(RECT {
+        left: i32::try_from(rect.x).context("camera overlay x overflowed")?,
+        top: i32::try_from(rect.y).context("camera overlay y overflowed")?,
+        right: i32::try_from(right).context("camera overlay right edge overflowed i32")?,
+        bottom: i32::try_from(bottom).context("camera overlay bottom edge overflowed i32")?,
+    })
 }
 
 fn configure_codec_api(
@@ -775,6 +1803,8 @@ impl Drop for MediaFoundationH264Encoder {
             drop(events);
             drop(transform);
             drop(activation);
+            drop(self.d3d11_input.take());
+            drop(self.d3d11_cpu_upload.take());
             if self.mf_started {
                 let _ = MFShutdown();
                 self.mf_started = false;
@@ -868,6 +1898,22 @@ fn activation_name(activation: &IMFActivate) -> Result<String> {
     Ok(String::from_utf16_lossy(&value[..end]))
 }
 
+fn activation_adapter_luid(activation: &IMFActivate) -> Result<Option<u64>> {
+    let size = match unsafe { activation.GetBlobSize(&MFT_ENUM_ADAPTER_LUID) } {
+        Ok(size) => size,
+        Err(_) => return Ok(None),
+    };
+    ensure!(
+        size == 8,
+        "MFT_ENUM_ADAPTER_LUID contained {size} bytes instead of 8"
+    );
+    let mut bytes = [0_u8; 8];
+    unsafe {
+        activation.GetBlob(&MFT_ENUM_ADAPTER_LUID, &mut bytes, None)?;
+    }
+    Ok(Some(u64::from_ne_bytes(bytes)))
+}
+
 fn create_video_type(
     config: &MediaFoundationEncoderConfig,
     subtype: windows::core::GUID,
@@ -883,6 +1929,10 @@ fn create_video_type(
         )?;
         media_type.SetUINT64(&MF_MT_FRAME_RATE, (u64::from(config.fps) << 32) | 1)?;
         media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+        media_type.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32)?;
+        media_type.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32)?;
+        media_type.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32)?;
+        media_type.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)?;
         media_type.SetUINT32(
             &MF_MT_AVG_BITRATE,
             config.bitrate_kbps.saturating_mul(1_000),
@@ -897,8 +1947,29 @@ fn create_video_type(
     Ok(media_type)
 }
 
-fn create_input_sample(bytes: &[u8], pts: i64, duration: i64) -> Result<IMFSample> {
-    let len = u32::try_from(bytes.len()).context("Media Foundation input frame exceeded u32")?;
+fn create_input_sample(
+    i420: &[u8],
+    input_subtype: MediaFoundationInputSubtype,
+    width: u32,
+    height: u32,
+    pts: i64,
+    duration: i64,
+) -> Result<IMFSample> {
+    let buffer = match input_subtype {
+        MediaFoundationInputSubtype::I420 => create_i420_input_buffer(i420)?,
+        MediaFoundationInputSubtype::Nv12 => create_nv12_input_buffer(i420, width, height)?,
+    };
+    let sample = unsafe { MFCreateSample() }?;
+    unsafe {
+        sample.AddBuffer(&buffer)?;
+        sample.SetSampleTime(pts)?;
+        sample.SetSampleDuration(duration)?;
+    }
+    Ok(sample)
+}
+
+fn create_i420_input_buffer(i420: &[u8]) -> Result<IMFMediaBuffer> {
+    let len = u32::try_from(i420.len()).context("Media Foundation input frame exceeded u32")?;
     let buffer = unsafe { MFCreateMemoryBuffer(len) }?;
     let mut target = ptr::null_mut();
     let mut max_len = 0_u32;
@@ -908,17 +1979,61 @@ fn create_input_sample(bytes: &[u8], pts: i64, duration: i64) -> Result<IMFSampl
             let _ = buffer.Unlock();
             bail!("Media Foundation input buffer was smaller than requested");
         }
-        ptr::copy_nonoverlapping(bytes.as_ptr(), target, bytes.len());
+        std::slice::from_raw_parts_mut(target, i420.len()).copy_from_slice(i420);
         buffer.Unlock()?;
         buffer.SetCurrentLength(len)?;
     }
-    let sample = unsafe { MFCreateSample() }?;
+    Ok(buffer)
+}
+
+fn create_nv12_input_buffer(i420: &[u8], width: u32, height: u32) -> Result<IMFMediaBuffer> {
+    ensure!(
+        width.is_multiple_of(2) && height.is_multiple_of(2),
+        "NV12 input requires even dimensions"
+    );
+    let buffer = unsafe { MFCreate2DMediaBuffer(width, height, MFVideoFormat_NV12.data1, false) }?;
+    let buffer_2d: IMF2DBuffer2 = buffer.cast()?;
+    let mut scanline = ptr::null_mut();
+    let mut pitch = 0_i32;
+    let mut buffer_start = ptr::null_mut();
+    let mut buffer_len = 0_u32;
     unsafe {
-        sample.AddBuffer(&buffer)?;
-        sample.SetSampleTime(pts)?;
-        sample.SetSampleDuration(duration)?;
+        buffer_2d.Lock2DSize(
+            MF2DBuffer_LockFlags_Write,
+            &mut scanline,
+            &mut pitch,
+            &mut buffer_start,
+            &mut buffer_len,
+        )?;
+        let write_result = (|| {
+            ensure!(
+                pitch > 0,
+                "NV12 input buffer returned non-positive pitch {pitch}"
+            );
+            ensure!(
+                scanline == buffer_start,
+                "NV12 input buffer returned an unexpected top-row offset"
+            );
+            let pitch = usize::try_from(pitch)?;
+            let height = usize::try_from(height)?;
+            let required_len = pitch
+                .checked_mul(height + height / 2)
+                .context("NV12 strided input buffer size overflowed")?;
+            ensure!(
+                required_len <= buffer_len as usize,
+                "NV12 input buffer length {buffer_len} was smaller than required {required_len}"
+            );
+            let target = std::slice::from_raw_parts_mut(buffer_start, required_len);
+            i420_to_nv12_strided(i420, width, height as u32, pitch, target)
+        })();
+        if let Err(error) = write_result {
+            let _ = buffer_2d.Unlock2D();
+            return Err(error);
+        }
+        buffer_2d.Unlock2D()?;
+        buffer.SetCurrentLength(buffer_2d.GetContiguousLength()?)?;
     }
-    Ok(sample)
+    Ok(buffer)
 }
 
 fn copy_media_buffer(buffer: &IMFMediaBuffer) -> Result<Vec<u8>> {
@@ -964,7 +2079,13 @@ fn frame_index_from_100ns(pts: i64, fps: u32) -> Result<u64> {
     u64::try_from(value).context("Media Foundation frame index exceeded u64")
 }
 
-fn i420_to_nv12(i420: &[u8], width: u32, height: u32, output: &mut Vec<u8>) -> Result<()> {
+fn i420_to_nv12_strided(
+    i420: &[u8],
+    width: u32,
+    height: u32,
+    pitch: usize,
+    output: &mut [u8],
+) -> Result<()> {
     ensure!(
         width.is_multiple_of(2) && height.is_multiple_of(2),
         "NV12 conversion requires even dimensions"
@@ -975,13 +2096,36 @@ fn i420_to_nv12(i420: &[u8], width: u32, height: u32, output: &mut Vec<u8>) -> R
         i420.len() == y_len + chroma_len * 2,
         "I420/NV12 conversion input length mismatch"
     );
-    output.resize(i420.len(), 0);
-    output[..y_len].copy_from_slice(&i420[..y_len]);
+    let width = usize::try_from(width)?;
+    let height = usize::try_from(height)?;
+    ensure!(
+        pitch >= width,
+        "I420/NV12 conversion pitch {pitch} was smaller than width {width}"
+    );
+    let output_len = pitch
+        .checked_mul(height + height / 2)
+        .context("I420/NV12 conversion output size overflowed")?;
+    ensure!(
+        output.len() == output_len,
+        "I420/NV12 conversion output length mismatch"
+    );
+    for row in 0..height {
+        let source_start = row * width;
+        let target_start = row * pitch;
+        output[target_start..target_start + width]
+            .copy_from_slice(&i420[source_start..source_start + width]);
+    }
     let u = &i420[y_len..y_len + chroma_len];
     let v = &i420[y_len + chroma_len..];
-    for index in 0..chroma_len {
-        output[y_len + index * 2] = u[index];
-        output[y_len + index * 2 + 1] = v[index];
+    let chroma_width = width / 2;
+    let uv_offset = pitch * height;
+    for row in 0..height / 2 {
+        let source_start = row * chroma_width;
+        let target_start = uv_offset + row * pitch;
+        for column in 0..chroma_width {
+            output[target_start + column * 2] = u[source_start + column];
+            output[target_start + column * 2 + 1] = v[source_start + column];
+        }
     }
     Ok(())
 }
@@ -1081,9 +2225,27 @@ mod tests {
     #[test]
     fn converts_i420_chroma_to_nv12_interleaving() {
         let input = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 20, 21];
-        let mut output = Vec::new();
-        i420_to_nv12(&input, 4, 2, &mut output).unwrap();
+        let mut output = [0; 12];
+        i420_to_nv12_strided(&input, 4, 2, 4, &mut output).unwrap();
         assert_eq!(output, [1, 2, 3, 4, 5, 6, 7, 8, 10, 20, 11, 21]);
+    }
+
+    #[test]
+    fn converts_i420_into_strided_nv12_rows_without_touching_padding() {
+        let input = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 20, 21];
+        let mut output = [0xff; 24];
+        i420_to_nv12_strided(&input, 4, 2, 8, &mut output).unwrap();
+        assert_eq!(&output[..8], &[1, 2, 3, 4, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(&output[8..16], &[5, 6, 7, 8, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(&output[16..], &[10, 20, 11, 21, 0xff, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn rejects_an_incorrect_strided_nv12_output_length() {
+        let input = [1, 2, 3, 4, 5, 6];
+        let mut output = [0; 11];
+        let error = i420_to_nv12_strided(&input, 2, 2, 4, &mut output).unwrap_err();
+        assert!(error.to_string().contains("output length mismatch"));
     }
 
     #[test]

@@ -46,6 +46,8 @@ use crate::diagnostics::{
     apply_recording_startup_barrier_stats, apply_runtime_diagnostics_snapshot, apply_stream_health,
     starting_diagnostics,
 };
+#[cfg(target_os = "windows")]
+use crate::encoder_bridge::DirectD3D11CameraOverlay;
 use crate::encoder_bridge::{
     EncoderBridgeDiagnosticsContext, EncoderBridgeOutputProfile, EncoderBridgeOutputRole,
     EncoderBridgeRecordingSession, EncoderBridgeVideoOutput, start_synthetic_recording_bridge,
@@ -57,6 +59,8 @@ use crate::h264_profile::{h264_high_level_label, quality_posture_canvas_envelope
 #[cfg(target_os = "windows")]
 use crate::mpeg_ts::{MpegTsH264Writer, timing_to_90khz};
 use crate::pipeline::{RecordingPipeline, container_for_outputs, container_key};
+#[cfg(target_os = "windows")]
+use crate::preview_camera::preview_camera_frame_source;
 use crate::preview_camera::{
     preview_camera_latest_frame_info, reset_preview_camera_capture_timings,
 };
@@ -1650,114 +1654,180 @@ pub async fn start_session(
             height: params.output.video.height,
             fps: SCREEN_OVERLAY_FPS,
         });
-    let mut startup_barrier_result: Option<CompositorStartupBarrierResult> = None;
-    let mut recording_startup_scene: Option<RecordingStartupSceneLease> = None;
-    let (encoder_bridge_frame_store, encoder_bridge_stream_frame_store) = if use_encoder_bridge {
-        let target_fps = recording_compositor_target_fps(&state, &params.output.video).await;
-        start_synthetic_compositor(
-            state.clone(),
-            CompositorStartParams {
-                target_fps,
-                width: params.output.video.width,
-                height: params.output.video.height,
-                frame_consumer: if matches!(
-                    encoder_bridge_video_output,
-                    EncoderBridgeVideoOutput::RawYuv420p
-                ) {
-                    CompositorFrameConsumer::RawYuvEncoder
-                } else if matches!(
-                    encoder_bridge_video_output,
-                    EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
-                ) {
-                    CompositorFrameConsumer::MediaFoundationEncoder
-                } else {
-                    CompositorFrameConsumer::VideoToolboxEncoder
-                },
-                stream_output: encoder_bridge_stream_output,
-                // Per-leg overlay plan (R1): primary is the clean source
-                // recording (or the stream when stream-only); aux is the
-                // captioned stream leg for combined sessions.
-                caption_overlay_on_primary: session_caption_plan.primary,
-                caption_overlay_on_aux: session_caption_plan.aux,
-                highlight_overlay_on_primary: crate::captions::highlight_overlay_leg_plan(
-                    params.output.record_enabled,
-                    params.output.stream_enabled,
-                    encoder_bridge_stream_output.is_some(),
-                )
-                .0,
-                highlight_overlay_on_aux: crate::captions::highlight_overlay_leg_plan(
-                    params.output.record_enabled,
-                    params.output.stream_enabled,
-                    encoder_bridge_stream_output.is_some(),
-                )
-                .1,
-            },
+    let highlight_overlay_plan = crate::captions::highlight_overlay_leg_plan(
+        params.output.record_enabled,
+        params.output.stream_enabled,
+        encoder_bridge_stream_output.is_some(),
+    );
+    #[cfg(target_os = "windows")]
+    let (direct_d3d11_recording_source, direct_d3d11_camera_overlay) = if use_encoder_bridge
+        && matches!(
+            encoder_bridge_video_output,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
         )
-        .await;
-        let scene = params.scene.clone().unwrap_or_else(|| {
-            scene_from_capture_config(SceneConfigParams {
+        && params.output.record_enabled
+        && !params.output.stream_enabled
+        && params.scene.is_none()
+        && matches!(
+            params.layout.layout_preset,
+            LayoutPreset::ScreenOnly | LayoutPreset::ScreenCamera
+        )
+        && camera_chroma_key(&params.layout).is_none()
+        && !session_caption_plan.primary
+        && !session_caption_plan.aux
+        && !highlight_overlay_plan.0
+        && !highlight_overlay_plan.1
+    {
+        let camera_overlay = if matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera) {
+            let scene = scene_from_capture_config(SceneConfigParams {
                 sources: params.sources.clone(),
                 layout: params.layout.clone(),
                 video: Some(params.output.video.clone()),
                 background: None,
                 protected_overlay_window_ids: Vec::new(),
-            })
-        });
-        let startup_source_requirements = recording_startup_source_requirements(&scene);
-        if let Err(error) = await_recording_camera_cadence_ready(
-            &state,
-            &session_id,
-            params.output.video.fps,
-            startup_source_requirements,
-        )
-        .await
+            });
+            let destination = scene
+                .sources
+                .iter()
+                .find(|source| source.visible && matches!(source.kind, SceneSourceKind::Camera))
+                .and_then(|source| {
+                    let transform =
+                        scene_source_render_transform(&source.transform, &source.kind, 0.0);
+                    scene_source_rect_pixels(
+                        &transform,
+                        params.output.video.width,
+                        params.output.video.height,
+                    )
+                    .map(|destination| (destination, scene_crop_from_transform(&transform)))
+                });
+            match (preview_camera_frame_source(&state).await, destination) {
+                (Some(source), Some((destination, crop)))
+                    if source.latest_frame_blocking().is_some() =>
+                {
+                    Some(DirectD3D11CameraOverlay {
+                        source,
+                        destination,
+                        crop,
+                        contain: matches!(
+                            scene_source_fit(&SceneSourceKind::Camera, &params.layout),
+                            SceneFit::Contain
+                        ),
+                        mirror_x: params.layout.camera_mirror,
+                        mask: camera_mask(&params.layout),
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let camera_ready = matches!(params.layout.layout_preset, LayoutPreset::ScreenOnly)
+            || camera_overlay.is_some();
+        let screen = if camera_ready {
+            crate::preview_screen::preview_screen_frame_source(&state)
+                .await
+                .and_then(|source| source.begin_direct_d3d11_recording())
+                .filter(|source| {
+                    source.latest_frame().is_some_and(|frame| {
+                        u64::from(frame.width) * u64::from(params.output.video.height)
+                            == u64::from(params.output.video.width) * u64::from(frame.height)
+                    })
+                })
+        } else {
+            None
+        };
+        if screen.is_some() {
+            (screen, camera_overlay)
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let direct_d3d11_recording_source = None;
+    if direct_d3d11_recording_source.is_some() {
+        let direct_description = if cfg!(target_os = "windows")
+            && matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera)
         {
-            emit_preflight_failure_report(
-                &state,
-                &session_id,
-                "camera source cadence",
-                &error.to_string(),
-                &params,
-                &startup_source_requirements,
+            "Direct D3D11 screen+camera recording selected: WGC texture + camera overlay -> D3D11 NV12 -> Media Foundation."
+        } else {
+            "Direct D3D11 screen recording selected: WGC texture -> D3D11 NV12 -> Media Foundation."
+        };
+        state.emit_log("info", direct_description.to_string());
+        let direct_snapshot = {
+            let mut diagnostics = state.diagnostics.lock().await;
+            diagnostics.encoder_bridge_encoded_output_input_subtype =
+                Some("NV12-D3D11".to_string());
+            diagnostics.clone()
+        };
+        state.emit_event(
+            "diagnostics.stats",
+            apply_runtime_diagnostics_snapshot(direct_snapshot, state.ffmpeg_work.snapshot()),
+        );
+    }
+    let mut startup_barrier_result: Option<CompositorStartupBarrierResult> = None;
+    let mut recording_startup_scene: Option<RecordingStartupSceneLease> = None;
+    let (encoder_bridge_frame_store, encoder_bridge_stream_frame_store) =
+        if direct_d3d11_recording_source.is_some() {
+            // The direct path owns the retained WGC source and schedules it on
+            // the bridge clock. Starting the CPU compositor here would retain
+            // the full-frame BGRA -> I420 cost even though its output is unused.
+            (None, None)
+        } else if use_encoder_bridge {
+            let target_fps = recording_compositor_target_fps(&state, &params.output.video).await;
+            start_synthetic_compositor(
+                state.clone(),
+                CompositorStartParams {
+                    target_fps,
+                    width: params.output.video.width,
+                    height: params.output.video.height,
+                    frame_consumer: if matches!(
+                        encoder_bridge_video_output,
+                        EncoderBridgeVideoOutput::RawYuv420p
+                    ) {
+                        CompositorFrameConsumer::RawYuvEncoder
+                    } else if matches!(
+                        encoder_bridge_video_output,
+                        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+                    ) {
+                        CompositorFrameConsumer::MediaFoundationEncoder
+                    } else {
+                        CompositorFrameConsumer::VideoToolboxEncoder
+                    },
+                    stream_output: encoder_bridge_stream_output,
+                    // Per-leg overlay plan (R1): primary is the clean source
+                    // recording (or the stream when stream-only); aux is the
+                    // captioned stream leg for combined sessions.
+                    caption_overlay_on_primary: session_caption_plan.primary,
+                    caption_overlay_on_aux: session_caption_plan.aux,
+                    highlight_overlay_on_primary: highlight_overlay_plan.0,
+                    highlight_overlay_on_aux: highlight_overlay_plan.1,
+                },
             )
             .await;
-            if let Some(fifo_path) = encoder_bridge_fifo.as_ref() {
-                let _ = crate::fifo::cleanup(fifo_path);
-            }
-            if let Some(fifo_path) = encoder_bridge_stream_fifo.as_ref() {
-                let _ = crate::fifo::cleanup(fifo_path);
-            }
-            return Err(error);
-        }
-        let startup_scene = commit_recording_startup_scene_at_time(
-            &state,
-            &scene,
-            params.layout.clone(),
-            active_screen.clone(),
-            u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
-        )
-        .await;
-        let startup_scene_revision = startup_scene.scene_revision;
-        recording_startup_scene = Some(startup_scene);
-        match await_recording_startup_barrier(
-            &state,
-            &session_id,
-            params.output.video.width,
-            params.output.video.height,
-            params.output.video.fps,
-            Some(startup_scene_revision),
-            startup_source_requirements,
-        )
-        .await
-        {
-            Ok(result) => {
-                startup_barrier_result = Some(result);
-            }
-            Err(error) => {
+            let scene = params.scene.clone().unwrap_or_else(|| {
+                scene_from_capture_config(SceneConfigParams {
+                    sources: params.sources.clone(),
+                    layout: params.layout.clone(),
+                    video: Some(params.output.video.clone()),
+                    background: None,
+                    protected_overlay_window_ids: Vec::new(),
+                })
+            });
+            let startup_source_requirements = recording_startup_source_requirements(&scene);
+            if let Err(error) = await_recording_camera_cadence_ready(
+                &state,
+                &session_id,
+                params.output.video.fps,
+                startup_source_requirements,
+            )
+            .await
+            {
                 emit_preflight_failure_report(
                     &state,
                     &session_id,
-                    "compositor startup",
+                    "camera source cadence",
                     &error.to_string(),
                     &params,
                     &startup_source_requirements,
@@ -1771,21 +1841,63 @@ pub async fn start_session(
                 }
                 return Err(error);
             }
-        }
-        let recording_store = Some(compositor_frame_store(&state).await);
-        let stream_store = if encoder_bridge_stream_output.is_some() {
-            Some(
-                compositor_stream_frame_store(&state)
-                    .await
-                    .context("Split output compositor stream frame store was not prepared")?,
+            let startup_scene = commit_recording_startup_scene_at_time(
+                &state,
+                &scene,
+                params.layout.clone(),
+                active_screen.clone(),
+                u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
             )
+            .await;
+            let startup_scene_revision = startup_scene.scene_revision;
+            recording_startup_scene = Some(startup_scene);
+            match await_recording_startup_barrier(
+                &state,
+                &session_id,
+                params.output.video.width,
+                params.output.video.height,
+                params.output.video.fps,
+                Some(startup_scene_revision),
+                startup_source_requirements,
+            )
+            .await
+            {
+                Ok(result) => {
+                    startup_barrier_result = Some(result);
+                }
+                Err(error) => {
+                    emit_preflight_failure_report(
+                        &state,
+                        &session_id,
+                        "compositor startup",
+                        &error.to_string(),
+                        &params,
+                        &startup_source_requirements,
+                    )
+                    .await;
+                    if let Some(fifo_path) = encoder_bridge_fifo.as_ref() {
+                        let _ = crate::fifo::cleanup(fifo_path);
+                    }
+                    if let Some(fifo_path) = encoder_bridge_stream_fifo.as_ref() {
+                        let _ = crate::fifo::cleanup(fifo_path);
+                    }
+                    return Err(error);
+                }
+            }
+            let recording_store = Some(compositor_frame_store(&state).await);
+            let stream_store = if encoder_bridge_stream_output.is_some() {
+                Some(
+                    compositor_stream_frame_store(&state)
+                        .await
+                        .context("Split output compositor stream frame store was not prepared")?,
+                )
+            } else {
+                None
+            };
+            (recording_store, stream_store)
         } else {
-            None
+            (None, None)
         };
-        (recording_store, stream_store)
-    } else {
-        (None, None)
-    };
     let args = if use_encoder_bridge {
         let fifo_path = encoder_bridge_fifo
             .as_deref()
@@ -1950,6 +2062,9 @@ pub async fn start_session(
             params.output.video.height,
             bridge_fifo_path,
             encoder_bridge_frame_store.clone(),
+            direct_d3d11_recording_source,
+            #[cfg(target_os = "windows")]
+            direct_d3d11_camera_overlay,
             encoder_bridge_video_output,
             Some(params.output.video.bitrate_kbps),
             // Low latency only when live legs consume THIS output (shared
@@ -1981,6 +2096,9 @@ pub async fn start_session(
                     stream_profile.height,
                     stream_fifo_path,
                     Some(stream_frame_store),
+                    None,
+                    #[cfg(target_os = "windows")]
+                    None,
                     encoder_bridge_video_output,
                     Some(stream_profile.bitrate_kbps),
                     true,
@@ -7667,6 +7785,12 @@ fn bridge_compositor_ffmpeg_args(
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
             | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
                 args.extend(["-c:v".to_string(), "copy".to_string()]);
+                if matches!(
+                    video_output,
+                    EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+                ) {
+                    append_media_foundation_h264_color_metadata_args(&mut args);
+                }
             }
         }
         append_audio_encoding_args(
@@ -7691,7 +7815,14 @@ fn bridge_compositor_ffmpeg_args(
     match (output_path, stream_targets) {
         (Some(path), []) => args.push(ffmpeg_file_path(path)),
         (Some(path), _) if copy_stream_fanout => {
-            append_bridge_copy_file_output(&mut args, &input_layout, &params.audio, true, path);
+            append_bridge_copy_file_output(
+                &mut args,
+                &input_layout,
+                &params.audio,
+                true,
+                video_output,
+                path,
+            );
             for target in stream_targets {
                 append_bridge_copy_flv_output(
                     &mut args,
@@ -7699,6 +7830,7 @@ fn bridge_compositor_ffmpeg_args(
                     &params.audio,
                     target,
                     false,
+                    video_output,
                 );
             }
         }
@@ -7718,6 +7850,7 @@ fn bridge_compositor_ffmpeg_args(
                     &params.audio,
                     target,
                     false,
+                    video_output,
                 );
             }
         }
@@ -7807,6 +7940,12 @@ fn bridge_compositor_split_output_ffmpeg_args(
         "-tag:v".to_string(),
         "0".to_string(),
     ]);
+    if matches!(
+        recording_video_output,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) {
+        append_media_foundation_h264_color_metadata_args(&mut args);
+    }
     append_audio_encoding_args(&mut args, &input_layout, &params.audio, true);
     args.push("-shortest".to_string());
     args.push(ffmpeg_file_path(output_path));
@@ -7861,6 +8000,7 @@ fn bridge_compositor_split_output_ffmpeg_args(
                 &params.audio,
                 target,
                 true,
+                recording_video_output,
             );
         }
         return Ok(args);
@@ -7871,7 +8011,14 @@ fn bridge_compositor_split_output_ffmpeg_args(
     // SESSION — the old direct/tee shapes aborted the local recording when a
     // platform handshake failed (plan 023 L1).
     for target in stream_targets {
-        append_bridge_copy_flv_output(&mut args, &stream_input_layout, &params.audio, target, true);
+        append_bridge_copy_flv_output(
+            &mut args,
+            &stream_input_layout,
+            &params.audio,
+            target,
+            true,
+            recording_video_output,
+        );
     }
 
     Ok(args)
@@ -8058,9 +8205,10 @@ fn append_bridge_copy_file_output(
     input_layout: &InputLayout,
     audio: &AudioSettings,
     streaming_audio: bool,
+    video_output: EncoderBridgeVideoOutput,
     path: &Path,
 ) {
-    append_bridge_copy_output_args(args, input_layout, audio, streaming_audio);
+    append_bridge_copy_output_args(args, input_layout, audio, streaming_audio, video_output);
     args.push(ffmpeg_file_path(path));
 }
 
@@ -8070,6 +8218,7 @@ fn append_bridge_copy_flv_output(
     audio: &AudioSettings,
     target: &StreamTarget,
     advance_audio: bool,
+    video_output: EncoderBridgeVideoOutput,
 ) {
     let stream_audio;
     let audio = if advance_audio {
@@ -8078,7 +8227,7 @@ fn append_bridge_copy_flv_output(
     } else {
         audio
     };
-    append_bridge_copy_output_args(args, input_layout, audio, true);
+    append_bridge_copy_output_args(args, input_layout, audio, true, video_output);
     // FLV's H264 codec tag, explicitly: the mpegts input carries tag [27]
     // (stream_type) through -c:v copy, wrapper muxers clone it verbatim into
     // the inner flv muxer, and "-tag:v 0" is a no-op for copy (0 = keep).
@@ -8111,6 +8260,7 @@ fn append_bridge_copy_output_args(
     input_layout: &InputLayout,
     audio: &AudioSettings,
     streaming_audio: bool,
+    video_output: EncoderBridgeVideoOutput,
 ) {
     args.extend([
         "-map".to_string(),
@@ -8118,8 +8268,23 @@ fn append_bridge_copy_output_args(
     ]);
     append_audio_output_args(args, input_layout);
     args.extend(["-c:v".to_string(), "copy".to_string()]);
+    if matches!(
+        video_output,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) {
+        append_media_foundation_h264_color_metadata_args(args);
+    }
     append_audio_encoding_args(args, input_layout, audio, streaming_audio);
     args.push("-shortest".to_string());
+}
+
+fn append_media_foundation_h264_color_metadata_args(args: &mut Vec<String>) {
+    args.extend(h264_bt709_color_tag_args());
+    args.extend([
+        "-bsf:v".to_string(),
+        "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
+            .to_string(),
+    ]);
 }
 
 fn stream_output_audio_settings(audio: &AudioSettings) -> AudioSettings {
@@ -13981,6 +14146,36 @@ mod tests {
     }
 
     #[test]
+    fn bridge_recording_media_foundation_copy_stamps_bt709_h264_metadata() {
+        let params = base_params(true, false);
+        let fifo_path = Path::new("/tmp/videorc-bridge-input.ts");
+        let args = bridge_recording_ffmpeg_args(
+            &CaptureInputs {
+                video: VideoInput::TestPattern,
+                camera_index: None,
+                microphone: None,
+            },
+            &params,
+            Some(Path::new("/tmp/videorc-bridge-test.mp4")),
+            fifo_path,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        )
+        .unwrap();
+
+        assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
+        assert_eq!(arg_value(&args, "-colorspace"), Some("bt709"));
+        assert_eq!(arg_value(&args, "-color_primaries"), Some("bt709"));
+        assert_eq!(arg_value(&args, "-color_trc"), Some("bt709"));
+        assert_eq!(arg_value(&args, "-color_range"), Some("tv"));
+        assert_eq!(
+            arg_value(&args, "-bsf:v"),
+            Some(
+                "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
+            )
+        );
+    }
+
+    #[test]
     fn bridge_recording_h264_mpegts_opens_native_audio_before_video_fifo() {
         let params = base_params(true, false);
         let fifo_path = Path::new("/tmp/videorc-bridge-input.ts");
@@ -15603,19 +15798,14 @@ mod tests {
         assert!(later_error.error.to_string().contains("state is unknown"));
     }
 
+    const TEST_LIVE_AUDIO_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+    const TEST_LIVE_AUDIO_PROMPT_TIMEOUT: Duration = Duration::from_secs(1);
+
     async fn spawn_test_stdin_sink() -> (tokio::process::Child, ChildStdin) {
         #[cfg(target_os = "windows")]
-        let mut command = {
-            let mut command = Command::new("cmd");
-            command.args(["/C", "more > NUL"]);
-            command
-        };
+        let mut command = Command::new("more.com");
         #[cfg(not(target_os = "windows"))]
-        let mut command = {
-            let mut command = Command::new("sh");
-            command.args(["-c", "cat >/dev/null"]);
-            command
-        };
+        let mut command = Command::new("cat");
         command
             .kill_on_drop(true)
             .stdin(Stdio::piped())
@@ -15624,6 +15814,23 @@ mod tests {
         let mut child = command.spawn().expect("spawn stdin sink");
         let stdin = child.stdin.take().expect("stdin sink pipe");
         (child, stdin)
+    }
+
+    async fn wait_for_test_stdin_sink(child: &mut tokio::process::Child) {
+        match timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, child.wait()).await {
+            Ok(result) => {
+                result.expect("wait for stdin sink");
+            }
+            Err(_) => {
+                let pid = child.id();
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                panic!(
+                    "closed command pipe did not reach EOF within {}ms (pid={pid:?})",
+                    TEST_LIVE_AUDIO_EVENT_TIMEOUT.as_millis()
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -15656,7 +15863,7 @@ mod tests {
         );
 
         assert!(session.mark_command_ready());
-        timeout(Duration::from_secs(1), async {
+        timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, async {
             loop {
                 if session.session.try_lock().is_err() {
                     break;
@@ -15667,7 +15874,7 @@ mod tests {
         .await
         .expect("ready update must enter the serialized command lane");
         assert_eq!(
-            timeout(Duration::from_secs(1), dispatches.recv())
+            timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, dispatches.recv())
                 .await
                 .expect("written command must publish dispatch evidence"),
             Some(())
@@ -15675,17 +15882,14 @@ mod tests {
         reply_sender
             .send(FfmpegFilterCommandReply { return_code: 0 })
             .unwrap();
-        timeout(Duration::from_secs(1), applying)
+        timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, applying)
             .await
             .expect("ready command must use the acknowledgement budget")
             .unwrap()
             .unwrap();
 
         session.close_stdin().await.unwrap();
-        timeout(Duration::from_secs(1), child.wait())
-            .await
-            .expect("closed command pipe should reach EOF")
-            .expect("wait for stdin sink");
+        wait_for_test_stdin_sink(&mut child).await;
     }
 
     #[tokio::test]
@@ -15729,19 +15933,18 @@ mod tests {
         assert!(!last_applied.muted);
 
         session.close_stdin().await.unwrap();
-        timeout(Duration::from_secs(1), child.wait())
-            .await
-            .expect("closed command pipe should reach EOF")
-            .expect("wait for stdin sink");
+        wait_for_test_stdin_sink(&mut child).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_terminal_interrupt_is_session_ended_not_unknown_audio_state() {
         let (mut child, stdin) = spawn_test_stdin_sink().await;
         let (_reply_sender, replies) = mpsc::unbounded_channel();
+        let (dispatch_sender, mut dispatches) = mpsc::unbounded_channel();
         let session = Arc::new(FfmpegLiveAudioSessionHandle::new(
             stdin,
-            FfmpegLiveAudioControl::new(1, replies, AudioProcessingSettings::default()),
+            FfmpegLiveAudioControl::new(1, replies, AudioProcessingSettings::default())
+                .with_dispatch_sender(dispatch_sender),
         ));
         session.mark_command_ready();
         let applying = {
@@ -15755,19 +15958,13 @@ mod tests {
                     .await
             })
         };
-        timeout(Duration::from_secs(1), async {
-            loop {
-                if session.session.try_lock().is_err() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("command must enter its acknowledgement wait");
+        timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, dispatches.recv())
+            .await
+            .expect("command must enter its acknowledgement wait")
+            .expect("command dispatch evidence");
 
         assert!(session.mark_terminal());
-        let failure = timeout(Duration::from_millis(100), applying)
+        let failure = timeout(TEST_LIVE_AUDIO_PROMPT_TIMEOUT, applying)
             .await
             .expect("terminal process state must interrupt acknowledgement promptly")
             .unwrap()
@@ -15777,10 +15974,7 @@ mod tests {
         assert!(failure.confirmed_settings.is_some());
 
         session.close_stdin().await.unwrap();
-        timeout(Duration::from_secs(1), child.wait())
-            .await
-            .expect("closed command pipe should reach EOF")
-            .expect("wait for stdin sink");
+        wait_for_test_stdin_sink(&mut child).await;
     }
 
     #[tokio::test]
@@ -15789,9 +15983,11 @@ mod tests {
         let mut events = state.events.subscribe();
         let (mut child, stdin) = spawn_test_stdin_sink().await;
         let (reply_sender, replies) = mpsc::unbounded_channel();
+        let (dispatch_sender, mut dispatches) = mpsc::unbounded_channel();
         let live_audio_session = Arc::new(FfmpegLiveAudioSessionHandle::new(
             stdin,
-            FfmpegLiveAudioControl::new(1, replies, AudioProcessingSettings::default()),
+            FfmpegLiveAudioControl::new(1, replies, AudioProcessingSettings::default())
+                .with_dispatch_sender(dispatch_sender),
         ));
         assert!(live_audio_session.mark_command_ready());
         let audio_tracks = vec![microphone_audio_track()];
@@ -15835,29 +16031,20 @@ mod tests {
             .await
         });
 
-        let session_waiting_for_reply = timeout(Duration::from_secs(1), async {
-            loop {
-                if live_audio_session.session.try_lock().is_err() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
-        assert!(
-            session_waiting_for_reply.is_ok(),
-            "live update never entered its session-scoped acknowledgement wait"
-        );
+        timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, dispatches.recv())
+            .await
+            .expect("live update never entered its session-scoped acknowledgement wait")
+            .expect("command dispatch evidence");
 
         let stop_state = state.clone();
         let stop = tokio::spawn(async move { stop_recording(stop_state).await });
 
-        timeout(Duration::from_millis(100), stop_intent_receiver)
+        timeout(TEST_LIVE_AUDIO_PROMPT_TIMEOUT, stop_intent_receiver)
             .await
             .expect("stop intent must not wait for FFmpeg acknowledgement")
             .expect("authoritative stop intent");
 
-        let stopping_event = timeout(Duration::from_secs(1), async {
+        let stopping_event = timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, async {
             loop {
                 let event = events.recv().await.expect("recording event");
                 if event.event == "recording.status" {
@@ -15873,7 +16060,7 @@ mod tests {
             "stop should be waiting behind the in-flight session command only after publication"
         );
 
-        let result = timeout(Duration::from_millis(100), update)
+        let result = timeout(TEST_LIVE_AUDIO_PROMPT_TIMEOUT, update)
             .await
             .expect("stop must interrupt an in-flight live-audio acknowledgement")
             .unwrap();
@@ -15892,10 +16079,7 @@ mod tests {
         assert_eq!(late_result.reason_code.as_deref(), Some("session-ended"));
         drop(reply_sender);
 
-        timeout(Duration::from_secs(1), child.wait())
-            .await
-            .expect("FFmpeg stdin sink should close after the acknowledgement")
-            .expect("wait for stdin sink");
+        wait_for_test_stdin_sink(&mut child).await;
         stop.abort();
         let _ = stop.await;
         state.recording.lock().await.take();
@@ -15945,10 +16129,7 @@ mod tests {
         assert!(sticky_error.confirmed_settings.is_none());
 
         live_audio_session.close_stdin().await.unwrap();
-        timeout(Duration::from_secs(1), child.wait())
-            .await
-            .expect("closed live command pipe should reach EOF")
-            .expect("wait for stdin sink");
+        wait_for_test_stdin_sink(&mut child).await;
     }
 
     #[test]

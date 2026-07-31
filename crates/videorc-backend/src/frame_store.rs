@@ -83,6 +83,60 @@ pub struct RetainedIoSurface;
 #[derive(Debug, Clone)]
 pub struct RetainedPixelBuffer;
 
+#[cfg(target_os = "windows")]
+mod source_d3d11_texture {
+    use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+
+    /// A captured D3D11 texture retained with the logical source frame.
+    ///
+    /// The capture device is created with D3D11 multithread protection. Consumers
+    /// may therefore retain this COM reference across the capture/compositor
+    /// boundary instead of forcing the source through a BGRA byte pipe first.
+    #[derive(Clone)]
+    pub struct RetainedD3D11Texture {
+        texture: ID3D11Texture2D,
+        adapter_luid: u64,
+    }
+
+    impl RetainedD3D11Texture {
+        pub fn new(texture: ID3D11Texture2D, adapter_luid: u64) -> Self {
+            Self {
+                texture,
+                adapter_luid,
+            }
+        }
+
+        /// The direct encoder/GPU compositor consumer lands in the next issue
+        /// slice; retaining this accessor now makes the frame handoff contract
+        /// explicit without forcing a second wrapper change.
+        #[allow(dead_code)]
+        pub fn texture(&self) -> &ID3D11Texture2D {
+            &self.texture
+        }
+
+        #[allow(dead_code)]
+        pub const fn adapter_luid(&self) -> u64 {
+            self.adapter_luid
+        }
+    }
+
+    impl std::fmt::Debug for RetainedD3D11Texture {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("RetainedD3D11Texture")
+                .field("adapter_luid", &format_args!("{:016x}", self.adapter_luid))
+                .finish_non_exhaustive()
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub use source_d3d11_texture::RetainedD3D11Texture;
+
+/// Off-Windows stub so `StoredFrame` keeps one portable shape.
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, Clone)]
+pub struct RetainedD3D11Texture;
+
 #[derive(Debug)]
 pub(crate) struct FrameBufferPool {
     spare_buffers: Vec<Vec<u8>>,
@@ -129,6 +183,10 @@ pub struct StoredFrame<P, M = ()> {
     /// Retained source CVPixelBuffer for CoreVideo-to-Metal import where the source path supports
     /// it. `bytes` remains the fallback and artifact path.
     pub source_pixel_buffer: Option<RetainedPixelBuffer>,
+    /// Retained Windows capture texture for D3D11 composition or direct Media
+    /// Foundation submission. `bytes` remains the explicit CPU fallback.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub source_d3d11_texture: Option<RetainedD3D11Texture>,
     #[doc(hidden)]
     pub(crate) recycle_pool: Option<Weak<StdMutex<FrameBufferPool>>>,
     pub captured_at: Instant,
@@ -274,6 +332,7 @@ impl<P, M> FrameStore<P, M> {
             bytes,
             None,
             None,
+            None,
         )
     }
 
@@ -303,6 +362,36 @@ impl<P, M> FrameStore<P, M> {
             bytes,
             source_iosurface,
             source_pixel_buffer,
+            None,
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_with_d3d11_texture(
+        &mut self,
+        sequence: u64,
+        width: u32,
+        height: u32,
+        pixel_format: P,
+        captured_at: Instant,
+        bytes: Vec<u8>,
+        source_d3d11_texture: RetainedD3D11Texture,
+    ) -> FrameHandle<P, M>
+    where
+        M: Default,
+    {
+        self.publish_full(
+            sequence,
+            width,
+            height,
+            pixel_format,
+            M::default(),
+            captured_at,
+            bytes,
+            None,
+            None,
+            Some(source_d3d11_texture),
         )
     }
 
@@ -318,6 +407,7 @@ impl<P, M> FrameStore<P, M> {
         bytes: Vec<u8>,
         source_iosurface: Option<RetainedIoSurface>,
         source_pixel_buffer: Option<RetainedPixelBuffer>,
+        source_d3d11_texture: Option<RetainedD3D11Texture>,
     ) -> FrameHandle<P, M> {
         if self.latest.take().is_some() {
             self.frames_replaced = self.frames_replaced.saturating_add(1);
@@ -332,6 +422,7 @@ impl<P, M> FrameStore<P, M> {
             bytes,
             source_iosurface,
             source_pixel_buffer,
+            source_d3d11_texture,
             recycle_pool: Some(Arc::downgrade(&self.buffer_pool)),
             captured_at,
         });

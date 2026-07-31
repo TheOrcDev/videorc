@@ -4,11 +4,33 @@ import test from 'node:test'
 import {
   assertBmpHeaders,
   assertNonblankBmp,
+  assertWindowsGraphicsCaptureTexture,
   nativeWindowsCompositorUsesScreen,
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive,
+  requiredBmpPreviewAdvances,
   selectNativeWindowsScreen
 } from './windows-native-screen-gates.mjs'
+
+test('Windows Graphics Capture gate requires a live retained D3D11 texture', () => {
+  const live = {
+    state: 'live',
+    framesCaptured: 2,
+    actualWidth: 1920,
+    actualHeight: 1080,
+    d3d11TextureAvailable: true
+  }
+
+  assert.doesNotThrow(() => assertWindowsGraphicsCaptureTexture(live))
+  assert.throws(
+    () => assertWindowsGraphicsCaptureTexture({ ...live, d3d11TextureAvailable: false }),
+    /did not retain/
+  )
+  assert.throws(
+    () => assertWindowsGraphicsCaptureTexture({ ...live, framesCaptured: 0 }),
+    /evidence is incomplete/
+  )
+})
 
 test('native Windows screen selection prefers DXGI and falls back to gdigrab', () => {
   const gdigrab = {
@@ -29,6 +51,12 @@ test('native Windows screen selection prefers DXGI and falls back to gdigrab', (
     [dxgi.id, 'screen:gdigrab:desktop']
   )
   assert.deepEqual(nativeWindowsScreenCandidates([gdigrab]), [gdigrab])
+})
+
+test('BMP preview liveness threshold is relaxed only for the hosted software renderer', () => {
+  assert.equal(requiredBmpPreviewAdvances({ detail: 'Microsoft Basic Render Driver' }), 3)
+  assert.equal(requiredBmpPreviewAdvances({ detail: 'NVIDIA GeForce GTX 1650 SUPER' }), 5)
+  assert.equal(requiredBmpPreviewAdvances({}), 5)
 })
 
 test('native ScreenOnly recording proof joins recording, compositor, and source authority', () => {
@@ -60,6 +88,20 @@ test('native ScreenOnly recording proof joins recording, compositor, and source 
 
   assert.equal(nativeWindowsScreenRecordingActive(evidence, sourceId), true)
   assert.equal(nativeWindowsCompositorUsesScreen(evidence.compositor, sourceId), true)
+  assert.equal(
+    nativeWindowsScreenRecordingActive(
+      {
+        ...evidence,
+        diagnostics: {
+          ...evidence.diagnostics,
+          encoderBridgeEncodedOutputInputSubtype: 'NV12-D3D11'
+        },
+        compositor: { state: 'idle' }
+      },
+      sourceId
+    ),
+    true
+  )
   assert.equal(
     nativeWindowsScreenRecordingActive(
       {

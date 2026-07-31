@@ -10,7 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Output as ProcessOutput;
 
-use crate::process_job::output_owned_tokio;
+use crate::process_job::spawn_owned_tokio;
 use crate::state::AppState;
 use crate::storage::{SessionFileBoundIdentity, SessionFileOperation};
 
@@ -345,10 +345,19 @@ pub(crate) async fn probe_duration_ms(ffmpeg_path: &str, file: &Path) -> Option<
 }
 
 async fn output_duration_probe(command: &mut tokio::process::Command) -> io::Result<ProcessOutput> {
+    output_duration_probe_with_spawned_pid(command, |_| {}).await
+}
+
+async fn output_duration_probe_with_spawned_pid(
+    command: &mut tokio::process::Command,
+    on_spawned: impl FnOnce(Option<u32>),
+) -> io::Result<ProcessOutput> {
     // Finalization bounds this probe with `tokio::time::timeout`. Without this,
     // dropping `wait_with_output` leaves ffprobe running after that timeout.
     command.kill_on_drop(true);
-    output_owned_tokio(command).await
+    let child = spawn_owned_tokio(command)?;
+    on_spawned(child.id());
+    child.wait_with_output().await
 }
 
 /// Duplicate the session's VISIBLE file + row. Returns the new session id.
@@ -532,13 +541,9 @@ mod tests {
         bytes
     }
 
-    fn long_running_probe_command(pid_file: &Path) -> tokio::process::Command {
+    fn long_running_probe_command() -> tokio::process::Command {
         #[cfg(target_os = "windows")]
         {
-            let escaped_pid_file = pid_file.display().to_string().replace('\'', "''");
-            let script = format!(
-                "[System.IO.File]::WriteAllText('{escaped_pid_file}', [string]$PID); Start-Sleep -Seconds 30"
-            );
             let powershell = std::env::var("SystemRoot")
                 .ok()
                 .map(|root| {
@@ -562,55 +567,48 @@ mod tests {
                 })
                 .unwrap_or_else(|| std::path::PathBuf::from("pwsh.exe"));
             let mut command = tokio::process::Command::new(powershell);
-            command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ]);
             command
         }
 
         #[cfg(not(target_os = "windows"))]
         {
             let mut command = tokio::process::Command::new("sh");
-            command
-                .args([
-                    "-c",
-                    "printf '%s\\n' \"$$\" > \"$1\"; exec sleep 30",
-                    "videorc-duration-probe-test",
-                ])
-                .arg(pid_file);
+            command.args(["-c", "exec sleep 30", "videorc-duration-probe-test"]);
             command
         }
     }
 
     #[tokio::test]
     async fn timed_out_duration_probe_terminates_its_child() {
-        let base = std::env::temp_dir().join(format!(
-            "videorc-duration-probe-timeout-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&base).unwrap();
-        let pid_file = base.join("pid");
-        let mut command = long_running_probe_command(&pid_file);
+        let mut command = long_running_probe_command();
         command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
 
-        // Windows runners can take more than a second to cold-start
-        // powershell.exe before the script writes its PID. Keep the command's
-        // 30-second sleep as the behavior under test while allowing startup
-        // enough time that a slow host does not turn this lifecycle assertion
-        // into a PID-file race.
-        let probe_timeout = if cfg!(target_os = "windows") {
-            std::time::Duration::from_secs(5)
-        } else {
-            std::time::Duration::from_secs(1)
-        };
-        let result = tokio::time::timeout(probe_timeout, output_duration_probe(&mut command)).await;
+        // Observe the PID at the successful Rust spawn boundary. Waiting for a
+        // PowerShell script to publish it races the timeout on loaded Windows
+        // runners and can fail even when kill-on-drop works correctly.
+        let spawned_pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let observed_pid = std::sync::Arc::clone(&spawned_pid);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            output_duration_probe_with_spawned_pid(&mut command, move |pid| {
+                if let Some(pid) = pid {
+                    observed_pid.store(pid, std::sync::atomic::Ordering::Release);
+                }
+            }),
+        )
+        .await;
         assert!(result.is_err(), "probe child should exceed the timeout");
 
-        let pid = std::fs::read_to_string(&pid_file)
-            .expect("probe child should publish its pid before sleeping")
-            .trim()
-            .parse::<u32>()
-            .expect("probe child pid should be numeric");
+        let pid = spawned_pid.load(std::sync::atomic::Ordering::Acquire);
+        assert_ne!(pid, 0, "duration probe should expose its spawned child pid");
         let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if !crate::process_job::process_is_running(pid).expect("probe child liveness") {
@@ -624,7 +622,6 @@ mod tests {
         if !stopped {
             let _ = crate::process_job::terminate_process(pid, true);
         }
-        let _ = std::fs::remove_dir_all(&base);
 
         assert!(stopped, "timed-out duration probe child {pid} stayed alive");
     }

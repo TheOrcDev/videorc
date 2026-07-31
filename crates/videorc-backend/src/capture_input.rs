@@ -159,6 +159,21 @@ pub fn append_windows_dshow_video_input_opts(
     device_name: &str,
     fps: Option<u32>,
 ) {
+    append_windows_dshow_video_input_mode_opts(args, device_name, fps, None, None);
+}
+
+/// DirectShow video input with an optional explicit native capture mode.
+/// Windows webcams commonly advertise 720p30 only as MJPEG while their
+/// uncompressed YUY2 mode tops out at 5-10 fps. These options must remain
+/// before `-i` so DirectShow negotiates the compressed device mode instead of
+/// silently selecting its low-cadence default.
+pub fn append_windows_dshow_video_input_mode_opts(
+    args: &mut Vec<String>,
+    device_name: &str,
+    fps: Option<u32>,
+    video_size: Option<(u32, u32)>,
+    codec: Option<&str>,
+) {
     args.extend([
         "-fflags".to_string(),
         "nobuffer".to_string(),
@@ -175,6 +190,12 @@ pub fn append_windows_dshow_video_input_opts(
     ]);
     if let Some(fps) = fps {
         args.extend(["-framerate".to_string(), fps.to_string()]);
+    }
+    if let Some((width, height)) = video_size {
+        args.extend(["-video_size".to_string(), format!("{width}x{height}")]);
+    }
+    if let Some(codec) = codec {
+        args.extend(["-vcodec".to_string(), codec.to_string()]);
     }
     args.extend(["-i".to_string(), format!("video={device_name}")]);
 }
@@ -436,6 +457,31 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "-framerate"));
         assert_eq!(args.last().map(String::as_str), Some("video=USB Camera"));
         assert!(args.windows(2).any(|pair| pair == ["-f", "dshow"]));
+    }
+
+    #[test]
+    fn windows_dshow_camera_input_places_mjpeg_mode_before_input() {
+        let mut args = Vec::new();
+        append_windows_dshow_video_input_mode_opts(
+            &mut args,
+            "USB Camera",
+            Some(30),
+            Some((1280, 720)),
+            Some("mjpeg"),
+        );
+
+        let input_index = args.iter().position(|arg| arg == "-i").unwrap();
+        assert!(
+            args[..input_index]
+                .windows(2)
+                .any(|pair| pair == ["-video_size", "1280x720"])
+        );
+        assert!(
+            args[..input_index]
+                .windows(2)
+                .any(|pair| pair == ["-vcodec", "mjpeg"])
+        );
+        assert_eq!(args[input_index + 1], "video=USB Camera");
     }
 
     #[test]

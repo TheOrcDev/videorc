@@ -340,6 +340,7 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         preview_screen_actual_width: None,
         preview_screen_actual_height: None,
         preview_screen_iosurface_available: None,
+        preview_screen_d3d11_texture_available: None,
         preview_screen_capture_gap_p95_ms: None,
         preview_screen_capture_gap_max_ms: None,
         preview_screen_pixel_buffer_lock_p95_ms: None,
@@ -1078,6 +1079,7 @@ pub fn apply_preview_screen_source_stats(
     stats.preview_screen_actual_width = status.actual_width;
     stats.preview_screen_actual_height = status.actual_height;
     stats.preview_screen_iosurface_available = status.iosurface_available;
+    stats.preview_screen_d3d11_texture_available = status.d3d11_texture_available;
     if status.dropped_frames > 0 {
         stats.bottleneck = DiagnosticBottleneck::Capture;
     }
@@ -1909,6 +1911,7 @@ mod tests {
         assert_eq!(stats.preview_screen_actual_width, None);
         assert_eq!(stats.preview_screen_actual_height, None);
         assert_eq!(stats.preview_screen_iosurface_available, None);
+        assert_eq!(stats.preview_screen_d3d11_texture_available, None);
         assert_eq!(stats.preview_screen_capture_gap_p95_ms, None);
         assert_eq!(stats.preview_screen_capture_gap_max_ms, None);
         assert_eq!(stats.preview_screen_pixel_buffer_lock_p95_ms, None);
@@ -2089,6 +2092,7 @@ mod tests {
                 actual_width: Some(3840),
                 actual_height: Some(2160),
                 iosurface_available: Some(true),
+                d3d11_texture_available: Some(true),
                 source_fps: Some(30.0),
                 frame_age_ms: Some(12),
                 frames_captured: 90,
@@ -2108,6 +2112,7 @@ mod tests {
         assert_eq!(stats.preview_screen_actual_width, Some(3840));
         assert_eq!(stats.preview_screen_actual_height, Some(2160));
         assert_eq!(stats.preview_screen_iosurface_available, Some(true));
+        assert_eq!(stats.preview_screen_d3d11_texture_available, Some(true));
         assert_eq!(
             stats.preview_screen_message.as_deref(),
             Some("screen stream started")

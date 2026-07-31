@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, SystemTime};
 
 use chrono::Utc;
+use rayon::prelude::*;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, sleep};
@@ -3902,6 +3903,82 @@ struct RgbaSource<'a> {
     format: SourcePixelFormat,
 }
 
+/// Renders a camera source into a small, transparent BGRA overlay ready for
+/// upload to the Windows D3D11 video processor. The full-size screen remains a
+/// retained GPU texture; only the camera inset is sampled on the CPU.
+///
+/// Keeping this beside the CPU compositor's source-fit helpers makes the
+/// direct Windows path share the same crop, fit, mirror, and mask behavior.
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_camera_overlay_bgra(
+    source_bytes: &[u8],
+    source_width: u32,
+    source_height: u32,
+    overlay_width: u32,
+    overlay_height: u32,
+    crop: SceneCrop,
+    contain: bool,
+    mirror_x: bool,
+    mask: SceneMask,
+    output: &mut Vec<u8>,
+) -> bool {
+    let source = RgbaSource {
+        bytes: source_bytes,
+        width: source_width,
+        height: source_height,
+        format: SourcePixelFormat::Bgra,
+    };
+    if source.width == 0 || source.height == 0 || source.bytes.len() < source_pixel_len(&source) {
+        return false;
+    }
+    let rect = PixelRect {
+        x: 0,
+        y: 0,
+        width: overlay_width,
+        height: overlay_height,
+    };
+    let Some(fit) = source_fit(source_width, source_height, rect, contain, crop) else {
+        return false;
+    };
+    let Some(byte_len) = usize::try_from(overlay_width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(overlay_height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return false;
+    };
+    output.resize(byte_len, 0);
+    output.fill(0);
+    let row_len = overlay_width as usize * 4;
+    output
+        .par_chunks_mut(row_len)
+        .enumerate()
+        .for_each(|(dest_y, row)| {
+            for dest_x in 0..overlay_width as usize {
+                if !source_mask_allows(mask, dest_x, dest_y, &fit) {
+                    continue;
+                }
+                let Some((source_x, source_y)) =
+                    map_source_pixel(dest_x as u32, dest_y as u32, &source, &fit, mirror_x)
+                else {
+                    continue;
+                };
+                let (r, g, b, alpha) = read_source_rgba(&source, source_x, source_y);
+                let offset = dest_x * 4;
+                row[offset] = b;
+                row[offset + 1] = g;
+                row[offset + 2] = r;
+                row[offset + 3] = alpha;
+            }
+        });
+    true
+}
+
 fn cached_image_cpu_pixels(
     source: &CompositorImageSource,
 ) -> Option<(&[u8], (u32, u32), SourcePixelFormat)> {
@@ -4255,12 +4332,32 @@ fn blit_rgba_to_yuv420p(
     let y_len = canvas_width * canvas_height;
     let uv_width = canvas_width.div_ceil(2);
     let uv_height = canvas_height.div_ceil(2);
-    let u_start = y_len;
-    let v_start = y_len + uv_width * uv_height;
     let draw_left = fit.x as usize;
     let draw_top = fit.y as usize;
     let draw_right = fit.x.saturating_add(fit.width).min(canvas_width as u32) as usize;
     let draw_bottom = fit.y.saturating_add(fit.height).min(canvas_height as u32) as usize;
+    if options.mask == SceneMask::None
+        && options.chroma_key.is_none()
+        && !options.mirror_x
+        && fit.source_x == 0.0
+        && fit.source_y == 0.0
+        && fit.source_width == f64::from(source.width)
+        && fit.source_height == f64::from(source.height)
+        && fit.width == source.width
+        && fit.height == source.height
+    {
+        blit_untransformed_rgba_to_yuv420p(
+            source,
+            dest,
+            canvas_width,
+            canvas_height,
+            draw_left,
+            draw_top,
+            draw_right,
+            draw_bottom,
+        );
+        return true;
+    }
 
     // Chroma key: resolve the source pixel to (rgb after despill, key alpha).
     // None means the pixel keys fully out. Without a spec every pixel is the
@@ -4277,70 +4374,155 @@ fn blit_rgba_to_yuv420p(
         Some((r, g, b, key_alpha))
     };
 
-    for dest_y in draw_top..draw_bottom {
-        for dest_x in draw_left..draw_right {
-            if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
-                continue;
-            }
-            let Some((source_x, source_y)) =
-                map_source_pixel(dest_x as u32, dest_y as u32, source, &fit, options.mirror_x)
-            else {
-                continue;
-            };
-            let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
-            if a < 16 {
-                continue;
-            }
-            let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
-                continue;
-            };
-            let (y_value, _u_value, _v_value) = rgb_to_yuv(r, g, b);
-            let index = dest_y * canvas_width + dest_x;
-            dest[index] = if key_alpha == 255 {
-                y_value
-            } else {
-                alpha_blend_channel(y_value, dest[index], u16::from(key_alpha))
-            };
-        }
-    }
-
     let uv_left = draw_left / 2;
     let uv_top = draw_top / 2;
     let uv_right = draw_right.div_ceil(2).min(uv_width);
     let uv_bottom = draw_bottom.div_ceil(2).min(uv_height);
-    for uv_y in uv_top..uv_bottom {
-        for uv_x in uv_left..uv_right {
-            let dest_x = (uv_x * 2).min(draw_right.saturating_sub(1));
-            let dest_y = (uv_y * 2).min(draw_bottom.saturating_sub(1));
-            if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
-                continue;
-            }
-            let Some((source_x, source_y)) =
-                map_source_pixel(dest_x as u32, dest_y as u32, source, &fit, options.mirror_x)
-            else {
-                continue;
-            };
-            let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
-            if a < 16 {
-                continue;
-            }
-            let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
-                continue;
-            };
-            let (_y_value, u_value, v_value) = rgb_to_yuv(r, g, b);
-            let uv_index = uv_y * uv_width + uv_x;
-            if key_alpha == 255 {
-                dest[u_start + uv_index] = u_value;
-                dest[v_start + uv_index] = v_value;
-            } else {
-                dest[u_start + uv_index] =
-                    alpha_blend_channel(u_value, dest[u_start + uv_index], u16::from(key_alpha));
-                dest[v_start + uv_index] =
-                    alpha_blend_channel(v_value, dest[v_start + uv_index], u16::from(key_alpha));
-            }
-        }
-    }
+    let (y_plane, chroma_planes) = dest.split_at_mut(y_len);
+    let (u_plane, v_plane) = chroma_planes.split_at_mut(uv_width * uv_height);
+    rayon::join(
+        || {
+            y_plane[draw_top * canvas_width..draw_bottom * canvas_width]
+                .par_chunks_mut(canvas_width)
+                .enumerate()
+                .for_each(|(relative_y, row)| {
+                    let dest_y = draw_top + relative_y;
+                    for (dest_x, output) in
+                        row.iter_mut().enumerate().take(draw_right).skip(draw_left)
+                    {
+                        if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
+                            continue;
+                        }
+                        let Some((source_x, source_y)) = map_source_pixel(
+                            dest_x as u32,
+                            dest_y as u32,
+                            source,
+                            &fit,
+                            options.mirror_x,
+                        ) else {
+                            continue;
+                        };
+                        let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
+                        if a < 16 {
+                            continue;
+                        }
+                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
+                            continue;
+                        };
+                        let (y_value, _u_value, _v_value) = rgb_to_yuv(r, g, b);
+                        *output = if key_alpha == 255 {
+                            y_value
+                        } else {
+                            alpha_blend_channel(y_value, *output, u16::from(key_alpha))
+                        };
+                    }
+                });
+        },
+        || {
+            u_plane[uv_top * uv_width..uv_bottom * uv_width]
+                .par_chunks_mut(uv_width)
+                .zip(v_plane[uv_top * uv_width..uv_bottom * uv_width].par_chunks_mut(uv_width))
+                .enumerate()
+                .for_each(|(relative_y, (u_row, v_row))| {
+                    let uv_y = uv_top + relative_y;
+                    for uv_x in uv_left..uv_right {
+                        let dest_x = (uv_x * 2).min(draw_right.saturating_sub(1));
+                        let dest_y = (uv_y * 2).min(draw_bottom.saturating_sub(1));
+                        if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
+                            continue;
+                        }
+                        let Some((source_x, source_y)) = map_source_pixel(
+                            dest_x as u32,
+                            dest_y as u32,
+                            source,
+                            &fit,
+                            options.mirror_x,
+                        ) else {
+                            continue;
+                        };
+                        let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
+                        if a < 16 {
+                            continue;
+                        }
+                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
+                            continue;
+                        };
+                        let (_y_value, u_value, v_value) = rgb_to_yuv(r, g, b);
+                        if key_alpha == 255 {
+                            u_row[uv_x] = u_value;
+                            v_row[uv_x] = v_value;
+                        } else {
+                            u_row[uv_x] =
+                                alpha_blend_channel(u_value, u_row[uv_x], u16::from(key_alpha));
+                            v_row[uv_x] =
+                                alpha_blend_channel(v_value, v_row[uv_x], u16::from(key_alpha));
+                        }
+                    }
+                });
+        },
+    );
     true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_untransformed_rgba_to_yuv420p(
+    source: &RgbaSource<'_>,
+    dest: &mut [u8],
+    canvas_width: usize,
+    canvas_height: usize,
+    draw_left: usize,
+    draw_top: usize,
+    draw_right: usize,
+    draw_bottom: usize,
+) {
+    let y_len = canvas_width * canvas_height;
+    let uv_width = canvas_width.div_ceil(2);
+    let uv_height = canvas_height.div_ceil(2);
+    let uv_left = draw_left / 2;
+    let uv_top = draw_top / 2;
+    let uv_right = draw_right.div_ceil(2).min(uv_width);
+    let uv_bottom = draw_bottom.div_ceil(2).min(uv_height);
+    let (y_plane, chroma_planes) = dest.split_at_mut(y_len);
+    let (u_plane, v_plane) = chroma_planes.split_at_mut(uv_width * uv_height);
+    rayon::join(
+        || {
+            y_plane[draw_top * canvas_width..draw_bottom * canvas_width]
+                .par_chunks_mut(canvas_width)
+                .enumerate()
+                .for_each(|(relative_y, row)| {
+                    let dest_y = draw_top + relative_y;
+                    let source_y = (dest_y - draw_top) as u32;
+                    for (dest_x, output) in
+                        row.iter_mut().enumerate().take(draw_right).skip(draw_left)
+                    {
+                        let source_x = (dest_x - draw_left) as u32;
+                        let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
+                        if a >= 16 {
+                            *output = rgb_to_yuv(r, g, b).0;
+                        }
+                    }
+                });
+        },
+        || {
+            u_plane[uv_top * uv_width..uv_bottom * uv_width]
+                .par_chunks_mut(uv_width)
+                .zip(v_plane[uv_top * uv_width..uv_bottom * uv_width].par_chunks_mut(uv_width))
+                .enumerate()
+                .for_each(|(relative_y, (u_row, v_row))| {
+                    let uv_y = uv_top + relative_y;
+                    let source_y = (uv_y * 2).saturating_sub(draw_top) as u32;
+                    for uv_x in uv_left..uv_right {
+                        let source_x = (uv_x * 2).saturating_sub(draw_left) as u32;
+                        let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
+                        if a >= 16 {
+                            let (_, u_value, v_value) = rgb_to_yuv(r, g, b);
+                            u_row[uv_x] = u_value;
+                            v_row[uv_x] = v_value;
+                        }
+                    }
+                });
+        },
+    );
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4960,6 +5142,7 @@ mod tests {
             bytes: vec![0, 0, 0, 255],
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -4978,6 +5161,7 @@ mod tests {
             bytes: vec![0, 0, 0, 255],
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now()
                 - COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_AFTER
@@ -5001,6 +5185,7 @@ mod tests {
             bytes: vec![0, 0, 0, 255],
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now()
                 - COMPOSITOR_LIVE_SOURCE_STALE_RECOVERY_AFTER
@@ -5155,6 +5340,48 @@ mod tests {
 
         let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
         assert!(bytes[..8].iter().all(|&value| value == blue_y));
+    }
+
+    #[test]
+    fn untransformed_bgra_fast_path_preserves_bt709_plane_values() {
+        let source = [
+            0, 0, 255, 255, // red
+            0, 255, 0, 255, // green
+            255, 0, 0, 255, // blue
+            255, 255, 255, 255, // white
+        ];
+        let mut bytes = vec![0; raw_yuv420p_len(2, 2)];
+
+        assert!(blit_rgba_to_yuv420p(
+            &RgbaSource {
+                bytes: &source,
+                width: 2,
+                height: 2,
+                format: SourcePixelFormat::Bgra,
+            },
+            &mut bytes,
+            2,
+            2,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            SourceRenderOptions {
+                crop: SceneCrop::none(),
+                contain: false,
+                mirror_x: false,
+                mask: SceneMask::None,
+                chroma_key: None,
+            },
+        ));
+
+        let red = rgb_to_yuv(255, 0, 0);
+        let green = rgb_to_yuv(0, 255, 0);
+        let blue = rgb_to_yuv(0, 0, 255);
+        let white = rgb_to_yuv(255, 255, 255);
+        assert_eq!(bytes, [red.0, green.0, blue.0, white.0, red.1, red.2]);
     }
 
     /// A 2×2 blue YUV canvas the chroma-key blit tests composite onto.
@@ -5380,6 +5607,54 @@ mod tests {
         assert_eq!(
             rgba_to_bgra_bytes(&[10, 20, 30, 40, 50, 60, 70, 80]),
             vec![30, 20, 10, 40, 70, 60, 50, 80]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn direct_camera_overlay_preserves_bgra_mirror_and_circle_alpha() {
+        let source = [
+            10, 20, 30, 255, 40, 50, 60, 255, // row 0
+            70, 80, 90, 255, 100, 110, 120, 255, // row 1
+        ];
+        let mut mirrored = Vec::new();
+        assert!(render_camera_overlay_bgra(
+            &source,
+            2,
+            2,
+            2,
+            2,
+            SceneCrop::none(),
+            false,
+            true,
+            SceneMask::None,
+            &mut mirrored,
+        ));
+        assert_eq!(
+            mirrored,
+            vec![
+                40, 50, 60, 255, 10, 20, 30, 255, 100, 110, 120, 255, 70, 80, 90, 255,
+            ]
+        );
+
+        let mut circle = Vec::new();
+        assert!(render_camera_overlay_bgra(
+            &[255; 4 * 4 * 4],
+            4,
+            4,
+            4,
+            4,
+            SceneCrop::none(),
+            false,
+            false,
+            SceneMask::Circle,
+            &mut circle,
+        ));
+        assert_eq!(circle[3], 0, "top-left corner must be transparent");
+        assert_eq!(
+            circle[((1 * 4 + 1) * 4) + 3],
+            255,
+            "circle center must remain opaque"
         );
     }
 
@@ -5645,6 +5920,7 @@ mod tests {
             bytes: [255, 0, 0, 255].repeat(16),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -5657,6 +5933,7 @@ mod tests {
             bytes: [0, 0, 255, 255].repeat(16),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -5751,6 +6028,7 @@ mod tests {
             bytes: [255, 0, 0, 255].repeat(100 * 100),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -7878,6 +8156,7 @@ mod tests {
             bytes: [255, 0, 0, 255].repeat(100 * 100),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -7953,6 +8232,7 @@ mod tests {
             bytes: [0, 0, 255, 255].repeat(160 * 90),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -7965,6 +8245,7 @@ mod tests {
             bytes: [255, 0, 0, 255].repeat(160 * 90),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -8164,6 +8445,7 @@ mod tests {
             bytes: [0, 0, 255, 255].repeat(16),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: Instant::now(),
         });
@@ -8345,6 +8627,7 @@ mod tests {
             bytes: [0, 0, 255, 255].repeat(16),
             source_iosurface: None,
             source_pixel_buffer: None,
+            source_d3d11_texture: None,
             recycle_pool: None,
             captured_at: camera_captured_at,
         });

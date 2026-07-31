@@ -163,6 +163,36 @@ async function recordCombo({ ws, smoke, combo, assertPreviewLiveness = false, st
   } else {
     await new Promise((resolveSleep) => setTimeout(resolveSleep, recordingMs))
   }
+  const diagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
+  const bridgeDiagnostics = Object.fromEntries(
+    [
+      'encoderBridgeInputFps',
+      'encoderBridgeQueueDepth',
+      'encoderBridgeOutputQueueOldestFrameAgeMs',
+      'encoderBridgeOutputQueueCapacityPressureEvents',
+      'encoderBridgeDroppedFrames',
+      'encoderBridgeRepeatedFrames',
+      'encoderBridgeEncodedOutputFrames',
+      'encoderBridgeEncodedOutputBytes',
+      'encoderBridgeEncodedOutputErrors',
+      'encoderBridgeEncodedSubmitP95Ms',
+      'encoderBridgeEncodedFifoWriteP95Ms',
+      'encoderBridgeCompositorWaitP95Ms',
+      'encoderBridgeWriterLoopP95Ms',
+      'encoderBridgeWriterActiveP95Ms',
+      'encoderBridgeDeadlineLagP95Ms',
+      'encoderBridgeDeadlineLagMaxMs',
+      'encoderBridgeError'
+    ]
+      .filter((key) => diagnostics[key] !== undefined)
+      .map((key) => [key, diagnostics[key]])
+  )
+  if (
+    process.env.VIDEORC_MATRIX_PRINT_BRIDGE_DIAGNOSTICS === '1' ||
+    process.env.VIDEORC_SMOKE_PRINT_APP_OUTPUT === '1'
+  ) {
+    console.log(`[matrix:${combo.label}] bridge diagnostics ${JSON.stringify(bridgeDiagnostics)}`)
+  }
   const stopped = await request(ws, timeoutMs, 'session.stop')
   const outputPath = stopped.outputPath ?? started.outputPath
   if (!outputPath || !existsSync(outputPath)) {
@@ -196,7 +226,8 @@ async function recordCombo({ ws, smoke, combo, assertPreviewLiveness = false, st
     sizeBytes: statSync(outputPath).size,
     failures,
     warnings: quality.verdict.warnings,
-    metrics: quality.metrics
+    metrics: quality.metrics,
+    bridgeDiagnostics
   }
 }
 
@@ -213,7 +244,9 @@ async function runPass({ passLabel, combos, extraEnv = {}, assertPreviewLiveness
       },
       timeoutMs,
       requiredMarkers: ['backend-ready', 'preview-motion-ready'],
-      onLine: () => {}
+      onLine: (line) => {
+        if (process.env.VIDEORC_SMOKE_PRINT_APP_OUTPUT === '1') console.log(line)
+      }
     })
     stopApp = launch.stop
     const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)

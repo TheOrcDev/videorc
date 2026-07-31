@@ -314,6 +314,7 @@ export async function collectPerformanceMetadata({ cwd = process.cwd(), env = pr
       : null,
     packagePayload,
     appRole: env.VIDEORC_PERF_APP_ROLE || null,
+    electronBackgroundPolicy: performanceElectronBackgroundPolicy(env),
     source: {
       width: positiveNumber(env.VIDEORC_PERF_SOURCE_WIDTH),
       height: positiveNumber(env.VIDEORC_PERF_SOURCE_HEIGHT),
@@ -321,6 +322,12 @@ export async function collectPerformanceMetadata({ cwd = process.cwd(), env = pr
     },
     outputs: jsonArray(env.VIDEORC_PERF_OUTPUTS_JSON)
   }
+}
+
+export function performanceElectronBackgroundPolicy(env = process.env) {
+  return env.VIDEORC_ELECTRON_BACKGROUND_POLICY === 'legacy-unthrottled'
+    ? 'legacy-unthrottled'
+    : 'scoped'
 }
 
 export async function currentMacosCaffeinatePowerAssertionVerified({
@@ -433,6 +440,14 @@ export function evaluateChildPerformanceMetadata({ actual, expected, requireClea
         `child ${field} was ${actual?.[field] ?? 'missing'}; expected ${expected?.[field] ?? 'missing'}`
       )
     }
+  }
+  if (
+    (actual?.electronBackgroundPolicy ?? null) !==
+    (expected?.electronBackgroundPolicy ?? null)
+  ) {
+    failures.push(
+      `child Electron background policy was ${actual?.electronBackgroundPolicy ?? 'missing'}; expected ${expected?.electronBackgroundPolicy ?? 'missing'}`
+    )
   }
   if (stableJson(actual?.performanceWindow) !== stableJson(expected?.performanceWindow)) {
     failures.push('child performance window identity did not match the wrapper')

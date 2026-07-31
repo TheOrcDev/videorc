@@ -165,6 +165,7 @@ import {
 } from './gpu-fallback'
 import {
   backgroundThrottlingFor,
+  electronBackgroundPolicyFromEnv,
   shouldDisableOcclusionThrottling
 } from './electron-background-policy'
 import { createMediaPermissionGrantWatcher } from './system-permission-watch'
@@ -681,6 +682,7 @@ if (remoteDebugPortOverride) {
 if (process.env.VIDEORC_SMOKE_DISABLE_ELECTRON_GPU === '1') {
   app.commandLine.appendSwitch('disable-gpu')
 }
+const electronBackgroundPolicy = electronBackgroundPolicyFromEnv(process.env)
 // GPU fallback (Windows Insider incident: broken Chromium GPU process boots
 // only with GPU flags and composites transparent windows as BLANK). Must run
 // before app.ready: VIDEORC_DISABLE_GPU=1 is the explicit user hatch, a
@@ -766,7 +768,7 @@ app.on('child-process-gone', (_event, details) => {
 // per-window backgroundThrottling:false flag only covers timers/visibility; the
 // occlusion-driven compositor suspension needs these process-level switches on
 // the production macOS CAMetalLayer path. Windows keeps Chromium's defaults.
-if (shouldDisableOcclusionThrottling(process.platform)) {
+if (shouldDisableOcclusionThrottling(process.platform, electronBackgroundPolicy)) {
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
   app.commandLine.appendSwitch('disable-renderer-backgrounding')
 }
@@ -1437,7 +1439,7 @@ function createWindow(): void {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       ...rendererWindowWebPreferences('main'),
-      backgroundThrottling: backgroundThrottlingFor('main')
+      backgroundThrottling: backgroundThrottlingFor('main', electronBackgroundPolicy)
     }
   })
   registerRendererWindow(mainWindow, 'main')
@@ -2205,7 +2207,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       ...rendererWindowWebPreferences('notes'),
-      backgroundThrottling: backgroundThrottlingFor('notes')
+      backgroundThrottling: backgroundThrottlingFor('notes', electronBackgroundPolicy)
     }
   })
   registerRendererWindow(window, 'notes')
@@ -2750,7 +2752,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       ...rendererWindowWebPreferences('comments'),
-      backgroundThrottling: backgroundThrottlingFor('comments')
+      backgroundThrottling: backgroundThrottlingFor('comments', electronBackgroundPolicy)
     }
   })
   registerRendererWindow(window, 'comments')
@@ -2971,7 +2973,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       ...rendererWindowWebPreferences('captions'),
-      backgroundThrottling: backgroundThrottlingFor('captions')
+      backgroundThrottling: backgroundThrottlingFor('captions', electronBackgroundPolicy)
     }
   })
   registerRendererWindow(window, 'captions')
@@ -3400,7 +3402,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
-      backgroundThrottling: backgroundThrottlingFor('preview')
+      backgroundThrottling: backgroundThrottlingFor('preview', electronBackgroundPolicy)
     }
   })
   previewWindowClosing = false
@@ -4862,7 +4864,7 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
         sandbox: true,
         contextIsolation: true,
         nodeIntegration: false,
-        backgroundThrottling: backgroundThrottlingFor('proof-surface')
+        backgroundThrottling: backgroundThrottlingFor('proof-surface', electronBackgroundPolicy)
       }
     })
     nativePreviewSurfaceWindow = surfaceWindow

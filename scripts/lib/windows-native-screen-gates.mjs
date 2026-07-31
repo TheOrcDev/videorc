@@ -33,7 +33,8 @@ export function nativeWindowsScreenRecordingActive(evidence, sourceId) {
   return (
     diagnostics?.activeOutputMode === 'record' &&
     recording?.state === 'recording' &&
-    nativeWindowsCompositorUsesScreen(compositor, sourceId) &&
+    (nativeWindowsCompositorUsesScreen(compositor, sourceId) ||
+      diagnostics?.encoderBridgeEncodedOutputInputSubtype === 'NV12-D3D11') &&
     sourceEntry?.status === 'live'
   )
 }
@@ -66,6 +67,26 @@ export function nativeWindowsCompositorUsesScreen(compositor, sourceId) {
     sceneSource != null &&
     liveSource != null
   )
+}
+
+export function assertWindowsGraphicsCaptureTexture(status) {
+  if (status?.state !== 'live' || status?.d3d11TextureAvailable !== true) {
+    throw new Error(
+      `Windows Graphics Capture did not retain a D3D11 source texture: ${JSON.stringify(status)}`
+    )
+  }
+  if (
+    !Number.isSafeInteger(status.framesCaptured) ||
+    status.framesCaptured < 1 ||
+    !Number.isSafeInteger(status.actualWidth) ||
+    status.actualWidth < 1 ||
+    !Number.isSafeInteger(status.actualHeight) ||
+    status.actualHeight < 1
+  ) {
+    throw new Error(
+      `Windows Graphics Capture texture evidence is incomplete: ${JSON.stringify(status)}`
+    )
+  }
 }
 
 export function assertBmpHeaders(headers, status) {
@@ -131,4 +152,12 @@ export function assertNonblankBmp(bytes, headers) {
       `BMP preview decoded as blank/constant: range=${maximum - minimum}, max=${maximum}.`
     )
   }
+}
+
+export function requiredBmpPreviewAdvances(screen) {
+  // GitHub-hosted Windows runners expose the Microsoft Basic Render Driver,
+  // which has no physical compositor/GPU cadence. Keep proving that the BMP
+  // surface advances through recording, but do not apply the physical-GPU
+  // five-frame expectation to this explicitly identified software renderer.
+  return /microsoft basic render driver/i.test(screen?.detail ?? '') ? 3 : 5
 }

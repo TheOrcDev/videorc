@@ -48,6 +48,8 @@ CI covers Rust advisory audit, Rust fmt, clippy, Rust tests, JS production advis
 ## Process And Script Rules
 
 - Do not use broad process scans such as `pgrep -f` to clean up app children. Only reap app-owned PIDs recorded by Videorc.
+- Windows async/process tests must use explicit readiness channels or spawn-boundary evidence. Do not use fixed sleeps, temporary files, or shell-wrapped grandchildren as lifecycle handshakes. Give child cleanup a bounded deadline and kill/reap the owned child before failing.
+- Before handing off a change to Windows async/process tests, run the affected filters at least 25 times and the full Windows Rust suite three times from PowerShell 7. A single green run is not stability evidence.
 - Keep scratch probes out of the committed tree unless they are promoted into maintained smoke/probe scripts. If a temporary script is useful, put it under `scripts/` with a clear name, testable assumptions, and a package script.
 - Do not commit secrets, local tokens, app data, recordings, or generated media evidence unless a doc explicitly asks for a tiny fixture.
 - The worktree may contain user changes. Stage only files you intentionally changed for the current slice.
