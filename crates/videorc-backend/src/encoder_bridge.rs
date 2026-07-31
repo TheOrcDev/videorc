@@ -1063,6 +1063,7 @@ struct SyntheticRecordingWriterParams {
     startup_ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
     fifo_path: PathBuf,
     frame_store: Option<CompositorFrameStore>,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     direct_d3d11_source: Option<PreviewScreenD3D11FrameSource>,
     #[cfg(target_os = "windows")]
     direct_d3d11_camera_overlay: Option<DirectD3D11CameraOverlay>,
