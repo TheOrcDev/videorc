@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 
 import type { EntitlementsSnapshot } from './backend'
 import {
+  BASIC_STREAMING_LIMITS,
   DEFAULT_BASIC_ENTITLEMENTS,
+  PREMIUM_STREAMING_LIMITS,
   entitlementCapability,
   entitlementDisabledReason,
   isFeatureEntitled
@@ -45,10 +47,10 @@ const developerEntitlements: EntitlementsSnapshot = {
       maxFps: 30
     },
     streaming: {
-      maxWidth: 1920,
-      maxHeight: 1080,
-      maxFps: 30,
-      maxBitrateKbps: 6000,
+      maxWidth: 3840,
+      maxHeight: 2160,
+      maxFps: 60,
+      maxBitrateKbps: 30000,
       maxDestinations: 3
     }
   }
@@ -85,6 +87,14 @@ describe('entitlements', () => {
       maxBitrateKbps: 6000,
       maxDestinations: 1
     })
+    expect(DEFAULT_BASIC_ENTITLEMENTS.limits.streaming).toEqual(BASIC_STREAMING_LIMITS)
+    expect(PREMIUM_STREAMING_LIMITS).toEqual({
+      maxWidth: 3840,
+      maxHeight: 2160,
+      maxFps: 60,
+      maxBitrateKbps: 30000,
+      maxDestinations: 3
+    })
   })
 
   it('treats developer override state as entitled', () => {
@@ -93,6 +103,7 @@ describe('entitlements', () => {
     expect(isFeatureEntitled(developerEntitlements, 'cloud-ai')).toBe(true)
     expect(isFeatureEntitled(developerEntitlements, 'noise-cleanup')).toBe(true)
     expect(entitlementDisabledReason(developerEntitlements, 'cloud-ai')).toBeNull()
+    expect(developerEntitlements.limits.streaming.maxFps).toBe(60)
   })
 
   it('returns a disabled fallback for a missing capability', () => {

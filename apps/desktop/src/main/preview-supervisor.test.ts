@@ -9,8 +9,18 @@ import {
 function supervisor(): PreviewSupervisorModel {
   let tick = 0
   return new PreviewSupervisorModel({
-    now: () => `2026-06-19T12:00:00.${String(tick++).padStart(3, '0')}Z`
+    now: () => `2026-06-19T12:00:00.${String(tick++).padStart(3, '0')}Z`,
+    platform: 'darwin'
   })
+}
+
+function metalLive(generation: number) {
+  return {
+    generation,
+    transport: 'native-surface' as const,
+    backing: 'cametal-layer' as const,
+    nativePreviewHostKind: 'in-process' as const
+  }
 }
 
 describe('PreviewSupervisorModel', () => {
@@ -47,7 +57,7 @@ describe('PreviewSupervisorModel', () => {
       surfaceActive: false
     })
 
-    const live = model.surfaceLive({ generation: 1 })
+    const live = model.surfaceLive(metalLive(1))
     expect(live).toMatchObject({
       lifecycleState: 'surface-live',
       generation: 1,
@@ -64,7 +74,7 @@ describe('PreviewSupervisorModel', () => {
     model.openWindow()
     model.windowOpened()
     model.requestSurface()
-    model.surfaceLive({ generation: 1 })
+    model.surfaceLive(metalLive(1))
 
     const closing = model.closeWindow()
     expect(closing).toMatchObject({
@@ -96,7 +106,7 @@ describe('PreviewSupervisorModel', () => {
     model.openWindow()
     model.windowOpened()
     model.requestSurface()
-    model.surfaceLive({ generation: 1 })
+    model.surfaceLive(metalLive(1))
     model.closeWindow()
 
     const reopened = model.openWindow()
@@ -109,7 +119,7 @@ describe('PreviewSupervisorModel', () => {
 
     model.windowOpened()
     model.requestSurface()
-    model.surfaceLive({ generation: 2 })
+    model.surfaceLive(metalLive(2))
 
     const afterStaleClose = model.finishClose(1)
     expect(afterStaleClose).toMatchObject({
@@ -125,7 +135,7 @@ describe('PreviewSupervisorModel', () => {
     model.openWindow()
     model.windowOpened()
     model.requestSurface()
-    model.surfaceLive({ generation: 1 })
+    model.surfaceLive(metalLive(1))
     model.closeWindow()
     model.openWindow()
     model.windowOpened()
@@ -134,7 +144,7 @@ describe('PreviewSupervisorModel', () => {
     const before = model.snapshot()
     model.surfaceFallback(1, 'old helper fell back late')
     model.surfaceFailed({ generation: 1, message: 'old helper failed late' })
-    model.surfaceLive({ generation: 1 })
+    model.surfaceLive(metalLive(1))
 
     expect(model.snapshot()).toEqual(before)
   })
@@ -158,7 +168,7 @@ describe('PreviewSupervisorModel', () => {
       lastError: 'Screen Recording permission is required.'
     })
 
-    model.surfaceLive({ generation: 1 })
+    model.surfaceLive(metalLive(1))
     expect(model.snapshot()).toEqual(permissionRequired)
   })
 
@@ -197,6 +207,42 @@ describe('PreviewSupervisorModel', () => {
       transport: 'electron-proof-surface',
       backing: 'electron-browser-window',
       fallbackReason: 'No Metal IOSurface target was available.'
+    })
+  })
+
+  it('accepts only the complete D3D11 triple as Windows native', () => {
+    const model = new PreviewSupervisorModel({ platform: 'win32' })
+    model.openWindow()
+    model.windowOpened()
+    model.requestSurface()
+
+    expect(
+      model.surfaceLive({
+        generation: 1,
+        transport: 'd3d11-shared-texture',
+        backing: 'directcomposition-swapchain',
+        nativePreviewHostKind: 'backend-d3d11-presenter'
+      })
+    ).toMatchObject({
+      lifecycleState: 'surface-live',
+      transport: 'd3d11-shared-texture',
+      backing: 'directcomposition-swapchain',
+      nativePreviewHostKind: 'backend-d3d11-presenter'
+    })
+  })
+
+  it('fails crossed platform pairs closed into the proof fallback', () => {
+    const model = new PreviewSupervisorModel({ platform: 'win32' })
+    model.openWindow()
+    model.windowOpened()
+    model.requestSurface()
+
+    expect(model.surfaceLive(metalLive(1))).toMatchObject({
+      lifecycleState: 'surface-fallback',
+      surfaceActive: false,
+      transport: 'electron-proof-surface',
+      backing: 'electron-browser-window',
+      nativePreviewHostKind: 'proof-surface'
     })
   })
 

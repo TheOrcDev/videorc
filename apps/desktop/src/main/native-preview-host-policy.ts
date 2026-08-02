@@ -1,4 +1,11 @@
 import type { PreviewSurfaceStatus } from '../shared/backend'
+import {
+  hasCanonicalWindowsD3d11PresenterEvidence,
+  isCanonicalWindowsD3d11PreviewStatus,
+  isNativePreviewCapability,
+  isWindowsD3d11PreviewCapability,
+  nativePreviewCapability
+} from '../shared/native-preview-capability'
 
 export interface NativePreviewHelperFallbackPolicyOptions {
   fallbackFlag?: string
@@ -9,6 +16,8 @@ export interface NativePreviewPlacementOwnershipInput {
   status: PreviewSurfaceStatus
   driverKind: 'in-process' | 'external-module' | 'helper-process' | null
   recentPresent: boolean
+  platform?: NodeJS.Platform
+  generation?: number
 }
 
 export type NativePreviewPresentFailureDisposition =
@@ -17,7 +26,263 @@ export type NativePreviewPresentFailureDisposition =
   | 'retain-native'
   | 'disable-native'
 
-export type NativePreviewSupervisorDisposition = 'pending' | 'live' | 'fallback'
+export type NativePreviewSupervisorDisposition = 'pending' | 'live' | 'fallback' | 'failed'
+
+export interface WindowsD3d11PresenterReconcileInput {
+  platform: NodeJS.Platform
+  previewWindowOpen: boolean
+  proofSurfaceAvailable?: boolean
+  generation: number
+  trustedGeneration: number | null
+}
+
+export interface WindowsD3d11BackendEventAuthority {
+  previewGeneration: number
+  mediaGeneration: number
+}
+
+/** Backend events are authoritative only when they name both host and media runs. */
+export function windowsD3d11BackendEventAuthority(
+  status: PreviewSurfaceStatus
+): WindowsD3d11BackendEventAuthority | null {
+  const presenter = status.windowsD3d11Presenter
+  const previewGeneration = presenter?.previewGeneration
+  if (
+    !presenter ||
+    typeof previewGeneration !== 'number' ||
+    !Number.isSafeInteger(previewGeneration) ||
+    previewGeneration < 0 ||
+    !Number.isSafeInteger(presenter.mediaGeneration) ||
+    presenter.mediaGeneration < 0
+  ) {
+    return null
+  }
+  return {
+    previewGeneration,
+    mediaGeneration: presenter.mediaGeneration
+  }
+}
+
+export function windowsD3d11BackendStatusIsStale(
+  previous: PreviewSurfaceStatus | null,
+  candidate: PreviewSurfaceStatus,
+  generation: number
+): boolean {
+  const candidateAuthority = windowsD3d11BackendEventAuthority(candidate)
+  if (!candidateAuthority || candidateAuthority.previewGeneration !== generation) {
+    return true
+  }
+  if (!previous) {
+    return false
+  }
+
+  const previousAuthority = windowsD3d11BackendEventAuthority(previous)
+  if (!previousAuthority || previousAuthority.previewGeneration !== generation) {
+    return false
+  }
+  if (candidateAuthority.mediaGeneration < previousAuthority.mediaGeneration) {
+    return true
+  }
+  if (candidateAuthority.mediaGeneration > previousAuthority.mediaGeneration) {
+    return false
+  }
+
+  // Wall-clock timestamps are diagnostic metadata, never ordering authority.
+  // Within one media run lower progress can only be a delayed retired callback
+  // or reset. Equal progress is accepted solely for an explicit authority
+  // downgrade; Rust teardown intentionally preserves the final counters.
+  const previousProgress = windowsD3d11PresenterProgress(previous)
+  const candidateProgress = windowsD3d11PresenterProgress(candidate)
+  if (candidateProgress < previousProgress) {
+    return true
+  }
+  if (candidateProgress > previousProgress) {
+    return false
+  }
+  return !(
+    hasCanonicalWindowsD3d11PresenterEvidence(previous, generation) &&
+    windowsD3d11PresenterExplicitlyFailed(candidate)
+  )
+}
+
+function windowsD3d11PresenterProgress(status: PreviewSurfaceStatus): number {
+  return Math.max(
+    status.windowsD3d11Presenter?.lastPresentedSequence ?? 0,
+    status.windowsD3d11Presenter?.successfulPresents ?? 0
+  )
+}
+
+function windowsD3d11PresenterExplicitlyFailed(status: PreviewSurfaceStatus): boolean {
+  return (
+    status.state === 'unavailable' ||
+    status.state === 'stopped' ||
+    status.state === 'failed' ||
+    status.firstFrameContract === 'fallback' ||
+    status.windowsD3d11Presenter?.fallbackReason !== undefined
+  )
+}
+
+export function nativePreviewFramePollingSuppressionGenerationMatches(
+  requestedGeneration: number,
+  currentGeneration: number
+): boolean {
+  return (
+    Number.isSafeInteger(requestedGeneration) &&
+    requestedGeneration >= 0 &&
+    requestedGeneration === currentGeneration
+  )
+}
+
+function inactiveWindowsPreviewStatus(
+  status: PreviewSurfaceStatus,
+  message: string
+): PreviewSurfaceStatus {
+  const state =
+    status.state === 'stopped' || status.state === 'failed' || status.state === 'unavailable'
+      ? status.state
+      : 'unavailable'
+  return {
+    ...status,
+    state,
+    transport: 'unavailable',
+    backing: 'none',
+    nativePreviewHostKind: undefined,
+    nativePreviewHostAttached: false,
+    framePollingSuppressed: true,
+    sourcePixelsPresent: false,
+    windowsD3d11Presenter: undefined,
+    firstFrameContract: undefined,
+    firstFrameReason: undefined,
+    updatedAt: status.updatedAt || new Date().toISOString(),
+    message
+  }
+}
+
+function proofFallbackStatus(
+  current: PreviewSurfaceStatus,
+  backend: PreviewSurfaceStatus | null,
+  reason: string
+): PreviewSurfaceStatus {
+  const presenter = backend?.windowsD3d11Presenter
+  return {
+    ...current,
+    state: 'live',
+    transport: 'electron-proof-surface',
+    backing: 'electron-browser-window',
+    nativePreviewHostKind: 'proof-surface',
+    nativePreviewHostAttached: false,
+    framePollingSuppressed: false,
+    sourcePixelsPresent:
+      current.nativePreviewHostKind === 'proof-surface' && current.sourcePixelsPresent,
+    windowsD3d11Presenter: presenter,
+    firstFrameContract: 'fallback',
+    firstFrameReason: presenter?.fallbackReason ?? reason,
+    updatedAt: backend?.updatedAt ?? new Date().toISOString(),
+    message: backend?.message ?? reason
+  }
+}
+
+/**
+ * Reconcile renderer-safe backend evidence into Electron-main preview state.
+ *
+ * The trusted generation is armed only after main has sent a freshly-read HWND
+ * for that lifecycle generation. A queued status from an older preview can
+ * therefore never revive the D3D11 claim after close/reopen.
+ */
+export function reconcileWindowsD3d11PresenterStatus(
+  current: PreviewSurfaceStatus,
+  backend: PreviewSurfaceStatus | null,
+  input: WindowsD3d11PresenterReconcileInput
+): PreviewSurfaceStatus {
+  const proofSurfaceAvailable =
+    input.previewWindowOpen && (input.proofSurfaceAvailable ?? input.previewWindowOpen)
+  if (!input.previewWindowOpen) {
+    return inactiveWindowsPreviewStatus(current, 'Preview window is closed.')
+  }
+
+  const generationIsTrusted =
+    input.platform === 'win32' && input.trustedGeneration === input.generation
+  if (!generationIsTrusted || !backend) {
+    if (
+      current.nativePreviewHostKind !== 'backend-d3d11-presenter' &&
+      current.windowsD3d11Presenter === undefined
+    ) {
+      return proofSurfaceAvailable
+        ? current
+        : inactiveWindowsPreviewStatus(current, 'Electron proof preview surface is not attached.')
+    }
+    return proofSurfaceAvailable
+      ? proofFallbackStatus(
+          current,
+          null,
+          'Backend D3D11 presenter authority ended; Electron proof fallback is active.'
+        )
+      : inactiveWindowsPreviewStatus(current, 'Electron proof preview surface is not attached.')
+  }
+
+  const presenter = backend.windowsD3d11Presenter
+  // Event delivery is independent from the HWND/bounds request that arms a
+  // generation. A queued status from the retired presenter must be ignored,
+  // not interpreted as evidence that the current presenter fell back.
+  if (
+    presenter?.previewGeneration !== undefined &&
+    presenter.previewGeneration !== input.generation
+  ) {
+    return current
+  }
+  if (
+    backend.state === 'unavailable' ||
+    backend.state === 'stopped' ||
+    backend.state === 'failed'
+  ) {
+    return inactiveWindowsPreviewStatus(
+      backend,
+      backend.message ?? `Backend preview surface is ${backend.state}.`
+    )
+  }
+  const currentPresenter = current.windowsD3d11Presenter
+  if (
+    presenter &&
+    currentPresenter &&
+    currentPresenter.previewGeneration === presenter.previewGeneration &&
+    currentPresenter.mediaGeneration === presenter.mediaGeneration &&
+    currentPresenter.fallbackReason !== undefined &&
+    presenter.fallbackReason === undefined &&
+    presenter.successfulPresents <= currentPresenter.successfulPresents
+  ) {
+    return current
+  }
+  if (hasCanonicalWindowsD3d11PresenterEvidence(backend, input.generation) && presenter) {
+    const presentedFrameId = Math.max(
+      backend.presentedFrameId ?? 0,
+      presenter.lastPresentedSequence ?? 0,
+      presenter.successfulPresents
+    )
+    return {
+      ...current,
+      state: 'live',
+      transport: 'd3d11-shared-texture',
+      backing: 'directcomposition-swapchain',
+      nativePreviewHostKind: 'backend-d3d11-presenter',
+      nativePreviewHostAttached: true,
+      framePollingSuppressed: true,
+      sourcePixelsPresent: true,
+      windowsD3d11Presenter: presenter,
+      presentedFrameId,
+      framesRendered: Math.max(current.framesRendered, presentedFrameId),
+      firstFrameContract: 'met',
+      firstFrameReason: 'Backend D3D11 presenter completed its first live-source present.',
+      updatedAt: backend.updatedAt,
+      message: backend.message ?? 'Backend D3D11 DirectComposition preview is presenting.'
+    }
+  }
+
+  const reason =
+    presenter?.fallbackReason ?? 'Backend D3D11 presenter is waiting for a live-source present.'
+  return proofSurfaceAvailable
+    ? proofFallbackStatus(current, backend, reason)
+    : inactiveWindowsPreviewStatus(backend, reason)
+}
 
 /**
  * Classify the active preview host for the user-facing lifecycle supervisor.
@@ -28,37 +293,41 @@ export type NativePreviewSupervisorDisposition = 'pending' | 'live' | 'fallback'
  * pixels are present, and remains pending before that proof arrives.
  */
 export function nativePreviewSupervisorDisposition(
-  status: Pick<PreviewSurfaceStatus, 'transport' | 'firstFrameContract'>,
+  status: PreviewSurfaceStatus,
   platform: NodeJS.Platform
 ): NativePreviewSupervisorDisposition {
-  if (status.transport === 'native-surface') {
+  if (status.state === 'unavailable' || status.state === 'stopped' || status.state === 'failed') {
+    return 'failed'
+  }
+  const capability = nativePreviewCapability(status, platform)
+  if (capability === 'macos-metal') {
     return 'live'
   }
+  const generation = status.windowsD3d11Presenter?.previewGeneration
   if (
-    status.transport === 'electron-proof-surface' &&
-    platform === 'win32' &&
+    capability === 'windows-d3d11' &&
+    generation !== undefined &&
+    isCanonicalWindowsD3d11PreviewStatus(status, generation) &&
     status.firstFrameContract === 'met'
   ) {
     return 'live'
   }
-  if (
-    status.transport === 'electron-proof-surface' &&
-    platform === 'win32' &&
-    status.firstFrameContract !== 'fallback'
-  ) {
+  if (capability === 'windows-d3d11' && status.firstFrameContract !== 'fallback') {
     return 'pending'
   }
   return 'fallback'
 }
 
 export function nativePreviewSupervisorFallbackReason(
-  status: Pick<PreviewSurfaceStatus, 'transport' | 'firstFrameContract' | 'firstFrameReason'>,
+  status: Pick<
+    PreviewSurfaceStatus,
+    'transport' | 'backing' | 'nativePreviewHostKind' | 'firstFrameContract' | 'firstFrameReason'
+  >,
   platform: NodeJS.Platform,
   fallbackReason: string
 ): string {
   if (
-    platform === 'win32' &&
-    status.transport === 'electron-proof-surface' &&
+    isWindowsD3d11PreviewCapability(status, platform) &&
     status.firstFrameContract === 'fallback' &&
     status.firstFrameReason?.trim()
   ) {
@@ -103,15 +372,35 @@ export function nativePreviewValidatedHandoffStatus(
 export function nativePreviewPlacementOwnedByNativeSurface(
   input: NativePreviewPlacementOwnershipInput
 ): boolean {
-  const attachedNativeSurface = nativePreviewSurfaceHasAttachedNativePixels(input.status)
-  return attachedNativeSurface && (input.driverKind === 'in-process' || input.recentPresent)
+  const platform = input.platform ?? process.platform
+  const attachedNativeSurface = nativePreviewSurfaceHasAttachedNativePixels(
+    input.status,
+    platform,
+    input.generation
+  )
+  return (
+    attachedNativeSurface &&
+    (isWindowsD3d11PreviewCapability(input.status, platform) ||
+      input.driverKind === 'in-process' ||
+      input.recentPresent)
+  )
 }
 
-export function nativePreviewSurfaceHasAttachedNativePixels(status: PreviewSurfaceStatus): boolean {
+export function nativePreviewSurfaceHasAttachedNativePixels(
+  status: PreviewSurfaceStatus,
+  platform: NodeJS.Platform = process.platform,
+  generation?: number
+): boolean {
+  if (isWindowsD3d11PreviewCapability(status, platform)) {
+    const expectedGeneration = generation ?? status.windowsD3d11Presenter?.previewGeneration
+    return (
+      expectedGeneration !== undefined &&
+      isCanonicalWindowsD3d11PreviewStatus(status, expectedGeneration)
+    )
+  }
   return (
     status.state === 'live' &&
-    status.transport === 'native-surface' &&
-    status.backing === 'cametal-layer' &&
+    isNativePreviewCapability(status, platform) &&
     status.sourcePixelsPresent === true &&
     status.nativePreviewHostAttached === true &&
     status.nativePreviewHostKind !== 'proof-surface'
@@ -131,6 +420,9 @@ export function nativePreviewDriverFailureFallbackStatus(
     sourcePixelsPresent: false,
     nativePreviewHostKind: 'proof-surface',
     nativePreviewHostAttached: false,
+    windowsD3d11Presenter: undefined,
+    firstFrameContract: 'fallback',
+    firstFrameReason: input.reason,
     updatedAt: new Date().toISOString(),
     message: input.reason
   }
@@ -153,11 +445,22 @@ export function nativePreviewProofPollingSuppressed(input: {
   )
 }
 
+/** Main-process lifecycle policy for the detached preview proof poller. */
+export function nativePreviewLifecycleFramePollingSuppressed(previewWindowOpen: boolean): boolean {
+  return !previewWindowOpen
+}
+
 export function nativePreviewFramePollingSuppressionStatus(
   status: PreviewSurfaceStatus,
-  suppressed: boolean
+  suppressed: boolean,
+  platform: NodeJS.Platform = process.platform,
+  generation?: number
 ): PreviewSurfaceStatus {
-  const attachedNativeSurface = nativePreviewSurfaceHasAttachedNativePixels(status)
+  const attachedNativeSurface = nativePreviewSurfaceHasAttachedNativePixels(
+    status,
+    platform,
+    generation
+  )
 
   return {
     ...status,
@@ -181,5 +484,5 @@ export function nativePreviewFramePollingSuppressionStatus(
 export function nativePreviewClosedWindowUnsuppressStatus(
   status: PreviewSurfaceStatus
 ): PreviewSurfaceStatus {
-  return nativePreviewFramePollingSuppressionStatus(status, true)
+  return inactiveWindowsPreviewStatus(status, 'Preview window is closed.')
 }

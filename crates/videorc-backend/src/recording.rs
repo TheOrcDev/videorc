@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
@@ -65,6 +66,8 @@ use crate::preview_camera::{
     preview_camera_latest_frame_info, reset_preview_camera_capture_timings,
 };
 use crate::preview_screen::preview_screen_latest_frame_info;
+#[cfg(target_os = "windows")]
+use crate::preview_surface::{PreviewCompositorSuspension, suspend_preview_compositor_for_d3d11};
 use crate::process_job::{
     process_is_running as process_is_running_by_pid, spawn_owned_tokio, status_owned_tokio,
     terminate_process,
@@ -79,7 +82,9 @@ use crate::protocol::{
     PreviewSnapshot, PreviewSnapshotParams, PreviewSurfaceBacking, PreviewTransport,
     RecordingPipelineStage, RecordingState, RecordingStatus, RemuxSessionParams, RtmpPreset,
     RtmpSettings, Scene, SceneConfigParams, SceneSourceKind, SideBySideCameraSide,
-    StartSessionParams, StreamHealth, StreamScreen, VideoPreset, VideoSettings,
+    StartSessionParams, StreamHealth, StreamOutputBridge, StreamOutputTopologyProbeParams,
+    StreamOutputTopologyProbeResult, StreamOutputTopologyProbeState, StreamOutputTopologyRole,
+    StreamScreen, VideoPreset, VideoSettings,
 };
 use crate::repair::{
     GateStatus, MAINTENANCE_CANCELLED, QualityExpectations, QualityThresholds, QualityVerdict,
@@ -112,9 +117,18 @@ use crate::streaming::{
     StreamTargetsSnapshot, StreamUrlMode, StreamingSettings, stream_platform_from_preset,
     stream_platform_id, stream_platform_label,
 };
+#[cfg(any(target_os = "windows", test))]
+use crate::windows_d3d11_session::WindowsD3d11MediaMode;
+#[cfg(target_os = "windows")]
+use crate::windows_d3d11_session::{
+    WindowsD3d11CameraInput, WindowsD3d11OverlayInput, WindowsD3d11SessionDiagnosticsSnapshot,
+    WindowsD3d11SessionMonitor, WindowsD3d11SessionPlan, WindowsD3d11SessionPump,
+    WindowsD3d11SessionRequest, WindowsD3d11SessionSelection, WindowsD3d11VideoPlan,
+    select_windows_d3d11_session, validate_windows_d3d11_startup_evidence,
+};
 #[cfg(target_os = "windows")]
 use crate::windows_media_foundation_encoder::{
-    MediaFoundationEncoderConfig, MediaFoundationInputSubtype, probe_hardware_encoder,
+    MediaFoundationEncoderConfig, probe_hardware_encoder,
 };
 
 const PREVIEW_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -765,6 +779,99 @@ impl FfmpegLiveAudioSessionHandle {
 }
 
 type SharedFfmpegLiveAudioSession = Arc<FfmpegLiveAudioSessionHandle>;
+type SharedStreamTargetsSnapshot = Arc<StdMutex<StreamTargetsSnapshot>>;
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsD3d11RecoveryPhase {
+    Armed { generation: u64 },
+    Recovering { failed_generation: u64 },
+    Recovered { generation: u64 },
+    Terminal,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsD3d11RecoveryPhase {
+    fn begin(&mut self, failed_generation: u64) -> Result<(), String> {
+        match *self {
+            Self::Armed { generation } if generation == failed_generation => {
+                *self = Self::Recovering { failed_generation };
+                Ok(())
+            }
+            Self::Recovered { generation } if generation == failed_generation => {
+                *self = Self::Terminal;
+                Err(format!(
+                    "recovered D3D11 generation {failed_generation} failed again"
+                ))
+            }
+            Self::Recovering {
+                failed_generation: active,
+            } if active == failed_generation => Err(format!(
+                "D3D11 generation {failed_generation} recovery is already in progress"
+            )),
+            Self::Terminal => Err("D3D11 recovery is already terminal".to_string()),
+            phase => Err(format!(
+                "stale D3D11 recovery callback for generation {failed_generation} while {phase:?}"
+            )),
+        }
+    }
+
+    fn complete(
+        &mut self,
+        failed_generation: u64,
+        recovered_generation: u64,
+    ) -> Result<(), String> {
+        if recovered_generation != failed_generation.saturating_add(1) {
+            *self = Self::Terminal;
+            return Err(format!(
+                "D3D11 recovery expected generation {}, received {recovered_generation}",
+                failed_generation.saturating_add(1)
+            ));
+        }
+        match *self {
+            Self::Recovering {
+                failed_generation: active,
+            } if active == failed_generation => {
+                *self = Self::Recovered {
+                    generation: recovered_generation,
+                };
+                Ok(())
+            }
+            phase => {
+                *self = Self::Terminal;
+                Err(format!(
+                    "D3D11 recovery completion raced invalid phase {phase:?}"
+                ))
+            }
+        }
+    }
+
+    fn fail(&mut self) {
+        *self = Self::Terminal;
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+struct WindowsD3d11RecoveryContext {
+    mode: WindowsD3d11MediaMode,
+    plan: WindowsD3d11SessionPlan,
+    camera: Option<WindowsD3d11CameraInput>,
+    overlays: WindowsD3d11OverlayInput,
+    phase: WindowsD3d11RecoveryPhase,
+}
+
+#[cfg(target_os = "windows")]
+impl std::fmt::Debug for WindowsD3d11RecoveryContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WindowsD3d11RecoveryContext")
+            .field("mode", &self.mode)
+            .field("plan", &self.plan)
+            .field("phase", &self.phase)
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FfmpegLiveAudioStopMode {
@@ -796,6 +903,25 @@ pub struct ActiveRecording {
     pub screen_overlay: Option<ScreenOverlaySession>,
     pub encoder_bridge: Option<EncoderBridgeRecordingSession>,
     pub encoder_bridge_stream: Option<EncoderBridgeRecordingSession>,
+    /// Owns monitor cancellation and task lifetime. It is declared before the
+    /// pump so an unexpected `ActiveRecording` drop aborts the monitor before
+    /// releasing the generation-scoped media authority.
+    #[cfg(target_os = "windows")]
+    windows_d3d11_monitor: Option<WindowsD3d11SessionMonitorTask>,
+    /// One generation-scoped D3D11 capture/compositor/MF authority. This field
+    /// follows both bridge sessions so their ticket-store clones are dropped
+    /// before the role leases and media thread are drained.
+    #[cfg(target_os = "windows")]
+    windows_d3d11_media: Option<WindowsD3d11SessionPump>,
+    #[cfg(target_os = "windows")]
+    windows_d3d11_recovery: Option<WindowsD3d11RecoveryContext>,
+    #[cfg(target_os = "windows")]
+    windows_d3d11_preview_compositor_suspension: Option<PreviewCompositorSuspension>,
+    /// Authoritative, generation-scoped runtime state for this session's
+    /// destinations. The stderr monitor updates this exact snapshot before
+    /// publishing `stream.targets`, and polling RPCs clone it from the active
+    /// recording rather than reconstructing state from events.
+    stream_targets_snapshot: SharedStreamTargetsSnapshot,
     /// Frozen at session start from the Recording/Both caption selection.
     /// Finalization may render a non-destructive `(captioned)` copy only when
     /// this is true; the source recording itself always stays clean.
@@ -816,6 +942,80 @@ pub struct ActiveRecording {
     /// Renderer/status hint only. Successful finalization uses the ordered
     /// monitor result above rather than sampling this flag after process exit.
     pub stop_requested: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+struct WindowsD3d11SessionMonitorTask {
+    stop: Arc<AtomicBool>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    /// Last generation-valid snapshot retained independently of
+    /// `ActiveRecording.windows_d3d11_media`. Recovery temporarily takes that
+    /// pump out of the recording slot, so shutdown needs this fallback to
+    /// publish authoritative diagnostics after the monitor joins.
+    last_snapshot: Arc<StdMutex<Option<WindowsD3d11SessionDiagnosticsSnapshot>>>,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsD3d11SessionMonitorTask {
+    fn spawn(
+        state: AppState,
+        session_id: String,
+        generation: u64,
+        mode: WindowsD3d11MediaMode,
+        monitor: WindowsD3d11SessionMonitor,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let task_stop = Arc::clone(&stop);
+        let initial_snapshot = monitor
+            .diagnostics_snapshot()
+            .ok()
+            .filter(|snapshot| snapshot.pump.generation == generation);
+        let last_snapshot = Arc::new(StdMutex::new(initial_snapshot));
+        let task_last_snapshot = Arc::clone(&last_snapshot);
+        let task = tokio::spawn(run_windows_d3d11_session_monitor(
+            state,
+            session_id,
+            generation,
+            mode,
+            monitor,
+            task_stop,
+            task_last_snapshot,
+        ));
+        Self {
+            stop,
+            task: Some(task),
+            last_snapshot,
+        }
+    }
+
+    async fn stop_and_join(&mut self) {
+        self.request_stop();
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+
+    fn request_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+
+    fn last_snapshot(&self) -> Option<WindowsD3d11SessionDiagnosticsSnapshot> {
+        self.last_snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsD3d11SessionMonitorTask {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -937,6 +1137,24 @@ impl ActiveRecording {
             .as_ref()
             .and_then(EncoderBridgeRecordingSession::terminal_failure)
     }
+
+    fn stream_targets_snapshot(&self) -> StreamTargetsSnapshot {
+        self.stream_targets_snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+/// Returns the current session's authoritative per-destination runtime state.
+/// A missing active session is an error so polling acceptance harnesses cannot
+/// accidentally treat an empty/stale event cache as healthy evidence.
+pub async fn current_stream_targets_snapshot(state: &AppState) -> Result<StreamTargetsSnapshot> {
+    let recording = state.recording.lock().await;
+    let active = recording
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No active capture session has stream target state"))?;
+    Ok(active.stream_targets_snapshot())
 }
 
 /// Capture-relative media time used to seed a caption session that starts
@@ -1241,6 +1459,7 @@ pub async fn start_session(
     }
 
     hydrate_stream_key_secret_refs(&state, &mut params)?;
+    normalize_stream_only_output_video(&mut params)?;
     validate_session_entitlements(&params, &entitlements::current_entitlements())?;
 
     let capture_permit = state.ffmpeg_work.begin_capture_when_available().await;
@@ -1276,13 +1495,14 @@ pub async fn start_session(
             .filter(|streaming| streaming.enabled)
         {
             Some(streaming) => {
-                let resolution = resolve_stream_targets(streaming);
+                let mut resolution = resolve_stream_targets(streaming);
                 // validate_outputs() already guaranteed a ready target; re-check
                 // defensively so an empty set surfaces the actionable error rather
                 // than silently starting with no stream legs.
                 if resolution.ready.is_empty() {
                     stream_targets_from_streaming(streaming)?;
                 }
+                apply_provider_output_plan_to_ready_targets(&params, &mut resolution.ready)?;
                 resolution
             }
             None => StreamTargetResolution {
@@ -1467,7 +1687,7 @@ pub async fn start_session(
     if !use_encoder_bridge {
         state.emit_log(
             "warn",
-            "Session is using the legacy FFmpeg capture path (encoder bridge disabled by env, streaming above 30fps, or 4K60).",
+            "Session is using the legacy FFmpeg capture path (encoder bridge disabled by env, the profile is outside the proven 60fps bridge envelope, or 4K60 was selected).",
         );
     }
     // Shared session epoch (plan slice A2): the encoder bridge sets this at its first
@@ -1491,13 +1711,26 @@ pub async fn start_session(
     } else {
         EncoderBridgeVideoOutput::RawYuv420p
     };
+    let encoder_output_topology = encoder_output_topology_plan_from_session(&params)?;
     let windows_encoded_bridge_decision = resolve_windows_encoded_bridge_decision(
         &ffmpeg_path,
-        &params,
+        &encoder_output_topology,
         requested_encoder_bridge_video_output,
     )
-    .await?;
+    .await;
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
+    if params.output.stream_enabled {
+        let provider_plan = resolve_provider_stream_output_plan(&params)?;
+        if let Err(error) = validate_provider_plan_against_effective_bridge(
+            &provider_plan,
+            encoder_bridge_video_output,
+        ) {
+            if let Some(fifo_path) = encoder_bridge_fifo.as_ref() {
+                let _ = crate::fifo::cleanup(fifo_path);
+            }
+            return Err(error);
+        }
+    }
     if let Some(reason) = windows_encoded_bridge_decision.fallback_reason.as_deref() {
         state.emit_log(
             "warn",
@@ -1581,6 +1814,261 @@ pub async fn start_session(
     } else {
         None
     };
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_media_mode =
+        WindowsD3d11MediaMode::from_process_env().map_err(anyhow::Error::msg)?;
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_initial_diagnostics;
+    #[cfg(target_os = "windows")]
+    let mut windows_d3d11_recovery = None;
+    #[cfg(target_os = "windows")]
+    let mut windows_d3d11_media = {
+        let media_mode = windows_d3d11_media_mode;
+        let layout_capability = windows_d3d11_display_camera_layout(&params.layout.layout_preset);
+        let camera_required = layout_capability.unwrap_or(false);
+        let camera_input = if camera_required {
+            preview_camera_frame_source(&state)
+                .await
+                .map(|source| WindowsD3d11CameraInput {
+                    source,
+                    layout: params.layout.clone(),
+                })
+        } else {
+            None
+        };
+        let selected_screen = match params.sources.screen_id.as_deref() {
+            Some(screen_id) => crate::devices::list_devices(&ffmpeg_path)
+                .await
+                .devices
+                .into_iter()
+                .find(|device| device.id == screen_id),
+            None => None,
+        };
+        let mut unsupported_scene_features = Vec::new();
+        if params.sources.test_pattern {
+            unsupported_scene_features.push("test-pattern".to_string());
+        }
+        let request = WindowsD3d11SessionRequest {
+            platform_supported: true,
+            screen_id: params.sources.screen_id.clone(),
+            window_selected: params.sources.window_id.is_some(),
+            screen_available: selected_screen
+                .as_ref()
+                .is_some_and(|device| device.status == crate::protocol::DeviceStatus::Available),
+            source_width: selected_screen.as_ref().and_then(|device| device.width),
+            source_height: selected_screen.as_ref().and_then(|device| device.height),
+            supported_layout: layout_capability.is_some(),
+            camera_required,
+            camera_source_available: !camera_required || camera_input.is_some(),
+            explicit_scene: params.scene.is_some(),
+            unsupported_scene_features,
+            media_foundation_selected: use_encoder_bridge
+                && matches!(
+                    encoder_bridge_video_output,
+                    EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+                ),
+            record_enabled: params.output.record_enabled,
+            stream_enabled: params.output.stream_enabled,
+            primary: WindowsD3d11VideoPlan {
+                width: params.output.video.width,
+                height: params.output.video.height,
+                fps: params.output.video.fps,
+                bitrate_kbps: params.output.video.bitrate_kbps,
+            },
+            auxiliary: encoder_bridge_stream_profile.as_ref().map(|profile| {
+                WindowsD3d11VideoPlan {
+                    width: profile.width,
+                    height: profile.height,
+                    fps: profile.fps,
+                    bitrate_kbps: profile.bitrate_kbps,
+                }
+            }),
+        };
+        match select_windows_d3d11_session(media_mode, request).map_err(anyhow::Error::msg)? {
+            WindowsD3d11SessionSelection::Disabled => {
+                windows_d3d11_initial_diagnostics =
+                    crate::protocol::WindowsD3d11MediaDiagnostics::default();
+                None
+            }
+            WindowsD3d11SessionSelection::NaturalFallback(fallback) => {
+                windows_d3d11_initial_diagnostics = windows_d3d11_fallback_diagnostics(
+                    media_mode,
+                    format!("{}: {}", fallback.code, fallback.detail),
+                );
+                state.emit_log(
+                    "warn",
+                    format!(
+                        "Unified Windows D3D11 media path selected its named fallback: {fallback}"
+                    ),
+                );
+                emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    fallback.code,
+                    &fallback.detail,
+                )?;
+                None
+            }
+            WindowsD3d11SessionSelection::Candidate(plan) => {
+                let (highlight_on_primary, highlight_on_auxiliary) =
+                    crate::captions::highlight_overlay_leg_plan(
+                        params.output.record_enabled,
+                        params.output.stream_enabled,
+                        plan.auxiliary.is_some(),
+                    );
+                let overlays = WindowsD3d11OverlayInput {
+                    captions: state.caption_overlay.clone(),
+                    highlight: state.highlight_overlay.clone(),
+                    caption_on_primary: session_caption_plan.primary,
+                    caption_on_auxiliary: session_caption_plan.aux,
+                    highlight_on_primary,
+                    highlight_on_auxiliary,
+                };
+                match WindowsD3d11SessionPump::start(
+                    &state.windows_d3d11_media,
+                    plan.clone(),
+                    camera_input.clone(),
+                    overlays.clone(),
+                ) {
+                    Ok(pump) => {
+                        match validate_windows_d3d11_startup_evidence(
+                            media_mode,
+                            &plan,
+                            pump.startup_evidence(),
+                        )
+                        .map_err(anyhow::Error::msg)?
+                        {
+                            None => {
+                                match pump.monitor().diagnostics_snapshot() {
+                                    Ok(snapshot) => {
+                                        windows_d3d11_initial_diagnostics =
+                                            windows_d3d11_live_diagnostics(
+                                                media_mode,
+                                                &snapshot,
+                                                Default::default(),
+                                            );
+                                        state.emit_log(
+                                            "info",
+                                            format!(
+                                                "Unified Windows D3D11 capture/compositor/Media Foundation authority is ready (generation {}).",
+                                                pump.snapshot().generation
+                                            ),
+                                        );
+                                        windows_d3d11_recovery =
+                                            Some(WindowsD3d11RecoveryContext {
+                                                mode: media_mode,
+                                                plan: plan.clone(),
+                                                camera: camera_input.clone(),
+                                                overlays: overlays.clone(),
+                                                phase: WindowsD3d11RecoveryPhase::Armed {
+                                                    generation: pump.snapshot().generation,
+                                                },
+                                            });
+                                        Some(pump)
+                                    }
+                                    Err(error) => {
+                                        // The initial status snapshot is part
+                                        // of the production-path claim. Do not
+                                        // retain a live GPU pump while
+                                        // publishing fallback diagnostics: its
+                                        // capture/encoder roles would keep the
+                                        // authority alive beside the legacy
+                                        // compositor and duplicate all work.
+                                        drop(pump);
+                                        let reason = format!(
+                                            "windows-d3d11-media-diagnostics-unavailable: {error}"
+                                        );
+                                        if media_mode.is_required() {
+                                            if let Some(path) = encoder_bridge_fifo.as_ref() {
+                                                let _ = crate::fifo::cleanup(path);
+                                            }
+                                            if let Some(path) = encoder_bridge_stream_fifo.as_ref()
+                                            {
+                                                let _ = crate::fifo::cleanup(path);
+                                            }
+                                            bail!(
+                                                "VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA=1 rejected session startup: {reason}"
+                                            );
+                                        }
+                                        windows_d3d11_initial_diagnostics =
+                                            windows_d3d11_fallback_diagnostics(
+                                                media_mode,
+                                                reason.clone(),
+                                            );
+                                        state.emit_log(
+                                            "warn",
+                                            format!(
+                                                "Unified Windows D3D11 startup could not prove initial diagnostics; using the named legacy bridge fallback: {error}"
+                                            ),
+                                        );
+                                        emit_health_event(
+                                            &state,
+                                            Some(&session_id),
+                                            HealthLevel::Warn,
+                                            "windows-d3d11-media-diagnostics-unavailable",
+                                            &reason,
+                                        )?;
+                                        None
+                                    }
+                                }
+                            }
+                            Some(fallback) => {
+                                windows_d3d11_initial_diagnostics =
+                                    windows_d3d11_fallback_diagnostics(
+                                        media_mode,
+                                        format!("{}: {}", fallback.code, fallback.detail),
+                                    );
+                                state.emit_log(
+                                    "warn",
+                                    format!(
+                                        "Unified Windows D3D11 media startup selected its named fallback: {fallback}"
+                                    ),
+                                );
+                                emit_health_event(
+                                    &state,
+                                    Some(&session_id),
+                                    HealthLevel::Warn,
+                                    fallback.code,
+                                    &fallback.detail,
+                                )?;
+                                None
+                            }
+                        }
+                    }
+                    Err(error) if media_mode.is_required() => {
+                        if let Some(path) = encoder_bridge_fifo.as_ref() {
+                            let _ = crate::fifo::cleanup(path);
+                        }
+                        if let Some(path) = encoder_bridge_stream_fifo.as_ref() {
+                            let _ = crate::fifo::cleanup(path);
+                        }
+                        bail!(
+                            "VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA=1 rejected session startup: windows-d3d11-media-startup-failed: {error}"
+                        );
+                    }
+                    Err(error) => {
+                        let message = format!(
+                            "Unified Windows D3D11 media startup failed; using the named legacy bridge fallback: {error}"
+                        );
+                        windows_d3d11_initial_diagnostics = windows_d3d11_fallback_diagnostics(
+                            media_mode,
+                            format!("windows-d3d11-media-startup-failed: {error}"),
+                        );
+                        state.emit_log("warn", &message);
+                        emit_health_event(
+                            &state,
+                            Some(&session_id),
+                            HealthLevel::Warn,
+                            "windows-d3d11-media-startup-failed",
+                            &message,
+                        )?;
+                        None
+                    }
+                }
+            }
+        }
+    };
     let screen_overlay_fifo =
         if !use_encoder_bridge && (active_screen.is_some() || params.output.stream_enabled) {
             let fifo_path = screen_overlay_fifo_path(&session_id);
@@ -1607,30 +2095,19 @@ pub async fn start_session(
     // Both the shared-compositor bridge and the legacy path request the platform H.264
     // encoder. The bridge is the protected consumer of the compositor output, paced by
     // the output clock; the legacy path captures via FFmpeg.
-    initial_diagnostics.encode_backend = Some(
-        if matches!(
-            encoder_bridge_video_output,
-            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
-        ) {
-            EncodeBackend::HardwareMediaFoundation
-        } else {
-            default_h264_encode_backend()
-        },
-    );
+    initial_diagnostics.encode_backend =
+        Some(windows_encoded_bridge_decision.effective_encode_backend);
     initial_diagnostics.encoder_bridge_requested_video_output = Some(
         encoder_bridge_video_output_label(windows_encoded_bridge_decision.requested).to_string(),
     );
     initial_diagnostics.encoder_bridge_effective_video_output = Some(
         encoder_bridge_video_output_label(windows_encoded_bridge_decision.effective).to_string(),
     );
-    initial_diagnostics.encoder_bridge_encoded_output_backend = match encoder_bridge_video_output {
-        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => Some("videotoolbox".to_string()),
-        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
-            Some("media-foundation".to_string())
-        }
-        EncoderBridgeVideoOutput::RawYuv420p => None,
-    };
+    initial_diagnostics.encoder_bridge_encoded_output_backend =
+        Some(encoder_bridge_encoded_output_backend_label(
+            encoder_bridge_video_output,
+            windows_encoded_bridge_decision.effective_encode_backend,
+        ));
     initial_diagnostics.encoder_bridge_encoded_output_encoder_identity =
         windows_encoded_bridge_decision.encoder_identity.clone();
     initial_diagnostics.encoder_bridge_encoded_output_input_subtype =
@@ -1638,6 +2115,18 @@ pub async fn start_session(
     initial_diagnostics.encoder_bridge_encoded_output_fallback_reason =
         windows_encoded_bridge_decision.fallback_reason.clone();
     initial_diagnostics.recording_protected = use_encoder_bridge;
+    #[cfg(target_os = "windows")]
+    {
+        initial_diagnostics.windows_d3d11_media = windows_d3d11_initial_diagnostics.clone();
+        if windows_d3d11_media.is_some() {
+            initial_diagnostics.compositor_backend = Some(CompositorBackend::D3d11);
+            initial_diagnostics.compositor_fallback_reason = None;
+        } else if windows_d3d11_initial_diagnostics.requested {
+            initial_diagnostics.compositor_backend = Some(CompositorBackend::CpuFallback);
+            initial_diagnostics.compositor_fallback_reason =
+                windows_d3d11_initial_diagnostics.fallback_reason.clone();
+        }
+    }
     {
         let mut diagnostics = state.diagnostics.lock().await;
         *diagnostics = initial_diagnostics.clone();
@@ -1654,13 +2143,31 @@ pub async fn start_session(
             height: params.output.video.height,
             fps: SCREEN_OVERLAY_FPS,
         });
+    #[cfg(target_os = "windows")]
+    let use_windows_d3d11_media = windows_d3d11_media.is_some();
+    #[cfg(not(target_os = "windows"))]
+    let use_windows_d3d11_media = false;
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_preview_compositor_suspension = if use_windows_d3d11_media {
+        suspend_preview_compositor_for_d3d11(
+            &state,
+            windows_d3d11_media
+                .as_ref()
+                .map(|pump| pump.snapshot().generation)
+                .unwrap_or_default(),
+        )
+        .await
+    } else {
+        None
+    };
     let highlight_overlay_plan = crate::captions::highlight_overlay_leg_plan(
         params.output.record_enabled,
         params.output.stream_enabled,
         encoder_bridge_stream_output.is_some(),
     );
     #[cfg(target_os = "windows")]
-    let (direct_d3d11_recording_source, direct_d3d11_camera_overlay) = if use_encoder_bridge
+    let (direct_d3d11_recording_source, direct_d3d11_camera_overlay) = if !use_windows_d3d11_media
+        && use_encoder_bridge
         && matches!(
             encoder_bridge_video_output,
             EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
@@ -1774,8 +2281,15 @@ pub async fn start_session(
             // the bridge clock. Starting the CPU compositor here would retain
             // the full-frame BGRA -> I420 cost even though its output is unused.
             (None, None)
-        } else if use_encoder_bridge {
-            let target_fps = recording_compositor_target_fps(&state, &params.output.video).await;
+        } else if use_encoder_bridge && !use_windows_d3d11_media {
+            let target_fps = recording_compositor_target_fps(&state, &params.output.video)
+                .await
+                .max(
+                    encoder_bridge_resolved_stream_profile
+                        .as_ref()
+                        .map(|profile| profile.fps)
+                        .unwrap_or_default(),
+                );
             start_synthetic_compositor(
                 state.clone(),
                 CompositorStartParams {
@@ -1896,6 +2410,10 @@ pub async fn start_session(
             };
             (recording_store, stream_store)
         } else {
+            // A live Windows D3D11 pump owns capture, composition, preview
+            // surfaces, and both NV12 outputs. Starting the synthetic CPU
+            // compositor here would duplicate capture/GPU work even though
+            // the bridge writer consumes only D3D11 tickets.
             (None, None)
         };
     let args = if use_encoder_bridge {
@@ -2039,6 +2557,14 @@ pub async fn start_session(
             use_encoder_bridge.then(|| video_epoch.clone()),
         )
     });
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_primary_input = windows_d3d11_media
+        .as_ref()
+        .map(WindowsD3d11SessionPump::primary_encoder_source);
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_auxiliary_input = windows_d3d11_media
+        .as_ref()
+        .and_then(WindowsD3d11SessionPump::auxiliary_encoder_source);
     let (encoder_bridge, encoder_bridge_stream) = if use_encoder_bridge {
         let bridge_fifo_path = encoder_bridge_fifo
             .clone()
@@ -2065,6 +2591,8 @@ pub async fn start_session(
             direct_d3d11_recording_source,
             #[cfg(target_os = "windows")]
             direct_d3d11_camera_overlay,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_primary_input,
             encoder_bridge_video_output,
             Some(params.output.video.bitrate_kbps),
             // Low latency only when live legs consume THIS output (shared
@@ -2078,9 +2606,18 @@ pub async fn start_session(
         let mut stream_bridge = match (
             encoder_bridge_stream_fifo.clone(),
             encoder_bridge_stream_profile.as_ref(),
-            encoder_bridge_stream_frame_store.clone(),
         ) {
-            (Some(stream_fifo_path), Some(stream_profile), Some(stream_frame_store)) => {
+            (Some(stream_fifo_path), Some(stream_profile)) => {
+                #[cfg(target_os = "windows")]
+                let has_stream_source = encoder_bridge_stream_frame_store.is_some()
+                    || windows_d3d11_auxiliary_input.is_some();
+                #[cfg(not(target_os = "windows"))]
+                let has_stream_source = encoder_bridge_stream_frame_store.is_some();
+                if !has_stream_source {
+                    bail!(
+                        "Split-output encoder bridge has neither a compositor frame store nor a D3D11 auxiliary ticket source"
+                    );
+                }
                 let stream_diagnostics_context = encoder_bridge_diagnostics_context(
                     EncoderBridgeOutputRole::Stream,
                     Some(&params.output.video),
@@ -2095,10 +2632,12 @@ pub async fn start_session(
                     stream_profile.width,
                     stream_profile.height,
                     stream_fifo_path,
-                    Some(stream_frame_store),
+                    encoder_bridge_stream_frame_store.clone(),
                     None,
                     #[cfg(target_os = "windows")]
                     None,
+                    #[cfg(target_os = "windows")]
+                    windows_d3d11_auxiliary_input,
                     encoder_bridge_video_output,
                     Some(stream_profile.bitrate_kbps),
                     true,
@@ -2131,6 +2670,27 @@ pub async fn start_session(
     let gate_expect_audio = !audio_tracks.is_empty();
     let gate_intended_fps = (params.output.video.fps > 0).then_some(params.output.video.fps as f64);
     let (stop_intent_sender, stop_intent_receiver) = oneshot::channel();
+    let stream_tee_has_recording_leg =
+        output_path.is_some() && !(use_encoder_bridge && encoder_bridge_stream_profile.is_some());
+    let (stream_runtime, slave_positions, stream_url_positions) = build_stream_runtime(
+        &stream_targets,
+        &skipped_targets,
+        stream_tee_has_recording_leg,
+    );
+    let stream_targets_snapshot = Arc::new(StdMutex::new(StreamTargetsSnapshot {
+        session_id: session_id.clone(),
+        targets: stream_runtime,
+    }));
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_monitor = windows_d3d11_media.as_ref().map(|pump| {
+        WindowsD3d11SessionMonitorTask::spawn(
+            state.clone(),
+            session_id.clone(),
+            pump.snapshot().generation,
+            windows_d3d11_media_mode,
+            pump.monitor(),
+        )
+    });
     let active = ActiveRecording {
         session_id: session_id.clone(),
         pid,
@@ -2157,6 +2717,15 @@ pub async fn start_session(
         },
         encoder_bridge,
         encoder_bridge_stream,
+        #[cfg(target_os = "windows")]
+        windows_d3d11_monitor,
+        #[cfg(target_os = "windows")]
+        windows_d3d11_media: windows_d3d11_media.take(),
+        #[cfg(target_os = "windows")]
+        windows_d3d11_recovery,
+        #[cfg(target_os = "windows")]
+        windows_d3d11_preview_compositor_suspension,
+        stream_targets_snapshot: stream_targets_snapshot.clone(),
         captioned_copy_requested: session_caption_plan.captioned_copy,
         keep_original_media: params.output.keep_original_mkv,
         comment_highlight_available: comment_highlight_available(&params, use_encoder_bridge),
@@ -2262,21 +2831,9 @@ pub async fn start_session(
         tokio::spawn(publish_preview_stdout(state.clone(), None, stdout));
     }
 
-    let stream_tee_has_recording_leg =
-        output_path.is_some() && !(use_encoder_bridge && encoder_bridge_stream_profile.is_some());
-    let (stream_runtime, slave_positions, stream_url_positions) = build_stream_runtime(
-        &stream_targets,
-        &skipped_targets,
-        stream_tee_has_recording_leg,
-    );
-    if !stream_runtime.is_empty() {
-        state.emit_event(
-            "stream.targets",
-            StreamTargetsSnapshot {
-                session_id: session_id.clone(),
-                targets: stream_runtime.clone(),
-            },
-        );
+    let initial_stream_targets_snapshot = stream_targets_snapshot_value(&stream_targets_snapshot);
+    if !initial_stream_targets_snapshot.targets.is_empty() {
+        state.emit_event("stream.targets", initial_stream_targets_snapshot);
     }
 
     if let Some(stderr) = stderr {
@@ -2286,9 +2843,14 @@ pub async fn start_session(
         let ffmpeg_audio_reply_sender = ffmpeg_audio_reply_sender;
         let ffmpeg_live_audio_session = ffmpeg_live_audio_stderr_session;
         tokio::spawn(async move {
-            let mut stream_runtime = stream_runtime;
             let mut capture_media_clock_logged = false;
             let mut first_fatal_ffmpeg_line_logged = false;
+            // This monitor owns exactly one FFmpeg process generation. A replacement
+            // process creates a fresh monitor/accumulator, while the explicit generation
+            // remains testable so future in-place restarts cannot inherit counters.
+            let process_generation = 0_u64;
+            let mut stream_health_accumulator =
+                StreamHealthAccumulator::new(&log_session_id, process_generation);
             let mut lines = BufReader::new(stderr).lines();
             let stderr_reached_eof = loop {
                 let line = match lines.next_line().await {
@@ -2377,7 +2939,9 @@ pub async fn start_session(
                 } else {
                     log_state.emit_log("warn", trimmed);
                 }
-                if let Some(stream_health) = parse_ffmpeg_stream_health(&log_session_id, trimmed) {
+                if let Some(delta) = parse_ffmpeg_stream_health(trimmed) {
+                    let stream_health =
+                        stream_health_accumulator.apply(&log_session_id, process_generation, delta);
                     let scene_revision = current_compositor_scene_revision(&log_state).await;
                     let diagnostic_stats = {
                         let mut diagnostics = log_state.diagnostics.lock().await;
@@ -2428,67 +2992,47 @@ pub async fn start_session(
                         .find(|(url, _)| *url == failure.url)
                         .map(|(_, position)| *position)
                 {
-                    let mut changed = false;
-                    if let Some(entry) = stream_runtime.get_mut(position)
-                        && entry.state != StreamTargetState::Failed
-                    {
-                        let reason = if failure.reason.is_empty() {
-                            "Stream connection failed".to_string()
-                        } else {
-                            failure.reason.clone()
-                        };
+                    let reason = if failure.reason.is_empty() {
+                        "Stream connection failed".to_string()
+                    } else {
+                        failure.reason.clone()
+                    };
+                    if let Some((label, snapshot)) = mark_stream_target_failed(
+                        &stream_targets_snapshot,
+                        position,
+                        reason.clone(),
+                    ) {
                         let _ = emit_health_event(
                             &log_state,
                             Some(&log_session_id),
                             HealthLevel::Warn,
                             "stream-target-failed",
-                            &format!("Streaming to {} stopped: {reason}", entry.label),
+                            &format!("Streaming to {label} stopped: {reason}"),
                         );
-                        entry.state = StreamTargetState::Failed;
-                        entry.message = Some(reason);
-                        changed = true;
-                    }
-                    if changed {
-                        log_state.emit_event(
-                            "stream.targets",
-                            StreamTargetsSnapshot {
-                                session_id: log_session_id.clone(),
-                                targets: stream_runtime.clone(),
-                            },
-                        );
+                        log_state.emit_event("stream.targets", snapshot);
                     }
                 }
                 if let Some(failure) = parse_tee_slave_failure(trimmed)
                     && let Some(Some(position)) = slave_positions.get(failure.slave_index).copied()
                 {
-                    let mut changed = false;
-                    if let Some(entry) = stream_runtime.get_mut(position)
-                        && entry.state != StreamTargetState::Failed
-                    {
-                        let reason = if failure.reason.is_empty() {
-                            "Stream connection failed".to_string()
-                        } else {
-                            failure.reason.clone()
-                        };
+                    let reason = if failure.reason.is_empty() {
+                        "Stream connection failed".to_string()
+                    } else {
+                        failure.reason.clone()
+                    };
+                    if let Some((label, snapshot)) = mark_stream_target_failed(
+                        &stream_targets_snapshot,
+                        position,
+                        reason.clone(),
+                    ) {
                         let _ = emit_health_event(
                             &log_state,
                             Some(&log_session_id),
                             HealthLevel::Warn,
                             "stream-target-failed",
-                            &format!("Streaming to {} stopped: {reason}", entry.label),
+                            &format!("Streaming to {label} stopped: {reason}"),
                         );
-                        entry.state = StreamTargetState::Failed;
-                        entry.message = Some(reason);
-                        changed = true;
-                    }
-                    if changed {
-                        log_state.emit_event(
-                            "stream.targets",
-                            StreamTargetsSnapshot {
-                                session_id: log_session_id.clone(),
-                                targets: stream_runtime.clone(),
-                            },
-                        );
+                        log_state.emit_event("stream.targets", snapshot);
                     }
                 }
             };
@@ -2660,6 +3204,20 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     let mut force_stop_now = false;
     let mut ffmpeg_live_audio_stop_session = None;
     let mut legacy_ffmpeg_stdin = None;
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_monitor_to_join;
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_final_mode;
+    #[cfg(target_os = "windows")]
+    let mut windows_d3d11_final_snapshot;
+    #[cfg(target_os = "windows")]
+    let mut windows_d3d11_final_snapshot_phase = WindowsD3d11FinalSnapshotPhase::default();
+    #[cfg(target_os = "windows")]
+    let windows_encoder_bridge_shutdown_order = windows_encoder_bridge_shutdown_order(
+        active.windows_d3d11_monitor.is_some(),
+        active.windows_d3d11_recovery.is_some(),
+        active.windows_d3d11_media.is_some(),
+    );
     if !active.stop_requested {
         // Send before touching FFmpeg stdin. The monitor gives an already-ready
         // process exit priority over this signal, closing the old wait -> lock
@@ -2675,6 +3233,64 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     active
         .pipeline
         .mark_finalizing("Waiting for FFmpeg to flush and close output files.");
+    #[cfg(target_os = "windows")]
+    if let Some(pump) = active.windows_d3d11_media.as_ref()
+        && let Some(error) = pump.snapshot().terminal_error
+    {
+        state.emit_log(
+            "error",
+            format!("Unified Windows D3D11 media pump stopped unexpectedly: {error}"),
+        );
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut diagnostics = state.diagnostics.lock().await;
+        if diagnostics.windows_d3d11_media.state == crate::protocol::WindowsD3d11MediaState::Live {
+            diagnostics.windows_d3d11_media.state =
+                crate::protocol::WindowsD3d11MediaState::Draining;
+        }
+        drop(diagnostics);
+
+        // Unified D3D11 writers own MF drain/flush. Join them while the media
+        // authority and diagnostics monitor are still live so their final
+        // timeout counters survive in the authoritative snapshot. A raw
+        // fallback writer must stay on the normal FFmpeg stop edge: joining it
+        // here leaves a wall-clock input idle while later async cleanup runs,
+        // stretching the final frame and lowering cadence.
+        if matches!(
+            windows_encoder_bridge_shutdown_order,
+            WindowsEncoderBridgeShutdownOrder::JoinBeforeD3d11FinalSnapshot
+        ) {
+            if let Some(stream_bridge) = active.encoder_bridge_stream.as_mut() {
+                stream_bridge.stop_and_join_writer();
+            }
+            if let Some(recording_bridge) = active.encoder_bridge.as_mut() {
+                recording_bridge.stop_and_join_writer();
+            }
+            windows_d3d11_final_snapshot_phase
+                .writers_joined()
+                .expect("Windows D3D11 writers join exactly once before final diagnostics");
+        }
+        windows_d3d11_monitor_to_join = active.windows_d3d11_monitor.take();
+        if let Some(monitor) = windows_d3d11_monitor_to_join.as_ref() {
+            // Do not await while holding `state.recording`: recovery may be
+            // waiting for this exact mutex. The stop bit prevents new monitor
+            // publications after its next boundary; the final snapshot is
+            // published only after the task has actually joined below.
+            monitor.request_stop();
+        }
+        windows_d3d11_final_mode = active
+            .windows_d3d11_recovery
+            .as_ref()
+            .map_or(WindowsD3d11MediaMode::Automatic, |recovery| recovery.mode);
+        windows_d3d11_final_snapshot = active
+            .windows_d3d11_media
+            .as_ref()
+            .and_then(|pump| pump.monitor().diagnostics_snapshot().ok());
+        if let Some(pump) = active.windows_d3d11_media.as_ref() {
+            let _ = pump.destroy_preview();
+        }
+    }
     let uses_encoder_bridge = active.encoder_bridge.is_some();
     if let Some(session) = active.ffmpeg_live_audio_session.take() {
         // Make the stop edge visible to updates that cloned the handle before
@@ -2710,6 +3326,42 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
         crate::comment_highlight::clear_comment_highlight_for_session_end(&state, &wait_session_id)
             .await;
     drop(guard);
+
+    #[cfg(target_os = "windows")]
+    if let Some(mut monitor) = windows_d3d11_monitor_to_join {
+        monitor.stop_and_join().await;
+        if windows_d3d11_final_snapshot.is_none() {
+            windows_d3d11_final_snapshot = monitor.last_snapshot();
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if matches!(
+            windows_encoder_bridge_shutdown_order,
+            WindowsEncoderBridgeShutdownOrder::JoinBeforeD3d11FinalSnapshot
+        ) {
+            windows_d3d11_final_snapshot_phase
+                .monitor_joined()
+                .expect("Windows D3D11 monitor joins after writers");
+            if let Some(snapshot) = windows_d3d11_final_snapshot {
+                publish_final_windows_d3d11_diagnostics(
+                    &state,
+                    &session_id,
+                    windows_d3d11_final_mode,
+                    snapshot,
+                    windows_d3d11_final_snapshot_phase,
+                )
+                .await;
+            }
+        }
+        // No monitor callback can resurrect a retired presenter after this
+        // exact teardown because the task is joined above.
+        teardown_current_windows_d3d11_presenter(
+            &state,
+            "windows-d3d11-recording-session-stopping",
+        )
+        .await;
+    }
 
     // Publish the authoritative user-visible stop edge before any session
     // mutex or FFmpeg I/O can wait behind an in-flight command acknowledgement.
@@ -4542,14 +5194,77 @@ async fn monitor_session(
                 native_audio_stats,
             }
         });
-    if monitored_recording.is_some() {
-        guard.take();
-    }
+    let retired_active = monitored_recording
+        .is_some()
+        .then(|| guard.take())
+        .flatten();
     drop(guard);
 
     let Some(mut monitored_recording) = monitored_recording else {
         return;
     };
+
+    #[cfg(target_os = "windows")]
+    if let Some(mut active) = retired_active {
+        let mut final_snapshot_phase = WindowsD3d11FinalSnapshotPhase::default();
+        if let Some(stream_bridge) = active.encoder_bridge_stream.as_mut() {
+            stream_bridge.stop_and_join_writer();
+        }
+        if let Some(recording_bridge) = active.encoder_bridge.as_mut() {
+            recording_bridge.stop_and_join_writer();
+        }
+        final_snapshot_phase
+            .writers_joined()
+            .expect("Windows D3D11 writers join exactly once before final diagnostics");
+        // Terminal bridge failures may be published only as the writer exits;
+        // refresh them after the bounded MF drain/flush has completed.
+        monitored_recording.recording_bridge_terminal_failure =
+            active.recording_bridge_terminal_failure();
+        monitored_recording.stream_bridge_terminal_failure =
+            active.stream_bridge_terminal_failure();
+        let mut retained_snapshot = None;
+        if let Some(mut monitor) = active.windows_d3d11_monitor.take() {
+            monitor.request_stop();
+            monitor.stop_and_join().await;
+            retained_snapshot = monitor.last_snapshot();
+        }
+        final_snapshot_phase
+            .monitor_joined()
+            .expect("Windows D3D11 monitor joins after writers");
+        let final_snapshot = active
+            .windows_d3d11_media
+            .as_ref()
+            .and_then(|pump| pump.monitor().diagnostics_snapshot().ok())
+            .or(retained_snapshot);
+        if let Some(snapshot) = final_snapshot {
+            let mode = active
+                .windows_d3d11_recovery
+                .as_ref()
+                .map_or(WindowsD3d11MediaMode::Automatic, |recovery| recovery.mode);
+            publish_final_windows_d3d11_diagnostics(
+                &state,
+                &session_id,
+                mode,
+                snapshot,
+                final_snapshot_phase,
+            )
+            .await;
+        }
+        if let Some(pump) = active.windows_d3d11_media.as_ref() {
+            let _ = pump.destroy_preview();
+        }
+        teardown_current_windows_d3d11_presenter(&state, "windows-d3d11-recording-process-exited")
+            .await;
+        // The pump must release the D3D generation before the suspended CPU
+        // preview is eligible to restore its own compositor run.
+        drop(active.windows_d3d11_media.take());
+        if let Some(suspension) = active.windows_d3d11_preview_compositor_suspension.take() {
+            suspension.restore().await;
+        }
+        drop(active);
+    }
+    #[cfg(not(target_os = "windows"))]
+    drop(retired_active);
 
     // Dropping ActiveRecording stops the native post-controls audio producer.
     // Close the caption bus now, drain the provider's final utterance within a
@@ -6937,6 +7652,7 @@ fn h264_bt709_color_tag_args() -> [String; 8] {
 fn compositor_backend_label(backend: Option<CompositorBackend>) -> &'static str {
     match backend {
         Some(CompositorBackend::Metal) => "metal",
+        Some(CompositorBackend::D3d11) => "d3d11",
         Some(CompositorBackend::Cpu) => "cpu",
         Some(CompositorBackend::CpuFallback) => "cpu-fallback",
         None => "unknown",
@@ -6952,6 +7668,24 @@ fn encode_backend_label(backend: Option<EncodeBackend>) -> &'static str {
         Some(EncodeBackend::SoftwareX264) => "software-x264",
         None => "unknown",
     }
+}
+
+fn encoder_bridge_encoded_output_backend_label(
+    video_output: EncoderBridgeVideoOutput,
+    effective_encode_backend: EncodeBackend,
+) -> String {
+    match video_output {
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => "videotoolbox",
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => "media-foundation",
+        // Raw describes the compositor-to-FFmpeg transport, not the encoder
+        // FFmpeg uses after that transport. Keep diagnostics truthful about
+        // the established software/hardware backend selected for the session.
+        EncoderBridgeVideoOutput::RawYuv420p => {
+            encode_backend_label(Some(effective_encode_backend))
+        }
+    }
+    .to_string()
 }
 
 /// Build the structured preflight report from the live diagnostics snapshot and emit it as an
@@ -7141,10 +7875,8 @@ fn tee_output_args(spec: String) -> Vec<String> {
 }
 
 /// Record-only 60fps recordings ride the encoder bridge up to 1440p (the
-/// perf-gated envelope): same compositor the preview shows, VideoToolbox
-/// session, epoch-trimmed start, and bounded stop. 4K60 (experimental) and
-/// any >30fps STREAMING profile keep the legacy path until they have their
-/// own perf evidence.
+/// perf-gated envelope): same compositor the preview shows, platform encoder,
+/// epoch-trimmed start, and bounded stop. 4K60 remains outside that envelope.
 fn record_only_bridge_60fps_eligible(params: &StartSessionParams) -> bool {
     if params.output.stream_enabled {
         return false;
@@ -7155,6 +7887,77 @@ fn record_only_bridge_60fps_eligible(params: &StartSessionParams) -> bool {
     let long_side = params.output.video.width.max(params.output.video.height);
     let short_side = params.output.video.width.min(params.output.video.height);
     long_side <= 2560 && short_side <= 1440
+}
+
+/// Livestreaming has a narrower proven 60fps bridge envelope than local
+/// recording. Every encoded role must stay at 1080p or below; this includes
+/// the local recording role because the compositor runs at the fastest role's
+/// cadence. A 4K30 recording plus a 1080p60 auxiliary stream would otherwise
+/// make the compositor render the 4K surface at 60fps.
+fn streaming_bridge_60fps_eligible(params: &StartSessionParams) -> bool {
+    if !params.output.stream_enabled {
+        return false;
+    }
+    let Ok(plan) = resolve_provider_stream_output_plan(params) else {
+        return false;
+    };
+    let mut profiles = plan
+        .targets
+        .into_iter()
+        .map(|target| target.video)
+        .collect::<Vec<_>>();
+    if params.output.record_enabled {
+        profiles.push(params.output.video.clone());
+    }
+    profiles.into_iter().all(|profile| {
+        profile.fps <= 60
+            && profile.width.max(profile.height) <= 1920
+            && profile.width.min(profile.height) <= 1080
+    })
+}
+
+fn requested_compositor_bridge_fps(params: &StartSessionParams) -> u32 {
+    let stream_fps = if params.output.stream_enabled {
+        resolve_provider_stream_output_plan(params)
+            .ok()
+            .and_then(|plan| {
+                plan.targets
+                    .into_iter()
+                    .map(|target| target.video.fps)
+                    .max()
+            })
+            .unwrap_or_default()
+    } else {
+        0
+    };
+    params.output.video.fps.max(stream_fps)
+}
+
+/// The Windows GPU session owns DXGI acquisition directly and therefore must
+/// not be gated on a legacy preview-screen frame store that it never consumes.
+/// This is deliberately only a preflight candidate check: device discovery,
+/// camera availability, encoder probing, and the generation-scoped startup
+/// evidence remain authoritative later in `select_windows_d3d11_session`.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_screen_preflight_candidate(
+    params: &StartSessionParams,
+    mode: WindowsD3d11MediaMode,
+    requested_video_output: EncoderBridgeVideoOutput,
+) -> bool {
+    mode != WindowsD3d11MediaMode::Disabled
+        && matches!(
+            requested_video_output,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        )
+        && params.scene.is_none()
+        && !params.sources.test_pattern
+        && params.sources.window_id.is_none()
+        && params
+            .sources
+            .screen_id
+            .as_deref()
+            .is_some_and(|screen_id| parse_windows_dxgi_output_index(screen_id).is_some())
+        && windows_d3d11_display_camera_layout(&params.layout.layout_preset).is_some()
 }
 
 async fn should_use_compositor_encoder_bridge(
@@ -7172,12 +7975,13 @@ async fn should_use_compositor_encoder_bridge(
         // Explicit developer env override — the only sanctioned legacy escape hatch.
         return Ok(false);
     }
-    if params.output.video.fps > 30 && !record_only_bridge_60fps_eligible(params) {
-        // The bridge cap: >30fps rides the legacy path EXCEPT record-only
-        // sessions up to 1440p60, which now get the same WYSIWYG compositor +
-        // VideoToolbox + epoch-trim pipeline as 30fps (recording-quality plan
-        // Q2). Streaming >30fps and 4K60 keep the legacy path; not silent —
-        // the session log records it below at the call site.
+    let requested_fps = requested_compositor_bridge_fps(params);
+    if requested_fps > 30
+        && !(record_only_bridge_60fps_eligible(params) || streaming_bridge_60fps_eligible(params))
+    {
+        // The bridge cap: record-only runs to 1440p60; livestreaming runs to
+        // 1080p60 across every encoded role. Profiles outside those measured
+        // envelopes retain the legacy path, and the session log says so.
         return Ok(false);
     }
     let scene = params.scene.clone().unwrap_or_else(|| {
@@ -7190,7 +7994,25 @@ async fn should_use_compositor_encoder_bridge(
         })
     });
     let screen_image_usable = stream_screen_image_usable(active_screen);
-    if wait_for_recording_encoder_bridge_sources_ready(state, &scene, screen_image_usable).await {
+    #[cfg(target_os = "windows")]
+    let d3d11_screen_source_authoritative = windows_d3d11_screen_preflight_candidate(
+        params,
+        WindowsD3d11MediaMode::from_process_env().map_err(anyhow::Error::msg)?,
+        recording_encoder_bridge_video_output(
+            params.output.record_enabled,
+            params.output.stream_enabled,
+        ),
+    );
+    #[cfg(not(target_os = "windows"))]
+    let d3d11_screen_source_authoritative = false;
+    if wait_for_recording_encoder_bridge_sources_ready(
+        state,
+        &scene,
+        screen_image_usable,
+        d3d11_screen_source_authoritative,
+    )
+    .await
+    {
         return Ok(true);
     }
     // No silent downgrade (master plan, locked): falling back to the legacy FFmpeg
@@ -7202,10 +8024,25 @@ async fn should_use_compositor_encoder_bridge(
     let has_screen_frame = !screen_preview_is_failed(&screen_status)
         && preview_screen_latest_frame_info(state).await.is_some();
     let mut missing = Vec::new();
-    if !has_screen_frame {
+    let visible_camera_required = scene
+        .sources
+        .iter()
+        .any(|source| source.visible && source.kind == SceneSourceKind::Camera);
+    let visible_screen_required = scene.sources.iter().any(|source| {
+        source.visible
+            && matches!(
+                source.kind,
+                SceneSourceKind::Screen | SceneSourceKind::Window
+            )
+    });
+    if visible_screen_required
+        && !screen_image_usable
+        && !has_screen_frame
+        && !d3d11_screen_source_authoritative
+    {
         missing.push("screen");
     }
-    if !has_camera_frame {
+    if visible_camera_required && !has_camera_frame {
         missing.push("camera");
     }
     let detail = if screen_preview_is_failed(&screen_status) {
@@ -7245,6 +8082,7 @@ async fn wait_for_recording_encoder_bridge_sources_ready(
     state: &AppState,
     scene: &Scene,
     screen_image_usable: bool,
+    d3d11_screen_source_authoritative: bool,
 ) -> bool {
     let deadline = Instant::now() + RECORDING_ENCODER_BRIDGE_SOURCE_READY_TIMEOUT;
     loop {
@@ -7260,6 +8098,7 @@ async fn wait_for_recording_encoder_bridge_sources_ready(
             screen_image_usable,
             has_camera_frame,
             has_screen_frame,
+            d3d11_screen_source_authoritative,
         ) {
             return true;
         }
@@ -7314,18 +8153,31 @@ fn recording_encoder_bridge_video_output(
 
 #[derive(Debug, Clone)]
 struct WindowsEncodedBridgeDecision {
+    capability_key: String,
     requested: EncoderBridgeVideoOutput,
     effective: EncoderBridgeVideoOutput,
+    effective_encode_backend: EncodeBackend,
+    probe_state: StreamOutputTopologyProbeState,
     encoder_identity: Option<String>,
     input_subtype: Option<String>,
     fallback_reason: Option<String>,
 }
 
 impl WindowsEncodedBridgeDecision {
-    fn unchanged(output: EncoderBridgeVideoOutput) -> Self {
+    fn unchanged(
+        capability_key: String,
+        output: EncoderBridgeVideoOutput,
+        fallback_encode_backend: EncodeBackend,
+    ) -> Self {
         Self {
+            capability_key,
             requested: output,
             effective: output,
+            effective_encode_backend: encode_backend_for_bridge_output(
+                output,
+                fallback_encode_backend,
+            ),
+            probe_state: StreamOutputTopologyProbeState::NotRequired,
             encoder_identity: None,
             input_subtype: None,
             fallback_reason: None,
@@ -7333,110 +8185,676 @@ impl WindowsEncodedBridgeDecision {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncoderOutputTopologyProbeRole {
+    Shared,
+    Recording,
+    Stream,
+}
+
+impl EncoderOutputTopologyProbeRole {
+    const fn capability_label(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Recording => "split-recording",
+            Self::Stream => "split-stream",
+        }
+    }
+
+    #[cfg(any(test, target_os = "windows"))]
+    const fn fallback_label(self) -> &'static str {
+        match self {
+            Self::Shared => "shared output",
+            Self::Recording => "recording output",
+            Self::Stream => "stream output",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EncoderOutputTopologyProbeProfile {
+    role: EncoderOutputTopologyProbeRole,
+    video: VideoSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EncoderOutputTopologyPlan {
+    output_roles: Vec<StreamOutputTopologyRole>,
+    profiles: Vec<EncoderOutputTopologyProbeProfile>,
+}
+
+impl EncoderOutputTopologyPlan {
+    fn shared(video: VideoSettings) -> Self {
+        Self {
+            output_roles: vec![StreamOutputTopologyRole::Shared],
+            profiles: vec![EncoderOutputTopologyProbeProfile {
+                role: EncoderOutputTopologyProbeRole::Shared,
+                video,
+            }],
+        }
+    }
+
+    fn split(recording: VideoSettings, stream: VideoSettings) -> Self {
+        Self {
+            output_roles: vec![
+                StreamOutputTopologyRole::Recording,
+                StreamOutputTopologyRole::Stream,
+            ],
+            profiles: vec![
+                EncoderOutputTopologyProbeProfile {
+                    role: EncoderOutputTopologyProbeRole::Recording,
+                    video: recording,
+                },
+                EncoderOutputTopologyProbeProfile {
+                    role: EncoderOutputTopologyProbeRole::Stream,
+                    video: stream,
+                },
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MediaFoundationTopologyProbe {
+    #[cfg(any(test, target_os = "windows"))]
+    Passed {
+        encoder_identity: String,
+        input_subtype: String,
+    },
+    #[cfg(any(test, target_os = "windows"))]
+    Rejected { reason: String },
+    #[cfg(any(test, not(target_os = "windows")))]
+    Unsupported { reason: String },
+}
+
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MediaFoundationProfileProbe {
+    Passed {
+        encoder_identity: String,
+        input_subtype: String,
+    },
+    Rejected {
+        reason: String,
+    },
+}
+
+const STREAM_OUTPUT_TOPOLOGY_CAPABILITY_KEY_VERSION: &str = "stream-output-topology-v1";
+const STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES: usize = 480;
+
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct WindowsGraphicsAdapterDriverIdentity {
+    adapter_luid: u64,
+    vendor_id: u32,
+    device_id: u32,
+    subsystem_id: u32,
+    revision: u32,
+    driver_version: u64,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_graphics_adapter_driver_identity_material(
+    mut adapters: Vec<WindowsGraphicsAdapterDriverIdentity>,
+) -> Option<String> {
+    if adapters.is_empty() {
+        return None;
+    }
+    adapters.sort_unstable();
+    Some(
+        adapters
+            .into_iter()
+            .map(|adapter| {
+                format!(
+                    "luid={:016x};pci={:04x}:{:04x}:{:08x}:{:02x};d3d11-driver={:016x}",
+                    adapter.adapter_luid,
+                    adapter.vendor_id,
+                    adapter.device_id,
+                    adapter.subsystem_id,
+                    adapter.revision,
+                    adapter.driver_version,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|"),
+    )
+}
+
+/// Stable material for invalidating Windows encoder capability verdicts when
+/// the hardware adapter or its user-mode D3D11 driver changes. Failure is
+/// deliberately non-cacheable: reusing a verdict under an unknown driver is
+/// less safe than probing again.
 #[cfg(target_os = "windows")]
-async fn resolve_windows_encoded_bridge_decision(
-    ffmpeg_path: &str,
-    params: &StartSessionParams,
-    requested: EncoderBridgeVideoOutput,
-) -> Result<WindowsEncodedBridgeDecision> {
-    if !matches!(
-        requested,
-        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
-    ) {
-        return Ok(WindowsEncodedBridgeDecision::unchanged(requested));
-    }
-    let mut profiles = vec![params.output.video.clone()];
-    if params.output.record_enabled && params.output.stream_enabled {
-        for profile in companion_stream_outputs_for_recording(params, &params.output.video)? {
-            if !profiles
-                .iter()
-                .any(|existing| same_video_profile(existing, &profile))
-            {
-                profiles.push(profile);
-            }
-        }
-    }
-    let split = profiles.len() > 1;
-    let mut identity = None;
-    let mut input_subtype = None;
-    for (index, profile) in profiles.iter().enumerate() {
-        let topology = if split {
-            if index == 0 {
-                "split-recording"
-            } else {
-                "split-stream"
-            }
-        } else {
-            "shared"
-        };
-        match probe_windows_native_encoded_bridge(ffmpeg_path, profile, topology).await {
-            Ok(probe) => {
-                identity.get_or_insert(probe.encoder_identity);
-                input_subtype.get_or_insert(probe.input_subtype.label().to_string());
-            }
-            Err(error) if split => {
-                bail!(
-                    "Split encoded output requires every Media Foundation encoder probe to pass; {} failed: {error}",
-                    profile_label(profile)
-                );
-            }
-            Err(error) => {
-                return Ok(WindowsEncodedBridgeDecision {
-                    requested,
-                    effective: EncoderBridgeVideoOutput::RawYuv420p,
-                    encoder_identity: None,
-                    input_subtype: None,
-                    fallback_reason: Some(error.to_string()),
-                });
-            }
-        }
-    }
-    Ok(WindowsEncodedBridgeDecision {
-        requested,
-        effective: requested,
-        encoder_identity: identity,
-        input_subtype,
-        fallback_reason: None,
+fn graphics_adapter_driver_identity() -> String {
+    query_windows_graphics_adapter_driver_identity().unwrap_or_else(|reason| {
+        format!(
+            "windows-adapter-driver-unavailable:{reason}:{}",
+            Uuid::new_v4()
+        )
     })
 }
 
 #[cfg(not(target_os = "windows"))]
-async fn resolve_windows_encoded_bridge_decision(
-    _ffmpeg_path: &str,
-    _params: &StartSessionParams,
-    requested: EncoderBridgeVideoOutput,
-) -> Result<WindowsEncodedBridgeDecision> {
-    if matches!(
-        requested,
-        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
-    ) {
-        Ok(WindowsEncodedBridgeDecision {
-            requested,
-            effective: EncoderBridgeVideoOutput::RawYuv420p,
-            encoder_identity: None,
-            input_subtype: None,
-            fallback_reason: Some(
-                "Media Foundation encoded output is available only on Windows".to_string(),
-            ),
-        })
-    } else {
-        Ok(WindowsEncodedBridgeDecision::unchanged(requested))
-    }
+fn graphics_adapter_driver_identity() -> String {
+    format!(
+        "platform={};windows-adapter-driver=not-applicable",
+        std::env::consts::OS
+    )
 }
 
 #[cfg(target_os = "windows")]
+fn query_windows_graphics_adapter_driver_identity() -> Result<String, String> {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIFactory1,
+    };
+
+    // IID_ID3D11Device from d3d11.h. CheckInterfaceSupport only needs this
+    // GUID, so Plan 039 does not widen the windows crate feature set.
+    const IID_ID3D11_DEVICE: windows::core::GUID =
+        windows::core::GUID::from_u128(0xdb6f6ddb_ac77_4e88_8253_819df9bbf140);
+
+    let windows_error_code =
+        |error: windows::core::Error| format!("hresult-{:08x}", error.code().0 as u32);
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(windows_error_code)?;
+    let mut identities = Vec::new();
+    let mut adapter_index = 0;
+    loop {
+        let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
+            Ok(adapter) => adapter,
+            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(error) => return Err(windows_error_code(error)),
+        };
+        adapter_index += 1;
+
+        let description = unsafe { adapter.GetDesc1() }.map_err(windows_error_code)?;
+        if description.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+            continue;
+        }
+        let driver_version = unsafe { adapter.CheckInterfaceSupport(&IID_ID3D11_DEVICE) }
+            .map_err(windows_error_code)?;
+        identities.push(WindowsGraphicsAdapterDriverIdentity {
+            adapter_luid: (u64::from(description.AdapterLuid.HighPart as u32) << 32)
+                | u64::from(description.AdapterLuid.LowPart),
+            vendor_id: description.VendorId,
+            device_id: description.DeviceId,
+            subsystem_id: description.SubSysId,
+            revision: description.Revision,
+            driver_version: driver_version as u64,
+        });
+    }
+    windows_graphics_adapter_driver_identity_material(identities)
+        .ok_or_else(|| "no-hardware-dxgi-adapter".to_string())
+}
+
+fn normalize_stream_output_topology_probe_params(
+    mut params: StreamOutputTopologyProbeParams,
+) -> Result<StreamOutputTopologyProbeParams> {
+    validate_video_settings(&params.stream_profile)?;
+    validate_named_video_profile(&params.stream_profile)?;
+    if let Some(recording) = params.recording_profile.as_ref() {
+        validate_video_settings(recording)?;
+        validate_named_video_profile(recording)?;
+    }
+
+    params.ffmpeg_path.take_if(|path| path.trim().is_empty());
+    params.output_roles.sort_unstable();
+    if params.output_roles.is_empty() {
+        bail!("Output topology probe requires an output role.");
+    }
+    if params
+        .output_roles
+        .windows(2)
+        .any(|roles| roles[0] == roles[1])
+    {
+        bail!("Output topology probe roles must be unique.");
+    }
+
+    match params.output_roles.as_slice() {
+        [StreamOutputTopologyRole::Shared] => {
+            if let Some(recording) = params.recording_profile.as_ref()
+                && !same_video_profile(recording, &params.stream_profile)
+            {
+                bail!(
+                    "A shared output role requires matching recording and stream profiles; use recording and stream roles for a split topology."
+                );
+            }
+        }
+        [
+            StreamOutputTopologyRole::Recording,
+            StreamOutputTopologyRole::Stream,
+        ] => {
+            if params.recording_profile.is_none() {
+                bail!("A split output topology requires a recording profile.");
+            }
+        }
+        _ => {
+            bail!(
+                "Stream output topology roles must be either shared or the recording and stream pair."
+            );
+        }
+    }
+
+    Ok(params)
+}
+
+fn encoder_output_topology_plan_from_probe(
+    params: &StreamOutputTopologyProbeParams,
+) -> EncoderOutputTopologyPlan {
+    if params.output_roles == [StreamOutputTopologyRole::Shared] {
+        EncoderOutputTopologyPlan::shared(params.stream_profile.clone())
+    } else {
+        EncoderOutputTopologyPlan::split(
+            params
+                .recording_profile
+                .clone()
+                .expect("validated split topology has a recording profile"),
+            params.stream_profile.clone(),
+        )
+    }
+}
+
+fn encoder_output_topology_plan_from_session(
+    params: &StartSessionParams,
+) -> Result<EncoderOutputTopologyPlan> {
+    match (params.output.record_enabled, params.output.stream_enabled) {
+        (true, true) => {
+            let mut companion_outputs =
+                companion_stream_outputs_for_recording(params, &params.output.video)?;
+            if companion_outputs.len() > 1 {
+                bail!(
+                    "Mixed stream output currently supports one companion output profile beside the recording profile."
+                );
+            }
+            if let Some(stream) = companion_outputs.pop() {
+                return Ok(EncoderOutputTopologyPlan::split(
+                    params.output.video.clone(),
+                    stream,
+                ));
+            }
+            if caption_leg_plan(params).force_same_profile_split {
+                return Ok(EncoderOutputTopologyPlan::split(
+                    params.output.video.clone(),
+                    params.output.video.clone(),
+                ));
+            }
+            Ok(EncoderOutputTopologyPlan::shared(
+                params.output.video.clone(),
+            ))
+        }
+        (true, false) => Ok(EncoderOutputTopologyPlan::shared(
+            params.output.video.clone(),
+        )),
+        (false, true) => Ok(EncoderOutputTopologyPlan::shared(
+            resolve_stream_output_video(params)?,
+        )),
+        (false, false) => bail!("Output topology requires recording or streaming to be enabled."),
+    }
+}
+
+fn encode_backend_for_bridge_output(
+    output: EncoderBridgeVideoOutput,
+    fallback_encode_backend: EncodeBackend,
+) -> EncodeBackend {
+    match output {
+        EncoderBridgeVideoOutput::RawYuv420p => fallback_encode_backend,
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => EncodeBackend::HardwareVideotoolbox,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
+            EncodeBackend::HardwareMediaFoundation
+        }
+    }
+}
+
+fn stream_output_bridge(output: EncoderBridgeVideoOutput) -> StreamOutputBridge {
+    match output {
+        EncoderBridgeVideoOutput::RawYuv420p => StreamOutputBridge::RawYuv420p,
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB => {
+            StreamOutputBridge::VideoToolboxH264AnnexB
+        }
+        EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => {
+            StreamOutputBridge::VideoToolboxH264MpegTs
+        }
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
+            StreamOutputBridge::WindowsMediaFoundationH264MpegTs
+        }
+    }
+}
+
+fn bounded_stream_output_topology_fallback_reason(reason: &str) -> String {
+    let cleaned = reason
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleaned = if cleaned.is_empty() {
+        "Media Foundation output topology probe was rejected".to_string()
+    } else {
+        cleaned
+    };
+    if cleaned.len() <= STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES {
+        return cleaned;
+    }
+
+    const SUFFIX: &str = "...";
+    let mut end = STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES - SUFFIX.len();
+    while !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", cleaned[..end].trim_end(), SUFFIX)
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn summarize_media_foundation_topology_probes(
+    plan: &EncoderOutputTopologyPlan,
+    probes: &[MediaFoundationProfileProbe],
+) -> MediaFoundationTopologyProbe {
+    let mut identity = None;
+    let mut input_subtype = None;
+    for (index, profile) in plan.profiles.iter().enumerate() {
+        match probes.get(index) {
+            Some(MediaFoundationProfileProbe::Passed {
+                encoder_identity,
+                input_subtype: probe_input_subtype,
+            }) => {
+                identity.get_or_insert_with(|| encoder_identity.clone());
+                input_subtype.get_or_insert_with(|| probe_input_subtype.clone());
+            }
+            Some(MediaFoundationProfileProbe::Rejected { reason }) => {
+                return MediaFoundationTopologyProbe::Rejected {
+                    reason: format!(
+                        "Media Foundation {} probe rejected {}x{}@{} {}kbps: {reason}",
+                        profile.role.fallback_label(),
+                        profile.video.width,
+                        profile.video.height,
+                        profile.video.fps,
+                        profile.video.bitrate_kbps,
+                    ),
+                };
+            }
+            None => {
+                return MediaFoundationTopologyProbe::Rejected {
+                    reason: format!(
+                        "Media Foundation {} probe did not produce a verdict",
+                        profile.role.fallback_label(),
+                    ),
+                };
+            }
+        }
+    }
+    MediaFoundationTopologyProbe::Passed {
+        encoder_identity: identity.unwrap_or_else(|| "<unknown>".to_string()),
+        input_subtype: input_subtype.unwrap_or_else(|| "<unknown>".to_string()),
+    }
+}
+
+fn output_topology_capability_key(
+    ffmpeg_path: &str,
+    plan: &EncoderOutputTopologyPlan,
+    requested: EncoderBridgeVideoOutput,
+    graphics_adapter_driver_identity: &str,
+) -> String {
+    let path = PathBuf::from(ffmpeg_path);
+    let canonical_path = std::fs::canonicalize(&path).unwrap_or(path);
+    let metadata = std::fs::metadata(&canonical_path).ok();
+    let modified_ms = metadata.as_ref().and_then(|metadata| {
+        metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis())
+    });
+    let mut material = format!(
+        "version={STREAM_OUTPUT_TOPOLOGY_CAPABILITY_KEY_VERSION}\nos={}\ngraphics_adapter_driver={graphics_adapter_driver_identity}\nffmpeg={}\nffmpeg_len={:?}\nffmpeg_modified_ms={modified_ms:?}\nrequested={}\n",
+        std::env::consts::OS,
+        canonical_path.to_string_lossy(),
+        metadata.as_ref().map(std::fs::Metadata::len),
+        encoder_bridge_video_output_label(requested),
+    );
+    for role in &plan.output_roles {
+        material.push_str(&format!("output_role={role:?}\n"));
+    }
+    for profile in &plan.profiles {
+        material.push_str(&format!(
+            "profile_role={}\nprofile={}x{}@{}:{}\n",
+            profile.role.capability_label(),
+            profile.video.width,
+            profile.video.height,
+            profile.video.fps,
+            profile.video.bitrate_kbps,
+        ));
+    }
+    let digest = Sha256::digest(material.as_bytes());
+    format!("{STREAM_OUTPUT_TOPOLOGY_CAPABILITY_KEY_VERSION}:{digest:x}")
+}
+
+fn select_windows_encoded_bridge_decision(
+    requested: EncoderBridgeVideoOutput,
+    capability_key: String,
+    probe: Option<MediaFoundationTopologyProbe>,
+    fallback_encode_backend: EncodeBackend,
+) -> WindowsEncodedBridgeDecision {
+    if !matches!(
+        requested,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) {
+        return WindowsEncodedBridgeDecision::unchanged(
+            capability_key,
+            requested,
+            fallback_encode_backend,
+        );
+    }
+
+    match probe {
+        #[cfg(any(test, target_os = "windows"))]
+        Some(MediaFoundationTopologyProbe::Passed {
+            encoder_identity,
+            input_subtype,
+        }) => WindowsEncodedBridgeDecision {
+            capability_key,
+            requested,
+            effective: requested,
+            effective_encode_backend: EncodeBackend::HardwareMediaFoundation,
+            probe_state: StreamOutputTopologyProbeState::Passed,
+            encoder_identity: Some(encoder_identity),
+            input_subtype: Some(input_subtype),
+            fallback_reason: None,
+        },
+        #[cfg(any(test, target_os = "windows"))]
+        Some(MediaFoundationTopologyProbe::Rejected { reason }) => WindowsEncodedBridgeDecision {
+            capability_key,
+            requested,
+            effective: EncoderBridgeVideoOutput::RawYuv420p,
+            effective_encode_backend: fallback_encode_backend,
+            probe_state: StreamOutputTopologyProbeState::Rejected,
+            encoder_identity: None,
+            input_subtype: None,
+            fallback_reason: Some(bounded_stream_output_topology_fallback_reason(&reason)),
+        },
+        #[cfg(any(test, not(target_os = "windows")))]
+        Some(MediaFoundationTopologyProbe::Unsupported { reason }) => {
+            WindowsEncodedBridgeDecision {
+                capability_key,
+                requested,
+                effective: EncoderBridgeVideoOutput::RawYuv420p,
+                effective_encode_backend: fallback_encode_backend,
+                probe_state: StreamOutputTopologyProbeState::Unsupported,
+                encoder_identity: None,
+                input_subtype: None,
+                fallback_reason: Some(bounded_stream_output_topology_fallback_reason(&reason)),
+            }
+        }
+        None => WindowsEncodedBridgeDecision {
+            capability_key,
+            requested,
+            effective: EncoderBridgeVideoOutput::RawYuv420p,
+            effective_encode_backend: fallback_encode_backend,
+            probe_state: StreamOutputTopologyProbeState::Rejected,
+            encoder_identity: None,
+            input_subtype: None,
+            fallback_reason: Some(bounded_stream_output_topology_fallback_reason(
+                "Media Foundation output topology probe did not produce a verdict",
+            )),
+        },
+    }
+}
+
+async fn resolve_windows_encoded_bridge_decision(
+    ffmpeg_path: &str,
+    plan: &EncoderOutputTopologyPlan,
+    requested: EncoderBridgeVideoOutput,
+) -> WindowsEncodedBridgeDecision {
+    let graphics_adapter_driver_identity = graphics_adapter_driver_identity();
+    let capability_key = output_topology_capability_key(
+        ffmpeg_path,
+        plan,
+        requested,
+        &graphics_adapter_driver_identity,
+    );
+    let probe = if matches!(
+        requested,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) {
+        Some(
+            probe_windows_media_foundation_topology(
+                ffmpeg_path,
+                plan,
+                &graphics_adapter_driver_identity,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    select_windows_encoded_bridge_decision(
+        requested,
+        capability_key,
+        probe,
+        default_h264_encode_backend(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+async fn probe_windows_media_foundation_topology(
+    ffmpeg_path: &str,
+    plan: &EncoderOutputTopologyPlan,
+    graphics_adapter_driver_identity: &str,
+) -> MediaFoundationTopologyProbe {
+    let mut probes = Vec::with_capacity(plan.profiles.len());
+    for profile in &plan.profiles {
+        match probe_windows_native_encoded_bridge(
+            ffmpeg_path,
+            &profile.video,
+            profile.role.capability_label(),
+            graphics_adapter_driver_identity,
+        )
+        .await
+        {
+            Ok(probe) => {
+                probes.push(MediaFoundationProfileProbe::Passed {
+                    encoder_identity: probe.encoder_identity,
+                    input_subtype: probe.input_subtype.label().to_string(),
+                });
+            }
+            Err(error) => {
+                probes.push(MediaFoundationProfileProbe::Rejected {
+                    reason: error.to_string(),
+                });
+                break;
+            }
+        }
+    }
+    summarize_media_foundation_topology_probes(plan, &probes)
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn probe_windows_media_foundation_topology(
+    _ffmpeg_path: &str,
+    _plan: &EncoderOutputTopologyPlan,
+    _graphics_adapter_driver_identity: &str,
+) -> MediaFoundationTopologyProbe {
+    MediaFoundationTopologyProbe::Unsupported {
+        reason: "Media Foundation encoded output is available only on Windows".to_string(),
+    }
+}
+
+pub async fn probe_stream_output_topology(
+    params: StreamOutputTopologyProbeParams,
+) -> Result<StreamOutputTopologyProbeResult> {
+    let params = normalize_stream_output_topology_probe_params(params)?;
+    let plan = encoder_output_topology_plan_from_probe(&params);
+    let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path.clone());
+    let requested = recording_encoder_bridge_video_output(params.recording_profile.is_some(), true);
+    let decision = resolve_windows_encoded_bridge_decision(&ffmpeg_path, &plan, requested).await;
+
+    Ok(StreamOutputTopologyProbeResult {
+        capability_key: decision.capability_key,
+        stream_profile: params.stream_profile,
+        recording_profile: params.recording_profile,
+        output_roles: plan.output_roles,
+        requested_bridge_output: stream_output_bridge(decision.requested),
+        effective_bridge_output: stream_output_bridge(decision.effective),
+        effective_encode_backend: decision.effective_encode_backend,
+        probe_state: decision.probe_state,
+        fallback_reason: decision.fallback_reason,
+    })
+}
+
+#[cfg(any(test, target_os = "windows"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WindowsNativeEncodedProbeKey {
+    graphics_adapter_driver_identity: String,
     ffmpeg_path: PathBuf,
     ffmpeg_len: Option<u64>,
     ffmpeg_modified_ms: Option<u128>,
     encoder_identity: String,
-    input_subtype: MediaFoundationInputSubtype,
+    input_subtype: String,
     width: u32,
     height: u32,
     fps: u32,
     bitrate_kbps: u32,
     topology: &'static str,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_native_encoded_probe_key(
+    ffmpeg_path: &str,
+    graphics_adapter_driver_identity: &str,
+    encoder_identity: &str,
+    input_subtype: &str,
+    video: &VideoSettings,
+    topology: &'static str,
+) -> WindowsNativeEncodedProbeKey {
+    let path = PathBuf::from(ffmpeg_path);
+    let metadata = std::fs::metadata(&path).ok();
+    WindowsNativeEncodedProbeKey {
+        graphics_adapter_driver_identity: graphics_adapter_driver_identity.to_string(),
+        ffmpeg_path: std::fs::canonicalize(&path).unwrap_or(path),
+        ffmpeg_len: metadata.as_ref().map(std::fs::Metadata::len),
+        ffmpeg_modified_ms: metadata.and_then(|metadata| {
+            metadata
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_millis())
+        }),
+        encoder_identity: encoder_identity.to_string(),
+        input_subtype: input_subtype.to_string(),
+        width: video.width,
+        height: video.height,
+        fps: video.fps,
+        bitrate_kbps: video.bitrate_kbps,
+        topology,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -7449,6 +8867,7 @@ async fn probe_windows_native_encoded_bridge(
     ffmpeg_path: &str,
     video: &VideoSettings,
     topology: &'static str,
+    graphics_adapter_driver_identity: &str,
 ) -> Result<crate::windows_media_foundation_encoder::MediaFoundationProbe> {
     let config = MediaFoundationEncoderConfig {
         width: video.width,
@@ -7460,27 +8879,14 @@ async fn probe_windows_native_encoded_bridge(
     let probe = tokio::task::spawn_blocking(move || probe_hardware_encoder(config))
         .await
         .context("Media Foundation hardware probe thread panicked")??;
-    let path = PathBuf::from(ffmpeg_path);
-    let metadata = std::fs::metadata(&path).ok();
-    let key = WindowsNativeEncodedProbeKey {
-        ffmpeg_path: std::fs::canonicalize(&path).unwrap_or(path),
-        ffmpeg_len: metadata.as_ref().map(std::fs::Metadata::len),
-        ffmpeg_modified_ms: metadata.and_then(|metadata| {
-            metadata
-                .modified()
-                .ok()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|duration| duration.as_millis())
-        }),
-        encoder_identity: probe.encoder_identity.clone(),
-        input_subtype: probe.input_subtype,
-        width: video.width,
-        height: video.height,
-        fps: video.fps,
-        bitrate_kbps: video.bitrate_kbps,
+    let key = windows_native_encoded_probe_key(
+        ffmpeg_path,
+        graphics_adapter_driver_identity,
+        &probe.encoder_identity,
+        probe.input_subtype.label(),
+        video,
         topology,
-    };
+    );
     if let Some(cached) = WINDOWS_NATIVE_ENCODED_PROBE_CACHE
         .get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
         .lock()
@@ -7583,14 +8989,6 @@ fn ensure_probe_status(status: ExitStatus, stderr: &[u8]) -> Result<()> {
     )
 }
 
-#[cfg(target_os = "windows")]
-fn profile_label(video: &VideoSettings) -> String {
-    format!(
-        "{}x{}@{} {}kbps",
-        video.width, video.height, video.fps, video.bitrate_kbps
-    )
-}
-
 fn select_encoder_bridge_video_output(
     setting: Option<&str>,
     record_enabled: bool,
@@ -7653,12 +9051,1263 @@ fn default_encoder_bridge_video_output_for_outputs(
     default_encoder_bridge_video_output()
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_display_camera_layout(layout: &LayoutPreset) -> Option<bool> {
+    match layout {
+        LayoutPreset::ScreenOnly | LayoutPreset::VerticalScreenOnly => Some(false),
+        LayoutPreset::ScreenCamera
+        | LayoutPreset::SideBySide
+        | LayoutPreset::VerticalCameraTop
+        | LayoutPreset::VerticalCameraBottom
+        | LayoutPreset::VerticalSplit
+        | LayoutPreset::VerticalScreenCamera => Some(true),
+        LayoutPreset::CameraOnly | LayoutPreset::VerticalCameraOnly => None,
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_fallback_diagnostics(
+    mode: WindowsD3d11MediaMode,
+    reason: impl Into<String>,
+) -> crate::protocol::WindowsD3d11MediaDiagnostics {
+    crate::protocol::WindowsD3d11MediaDiagnostics {
+        state: crate::protocol::WindowsD3d11MediaState::Fallback,
+        requested: mode != WindowsD3d11MediaMode::Disabled,
+        required: mode.is_required(),
+        capture_backend: Some(crate::protocol::WindowsD3d11CaptureBackend::LegacyFfmpeg),
+        cursor_mode: Some(crate::protocol::WindowsD3d11CursorMode::DisabledFallback),
+        fallback_reason: Some(reason.into()),
+        ..Default::default()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_d3d11_live_diagnostics(
+    mode: WindowsD3d11MediaMode,
+    snapshot: &WindowsD3d11SessionDiagnosticsSnapshot,
+    polls: crate::protocol::PreviewImagePollCounts,
+) -> crate::protocol::WindowsD3d11MediaDiagnostics {
+    use crate::windows_d3d11_capture::{
+        WindowsD3d11CaptureBackend as CaptureBackend, WindowsD3d11CursorMode as CursorMode,
+    };
+
+    let capture = snapshot.device.runtime.capture;
+    let compositor = snapshot.device.runtime.compositor;
+    let presenter = snapshot
+        .presenter
+        .as_ref()
+        .map(|status| &status.diagnostics);
+    let terminal_error = snapshot.pump.terminal_error.clone();
+    let capture_fallback = capture
+        .and_then(|diagnostics| diagnostics.fallback_reason)
+        .map(|reason| reason.as_str().to_string());
+    let state = if terminal_error.is_some() || snapshot.device.device_loss_code.is_some() {
+        crate::protocol::WindowsD3d11MediaState::Failed
+    } else {
+        crate::protocol::WindowsD3d11MediaState::Live
+    };
+    let capture_backend = capture.and_then(|diagnostics| {
+        diagnostics.capture_backend.map(|backend| match backend {
+            CaptureBackend::DesktopDuplication => {
+                crate::protocol::WindowsD3d11CaptureBackend::DesktopDuplication
+            }
+            CaptureBackend::WindowsGraphicsCaptureMonitor => {
+                crate::protocol::WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor
+            }
+        })
+    });
+    let cursor_mode = capture.and_then(|diagnostics| {
+        diagnostics.cursor_mode.map(|mode| match mode {
+            CursorMode::Embedded => crate::protocol::WindowsD3d11CursorMode::Embedded,
+            CursorMode::Separate => crate::protocol::WindowsD3d11CursorMode::Separate,
+            CursorMode::ExcludedWgc => crate::protocol::WindowsD3d11CursorMode::ExcludedWgc,
+            CursorMode::DisabledFallback => {
+                crate::protocol::WindowsD3d11CursorMode::DisabledFallback
+            }
+        })
+    });
+    let preview_drops = presenter.map_or(0, |presenter| {
+        presenter
+            .latest_wins_drops
+            .saturating_add(presenter.hidden_drops)
+            .saturating_add(presenter.busy_drops)
+            .saturating_add(presenter.stale_frame_drops)
+    });
+    let pump = snapshot.device.pump;
+    crate::protocol::WindowsD3d11MediaDiagnostics {
+        state,
+        requested: mode != WindowsD3d11MediaMode::Disabled,
+        required: mode.is_required(),
+        adapter_luid: Some(format!("{:016x}", snapshot.pump.authority_adapter_luid)),
+        capture_adapter_luid: Some(format!("{:016x}", snapshot.pump.capture_adapter_luid)),
+        compositor_adapter_luid: Some(format!("{:016x}", snapshot.pump.compositor_adapter_luid)),
+        primary_encoder_adapter_luid: Some(format!(
+            "{:016x}",
+            snapshot.pump.primary_encoder_adapter_luid
+        )),
+        auxiliary_encoder_adapter_luid: snapshot
+            .pump
+            .auxiliary_encoder_adapter_luid
+            .map(|luid| format!("{luid:016x}")),
+        generation: Some(snapshot.pump.generation),
+        capture_backend,
+        cursor_mode,
+        cursor_requested: capture.is_some_and(|diagnostics| diagnostics.cursor_requested),
+        cursor_pixels_source: capture.and_then(|diagnostics| {
+            diagnostics
+                .cursor_pixels_source
+                .map(|source| source.as_str().to_string())
+        }),
+        cursor_exclusion_guaranteed: capture
+            .is_some_and(|diagnostics| diagnostics.cursor_exclusion_guaranteed),
+        capture_readback_frames: capture
+            .map_or(0, |diagnostics| diagnostics.capture_readback_frames),
+        texture_import_frames: snapshot.pump.composed_frames,
+        camera_upload_frames: compositor
+            .map_or(snapshot.pump.camera_upload_frames, |diagnostics| {
+                diagnostics.camera_upload_frames
+            }),
+        cursor_shape_uploads: capture.map_or(0, |diagnostics| diagnostics.pointer_shape_uploads),
+        cursor_composited_frames: capture
+            .map_or(0, |diagnostics| diagnostics.pointer_composited_frames),
+        compositor_cpu_fallback_frames: 0,
+        preview_presents: presenter.map_or(0, |presenter| presenter.successful_presents),
+        preview_drops,
+        preview_bmp_requests: polls.camera_bmp.saturating_add(polls.screen_bmp),
+        preview_bmp_bytes: 0,
+        message_pump_lag_p95_ms: Some(pump.message_lag_p95_micros as f64 / 1_000.0),
+        message_pump_lag_max_ms: Some(pump.max_message_lag_micros as f64 / 1_000.0),
+        media_command_lag_p95_ms: Some(pump.command_lag_p95_micros as f64 / 1_000.0),
+        media_command_lag_max_ms: Some(pump.max_command_lag_micros as f64 / 1_000.0),
+        maximum_consecutive_message_batch: u64::from(pump.max_message_batch),
+        maximum_consecutive_media_batch: u64::from(pump.max_media_batch),
+        encoder_gpu_samples: snapshot.device.runtime.encoder_gpu_samples,
+        encoder_system_memory_samples: snapshot.device.runtime.encoder_system_memory_samples,
+        raw_video_copied_frames: 0,
+        texture_pool_capacity: snapshot.device.runtime.texture_pool_capacity,
+        texture_pool_in_use: snapshot.device.runtime.texture_pool_in_use,
+        texture_pool_pressure_events: snapshot
+            .device
+            .runtime
+            .texture_pool_pressure_events
+            .saturating_add(snapshot.pump.pressure_skips),
+        adapter_mismatches: snapshot.pump.adapter_mismatches,
+        device_resets: capture
+            .map_or(0, |diagnostics| diagnostics.device_resets)
+            .saturating_add(u64::from(snapshot.device.device_loss_code.is_some())),
+        synchronization_timeouts: snapshot.device.runtime.synchronization_timeouts,
+        stale_generation_callbacks: snapshot.device.runtime.stale_generation_callbacks,
+        fallback_reason: terminal_error.or(capture_fallback),
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum WindowsD3d11FinalSnapshotPhase {
+    #[default]
+    Running,
+    WritersJoined,
+    MonitorJoined,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsEncoderBridgeShutdownOrder {
+    StopWithFfmpeg,
+    JoinBeforeD3d11FinalSnapshot,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_encoder_bridge_shutdown_order(
+    has_d3d11_monitor: bool,
+    has_d3d11_recovery_context: bool,
+    has_d3d11_media_authority: bool,
+) -> WindowsEncoderBridgeShutdownOrder {
+    if has_d3d11_monitor || has_d3d11_recovery_context || has_d3d11_media_authority {
+        WindowsEncoderBridgeShutdownOrder::JoinBeforeD3d11FinalSnapshot
+    } else {
+        WindowsEncoderBridgeShutdownOrder::StopWithFfmpeg
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsD3d11FinalSnapshotPhase {
+    fn writers_joined(&mut self) -> Result<(), &'static str> {
+        if *self != Self::Running {
+            return Err("Windows D3D11 writers were already finalized");
+        }
+        *self = Self::WritersJoined;
+        Ok(())
+    }
+
+    fn monitor_joined(&mut self) -> Result<(), &'static str> {
+        if *self != Self::WritersJoined {
+            return Err("Windows D3D11 monitor cannot join before all writers");
+        }
+        *self = Self::MonitorJoined;
+        Ok(())
+    }
+
+    fn permits_final_snapshot(self) -> bool {
+        self == Self::MonitorJoined
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn publish_final_windows_d3d11_diagnostics(
+    state: &AppState,
+    session_id: &str,
+    mode: WindowsD3d11MediaMode,
+    snapshot: crate::windows_d3d11_session::WindowsD3d11SessionDiagnosticsSnapshot,
+    phase: WindowsD3d11FinalSnapshotPhase,
+) {
+    if !phase.permits_final_snapshot() {
+        state.emit_log(
+            "error",
+            "Refusing to publish final Windows D3D11 diagnostics before the monitor joined.",
+        );
+        return;
+    }
+    let mut public = windows_d3d11_live_diagnostics(
+        mode,
+        &snapshot,
+        crate::diagnostics::PREVIEW_POLL_COUNTS.snapshot(),
+    );
+    if public.state == crate::protocol::WindowsD3d11MediaState::Live {
+        public.state = crate::protocol::WindowsD3d11MediaState::Draining;
+    }
+    let emitted = {
+        let mut diagnostics = state.diagnostics.lock().await;
+        if diagnostics.session_id.as_deref() != Some(session_id) {
+            return;
+        }
+        diagnostics.windows_d3d11_media = public;
+        diagnostics.clone()
+    };
+    state.emit_event(
+        "diagnostics.stats",
+        apply_runtime_diagnostics_snapshot(emitted, state.ffmpeg_work.snapshot()),
+    );
+}
+
+#[cfg(target_os = "windows")]
+async fn teardown_current_windows_d3d11_presenter(state: &AppState, reason: &str) {
+    let identity = {
+        let surface = state.preview_surface.lock().await;
+        surface
+            .status
+            .windows_d3d11_presenter
+            .as_ref()
+            .and_then(|presenter| {
+                presenter
+                    .preview_generation
+                    .map(|preview_generation| (presenter.media_generation, preview_generation))
+            })
+    };
+    if let Some((media_generation, preview_generation)) = identity {
+        let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+            state,
+            media_generation,
+            preview_generation,
+            reason,
+        )
+        .await;
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct RecoveredWindowsD3d11Session {
+    generation: u64,
+    monitor: WindowsD3d11SessionMonitor,
+    diagnostics_snapshot: WindowsD3d11SessionDiagnosticsSnapshot,
+    configured_placement: Option<crate::windows_d3d11_preview::WindowsD3d11PreviewPlacement>,
+    presenter_diagnostics: Option<crate::protocol::WindowsD3d11PresenterDiagnostics>,
+}
+
+#[cfg(target_os = "windows")]
+async fn fail_windows_d3d11_recovery(state: &AppState, session_id: &str) {
+    let mut recording = state.recording.lock().await;
+    if let Some(active) = recording
+        .as_mut()
+        .filter(|active| active.session_id == session_id)
+        && let Some(recovery) = active.windows_d3d11_recovery.as_mut()
+    {
+        recovery.phase.fail();
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn configure_recovered_windows_d3d11_presenter(
+    state: &AppState,
+    monitor: &WindowsD3d11SessionMonitor,
+    media_generation: u64,
+    adapter_luid: crate::windows_d3d11_device::DxgiAdapterLuid,
+    restore_presenter: bool,
+    stop: &AtomicBool,
+) -> Result<
+    Option<(
+        crate::windows_d3d11_preview::WindowsD3d11PreviewPlacement,
+        crate::windows_d3d11_preview::WindowsD3d11PresenterStatus,
+    )>,
+    String,
+> {
+    if !restore_presenter {
+        return Ok(None);
+    }
+    let placement = match crate::preview_surface::trusted_windows_d3d11_preview_placement(
+        state,
+        media_generation,
+        adapter_luid,
+    )
+    .await
+    {
+        // Hidden/minimized is still a real configured target. Rebind it inside
+        // the N -> N+1 transaction and publish an explicit Electron fallback
+        // instead of deferring presenter recreation to a later monitor tick.
+        Ok(placement) => placement,
+        Err(error) => {
+            state.emit_log(
+                "info",
+                format!(
+                    "Skipping replacement D3D11 presenter because no active trusted placement remains: {error}"
+                ),
+            );
+            return Ok(None);
+        }
+    };
+    let configured = async {
+        crate::preview_surface::begin_windows_d3d11_presenter_configuration(
+            state,
+            placement.media_generation,
+            placement.preview_generation,
+        )
+        .await?;
+        let mut status = monitor
+            .configure_preview(placement)
+            .map_err(|error| error.to_string())?;
+        let configured_hidden_drops = status.diagnostics.hidden_drops;
+        let proof_started_at = Instant::now();
+        if !placement.visible {
+            status.diagnostics.fallback_reason =
+                Some("windows-d3d11-preview-hidden-during-recovery".to_string());
+        }
+        while !status.canonical_claim_ready {
+            if !placement.visible {
+                break;
+            }
+            if stop.load(Ordering::Acquire) {
+                return Err(
+                    "replacement D3D11 presenter proof was cancelled by session stop".into(),
+                );
+            }
+            // A minimized/hidden Electron target cannot produce a first
+            // Present even though its trusted placement was visible when the
+            // replacement presenter was configured. That preview-only state
+            // must not make an otherwise healthy media recovery terminal.
+            // Publish an explicit proof fallback and keep the configured
+            // presenter alive; the monitor will promote it once the target is
+            // presentable again.
+            if status.diagnostics.hidden_drops > configured_hidden_drops {
+                status.diagnostics.fallback_reason =
+                    Some("windows-d3d11-preview-hidden-during-recovery".to_string());
+                break;
+            }
+            if proof_started_at.elapsed() >= Duration::from_secs(2) {
+                return Err(format!(
+                    "replacement D3D11 presenter did not prove first-present/source liveness: {}",
+                    status
+                        .diagnostics
+                        .fallback_reason
+                        .as_deref()
+                        .unwrap_or("waiting-first-present")
+                ));
+            }
+            sleep(Duration::from_millis(25)).await;
+            status = monitor
+                .preview_status()
+                .map_err(|error| error.to_string())?;
+        }
+        crate::preview_surface::update_windows_d3d11_presenter_status(state, status.clone())
+            .await?;
+        Ok::<_, String>(status)
+    }
+    .await;
+    match configured {
+        Ok(status) => Ok(Some((placement, status))),
+        Err(error) => {
+            let _ = monitor.destroy_preview();
+            crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                state,
+                placement.media_generation,
+                placement.preview_generation,
+            )
+            .await;
+            Err(error)
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn recover_windows_d3d11_session(
+    state: &AppState,
+    session_id: &str,
+    failed_generation: u64,
+    old_monitor: WindowsD3d11SessionMonitor,
+    configured_placement: Option<crate::windows_d3d11_preview::WindowsD3d11PreviewPlacement>,
+    stop: &AtomicBool,
+) -> Result<RecoveredWindowsD3d11Session, String> {
+    if stop.load(Ordering::Acquire) {
+        return Err("D3D11 recovery was cancelled by session stop".to_string());
+    }
+    // Backend presenter ownership is proved by the monitor's configured
+    // placement, not by whether renderer status teardown accepts the previous
+    // identity. Status can already have been invalidated by a newer preview
+    // generation while the old backend presenter still requires replacement.
+    let restore_presenter = configured_placement.is_some();
+    if let Some(placement) = configured_placement {
+        let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+            state,
+            placement.media_generation,
+            placement.preview_generation,
+            "windows-d3d11-media-generation-recovering",
+        )
+        .await;
+        crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+            state,
+            placement.media_generation,
+            placement.preview_generation,
+        )
+        .await;
+    }
+    let _ = old_monitor.destroy_preview();
+    // The monitor's media client must be gone before the authority is joined.
+    // Remaining writer/ticket clients own the shared wake event safely.
+    drop(old_monitor);
+
+    let (mut old_pump, recovery) = {
+        let mut recording = state.recording.lock().await;
+        let active = recording
+            .as_mut()
+            .filter(|active| active.session_id == session_id)
+            .ok_or_else(|| "recording ended before D3D11 recovery began".to_string())?;
+        if active.stop_requested || stop.load(Ordering::Acquire) {
+            return Err("D3D11 recovery was cancelled by session stop".to_string());
+        }
+        let recovery = active
+            .windows_d3d11_recovery
+            .as_mut()
+            .ok_or_else(|| "active recording has no D3D11 recovery context".to_string())?;
+        recovery.phase.begin(failed_generation)?;
+        let recovery = recovery.clone();
+        let Some(pump) = active.windows_d3d11_media.take() else {
+            active
+                .windows_d3d11_recovery
+                .as_mut()
+                .expect("recovery context was just validated")
+                .phase
+                .fail();
+            return Err("active recording lost its D3D11 session pump".to_string());
+        };
+        if pump.snapshot().generation != failed_generation {
+            active.windows_d3d11_media = Some(pump);
+            active
+                .windows_d3d11_recovery
+                .as_mut()
+                .expect("recovery context was just validated")
+                .phase
+                .fail();
+            return Err(format!(
+                "active D3D11 pump generation does not match failed generation {failed_generation}"
+            ));
+        }
+        (pump, recovery)
+    };
+
+    let retired = match crate::state::retire_windows_d3d11_media_for_device_loss(
+        &state.windows_d3d11_media,
+        failed_generation,
+    ) {
+        Ok(retired) => retired,
+        Err(error) => {
+            fail_windows_d3d11_recovery(state, session_id).await;
+            return Err(format!(
+                "could not retire D3D11 generation {failed_generation}: {error}"
+            ));
+        }
+    };
+    if !retired {
+        fail_windows_d3d11_recovery(state, session_id).await;
+        return Err(format!(
+            "D3D11 generation {failed_generation} was already retired before recovery ownership was acquired"
+        ));
+    }
+    // Join the capture/compositor worker after the media thread is retired.
+    old_pump.stop();
+    drop(old_pump);
+
+    if stop.load(Ordering::Acquire) {
+        fail_windows_d3d11_recovery(state, session_id).await;
+        return Err("D3D11 recovery was cancelled after authority retirement".to_string());
+    }
+
+    let pump = match WindowsD3d11SessionPump::start(
+        &state.windows_d3d11_media,
+        recovery.plan.clone(),
+        recovery.camera.clone(),
+        recovery.overlays.clone(),
+    ) {
+        Ok(pump) => pump,
+        Err(error) => {
+            fail_windows_d3d11_recovery(state, session_id).await;
+            return Err(format!(
+                "could not recreate the D3D11 session pump: {error}"
+            ));
+        }
+    };
+    let recovered_generation = pump.snapshot().generation;
+    if recovered_generation != failed_generation.saturating_add(1) {
+        drop(pump);
+        fail_windows_d3d11_recovery(state, session_id).await;
+        return Err(format!(
+            "D3D11 recovery expected generation {}, received {recovered_generation}",
+            failed_generation.saturating_add(1)
+        ));
+    }
+    let startup_fallback = match validate_windows_d3d11_startup_evidence(
+        recovery.mode,
+        &recovery.plan,
+        pump.startup_evidence(),
+    ) {
+        Ok(fallback) => fallback,
+        Err(error) => {
+            drop(pump);
+            fail_windows_d3d11_recovery(state, session_id).await;
+            return Err(format!("recovered D3D11 startup evidence failed: {error}"));
+        }
+    };
+    if let Some(fallback) = startup_fallback {
+        drop(pump);
+        fail_windows_d3d11_recovery(state, session_id).await;
+        return Err(format!(
+            "recovered D3D11 generation selected fallback: {fallback}"
+        ));
+    }
+    let recovered_snapshot = match pump.monitor().diagnostics_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            drop(pump);
+            fail_windows_d3d11_recovery(state, session_id).await;
+            return Err(format!("recovered D3D11 diagnostics unavailable: {error}"));
+        }
+    };
+    let primary_source = pump.primary_encoder_source();
+    let auxiliary_source = pump.auxiliary_encoder_source();
+    let recovered_monitor = pump.monitor();
+    // Presenter creation/rebind is part of the successor-generation
+    // transaction. Do not expose the replacement ticket sources or mark the
+    // recovery complete until the active preview target has either proved its
+    // first Present or explicitly entered the hidden-target fallback.
+    let recovered_presenter = match configure_recovered_windows_d3d11_presenter(
+        state,
+        &recovered_monitor,
+        recovered_generation,
+        recovered_snapshot.device.adapter_luid,
+        restore_presenter,
+        stop,
+    )
+    .await
+    {
+        Ok(presenter) => presenter,
+        Err(error) => {
+            drop(pump);
+            fail_windows_d3d11_recovery(state, session_id).await;
+            return Err(format!(
+                "could not restore the recovered D3D11 presenter: {error}"
+            ));
+        }
+    };
+    let recovered_suspension =
+        suspend_preview_compositor_for_d3d11(state, recovered_generation).await;
+
+    let mut pump = Some(pump);
+    let mut recovered_suspension = Some(recovered_suspension);
+    let install_result = {
+        let mut recording = state.recording.lock().await;
+        (|| -> Result<Option<PreviewCompositorSuspension>, String> {
+            let active = recording
+                .as_mut()
+                .filter(|active| active.session_id == session_id)
+                .ok_or_else(|| "recording ended before recovered D3D11 install".to_string())?;
+            if active.stop_requested || stop.load(Ordering::Acquire) {
+                return Err("session stopped before recovered D3D11 install".to_string());
+            }
+            let recording_bridge = active.encoder_bridge.as_ref().ok_or_else(|| {
+                "recovered D3D11 session has no recording/shared bridge".to_string()
+            })?;
+            if !recording_bridge
+                .can_replace_d3d11_input_generation(failed_generation, &primary_source)?
+            {
+                return Err("recording/shared D3D11 ticket source is no longer current".to_string());
+            }
+            if let Some(stream_bridge) = active.encoder_bridge_stream.as_ref() {
+                let auxiliary_source = auxiliary_source.as_ref().ok_or_else(|| {
+                    "recovered split-output D3D11 session has no auxiliary source".to_string()
+                })?;
+                if !stream_bridge
+                    .can_replace_d3d11_input_generation(failed_generation, auxiliary_source)?
+                {
+                    return Err("stream D3D11 ticket source is no longer current".to_string());
+                }
+            }
+            if !recording_bridge
+                .replace_d3d11_input_generation(failed_generation, &primary_source)?
+            {
+                return Err("recording/shared D3D11 ticket source swap lost ownership".to_string());
+            }
+            if let Some(stream_bridge) = active.encoder_bridge_stream.as_ref()
+                && !stream_bridge.replace_d3d11_input_generation(
+                    failed_generation,
+                    auxiliary_source
+                        .as_ref()
+                        .expect("auxiliary replacement was preflighted"),
+                )?
+            {
+                return Err("stream D3D11 ticket source swap lost ownership".to_string());
+            }
+            active
+                .windows_d3d11_recovery
+                .as_mut()
+                .expect("recovery context was validated before restart")
+                .phase
+                .complete(failed_generation, recovered_generation)?;
+            active.windows_d3d11_media = pump.take();
+            Ok(std::mem::replace(
+                &mut active.windows_d3d11_preview_compositor_suspension,
+                recovered_suspension
+                    .take()
+                    .expect("recovered suspension is installed exactly once"),
+            ))
+        })()
+    };
+    let old_suspension = match install_result {
+        Ok(suspension) => suspension,
+        Err(error) => {
+            // Uninstalled pump/suspension values drop here and retire only the
+            // attempted successor generation. The failed generation remains
+            // terminal and cannot consume a second restart.
+            if let Some((placement, _)) = recovered_presenter.as_ref() {
+                let _ = recovered_monitor.destroy_preview();
+                let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                    state,
+                    placement.media_generation,
+                    placement.preview_generation,
+                    "windows-d3d11-recovery-install-failed",
+                )
+                .await;
+                crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                    state,
+                    placement.media_generation,
+                    placement.preview_generation,
+                )
+                .await;
+            }
+            drop(pump);
+            drop(recovered_suspension);
+            fail_windows_d3d11_recovery(state, session_id).await;
+            return Err(error);
+        }
+    };
+    // This token is now superseded by recovered_generation and is inert.
+    drop(old_suspension);
+
+    let public = windows_d3d11_live_diagnostics(
+        recovery.mode,
+        &recovered_snapshot,
+        crate::diagnostics::PREVIEW_POLL_COUNTS.snapshot(),
+    );
+    let emitted = {
+        let mut diagnostics = state.diagnostics.lock().await;
+        if diagnostics.session_id.as_deref() != Some(session_id) {
+            None
+        } else {
+            diagnostics.windows_d3d11_media = public;
+            diagnostics.compositor_backend = Some(CompositorBackend::D3d11);
+            diagnostics.compositor_fallback_reason = None;
+            Some(diagnostics.clone())
+        }
+    };
+    if let Some(emitted) = emitted {
+        state.emit_event(
+            "diagnostics.stats",
+            apply_runtime_diagnostics_snapshot(emitted, state.ffmpeg_work.snapshot()),
+        );
+    }
+    state.emit_log(
+        "warn",
+        format!(
+            "Recovered unified Windows D3D11 media authority from generation {failed_generation} to {recovered_generation}."
+        ),
+    );
+    Ok(RecoveredWindowsD3d11Session {
+        generation: recovered_generation,
+        monitor: recovered_monitor,
+        diagnostics_snapshot: recovered_snapshot,
+        configured_placement: recovered_presenter
+            .as_ref()
+            .map(|(placement, _)| *placement),
+        presenter_diagnostics: recovered_presenter.map(|(_, status)| status.diagnostics),
+    })
+}
+
+#[cfg(target_os = "windows")]
+async fn run_windows_d3d11_session_monitor(
+    state: AppState,
+    session_id: String,
+    mut generation: u64,
+    mode: WindowsD3d11MediaMode,
+    monitor: WindowsD3d11SessionMonitor,
+    stop: Arc<AtomicBool>,
+    last_snapshot: Arc<StdMutex<Option<WindowsD3d11SessionDiagnosticsSnapshot>>>,
+) {
+    let mut monitor = Some(monitor);
+    let mut configured_placement: Option<
+        crate::windows_d3d11_preview::WindowsD3d11PreviewPlacement,
+    > = None;
+    let mut last_presenter = None;
+    let mut last_placement_error = None;
+    let mut consecutive_snapshot_errors = 0_u8;
+    'monitor: while !stop.load(Ordering::Acquire) {
+        if !windows_d3d11_monitor_identity_is_current(&state, &stop, &session_id, generation).await
+        {
+            break;
+        }
+        let current_monitor = monitor
+            .as_ref()
+            .expect("the D3D11 monitor is owned except during synchronous recovery");
+        let snapshot = match current_monitor.diagnostics_snapshot() {
+            Ok(snapshot) => {
+                consecutive_snapshot_errors = 0;
+                snapshot
+            }
+            Err(error) => {
+                if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                    break;
+                }
+                consecutive_snapshot_errors = consecutive_snapshot_errors.saturating_add(1);
+                if consecutive_snapshot_errors >= 3 {
+                    let reason = format!("windows-d3d11-media-monitor-failed: {error}");
+                    if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                        break;
+                    }
+                    let failed_monitor = monitor
+                        .take()
+                        .expect("the failed D3D11 monitor is still owned");
+                    match recover_windows_d3d11_session(
+                        &state,
+                        &session_id,
+                        generation,
+                        failed_monitor,
+                        configured_placement.take(),
+                        &stop,
+                    )
+                    .await
+                    {
+                        Ok(recovered) => {
+                            *last_snapshot
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some(recovered.diagnostics_snapshot.clone());
+                            generation = recovered.generation;
+                            configured_placement = recovered.configured_placement;
+                            last_presenter = recovered.presenter_diagnostics;
+                            monitor = Some(recovered.monitor);
+                            last_placement_error = None;
+                            consecutive_snapshot_errors = 0;
+                            continue 'monitor;
+                        }
+                        Err(recovery_error) => {
+                            if windows_d3d11_recording_is_stopping(&state, &stop, &session_id).await
+                            {
+                                break 'monitor;
+                            }
+                            let terminal_reason = format!(
+                                "{reason}; automatic generation recovery failed: {recovery_error}"
+                            );
+                            fail_windows_d3d11_recovery(&state, &session_id).await;
+                            publish_windows_d3d11_monitor_failure(
+                                &state,
+                                &session_id,
+                                terminal_reason.clone(),
+                            )
+                            .await;
+                            state.emit_log(
+                                "error",
+                                format!(
+                                    "D3D11 diagnostics monitor failed for session {session_id}; recovery stopped: {recovery_error}"
+                                ),
+                            );
+                            break 'monitor;
+                        }
+                    }
+                }
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        };
+        let current_monitor = monitor
+            .as_ref()
+            .expect("the D3D11 monitor was restored after recovery");
+        if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+            break;
+        }
+        if snapshot.pump.generation != generation
+            || !windows_d3d11_monitor_identity_is_current(&state, &stop, &session_id, generation)
+                .await
+        {
+            break;
+        }
+        *last_snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(snapshot.clone());
+
+        let trusted_placement = crate::preview_surface::trusted_windows_d3d11_preview_placement(
+            &state,
+            snapshot.pump.generation,
+            snapshot.device.adapter_luid,
+        )
+        .await;
+        if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+            break;
+        }
+        match trusted_placement {
+            Ok(placement) => {
+                last_placement_error = None;
+                if windows_d3d11_preview_monitor_target_action(
+                    configured_placement.is_some(),
+                    configured_placement.as_ref() != Some(&placement),
+                    true,
+                ) == WindowsD3d11PreviewMonitorTargetAction::Configure
+                {
+                    let previous_placement = configured_placement;
+                    let configuration =
+                        crate::preview_surface::begin_windows_d3d11_presenter_configuration(
+                            &state,
+                            placement.media_generation,
+                            placement.preview_generation,
+                        )
+                        .await
+                        .and_then(|()| {
+                            current_monitor
+                                .configure_preview(placement)
+                                .map_err(|error| error.to_string())
+                        });
+                    match configuration {
+                        Ok(status) => {
+                            // Record backend ownership before any stop edge so
+                            // the common monitor cleanup can retire this exact
+                            // pending configuration even if no status update is
+                            // published.
+                            configured_placement = Some(placement);
+                            if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                                break 'monitor;
+                            }
+                            if last_presenter.as_ref() != Some(&status.diagnostics) {
+                                if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                                    break 'monitor;
+                                }
+                                if let Err(error) =
+                                    crate::preview_surface::update_windows_d3d11_presenter_status(
+                                        &state,
+                                        status.clone(),
+                                    )
+                                    .await
+                                {
+                                    let _ = current_monitor.destroy_preview();
+                                    crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                                        &state,
+                                        placement.media_generation,
+                                        placement.preview_generation,
+                                    )
+                                    .await;
+                                    configured_placement = None;
+                                    last_presenter = None;
+                                    state.emit_log(
+                                        "warn",
+                                        format!(
+                                            "Rejected stale Windows D3D11 presenter configuration: {error}"
+                                        ),
+                                    );
+                                    continue 'monitor;
+                                }
+                                if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                                    break 'monitor;
+                                }
+                                last_presenter = Some(status.diagnostics);
+                            }
+                        }
+                        Err(error) => {
+                            let _ = current_monitor.destroy_preview();
+                            configured_placement = None;
+                            last_presenter = None;
+                            let reason = format!("windows-d3d11-preview-configure-failed: {error}");
+                            if let Some(previous) = previous_placement {
+                                let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                                    &state,
+                                    previous.media_generation,
+                                    previous.preview_generation,
+                                    reason.clone(),
+                                )
+                                .await;
+                                crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                                    &state,
+                                    previous.media_generation,
+                                    previous.preview_generation,
+                                )
+                                .await;
+                            }
+                            crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                                &state,
+                                placement.media_generation,
+                                placement.preview_generation,
+                            )
+                            .await;
+                            if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                                break 'monitor;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                let action = windows_d3d11_preview_monitor_target_action(
+                    configured_placement.is_some(),
+                    false,
+                    false,
+                );
+                if action == WindowsD3d11PreviewMonitorTargetAction::Destroy {
+                    let _ = current_monitor.destroy_preview();
+                }
+                let previous_placement = configured_placement.take();
+                configured_placement = None;
+                last_presenter = None;
+                if let Some(previous) = previous_placement {
+                    let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                        &state,
+                        previous.media_generation,
+                        previous.preview_generation,
+                        format!("windows-d3d11-preview-waiting-for-trusted-bounds: {error}"),
+                    )
+                    .await;
+                    crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                        &state,
+                        previous.media_generation,
+                        previous.preview_generation,
+                    )
+                    .await;
+                }
+                if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                    break;
+                }
+                if last_placement_error.as_deref() != Some(error.as_str()) {
+                    last_placement_error = Some(error);
+                }
+            }
+        }
+
+        if configured_placement.is_some() {
+            let status = current_monitor.preview_status();
+            if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                break;
+            }
+            match status {
+                Ok(status) if last_presenter.as_ref() != Some(&status.diagnostics) => {
+                    if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                        break;
+                    }
+                    let update = crate::preview_surface::update_windows_d3d11_presenter_status(
+                        &state,
+                        status.clone(),
+                    )
+                    .await;
+                    if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                        break;
+                    }
+                    match update {
+                        Ok(_) => last_presenter = Some(status.diagnostics),
+                        Err(error) => {
+                            let _ = current_monitor.destroy_preview();
+                            let previous = configured_placement.take();
+                            last_presenter = None;
+                            if let Some(previous) = previous {
+                                let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                                    &state,
+                                    previous.media_generation,
+                                    previous.preview_generation,
+                                    format!("windows-d3d11-preview-update-rejected: {error}"),
+                                )
+                                .await;
+                                crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                                    &state,
+                                    previous.media_generation,
+                                    previous.preview_generation,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = current_monitor.destroy_preview();
+                    let previous = configured_placement.take();
+                    last_presenter = None;
+                    if let Some(previous) = previous {
+                        let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                            &state,
+                            previous.media_generation,
+                            previous.preview_generation,
+                            format!("windows-d3d11-preview-present-failed: {error}"),
+                        )
+                        .await;
+                        crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                            &state,
+                            previous.media_generation,
+                            previous.preview_generation,
+                        )
+                        .await;
+                    }
+                }
+                Ok(_) => {}
+            }
+        }
+
+        if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+            break;
+        }
+        let public = windows_d3d11_live_diagnostics(
+            mode,
+            &snapshot,
+            crate::diagnostics::PREVIEW_POLL_COUNTS.snapshot(),
+        );
+        let terminal = public.state == crate::protocol::WindowsD3d11MediaState::Failed;
+        let emitted = {
+            let mut diagnostics = state.diagnostics.lock().await;
+            if windows_d3d11_monitor_stop_requested(&stop, current_monitor)
+                || !windows_d3d11_monitor_identity_matches(&diagnostics, &session_id, generation)
+            {
+                drop(diagnostics);
+                break;
+            }
+            diagnostics.windows_d3d11_media = public;
+            diagnostics.compositor_backend = Some(CompositorBackend::D3d11);
+            diagnostics.compositor_fallback_reason = None;
+            diagnostics.clone()
+        };
+        if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+            break;
+        }
+        state.emit_event(
+            "diagnostics.stats",
+            apply_runtime_diagnostics_snapshot(emitted, state.ffmpeg_work.snapshot()),
+        );
+        if terminal {
+            if snapshot.pump.device_lost || snapshot.device.device_loss_code.is_some() {
+                let failed_monitor = monitor
+                    .take()
+                    .expect("the terminal D3D11 monitor is still owned");
+                match recover_windows_d3d11_session(
+                    &state,
+                    &session_id,
+                    generation,
+                    failed_monitor,
+                    configured_placement.take(),
+                    &stop,
+                )
+                .await
+                {
+                    Ok(recovered) => {
+                        *last_snapshot
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            Some(recovered.diagnostics_snapshot.clone());
+                        generation = recovered.generation;
+                        configured_placement = recovered.configured_placement;
+                        last_presenter = recovered.presenter_diagnostics;
+                        monitor = Some(recovered.monitor);
+                        last_placement_error = None;
+                        consecutive_snapshot_errors = 0;
+                        continue 'monitor;
+                    }
+                    Err(recovery_error) => {
+                        if windows_d3d11_recording_is_stopping(&state, &stop, &session_id).await {
+                            break 'monitor;
+                        }
+                        let terminal_reason = format!(
+                            "windows-d3d11-media-terminal-failure; automatic generation recovery failed: {recovery_error}"
+                        );
+                        fail_windows_d3d11_recovery(&state, &session_id).await;
+                        publish_windows_d3d11_monitor_failure(&state, &session_id, terminal_reason)
+                            .await;
+                        state.emit_log(
+                            "error",
+                            format!(
+                                "D3D11 generation {generation} device loss could not be recovered: {recovery_error}"
+                            ),
+                        );
+                        break 'monitor;
+                    }
+                }
+            }
+            let _ = current_monitor.destroy_preview();
+            if let Some(previous) = configured_placement.take() {
+                let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                    &state,
+                    previous.media_generation,
+                    previous.preview_generation,
+                    "windows-d3d11-media-terminal-failure",
+                )
+                .await;
+                crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                    &state,
+                    previous.media_generation,
+                    previous.preview_generation,
+                )
+                .await;
+            }
+            break;
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    if let Some(monitor) = monitor.as_ref() {
+        let _ = monitor.destroy_preview();
+    }
+    if let Some(previous) = configured_placement {
+        let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+            &state,
+            previous.media_generation,
+            previous.preview_generation,
+            "windows-d3d11-media-monitor-stopped",
+        )
+        .await;
+        crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+            &state,
+            previous.media_generation,
+            previous.preview_generation,
+        )
+        .await;
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn publish_windows_d3d11_monitor_failure(state: &AppState, session_id: &str, reason: String) {
+    let emitted = {
+        let mut diagnostics = state.diagnostics.lock().await;
+        if diagnostics.session_id.as_deref() != Some(session_id) {
+            return;
+        }
+        diagnostics.windows_d3d11_media.state = crate::protocol::WindowsD3d11MediaState::Failed;
+        diagnostics.windows_d3d11_media.fallback_reason = Some(reason);
+        diagnostics.clone()
+    };
+    state.emit_event(
+        "diagnostics.stats",
+        apply_runtime_diagnostics_snapshot(emitted, state.ffmpeg_work.snapshot()),
+    );
+}
+
+#[cfg(target_os = "windows")]
+async fn windows_d3d11_recording_is_stopping(
+    state: &AppState,
+    stop: &AtomicBool,
+    session_id: &str,
+) -> bool {
+    if stop.load(Ordering::Acquire) {
+        return true;
+    }
+    let recording = state.recording.lock().await;
+    recording
+        .as_ref()
+        .filter(|active| active.session_id == session_id)
+        .is_none_or(|active| active.stop_requested)
+}
+
+#[cfg(target_os = "windows")]
+async fn windows_d3d11_monitor_identity_is_current(
+    state: &AppState,
+    stop: &AtomicBool,
+    session_id: &str,
+    generation: u64,
+) -> bool {
+    if stop.load(Ordering::Acquire) {
+        return false;
+    }
+    let diagnostics = state.diagnostics.lock().await;
+    windows_d3d11_monitor_identity_matches(&diagnostics, session_id, generation)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_monitor_identity_matches(
+    diagnostics: &crate::protocol::DiagnosticStats,
+    session_id: &str,
+    generation: u64,
+) -> bool {
+    diagnostics.session_id.as_deref() == Some(session_id)
+        && diagnostics.windows_d3d11_media.generation == Some(generation)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_d3d11_monitor_stop_requested(
+    stop: &AtomicBool,
+    monitor: &WindowsD3d11SessionMonitor,
+) -> bool {
+    if !stop.load(Ordering::Acquire) {
+        return false;
+    }
+    let _ = monitor.destroy_preview();
+    true
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsD3d11PreviewMonitorTargetAction {
+    Wait,
+    Keep,
+    Configure,
+    Destroy,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_preview_monitor_target_action(
+    has_configured_target: bool,
+    trusted_target_changed: bool,
+    trusted_target_available: bool,
+) -> WindowsD3d11PreviewMonitorTargetAction {
+    if !trusted_target_available {
+        return if has_configured_target {
+            WindowsD3d11PreviewMonitorTargetAction::Destroy
+        } else {
+            WindowsD3d11PreviewMonitorTargetAction::Wait
+        };
+    }
+    if !has_configured_target || trusted_target_changed {
+        WindowsD3d11PreviewMonitorTargetAction::Configure
+    } else {
+        WindowsD3d11PreviewMonitorTargetAction::Keep
+    }
+}
+
 fn default_encoder_bridge_video_output() -> EncoderBridgeVideoOutput {
     #[cfg(target_os = "macos")]
     {
         EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        // Request the capability-probed Media Foundation topology by default.
+        // `resolve_windows_encoded_bridge_decision` owns the named software
+        // fallback when the runtime encoder/topology probe rejects it.
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         EncoderBridgeVideoOutput::RawYuv420p
     }
@@ -7684,6 +10333,7 @@ fn recording_encoder_bridge_sources_ready(
     has_active_screen_image: bool,
     has_camera_frame: bool,
     has_screen_frame: bool,
+    d3d11_screen_source_authoritative: bool,
 ) -> bool {
     scene
         .sources
@@ -7692,9 +10342,10 @@ fn recording_encoder_bridge_sources_ready(
         .all(|source| match source.kind {
             SceneSourceKind::TestPattern => true,
             SceneSourceKind::Camera => has_camera_frame,
-            SceneSourceKind::Screen | SceneSourceKind::Window => {
-                has_active_screen_image || has_screen_frame
+            SceneSourceKind::Screen => {
+                d3d11_screen_source_authoritative || has_active_screen_image || has_screen_frame
             }
+            SceneSourceKind::Window => has_active_screen_image || has_screen_frame,
         })
 }
 
@@ -9811,23 +12462,24 @@ fn validate_session_entitlements(
                 destination_count
             );
         }
-        let stream_video = resolve_stream_output_video(params)?;
-        if stream_video.width > snapshot.limits.streaming.max_width
-            || stream_video.height > snapshot.limits.streaming.max_height
-            || stream_video.fps > snapshot.limits.streaming.max_fps
-            || stream_video.bitrate_kbps > snapshot.limits.streaming.max_bitrate_kbps
-        {
-            bail!(
-                "This plan allows livestreaming up to {}x{}@{}fps, {} kbps; selected stream output is {}x{}@{}fps, {} kbps.",
-                snapshot.limits.streaming.max_width,
-                snapshot.limits.streaming.max_height,
-                snapshot.limits.streaming.max_fps,
-                snapshot.limits.streaming.max_bitrate_kbps,
-                stream_video.width,
-                stream_video.height,
-                stream_video.fps,
-                stream_video.bitrate_kbps
-            );
+        for stream_video in resolved_enabled_stream_output_videos(params)? {
+            if stream_video.width > snapshot.limits.streaming.max_width
+                || stream_video.height > snapshot.limits.streaming.max_height
+                || stream_video.fps > snapshot.limits.streaming.max_fps
+                || stream_video.bitrate_kbps > snapshot.limits.streaming.max_bitrate_kbps
+            {
+                bail!(
+                    "This plan allows livestreaming up to {}x{}@{}fps, {} kbps; selected stream output is {}x{}@{}fps, {} kbps.",
+                    snapshot.limits.streaming.max_width,
+                    snapshot.limits.streaming.max_height,
+                    snapshot.limits.streaming.max_fps,
+                    snapshot.limits.streaming.max_bitrate_kbps,
+                    stream_video.width,
+                    stream_video.height,
+                    stream_video.fps,
+                    stream_video.bitrate_kbps
+                );
+            }
         }
     }
 
@@ -9965,6 +12617,19 @@ fn validate_video_profile_policy(params: &StartSessionParams) -> Result<()> {
     validate_named_video_profile(video)?;
 
     if params.output.stream_enabled {
+        let provider_plan = resolve_provider_stream_output_plan(params)?;
+        if params.output.record_enabled
+            && !provider_plan.separate_encoded_output_role
+            && !same_video_profile(video, &provider_plan.stream_video)
+        {
+            bail!(
+                "Local recording and livestream destinations share one encoder for this session. Select the strictest resolved stream profile ({}x{}@{}fps, {} kbps) for the recording too, or use a proven encoded split-output role.",
+                provider_plan.stream_video.width,
+                provider_plan.stream_video.height,
+                provider_plan.stream_video.fps,
+                provider_plan.stream_video.bitrate_kbps
+            );
+        }
         let has_explicit_stream_output_profile = params
             .streaming
             .as_ref()
@@ -9981,10 +12646,6 @@ fn validate_video_profile_policy(params: &StartSessionParams) -> Result<()> {
             .unwrap_or(&params.output.video);
         if is_true_4k_stream_output(stream_video) {
             validate_true_4k_stream_profile(params, stream_video)?;
-        } else if stream_video.bitrate_kbps > 6000 {
-            bail!(
-                "Streaming bitrate must be 6000 kbps or lower for the v1 platform-safe path. Select stream-safe-1080p30/60 or reduce the custom bitrate."
-            );
         }
         if video.width > 1920 || video.height > 1080 {
             if !params.output.record_enabled {
@@ -10183,23 +12844,384 @@ fn companion_stream_outputs_for_recording(
     Ok(outputs)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedStreamTargetVideo {
+    target_id: String,
+    platform: StreamPlatform,
+    video: VideoSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderStreamOutputPlan {
+    targets: Vec<ResolvedStreamTargetVideo>,
+    stream_video: VideoSettings,
+    separate_encoded_output_role: bool,
+}
+
+fn normalize_stream_only_output_video(params: &mut StartSessionParams) -> Result<()> {
+    if params.output.stream_enabled && !params.output.record_enabled {
+        // A stream-only session has exactly one encoder even when RTMP fans
+        // out to several providers. Make the session's compositor/FFmpeg
+        // profile equal the provider plan instead of leaving the recording
+        // preset as a second, fictitious source of truth.
+        params.output.video = resolve_provider_stream_output_plan(params)?.stream_video;
+    }
+    Ok(())
+}
+
+fn apply_provider_output_plan_to_ready_targets(
+    params: &StartSessionParams,
+    ready: &mut [StreamTarget],
+) -> Result<()> {
+    let plan = resolve_provider_stream_output_plan(params)?;
+    debug_assert!(
+        !plan.separate_encoded_output_role
+            || (params.output.record_enabled && params.output.stream_enabled)
+    );
+    for target in ready {
+        let resolved = plan
+            .targets
+            .iter()
+            .find(|resolved| resolved.target_id == target.target_id)
+            .with_context(|| {
+                format!(
+                    "No provider output profile was resolved for ready target {}.",
+                    target.label
+                )
+            })?;
+        debug_assert_eq!(resolved.platform, target.platform);
+        target.output_video = Some(resolved.video.clone());
+    }
+    Ok(())
+}
+
+fn validate_provider_plan_against_effective_bridge(
+    plan: &ProviderStreamOutputPlan,
+    effective_bridge: EncoderBridgeVideoOutput,
+) -> Result<()> {
+    if plan.separate_encoded_output_role
+        && matches!(effective_bridge, EncoderBridgeVideoOutput::RawYuv420p)
+    {
+        bail!(
+            "The encoder capability probe did not prove a separate encoded stream output. Use the shared provider-safe profile at 6000 kbps or lower for this session."
+        );
+    }
+    Ok(())
+}
+
+fn resolve_provider_stream_output_plan(
+    params: &StartSessionParams,
+) -> Result<ProviderStreamOutputPlan> {
+    resolve_provider_stream_output_plan_with_separate_roles(
+        params,
+        separate_encoded_provider_output_role_available(params),
+    )
+}
+
+fn resolve_provider_stream_output_plan_with_separate_roles(
+    params: &StartSessionParams,
+    separate_encoded_output_role_available: bool,
+) -> Result<ProviderStreamOutputPlan> {
+    if !params.output.stream_enabled {
+        bail!("A stream output profile requires streaming to be enabled.");
+    }
+
+    let Some(streaming) = params
+        .streaming
+        .as_ref()
+        .filter(|streaming| streaming.enabled)
+    else {
+        let platform = stream_platform_from_preset(&params.output.rtmp.preset);
+        validate_stream_profile_for_provider(platform, &params.output.video)?;
+        return Ok(ProviderStreamOutputPlan {
+            targets: vec![ResolvedStreamTargetVideo {
+                target_id: stream_platform_id(platform).to_string(),
+                platform,
+                video: params.output.video.clone(),
+            }],
+            stream_video: params.output.video.clone(),
+            separate_encoded_output_role: false,
+        });
+    };
+
+    let mut targets = Vec::new();
+    for target in streaming.targets.iter().filter(|target| target.enabled) {
+        // Incomplete destinations are surfaced as skipped at session start and
+        // do not constrain the encode that the ready destinations actually use.
+        if resolve_stream_target(streaming, target).is_err() {
+            continue;
+        }
+        let video = stream_target_output_video(streaming, target);
+        validate_stream_profile_for_provider(target.platform, &video)?;
+        targets.push(ResolvedStreamTargetVideo {
+            target_id: target.id.clone(),
+            platform: target.platform,
+            video,
+        });
+    }
+    if targets.is_empty() {
+        bail!("Enable at least one ready streaming destination.");
+    }
+
+    let targets_share_one_profile = targets
+        .iter()
+        .all(|target| same_video_profile(&target.video, &targets[0].video));
+    let recording_already_shares_target_profile = !params.output.record_enabled
+        || same_video_profile(&params.output.video, &targets[0].video);
+    if targets_share_one_profile && recording_already_shares_target_profile {
+        return Ok(ProviderStreamOutputPlan {
+            stream_video: targets[0].video.clone(),
+            targets,
+            separate_encoded_output_role: false,
+        });
+    }
+
+    if separate_encoded_output_role_available
+        && separate_provider_roles_fit_bridge_envelope(params, &targets)
+        && stream_targets_fit_recording_plus_one_companion(params, &targets)
+    {
+        // This is the only independent-output shape implemented today:
+        // recording is one encoded role and every stream target is routed from
+        // either that profile or one encoded companion role. Diagnostics then
+        // truthfully reports `separateOutputEncodersActive`.
+        let stream_video = targets
+            .iter()
+            .max_by_key(|target| stream_profile_strictness_key(&target.video))
+            .expect("non-empty stream target plan")
+            .video
+            .clone();
+        return Ok(ProviderStreamOutputPlan {
+            targets,
+            stream_video,
+            separate_encoded_output_role: true,
+        });
+    }
+
+    let youtube_only = targets
+        .iter()
+        .all(|target| target.platform == StreamPlatform::Youtube);
+    let mut shared_candidates = targets
+        .iter()
+        .map(|target| {
+            if youtube_only {
+                target.video.clone()
+            } else {
+                provider_safe_shared_profile(&target.video)
+            }
+        })
+        .collect::<Vec<_>>();
+    if params.output.record_enabled {
+        shared_candidates.push(provider_safe_shared_profile(&params.output.video));
+    }
+    let shared = strictest_shared_stream_profile(&shared_candidates)?;
+    for target in &mut targets {
+        target.video = shared.clone();
+    }
+
+    Ok(ProviderStreamOutputPlan {
+        targets,
+        stream_video: shared,
+        separate_encoded_output_role: false,
+    })
+}
+
+fn validate_stream_profile_for_provider(
+    platform: StreamPlatform,
+    video: &VideoSettings,
+) -> Result<()> {
+    validate_video_settings(video)?;
+    validate_named_video_profile(video)?;
+
+    if matches!(
+        video.preset,
+        VideoPreset::StreamYoutube1080p30
+            | VideoPreset::StreamYoutube1080p60
+            | VideoPreset::StreamYoutube4k30
+    ) && platform != StreamPlatform::Youtube
+    {
+        bail!(
+            "The {:?} stream profile is available only for YouTube destinations.",
+            video.preset
+        );
+    }
+
+    if is_true_4k_stream_output(video) {
+        if platform != StreamPlatform::Youtube
+            || !matches!(video.preset, VideoPreset::StreamYoutube4k30)
+        {
+            bail!("True 4K streaming requires the YouTube 4K30 stream profile.");
+        }
+        return require_video_profile(video, 3840, 2160, 30, 30_000);
+    }
+
+    if video.width > 1920 || video.height > 1080 {
+        bail!(
+            "Stream output for {:?} must be 1080p or lower unless it uses the exact YouTube 4K30 profile.",
+            platform
+        );
+    }
+
+    if video.bitrate_kbps > 6000
+        && !matches!(
+            (platform, &video.preset),
+            (
+                StreamPlatform::Youtube,
+                VideoPreset::StreamYoutube1080p30 | VideoPreset::StreamYoutube1080p60
+            )
+        )
+    {
+        bail!(
+            "Stream output for {:?} must be 6000 kbps or lower; YouTube rates above that limit require the exact YouTube 1080p30/60 profile.",
+            platform
+        );
+    }
+
+    Ok(())
+}
+
+fn separate_encoded_provider_output_role_available(params: &StartSessionParams) -> bool {
+    if !params.output.record_enabled
+        || !params.output.stream_enabled
+        || compositor_encoder_bridge_disabled(
+            params.output.record_enabled,
+            params.output.stream_enabled,
+        )
+    {
+        return false;
+    }
+    ensure_encoded_bridge_video_output(recording_encoder_bridge_video_output(
+        params.output.record_enabled,
+        params.output.stream_enabled,
+    ))
+    .is_ok()
+}
+
+fn separate_provider_roles_fit_bridge_envelope(
+    params: &StartSessionParams,
+    targets: &[ResolvedStreamTargetVideo],
+) -> bool {
+    let requested_fps = targets
+        .iter()
+        .map(|target| target.video.fps)
+        .max()
+        .unwrap_or_default()
+        .max(params.output.video.fps);
+    if requested_fps <= 30 {
+        return true;
+    }
+    std::iter::once(&params.output.video)
+        .chain(targets.iter().map(|target| &target.video))
+        .all(|profile| {
+            profile.fps <= 60
+                && profile.width.max(profile.height) <= 1920
+                && profile.width.min(profile.height) <= 1080
+        })
+}
+
+fn stream_targets_fit_recording_plus_one_companion(
+    params: &StartSessionParams,
+    targets: &[ResolvedStreamTargetVideo],
+) -> bool {
+    let mut companion: Option<&VideoSettings> = None;
+    for target in targets {
+        if same_video_profile(&target.video, &params.output.video) {
+            continue;
+        }
+        match companion {
+            Some(existing) if !same_video_profile(existing, &target.video) => return false,
+            None => companion = Some(&target.video),
+            _ => {}
+        }
+    }
+    companion.is_some()
+}
+
+fn provider_safe_shared_profile(video: &VideoSettings) -> VideoSettings {
+    match video.preset {
+        VideoPreset::StreamYoutube1080p30 | VideoPreset::StreamYoutube4k30 => {
+            video_preset_defaults(VideoPreset::StreamSafe1080p30)
+        }
+        VideoPreset::StreamYoutube1080p60 | VideoPreset::Stream1080p60 => {
+            video_preset_defaults(VideoPreset::StreamSafe1080p60)
+        }
+        _ if video.bitrate_kbps > 6000 => {
+            let mut safe = video.clone();
+            safe.preset = VideoPreset::Custom;
+            safe.bitrate_kbps = 6000;
+            safe
+        }
+        _ => video.clone(),
+    }
+}
+
+fn strictest_shared_stream_profile(candidates: &[VideoSettings]) -> Result<VideoSettings> {
+    let first = candidates
+        .first()
+        .context("A shared stream output requires at least one profile.")?;
+    if candidates
+        .iter()
+        .all(|candidate| same_video_profile(candidate, first))
+    {
+        return Ok(first.clone());
+    }
+
+    let smallest_canvas = candidates
+        .iter()
+        .min_by_key(|candidate| u64::from(candidate.width) * u64::from(candidate.height))
+        .expect("non-empty shared profile candidates");
+    let fps = candidates
+        .iter()
+        .map(|candidate| candidate.fps)
+        .min()
+        .expect("non-empty shared profile candidates");
+    let bitrate_kbps = candidates
+        .iter()
+        .map(|candidate| candidate.bitrate_kbps)
+        .min()
+        .expect("non-empty shared profile candidates");
+    let mut shared = VideoSettings {
+        preset: VideoPreset::Custom,
+        width: smallest_canvas.width,
+        height: smallest_canvas.height,
+        fps,
+        bitrate_kbps,
+    };
+    shared.preset = canonical_stream_preset_for_profile(&shared);
+    validate_video_settings(&shared)?;
+    validate_named_video_profile(&shared)?;
+    Ok(shared)
+}
+
+fn canonical_stream_preset_for_profile(video: &VideoSettings) -> VideoPreset {
+    match (video.width, video.height, video.fps, video.bitrate_kbps) {
+        (1920, 1080, 30, 6000) => VideoPreset::StreamSafe1080p30,
+        (1920, 1080, 60, 6000) => VideoPreset::StreamSafe1080p60,
+        (1920, 1080, 30, 10_000) => VideoPreset::StreamYoutube1080p30,
+        (1920, 1080, 60, 12_000) => VideoPreset::StreamYoutube1080p60,
+        (3840, 2160, 30, 30_000) => VideoPreset::StreamYoutube4k30,
+        _ => VideoPreset::Custom,
+    }
+}
+
+fn stream_profile_strictness_key(video: &VideoSettings) -> (u64, u32, u32) {
+    (
+        u64::from(video.width) * u64::from(video.height),
+        video.fps,
+        video.bitrate_kbps,
+    )
+}
+
 fn resolved_enabled_stream_output_videos(
     params: &StartSessionParams,
 ) -> Result<Vec<VideoSettings>> {
     if !params.output.stream_enabled {
         return Ok(Vec::new());
     }
-    if let Some(streaming) = params
-        .streaming
-        .as_ref()
-        .filter(|streaming| streaming.enabled)
-    {
-        return Ok(enabled_streaming_targets(params)
-            .into_iter()
-            .map(|target| stream_target_output_video(streaming, target))
-            .collect());
-    }
-    Ok(vec![params.output.video.clone()])
+    Ok(resolve_provider_stream_output_plan(params)?
+        .targets
+        .into_iter()
+        .map(|target| target.video)
+        .collect())
 }
 
 fn same_video_profile(left: &VideoSettings, right: &VideoSettings) -> bool {
@@ -10280,18 +13302,7 @@ fn encoder_bridge_diagnostics_context(
 }
 
 fn resolve_stream_output_video(params: &StartSessionParams) -> Result<VideoSettings> {
-    let stream_video = match params
-        .streaming
-        .as_ref()
-        .filter(|streaming| streaming.enabled)
-    {
-        Some(streaming) => {
-            let mut video = video_preset_defaults(streaming.default_output_preset.clone());
-            video.bitrate_kbps = streaming.default_bitrate_kbps;
-            video
-        }
-        None => params.output.video.clone(),
-    };
+    let stream_video = resolve_provider_stream_output_plan(params)?.stream_video;
 
     if is_true_4k_stream_output(&stream_video) {
         validate_true_4k_stream_profile(params, &stream_video)?;
@@ -10304,9 +13315,6 @@ fn resolve_stream_output_video(params: &StartSessionParams) -> Result<VideoSetti
             stream_video.width,
             stream_video.height
         );
-    }
-    if stream_video.bitrate_kbps > 6000 {
-        bail!("Stream output bitrate must be 6000 kbps or lower for the v1 platform-safe path.");
     }
 
     Ok(stream_video)
@@ -10438,6 +13446,20 @@ fn video_preset_defaults(preset: VideoPreset) -> VideoSettings {
             fps: 60,
             bitrate_kbps: 6000,
         },
+        VideoPreset::StreamYoutube1080p30 => VideoSettings {
+            preset,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 10_000,
+        },
+        VideoPreset::StreamYoutube1080p60 => VideoSettings {
+            preset,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: 12_000,
+        },
         VideoPreset::StreamYoutube4k30 => VideoSettings {
             preset,
             width: 3840,
@@ -10477,6 +13499,8 @@ fn validate_named_video_profile(video: &VideoSettings) -> Result<()> {
         VideoPreset::Record4k60Experimental => require_video_profile(video, 3840, 2160, 60, 50_000),
         VideoPreset::StreamSafe1080p30 => require_video_profile(video, 1920, 1080, 30, 6000),
         VideoPreset::StreamSafe1080p60 => require_video_profile(video, 1920, 1080, 60, 6000),
+        VideoPreset::StreamYoutube1080p30 => require_video_profile(video, 1920, 1080, 30, 10_000),
+        VideoPreset::StreamYoutube1080p60 => require_video_profile(video, 1920, 1080, 60, 12_000),
         VideoPreset::StreamYoutube4k30 => require_video_profile(video, 3840, 2160, 30, 30_000),
         _ => Ok(()),
     }
@@ -10698,13 +13722,18 @@ fn stream_target_output_video(
     target: &StreamTargetSettings,
 ) -> VideoSettings {
     let output_preset = target.output_preset.clone().unwrap_or_else(|| {
-        if streaming.default_output_preset == VideoPreset::StreamYoutube4k30
-            && target.platform != StreamPlatform::Youtube
-        {
-            VideoPreset::StreamSafe1080p30
-        } else {
-            streaming.default_output_preset.clone()
+        if target.platform != StreamPlatform::Youtube {
+            match &streaming.default_output_preset {
+                VideoPreset::StreamYoutube1080p30 | VideoPreset::StreamYoutube4k30 => {
+                    return VideoPreset::StreamSafe1080p30;
+                }
+                VideoPreset::StreamYoutube1080p60 => {
+                    return VideoPreset::StreamSafe1080p60;
+                }
+                _ => {}
+            }
         }
+        streaming.default_output_preset.clone()
     });
     let mut video = video_preset_defaults(output_preset.clone());
     video.bitrate_kbps = target.output_bitrate_kbps.unwrap_or_else(|| {
@@ -10761,6 +13790,34 @@ fn stream_targets_from_streaming(streaming: &StreamingSettings) -> Result<Vec<St
 /// its stream tee starts at slave #0 even though local recording is enabled.
 fn tee_slave_offset(stream_tee_has_recording_leg: bool) -> usize {
     usize::from(stream_tee_has_recording_leg)
+}
+
+fn stream_targets_snapshot_value(shared: &SharedStreamTargetsSnapshot) -> StreamTargetsSnapshot {
+    shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// Atomically transitions one destination and returns the full replacement
+/// snapshot that must be emitted. Returning the label alongside it keeps the
+/// health event and authoritative RPC state sourced from the same mutation.
+fn mark_stream_target_failed(
+    shared: &SharedStreamTargetsSnapshot,
+    position: usize,
+    reason: String,
+) -> Option<(String, StreamTargetsSnapshot)> {
+    let mut snapshot = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = snapshot.targets.get_mut(position)?;
+    if entry.state == StreamTargetState::Failed {
+        return None;
+    }
+    let label = entry.label.clone();
+    entry.state = StreamTargetState::Failed;
+    entry.message = Some(reason);
+    Some((label, snapshot.clone()))
 }
 
 /// Builds the initial per-target runtime snapshot — ready destinations as `Live`,
@@ -11172,23 +14229,96 @@ fn looks_like_ffmpeg_health_event(line: &str) -> bool {
         || normalized.contains("connection")
 }
 
-fn parse_ffmpeg_stream_health(session_id: &str, line: &str) -> Option<StreamHealth> {
-    let fps = parse_stat_f64(line, "fps=");
-    let dropped_frames =
-        parse_stat_u64(line, "drop_frames=").or_else(|| parse_stat_u64(line, "drop="));
-    let speed = parse_stat_f64(line, "speed=");
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ParsedStreamHealthDelta {
+    fps: Option<f64>,
+    dropped_frames: Option<u64>,
+    speed: Option<f64>,
+    bitrate_kbps: Option<f64>,
+    total_bytes: Option<u64>,
+    duplicated_frames: Option<u64>,
+}
 
-    if fps.is_none() && dropped_frames.is_none() && speed.is_none() {
+#[derive(Debug, Clone)]
+struct StreamHealthAccumulator {
+    session_id: String,
+    process_generation: u64,
+    fps: Option<f64>,
+    dropped_frames: Option<u64>,
+    speed: Option<f64>,
+    bitrate_kbps: Option<f64>,
+    total_bytes: Option<u64>,
+    duplicated_frames: Option<u64>,
+}
+
+impl StreamHealthAccumulator {
+    fn new(session_id: impl Into<String>, process_generation: u64) -> Self {
+        Self {
+            session_id: session_id.into(),
+            process_generation,
+            fps: None,
+            dropped_frames: None,
+            speed: None,
+            bitrate_kbps: None,
+            total_bytes: None,
+            duplicated_frames: None,
+        }
+    }
+
+    fn apply(
+        &mut self,
+        session_id: &str,
+        process_generation: u64,
+        delta: ParsedStreamHealthDelta,
+    ) -> StreamHealth {
+        if self.session_id != session_id || self.process_generation != process_generation {
+            *self = Self::new(session_id, process_generation);
+        }
+
+        self.fps = delta.fps.or(self.fps);
+        self.speed = delta.speed.or(self.speed);
+        self.bitrate_kbps = delta.bitrate_kbps.or(self.bitrate_kbps);
+        self.dropped_frames = monotonic_counter(self.dropped_frames, delta.dropped_frames);
+        self.total_bytes = monotonic_counter(self.total_bytes, delta.total_bytes);
+        self.duplicated_frames = monotonic_counter(self.duplicated_frames, delta.duplicated_frames);
+
+        StreamHealth {
+            session_id: self.session_id.clone(),
+            fps: self.fps,
+            dropped_frames: self.dropped_frames,
+            speed: self.speed,
+            bitrate_kbps: self.bitrate_kbps,
+            total_bytes: self.total_bytes,
+            duplicated_frames: self.duplicated_frames,
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+fn monotonic_counter(current: Option<u64>, update: Option<u64>) -> Option<u64> {
+    match (current, update) {
+        (Some(current), Some(update)) => Some(current.max(update)),
+        (current, update) => update.or(current),
+    }
+}
+
+fn parse_ffmpeg_stream_health(line: &str) -> Option<ParsedStreamHealthDelta> {
+    let delta = ParsedStreamHealthDelta {
+        fps: parse_stat_f64(line, "fps="),
+        dropped_frames: parse_stat_u64(line, "drop_frames=")
+            .or_else(|| parse_stat_u64(line, "drop=")),
+        speed: parse_stat_f64(line, "speed="),
+        bitrate_kbps: parse_stat_bitrate_kbps(line, "bitrate="),
+        total_bytes: parse_stat_u64(line, "total_size="),
+        duplicated_frames: parse_stat_u64(line, "dup_frames=")
+            .or_else(|| parse_stat_u64(line, "dup=")),
+    };
+
+    if delta == ParsedStreamHealthDelta::default() {
         return None;
     }
 
-    Some(StreamHealth {
-        session_id: session_id.to_string(),
-        fps,
-        dropped_frames,
-        speed,
-        created_at: Utc::now().to_rfc3339(),
-    })
+    Some(delta)
 }
 
 fn parse_stat_f64(line: &str, label: &str) -> Option<f64> {
@@ -11200,6 +14330,24 @@ fn parse_stat_f64(line: &str, label: &str) -> Option<f64> {
 
 fn parse_stat_u64(line: &str, label: &str) -> Option<u64> {
     stat_value(line, label)?.parse::<u64>().ok()
+}
+
+fn parse_stat_bitrate_kbps(line: &str, label: &str) -> Option<f64> {
+    let value = stat_value(line, label)?;
+    if value.eq_ignore_ascii_case("n/a") {
+        return None;
+    }
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("kbits/s") {
+        (number, 1.0)
+    } else if let Some(number) = value.strip_suffix("Mbits/s") {
+        (number, 1_000.0)
+    } else if let Some(number) = value.strip_suffix("bits/s") {
+        (number, 0.001)
+    } else {
+        (value, 1.0)
+    };
+    let bitrate = number.parse::<f64>().ok()? * multiplier;
+    bitrate.is_finite().then_some(bitrate)
 }
 
 fn stat_value<'a>(line: &'a str, label: &str) -> Option<&'a str> {
@@ -11228,6 +14376,26 @@ mod tests {
         StreamTargetState, default_stream_targets,
     };
     use tokio::sync::broadcast;
+
+    #[test]
+    fn windows_d3d11_layout_capability_covers_shipping_display_camera_presets() {
+        for layout in [
+            LayoutPreset::ScreenCamera,
+            LayoutPreset::SideBySide,
+            LayoutPreset::VerticalCameraTop,
+            LayoutPreset::VerticalCameraBottom,
+            LayoutPreset::VerticalSplit,
+            LayoutPreset::VerticalScreenCamera,
+        ] {
+            assert_eq!(windows_d3d11_display_camera_layout(&layout), Some(true));
+        }
+        for layout in [LayoutPreset::ScreenOnly, LayoutPreset::VerticalScreenOnly] {
+            assert_eq!(windows_d3d11_display_camera_layout(&layout), Some(false));
+        }
+        for layout in [LayoutPreset::CameraOnly, LayoutPreset::VerticalCameraOnly] {
+            assert_eq!(windows_d3d11_display_camera_layout(&layout), None);
+        }
+    }
 
     // Plan 030 S1: progress spam flooded the 200-entry log ring during the
     // 2026-07-08 X incident, evicting every useful entry in ~60s. The filter
@@ -11625,6 +14793,20 @@ mod tests {
             "software-media-foundation"
         );
         assert_eq!(
+            encoder_bridge_encoded_output_backend_label(
+                EncoderBridgeVideoOutput::RawYuv420p,
+                EncodeBackend::SoftwareOpenH264,
+            ),
+            "software-open-h264"
+        );
+        assert_eq!(
+            encoder_bridge_encoded_output_backend_label(
+                EncoderBridgeVideoOutput::RawYuv420p,
+                EncodeBackend::SoftwareX264,
+            ),
+            "software-x264"
+        );
+        assert_eq!(
             encode_backend_label(Some(EncodeBackend::SoftwareX264)),
             "software-x264"
         );
@@ -11975,6 +15157,376 @@ mod tests {
     }
 
     #[test]
+    fn stream_output_topology_request_normalizes_roles_and_rejects_ambiguous_shapes() {
+        let recording = VideoSettings {
+            preset: VideoPreset::Record4k30,
+            width: 3840,
+            height: 2160,
+            fps: 30,
+            bitrate_kbps: 30_000,
+        };
+        let stream = VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+        };
+        let normalized =
+            normalize_stream_output_topology_probe_params(StreamOutputTopologyProbeParams {
+                ffmpeg_path: Some("".to_string()),
+                stream_profile: stream.clone(),
+                recording_profile: Some(recording.clone()),
+                output_roles: vec![
+                    StreamOutputTopologyRole::Stream,
+                    StreamOutputTopologyRole::Recording,
+                ],
+            })
+            .unwrap();
+        assert_eq!(normalized.ffmpeg_path, None);
+        assert_eq!(
+            normalized.output_roles,
+            vec![
+                StreamOutputTopologyRole::Recording,
+                StreamOutputTopologyRole::Stream,
+            ]
+        );
+
+        let duplicate =
+            normalize_stream_output_topology_probe_params(StreamOutputTopologyProbeParams {
+                ffmpeg_path: None,
+                stream_profile: stream.clone(),
+                recording_profile: Some(recording.clone()),
+                output_roles: vec![
+                    StreamOutputTopologyRole::Recording,
+                    StreamOutputTopologyRole::Stream,
+                    StreamOutputTopologyRole::Stream,
+                ],
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(duplicate.contains("unique"), "{duplicate}");
+
+        let mismatched_shared =
+            normalize_stream_output_topology_probe_params(StreamOutputTopologyProbeParams {
+                ffmpeg_path: None,
+                stream_profile: stream,
+                recording_profile: Some(recording),
+                output_roles: vec![StreamOutputTopologyRole::Shared],
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            mismatched_shared.contains("matching recording and stream profiles"),
+            "{mismatched_shared}"
+        );
+    }
+
+    #[test]
+    fn stream_output_topology_split_probe_rejection_selects_bounded_openh264_fallback() {
+        let plan = EncoderOutputTopologyPlan::split(
+            VideoSettings {
+                preset: VideoPreset::Record4k30,
+                width: 3840,
+                height: 2160,
+                fps: 30,
+                bitrate_kbps: 30_000,
+            },
+            VideoSettings {
+                preset: VideoPreset::StreamSafe1080p60,
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                bitrate_kbps: 6_000,
+            },
+        );
+        let probes = vec![
+            MediaFoundationProfileProbe::Passed {
+                encoder_identity: "hardware-encoder".to_string(),
+                input_subtype: "NV12".to_string(),
+            },
+            MediaFoundationProfileProbe::Rejected {
+                reason: format!("driver rejected stream profile\n{}", "x".repeat(1_000)),
+            },
+        ];
+        let summary = summarize_media_foundation_topology_probes(&plan, &probes);
+        let decision = select_windows_encoded_bridge_decision(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "stream-output-topology-v1:test".to_string(),
+            Some(summary),
+            EncodeBackend::SoftwareOpenH264,
+        );
+
+        assert_eq!(decision.effective, EncoderBridgeVideoOutput::RawYuv420p);
+        assert_eq!(
+            decision.effective_encode_backend,
+            EncodeBackend::SoftwareOpenH264
+        );
+        assert_eq!(
+            decision.probe_state,
+            StreamOutputTopologyProbeState::Rejected
+        );
+        let reason = decision.fallback_reason.unwrap();
+        assert!(reason.contains("stream output"), "{reason}");
+        assert!(reason.contains("1920x1080@60 6000kbps"), "{reason}");
+        assert!(!reason.contains('\n'), "{reason}");
+        assert!(
+            reason.len() <= STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES,
+            "{} > {}",
+            reason.len(),
+            STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn stream_output_topology_requires_every_split_role_to_pass() {
+        let video = VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+        };
+        let plan = EncoderOutputTopologyPlan::split(video.clone(), video);
+        let probes = vec![
+            MediaFoundationProfileProbe::Passed {
+                encoder_identity: "hardware-encoder".to_string(),
+                input_subtype: "NV12".to_string(),
+            },
+            MediaFoundationProfileProbe::Passed {
+                encoder_identity: "hardware-encoder".to_string(),
+                input_subtype: "NV12".to_string(),
+            },
+        ];
+        let decision = select_windows_encoded_bridge_decision(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "stream-output-topology-v1:test".to_string(),
+            Some(summarize_media_foundation_topology_probes(&plan, &probes)),
+            EncodeBackend::SoftwareOpenH264,
+        );
+
+        assert_eq!(
+            decision.effective,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        );
+        assert_eq!(
+            decision.effective_encode_backend,
+            EncodeBackend::HardwareMediaFoundation
+        );
+        assert_eq!(decision.probe_state, StreamOutputTopologyProbeState::Passed);
+        assert_eq!(
+            decision.encoder_identity.as_deref(),
+            Some("hardware-encoder")
+        );
+        assert_eq!(decision.input_subtype.as_deref(), Some("NV12"));
+        assert_eq!(decision.fallback_reason, None);
+    }
+
+    #[test]
+    fn stream_output_topology_capability_key_tracks_binary_profile_and_roles() {
+        let video = VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+        };
+        let shared = EncoderOutputTopologyPlan::shared(video.clone());
+        let split = EncoderOutputTopologyPlan::split(video.clone(), video.clone());
+        let binary = std::env::temp_dir().join(format!(
+            "videorc-stream-topology-key-{}.bin",
+            Uuid::new_v4()
+        ));
+        std::fs::write(&binary, b"first-build").unwrap();
+        let binary = binary.to_string_lossy().into_owned();
+        let first = output_topology_capability_key(
+            &binary,
+            &shared,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "adapter=8086:46a6;driver=1.2.3.4",
+        );
+        assert!(first.starts_with("stream-output-topology-v1:"));
+        assert_eq!(first.len(), "stream-output-topology-v1:".len() + 64);
+        assert_ne!(
+            first,
+            output_topology_capability_key(
+                &binary,
+                &split,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+                "adapter=8086:46a6;driver=1.2.3.4",
+            ),
+            "shared and split output roles require distinct verdicts"
+        );
+
+        let mut higher_fps = video;
+        higher_fps.fps = 60;
+        assert_ne!(
+            first,
+            output_topology_capability_key(
+                &binary,
+                &EncoderOutputTopologyPlan::shared(higher_fps),
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+                "adapter=8086:46a6;driver=1.2.3.4",
+            ),
+            "profile changes must invalidate a verdict"
+        );
+        assert_ne!(
+            first,
+            output_topology_capability_key(
+                &binary,
+                &shared,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+                "adapter=8086:46a6;driver=1.2.3.5",
+            ),
+            "adapter-driver changes must invalidate a topology verdict"
+        );
+
+        std::fs::write(&binary, b"second-build-with-different-length").unwrap();
+        let replaced = output_topology_capability_key(
+            &binary,
+            &shared,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "adapter=8086:46a6;driver=1.2.3.4",
+        );
+        let _ = std::fs::remove_file(&binary);
+        assert_ne!(
+            first, replaced,
+            "an in-place FFmpeg replacement must invalidate a verdict"
+        );
+    }
+
+    #[test]
+    fn windows_graphics_adapter_driver_identity_is_order_stable_and_driver_sensitive() {
+        let integrated = WindowsGraphicsAdapterDriverIdentity {
+            adapter_luid: 0x0000_0001_0000_0002,
+            vendor_id: 0x8086,
+            device_id: 0x46a6,
+            subsystem_id: 0x0000_0001,
+            revision: 3,
+            driver_version: 0x0001_0002_0003_0004,
+        };
+        let discrete = WindowsGraphicsAdapterDriverIdentity {
+            adapter_luid: 0x0000_0003_0000_0004,
+            vendor_id: 0x10de,
+            device_id: 0x2684,
+            subsystem_id: 0x0000_0002,
+            revision: 1,
+            driver_version: 0x0005_0006_0007_0008,
+        };
+        let first = windows_graphics_adapter_driver_identity_material(vec![
+            discrete.clone(),
+            integrated.clone(),
+        ])
+        .unwrap();
+        assert_eq!(
+            first,
+            windows_graphics_adapter_driver_identity_material(vec![
+                integrated.clone(),
+                discrete.clone()
+            ])
+            .unwrap(),
+            "DXGI enumeration order must not perturb a capability key"
+        );
+
+        let mut updated = discrete;
+        updated.driver_version += 1;
+        assert_ne!(
+            first,
+            windows_graphics_adapter_driver_identity_material(vec![integrated, updated]).unwrap(),
+            "a driver update must invalidate cached GPU capability verdicts"
+        );
+        assert_eq!(
+            windows_graphics_adapter_driver_identity_material(Vec::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn windows_native_encoded_probe_key_tracks_adapter_driver_identity() {
+        let video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        let binary =
+            std::env::temp_dir().join(format!("videorc-native-probe-key-{}.bin", Uuid::new_v4()));
+        std::fs::write(&binary, b"ffmpeg-build").unwrap();
+        let binary = binary.to_string_lossy().into_owned();
+        let first = windows_native_encoded_probe_key(
+            &binary,
+            "adapter=10de:2684;driver=31.0.15.5000",
+            "hardware-encoder",
+            "NV12",
+            &video,
+            "shared",
+        );
+        let updated_driver = windows_native_encoded_probe_key(
+            &binary,
+            "adapter=10de:2684;driver=32.0.15.6000",
+            "hardware-encoder",
+            "NV12",
+            &video,
+            "shared",
+        );
+        let replaced_adapter = windows_native_encoded_probe_key(
+            &binary,
+            "adapter=8086:46a6;driver=31.0.101.5000",
+            "hardware-encoder",
+            "NV12",
+            &video,
+            "shared",
+        );
+        let _ = std::fs::remove_file(&binary);
+
+        assert_ne!(
+            first, updated_driver,
+            "a driver update must bypass the native encoded-probe cache"
+        );
+        assert_ne!(
+            first, replaced_adapter,
+            "an adapter change must bypass the native encoded-probe cache"
+        );
+    }
+
+    #[test]
+    fn stream_output_topology_session_start_and_rpc_build_the_same_split_plan() {
+        let mut params = base_params(true, true);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Record4k30,
+            width: 3840,
+            height: 2160,
+            fps: 30,
+            bitrate_kbps: 30_000,
+        };
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "yt",
+        )]);
+        streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+        streaming.default_bitrate_kbps = 6_000;
+        params.streaming = Some(streaming);
+
+        let session_plan = encoder_output_topology_plan_from_session(&params).unwrap();
+        let normalized =
+            normalize_stream_output_topology_probe_params(StreamOutputTopologyProbeParams {
+                ffmpeg_path: None,
+                stream_profile: VideoSettings {
+                    preset: VideoPreset::StreamSafe1080p30,
+                    width: 1920,
+                    height: 1080,
+                    fps: 30,
+                    bitrate_kbps: 6_000,
+                },
+                recording_profile: Some(params.output.video.clone()),
+                output_roles: vec![
+                    StreamOutputTopologyRole::Recording,
+                    StreamOutputTopologyRole::Stream,
+                ],
+            })
+            .unwrap();
+        let preflight_plan = encoder_output_topology_plan_from_probe(&normalized);
+
+        assert_eq!(session_plan, preflight_plan);
+    }
+
+    #[test]
     fn recording_startup_frame_gap_budget_scales_with_target_fps() {
         #[cfg(target_os = "macos")]
         {
@@ -12169,6 +15721,45 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    fn test_active_recording_with_stream_targets(
+        snapshot: StreamTargetsSnapshot,
+    ) -> ActiveRecording {
+        ActiveRecording {
+            session_id: snapshot.session_id.clone(),
+            pid: 0,
+            stdin: None,
+            output_path: None,
+            stream_url: None,
+            ffmpeg_path: "test-ffmpeg".to_string(),
+            started_at: Utc::now().to_rfc3339(),
+            capture_epoch: Arc::new(std::sync::OnceLock::new()),
+            capture_started_fallback: Instant::now(),
+            mode: "stream".to_string(),
+            audio_tracks: Vec::new(),
+            pipeline: RecordingPipeline::new(false, true, &[]),
+            native_audio: None,
+            ffmpeg_live_audio_session: None,
+            screen_overlay: None,
+            encoder_bridge: None,
+            encoder_bridge_stream: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_monitor: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_media: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_recovery: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_preview_compositor_suspension: None,
+            stream_targets_snapshot: Arc::new(StdMutex::new(snapshot)),
+            captioned_copy_requested: false,
+            keep_original_media: false,
+            comment_highlight_available: false,
+            _capture_permit: None,
+            stop_intent_sender: None,
+            stop_requested: false,
+        }
     }
 
     fn test_state_with_file_database(directory: &Path) -> AppState {
@@ -12800,6 +16391,262 @@ mod tests {
     }
 
     #[test]
+    fn youtube_1080p_stream_presets_have_fixed_provider_rates() {
+        let youtube_30 = video_preset_defaults(VideoPreset::StreamYoutube1080p30);
+        assert_eq!(
+            youtube_30,
+            VideoSettings {
+                preset: VideoPreset::StreamYoutube1080p30,
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate_kbps: 10_000,
+            }
+        );
+        let youtube_60 = video_preset_defaults(VideoPreset::StreamYoutube1080p60);
+        assert_eq!(
+            youtube_60,
+            VideoSettings {
+                preset: VideoPreset::StreamYoutube1080p60,
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                bitrate_kbps: 12_000,
+            }
+        );
+
+        let mut modified = youtube_60;
+        modified.bitrate_kbps = 11_999;
+        assert!(
+            validate_named_video_profile(&modified)
+                .unwrap_err()
+                .to_string()
+                .contains("12000kbps")
+        );
+    }
+
+    #[test]
+    fn youtube_only_uses_validated_1080p_provider_rate() {
+        for (preset, bitrate_kbps) in [
+            (VideoPreset::StreamYoutube1080p30, 10_000),
+            (VideoPreset::StreamYoutube1080p60, 12_000),
+        ] {
+            let mut params = base_params(false, true);
+            let mut streaming = streaming_for(&[(
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "youtube-key",
+            )]);
+            streaming.default_output_preset = preset.clone();
+            streaming.default_bitrate_kbps = bitrate_kbps;
+            params.streaming = Some(streaming);
+
+            let plan =
+                resolve_provider_stream_output_plan_with_separate_roles(&params, false).unwrap();
+            assert_eq!(plan.stream_video.preset, preset);
+            assert_eq!(plan.stream_video.bitrate_kbps, bitrate_kbps);
+            assert!(!plan.separate_encoded_output_role);
+
+            normalize_stream_only_output_video(&mut params).unwrap();
+            assert_eq!(params.output.video.bitrate_kbps, bitrate_kbps);
+            validate_outputs(&params).unwrap();
+        }
+    }
+
+    #[test]
+    fn youtube_1080p60_is_inside_the_streaming_compositor_bridge_envelope() {
+        let mut params = base_params(false, true);
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "youtube-key",
+        )]);
+        streaming.default_output_preset = VideoPreset::StreamYoutube1080p60;
+        streaming.default_bitrate_kbps = 12_000;
+        params.streaming = Some(streaming);
+        normalize_stream_only_output_video(&mut params).unwrap();
+
+        assert_eq!(requested_compositor_bridge_fps(&params), 60);
+        assert!(streaming_bridge_60fps_eligible(&params));
+
+        params.output.record_enabled = true;
+        params.output.video = video_preset_defaults(VideoPreset::Record4k30);
+        assert!(
+            !streaming_bridge_60fps_eligible(&params),
+            "driving a 4K recording surface at the stream's 60fps cadence is outside the proven envelope"
+        );
+    }
+
+    #[test]
+    fn mixed_providers_sharing_one_encode_use_strictest_safe_profile() {
+        let mut params = base_params(false, true);
+        let mut streaming = streaming_for(&[
+            (
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "youtube-key",
+            ),
+            (
+                StreamPlatform::Twitch,
+                "rtmp://live.twitch.tv/app",
+                "twitch-key",
+            ),
+        ]);
+        streaming.default_output_preset = VideoPreset::StreamYoutube1080p60;
+        streaming.default_bitrate_kbps = 12_000;
+        params.streaming = Some(streaming);
+
+        let plan = resolve_provider_stream_output_plan_with_separate_roles(&params, false).unwrap();
+
+        assert_eq!(
+            plan.stream_video,
+            video_preset_defaults(VideoPreset::StreamSafe1080p60)
+        );
+        assert!(
+            plan.targets
+                .iter()
+                .all(|target| target.video.bitrate_kbps == 6000)
+        );
+        assert!(!plan.separate_encoded_output_role);
+    }
+
+    #[test]
+    fn mixed_providers_keep_youtube_rate_only_with_proven_separate_role() {
+        let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        let mut streaming = streaming_for(&[
+            (
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "youtube-key",
+            ),
+            (
+                StreamPlatform::Twitch,
+                "rtmp://live.twitch.tv/app",
+                "twitch-key",
+            ),
+        ]);
+        streaming.default_output_preset = VideoPreset::StreamYoutube1080p30;
+        streaming.default_bitrate_kbps = 10_000;
+        params.streaming = Some(streaming);
+
+        let plan = resolve_provider_stream_output_plan_with_separate_roles(&params, true).unwrap();
+
+        assert!(plan.separate_encoded_output_role);
+        assert_eq!(plan.stream_video.bitrate_kbps, 10_000);
+        assert_eq!(
+            plan.targets
+                .iter()
+                .find(|target| target.platform == StreamPlatform::Youtube)
+                .unwrap()
+                .video
+                .bitrate_kbps,
+            10_000
+        );
+        assert_eq!(
+            plan.targets
+                .iter()
+                .find(|target| target.platform == StreamPlatform::Twitch)
+                .unwrap()
+                .video
+                .bitrate_kbps,
+            6000
+        );
+        assert!(
+            validate_provider_plan_against_effective_bridge(
+                &plan,
+                EncoderBridgeVideoOutput::RawYuv420p
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("did not prove a separate encoded stream output")
+        );
+        validate_provider_plan_against_effective_bridge(
+            &plan,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn non_youtube_target_rejects_explicit_youtube_profile() {
+        let mut params = base_params(false, true);
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Twitch,
+            "rtmp://live.twitch.tv/app",
+            "twitch-key",
+        )]);
+        let twitch = streaming
+            .targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Twitch)
+            .unwrap();
+        twitch.output_preset = Some(VideoPreset::StreamYoutube1080p30);
+        twitch.output_bitrate_kbps = Some(10_000);
+        params.streaming = Some(streaming);
+
+        let error = resolve_provider_stream_output_plan_with_separate_roles(&params, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("only for YouTube"), "{error}");
+    }
+
+    #[test]
+    fn youtube_1080p_provider_rates_follow_streaming_entitlements() {
+        for (preset, bitrate_kbps) in [
+            (VideoPreset::StreamYoutube1080p30, 10_000),
+            (VideoPreset::StreamYoutube1080p60, 12_000),
+        ] {
+            let mut params = base_params(false, true);
+            let mut streaming = streaming_for(&[(
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "youtube-key",
+            )]);
+            streaming.default_output_preset = preset;
+            streaming.default_bitrate_kbps = bitrate_kbps;
+            params.streaming = Some(streaming);
+
+            let basic_error =
+                validate_session_entitlements(&params, &entitlements::basic_entitlements())
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                basic_error.contains("allows livestreaming up to 1920x1080"),
+                "{basic_error}"
+            );
+            validate_session_entitlements(
+                &params,
+                &entitlements::premium_entitlements(EntitlementSource::Creem),
+            )
+            .unwrap();
+            validate_session_entitlements(&params, &entitlements::developer_test_entitlements())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn youtube_4k60_streaming_remains_unsupported() {
+        let mut params = base_params(false, true);
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "youtube-key",
+        )]);
+        streaming.default_output_preset = VideoPreset::Record4k60Experimental;
+        streaming.default_bitrate_kbps = 50_000;
+        params.streaming = Some(streaming);
+
+        let error = normalize_stream_only_output_video(&mut params)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("requires the YouTube 4K30 stream profile"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn resolves_single_ready_stream_target() {
         let streaming = streaming_for(&[(
             StreamPlatform::Twitch,
@@ -13320,6 +17167,78 @@ mod tests {
         assert!(twitch.message.is_some());
         // A skipped target never leaks a URL.
         assert!(twitch.redacted_url.is_none());
+    }
+
+    #[test]
+    fn stream_target_failure_updates_the_authoritative_full_snapshot_once() {
+        let shared = Arc::new(StdMutex::new(StreamTargetsSnapshot {
+            session_id: "stream-generation-a".to_string(),
+            targets: vec![StreamTargetRuntime {
+                target_id: "youtube".to_string(),
+                platform: StreamPlatform::Youtube,
+                label: "YouTube".to_string(),
+                state: StreamTargetState::Live,
+                message: None,
+                redacted_url: Some("rtmp://youtube.example/live/••••".to_string()),
+            }],
+        }));
+
+        let (label, emitted) =
+            mark_stream_target_failed(&shared, 0, "Connection refused".to_string())
+                .expect("live target must transition");
+        assert_eq!(label, "YouTube");
+        assert_eq!(emitted.session_id, "stream-generation-a");
+        assert_eq!(emitted.targets[0].state, StreamTargetState::Failed);
+        assert_eq!(
+            emitted.targets[0].message.as_deref(),
+            Some("Connection refused")
+        );
+        assert_eq!(stream_targets_snapshot_value(&shared), emitted);
+        assert!(
+            mark_stream_target_failed(&shared, 0, "later duplicate".to_string()).is_none(),
+            "duplicate stderr lines must not create a second transition"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_targets_snapshot_is_generation_scoped_and_missing_session_fails_closed() {
+        let state = test_state();
+        let missing = current_stream_targets_snapshot(&state)
+            .await
+            .expect_err("idle state must not look like an empty healthy snapshot");
+        assert!(missing.to_string().contains("No active capture session"));
+
+        let generation_a = StreamTargetsSnapshot {
+            session_id: "stream-generation-a".to_string(),
+            targets: vec![StreamTargetRuntime {
+                target_id: "youtube".to_string(),
+                platform: StreamPlatform::Youtube,
+                label: "YouTube".to_string(),
+                state: StreamTargetState::Live,
+                message: None,
+                redacted_url: Some("rtmp://youtube.example/live/••••".to_string()),
+            }],
+        };
+        *state.recording.lock().await = Some(test_active_recording_with_stream_targets(
+            generation_a.clone(),
+        ));
+        assert_eq!(
+            current_stream_targets_snapshot(&state).await.unwrap(),
+            generation_a
+        );
+
+        let generation_b = StreamTargetsSnapshot {
+            session_id: "stream-generation-b".to_string(),
+            targets: Vec::new(),
+        };
+        *state.recording.lock().await = Some(test_active_recording_with_stream_targets(
+            generation_b.clone(),
+        ));
+        assert_eq!(
+            current_stream_targets_snapshot(&state).await.unwrap(),
+            generation_b,
+            "a replacement ActiveRecording must never inherit the prior target snapshot"
+        );
     }
 
     #[test]
@@ -14261,14 +18180,19 @@ mod tests {
             video_output,
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            video_output,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(video_output, EncoderBridgeVideoOutput::RawYuv420p);
         assert!(!args.contains(&"tee".to_string()));
         assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(args.contains(&"rtmp://a.rtmp.youtube.com/live2/abc123".to_string()));
         assert!(args.iter().any(|arg| arg == "-shortest"));
         assert!(!args.iter().any(|arg| arg == "[preview]"));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
             // FLV's H264 tag, forced: wrappers clone the mpegts tag verbatim.
@@ -14301,7 +18225,7 @@ mod tests {
             );
             assert_eq!(arg_value(&args, "-filter_complex"), None);
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             assert_eq!(
                 arg_value(&args, "-c:v"),
@@ -14443,9 +18367,14 @@ mod tests {
             video_output,
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            video_output,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(video_output, EncoderBridgeVideoOutput::RawYuv420p);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             // File output + one fifo-muxer FLV output per target — no tee
             // (mpegts→flv slaves reject the forwarded codec tag) and a
@@ -14461,7 +18390,7 @@ mod tests {
                 2
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             assert!(args.contains(&"tee".to_string()));
             let tee = args.iter().find(|arg| arg.contains("[f=matroska")).unwrap();
@@ -14471,7 +18400,7 @@ mod tests {
         assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(args.iter().any(|arg| arg == "-shortest"));
         assert!(!args.iter().any(|arg| arg == "[preview]"));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
             assert_eq!(arg_value(&args, "-filter_complex"), None);
@@ -14494,7 +18423,7 @@ mod tests {
                 None
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             assert_eq!(
                 arg_value(&args, "-c:v"),
@@ -14782,7 +18711,8 @@ mod tests {
             &test_pattern,
             false,
             false,
-            false
+            false,
+            false,
         ));
 
         let camera = scene_with_sources(vec![scene_source(
@@ -14792,10 +18722,10 @@ mod tests {
             true,
         )]);
         assert!(!recording_encoder_bridge_sources_ready(
-            &camera, false, false, false
+            &camera, false, false, false, false
         ));
         assert!(recording_encoder_bridge_sources_ready(
-            &camera, false, true, false
+            &camera, false, true, false, false
         ));
 
         let screen = scene_with_sources(vec![scene_source(
@@ -14805,14 +18735,27 @@ mod tests {
             true,
         )]);
         assert!(!recording_encoder_bridge_sources_ready(
-            &screen, false, false, false
+            &screen, false, false, false, false
         ));
         assert!(recording_encoder_bridge_sources_ready(
-            &screen, false, false, true
+            &screen, false, false, true, false
         ));
         assert!(recording_encoder_bridge_sources_ready(
-            &screen, true, false, false
+            &screen, true, false, false, false
         ));
+        assert!(recording_encoder_bridge_sources_ready(
+            &screen, false, false, false, true
+        ));
+        let window = scene_with_sources(vec![scene_source(
+            "source:window",
+            SceneSourceKind::Window,
+            scene_transform(0.0, 0.0, 1.0, 1.0),
+            true,
+        )]);
+        assert!(
+            !recording_encoder_bridge_sources_ready(&window, false, false, false, true),
+            "the DXGI-monitor authority must never satisfy a window-capture source"
+        );
 
         // A takeover screen row only counts when its image file actually exists.
         assert!(!stream_screen_image_usable(None));
@@ -14840,6 +18783,12 @@ mod tests {
         assert!(encoder_bridge_disabled_setting(Some("0")));
         assert!(!encoder_bridge_recording_disabled(None));
         let default_output = default_encoder_bridge_video_output();
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            default_output,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "Windows must capability-probe the production Media Foundation path without an env override"
+        );
         assert_eq!(
             parse_encoder_bridge_video_output(None, default_output),
             default_output
@@ -14890,7 +18839,12 @@ mod tests {
             select_encoder_bridge_video_output(None, true, true),
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            select_encoder_bridge_video_output(None, true, true),
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(
             select_encoder_bridge_video_output(None, true, true),
             EncoderBridgeVideoOutput::RawYuv420p
@@ -14904,7 +18858,12 @@ mod tests {
             select_encoder_bridge_video_output(None, false, true),
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            select_encoder_bridge_video_output(None, false, true),
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(
             select_encoder_bridge_video_output(None, false, true),
             EncoderBridgeVideoOutput::RawYuv420p
@@ -14912,6 +18871,191 @@ mod tests {
         assert_eq!(
             select_encoder_bridge_video_output(Some("mpeg-ts"), true, true),
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+        );
+    }
+
+    #[test]
+    fn windows_d3d11_preflight_bypasses_only_the_dxgi_screen_store() {
+        let mut params = base_params(false, true);
+        params.sources.screen_id = Some("screen:dxgi:00000000000003f1:2".to_string());
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        assert!(windows_d3d11_screen_preflight_candidate(
+            &params,
+            WindowsD3d11MediaMode::Automatic,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        ));
+
+        let mut disabled = params.clone();
+        assert!(!windows_d3d11_screen_preflight_candidate(
+            &disabled,
+            WindowsD3d11MediaMode::Disabled,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        ));
+        assert!(!windows_d3d11_screen_preflight_candidate(
+            &disabled,
+            WindowsD3d11MediaMode::Automatic,
+            EncoderBridgeVideoOutput::RawYuv420p,
+        ));
+        disabled.sources.window_id = Some("window:test".to_string());
+        assert!(!windows_d3d11_screen_preflight_candidate(
+            &disabled,
+            WindowsD3d11MediaMode::Automatic,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        ));
+        disabled.sources.window_id = None;
+        disabled.scene = Some(scene_with_sources(Vec::new()));
+        assert!(!windows_d3d11_screen_preflight_candidate(
+            &disabled,
+            WindowsD3d11MediaMode::Automatic,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        ));
+    }
+
+    #[test]
+    fn windows_d3d11_fallback_diagnostics_name_the_legacy_path() {
+        let diagnostics = windows_d3d11_fallback_diagnostics(
+            WindowsD3d11MediaMode::Automatic,
+            "windows-d3d11-media-screen-unavailable",
+        );
+        assert_eq!(
+            diagnostics.state,
+            crate::protocol::WindowsD3d11MediaState::Fallback
+        );
+        assert_eq!(
+            diagnostics.capture_backend,
+            Some(crate::protocol::WindowsD3d11CaptureBackend::LegacyFfmpeg)
+        );
+        assert_eq!(
+            diagnostics.cursor_mode,
+            Some(crate::protocol::WindowsD3d11CursorMode::DisabledFallback)
+        );
+        assert_eq!(
+            diagnostics.fallback_reason.as_deref(),
+            Some("windows-d3d11-media-screen-unavailable")
+        );
+    }
+
+    #[test]
+    fn windows_d3d11_preview_monitor_closes_and_reopens_cleanly() {
+        use WindowsD3d11PreviewMonitorTargetAction as Action;
+
+        assert_eq!(
+            windows_d3d11_preview_monitor_target_action(true, false, false),
+            Action::Destroy
+        );
+        assert_eq!(
+            windows_d3d11_preview_monitor_target_action(false, false, false),
+            Action::Wait
+        );
+        assert_eq!(
+            windows_d3d11_preview_monitor_target_action(false, true, true),
+            Action::Configure
+        );
+        assert_eq!(
+            windows_d3d11_preview_monitor_target_action(true, false, true),
+            Action::Keep
+        );
+        assert_eq!(
+            windows_d3d11_preview_monitor_target_action(true, true, true),
+            Action::Configure
+        );
+    }
+
+    #[test]
+    fn windows_d3d11_monitor_updates_only_its_session_and_generation() {
+        let mut diagnostics = crate::diagnostics::idle_diagnostics();
+        diagnostics.session_id = Some("session-a".to_string());
+        diagnostics.windows_d3d11_media.generation = Some(7);
+
+        assert!(windows_d3d11_monitor_identity_matches(
+            &diagnostics,
+            "session-a",
+            7
+        ));
+        assert!(!windows_d3d11_monitor_identity_matches(
+            &diagnostics,
+            "session-b",
+            7
+        ));
+        assert!(!windows_d3d11_monitor_identity_matches(
+            &diagnostics,
+            "session-a",
+            8
+        ));
+    }
+
+    #[test]
+    fn windows_d3d11_recovery_allows_one_immediate_successor_then_fails_closed() {
+        let mut phase = WindowsD3d11RecoveryPhase::Armed { generation: 7 };
+
+        phase.begin(7).unwrap();
+        assert_eq!(
+            phase,
+            WindowsD3d11RecoveryPhase::Recovering {
+                failed_generation: 7
+            }
+        );
+        phase.complete(7, 8).unwrap();
+        assert_eq!(
+            phase,
+            WindowsD3d11RecoveryPhase::Recovered { generation: 8 }
+        );
+
+        let repeat_loss = phase.begin(8).unwrap_err();
+        assert!(repeat_loss.contains("failed again"), "{repeat_loss}");
+        assert_eq!(phase, WindowsD3d11RecoveryPhase::Terminal);
+    }
+
+    #[test]
+    fn windows_d3d11_recovery_rejects_stale_and_skipped_generations() {
+        let mut phase = WindowsD3d11RecoveryPhase::Armed { generation: 12 };
+        let stale = phase.begin(11).unwrap_err();
+        assert!(stale.contains("stale"), "{stale}");
+        assert_eq!(phase, WindowsD3d11RecoveryPhase::Armed { generation: 12 });
+
+        phase.begin(12).unwrap();
+        let skipped = phase.complete(12, 14).unwrap_err();
+        assert!(skipped.contains("expected generation 13"), "{skipped}");
+        assert_eq!(phase, WindowsD3d11RecoveryPhase::Terminal);
+
+        let mut explicitly_failed = WindowsD3d11RecoveryPhase::Armed { generation: 20 };
+        explicitly_failed.fail();
+        assert_eq!(explicitly_failed, WindowsD3d11RecoveryPhase::Terminal);
+    }
+
+    #[test]
+    fn windows_d3d11_final_snapshot_waits_for_writer_and_monitor_join() {
+        let mut phase = WindowsD3d11FinalSnapshotPhase::default();
+        assert!(!phase.permits_final_snapshot());
+        assert!(phase.monitor_joined().is_err());
+        assert_eq!(phase, WindowsD3d11FinalSnapshotPhase::Running);
+
+        phase.writers_joined().unwrap();
+        assert!(!phase.permits_final_snapshot());
+        assert!(phase.writers_joined().is_err());
+
+        phase.monitor_joined().unwrap();
+        assert!(phase.permits_final_snapshot());
+        assert!(phase.monitor_joined().is_err());
+    }
+
+    #[test]
+    fn windows_writer_shutdown_order_covers_raw_fallback_and_d3d11_recovery() {
+        assert_eq!(
+            windows_encoder_bridge_shutdown_order(false, false, false),
+            WindowsEncoderBridgeShutdownOrder::StopWithFfmpeg
+        );
+        assert_eq!(
+            windows_encoder_bridge_shutdown_order(true, true, true),
+            WindowsEncoderBridgeShutdownOrder::JoinBeforeD3d11FinalSnapshot
+        );
+        assert_eq!(
+            windows_encoder_bridge_shutdown_order(true, true, false),
+            WindowsEncoderBridgeShutdownOrder::JoinBeforeD3d11FinalSnapshot
+        );
+        assert_eq!(
+            windows_encoder_bridge_shutdown_order(false, true, false),
+            WindowsEncoderBridgeShutdownOrder::JoinBeforeD3d11FinalSnapshot
         );
     }
 
@@ -16010,6 +20154,18 @@ mod tests {
             screen_overlay: None,
             encoder_bridge: None,
             encoder_bridge_stream: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_monitor: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_media: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_recovery: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_preview_compositor_suspension: None,
+            stream_targets_snapshot: Arc::new(StdMutex::new(StreamTargetsSnapshot {
+                session_id: "live-audio-lock-test".to_string(),
+                targets: Vec::new(),
+            })),
             captioned_copy_requested: false,
             keep_original_media: false,
             comment_highlight_available: false,
@@ -18064,6 +22220,7 @@ mod tests {
         // stream burn-in must force a separate stream leg so the recording stays clean.
         // No StreamingSettings → the stream output IS the recording profile.
         let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
         params.streaming = None;
 
         let without_burn_in = recording_compositor_stream_output(
@@ -18314,6 +22471,7 @@ mod tests {
     #[test]
     fn captioned_record_and_stream_rejects_multiple_target_profiles() {
         let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
         params.captions = Some(crate::protocol::CaptionsSessionParams {
             enabled: true,
             burn_target: crate::captions::CaptionBurnTarget::Stream,
@@ -18368,19 +22526,18 @@ mod tests {
             crate::captions::CaptionBurnTarget::Off,
             "an ineligible mixed captions-off session does not reserve an impossible live leg"
         );
-        // Platform truth: record+stream split output is VideoToolbox-only, so
-        // the captions-off session validates on macOS and is correctly
-        // rejected (for the split-output reason, not a captions reason) on
-        // Windows.
-        #[cfg(target_os = "macos")]
+        // Platform truth: record+stream split output has a native encoded
+        // bridge on macOS and Windows. Other platforms still reject it for the
+        // split-output reason, independently of captions.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         validate_outputs(&captions_off)
             .expect("captions-off preserves the existing mixed-profile capture behavior");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let error = validate_outputs(&captions_off).unwrap_err().to_string();
             assert!(
-                error.contains("VideoToolbox"),
-                "captions-off must fail for the split-output platform reason, not captions: {error}"
+                error.contains("share one encoder"),
+                "captions-off must fail for the unproven split-output reason, not captions: {error}"
             );
         }
     }
@@ -18482,7 +22639,7 @@ mod tests {
             "rtmp://a.rtmp.youtube.com/live2",
             "yt",
         )]);
-        streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+        streaming.default_output_preset = VideoPreset::Custom;
         streaming.default_bitrate_kbps = 9000;
         params.streaming = Some(streaming);
 
@@ -18629,7 +22786,10 @@ mod tests {
             bitrate_kbps: 30_000,
         };
         let error = validate_outputs(&stream_only_4k).unwrap_err().to_string();
-        assert!(error.contains("4K livestreaming is not enabled"), "{error}");
+        assert!(
+            error.contains("requires the YouTube 4K30 stream profile"),
+            "{error}"
+        );
 
         let mut high_bitrate_stream = base_params(false, true);
         high_bitrate_stream.output.video = VideoSettings {
@@ -18804,11 +22964,14 @@ mod tests {
         };
 
         let error = validate_outputs(&params).unwrap_err().to_string();
-        assert!(error.contains("4K livestreaming is not enabled"), "{error}");
+        assert!(
+            error.contains("requires the YouTube 4K30 stream profile"),
+            "{error}"
+        );
     }
 
     #[test]
-    fn rejects_4k_record_with_stream_fps_above_recording_fps() {
+    fn rejects_4k_record_with_60fps_stream_without_proven_split_role() {
         let mut params = base_params(true, true);
         params.output.video = VideoSettings {
             preset: VideoPreset::Record4k30,
@@ -18827,7 +22990,7 @@ mod tests {
         params.streaming = Some(streaming);
 
         let error = validate_outputs(&params).unwrap_err().to_string();
-        assert!(error.contains("stream FPS no higher"), "{error}");
+        assert!(error.contains("share one encoder"), "{error}");
     }
 
     #[test]
@@ -18926,17 +23089,85 @@ mod tests {
 
     #[test]
     fn parses_ffmpeg_stream_health() {
-        let health = parse_ffmpeg_stream_health(
-            "session",
-            "frame=151 fps=29.97 q=-0.0 size=1024kB drop=3 speed=1.02x",
+        let delta = parse_ffmpeg_stream_health(
+            "frame=151 fps=29.97 q=-0.0 bitrate=12000.5kbits/s total_size=2048 dup=2 drop=3 speed=1.02x",
         )
         .unwrap();
 
-        assert_eq!(health.fps, Some(29.97));
-        assert_eq!(health.dropped_frames, Some(3));
-        assert_eq!(health.speed, Some(1.02));
+        assert_eq!(delta.fps, Some(29.97));
+        assert_eq!(delta.dropped_frames, Some(3));
+        assert_eq!(delta.speed, Some(1.02));
+        assert_eq!(delta.bitrate_kbps, Some(12_000.5));
+        assert_eq!(delta.total_bytes, Some(2048));
+        assert_eq!(delta.duplicated_frames, Some(2));
 
-        let progress_health = parse_ffmpeg_stream_health("session", "drop_frames=7").unwrap();
-        assert_eq!(progress_health.dropped_frames, Some(7));
+        let progress_delta = parse_ffmpeg_stream_health("drop_frames=7").unwrap();
+        assert_eq!(progress_delta.dropped_frames, Some(7));
+        assert_eq!(
+            parse_ffmpeg_stream_health("bitrate=N/A"),
+            None,
+            "unknown progress values remain sparse"
+        );
+        assert_eq!(
+            parse_ffmpeg_stream_health("total_size=broken"),
+            None,
+            "malformed counters do not create health updates"
+        );
+    }
+
+    #[test]
+    fn stream_health_accumulator_preserves_sparse_values_and_monotonic_counters() {
+        let mut accumulator = StreamHealthAccumulator::new("session", 7);
+        let first = accumulator.apply(
+            "session",
+            7,
+            parse_ffmpeg_stream_health(
+                "fps=60.0 bitrate=12.0Mbits/s total_size=4096 dup_frames=4 drop_frames=3 speed=1.01x",
+            )
+            .unwrap(),
+        );
+        let second = accumulator.apply(
+            "session",
+            7,
+            parse_ffmpeg_stream_health(
+                "bitrate=11900kbits/s total_size=2048 dup_frames=2 drop_frames=1",
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(second.fps, first.fps);
+        assert_eq!(second.speed, first.speed);
+        assert_eq!(second.bitrate_kbps, Some(11_900.0));
+        assert_eq!(second.total_bytes, Some(4096));
+        assert_eq!(second.duplicated_frames, Some(4));
+        assert_eq!(second.dropped_frames, Some(3));
+    }
+
+    #[test]
+    fn stream_health_accumulator_resets_for_process_or_session_generation() {
+        let mut accumulator = StreamHealthAccumulator::new("session-a", 1);
+        let _ = accumulator.apply(
+            "session-a",
+            1,
+            parse_ffmpeg_stream_health("fps=60 total_size=9000 dup_frames=8").unwrap(),
+        );
+
+        let restarted = accumulator.apply(
+            "session-a",
+            2,
+            parse_ffmpeg_stream_health("total_size=10 dup_frames=1").unwrap(),
+        );
+        assert_eq!(restarted.fps, None);
+        assert_eq!(restarted.total_bytes, Some(10));
+        assert_eq!(restarted.duplicated_frames, Some(1));
+
+        let new_session = accumulator.apply(
+            "session-b",
+            2,
+            parse_ffmpeg_stream_health("bitrate=5000kbits/s").unwrap(),
+        );
+        assert_eq!(new_session.session_id, "session-b");
+        assert_eq!(new_session.total_bytes, None);
+        assert_eq!(new_session.duplicated_frames, None);
     }
 }

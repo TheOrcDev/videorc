@@ -9,6 +9,96 @@ export function selectNativeWindowsScreen(devices) {
   )
 }
 
+export function parseWindowsNativeScreenArgs(argv = []) {
+  const values = [...(argv[0] === '--' ? argv.slice(1) : argv)]
+  const d3d11 = takeFlag(values, '--d3d11')
+  const requireD3d11 = takeFlag(values, '--require-d3d11')
+  const expectFallback = takeOption(values, '--expect-fallback')
+  if (values.length > 0) {
+    throw new Error(`Unknown Windows native-screen argument: ${values[0]}`)
+  }
+  if (requireD3d11 && !d3d11) {
+    throw new Error('--require-d3d11 requires --d3d11.')
+  }
+  if (expectFallback !== undefined && expectFallback !== 'natural') {
+    throw new Error(`--expect-fallback must be natural; received ${expectFallback}.`)
+  }
+  if (expectFallback === 'natural' && (d3d11 || requireD3d11)) {
+    throw new Error('--expect-fallback natural cannot be combined with an explicit D3D11 path.')
+  }
+  return {
+    d3d11,
+    requireD3d11,
+    expectFallback: expectFallback ?? null
+  }
+}
+
+export function windowsNativeScreenRequiresFinalDiagnostics({
+  requireEncodedBridge = false,
+  d3d11 = false,
+  expectFallback = null
+} = {}) {
+  return requireEncodedBridge || d3d11 || Boolean(expectFallback)
+}
+
+export function evaluateWindowsNativeScreenD3d11Diagnostics(
+  diagnostics,
+  { requireOutput = false, expectFallback = null } = {}
+) {
+  const failures = []
+  const media = diagnostics?.windowsD3d11Media
+  if (!media || typeof media !== 'object') {
+    return ['windowsD3d11Media diagnostics were missing']
+  }
+  if (expectFallback === 'natural') {
+    if (media.state !== 'fallback') failures.push(`state=${media.state ?? 'missing'}`)
+    if (media.captureBackend !== 'legacy-ffmpeg') {
+      failures.push(`captureBackend=${media.captureBackend ?? 'missing'}`)
+    }
+    if (typeof media.fallbackReason !== 'string' || !media.fallbackReason.trim()) {
+      failures.push('fallbackReason=missing')
+    }
+    return failures
+  }
+
+  if (media.state !== 'live') failures.push(`state=${media.state ?? 'missing'}`)
+  if (media.captureBackend === 'legacy-ffmpeg' || !media.captureBackend) {
+    failures.push(`captureBackend=${media.captureBackend ?? 'missing'}`)
+  }
+  if ((media.captureReadbackFrames ?? 0) !== 0) {
+    failures.push(`captureReadbackFrames=${media.captureReadbackFrames}`)
+  }
+  if ((media.compositorCpuFallbackFrames ?? 0) !== 0) {
+    failures.push(`compositorCpuFallbackFrames=${media.compositorCpuFallbackFrames}`)
+  }
+  if ((media.encoderSystemMemorySamples ?? 0) !== 0) {
+    failures.push(`encoderSystemMemorySamples=${media.encoderSystemMemorySamples}`)
+  }
+  if ((media.rawVideoCopiedFrames ?? 0) !== 0) {
+    failures.push(`rawVideoCopiedFrames=${media.rawVideoCopiedFrames}`)
+  }
+  if ((media.previewBmpRequests ?? 0) !== 0 || (media.previewBmpBytes ?? 0) !== 0) {
+    failures.push(
+      `BMP=${media.previewBmpRequests ?? 0} requests/${media.previewBmpBytes ?? 0} bytes`
+    )
+  }
+  if ((media.adapterMismatches ?? 0) !== 0) {
+    failures.push(`adapterMismatches=${media.adapterMismatches}`)
+  }
+  if (typeof media.fallbackReason === 'string' && media.fallbackReason.trim()) {
+    failures.push(`fallbackReason=${media.fallbackReason}`)
+  }
+  if (requireOutput) {
+    if (!(media.textureImportFrames > 0)) {
+      failures.push(`textureImportFrames=${media.textureImportFrames ?? 0}`)
+    }
+    if (!(media.encoderGpuSamples > 0)) {
+      failures.push(`encoderGpuSamples=${media.encoderGpuSamples ?? 0}`)
+    }
+  }
+  return failures
+}
+
 export function nativeWindowsScreenCandidates(devices) {
   const selected = selectNativeWindowsScreen(devices)
   if (!selected) return []
@@ -23,6 +113,45 @@ export function nativeWindowsScreenCandidates(devices) {
       detail: 'Windows gdigrab fallback used when DXGI Desktop Duplication cannot start.'
     }
   ]
+}
+
+function takeFlag(values, name) {
+  const matches = values.reduce((count, value) => count + (value === name ? 1 : 0), 0)
+  if (matches > 1) throw new Error(`${name} may be supplied only once.`)
+  if (matches === 0) return false
+  values.splice(values.indexOf(name), 1)
+  return true
+}
+
+function takeOption(values, name) {
+  const indexes = values
+    .map((value, index) => (value === name ? index : -1))
+    .filter((index) => index >= 0)
+  if (indexes.length > 1) throw new Error(`${name} may be supplied only once.`)
+  if (indexes.length === 0) return undefined
+  const index = indexes[0]
+  const value = values[index + 1]
+  if (value === undefined || value.startsWith('--')) {
+    throw new Error(`${name} requires a value.`)
+  }
+  values.splice(index, 2)
+  return value
+}
+
+export function windowsNativeScreenPerformanceBudgetContext({
+  metadata,
+  scenario = 'windows-proof-recording',
+  timing
+} = {}) {
+  return {
+    scenario,
+    hardwareClass: metadata?.hardwareClass ?? null,
+    profileClass: metadata?.profileClass ?? null,
+    buildMode: metadata?.buildMode ?? null,
+    operatingSystem: metadata?.operatingSystem ?? null,
+    timing: timing ?? null,
+    candidatePayloadSha256: metadata?.packagePayload?.sha256 ?? null
+  }
 }
 
 export function nativeWindowsScreenRecordingActive(evidence, sourceId) {

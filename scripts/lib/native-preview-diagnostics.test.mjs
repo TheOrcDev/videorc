@@ -34,6 +34,15 @@ test('native preview latency budgets distinguish native Metal from contained pro
     resolveNativePreviewLatencyBudgets({
       ...configured,
       expectNativeMetalPreview: false,
+      expectNativePreview: true,
+      exerciseProofFramePolling: true
+    }),
+    { p95Ms: 50, p99Ms: 100 }
+  )
+  assert.deepEqual(
+    resolveNativePreviewLatencyBudgets({
+      ...configured,
+      expectNativeMetalPreview: false,
       exerciseProofFramePolling: false
     }),
     { p95Ms: 50, p99Ms: 100 }
@@ -67,18 +76,9 @@ test('native preview latency budgets distinguish native Metal from contained pro
 })
 
 test('proof-source advancement floor scales with the measurement and polling profile', () => {
-  assert.equal(
-    minimumProofSourceFrameDelta({ measurementMs: 4_000, pollingIntervalMs: 125 }),
-    8
-  )
-  assert.equal(
-    minimumProofSourceFrameDelta({ measurementMs: 500, pollingIntervalMs: 125 }),
-    2
-  )
-  assert.equal(
-    minimumProofSourceFrameDelta({ measurementMs: 4_000, pollingIntervalMs: 0 }),
-    2
-  )
+  assert.equal(minimumProofSourceFrameDelta({ measurementMs: 4_000, pollingIntervalMs: 125 }), 8)
+  assert.equal(minimumProofSourceFrameDelta({ measurementMs: 500, pollingIntervalMs: 125 }), 2)
+  assert.equal(minimumProofSourceFrameDelta({ measurementMs: 4_000, pollingIntervalMs: 0 }), 2)
 })
 
 test('native preview diagnostics exclude samples before the absolute measurement epoch', () => {
@@ -328,6 +328,128 @@ test('native preview diagnostics include record+stream samples', () => {
   assert.equal(summary.minFps, 29.8)
   assert.equal(summary.maxEncoderBridgeVideoToolboxOutputFrames, 72)
   assert.equal(summary.measuredSamples, 1)
+})
+
+test('native preview diagnostics require the Windows host kind and summarize D3D11 invariants', () => {
+  const summary = summarizeNativePreviewRecordingDiagnostics(
+    [
+      {
+        activeOutputMode: 'record+stream',
+        receivedAt: 3_500,
+        captureFps: 30,
+        renderFps: 30,
+        encoderSpeed: 1.01,
+        previewTransport: 'd3d11-shared-texture',
+        previewSurfaceBacking: 'directcomposition-swapchain',
+        nativePreviewHostKind: 'backend-d3d11-presenter',
+        windowsD3d11Media: {
+          state: 'live',
+          adapterLuid: '0x0000000000001234',
+          generation: 7,
+          captureBackend: 'desktop-duplication',
+          cursorMode: 'embedded',
+          captureReadbackFrames: 0,
+          textureImportFrames: 90,
+          compositorCpuFallbackFrames: 0,
+          previewPresents: 88,
+          previewDrops: 2,
+          previewBmpRequests: 0,
+          previewBmpBytes: 0,
+          encoderGpuSamples: 87,
+          encoderSystemMemorySamples: 0,
+          rawVideoCopiedFrames: 0,
+          texturePoolPressureEvents: 0,
+          adapterMismatches: 0,
+          deviceResets: 0,
+          messagePumpLagP95Ms: 12,
+          messagePumpLagMaxMs: 34
+        }
+      }
+    ],
+    {
+      ...baseOptions,
+      expectedSurfaceTransport: 'd3d11-shared-texture',
+      expectedSurfaceBacking: 'directcomposition-swapchain',
+      expectedNativePreviewHostKind: 'backend-d3d11-presenter',
+      previewSurfaceSamples: [
+        {
+          receivedAt: 3_600,
+          transport: 'd3d11-shared-texture',
+          backing: 'directcomposition-swapchain',
+          nativePreviewHostKind: 'backend-d3d11-presenter',
+          windowsD3d11Presenter: {
+            layered: true,
+            transparent: true,
+            noActivate: true,
+            excludedFromCapture: true,
+            windowActive: false,
+            windowFocused: false,
+            generationMatches: true,
+            ownerProcessMatches: true,
+            sameAdapter: true,
+            sourceLive: true,
+            firstPresentSucceeded: true,
+            successfulPresents: 88,
+            lastPresentedSequence: 90,
+            latestWinsDrops: 2,
+            hiddenDrops: 0,
+            busyDrops: 0,
+            staleFrameDrops: 0,
+            actualBounds: {
+              x: 100,
+              y: 200,
+              width: 960,
+              height: 540
+            },
+            fallbackReason: null
+          }
+        }
+      ]
+    }
+  )
+
+  assert.equal(summary.nativePreviewSamples, 2)
+  assert.equal(summary.lastWindowsD3d11State, 'live')
+  assert.equal(summary.lastWindowsD3d11AdapterLuid, '0x0000000000001234')
+  assert.equal(summary.lastWindowsD3d11Generation, 7)
+  assert.equal(summary.maxWindowsD3d11TextureImportFrames, 90)
+  assert.equal(summary.maxWindowsD3d11PreviewPresents, 88)
+  assert.equal(summary.maxWindowsD3d11EncoderGpuSamples, 87)
+  assert.equal(summary.maxWindowsD3d11MessagePumpLagP95Ms, 12)
+  assert.equal(summary.maxWindowsD3d11MessagePumpLagMaxMs, 34)
+  assert.equal(summary.lastWindowsD3d11PresenterLayered, true)
+  assert.equal(summary.lastWindowsD3d11PresenterNoActivate, true)
+  assert.equal(summary.lastWindowsD3d11PresenterWindowFocused, false)
+  assert.equal(summary.lastWindowsD3d11PresenterSameAdapter, true)
+  assert.equal(summary.lastWindowsD3d11PresenterFirstPresentSucceeded, true)
+  assert.equal(summary.lastWindowsD3d11PresenterSequence, 90)
+  assert.deepEqual(summary.lastWindowsD3d11PresenterBounds, {
+    x: 100,
+    y: 200,
+    width: 960,
+    height: 540
+  })
+  assert.equal(summary.maxWindowsD3d11PresenterSuccessfulPresents, 88)
+  assert.equal(summary.maxWindowsD3d11PresenterLatestWinsDrops, 2)
+
+  const crossedHost = summarizeNativePreviewRecordingDiagnostics(
+    [
+      {
+        activeOutputMode: 'record',
+        receivedAt: 3_500,
+        previewTransport: 'd3d11-shared-texture',
+        previewSurfaceBacking: 'directcomposition-swapchain',
+        nativePreviewHostKind: 'proof-surface'
+      }
+    ],
+    {
+      ...baseOptions,
+      expectedSurfaceTransport: 'd3d11-shared-texture',
+      expectedSurfaceBacking: 'directcomposition-swapchain',
+      expectedNativePreviewHostKind: 'backend-d3d11-presenter'
+    }
+  )
+  assert.equal(crossedHost.nativePreviewSamples, 0)
 })
 
 test('native preview diagnostics fall back to active samples when warmup hides them all', () => {

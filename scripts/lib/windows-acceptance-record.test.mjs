@@ -6,6 +6,7 @@ import {
   assertWindowsAcceptanceRecord,
   parseWindowsAcceptanceRecordUrl,
   REQUIRED_WINDOWS_ACCEPTANCE_GATES,
+  REQUIRED_WINDOWS_D3D11_ACCEPTANCE_GATES,
   resolveWindowsAcceptanceRecord,
   WindowsAcceptanceRecordError
 } from './windows-acceptance-record.mjs'
@@ -54,6 +55,53 @@ function validRecord() {
     requiredGates: Object.fromEntries(
       REQUIRED_WINDOWS_ACCEPTANCE_GATES.map((gate) => [gate, { status: 'PASS' }])
     )
+  }
+}
+
+function validD3d11Record() {
+  return {
+    ...validRecord(),
+    schemaVersion: 3,
+    requiredGates: Object.fromEntries(
+      REQUIRED_WINDOWS_D3D11_ACCEPTANCE_GATES.map((gate) => [gate, { status: 'PASS' }])
+    ),
+    qualificationEvidence: {
+      candidate: {
+        executableSha256: 'd'.repeat(64),
+        packagePayloadSha256: 'e'.repeat(64)
+      },
+      d3d11Budget: {
+        status: 'active',
+        sha256: 'f'.repeat(64)
+      },
+      comparisons: {
+        nvidiaTuringFloor: '1'.repeat(64),
+        intelXeIntegrated: '2'.repeat(64)
+      },
+      hosts: {
+        nvidiaTuringFloor: '3'.repeat(64),
+        intelXeIntegrated: '4'.repeat(64),
+        unsupportedNaturalFallback: '5'.repeat(64)
+      },
+      aggregateSha256: '6'.repeat(64),
+      qualifiedProfiles: {
+        nvidiaTuringFloor: ['1080p30', '1080p60'],
+        intelXeIntegrated: ['1080p30', '1080p60'],
+        unsupportedNaturalFallback: ['1080p30']
+      },
+      windowsSourceLane: {
+        d3dRustDiscovery: { status: 'PASS' },
+        fullRustTests: { status: 'PASS' },
+        clippy: { status: 'PASS' }
+      },
+      macosRegression: {
+        recordingStudio: { status: 'PASS' },
+        recordingStudioDevices: {
+          status: 'BLOCKED',
+          reason: 'Authorized camera and microphone hardware was unavailable.'
+        }
+      }
+    }
   }
 }
 
@@ -163,6 +211,39 @@ describe('Windows acceptance record contract', () => {
         WindowsAcceptanceRecordError
       )
     }
+  })
+
+  it('binds schema 3 acceptance to the final D3D budget and three-host evidence chain', () => {
+    const record = validD3d11Record()
+    assert.equal(
+      assertWindowsAcceptanceRecord(record, {
+        ...expectations,
+        installedAppSha256: 'd'.repeat(64),
+        packagePayloadSha256: 'e'.repeat(64)
+      }).status,
+      'PASS'
+    )
+
+    const broader = structuredClone(record)
+    broader.qualificationEvidence.qualifiedProfiles.intelXeIntegrated.push('4k30')
+    assert.throws(
+      () => assertWindowsAcceptanceRecord(broader, expectations),
+      /must be exactly 1080p30, 1080p60/
+    )
+
+    const missingFallback = structuredClone(record)
+    delete missingFallback.qualificationEvidence.hosts.unsupportedNaturalFallback
+    assert.throws(
+      () => assertWindowsAcceptanceRecord(missingFallback, expectations),
+      WindowsAcceptanceRecordError
+    )
+
+    const skippedMacRegression = structuredClone(record)
+    skippedMacRegression.qualificationEvidence.macosRegression.recordingStudio.status = 'BLOCKED'
+    assert.throws(
+      () => assertWindowsAcceptanceRecord(skippedMacRegression, expectations),
+      WindowsAcceptanceRecordError
+    )
   })
 
   it('fetches only the canonical raw URL without following redirects', async () => {

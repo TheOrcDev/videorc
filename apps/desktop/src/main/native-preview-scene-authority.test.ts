@@ -101,6 +101,28 @@ describe('native preview compositor scene authority', () => {
       )
     ).toBe(false)
   })
+
+  it('accepts only the canonical Windows D3D11 presenter as Windows scene proof', () => {
+    const status = {
+      state: 'live',
+      transport: 'd3d11-shared-texture',
+      backing: 'directcomposition-swapchain',
+      sourcePixelsPresent: true,
+      nativePreviewHostKind: 'backend-d3d11-presenter',
+      nativePreviewHostAttached: true,
+      nativePreviewPresentedSceneRevision: 12
+    } as PreviewSurfaceStatus
+
+    expect(nativePreviewStatusProvesSceneRevision(status, 12, 'win32')).toBe(true)
+    expect(nativePreviewStatusProvesSceneRevision(status, 12, 'darwin')).toBe(false)
+    expect(
+      nativePreviewStatusProvesSceneRevision(
+        { ...status, nativePreviewHostKind: 'proof-surface' },
+        12,
+        'win32'
+      )
+    ).toBe(false)
+  })
 })
 
 function scene(

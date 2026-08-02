@@ -8,6 +8,7 @@ import type {
   FileAssessment,
   GateStatus,
   LiveLayoutApplyStatus,
+  MainOwnedPreviewSurfaceBoundsParams,
   NoiseCleanupJob,
   OAuthCallbackResult,
   OAuthCompleteParams,
@@ -32,8 +33,13 @@ import type {
   SessionLogsPage,
   SessionStorageTotals,
   StartSessionParams,
+  StreamOutputTopologyProbeParams,
+  StreamOutputTopologyProbeResult,
+  StreamTargetsSnapshot,
+  VideoSettings,
   VideorcAccountSnapshot
 } from './backend'
+import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { LAYOUT_PRESET_VALUES } from './backend'
 import {
   arraySchema,
@@ -45,6 +51,7 @@ import {
   numberSchema,
   objectSchema,
   optionalSchema,
+  RuntimeSchemaError,
   runtimeSchema,
   stringSchema,
   undefinedSchema,
@@ -82,6 +89,11 @@ export interface BackendRpcMethodMap {
   'platformAccounts.oauth.complete': BackendRpcDefinition<OAuthCompleteParams, OAuthCallbackResult>
   'devices.list': BackendRpcDefinition<{ ffmpegPath?: string } | undefined, DeviceList>
   'recording.status': BackendRpcDefinition<undefined, RecordingStatus>
+  'stream.output.topology.probe': BackendRpcDefinition<
+    StreamOutputTopologyProbeParams,
+    StreamOutputTopologyProbeResult
+  >
+  'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'session.stop': BackendRpcDefinition<undefined, RecordingStatus>
   'scene.get': BackendRpcDefinition<undefined, Scene>
@@ -134,6 +146,7 @@ export interface BackendEventMap {
   'noiseCleanup.status': NoiseCleanupJob
   'platformAccounts.oauth.callback': OAuthCallbackResult
   'recording.status': RecordingStatus
+  'stream.targets': StreamTargetsSnapshot
   'scene.changed': Scene
   'compositor.status': CompositorStatus
   'preview.live.status': PreviewLiveStatus
@@ -304,6 +317,219 @@ const recordingStatusSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<RecordingStatus>
 
+const videoSettingsSchema = objectSchema(
+  {
+    preset: enumSchema([
+      'tutorial-1080p30',
+      'tutorial-1440p30',
+      'record-4k30',
+      'record-4k60-experimental',
+      'stream-safe-1080p30',
+      'stream-safe-1080p60',
+      'stream-youtube-1080p30',
+      'stream-youtube-1080p60',
+      'stream-youtube-4k30',
+      'stream-1080p60',
+      'vertical-1080x1920',
+      'custom'
+    ]),
+    width: numberSchema({ integer: true, min: 1, max: 65_536 }),
+    height: numberSchema({ integer: true, min: 1, max: 65_536 }),
+    fps: numberSchema({ integer: true, min: 1, max: 1000 }),
+    bitrateKbps: numberSchema({ integer: true, min: 1, max: 1_000_000 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<VideoSettings>
+
+const streamOutputTopologyRoleSchema = enumSchema(['shared', 'recording', 'stream'])
+const streamOutputBridgeSchema = enumSchema([
+  'raw-yuv420p',
+  'videotoolbox-h264-annex-b',
+  'videotoolbox-h264-mpegts',
+  'windows-media-foundation-h264-mpegts'
+])
+const encodeBackendSchema = enumSchema([
+  'software-x264',
+  'hardware-videotoolbox',
+  'hardware-media-foundation',
+  'software-media-foundation',
+  'software-open-h264'
+])
+const streamOutputTopologyProbeStateSchema = enumSchema([
+  'not-required',
+  'passed',
+  'rejected',
+  'unsupported'
+])
+
+const streamOutputTopologyProbeParamsFields = objectSchema(
+  {
+    ffmpegPath: optionalSchema(boundedPath),
+    streamProfile: videoSettingsSchema,
+    recordingProfile: optionalSchema(videoSettingsSchema),
+    outputRoles: arraySchema(streamOutputTopologyRoleSchema, { maxLength: 2 })
+  },
+  { allowUnknown: false }
+)
+
+const streamOutputTopologyProbeParamsSchema = runtimeSchema<StreamOutputTopologyProbeParams>(
+  'a secret-free stream output topology probe',
+  (value, path) => {
+    const parsed = streamOutputTopologyProbeParamsFields.parse(
+      value,
+      path
+    ) as StreamOutputTopologyProbeParams
+    validateStreamOutputTopologyRoles(parsed, path, false)
+    return parsed
+  }
+)
+
+const streamOutputTopologyProbeResultFields = objectSchema(
+  {
+    capabilityKey: stringSchema({ minLength: 1, maxLength: 256 }),
+    streamProfile: videoSettingsSchema,
+    recordingProfile: optionalSchema(videoSettingsSchema),
+    outputRoles: arraySchema(streamOutputTopologyRoleSchema, { maxLength: 2 }),
+    requestedBridgeOutput: streamOutputBridgeSchema,
+    effectiveBridgeOutput: streamOutputBridgeSchema,
+    effectiveEncodeBackend: encodeBackendSchema,
+    probeState: streamOutputTopologyProbeStateSchema,
+    fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 480 }))
+  },
+  { allowUnknown: false }
+)
+
+const streamOutputTopologyProbeResultSchema = boundedSemanticValue(
+  'a completed stream output topology probe',
+  runtimeSchema<StreamOutputTopologyProbeResult>(
+    'a completed stream output topology probe',
+    (value, path) => {
+      const parsed = streamOutputTopologyProbeResultFields.parse(
+        value,
+        path
+      ) as StreamOutputTopologyProbeResult
+      validateStreamOutputTopologyRoles(parsed, path, true)
+      if (!/^stream-output-topology-v1:[0-9a-f]{64}$/.test(parsed.capabilityKey)) {
+        throw new RuntimeSchemaError(`${path}.capabilityKey`, 'a versioned SHA-256 capability key')
+      }
+      const fallbackVerdict =
+        parsed.probeState === 'rejected' || parsed.probeState === 'unsupported'
+      if (fallbackVerdict && !parsed.fallbackReason) {
+        throw new RuntimeSchemaError(
+          `${path}.fallbackReason`,
+          'a non-empty reason for a rejected or unsupported topology'
+        )
+      }
+      if (!fallbackVerdict && parsed.fallbackReason !== undefined) {
+        throw new RuntimeSchemaError(
+          `${path}.fallbackReason`,
+          'absent for a passed or not-required topology'
+        )
+      }
+      if (parsed.requestedBridgeOutput !== parsed.effectiveBridgeOutput && !parsed.fallbackReason) {
+        throw new RuntimeSchemaError(
+          `${path}.fallbackReason`,
+          'a non-empty reason when the effective bridge differs'
+        )
+      }
+      return parsed
+    }
+  )
+) as RuntimeSchema<StreamOutputTopologyProbeResult>
+
+const streamTargetRuntimeSchema = objectSchema(
+  {
+    targetId: boundedString,
+    platform: enumSchema(['youtube', 'twitch', 'x', 'custom']),
+    label: boundedString,
+    state: enumSchema([
+      'not-configured',
+      'ready',
+      'connecting',
+      'live',
+      'warning',
+      'failed',
+      'stopped'
+    ]),
+    message: optionalText,
+    redactedUrl: optionalText
+  },
+  { allowUnknown: false }
+)
+
+const streamTargetsSnapshotSchema = boundedSemanticValue(
+  'a secret-free authoritative stream-target snapshot',
+  runtimeSchema<StreamTargetsSnapshot>(
+    'a secret-free authoritative stream-target snapshot',
+    (value, path) => {
+      const parsed = objectSchema(
+        {
+          sessionId: boundedString,
+          targets: arraySchema(streamTargetRuntimeSchema, { maxLength: 16 })
+        },
+        { allowUnknown: false }
+      ).parse(value, path) as StreamTargetsSnapshot
+      const targetIds = parsed.targets.map((target) => target.targetId)
+      if (new Set(targetIds).size !== targetIds.length) {
+        throw new RuntimeSchemaError(`${path}.targets`, 'unique targetId values')
+      }
+      return parsed
+    }
+  )
+) as RuntimeSchema<StreamTargetsSnapshot>
+
+function validateStreamOutputTopologyRoles(
+  value: Pick<
+    StreamOutputTopologyProbeParams,
+    'streamProfile' | 'recordingProfile' | 'outputRoles'
+  >,
+  path: string,
+  requireCanonicalSplitOrder: boolean
+): void {
+  const roles = value.outputRoles
+  if (roles.length === 1 && roles[0] === 'shared') {
+    if (
+      value.recordingProfile &&
+      !sameVideoOutputProfile(value.recordingProfile, value.streamProfile)
+    ) {
+      throw new RuntimeSchemaError(
+        `${path}.recordingProfile`,
+        'the same effective profile as streamProfile for a shared topology'
+      )
+    }
+    return
+  }
+
+  const splitRoles =
+    roles.length === 2 &&
+    roles.includes('recording') &&
+    roles.includes('stream') &&
+    new Set(roles).size === 2
+  if (
+    !splitRoles ||
+    (requireCanonicalSplitOrder && (roles[0] !== 'recording' || roles[1] !== 'stream'))
+  ) {
+    throw new RuntimeSchemaError(
+      `${path}.outputRoles`,
+      requireCanonicalSplitOrder
+        ? '["shared"] or the canonical ["recording", "stream"] pair'
+        : '["shared"] or one recording/stream pair'
+    )
+  }
+  if (!value.recordingProfile) {
+    throw new RuntimeSchemaError(`${path}.recordingProfile`, 'present for a split output topology')
+  }
+}
+
+function sameVideoOutputProfile(left: VideoSettings, right: VideoSettings): boolean {
+  return (
+    left.width === right.width &&
+    left.height === right.height &&
+    left.fps === right.fps &&
+    left.bitrateKbps === right.bitrateKbps
+  )
+}
+
 const sourceSelectionSchema = objectSchema(
   {
     screenId: optionalText,
@@ -435,12 +661,18 @@ const previewLiveStatusSchema = objectSchema(
     source: enumSchema(['idle-preview', 'recording-session', 'unavailable']),
     transport: enumSchema([
       'native-surface',
+      'd3d11-shared-texture',
       'electron-proof-surface',
       'latest-jpeg-polling',
       'mjpeg-stream',
       'unavailable'
     ]),
-    backing: enumSchema(['cametal-layer', 'electron-browser-window', 'none']),
+    backing: enumSchema([
+      'cametal-layer',
+      'directcomposition-swapchain',
+      'electron-browser-window',
+      'none'
+    ]),
     targetFps: optionalSchema(numberSchema({ min: 0, max: 1000 })),
     width: optionalSchema(nonNegativeInteger),
     height: optionalSchema(nonNegativeInteger),
@@ -450,33 +682,198 @@ const previewLiveStatusSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<PreviewLiveStatus>
 
+const rendererSafePreviewBoundsSchema = objectSchema(
+  {
+    screenX: numberSchema(),
+    screenY: numberSchema(),
+    width: numberSchema({ min: 0, max: 65_536 }),
+    height: numberSchema({ min: 0, max: 65_536 }),
+    scaleFactor: numberSchema({ min: 0.1, max: 16 }),
+    screenHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipX: optionalSchema(numberSchema()),
+    clipY: optionalSchema(numberSchema()),
+    clipWidth: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    visible: optionalSchema(booleanSchema),
+    orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    elevated: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+)
+
+const opaqueNativeWindowHandleSchema = runtimeSchema<string>(
+  'a nonzero fixed-width 64-bit hexadecimal window handle',
+  (value, path) => {
+    const handle = stringSchema({ minLength: 18, maxLength: 18 }).parse(value, path)
+    if (!/^0x[0-9a-f]{16}$/.test(handle) || handle === '0x0000000000000000') {
+      throw new RuntimeSchemaError(path, 'a nonzero lowercase 0x-prefixed 64-bit handle')
+    }
+    return handle
+  }
+)
+
+const mainOwnedPreviewBoundsSchema = objectSchema(
+  {
+    screenX: numberSchema(),
+    screenY: numberSchema(),
+    width: numberSchema({ min: 0, max: 65_536 }),
+    height: numberSchema({ min: 0, max: 65_536 }),
+    scaleFactor: numberSchema({ min: 0.1, max: 16 }),
+    screenHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipX: optionalSchema(numberSchema()),
+    clipY: optionalSchema(numberSchema()),
+    clipWidth: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    visible: optionalSchema(booleanSchema),
+    orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    orderAboveWindowHandle: optionalSchema(opaqueNativeWindowHandleSchema),
+    elevated: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+)
+
+const mainOwnedPreviewSurfaceBoundsParamsSchema = objectSchema(
+  {
+    bounds: mainOwnedPreviewBoundsSchema,
+    generation: numberSchema({ integer: true, min: 0, max: Number.MAX_SAFE_INTEGER })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<MainOwnedPreviewSurfaceBoundsParams>
+
+/** Validate the privileged main-to-backend shape without registering a renderer-callable RPC. */
+export function validateMainOwnedPreviewSurfaceBoundsParams(
+  value: unknown
+): MainOwnedPreviewSurfaceBoundsParams {
+  return mainOwnedPreviewSurfaceBoundsParamsSchema.parse(
+    value,
+    'main.previewSurfaceBounds'
+  ) as MainOwnedPreviewSurfaceBoundsParams
+}
+
+const windowsD3d11PresenterBoundsSchema = objectSchema(
+  {
+    x: numberSchema({ integer: true }),
+    y: numberSchema({ integer: true }),
+    width: nonNegativeInteger,
+    height: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+
+const windowsD3d11PresenterDiagnosticsSchema = objectSchema(
+  {
+    layered: booleanSchema,
+    transparent: booleanSchema,
+    noActivate: booleanSchema,
+    excludedFromCapture: booleanSchema,
+    windowActive: booleanSchema,
+    windowFocused: booleanSchema,
+    previewGeneration: optionalSchema(nonNegativeInteger),
+    mediaGeneration: nonNegativeInteger,
+    generationMatches: booleanSchema,
+    ownerProcessMatches: booleanSchema,
+    sameAdapter: booleanSchema,
+    sourceLive: booleanSchema,
+    firstPresentSucceeded: booleanSchema,
+    successfulPresents: nonNegativeInteger,
+    lastPresentedSequence: optionalSchema(nonNegativeInteger),
+    latestWinsDrops: nonNegativeInteger,
+    hiddenDrops: nonNegativeInteger,
+    busyDrops: nonNegativeInteger,
+    staleFrameDrops: nonNegativeInteger,
+    actualBounds: optionalSchema(windowsD3d11PresenterBoundsSchema),
+    fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 1024 }))
+  },
+  { allowUnknown: false }
+)
+
+const previewSurfaceStatusFieldsSchema = objectSchema(
+  {
+    state: enumSchema(['unavailable', 'starting', 'live', 'stopped', 'failed']),
+    source: enumSchema(['synthetic', 'camera', 'screen', 'window']),
+    transport: enumSchema([
+      'native-surface',
+      'd3d11-shared-texture',
+      'electron-proof-surface',
+      'latest-jpeg-polling',
+      'mjpeg-stream',
+      'unavailable'
+    ]),
+    backing: enumSchema([
+      'cametal-layer',
+      'directcomposition-swapchain',
+      'electron-browser-window',
+      'none'
+    ]),
+    targetFps: numberSchema({ min: 0, max: 1000 }),
+    width: nonNegativeInteger,
+    height: nonNegativeInteger,
+    framesRendered: nonNegativeInteger,
+    droppedFrames: nonNegativeInteger,
+    framePollingSuppressed: booleanSchema,
+    sourcePixelsPresent: booleanSchema,
+    pendingHostCommandCount: nonNegativeInteger,
+    nativePreviewHostKind: optionalSchema(
+      enumSchema([
+        'in-process',
+        'helper-process',
+        'external-module',
+        'proof-surface',
+        'backend-d3d11-presenter'
+      ])
+    ),
+    bounds: optionalSchema(rendererSafePreviewBoundsSchema),
+    windowsD3d11Presenter: optionalSchema(windowsD3d11PresenterDiagnosticsSchema),
+    updatedAt: timestamp
+  },
+  { allowUnknown: true }
+)
+
 const previewSurfaceStatusSchema = boundedSemanticValue(
-  'a native preview surface status',
-  objectSchema(
-    {
-      state: enumSchema(['unavailable', 'starting', 'live', 'stopped', 'failed']),
-      source: enumSchema(['synthetic', 'camera', 'screen', 'window']),
-      transport: enumSchema([
-        'native-surface',
-        'electron-proof-surface',
-        'latest-jpeg-polling',
-        'mjpeg-stream',
-        'unavailable'
-      ]),
-      backing: enumSchema(['cametal-layer', 'electron-browser-window', 'none']),
-      targetFps: numberSchema({ min: 0, max: 1000 }),
-      width: nonNegativeInteger,
-      height: nonNegativeInteger,
-      framesRendered: nonNegativeInteger,
-      droppedFrames: nonNegativeInteger,
-      framePollingSuppressed: booleanSchema,
-      sourcePixelsPresent: booleanSchema,
-      pendingHostCommandCount: nonNegativeInteger,
-      updatedAt: timestamp
-    },
-    { allowUnknown: true }
+  'a renderer-safe native preview surface status',
+  runtimeSchema<PreviewSurfaceStatus>(
+    'a renderer-safe native preview surface status',
+    (value, path) => {
+      rejectPrivilegedPreviewIdentity(value, path)
+      return previewSurfaceStatusFieldsSchema.parse(value, path) as PreviewSurfaceStatus
+    }
   )
 ) as RuntimeSchema<PreviewSurfaceStatus>
+
+function rejectPrivilegedPreviewIdentity(value: unknown, path: string): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return
+  }
+  const record = value as Record<string, unknown>
+  for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+    if (field in record) {
+      throw new RuntimeSchemaError(`${path}.${field}`, 'absent from renderer-facing state')
+    }
+  }
+  const bounds = record.bounds
+  if (typeof bounds === 'object' && bounds !== null && !Array.isArray(bounds)) {
+    const boundsRecord = bounds as Record<string, unknown>
+    for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+      if (field in boundsRecord) {
+        throw new RuntimeSchemaError(
+          `${path}.bounds.${field}`,
+          'absent from renderer-facing bounds'
+        )
+      }
+    }
+  }
+  const presenter = record.windowsD3d11Presenter
+  if (typeof presenter === 'object' && presenter !== null && !Array.isArray(presenter)) {
+    for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+      if (field in presenter) {
+        throw new RuntimeSchemaError(
+          `${path}.windowsD3d11Presenter.${field}`,
+          'absent from renderer-facing presenter diagnostics'
+        )
+      }
+    }
+  }
+}
 
 const previewCameraStatusSchema = boundedSemanticValue(
   'a preview camera status',
@@ -511,12 +908,79 @@ const previewScreenStatusSchema = boundedSemanticValue(
   )
 ) as RuntimeSchema<PreviewScreenStatus>
 
+const windowsD3d11MediaDiagnosticsSchema = objectSchema(
+  {
+    state: enumSchema(['unavailable', 'probing', 'live', 'draining', 'fallback', 'failed']),
+    requested: booleanSchema,
+    required: booleanSchema,
+    adapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    captureAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    compositorAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    primaryEncoderAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    auxiliaryEncoderAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    generation: optionalSchema(nonNegativeInteger),
+    captureBackend: optionalSchema(
+      enumSchema(['desktop-duplication', 'windows-graphics-capture-monitor', 'legacy-ffmpeg'])
+    ),
+    cursorMode: optionalSchema(
+      enumSchema(['embedded', 'separate', 'excluded-wgc', 'disabled-fallback'])
+    ),
+    cursorRequested: booleanSchema,
+    cursorPixelsSource: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    cursorExclusionGuaranteed: booleanSchema,
+    captureReadbackFrames: nonNegativeInteger,
+    textureImportFrames: nonNegativeInteger,
+    cameraUploadFrames: nonNegativeInteger,
+    cursorShapeUploads: nonNegativeInteger,
+    cursorCompositedFrames: nonNegativeInteger,
+    compositorCpuFallbackFrames: nonNegativeInteger,
+    previewPresents: nonNegativeInteger,
+    previewDrops: nonNegativeInteger,
+    previewBmpRequests: nonNegativeInteger,
+    previewBmpBytes: nonNegativeInteger,
+    messagePumpLagP95Ms: optionalSchema(numberSchema({ min: 0 })),
+    messagePumpLagMaxMs: optionalSchema(numberSchema({ min: 0 })),
+    mediaCommandLagP95Ms: optionalSchema(numberSchema({ min: 0 })),
+    mediaCommandLagMaxMs: optionalSchema(numberSchema({ min: 0 })),
+    maximumConsecutiveMessageBatch: nonNegativeInteger,
+    maximumConsecutiveMediaBatch: nonNegativeInteger,
+    encoderGpuSamples: nonNegativeInteger,
+    encoderSystemMemorySamples: nonNegativeInteger,
+    rawVideoCopiedFrames: nonNegativeInteger,
+    texturePoolCapacity: nonNegativeInteger,
+    texturePoolInUse: nonNegativeInteger,
+    texturePoolPressureEvents: nonNegativeInteger,
+    adapterMismatches: nonNegativeInteger,
+    deviceResets: nonNegativeInteger,
+    synchronizationTimeouts: nonNegativeInteger,
+    staleGenerationCallbacks: nonNegativeInteger,
+    fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 16_384 }))
+  },
+  { allowUnknown: false }
+)
+
+const previewImagePollCountsSchema = objectSchema(
+  {
+    cameraPng: nonNegativeInteger,
+    screenPng: nonNegativeInteger,
+    productionPng: nonNegativeInteger,
+    cameraBmp: nonNegativeInteger,
+    screenBmp: nonNegativeInteger,
+    liveJpeg: nonNegativeInteger,
+    liveMjpeg: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+
 const diagnosticStatsSchema = boundedSemanticValue(
   'bounded diagnostic statistics',
   objectSchema(
     {
       skippedFrames: nonNegativeInteger,
       droppedFrames: nonNegativeInteger,
+      compositorBackend: optionalSchema(enumSchema(['metal', 'd3d11', 'cpu', 'cpu-fallback'])),
+      windowsD3d11Media: optionalSchema(windowsD3d11MediaDiagnosticsSchema),
+      previewImagePollCounts: optionalSchema(previewImagePollCountsSchema),
       updatedAt: optionalSchema(timestamp)
     },
     { allowUnknown: true }
@@ -856,6 +1320,14 @@ const runtimeContracts = {
   },
   'devices.list': { params: undefinedOrFfmpegPathSchema, result: deviceListSchema },
   'recording.status': { params: undefinedSchema, result: recordingStatusSchema },
+  'stream.output.topology.probe': {
+    params: streamOutputTopologyProbeParamsSchema,
+    result: streamOutputTopologyProbeResultSchema
+  },
+  'stream.targets.snapshot': {
+    params: undefinedSchema,
+    result: streamTargetsSnapshotSchema
+  },
   'session.start': { params: sessionStartParamsSchema, result: recordingStatusSchema },
   'session.stop': { params: undefinedSchema, result: recordingStatusSchema },
   'scene.get': { params: undefinedSchema, result: sceneSchema },
@@ -1019,6 +1491,7 @@ const runtimeEventSchemas = {
   'noiseCleanup.status': noiseCleanupJobSchema,
   'platformAccounts.oauth.callback': oauthCallbackResultSchema,
   'recording.status': recordingStatusSchema,
+  'stream.targets': streamTargetsSnapshotSchema,
   'scene.changed': sceneSchema,
   'compositor.status': compositorStatusSchema,
   'preview.live.status': previewLiveStatusSchema,

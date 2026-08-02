@@ -25,9 +25,216 @@ use crate::resource_authority::ResourceAuthority;
 use crate::scene::default_scene;
 use crate::source_registry::SourceRegistry;
 use crate::storage::Database;
+use crate::windows_d3d11_device::{
+    DxgiAdapterLuid, WindowsD3d11CoordinatorReleaseAction, WindowsD3d11Error,
+    WindowsD3d11MediaCoordinatorState,
+};
+#[cfg(target_os = "windows")]
+use crate::windows_d3d11_device::{
+    WindowsD3d11MediaClient, WindowsD3d11MediaRole, WindowsD3d11MediaThread, WindowsD3d11RoleLease,
+    WindowsD3d11TexturePoolConfig, WindowsDxgiOutputSelection,
+};
 
 const PREVIEW_FRAME_CHANNEL_CAPACITY: usize = 256;
 const LOG_HISTORY_LIMIT: usize = 200;
+
+pub(crate) type WindowsD3d11MediaCoordinatorSlot = Arc<StdMutex<WindowsD3d11MediaCoordinator>>;
+
+/// Process-local owner for the one Windows D3D11 media authority.
+///
+/// The state machine is compiled and tested on every platform. The COM/D3D
+/// thread and its client exist only on Windows, never cross this mutex, and
+/// are drained before a retired generation can be reused.
+#[derive(Debug)]
+pub(crate) struct WindowsD3d11MediaCoordinator {
+    state: WindowsD3d11MediaCoordinatorState,
+    active_adapter_luid: Option<DxgiAdapterLuid>,
+    #[cfg(target_os = "windows")]
+    media_thread: Option<WindowsD3d11MediaThread>,
+    #[cfg(target_os = "windows")]
+    client: Option<WindowsD3d11MediaClient>,
+}
+
+impl WindowsD3d11MediaCoordinator {
+    fn new() -> Self {
+        Self {
+            state: WindowsD3d11MediaCoordinatorState::new(1)
+                .expect("the initial Windows D3D11 generation is valid"),
+            active_adapter_luid: None,
+            #[cfg(target_os = "windows")]
+            media_thread: None,
+            #[cfg(target_os = "windows")]
+            client: None,
+        }
+    }
+
+    fn finish_release_action(
+        &mut self,
+        action: WindowsD3d11CoordinatorReleaseAction,
+    ) -> Result<(), WindowsD3d11Error> {
+        match action {
+            WindowsD3d11CoordinatorReleaseAction::KeepMediaThread => Ok(()),
+            WindowsD3d11CoordinatorReleaseAction::DrainAndJoin {
+                retired_generation, ..
+            } => {
+                #[cfg(target_os = "windows")]
+                let shutdown_result = {
+                    self.client.take();
+                    if let Some(media_thread) = self.media_thread.take() {
+                        media_thread.shutdown()
+                    } else {
+                        Ok(())
+                    }
+                };
+                self.active_adapter_luid = None;
+                let finish_result = self.state.finish_shutdown(retired_generation);
+                #[cfg(target_os = "windows")]
+                {
+                    shutdown_result.and(finish_result)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    finish_result
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn release_role(&mut self, lease: WindowsD3d11RoleLease) -> Result<(), WindowsD3d11Error> {
+        let action = self.state.release(lease)?;
+        self.finish_release_action(action)
+    }
+
+    pub(crate) fn shutdown(&mut self) -> Result<(), WindowsD3d11Error> {
+        let Some(action) = self.state.retire_for_shutdown()? else {
+            return Ok(());
+        };
+        self.finish_release_action(action)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn retire_device_loss_once(&mut self, generation: u64) -> Result<bool, WindowsD3d11Error> {
+        let Some(action) = self.state.retire_for_device_loss_once(generation)? else {
+            return Ok(false);
+        };
+        self.finish_release_action(action)?;
+        Ok(true)
+    }
+}
+
+impl Drop for WindowsD3d11MediaCoordinator {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+pub(crate) struct WindowsD3d11MediaRoleHandle {
+    lease: Option<WindowsD3d11RoleLease>,
+    client: WindowsD3d11MediaClient,
+    coordinator: std::sync::Weak<StdMutex<WindowsD3d11MediaCoordinator>>,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsD3d11MediaRoleHandle {
+    pub(crate) fn client(&self) -> WindowsD3d11MediaClient {
+        self.client.clone()
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.lease.as_ref().map_or(0, |lease| lease.generation)
+    }
+
+    pub(crate) fn role(&self) -> WindowsD3d11MediaRole {
+        self.lease
+            .as_ref()
+            .map_or(WindowsD3d11MediaRole::Preview, |lease| lease.role)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsD3d11MediaRoleHandle {
+    fn drop(&mut self) {
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        let Some(coordinator) = self.coordinator.upgrade() else {
+            return;
+        };
+        let mut coordinator = coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = coordinator.release_role(lease);
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn acquire_windows_d3d11_media(
+    coordinator: &WindowsD3d11MediaCoordinatorSlot,
+    screen_id: &str,
+    role: WindowsD3d11MediaRole,
+    pool_config: WindowsD3d11TexturePoolConfig,
+) -> Result<WindowsD3d11MediaRoleHandle, WindowsD3d11Error> {
+    let selection = WindowsDxgiOutputSelection::parse(screen_id)?;
+    let mut owner = coordinator
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (lease, action) = owner.state.acquire(selection.adapter_luid, role)?;
+    match action {
+        crate::windows_d3d11_device::WindowsD3d11CoordinatorAcquireAction::StartMediaThread => {
+            match WindowsD3d11MediaThread::spawn(selection, lease.generation, pool_config) {
+                Ok(media_thread) => {
+                    owner.client = Some(media_thread.client());
+                    owner.media_thread = Some(media_thread);
+                    owner.active_adapter_luid = Some(selection.adapter_luid);
+                }
+                Err(error) => {
+                    let rollback = owner.state.release(lease)?;
+                    owner.finish_release_action(rollback)?;
+                    return Err(error);
+                }
+            }
+        }
+        crate::windows_d3d11_device::WindowsD3d11CoordinatorAcquireAction::ReuseMediaThread => {
+            if owner.active_adapter_luid != Some(selection.adapter_luid)
+                || owner.client.is_none()
+                || owner.media_thread.is_none()
+            {
+                let rollback = owner.state.release(lease)?;
+                owner.finish_release_action(rollback)?;
+                return Err(WindowsD3d11Error::new(
+                    crate::windows_d3d11_device::WindowsD3d11ErrorCode::AdapterMismatch,
+                    "D3D11 coordinator state has no matching live media thread",
+                ));
+            }
+        }
+    }
+    let client = owner.client.clone().ok_or_else(|| {
+        WindowsD3d11Error::new(
+            crate::windows_d3d11_device::WindowsD3d11ErrorCode::CommandChannelClosed,
+            "D3D11 coordinator did not publish its media client",
+        )
+    })?;
+    drop(owner);
+    Ok(WindowsD3d11MediaRoleHandle {
+        lease: Some(lease),
+        client,
+        coordinator: Arc::downgrade(coordinator),
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn retire_windows_d3d11_media_for_device_loss(
+    coordinator: &WindowsD3d11MediaCoordinatorSlot,
+    generation: u64,
+) -> Result<bool, WindowsD3d11Error> {
+    coordinator
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retire_device_loss_once(generation)
+}
 
 #[derive(Clone)]
 pub struct PreviewFrame {
@@ -379,6 +586,10 @@ pub struct AppState {
     /// make the surface status, native-host commands, and owned run id one
     /// atomic transition.
     pub preview_surface_lifecycle: Arc<tokio::sync::Mutex<()>>,
+    /// One generation-scoped D3D11 device/media-thread authority shared by
+    /// preview, recording, and streaming roles. This slot contains no
+    /// renderer-serializable resource handle.
+    pub(crate) windows_d3d11_media: WindowsD3d11MediaCoordinatorSlot,
     pub compositor: CompositorSlot,
     /// Serializes compositor worker stop/start handoffs so concurrent preview and
     /// recording ownership changes cannot orphan a `spawn_blocking` render worker.
@@ -460,6 +671,7 @@ impl AppState {
             preview_screen: Arc::new(tokio::sync::Mutex::new(initial_preview_screen_state())),
             preview_surface: Arc::new(tokio::sync::Mutex::new(initial_preview_surface_state())),
             preview_surface_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            windows_d3d11_media: Arc::new(StdMutex::new(WindowsD3d11MediaCoordinator::new())),
             compositor: Arc::new(tokio::sync::Mutex::new(initial_compositor_state())),
             compositor_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             scene: Arc::new(tokio::sync::Mutex::new(default_scene())),

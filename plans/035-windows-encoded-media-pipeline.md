@@ -5,6 +5,9 @@
 - **Priority**: P0
 - **Effort**: L
 - **Risk**: HIGH
+- **Execution status**: IN PROGRESS — PR #169 landed the opt-in Media
+  Foundation bridge; Plan 039 owns the remaining RTMP proof, natural fallback,
+  and default-promotion gate.
 - **Depends on**: Plan 038 calibration instrumentation — satisfied by PR #160
 - **Category**: perf / bug
 - **Planned at**: commit `54229f8f`, 2026-07-18
@@ -26,6 +29,13 @@ The non-macOS encoder bridge defaults to `RawYuv420p`, so a 4K30 frame stream mo
 - The native Media Foundation bridge is implemented behind an explicit opt-in.
   Packaged hardware acceptance and default promotion remain blocked until the
   full supported-device matrix and natural second-device fallback records pass.
+- The merged acceptance is recording-focused. It passed packaged 1080p30,
+  1080p60, and 1440p30 on the documented i5-8400/GTX 1650 SUPER machine, while
+  1440p60 remained below real time and 4K30 did not start. It did not exercise a
+  real RTMP listener or the full record-plus-stream/failure-isolation matrix.
+- Plan 039 is the execution overlay for the remaining 1080p release work. Do
+  not create a separate Windows stream benchmark or promote the default from
+  this plan alone.
 
 ## Completion checklist
 
@@ -37,6 +47,8 @@ The non-macOS encoder bridge defaults to `RawYuv420p`, so a 4K30 frame stream mo
 - [ ] Packaged supported-device encoded bridge matrix passes.
 - [ ] Natural unsupported-device OpenH264 fallback record passes.
 - [ ] Windows default promoted from raw to probed encoded output.
+- [ ] Plan 039 physical RTMP matrix passes for stream-only and
+  record-plus-stream at 1080p30/60.
 
 ## Scope
 
@@ -64,4 +76,8 @@ Stop if the proposed encoded container reintroduces wall-clock/duplicate PTS beh
 
 ## Maintenance notes
 
-The capability key must include the bundled FFmpeg path/version and output profile. Review any change to FIFO probing, muxer args, or encoder output selection against final artifacts, not only startup success.
+The capability key must include the bundled FFmpeg path/version and output
+profile. Review any change to FIFO probing, muxer args, or encoder output
+selection against final artifacts, not only startup success. Execute the
+remaining checklist through Plan 039 so recording, streaming, diagnostics, and
+the physical performance budget share one acceptance record.

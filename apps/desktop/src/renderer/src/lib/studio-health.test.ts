@@ -100,26 +100,56 @@ describe('studioHealth', () => {
     })
   })
 
-  // Windows: the CPU compositor and image-polling preview are the intended
-  // paths, not degradations — the badge must read healthy, never "Degraded"
-  // or "Fallback" (the tester-reported false alarms).
-  it('reads healthy for the CPU compositor on Windows', () => {
+  it('reports the retained CPU/proof Windows path as a named fallback', () => {
     expect(
       studioHealth(
-        stats({ compositorBackend: 'cpu', compositorCpuFallbackFrames: 42 }),
+        stats({
+          compositorBackend: 'cpu',
+          compositorCpuFallbackFrames: 0,
+          previewTransport: 'electron-proof-surface',
+          previewSurfaceBacking: 'electron-browser-window'
+        }),
         true,
-        'win32'
+        'win32',
+        'proof-surface'
       )
-    ).toMatchObject({ tone: 'good', value: 'Live' })
+    ).toMatchObject({ tone: 'warn', value: 'Fallback' })
   })
 
-  it('does not warn on image polling / proof surface on Windows', () => {
+  it('warns on image polling / proof surface on Windows', () => {
     expect(
       studioHealth(stats({ previewTransport: 'latest-jpeg-polling' }), true, 'win32')
-    ).toMatchObject({ tone: 'good', value: 'Live' })
+    ).toMatchObject({ tone: 'warn', value: 'Fallback' })
     expect(
       studioHealth(stats({ previewTransport: 'electron-proof-surface' }), true, 'win32')
+    ).toMatchObject({ tone: 'warn', value: 'Fallback' })
+  })
+
+  it('reads healthy only for the canonical Windows D3D11 presenter', () => {
+    expect(
+      studioHealth(
+        stats({
+          compositorBackend: 'd3d11',
+          previewTransport: 'd3d11-shared-texture',
+          previewSurfaceBacking: 'directcomposition-swapchain'
+        }),
+        true,
+        'win32',
+        'backend-d3d11-presenter'
+      )
     ).toMatchObject({ tone: 'good', value: 'Live' })
+    expect(
+      studioHealth(
+        stats({
+          compositorBackend: 'd3d11',
+          previewTransport: 'd3d11-shared-texture',
+          previewSurfaceBacking: 'directcomposition-swapchain'
+        }),
+        true,
+        'win32',
+        'proof-surface'
+      )
+    ).toMatchObject({ tone: 'warn', value: 'Fallback' })
   })
 
   it('still degrades on a genuine macOS Metal fallback', () => {

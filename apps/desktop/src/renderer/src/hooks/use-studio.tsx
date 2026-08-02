@@ -64,6 +64,7 @@ import {
   readyStreamTargetLabels,
   reconcileSourceSelection,
   reconcileSourceSelectionForLayoutTransaction,
+  resolveProviderStreamOutputPlan,
   rtmpDefaults,
   smokePreviewCompositorCaptureConfig,
   sourceSelectionChangeEvents,
@@ -112,7 +113,13 @@ import {
   shouldReloadSceneFromCaptureConfig
 } from '@/lib/layout-transaction-policy'
 import {
+  mergePreviewSurfaceHostStatus,
+  nativePreviewFramePollingRequestKey,
+  nativePreviewFramePollingResponseCanCommit,
   nativePreviewFramePollingShouldSuppress,
+  nativePreviewMainStatusReadGenerationMatches,
+  previewSurfaceStatusWithoutMainAuthority,
+  previewSurfaceStatusRequiresMainAuthority,
   nativePreviewSurfaceSyncCanCommit,
   nativePreviewSurfaceSyncNeedsCreate
 } from '@/lib/native-preview-surface-lifecycle'
@@ -199,6 +206,8 @@ import type {
   StreamMetadataValidation,
   StreamScreen,
   StreamHealth,
+  StreamOutputTopologyProbeParams,
+  StreamOutputTopologyProbeResult,
   StoreManualStreamKeyResult,
   StreamingSettings,
   StreamTargetRuntime,
@@ -445,6 +454,150 @@ function streamingWithTargetPatch(
     enabledTargetIds
   }
 }
+
+export function resolvedStreamingProfileEntitlementGate(
+  captureConfig: Pick<CaptureConfig, 'video' | 'streaming'>,
+  entitlements: EntitlementsSnapshot | null
+): ReturnType<typeof videoProfileEntitlementGate> {
+  const providerPlan = resolveProviderStreamOutputPlan(
+    captureConfig.video,
+    captureConfig.streaming,
+    {
+      // Recording has its own entitlement gate. Resolve the profile actually
+      // destined for providers here so a retained YouTube default cannot
+      // accidentally gate a provider-safe Twitch/X output.
+      recordEnabled: false
+    }
+  )
+  return videoProfileEntitlementGate({
+    entitlements,
+    kind: 'streaming',
+    video: providerPlan.streamVideo
+  })
+}
+
+export type StreamOutputTopologyPreflight =
+  | { state: 'not-requested' }
+  | { state: 'pending'; requestKey: string }
+  | {
+      state: 'ready'
+      requestKey: string
+      result: StreamOutputTopologyProbeResult
+    }
+  | { state: 'failed'; requestKey: string; message: string }
+
+export function buildStreamOutputTopologyProbeParams(
+  captureConfig: CaptureConfig,
+  streaming: StreamingSettings = captureConfig.streaming,
+  suppressCaptionsForSession = false
+): StreamOutputTopologyProbeParams {
+  const recordingProfile = { ...captureConfig.video }
+  // Probe the highest topology the configured outputs would need. This is
+  // deliberately optimistic: the backend's production capability selector is
+  // the authority that proves or rejects the separate encoded role. Building
+  // this request from the unproved shared plan would make a high-rate YouTube
+  // record+stream session preflight one topology and start another.
+  const providerPlanOptions = {
+    recordEnabled: captureConfig.recordEnabled,
+    separateEncodedOutputRoleAvailable: true
+  }
+  const providerPlan = resolveProviderStreamOutputPlan(
+    recordingProfile,
+    streaming,
+    providerPlanOptions
+  )
+  const streamProfile = providerPlan.streamVideo
+  const streamProfiles = providerPlan.targets.map(({ video }) => video)
+  const captionOutputReadiness = captionSessionOutputReadiness({
+    burnTarget: captureConfig.captions.burnTarget,
+    recordEnabled: captureConfig.recordEnabled,
+    streamEnabled: true,
+    recordingVideo: recordingProfile,
+    streamVideos: streamProfiles
+  })
+  const burnsStream =
+    captureConfig.captions.burnTarget === 'stream' || captureConfig.captions.burnTarget === 'both'
+  const forceSameProfileSplit =
+    captureConfig.recordEnabled &&
+    !suppressCaptionsForSession &&
+    burnsStream &&
+    (captureConfig.captions.enabled || captionOutputReadiness.ready)
+  const split =
+    captureConfig.recordEnabled &&
+    (forceSameProfileSplit || !sameTopologyVideoProfile(recordingProfile, streamProfile))
+
+  return {
+    streamProfile: { ...streamProfile },
+    ...(captureConfig.recordEnabled ? { recordingProfile } : {}),
+    outputRoles: split ? ['recording', 'stream'] : ['shared']
+  }
+}
+
+export function streamOutputTopologyProbeRequestKey(
+  params: StreamOutputTopologyProbeParams
+): string {
+  return JSON.stringify({
+    streamProfile: params.streamProfile,
+    recordingProfile: params.recordingProfile,
+    outputRoles: params.outputRoles
+  })
+}
+
+export function streamOutputTopologyBlockReason(
+  preflight: StreamOutputTopologyPreflight,
+  requestKey: string
+): string | null {
+  if (preflight.state === 'ready' && preflight.requestKey === requestKey) {
+    if (
+      preflight.result.outputRoles.includes('stream') &&
+      preflight.result.effectiveBridgeOutput === 'raw-yuv420p'
+    ) {
+      return `A separate encoded livestream output is unavailable${
+        preflight.result.fallbackReason ? `: ${preflight.result.fallbackReason}` : '.'
+      } Use one shared provider-safe profile at 6000 kbps or lower before going live.`
+    }
+    return null
+  }
+  if (preflight.state === 'failed' && preflight.requestKey === requestKey) {
+    return `Livestream output check failed: ${preflight.message}`
+  }
+  return 'Checking the exact livestream output path before Go Live.'
+}
+
+function streamOutputTopologyResultMatchesRequest(
+  result: StreamOutputTopologyProbeResult,
+  params: StreamOutputTopologyProbeParams
+): boolean {
+  return (
+    sameExactVideoSettings(result.streamProfile, params.streamProfile) &&
+    sameOptionalVideoSettings(result.recordingProfile, params.recordingProfile) &&
+    result.outputRoles.length === params.outputRoles.length &&
+    result.outputRoles.every((role, index) => role === params.outputRoles[index])
+  )
+}
+
+function sameOptionalVideoSettings(
+  left: VideoSettings | undefined,
+  right: VideoSettings | undefined
+): boolean {
+  return left === undefined || right === undefined
+    ? left === right
+    : sameExactVideoSettings(left, right)
+}
+
+function sameExactVideoSettings(left: VideoSettings, right: VideoSettings): boolean {
+  return left.preset === right.preset && sameTopologyVideoProfile(left, right)
+}
+
+function sameTopologyVideoProfile(left: VideoSettings, right: VideoSettings): boolean {
+  return (
+    left.width === right.width &&
+    left.height === right.height &&
+    left.fps === right.fps &&
+    left.bitrateKbps === right.bitrateKbps
+  )
+}
+
 const NATIVE_PREVIEW_COMPOSITOR_POLL_INTERVAL_MS = 1000 / 60
 // Fallback-pump dedupe (issue #157): an unchanged compositor status carries no
 // new pixels, so resubmitting it at 60Hz only burns main-process present work.
@@ -517,7 +670,8 @@ async function waitForRenderedCompositorSceneRevision(
 }
 
 async function waitForNativePreviewSurfaceSceneRevision(
-  sceneRevision: number
+  sceneRevision: number,
+  platform: string
 ): Promise<PreviewSurfaceStatus | null> {
   const readStatus = window.videorc?.getNativePreviewSurfaceStatus
   if (!readStatus) {
@@ -532,7 +686,7 @@ async function waitForNativePreviewSurfaceSceneRevision(
     } catch {
       return lastStatus
     }
-    if (nativePreviewStatusProvesSceneRevision(lastStatus, sceneRevision)) {
+    if (nativePreviewStatusProvesSceneRevision(lastStatus, sceneRevision, platform)) {
       return lastStatus
     }
     await sleep(NATIVE_PREVIEW_SCENE_FRAME_WAIT_INTERVAL_MS)
@@ -641,6 +795,8 @@ export type StudioContextValue = {
   healthEvents: HealthEvent[]
   streamHealth: StreamHealth | null
   streamTargets: StreamTargetRuntime[]
+  streamOutputTopologyPreflight: StreamOutputTopologyPreflight
+  refreshStreamOutputTopology: () => Promise<void>
   diagnosticStats: DiagnosticStats
   sessions: SessionSummary[]
   sessionsNextCursor: string | null
@@ -944,6 +1100,10 @@ const idleDiagnosticStats = (): DiagnosticStats => ({
   encoderBridgeOutputQueueCapacityPressureEvents: 0,
   encoderBridgeOutputQueueDroppedFrames: 0,
   encoderBridgeDroppedFrames: 0,
+  encoderBridgeRecordingDroppedFrames: 0,
+  encoderBridgeStreamDroppedFrames: 0,
+  encoderBridgeRecordingEncoderSpeed: undefined,
+  encoderBridgeStreamEncoderSpeed: undefined,
   encoderBridgeRepeatedFrames: 0,
   encoderBridgeRepeatedFrameBursts: 0,
   encoderBridgeMaxRepeatedFrameRun: 0,
@@ -953,6 +1113,8 @@ const idleDiagnosticStats = (): DiagnosticStats => ({
   encoderBridgeRepeatedFrameAgeMaxMs: undefined,
   encoderBridgeMetalTargetFrames: 0,
   encoderBridgeRawVideoCopiedFrames: 0,
+  encoderBridgeRecordingRawVideoCopiedFrames: 0,
+  encoderBridgeStreamRawVideoCopiedFrames: 0,
   encoderBridgeMetalTargetCopiedFrames: 0,
   encoderBridgeMetalTargetHandleFrames: 0,
   encoderBridgeZeroCopyFrames: 0,
@@ -1043,7 +1205,15 @@ const idleDiagnosticStats = (): DiagnosticStats => ({
   compositorScreenSourceCvpixelbufferImportFrames: 0,
   compositorScreenSourceByteUploadFrames: 0,
   compositorScreenSourceImportFailures: 0,
-  previewImagePollCounts: { cameraPng: 0, screenPng: 0, liveJpeg: 0, liveMjpeg: 0 },
+  previewImagePollCounts: {
+    cameraPng: 0,
+    screenPng: 0,
+    productionPng: 0,
+    cameraBmp: 0,
+    screenBmp: 0,
+    liveJpeg: 0,
+    liveMjpeg: 0
+  },
   recordingAtRisk: false,
   recordingRiskReasons: [],
   recordingProtected: false,
@@ -2089,6 +2259,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [streamMetadataDraft, setStreamMetadataDraft] = useState<StreamMetadataDraft | null>(null)
   const [streamMetadataValidation, setStreamMetadataValidation] =
     useState<StreamMetadataValidation | null>(null)
+  const [streamOutputTopologyPreflight, setStreamOutputTopologyPreflight] =
+    useState<StreamOutputTopologyPreflight>({ state: 'not-requested' })
+  const streamOutputTopologyPreflightRef = useRef<StreamOutputTopologyPreflight>({
+    state: 'not-requested'
+  })
+  const streamOutputTopologyProbeGenerationRef = useRef(0)
+  const streamOutputTopologyProbeInFlightRef = useRef<{
+    client: BackendClient
+    requestKey: string
+    controller: AbortController
+    promise: Promise<StreamOutputTopologyProbeResult>
+  } | null>(null)
+  const commitStreamOutputTopologyPreflight = useCallback((next: StreamOutputTopologyPreflight) => {
+    streamOutputTopologyPreflightRef.current = next
+    setStreamOutputTopologyPreflight(next)
+  }, [])
   const [goLivePreflight, setGoLivePreflight] = useState<GoLivePreflight | null>(null)
   const [goLiveConfirmationOpen, setGoLiveConfirmationOpen] = useState(false)
   const [goLiveConfirmationPending, setGoLiveConfirmationPending] = useState(false)
@@ -2302,6 +2488,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [mainPumpActive, setMainPumpActive] = useState(false)
   const previewSurfaceStatusCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previewSurfaceStatusLastCommitAtRef = useRef(0)
+  const nativePreviewMainStatusReadSerialRef = useRef(0)
   const diagnosticStatsPendingRef = useRef<DiagnosticStats | null>(null)
   const diagnosticStatsCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const diagnosticStatsLastCommitAtRef = useRef(0)
@@ -2734,6 +2921,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               {
                 recordingActive: isActiveRecordingState(recordingRef.current.state),
                 windowOpen: previewWindowRef.current.open,
+                platform: runtimeInfo?.platform ?? 'darwin',
                 status: previewSurfaceStatusRef.current
               }
             )
@@ -2835,7 +3023,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applyPreviewSurfaceStatusThrottled,
       nativePreviewRendererTimingStatusFields,
       nativePreviewSurfaceEnabled,
-      queueNativePreviewSurfacePresentReport
+      queueNativePreviewSurfacePresentReport,
+      runtimeInfo?.platform
     ]
   )
 
@@ -4214,7 +4403,37 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('preview.surface.status', (payload) => {
         bootstrapGuard.mark('previewSurface')
-        applyPreviewSurfaceStatusThrottled(payload as PreviewSurfaceStatus)
+        const backendStatus = payload as PreviewSurfaceStatus
+        const readSerial = ++nativePreviewMainStatusReadSerialRef.current
+        const previewGeneration = previewWindowRef.current.supervisor.generation
+        const mainStatusReadCanCommit = (): boolean =>
+          !disposed &&
+          readSerial === nativePreviewMainStatusReadSerialRef.current &&
+          nativePreviewMainStatusReadGenerationMatches(
+            previewGeneration,
+            previewWindowRef.current.supervisor.generation
+          )
+        if (
+          previewSurfaceStatusRequiresMainAuthority(backendStatus) &&
+          window.videorc?.getNativePreviewSurfaceStatus
+        ) {
+          void window.videorc
+            .getNativePreviewSurfaceStatus()
+            .then((mainStatus) => {
+              if (mainStatusReadCanCommit()) {
+                applyPreviewSurfaceStatusThrottled(mainStatus)
+              }
+            })
+            .catch(() => {
+              if (mainStatusReadCanCommit()) {
+                applyPreviewSurfaceStatusThrottled(
+                  previewSurfaceStatusWithoutMainAuthority(backendStatus)
+                )
+              }
+            })
+          return
+        }
+        applyPreviewSurfaceStatusThrottled(backendStatus)
       }),
       nextClient.on('compositor.status', (payload) => {
         bootstrapGuard.mark('compositor')
@@ -4564,6 +4783,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return
         }
 
+        let resolvedPreviewSurface = nextPreviewSurface
+        if (
+          previewSurfaceStatusRequiresMainAuthority(nextPreviewSurface) &&
+          window.videorc?.getNativePreviewSurfaceStatus
+        ) {
+          const previewGeneration = previewWindowRef.current.supervisor.generation
+          resolvedPreviewSurface = await window.videorc
+            .getNativePreviewSurfaceStatus()
+            .catch(() => previewSurfaceStatusWithoutMainAuthority(nextPreviewSurface))
+          if (
+            !generationIsCurrent() ||
+            !nativePreviewMainStatusReadGenerationMatches(
+              previewGeneration,
+              previewWindowRef.current.supervisor.generation
+            )
+          ) {
+            return
+          }
+        }
+
         // Commit the local, UI-critical snapshot before optional provider
         // validation. A slow or failing provider network call must not hold
         // devices, recording, or preview in the loading state.
@@ -4587,7 +4826,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           applyPreviewLiveStatus(nextPreview)
         }
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'previewSurface')) {
-          applyPreviewSurfaceStatus(nextPreviewSurface)
+          applyPreviewSurfaceStatus(resolvedPreviewSurface)
         }
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'previewCamera')) {
           applyPreviewCameraStatus(nextPreviewCamera)
@@ -4766,6 +5005,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       platformBootstrapClient.close()
       nativePreviewCompositorPendingRef.current = null
+      nativePreviewMainStatusReadSerialRef.current += 1
       nativePreviewCompositorLatestStatusRef.current = null
       nativePreviewFrameReadyLastEventAtRef.current = 0
       nativePreviewRendererFallbackActivatedAtRef.current = 0
@@ -5281,7 +5521,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
         const surfaceStatus =
           proofOwner === 'main-pump'
-            ? await waitForNativePreviewSurfaceSceneRevision(status.sceneRevision)
+            ? await waitForNativePreviewSurfaceSceneRevision(
+                status.sceneRevision,
+                runtimeInfo?.platform ?? 'darwin'
+              )
             : proofOwner === 'renderer-fallback' &&
                 window.videorc?.updateNativePreviewSurfaceCompositor
               ? await window.videorc.updateNativePreviewSurfaceCompositor(compositorStatus)
@@ -5294,7 +5537,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         applyPreviewSurfaceStatus(surfaceStatus)
         if (
           surfaceStatus.nativePreviewHostKind !== 'proof-surface' &&
-          !nativePreviewStatusProvesSceneRevision(surfaceStatus, status.sceneRevision)
+          !nativePreviewStatusProvesSceneRevision(
+            surfaceStatus,
+            status.sceneRevision,
+            runtimeInfo?.platform ?? 'darwin'
+          )
         ) {
           throw new NativePreviewPresentationProofError(
             `Native preview did not present committed scene revision ${status.sceneRevision}.`
@@ -5313,7 +5560,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       return true
     },
-    [applyPreviewSurfaceStatus, client, nativePreviewSurfaceEnabled]
+    [applyPreviewSurfaceStatus, client, nativePreviewSurfaceEnabled, runtimeInfo?.platform]
   )
 
   const rememberLiveLayoutCommit = useCallback(
@@ -6158,10 +6405,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [wsStatus])
 
-  // Frame polling serves the Electron proof surface. It is redundant during a
-  // recording only when an attached native layer owns presentation; Windows
-  // relies on proof polling for its visible preview. A closed window always
-  // suppresses polling — UI rewrite U2.
+  // Frame polling serves only the Electron proof surface. It is redundant
+  // during a recording when the platform's canonical native presenter owns
+  // pixels. A closed window always suppresses polling — UI rewrite U2.
   const syncFramePollingSuppression = useCallback(() => {
     if (
       !nativePreviewSurfaceEnabled ||
@@ -6170,20 +6416,34 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     const recordingActive = isActiveRecordingState(recordingRef.current.state)
+    const generation = previewWindowRef.current.supervisor.generation
     const suppress = nativePreviewFramePollingShouldSuppress({
       recordingActive,
       windowOpen: previewWindowRef.current.open,
+      platform: runtimeInfo?.platform ?? 'darwin',
+      generation,
       status: previewSurfaceStatusRef.current
     })
-    const requestKey = `${suppress}:${recordingActive}`
+    const requestKey = nativePreviewFramePollingRequestKey({
+      generation,
+      suppress,
+      recordingActive
+    })
     if (nativePreviewFramePollingRequestKeyRef.current === requestKey) {
       return
     }
     nativePreviewFramePollingRequestKeyRef.current = requestKey
     void window.videorc
-      .setNativePreviewSurfaceFramePollingSuppressed(suppress, recordingActive)
+      .setNativePreviewSurfaceFramePollingSuppressed(suppress, generation, recordingActive)
       .then((status) => {
-        if (nativePreviewFramePollingRequestKeyRef.current === requestKey) {
+        if (
+          nativePreviewFramePollingResponseCanCommit({
+            requestKey,
+            currentRequestKey: nativePreviewFramePollingRequestKeyRef.current,
+            requestGeneration: generation,
+            currentGeneration: previewWindowRef.current.supervisor.generation
+          })
+        ) {
           applyPreviewSurfaceStatus(status)
         }
       })
@@ -6193,30 +6453,44 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         console.error('Native preview frame-polling suppression failed:', error)
       })
-  }, [applyPreviewSurfaceStatus, nativePreviewSurfaceEnabled])
+  }, [applyPreviewSurfaceStatus, nativePreviewSurfaceEnabled, runtimeInfo?.platform])
 
   syncFramePollingSuppressionRef.current = syncFramePollingSuppression
 
   // Closing the preview window must cost nothing: tear the surface session down
   // (helper window, proof window, backend session) instead of merely hiding it.
-  const teardownDetachedPreviewSurface = useCallback(async (generation?: number) => {
-    const generationIsCurrent = (): boolean =>
-      generation === undefined || previewWindowRef.current.supervisor.generation === generation
-    nativePreviewSurfaceCreatedRef.current = false
-    nativePreviewSurfaceLastSyncedBoundsRef.current = null
-    nativePreviewSurfaceBoundsPendingRef.current = null
-    nativePreviewSurfaceBoundsPendingGenerationRef.current = undefined
-    try {
-      if (window.videorc?.applyNativePreviewHostCommands) {
-        await window.videorc.applyNativePreviewHostCommands([{ kind: 'destroy' }], generation)
+  const teardownDetachedPreviewSurface = useCallback(
+    async (generation?: number) => {
+      const generationIsCurrent = (): boolean =>
+        generation === undefined || previewWindowRef.current.supervisor.generation === generation
+      nativePreviewSurfaceCreatedRef.current = false
+      nativePreviewSurfaceLastSyncedBoundsRef.current = null
+      nativePreviewSurfaceBoundsPendingRef.current = null
+      nativePreviewSurfaceBoundsPendingGenerationRef.current = undefined
+      try {
+        const hostStatus = window.videorc?.applyNativePreviewHostCommands
+          ? await window.videorc.applyNativePreviewHostCommands([{ kind: 'destroy' }], generation)
+          : null
+        const backendStatus =
+          generationIsCurrent() && clientRef.current && wsStatusRef.current === 'connected'
+            ? await clientRef.current.request<PreviewSurfaceStatus>('preview.surface.destroy')
+            : null
+        if (!generationIsCurrent()) {
+          return
+        }
+        const status =
+          backendStatus && hostStatus
+            ? mergePreviewSurfaceHostStatus(backendStatus, hostStatus)
+            : (backendStatus ?? hostStatus)
+        if (status) {
+          applyPreviewSurfaceStatus(status)
+        }
+      } catch (error) {
+        console.error('Detached preview surface teardown failed:', error)
       }
-      if (generationIsCurrent() && clientRef.current && wsStatusRef.current === 'connected') {
-        await clientRef.current.request('preview.surface.destroy')
-      }
-    } catch (error) {
-      console.error('Detached preview surface teardown failed:', error)
-    }
-  }, [])
+    },
+    [applyPreviewSurfaceStatus]
+  )
 
   useEffect(() => {
     if (!nativePreviewSurfaceEnabled || runtimeInfo?.disableAutoPreview) {
@@ -6420,7 +6694,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       rendererUpdaterAvailable: Boolean(window.videorc?.updateNativePreviewSurfaceCompositor)
     })
     if (proofOwner === 'main-pump') {
-      const status = await waitForNativePreviewSurfaceSceneRevision(revision)
+      const status = await waitForNativePreviewSurfaceSceneRevision(
+        revision,
+        runtimeInfo?.platform ?? 'darwin'
+      )
       if (status) {
         applyPreviewSurfaceStatus(status)
       }
@@ -6437,7 +6714,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       })
       return
     }
-  }, [applyPreviewSurfaceStatus, client, nativePreviewSurfaceEnabled, wsStatus])
+  }, [
+    applyPreviewSurfaceStatus,
+    client,
+    nativePreviewSurfaceEnabled,
+    runtimeInfo?.platform,
+    wsStatus
+  ])
 
   useEffect(() => {
     if (!nativePreviewSurfaceEnabled) {
@@ -6556,6 +6839,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         appVersion: runtimeInfo?.version,
         rendererDiagnostics: {
           automaticSourceFallbacks: automaticSourceFallbacks.current,
+          nativePreviewSurfaceStatus: previewSurfaceStatus,
           runtimeInfo: runtimeInfo ?? undefined
         }
       }
@@ -6571,7 +6855,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } finally {
       setSupportBundleExportPending(false)
     }
-  }, [client, reportError, runtimeInfo, supportBundleExportPending])
+  }, [client, previewSurfaceStatus, reportError, runtimeInfo, supportBundleExportPending])
 
   const scheduleHardwareAccelerationRetry = useCallback(async () => {
     if (!window.videorc?.retryHardwareAcceleration) {
@@ -6654,14 +6938,150 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       })
     : { allowed: true as const }
   const streamingProfileEntitlement = captureConfig.streamEnabled
-    ? videoProfileEntitlementGate({
-        entitlements,
-        kind: 'streaming',
-        video: streamOutputVideoSettings(captureConfig.video, captureConfig.streaming)
-      })
+    ? resolvedStreamingProfileEntitlementGate(captureConfig, entitlements)
     : { allowed: true as const }
   const isSessionActive =
     isActiveRecordingState(recording.state) || startRequestPending || stopRequestPending
+
+  const currentStreamOutputTopologyRequest = useMemo(
+    () =>
+      captureConfig.streamEnabled
+        ? buildStreamOutputTopologyProbeParams(
+            captureConfig,
+            captureConfig.streaming,
+            suppressCaptionsForSession
+          )
+        : null,
+    [captureConfig, suppressCaptionsForSession]
+  )
+  const currentStreamOutputTopologyRequestKey = currentStreamOutputTopologyRequest
+    ? streamOutputTopologyProbeRequestKey(currentStreamOutputTopologyRequest)
+    : null
+
+  const probeStreamOutputTopology = useCallback(
+    (
+      params: StreamOutputTopologyProbeParams,
+      options: { force?: boolean } = {}
+    ): Promise<StreamOutputTopologyProbeResult> => {
+      if (!client || wsStatus !== 'connected') {
+        return Promise.reject(new Error('Backend socket is not connected.'))
+      }
+
+      const requestKey = streamOutputTopologyProbeRequestKey(params)
+      const current = streamOutputTopologyPreflightRef.current
+      if (!options.force && current.state === 'ready' && current.requestKey === requestKey) {
+        return Promise.resolve(current.result)
+      }
+      const currentFlight = streamOutputTopologyProbeInFlightRef.current
+      if (
+        !options.force &&
+        currentFlight?.client === client &&
+        currentFlight.requestKey === requestKey
+      ) {
+        return currentFlight.promise
+      }
+
+      streamOutputTopologyProbeGenerationRef.current += 1
+      const generation = streamOutputTopologyProbeGenerationRef.current
+      currentFlight?.controller.abort()
+      const controller = new AbortController()
+      commitStreamOutputTopologyPreflight({ state: 'pending', requestKey })
+
+      const promise = client
+        .requestTyped('stream.output.topology.probe', params, {
+          signal: controller.signal
+        })
+        .then((result) => {
+          if (!streamOutputTopologyResultMatchesRequest(result, params)) {
+            throw new Error(
+              'Backend returned a livestream output verdict for a different output configuration.'
+            )
+          }
+          if (
+            streamOutputTopologyProbeGenerationRef.current === generation &&
+            clientRef.current === client
+          ) {
+            commitStreamOutputTopologyPreflight({ state: 'ready', requestKey, result })
+          }
+          return result
+        })
+        .catch((error: unknown) => {
+          if (
+            streamOutputTopologyProbeGenerationRef.current === generation &&
+            clientRef.current === client &&
+            !(error instanceof DOMException && error.name === 'AbortError')
+          ) {
+            commitStreamOutputTopologyPreflight({
+              state: 'failed',
+              requestKey,
+              message:
+                error instanceof Error
+                  ? error.message
+                  : 'The livestream output path could not be verified.'
+            })
+          }
+          throw error
+        })
+        .finally(() => {
+          if (streamOutputTopologyProbeGenerationRef.current === generation) {
+            streamOutputTopologyProbeInFlightRef.current = null
+          }
+        })
+      streamOutputTopologyProbeInFlightRef.current = {
+        client,
+        requestKey,
+        controller,
+        promise
+      }
+      return promise
+    },
+    [client, commitStreamOutputTopologyPreflight, wsStatus]
+  )
+
+  useEffect(() => {
+    if (
+      !currentStreamOutputTopologyRequest ||
+      !client ||
+      wsStatus !== 'connected' ||
+      !health?.ffmpeg.available
+    ) {
+      streamOutputTopologyProbeGenerationRef.current += 1
+      streamOutputTopologyProbeInFlightRef.current?.controller.abort()
+      streamOutputTopologyProbeInFlightRef.current = null
+      if (streamOutputTopologyPreflightRef.current.state !== 'not-requested') {
+        commitStreamOutputTopologyPreflight({ state: 'not-requested' })
+      }
+      return
+    }
+    if (isSessionActive) {
+      return
+    }
+    void probeStreamOutputTopology(currentStreamOutputTopologyRequest).catch(() => {})
+  }, [
+    client,
+    commitStreamOutputTopologyPreflight,
+    currentStreamOutputTopologyRequest,
+    health?.ffmpeg.available,
+    isSessionActive,
+    probeStreamOutputTopology,
+    wsStatus
+  ])
+
+  useEffect(
+    () => () => {
+      streamOutputTopologyProbeGenerationRef.current += 1
+      streamOutputTopologyProbeInFlightRef.current?.controller.abort()
+      streamOutputTopologyProbeInFlightRef.current = null
+    },
+    []
+  )
+
+  const refreshStreamOutputTopology = useCallback(async () => {
+    if (!currentStreamOutputTopologyRequest) {
+      throw new Error('Enable livestreaming before checking the output path.')
+    }
+    await probeStreamOutputTopology(currentStreamOutputTopologyRequest, { force: true })
+  }, [currentStreamOutputTopologyRequest, probeStreamOutputTopology])
 
   // Every mic surface edits the same captureConfig. Mirror that one source of
   // truth into the active backend-owned native audio session, scoped by the
@@ -7765,6 +8185,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!health.ffmpeg.available) {
       return health.ffmpeg.message ?? 'FFmpeg is not available.'
     }
+    if (captureConfig.streamEnabled && currentStreamOutputTopologyRequestKey) {
+      const topologyReason = streamOutputTopologyBlockReason(
+        streamOutputTopologyPreflight,
+        currentStreamOutputTopologyRequestKey
+      )
+      if (topologyReason) {
+        return topologyReason
+      }
+    }
 
     return null
   })()
@@ -8159,10 +8588,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       let streamingForStart: StreamingSettings | null = null
       try {
         setLastError(null)
+        streamingForStart = streamingOverride ?? null
+        if (streamingForStart) {
+          await probeStreamOutputTopology(
+            buildStreamOutputTopologyProbeParams(
+              captureConfig,
+              streamingForStart,
+              suppressCaptionsForSession
+            )
+          )
+        }
         setStreamHealth(null)
         setStreamTargets([])
         setStartRequestPending(true)
-        streamingForStart = streamingOverride ?? null
         platformLifecycleStreamingRef.current = streamingForStart
         const lifecycleRunId = platformLifecycleRun.current + 1
         platformLifecycleRun.current = lifecycleRunId
@@ -8294,6 +8732,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       client,
       completePreparedPlatformBroadcasts,
       isSessionActive,
+      probeStreamOutputTopology,
       refreshSessions,
       reportError,
       sceneEditMode,
@@ -9746,6 +10185,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       signOutAccount,
       deviceList: visibleDeviceList,
       streamTargets,
+      streamOutputTopologyPreflight,
+      refreshStreamOutputTopology,
       sessions,
       sessionsNextCursor,
       sessionsLoadingMore,
@@ -9927,6 +10368,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       signOutAccount,
       visibleDeviceList,
       streamTargets,
+      streamOutputTopologyPreflight,
+      refreshStreamOutputTopology,
       sessions,
       sessionsNextCursor,
       sessionsLoadingMore,
@@ -10117,75 +10560,6 @@ function isEditableTargetSafe(target: EventTarget | null): boolean {
   return target instanceof HTMLElement
     ? Boolean(target.closest('input, textarea, select, button, [contenteditable="true"]'))
     : false
-}
-
-function mergePreviewSurfaceHostStatus(
-  backendStatus: PreviewSurfaceStatus,
-  hostStatus: PreviewSurfaceStatus
-): PreviewSurfaceStatus {
-  const hostLive = hostStatus.state === 'live'
-  const hostTransport =
-    hostStatus.transport !== 'unavailable' ? hostStatus.transport : backendStatus.transport
-  const hostBacking = hostStatus.backing !== 'none' ? hostStatus.backing : backendStatus.backing
-
-  if (!hostLive) {
-    return {
-      ...backendStatus,
-      framesRendered: Math.max(backendStatus.framesRendered, hostStatus.framesRendered),
-      message: backendStatus.message ?? hostStatus.message
-    }
-  }
-
-  return {
-    ...backendStatus,
-    state: hostStatus.state,
-    source: hostStatus.source,
-    transport: hostTransport,
-    backing: hostBacking,
-    width: hostStatus.width > 0 ? hostStatus.width : backendStatus.width,
-    height: hostStatus.height > 0 ? hostStatus.height : backendStatus.height,
-    targetFps: hostStatus.targetFps > 0 ? hostStatus.targetFps : backendStatus.targetFps,
-    framesRendered: Math.max(backendStatus.framesRendered, hostStatus.framesRendered),
-    presentedFrameId: hostStatus.presentedFrameId ?? backendStatus.presentedFrameId,
-    compositorFrameLag: hostStatus.compositorFrameLag ?? backendStatus.compositorFrameLag,
-    droppedFrames: hostStatus.droppedFrames ?? backendStatus.droppedFrames,
-    inputToPresentLatencyMs:
-      hostStatus.inputToPresentLatencyMs ?? backendStatus.inputToPresentLatencyMs,
-    inputToPresentLatencyP50Ms:
-      hostStatus.inputToPresentLatencyP50Ms ?? backendStatus.inputToPresentLatencyP50Ms,
-    inputToPresentLatencyP95Ms:
-      hostStatus.inputToPresentLatencyP95Ms ?? backendStatus.inputToPresentLatencyP95Ms,
-    inputToPresentLatencyP99Ms:
-      hostStatus.inputToPresentLatencyP99Ms ?? backendStatus.inputToPresentLatencyP99Ms,
-    presentFps: hostStatus.presentFps ?? backendStatus.presentFps,
-    intervalP95Ms: hostStatus.intervalP95Ms ?? backendStatus.intervalP95Ms,
-    intervalP99Ms: hostStatus.intervalP99Ms ?? backendStatus.intervalP99Ms,
-    nativePreviewMutationQueueCapacity:
-      hostStatus.nativePreviewMutationQueueCapacity ??
-      backendStatus.nativePreviewMutationQueueCapacity,
-    nativePreviewMutationQueueDepth:
-      hostStatus.nativePreviewMutationQueueDepth ?? backendStatus.nativePreviewMutationQueueDepth,
-    nativePreviewMutationQueueActiveCount:
-      hostStatus.nativePreviewMutationQueueActiveCount ??
-      backendStatus.nativePreviewMutationQueueActiveCount,
-    nativePreviewMutationQueuePendingCount:
-      hostStatus.nativePreviewMutationQueuePendingCount ??
-      backendStatus.nativePreviewMutationQueuePendingCount,
-    nativePreviewMutationQueueMaxDepth:
-      hostStatus.nativePreviewMutationQueueMaxDepth ??
-      backendStatus.nativePreviewMutationQueueMaxDepth,
-    nativePreviewMutationQueueRejectedCount:
-      hostStatus.nativePreviewMutationQueueRejectedCount ??
-      backendStatus.nativePreviewMutationQueueRejectedCount,
-    framePollingSuppressed:
-      hostStatus.framePollingSuppressed || backendStatus.framePollingSuppressed,
-    sourcePixelsPresent: hostStatus.sourcePixelsPresent || backendStatus.sourcePixelsPresent,
-    pendingHostCommandCount: backendStatus.pendingHostCommandCount,
-    bounds: hostStatus.bounds ?? backendStatus.bounds,
-    startedAt: hostStatus.startedAt ?? backendStatus.startedAt,
-    updatedAt: hostStatus.updatedAt,
-    message: hostStatus.message ?? backendStatus.message
-  }
 }
 
 function basename(path: string): string {

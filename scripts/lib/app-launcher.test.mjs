@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdtempSync, mkdirSync, realpathSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 
 import {
@@ -11,7 +13,8 @@ import {
   performanceAppSpawnSpec,
   resolveSmokeAppDirs,
   smokeAppEnv,
-  stopProcess
+  stopProcess,
+  windowsAcceptanceProfileDir
 } from './app-launcher.mjs'
 
 const SMOKE_ENV_KEYS = [
@@ -22,6 +25,9 @@ const SMOKE_ENV_KEYS = [
   'VIDEORC_USER_DATA_DIR',
   'VIDEORC_SMOKE_STATE_DIR',
   'VIDEORC_SMOKE_OUTPUT_DIR',
+  'VIDEORC_WINDOWS_ACCEPTANCE_DIR',
+  'VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR',
+  'VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED',
   'VIDEORC_DISABLE_BACKEND_REAP',
   'VIDEORC_SMOKE_PRINT_BACKEND_READY'
 ]
@@ -135,6 +141,115 @@ test('smokeAppEnv preserves explicit app dirs and reaper policy', () => {
     assert.equal(env.VIDEORC_DISABLE_BACKEND_REAP, '0')
     assert.equal(env.VIDEORC_SMOKE_PRINT_BACKEND_READY, '0')
   })
+})
+
+test('acceptance launches preserve one owned profile outside evidence only for installed Windows', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'videorc-acceptance-profile-test-'))
+  const profileDir = resolve(root, 'profile')
+  const evidenceDir = resolve(root, 'evidence')
+  mkdirSync(profileDir)
+  mkdirSync(evidenceDir)
+  const env = {
+    VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED: '1',
+    VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR: profileDir,
+    VIDEORC_WINDOWS_ACCEPTANCE_DIR: evidenceDir,
+    VIDEORC_SMOKE_OUTPUT_DIR: resolve(evidenceDir, 'run')
+  }
+  const ownerProbe = () => ({
+    current: 'WORKGROUP\\videorc-user',
+    owner: 'workgroup\\VIDEORC-USER'
+  })
+
+  assert.equal(
+    windowsAcceptanceProfileDir({ env, platform: 'win32', ownerProbe }),
+    realpathSync(profileDir)
+  )
+  assert.deepEqual(resolveSmokeAppDirs({ env, platform: 'win32', ownerProbe }), {
+    appDataDir: resolve(realpathSync(profileDir), 'app-data'),
+    userDataDir: resolve(realpathSync(profileDir), 'user-data')
+  })
+
+  const launchedEnv = smokeAppEnv(env, { platform: 'win32', ownerProbe })
+  const canonicalProfileDir = realpathSync(profileDir)
+  assert.equal(launchedEnv.VIDEORC_APP_DATA_DIR, resolve(canonicalProfileDir, 'app-data'))
+  assert.equal(launchedEnv.VIDEORC_USER_DATA_DIR, resolve(canonicalProfileDir, 'user-data'))
+  assert.equal(
+    launchedEnv.VIDEORC_DATABASE_PATH,
+    resolve(canonicalProfileDir, 'app-data/videorc.sqlite3')
+  )
+  assert.equal(
+    launchedEnv.VIDEORC_SECRETS_PATH,
+    resolve(canonicalProfileDir, 'app-data/videorc-secrets.json')
+  )
+  assert.equal(
+    launchedEnv.VIDEORC_RECORDINGS_DIR,
+    resolve(canonicalProfileDir, 'app-data/recordings')
+  )
+})
+
+test('acceptance profile validation rejects unsafe activation, location, and ownership', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'videorc-acceptance-profile-reject-'))
+  const evidenceDir = resolve(root, 'evidence')
+  const nestedProfileDir = resolve(evidenceDir, 'profile')
+  const safeProfileDir = resolve(root, 'profile')
+  mkdirSync(evidenceDir)
+  mkdirSync(nestedProfileDir)
+  mkdirSync(safeProfileDir)
+  const owned = () => ({ current: 'DOMAIN\\user', owner: 'DOMAIN\\user' })
+  const baseEnv = {
+    VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED: '1',
+    VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR: safeProfileDir,
+    VIDEORC_WINDOWS_ACCEPTANCE_DIR: evidenceDir
+  }
+
+  assert.throws(
+    () =>
+      windowsAcceptanceProfileDir({
+        env: { ...baseEnv, VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED: '0' },
+        platform: 'win32',
+        ownerProbe: owned
+      }),
+    /acceptance-only/
+  )
+  assert.throws(
+    () =>
+      windowsAcceptanceProfileDir({
+        env: baseEnv,
+        platform: 'darwin',
+        ownerProbe: owned
+      }),
+    /only on Windows/
+  )
+  assert.throws(
+    () =>
+      windowsAcceptanceProfileDir({
+        env: { ...baseEnv, VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR: 'relative-profile' },
+        platform: 'win32',
+        ownerProbe: owned
+      }),
+    /must be absolute/
+  )
+  assert.throws(
+    () =>
+      windowsAcceptanceProfileDir({
+        env: {
+          ...baseEnv,
+          VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR: nestedProfileDir
+        },
+        platform: 'win32',
+        ownerProbe: owned
+      }),
+    /outside the acceptance evidence/
+  )
+  assert.throws(
+    () =>
+      windowsAcceptanceProfileDir({
+        env: baseEnv,
+        platform: 'win32',
+        ownerProbe: () => ({ current: 'DOMAIN\\user', owner: 'DOMAIN\\other' })
+      }),
+    /owned by the current Windows user/
+  )
 })
 
 test('dev app launch uses explicit cmd.exe without shell argv reconstruction on Windows', () => {
@@ -321,7 +436,67 @@ test('stopProcess reports a graceful process-group stop', async () => {
   assert.equal(result.childExited, true)
   assert.equal(result.processGroupExited, true)
   assert.equal(result.escalated, false)
+  assert.equal(result.forced, false)
   assert.deepEqual(signals, ['SIGTERM'])
+})
+
+test('stopProcess skips signaling when the child and process group already exited', async () => {
+  const child = fakeChild(234)
+  child.exitCode = 0
+
+  const result = await stopProcess(child, {
+    beforeStop: () => {
+      throw new Error('beforeStop should not run for an exited tree')
+    },
+    signalProcessGroup: () => {
+      throw new Error('an exited tree must not be signaled')
+    },
+    waitForChildExit: async () => {
+      throw new Error('an exited child must not be awaited')
+    },
+    waitForProcessGroupExit: async () => {
+      throw new Error('an exited group must not be awaited')
+    },
+    processGroupExists: () => false
+  })
+
+  assert.deepEqual(result, {
+    pid: 234,
+    state: 'skipped',
+    childExited: true,
+    processGroupExited: true,
+    escalated: false,
+    forced: false,
+    signals: []
+  })
+})
+
+test('stopProcess records injected Windows taskkill semantics as forced', async () => {
+  for (const forcedSignalResult of [true, { forced: true }]) {
+    const child = fakeChild(345)
+    const signals = []
+
+    const result = await stopProcess(child, {
+      signalProcessGroup: (_pid, _child, signal) => {
+        signals.push(signal)
+        return forcedSignalResult
+      },
+      waitForChildExit: async () => {
+        child.signalCode = 'SIGTERM'
+      },
+      waitForProcessGroupExit: async () => {
+        throw new Error('group wait should not be needed')
+      },
+      processGroupExists: () => false
+    })
+
+    assert.equal(result.state, 'force-terminated')
+    assert.equal(result.childExited, true)
+    assert.equal(result.processGroupExited, true)
+    assert.equal(result.escalated, false)
+    assert.equal(result.forced, true)
+    assert.deepEqual(signals, ['SIGTERM'])
+  }
 })
 
 test('stopProcess escalates to SIGKILL when the process group survives SIGTERM', async () => {
@@ -352,6 +527,7 @@ test('stopProcess escalates to SIGKILL when the process group survives SIGTERM',
   assert.equal(result.childExited, true)
   assert.equal(result.processGroupExited, true)
   assert.equal(result.escalated, true)
+  assert.equal(result.forced, false)
   assert.deepEqual(signals, ['SIGTERM', 'SIGTERM', 'SIGKILL'])
 })
 
@@ -370,6 +546,7 @@ test('stopProcess reports leaked children when SIGKILL cannot finish teardown', 
   assert.equal(result.childExited, false)
   assert.equal(result.processGroupExited, false)
   assert.equal(result.escalated, true)
+  assert.equal(result.forced, false)
 
   await assert.rejects(
     stopProcess(fakeChild(790), {

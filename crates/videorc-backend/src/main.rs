@@ -64,6 +64,20 @@ mod twitch_chat;
 mod video_toolbox_encoder;
 mod videorc_api;
 mod viewer_stats;
+#[allow(dead_code)]
+mod windows_d3d11_capture;
+#[allow(dead_code)]
+mod windows_d3d11_compositor;
+#[allow(dead_code)]
+mod windows_d3d11_device;
+#[allow(dead_code)]
+mod windows_d3d11_encoder_contract;
+#[allow(dead_code)]
+mod windows_d3d11_preview;
+#[allow(dead_code)]
+mod windows_d3d11_session;
+#[allow(dead_code)]
+mod windows_d3d11_test_pattern;
 #[cfg(target_os = "windows")]
 mod windows_graphics_capture;
 #[cfg(target_os = "windows")]
@@ -103,8 +117,8 @@ use preview_screen::{
     start_preview_screen, stop_preview_screen,
 };
 use preview_surface::{
-    create_preview_surface, destroy_preview_surface, preview_surface_status,
-    register_preview_surface_resize, take_native_preview_host_commands,
+    apply_main_owned_preview_surface_bounds, create_preview_surface, destroy_preview_surface,
+    preview_surface_status, register_preview_surface_resize, take_native_preview_host_commands,
     update_preview_surface_bounds, update_preview_surface_present,
 };
 use protocol::{
@@ -112,10 +126,11 @@ use protocol::{
     ToolStatus,
 };
 use recording::{
-    create_preview_snapshot, idle_status, live_preview_status, preview_file_path, remux_session,
-    resume_pending_repair_jobs, shutdown_capture_processes, start_live_preview, start_session,
-    stop_live_preview, stop_recording, subscribe_live_preview_frames,
-    update_active_audio_processing, update_preview_frame_age,
+    create_preview_snapshot, current_stream_targets_snapshot, idle_status, live_preview_status,
+    preview_file_path, probe_stream_output_topology, remux_session, resume_pending_repair_jobs,
+    shutdown_capture_processes, start_live_preview, start_session, stop_live_preview,
+    stop_recording, subscribe_live_preview_frames, update_active_audio_processing,
+    update_preview_frame_age,
 };
 use scene::{
     nudge_source, reorder_sources, reset_source_transform, scene_from_capture_config,
@@ -398,6 +413,18 @@ async fn shutdown_signal(state: AppState) {
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
     shutdown_capture_processes(state.clone()).await;
+    {
+        let mut windows_media = state
+            .windows_d3d11_media
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(error) = windows_media.shutdown() {
+            state.emit_log(
+                "warn",
+                format!("Could not drain the Windows D3D11 media authority: {error}"),
+            );
+        }
+    }
     captions::shutdown_caption_artifacts(&state).await;
 }
 
@@ -5297,6 +5324,23 @@ async fn handle_text_message_with_role(
             let commands = take_native_preview_host_commands(state).await;
             ServerResponse::ok(command.id, commands)
         }
+        "resource.admin.preview_surface_bounds" => {
+            match serde_json::from_value::<protocol::MainOwnedPreviewSurfaceBoundsParams>(
+                command.params,
+            ) {
+                Ok(params) => match apply_main_owned_preview_surface_bounds(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "preview-surface-stacking-rejected",
+                        error,
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "remote.control.status" => ServerResponse::ok(command.id, remote_control_status(state)),
         "remote.control.enable" => match enable_remote_control(state) {
             Ok(status) => ServerResponse::ok(command.id, status),
@@ -5758,6 +5802,23 @@ async fn handle_text_message_with_role(
                     Err(error) => ServerResponse::error(
                         command.id,
                         "recording-start-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "stream.output.topology.probe" => {
+            match serde_json::from_value::<protocol::StreamOutputTopologyProbeParams>(
+                command.params,
+            ) {
+                Ok(params) => match probe_stream_output_topology(params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "stream-output-topology-probe-failed",
                         error.to_string(),
                     ),
                 },
@@ -7126,6 +7187,24 @@ async fn handle_text_message_with_role(
             }
         },
         "recording.status" => ServerResponse::ok(command.id, current_recording_status(state).await),
+        "stream.targets.snapshot" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "stream.targets.snapshot does not accept parameters",
+                )
+            } else {
+                match current_stream_targets_snapshot(state).await {
+                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "stream-targets-unavailable",
+                        error.to_string(),
+                    ),
+                }
+            }
+        }
         method => ServerResponse::error(
             command.id,
             "unknown-method",
@@ -8571,6 +8650,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn windows_d3d11_main_owned_preview_bounds_are_admin_only() {
+        let state = test_state();
+        let response = handle_text_message_with_role(
+            &state,
+            &serde_json::json!({
+                "id": "forged-preview-hwnd",
+                "method": "resource.admin.preview_surface_bounds",
+                "params": {
+                    "bounds": {
+                        "screenX": 0.0,
+                        "screenY": 0.0,
+                        "width": 640.0,
+                        "height": 360.0,
+                        "scaleFactor": 1.0,
+                        "orderAboveWindowHandle": "0x000000001234abcd"
+                    },
+                    "generation": 7
+                }
+            })
+            .to_string(),
+            BackendRole::Renderer,
+        )
+        .await;
+
+        assert!(!response.ok);
+        let error = response.error.expect("renderer HWND request rejection");
+        assert_eq!(error.code, "forbidden-method");
+    }
+
+    #[tokio::test]
     async fn recording_status_stays_stopping_for_the_authoritative_finalization_lease() {
         let state = test_state();
         let finalizing = state.ffmpeg_work.begin_finalizing();
@@ -8587,6 +8696,37 @@ mod tests {
             current_recording_status(&state).await.state,
             RecordingState::Idle
         ));
+    }
+
+    #[tokio::test]
+    async fn stream_targets_snapshot_rpc_fails_closed_without_an_active_session() {
+        let state = test_state();
+        let response = handle_text_message(
+            &state,
+            r#"{"id":"targets","method":"stream.targets.snapshot","params":{}}"#,
+        )
+        .await;
+
+        assert!(!response.ok);
+        let error = response.error.expect("idle snapshot error");
+        assert_eq!(error.code, "stream-targets-unavailable");
+        assert!(error.message.contains("No active capture session"));
+    }
+
+    #[tokio::test]
+    async fn stream_targets_snapshot_rpc_rejects_non_empty_parameters() {
+        let state = test_state();
+        let response = handle_text_message(
+            &state,
+            r#"{"id":"targets","method":"stream.targets.snapshot","params":{"sessionId":"stale"}}"#,
+        )
+        .await;
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.expect("parameter rejection").code,
+            "invalid-params"
+        );
     }
 
     #[tokio::test]
@@ -9568,6 +9708,87 @@ mod tests {
             .to_string(),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn stream_output_topology_probe_rpc_returns_a_secret_free_typed_verdict() {
+        let state = test_state();
+        let missing_ffmpeg_marker = format!("videorc-missing-ffmpeg-{}", Uuid::new_v4());
+        let missing_ffmpeg_path = std::env::temp_dir().join(&missing_ffmpeg_marker).join(
+            if cfg!(target_os = "windows") {
+                "ffmpeg.exe"
+            } else {
+                "ffmpeg"
+            },
+        );
+        assert!(
+            !missing_ffmpeg_path.exists(),
+            "the topology test requires a guaranteed-missing FFmpeg path"
+        );
+        let missing_ffmpeg_path = missing_ffmpeg_path.to_string_lossy().into_owned();
+        let response = request_for_test(
+            &state,
+            "topology-probe",
+            "stream.output.topology.probe",
+            json!({
+                "ffmpegPath": missing_ffmpeg_path,
+                "streamProfile": {
+                    "preset": "stream-safe-1080p30",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 30,
+                    "bitrateKbps": 6000
+                },
+                "outputRoles": ["shared"]
+            }),
+        )
+        .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let payload = response.payload.expect("topology probe payload");
+        assert_eq!(payload["streamProfile"]["width"], 1920);
+        assert_eq!(payload["outputRoles"], json!(["shared"]));
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(
+                payload["requestedBridgeOutput"],
+                "windows-media-foundation-h264-mpegts"
+            );
+            assert_eq!(payload["effectiveBridgeOutput"], "raw-yuv420p");
+            assert_eq!(payload["probeState"], "rejected");
+            let fallback_reason = payload["fallbackReason"]
+                .as_str()
+                .expect("a rejected Media Foundation topology has a fallback reason");
+            assert!(!fallback_reason.trim().is_empty());
+            assert!(
+                fallback_reason.len() <= 480,
+                "topology fallback reason must remain protocol-bounded"
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(
+                payload["requestedBridgeOutput"], payload["effectiveBridgeOutput"],
+                "the source default must not fabricate a probed fallback"
+            );
+            assert_eq!(payload["probeState"], "not-required");
+        }
+        let capability_key = payload["capabilityKey"]
+            .as_str()
+            .expect("hashed capability key");
+        assert!(capability_key.starts_with("stream-output-topology-v1:"));
+        assert_eq!(
+            capability_key.len(),
+            "stream-output-topology-v1:".len() + 64
+        );
+        let serialized = payload.to_string().to_ascii_lowercase();
+        assert!(
+            !serialized.contains(&missing_ffmpeg_marker.to_ascii_lowercase()),
+            "the local FFmpeg probe path must not leave the backend"
+        );
+        assert!(!serialized.contains("streamkey"));
+        assert!(!serialized.contains("serverurl"));
+        assert!(!serialized.contains("accesstoken"));
     }
 
     #[tokio::test]

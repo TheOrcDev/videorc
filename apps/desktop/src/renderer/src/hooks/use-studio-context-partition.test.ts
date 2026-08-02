@@ -153,6 +153,15 @@ describe('studio context invalidation boundaries', () => {
     expect(source).toMatch(/<Suspense fallback=\{<StudioDashboardBottomRowFallback \/>\}>/)
   })
 
+  it('keeps the Studio workspace behind the shell lazy-import boundary', () => {
+    const source = readFileSync(new URL('../components/app-shell.tsx', import.meta.url), 'utf8')
+
+    expect(source).toContain("await import('@/components/tabs/studio-tab')")
+    expect(source).not.toMatch(
+      /import\s*\{[^}]*StudioTab[^}]*\}\s*from\s*['"]@\/components\/tabs\/studio-tab['"]/
+    )
+  })
+
   it('preserves core provider identity across elapsed-time and preview telemetry updates', async () => {
     const core = { wsStatus: 'connected' } as StudioCoreContextValue
     const observedCoreValues: StudioCoreContextValue[] = []

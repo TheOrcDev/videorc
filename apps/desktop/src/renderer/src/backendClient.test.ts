@@ -295,6 +295,7 @@ describe('BackendClient request lifetime', () => {
   it('gives media jobs a longer finite method-specific timeout', () => {
     expect(backendRequestTimeoutMs('preview.surface.present')).toBe(5_000)
     expect(backendRequestTimeoutMs('health.ping')).toBe(30_000)
+    expect(backendRequestTimeoutMs('stream.output.topology.probe')).toBe(120_000)
     expect(backendRequestTimeoutMs('ai.run_post_recording')).toBe(30 * 60_000)
   })
 

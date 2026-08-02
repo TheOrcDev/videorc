@@ -39,6 +39,7 @@ import type {
 } from '@/lib/backend'
 import { compactTime, formatDroppedFrames, formatMetric } from '@/lib/format'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import { isNativePreviewCapability } from '../../../../shared/native-preview-capability'
 
 export function DiagnosticsTab(): ReactElement {
   const {
@@ -117,6 +118,7 @@ export function DiagnosticsTab(): ReactElement {
         expectsCamera: Boolean(captureConfig.sources.cameraId),
         expectsScreen: Boolean(captureConfig.sources.screenId || captureConfig.sources.windowId),
         nativePreviewSurfaceEnabled,
+        platform: runtimeInfo?.platform ?? 'darwin',
         previewCameraStatus,
         previewLiveStatus,
         previewScreenStatus,
@@ -128,6 +130,7 @@ export function DiagnosticsTab(): ReactElement {
       captureConfig.sources.screenId,
       captureConfig.sources.windowId,
       nativePreviewSurfaceEnabled,
+      runtimeInfo?.platform,
       previewCameraStatus,
       previewLiveStatus,
       previewScreenStatus,
@@ -191,13 +194,17 @@ export function DiagnosticsTab(): ReactElement {
               tone={
                 previewPathBadge(
                   diagnosticStats.previewTransport,
-                  diagnosticStats.previewSurfaceBacking
+                  diagnosticStats.previewSurfaceBacking,
+                  previewSurfaceStatus.nativePreviewHostKind,
+                  runtimeInfo?.platform ?? 'darwin'
                 ).tone
               }
               value={
                 previewPathBadge(
                   diagnosticStats.previewTransport,
-                  diagnosticStats.previewSurfaceBacking
+                  diagnosticStats.previewSurfaceBacking,
+                  previewSurfaceStatus.nativePreviewHostKind,
+                  runtimeInfo?.platform ?? 'darwin'
                 ).label
               }
             />
@@ -447,6 +454,50 @@ export function DiagnosticsTab(): ReactElement {
               value={formatEncodeBackend(diagnosticStats.encodeBackend)}
             />
             <DiagnosticMetric
+              label="Requested output"
+              value={diagnosticStats.encoderBridgeRequestedVideoOutput ?? '--'}
+            />
+            <DiagnosticMetric
+              label="Effective output"
+              value={diagnosticStats.encoderBridgeEffectiveVideoOutput ?? '--'}
+            />
+            <DiagnosticMetric
+              label="Output fallback"
+              value={diagnosticStats.encoderBridgeEncodedOutputFallbackReason ?? 'None'}
+            />
+            <DiagnosticMetric
+              label="Stream bitrate"
+              value={formatKbps(diagnosticStats.streamMeasuredBitrateKbps)}
+            />
+            <DiagnosticMetric
+              label="Stream bitrate range"
+              value={`${formatKbps(
+                diagnosticStats.streamMeasuredBitrateMinKbps
+              )} / ${formatKbps(diagnosticStats.streamMeasuredBitrateMaxKbps)}`}
+            />
+            <DiagnosticMetric
+              label="Stream bytes"
+              value={formatBytes(diagnosticStats.streamOutputTotalBytes)}
+            />
+            <DiagnosticMetric
+              label="Stream duplicated"
+              value={formatOptionalCounter(diagnosticStats.streamDuplicatedFrames)}
+            />
+            <DiagnosticMetric
+              label="Stream dropped"
+              value={formatOptionalCounter(
+                streamHealth?.droppedFrames ?? diagnosticStats.droppedFrames
+              )}
+            />
+            <DiagnosticMetric
+              label="Stream coalesced"
+              value={formatOptionalCounter(
+                diagnosticStats.encoderBridgeSeparateOutputEncodersActive
+                  ? diagnosticStats.encoderBridgeStreamQueueDroppedFrames
+                  : diagnosticStats.encoderBridgeOutputQueueDroppedFrames
+              )}
+            />
+            <DiagnosticMetric
               label="Recording repeats"
               value={diagnosticStats.encoderBridgeRepeatedFrames.toString()}
             />
@@ -678,7 +729,7 @@ function DiagnosticMetric({ label, value }: { label: string; value: string }): R
   return (
     <div className="rounded-row border bg-muted/40 px-3 py-2">
       <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="text-base font-semibold tabular-nums">{value}</div>
+      <div className="break-words text-base font-semibold tabular-nums">{value}</div>
     </div>
   )
 }
@@ -990,6 +1041,7 @@ function previewDiagnosisCopy({
   expectsCamera,
   expectsScreen,
   nativePreviewSurfaceEnabled,
+  platform,
   previewCameraStatus,
   previewLiveStatus,
   previewScreenStatus,
@@ -999,6 +1051,7 @@ function previewDiagnosisCopy({
   expectsCamera: boolean
   expectsScreen: boolean
   nativePreviewSurfaceEnabled: boolean
+  platform: string
   previewCameraStatus: PreviewCameraStatus
   previewLiveStatus: PreviewLiveStatus
   previewScreenStatus: PreviewScreenStatus
@@ -1038,14 +1091,20 @@ function previewDiagnosisCopy({
   if (diagnosticStats.previewTransport === 'electron-proof-surface') {
     return { label: 'Proof surface', tone: 'warn' }
   }
-  if (diagnosticStats.previewTransport !== 'native-surface') {
+  if (
+    !isNativePreviewCapability(
+      {
+        transport: diagnosticStats.previewTransport,
+        backing: diagnosticStats.previewSurfaceBacking,
+        nativePreviewHostKind: previewSurfaceStatus.nativePreviewHostKind
+      },
+      platform
+    )
+  ) {
     return {
       label: 'Fallback',
       tone: diagnosticStats.previewTransport === 'unavailable' ? 'neutral' : 'warn'
     }
-  }
-  if (diagnosticStats.previewSurfaceBacking !== 'cametal-layer') {
-    return { label: 'Surface backing', tone: 'warn' }
   }
 
   const targetFps = diagnosticStats.previewTargetFps ?? previewSurfaceStatus.targetFps
@@ -1151,6 +1210,18 @@ function formatMs(value?: number): string {
   return typeof value === 'number' ? `${value.toFixed(0)} ms` : '-- ms'
 }
 
+function formatKbps(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${Math.round(value).toLocaleString()} kbps`
+    : '-- kbps'
+}
+
+function formatOptionalCounter(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.round(value)).toLocaleString()
+    : '--'
+}
+
 function formatFrameLag(value?: number): string {
   return typeof value === 'number' ? `${value.toFixed(0)} frames` : '-- frames'
 }
@@ -1195,6 +1266,8 @@ function formatPreviewTransport(transport?: string): string {
   switch (transport) {
     case 'native-surface':
       return 'Native'
+    case 'd3d11-shared-texture':
+      return 'D3D11'
     case 'electron-proof-surface':
       return 'Proof'
     case 'latest-jpeg-polling':
@@ -1210,6 +1283,8 @@ function formatPreviewSurfaceBacking(backing?: string): string {
   switch (backing) {
     case 'cametal-layer':
       return 'CAMetalLayer'
+    case 'directcomposition-swapchain':
+      return 'DirectComposition swap chain'
     case 'electron-browser-window':
       return 'Electron BrowserWindow'
     case 'none':
@@ -1244,6 +1319,10 @@ function formatCompositorBackend(stats: DiagnosticStats): string {
   switch (stats.compositorBackend) {
     case 'metal':
       return 'Metal'
+    case 'd3d11':
+      return 'D3D11'
+    case 'cpu':
+      return 'CPU'
     case 'cpu-fallback': {
       const frames = stats.compositorCpuFallbackFrames ?? 0
       const reason = stats.compositorFallbackReason ? `: ${stats.compositorFallbackReason}` : ''
@@ -1258,23 +1337,46 @@ function formatImagePolls(counts?: DiagnosticStats['previewImagePollCounts']): s
   if (!counts) {
     return '--'
   }
-  const total = counts.cameraPng + counts.screenPng + counts.liveJpeg + counts.liveMjpeg
+  const total =
+    counts.cameraPng +
+    counts.screenPng +
+    counts.productionPng +
+    counts.cameraBmp +
+    counts.screenBmp +
+    counts.liveJpeg +
+    counts.liveMjpeg
   return total === 0
     ? 'None'
-    : `${total} (cam ${counts.cameraPng}, scr ${counts.screenPng}, jpg ${counts.liveJpeg}, mjpeg ${counts.liveMjpeg})`
+    : `${total} (PNG cam ${counts.cameraPng}, scr ${counts.screenPng}, prod ${counts.productionPng}; BMP cam ${counts.cameraBmp}, scr ${counts.screenBmp}; jpg ${counts.liveJpeg}, mjpeg ${counts.liveMjpeg})`
 }
 
-// The plan's "OBS-native preview" vs "Fallback preview" badge. Only the real Metal
-// layer may report native-surface; the Electron proof window stays explicitly non-native.
+// The plan's "OBS-native preview" vs "Fallback preview" badge. Only the
+// platform-canonical Metal or D3D11 presenter may report native; the Electron
+// proof window stays explicitly non-native.
 function previewPathBadge(
   transport?: string,
-  backing?: string
+  backing?: string,
+  hostKind?: PreviewSurfaceStatus['nativePreviewHostKind'],
+  platform = 'darwin'
 ): { label: string; tone: StatusTone } {
+  if (
+    transport &&
+    backing &&
+    isNativePreviewCapability(
+      {
+        transport: transport as DiagnosticStats['previewTransport'],
+        backing: backing as DiagnosticStats['previewSurfaceBacking'],
+        nativePreviewHostKind: hostKind
+      },
+      platform
+    )
+  ) {
+    return { label: 'OBS-native', tone: 'good' }
+  }
   switch (transport) {
     case 'native-surface':
-      return backing === 'cametal-layer'
-        ? { label: 'OBS-native', tone: 'good' }
-        : { label: 'Surface proof', tone: 'warn' }
+    case 'd3d11-shared-texture':
+      return { label: 'Surface proof', tone: 'warn' }
     case 'electron-proof-surface':
       return { label: 'Proof surface', tone: 'warn' }
     case 'latest-jpeg-polling':

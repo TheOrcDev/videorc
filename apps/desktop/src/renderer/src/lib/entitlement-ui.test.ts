@@ -8,7 +8,7 @@ import {
   streamingDestinationEnableGate,
   videoProfileEntitlementGate
 } from './entitlement-ui'
-import { DEFAULT_BASIC_ENTITLEMENTS } from './entitlements'
+import { DEFAULT_BASIC_ENTITLEMENTS, PREMIUM_STREAMING_LIMITS } from './entitlements'
 import { VIDEORC_PREMIUM_URL } from './premium-upgrade'
 
 const basicEntitlements = DEFAULT_BASIC_ENTITLEMENTS
@@ -46,13 +46,7 @@ const premiumEntitlements: EntitlementsSnapshot = {
       maxFps: 60,
       maxBitrateKbps: 50000
     },
-    streaming: {
-      maxWidth: 3840,
-      maxHeight: 2160,
-      maxFps: 30,
-      maxBitrateKbps: 30000,
-      maxDestinations: 3
-    }
+    streaming: PREMIUM_STREAMING_LIMITS
   }
 }
 
@@ -203,6 +197,77 @@ describe('entitlement UI gates', () => {
         video: youtube4k
       })
     ).toEqual({ allowed: true })
+  })
+
+  it('gates exact higher-rate YouTube 1080p profiles by tier', () => {
+    const youtubeProfiles: VideoSettings[] = [
+      {
+        preset: 'stream-youtube-1080p30',
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        bitrateKbps: 10000
+      },
+      {
+        preset: 'stream-youtube-1080p60',
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        bitrateKbps: 12000
+      }
+    ]
+
+    for (const video of youtubeProfiles) {
+      expect(
+        videoProfileEntitlementGate({
+          entitlements: basicEntitlements,
+          kind: 'streaming',
+          video
+        })
+      ).toMatchObject({
+        allowed: false,
+        featureId: 'livestreaming',
+        upgradeUrl: VIDEORC_PREMIUM_URL
+      })
+      expect(
+        videoProfileEntitlementGate({
+          entitlements: premiumEntitlements,
+          kind: 'streaming',
+          video
+        })
+      ).toEqual({ allowed: true })
+      expect(
+        videoProfileEntitlementGate({
+          entitlements: developerEntitlements,
+          kind: 'streaming',
+          video
+        })
+      ).toEqual({ allowed: true })
+    }
+  })
+
+  it('rejects unsupported 4K60 streaming even when the tier ceiling allows it', () => {
+    const unsupported4k60: VideoSettings = {
+      preset: 'custom',
+      width: 3840,
+      height: 2160,
+      fps: 60,
+      bitrateKbps: 30000
+    }
+
+    for (const entitlements of [premiumEntitlements, developerEntitlements]) {
+      expect(
+        videoProfileEntitlementGate({
+          entitlements,
+          kind: 'streaming',
+          video: unsupported4k60
+        })
+      ).toMatchObject({
+        allowed: false,
+        featureId: 'livestreaming',
+        reason: expect.stringContaining('exact YouTube 4K30 profile')
+      })
+    }
   })
 
   it('fails closed for Noise Cleanup and links Basic users to Premium', () => {

@@ -1,6 +1,7 @@
 import type {
   CompositorFrameReady,
   CompositorStatus,
+  PreviewSurfaceStatus,
   RecordingStatus,
   ServerEvent,
   ServerResponse
@@ -31,6 +32,14 @@ export function parseMainRecordingStatus(payload: unknown): RecordingStatus {
 
 export function parseMainRecordingStatusEvent(payload: unknown): RecordingStatus {
   return validateBackendEventPayload('recording.status', payload) as RecordingStatus
+}
+
+export function parseMainPreviewSurfaceStatus(payload: unknown): PreviewSurfaceStatus {
+  return validateBackendRpcResult('preview.surface.status', payload) as PreviewSurfaceStatus
+}
+
+export function parseMainPreviewSurfaceStatusEvent(payload: unknown): PreviewSurfaceStatus {
+  return validateBackendEventPayload('preview.surface.status', payload) as PreviewSurfaceStatus
 }
 
 export function parseMainCompositorStatusEvent(payload: unknown): CompositorStatus {

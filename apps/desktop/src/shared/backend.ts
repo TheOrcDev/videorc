@@ -202,6 +202,7 @@ export interface AutomaticSourceFallbackEvent {
 
 export interface RendererDiagnosticsSnapshot {
   automaticSourceFallbacks: AutomaticSourceFallbackEvent[]
+  nativePreviewSurfaceStatus?: PreviewSurfaceStatus
   runtimeInfo?: RuntimeInfo
 }
 
@@ -616,6 +617,8 @@ export type VideoPreset =
   | 'record-4k60-experimental'
   | 'stream-safe-1080p30'
   | 'stream-safe-1080p60'
+  | 'stream-youtube-1080p30'
+  | 'stream-youtube-1080p60'
   | 'stream-youtube-4k30'
   | 'stream-1080p60'
   | 'vertical-1080x1920'
@@ -1221,6 +1224,7 @@ export type PreviewLiveState = 'connecting' | 'live' | 'reconnecting' | 'unavail
 export type PreviewLiveSource = 'idle-preview' | 'recording-session' | 'unavailable'
 export type PreviewTransport =
   | 'native-surface'
+  | 'd3d11-shared-texture'
   | 'electron-proof-surface'
   | 'latest-jpeg-polling'
   | 'mjpeg-stream'
@@ -1237,13 +1241,111 @@ export type EncodeBackend =
   // libopenh264 software fallback on Windows — software Media Foundation ran
   // below realtime on real devices (issue #149).
   | 'software-open-h264'
-export type CompositorBackend = 'metal' | 'cpu' | 'cpu-fallback'
+
+export type StreamOutputTopologyRole = 'shared' | 'recording' | 'stream'
+
+export type StreamOutputBridge =
+  | 'raw-yuv420p'
+  | 'videotoolbox-h264-annex-b'
+  | 'videotoolbox-h264-mpegts'
+  | 'windows-media-foundation-h264-mpegts'
+
+export type StreamOutputTopologyProbeState = 'not-required' | 'passed' | 'rejected' | 'unsupported'
+
+/**
+ * Secret-free off-air probe input. Never add RTMP URLs, stream keys, OAuth
+ * credentials, or a full StartSessionParams to this contract.
+ */
+export interface StreamOutputTopologyProbeParams {
+  ffmpegPath?: string
+  streamProfile: VideoSettings
+  recordingProfile?: VideoSettings
+  outputRoles: StreamOutputTopologyRole[]
+}
+
+/** Exact output topology selected by the same production probe used at start. */
+export interface StreamOutputTopologyProbeResult {
+  capabilityKey: string
+  streamProfile: VideoSettings
+  recordingProfile?: VideoSettings
+  outputRoles: StreamOutputTopologyRole[]
+  requestedBridgeOutput: StreamOutputBridge
+  effectiveBridgeOutput: StreamOutputBridge
+  effectiveEncodeBackend: EncodeBackend
+  probeState: StreamOutputTopologyProbeState
+  fallbackReason?: string
+}
+
+export type CompositorBackend = 'metal' | 'd3d11' | 'cpu' | 'cpu-fallback'
+
+export type WindowsD3d11MediaState =
+  | 'unavailable'
+  | 'probing'
+  | 'live'
+  | 'draining'
+  | 'fallback'
+  | 'failed'
+
+export type WindowsD3d11CaptureBackend =
+  | 'desktop-duplication'
+  | 'windows-graphics-capture-monitor'
+  | 'legacy-ffmpeg'
+
+export type WindowsD3d11CursorMode = 'embedded' | 'separate' | 'excluded-wgc' | 'disabled-fallback'
+
+/** Scalar-only diagnostics. No COM pointer, texture/shared handle, or HWND is wire-safe. */
+export interface WindowsD3d11MediaDiagnostics {
+  state: WindowsD3d11MediaState
+  requested: boolean
+  required: boolean
+  adapterLuid?: string
+  captureAdapterLuid?: string
+  compositorAdapterLuid?: string
+  primaryEncoderAdapterLuid?: string
+  auxiliaryEncoderAdapterLuid?: string
+  generation?: number
+  captureBackend?: WindowsD3d11CaptureBackend
+  cursorMode?: WindowsD3d11CursorMode
+  cursorRequested: boolean
+  cursorPixelsSource?: string
+  cursorExclusionGuaranteed: boolean
+  captureReadbackFrames: number
+  textureImportFrames: number
+  cameraUploadFrames: number
+  cursorShapeUploads: number
+  cursorCompositedFrames: number
+  compositorCpuFallbackFrames: number
+  previewPresents: number
+  previewDrops: number
+  previewBmpRequests: number
+  previewBmpBytes: number
+  messagePumpLagP95Ms?: number
+  messagePumpLagMaxMs?: number
+  mediaCommandLagP95Ms?: number
+  mediaCommandLagMaxMs?: number
+  maximumConsecutiveMessageBatch: number
+  maximumConsecutiveMediaBatch: number
+  encoderGpuSamples: number
+  encoderSystemMemorySamples: number
+  rawVideoCopiedFrames: number
+  texturePoolCapacity: number
+  texturePoolInUse: number
+  texturePoolPressureEvents: number
+  adapterMismatches: number
+  deviceResets: number
+  synchronizationTimeouts: number
+  staleGenerationCallbacks: number
+  fallbackReason?: string
+}
 
 /** Cumulative request counts for the HTTP image-polling preview transports. A native
  * preview never fetches these, so a session in which they climb is not actually native. */
 export interface PreviewImagePollCounts {
   cameraPng: number
   screenPng: number
+  productionPng: number
+  cameraBmp: number
+  screenBmp: number
   liveJpeg: number
   liveMjpeg: number
 }
@@ -1283,6 +1385,22 @@ export interface PreviewSurfaceBounds {
   elevated?: boolean
 }
 
+/** Canonical lowercase, fixed-width pointer value. It is never renderer-facing. */
+export type OpaqueNativeWindowHandle = `0x${string}`
+
+/**
+ * Main-owned request shape for backend/native-host commands. Renderer bounds
+ * never include the Windows HWND; main injects it immediately before dispatch.
+ */
+export interface MainOwnedPreviewSurfaceBounds extends PreviewSurfaceBounds {
+  orderAboveWindowHandle?: OpaqueNativeWindowHandle
+}
+
+export interface MainOwnedPreviewSurfaceBoundsParams {
+  bounds: MainOwnedPreviewSurfaceBounds
+  generation: number
+}
+
 export type NativePreviewHostCommandKind = 'create' | 'update-bounds' | 'destroy'
 
 export interface NativePreviewHostCommand {
@@ -1292,7 +1410,17 @@ export interface NativePreviewHostCommand {
 
 export type PreviewSurfaceState = 'unavailable' | 'starting' | 'live' | 'stopped' | 'failed'
 export type PreviewSurfaceSource = 'synthetic' | 'camera' | 'screen' | 'window'
-export type PreviewSurfaceBacking = 'cametal-layer' | 'electron-browser-window' | 'none'
+export type PreviewSurfaceBacking =
+  | 'cametal-layer'
+  | 'directcomposition-swapchain'
+  | 'electron-browser-window'
+  | 'none'
+export type NativePreviewHostKind =
+  | 'in-process'
+  | 'helper-process'
+  | 'external-module'
+  | 'proof-surface'
+  | 'backend-d3d11-presenter'
 export type CompositorState = 'stopped' | 'starting' | 'live' | 'failed'
 export type CompositorSourceKind = 'camera' | 'screen' | 'window'
 export type CompositorSceneSourceKind = SceneSourceKind | 'screen-image' | 'background-image'
@@ -1510,7 +1638,7 @@ export interface PreviewSurfaceStatus {
   nativePreviewMainSceneMismatchAgeMs?: number
   nativePreviewMainLastSkippedSceneRevision?: number
   nativePreviewMainLastSkippedFrameSceneRevision?: number
-  nativePreviewHostKind?: 'in-process' | 'helper-process' | 'external-module' | 'proof-surface'
+  nativePreviewHostKind?: NativePreviewHostKind
   nativePreviewHostAttached?: boolean
   nativePreviewPlacementEventsReceived?: number
   nativePreviewPlacementsCoalesced?: number
@@ -1530,6 +1658,9 @@ export interface PreviewSurfaceStatus {
   sourcePixelsPresent: boolean
   pendingHostCommandCount: number
   bounds?: PreviewSurfaceBounds
+  /** Sanitized readback from the backend-owned Windows DirectComposition
+   * presenter. This intentionally contains no HWND or process ID. */
+  windowsD3d11Presenter?: WindowsD3d11PresenterDiagnostics
   startedAt?: string
   updatedAt: string
   message?: string
@@ -1539,6 +1670,37 @@ export interface PreviewSurfaceStatus {
   // unexplained indefinite wait.
   firstFrameContract?: 'pending' | 'healing' | 'met' | 'fallback'
   firstFrameReason?: string
+}
+
+export interface WindowsD3d11PresenterBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface WindowsD3d11PresenterDiagnostics {
+  layered: boolean
+  transparent: boolean
+  noActivate: boolean
+  excludedFromCapture: boolean
+  windowActive: boolean
+  windowFocused: boolean
+  previewGeneration?: number
+  mediaGeneration: number
+  generationMatches: boolean
+  ownerProcessMatches: boolean
+  sameAdapter: boolean
+  sourceLive: boolean
+  firstPresentSucceeded: boolean
+  successfulPresents: number
+  lastPresentedSequence?: number
+  latestWinsDrops: number
+  hiddenDrops: number
+  busyDrops: number
+  staleFrameDrops: number
+  actualBounds?: WindowsD3d11PresenterBounds
+  fallbackReason?: string
 }
 
 export interface PreviewSurfacePresentParams {
@@ -1730,6 +1892,9 @@ export interface StreamHealth {
   fps?: number
   droppedFrames?: number
   speed?: number
+  bitrateKbps?: number
+  totalBytes?: number
+  duplicatedFrames?: number
   createdAt: string
 }
 
@@ -1804,6 +1969,14 @@ export interface DiagnosticStats {
   encoderBridgeOutputQueueDroppedFrames: number
   encoderBridgeInputFps?: number
   encoderBridgeDroppedFrames: number
+  /** FFmpeg progress-reported drops attributable to the recording bridge. */
+  encoderBridgeRecordingDroppedFrames: number
+  /** FFmpeg progress-reported drops attributable to the stream bridge. */
+  encoderBridgeStreamDroppedFrames: number
+  /** FFmpeg progress-reported encoder speed for the recording bridge. */
+  encoderBridgeRecordingEncoderSpeed?: number
+  /** FFmpeg progress-reported encoder speed for the stream bridge. */
+  encoderBridgeStreamEncoderSpeed?: number
   /** Compositor frames re-fed to the encoder on under-run (duplicate frames in the final file). */
   encoderBridgeRepeatedFrames: number
   /** Distinct bridge under-run bursts; helps separate phase misses from clustered stalls. */
@@ -1824,6 +1997,10 @@ export interface DiagnosticStats {
   encoderBridgeMetalTargetFrames: number
   /** FIFO frames still written through raw-video FFmpeg stdin. */
   encoderBridgeRawVideoCopiedFrames: number
+  /** Raw-video FFmpeg writes attributable to the recording bridge. */
+  encoderBridgeRecordingRawVideoCopiedFrames: number
+  /** Raw-video FFmpeg writes attributable to the stream bridge. */
+  encoderBridgeStreamRawVideoCopiedFrames: number
   /** Raw-video writes where the source frame had an IOSurface-backed Metal target. */
   encoderBridgeMetalTargetCopiedFrames: number
   /** Raw-video writes where the bridge received the retained CoreVideo handle. */
@@ -1866,6 +2043,16 @@ export interface DiagnosticStats {
   streamOutputHeight?: number
   streamOutputFps?: number
   streamOutputBitrateKbps?: number
+  /** Latest measured FFmpeg output bitrate for the active stream. */
+  streamMeasuredBitrateKbps?: number
+  /** Lowest non-zero measured output bitrate observed in this stream session. */
+  streamMeasuredBitrateMinKbps?: number
+  /** Highest non-zero measured output bitrate observed in this stream session. */
+  streamMeasuredBitrateMaxKbps?: number
+  /** Cumulative bytes emitted by FFmpeg for this stream process generation. */
+  streamOutputTotalBytes?: number
+  /** Cumulative frames FFmpeg reports duplicating for this stream process generation. */
+  streamDuplicatedFrames?: number
   /** Number of distinct production VideoToolbox output encoders active for the session. */
   encoderBridgeActiveVideoToolboxOutputEncoders: number
   /** Frames/bytes produced by the local-recording VideoToolbox output encoder. */
@@ -1940,6 +2127,8 @@ export interface DiagnosticStats {
   compositorFallbackReason?: string
   /** Cumulative frames rendered by CPU fallback during the active compositor run. */
   compositorCpuFallbackFrames: number
+  /** Scalar-only state for the Windows D3D11 media authority. */
+  windowsD3d11Media?: WindowsD3d11MediaDiagnostics
   websocketTransport: WebSocketTransportDiagnosticStats
   /** Cumulative HTTP image-poll request counts; the transport-honesty gate fails when these climb during a "native" preview session. */
   previewImagePollCounts: PreviewImagePollCounts
@@ -2786,6 +2975,7 @@ export interface PreviewSupervisorState {
   surfaceActive: boolean
   transport: PreviewLifecycleTransport
   backing: PreviewLifecycleBacking
+  nativePreviewHostKind?: NativePreviewHostKind
   permissionStatus: PreviewPermissionStatus
   fallbackReason?: string
   lastError?: string
@@ -2801,6 +2991,7 @@ export interface NotesWindowState {
   windowId?: number
   alwaysOnTop: boolean
   protected: boolean
+  captureProtectionMarkerInstalled?: boolean
   enabled: boolean
   message?: string
 }
@@ -2818,6 +3009,7 @@ export interface CommentsWindowState {
   windowId?: number
   alwaysOnTop: boolean
   protected: boolean
+  captureProtectionMarkerInstalled?: boolean
   enabled: boolean
   message?: string
 }
@@ -3016,6 +3208,7 @@ export interface VideorcApi {
   onNativePreviewMainPumpActive: (callback: (active: boolean) => void) => () => void
   setNativePreviewSurfaceFramePollingSuppressed: (
     suppressed: boolean,
+    generation: number,
     recordingActive?: boolean
   ) => Promise<PreviewSurfaceStatus>
   destroyNativePreviewSurface: (generation?: number) => Promise<PreviewSurfaceStatus>
@@ -3295,6 +3488,7 @@ export interface CaptionsWindowState {
   bounds: { x: number; y: number; width: number; height: number } | null
   windowId?: number
   alwaysOnTop: boolean
+  captureProtectionMarkerInstalled?: boolean
   enabled: boolean
   message?: string
 }

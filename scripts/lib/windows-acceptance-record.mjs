@@ -29,6 +29,15 @@ export const REQUIRED_WINDOWS_ACCEPTANCE_GATES = Object.freeze([
   'advertisedRtmpWorkflow'
 ])
 
+export const REQUIRED_WINDOWS_D3D11_ACCEPTANCE_GATES = Object.freeze([
+  ...REQUIRED_WINDOWS_ACCEPTANCE_GATES,
+  'windowsD3d11Aggregate',
+  'windowsD3d11AutomaticDefault',
+  'windowsD3d11NaturalFallback',
+  'windowsD3d11SourceLane',
+  'macosRecordingStudioRegression'
+])
+
 export class WindowsAcceptanceRecordError extends Error {
   constructor(code, message) {
     super(message)
@@ -99,6 +108,8 @@ export function assertWindowsAcceptanceRecord(record, expectations) {
       'Windows acceptance record must be a JSON object.'
     )
   }
+  const schemaVersion = record.schemaVersion
+  const d3d11Record = schemaVersion === 3
   assertExactKeys(
     record,
     [
@@ -113,12 +124,18 @@ export function assertWindowsAcceptanceRecord(record, expectations) {
       'testedAt',
       'testPlatform',
       'releaseSequence',
-      'requiredGates'
+      'requiredGates',
+      ...(d3d11Record ? ['qualificationEvidence'] : [])
     ],
     'record'
   )
 
-  requireEqual(record.schemaVersion, 2, 'schemaVersion')
+  if (![2, 3].includes(schemaVersion)) {
+    throw new WindowsAcceptanceRecordError(
+      'acceptance-field-mismatch',
+      'schemaVersion must be 2 or 3.'
+    )
+  }
   requireEqual(record.kind, 'videorc-windows-alpha-acceptance', 'kind')
   requireEqual(record.status, 'PASS', 'status')
   requireEqual(record.releaseId, expectations.releaseId, 'releaseId')
@@ -174,8 +191,11 @@ export function assertWindowsAcceptanceRecord(record, expectations) {
 
   assertReleaseSequence(record.releaseSequence, record.releaseId, expectations)
 
-  assertExactKeys(record.requiredGates, REQUIRED_WINDOWS_ACCEPTANCE_GATES, 'requiredGates')
-  for (const gate of REQUIRED_WINDOWS_ACCEPTANCE_GATES) {
+  const requiredGates = d3d11Record
+    ? REQUIRED_WINDOWS_D3D11_ACCEPTANCE_GATES
+    : REQUIRED_WINDOWS_ACCEPTANCE_GATES
+  assertExactKeys(record.requiredGates, requiredGates, 'requiredGates')
+  for (const gate of requiredGates) {
     if (gate === 'alphaToAlphaUpdate' && expectations.priorAcceptedReleaseIds.length === 0) {
       assertExactKeys(record.requiredGates[gate], ['status', 'reason'], `requiredGates.${gate}`)
       requireEqual(
@@ -193,8 +213,172 @@ export function assertWindowsAcceptanceRecord(record, expectations) {
       requireEqual(record.requiredGates[gate].status, 'PASS', `requiredGates.${gate}.status`)
     }
   }
+  if (d3d11Record) {
+    assertWindowsD3d11QualificationEvidence(record.qualificationEvidence, expectations)
+  }
 
   return record
+}
+
+function assertWindowsD3d11QualificationEvidence(evidence, expectations) {
+  assertExactKeys(
+    evidence,
+    [
+      'candidate',
+      'd3d11Budget',
+      'comparisons',
+      'hosts',
+      'aggregateSha256',
+      'qualifiedProfiles',
+      'windowsSourceLane',
+      'macosRegression'
+    ],
+    'qualificationEvidence'
+  )
+  assertExactKeys(
+    evidence.candidate,
+    ['executableSha256', 'packagePayloadSha256'],
+    'qualificationEvidence.candidate'
+  )
+  requireSha256(
+    evidence.candidate.executableSha256,
+    'qualificationEvidence.candidate.executableSha256'
+  )
+  requireSha256(
+    evidence.candidate.packagePayloadSha256,
+    'qualificationEvidence.candidate.packagePayloadSha256'
+  )
+  if (expectations.installedAppSha256) {
+    requireEqual(
+      evidence.candidate.executableSha256,
+      expectations.installedAppSha256,
+      'qualificationEvidence.candidate.executableSha256'
+    )
+  }
+  if (expectations.packagePayloadSha256) {
+    requireEqual(
+      evidence.candidate.packagePayloadSha256,
+      expectations.packagePayloadSha256,
+      'qualificationEvidence.candidate.packagePayloadSha256'
+    )
+  }
+
+  assertExactKeys(evidence.d3d11Budget, ['status', 'sha256'], 'qualificationEvidence.d3d11Budget')
+  requireEqual(evidence.d3d11Budget.status, 'active', 'qualificationEvidence.d3d11Budget.status')
+  requireSha256(evidence.d3d11Budget.sha256, 'qualificationEvidence.d3d11Budget.sha256')
+  assertExactDigestMap(
+    evidence.comparisons,
+    ['nvidiaTuringFloor', 'intelXeIntegrated'],
+    'qualificationEvidence.comparisons'
+  )
+  assertExactDigestMap(
+    evidence.hosts,
+    ['nvidiaTuringFloor', 'intelXeIntegrated', 'unsupportedNaturalFallback'],
+    'qualificationEvidence.hosts'
+  )
+  requireSha256(evidence.aggregateSha256, 'qualificationEvidence.aggregateSha256')
+
+  assertExactKeys(
+    evidence.qualifiedProfiles,
+    ['nvidiaTuringFloor', 'intelXeIntegrated', 'unsupportedNaturalFallback'],
+    'qualificationEvidence.qualifiedProfiles'
+  )
+  requireExactProfiles(
+    evidence.qualifiedProfiles.nvidiaTuringFloor,
+    ['1080p30', '1080p60'],
+    'qualificationEvidence.qualifiedProfiles.nvidiaTuringFloor'
+  )
+  requireExactProfiles(
+    evidence.qualifiedProfiles.intelXeIntegrated,
+    ['1080p30', '1080p60'],
+    'qualificationEvidence.qualifiedProfiles.intelXeIntegrated'
+  )
+  requireExactProfiles(
+    evidence.qualifiedProfiles.unsupportedNaturalFallback,
+    ['1080p30'],
+    'qualificationEvidence.qualifiedProfiles.unsupportedNaturalFallback'
+  )
+
+  assertExactPassMap(
+    evidence.windowsSourceLane,
+    ['d3dRustDiscovery', 'fullRustTests', 'clippy'],
+    'qualificationEvidence.windowsSourceLane'
+  )
+  assertExactKeys(
+    evidence.macosRegression,
+    ['recordingStudio', 'recordingStudioDevices'],
+    'qualificationEvidence.macosRegression'
+  )
+  requireEqual(
+    evidence.macosRegression.recordingStudio?.status,
+    'PASS',
+    'qualificationEvidence.macosRegression.recordingStudio.status'
+  )
+  assertExactKeys(
+    evidence.macosRegression.recordingStudio,
+    ['status'],
+    'qualificationEvidence.macosRegression.recordingStudio'
+  )
+  const devices = evidence.macosRegression.recordingStudioDevices
+  if (devices?.status === 'PASS') {
+    assertExactKeys(
+      devices,
+      ['status'],
+      'qualificationEvidence.macosRegression.recordingStudioDevices'
+    )
+  } else if (devices?.status === 'BLOCKED') {
+    assertExactKeys(
+      devices,
+      ['status', 'reason'],
+      'qualificationEvidence.macosRegression.recordingStudioDevices'
+    )
+    if (typeof devices.reason !== 'string' || !devices.reason.trim()) {
+      throw new WindowsAcceptanceRecordError(
+        'acceptance-field-mismatch',
+        'qualificationEvidence.macosRegression.recordingStudioDevices.reason was missing.'
+      )
+    }
+  } else {
+    throw new WindowsAcceptanceRecordError(
+      'acceptance-field-mismatch',
+      'qualificationEvidence.macosRegression.recordingStudioDevices.status must be PASS or BLOCKED.'
+    )
+  }
+}
+
+function assertExactDigestMap(value, fields, label) {
+  assertExactKeys(value, fields, label)
+  for (const field of fields) requireSha256(value[field], `${label}.${field}`)
+}
+
+function assertExactPassMap(value, fields, label) {
+  assertExactKeys(value, fields, label)
+  for (const field of fields) {
+    assertExactKeys(value[field], ['status'], `${label}.${field}`)
+    requireEqual(value[field].status, 'PASS', `${label}.${field}.status`)
+  }
+}
+
+function requireExactProfiles(value, expected, label) {
+  if (
+    !Array.isArray(value) ||
+    value.length !== expected.length ||
+    value.some((profile, index) => profile !== expected[index])
+  ) {
+    throw new WindowsAcceptanceRecordError(
+      'acceptance-field-mismatch',
+      `${label} must be exactly ${expected.join(', ')}.`
+    )
+  }
+}
+
+function requireSha256(value, label) {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new WindowsAcceptanceRecordError(
+      'acceptance-field-mismatch',
+      `${label} must be a lowercase SHA-256 digest.`
+    )
+  }
 }
 
 export async function resolveWindowsAcceptanceRecord({
@@ -266,7 +450,9 @@ export async function resolveWindowsAcceptanceRecord({
 
 export function applyWindowsAcceptanceRecord({
   acceptanceRecordUrl,
+  installedAppSha256,
   manifest,
+  packagePayloadSha256,
   priorAcceptedReleaseIds,
   record,
   now
@@ -287,6 +473,8 @@ export function applyWindowsAcceptanceRecord({
     releasedAt: manifest.releasedAt,
     releaseId: manifest.releaseId,
     sourceCommit: manifest.sourceCommit,
+    ...(installedAppSha256 ? { installedAppSha256 } : {}),
+    ...(packagePayloadSha256 ? { packagePayloadSha256 } : {}),
     priorAcceptedReleaseIds
   })
   const accepted = {

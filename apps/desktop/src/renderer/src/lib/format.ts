@@ -96,7 +96,10 @@ export function mergeStreamHealth(
     ...update,
     fps: update.fps ?? current.fps,
     droppedFrames: update.droppedFrames ?? current.droppedFrames,
-    speed: update.speed ?? current.speed
+    speed: update.speed ?? current.speed,
+    bitrateKbps: update.bitrateKbps ?? current.bitrateKbps,
+    totalBytes: update.totalBytes ?? current.totalBytes,
+    duplicatedFrames: update.duplicatedFrames ?? current.duplicatedFrames
   }
 }
 

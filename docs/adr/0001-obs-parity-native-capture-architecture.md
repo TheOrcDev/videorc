@@ -43,15 +43,68 @@ The implementation direction is:
 
 ### Current platform implementation note
 
-As of 2026-07-14, macOS implements the native preview decision with the
-detached CAMetalLayer presenter. The Windows alpha has an explicit, temporary
-platform exception: its supported presenter is the uncompressed, latest-wins
-BMP Electron proof surface described in `docs/windows-port-plan.md`. A healthy
-Windows proof presenter may be live at the product-lifecycle level only after
-its first-frame and source-liveness contracts pass, but it must continue to
-report `electron-proof-surface` / `electron-browser-window` and must never be
-counted as native-rendered OBS-parity evidence. A future Windows-native host can
-replace this exception without changing the lifecycle contract.
+As of 2026-07-30, macOS implements the native preview decision with the
+detached CAMetalLayer presenter. The shipped Windows alpha still has an
+explicit, temporary platform exception: its supported presenter is the
+uncompressed, latest-wins BMP Electron proof surface described in
+`docs/windows-port-plan.md`. A healthy Windows proof presenter may be live at
+the product-lifecycle level only after its first-frame and source-liveness
+contracts pass, but it must continue to report
+`electron-proof-surface` / `electron-browser-window` and must never be counted
+as native-rendered OBS-parity evidence.
+
+The accepted Windows replacement is an independent D3D11 media path:
+
+```text
+stable DXGI output identity
+        |
+        v
+Desktop Duplication / Windows Graphics Capture
+        |  ID3D11Texture2D (BGRA)
+        v
+D3D11 scene compositor
+        |------------------------------|
+        |                              |
+        v                              v
+BGRA preview texture              NV12 output texture(s)
+        |                              |
+DirectComposition swap chain      Media Foundation GPU sample
+        |                              |
+backend-owned presenter HWND      hardware H.264 MFT
+                                       |
+                                       v
+                              FFmpeg mux/provider process
+```
+
+This is Videorc-owned code, not libobs or copied OBS code. FFmpeg remains the
+downstream mux/provider process; it does not regain display capture,
+composition, or preview ownership.
+
+The Windows path has these invariants:
+
+- one session has one dedicated D3D11 media thread, device, immediate context,
+  adapter LUID, fence timeline, and presenter message pump;
+- workers exchange immutable metadata and opaque generation-scoped lease IDs,
+  never COM pointers or reopenable texture handles;
+- capture, compositor, preview, and Media Foundation GPU input use the same
+  adapter authority;
+- preview is latest-wins and cannot block capture, recording, or streaming;
+- the encoder consumes timestamped NV12 GPU samples with BT.709/video-range
+  colorimetry; preview consumes BGRA;
+- unsupported fences, adapter mismatch, device loss, capture incompatibility,
+  or MFT rejection produce an explicit capability/fallback reason;
+- a fallback reports the legacy CPU/raw/BMP identity and counters. It never
+  retains a `d3d11-*` claim;
+- the existing scene graph, layout semantics, timestamps, provider targets,
+  and stream-target snapshot remain authoritative.
+
+The D3D11 modules and contracts are under implementation in Plan 040. This ADR
+accepts the architecture; it does not claim that the implementation is shipped
+or qualified. Promotion still requires the final Windows source lane, a signed
+installed candidate, NVIDIA and Intel physical matrices, a natural-fallback
+host, presenter lifecycle/input evidence, and an independently reviewed active
+performance budget. Until then, the Electron proof surface remains the
+truthfully named production fallback.
 
 ## Source References
 

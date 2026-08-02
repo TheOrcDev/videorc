@@ -34,7 +34,9 @@ use crate::mpeg_ts::{MpegTsH264Writer, timing_to_90khz};
 use crate::preview_camera::PreviewCameraFrameSource;
 use crate::preview_screen::PreviewScreenD3D11FrameSource;
 use crate::process_job::spawn_owned_tokio;
-use crate::protocol::{EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult};
+use crate::protocol::{
+    DiagnosticStats, EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult,
+};
 #[cfg(target_os = "windows")]
 use crate::scene_geometry::{PixelRect, SceneCrop, SceneMask};
 use crate::state::AppState;
@@ -42,6 +44,12 @@ use crate::state::AppState;
 use crate::video_toolbox_encoder::{
     VideoToolboxFrameTiming, VideoToolboxH264AnnexBFrame, VideoToolboxH264AsyncAnnexBFrame,
     VideoToolboxH264Session,
+};
+#[cfg(target_os = "windows")]
+use crate::windows_d3d11_device::{WindowsD3d11EncoderProgress, WindowsD3d11ErrorCode};
+#[cfg(target_os = "windows")]
+use crate::windows_d3d11_session::{
+    WindowsD3d11EncoderTicketSource, WindowsD3d11EncoderTicketSourceSnapshot,
 };
 #[cfg(target_os = "windows")]
 use crate::windows_media_foundation_encoder::{
@@ -122,6 +130,10 @@ const RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE: Duration = Duration::from_secs(10);
 #[cfg(not(target_os = "windows"))]
 const RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE: Duration = FIFO_FRAME_WRITE_HARD_TIMEOUT;
 const RAW_VIDEO_FIFO_STARTUP_PRIME_TIMEOUT: Duration = Duration::from_millis(2500);
+#[cfg(target_os = "windows")]
+const WINDOWS_D3D11_GENERATION_RECOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(target_os = "windows")]
+const WINDOWS_D3D11_GENERATION_RECOVERY_POLL: Duration = Duration::from_millis(50);
 const FIFO_WRITE_PROGRESS_YIELD_BUDGET: u32 = 64;
 const FIFO_WRITE_STALL_BACKOFF: Duration = Duration::from_micros(250);
 const VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK: usize = 8;
@@ -442,6 +454,90 @@ struct EncoderBridgeRuntimeStats {
     schedule_skipped_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EncoderBridgeRoleProcessDiagnostics {
+    raw_video_copied_frames: u64,
+    dropped_frames: u64,
+    encoder_speed: Option<f64>,
+    recording_raw_video_copied_frames: u64,
+    stream_raw_video_copied_frames: u64,
+    recording_dropped_frames: u64,
+    stream_dropped_frames: u64,
+    recording_encoder_speed: Option<f64>,
+    stream_encoder_speed: Option<f64>,
+}
+
+fn merge_encoder_bridge_role_process_diagnostics(
+    base: &DiagnosticStats,
+    runtime: EncoderBridgeRuntimeStats,
+    diagnostics_context: EncoderBridgeDiagnosticsContext,
+) -> EncoderBridgeRoleProcessDiagnostics {
+    let mut recording_raw_video_copied_frames =
+        base.encoder_bridge_recording_raw_video_copied_frames;
+    let mut stream_raw_video_copied_frames = base.encoder_bridge_stream_raw_video_copied_frames;
+    let mut recording_dropped_frames = base.encoder_bridge_recording_dropped_frames;
+    let mut stream_dropped_frames = base.encoder_bridge_stream_dropped_frames;
+    let mut recording_encoder_speed = base.encoder_bridge_recording_encoder_speed;
+    let mut stream_encoder_speed = base.encoder_bridge_stream_encoder_speed;
+
+    match effective_encoder_bridge_output_role(diagnostics_context) {
+        EncoderBridgeOutputRole::Recording => {
+            recording_raw_video_copied_frames = runtime.raw_video_copied_frames;
+            recording_dropped_frames = runtime.dropped_frames;
+            recording_encoder_speed = runtime.encoder_speed;
+        }
+        EncoderBridgeOutputRole::Stream => {
+            stream_raw_video_copied_frames = runtime.raw_video_copied_frames;
+            stream_dropped_frames = runtime.dropped_frames;
+            stream_encoder_speed = runtime.encoder_speed;
+        }
+        EncoderBridgeOutputRole::Shared => {
+            if diagnostics_context.recording_output.is_some() {
+                recording_raw_video_copied_frames = runtime.raw_video_copied_frames;
+                recording_dropped_frames = runtime.dropped_frames;
+                recording_encoder_speed = runtime.encoder_speed;
+            }
+            if diagnostics_context.stream_output.is_some() {
+                stream_raw_video_copied_frames = runtime.raw_video_copied_frames;
+                stream_dropped_frames = runtime.dropped_frames;
+                stream_encoder_speed = runtime.encoder_speed;
+            }
+        }
+    }
+
+    let slower_speed = |left: Option<f64>, right: Option<f64>| match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    };
+    let (raw_video_copied_frames, dropped_frames, encoder_speed) =
+        if diagnostics_context.separate_output_encoders_active {
+            (
+                recording_raw_video_copied_frames.saturating_add(stream_raw_video_copied_frames),
+                recording_dropped_frames.saturating_add(stream_dropped_frames),
+                slower_speed(recording_encoder_speed, stream_encoder_speed),
+            )
+        } else {
+            (
+                runtime.raw_video_copied_frames,
+                runtime.dropped_frames,
+                runtime.encoder_speed,
+            )
+        };
+
+    EncoderBridgeRoleProcessDiagnostics {
+        raw_video_copied_frames,
+        dropped_frames,
+        encoder_speed,
+        recording_raw_video_copied_frames,
+        stream_raw_video_copied_frames,
+        recording_dropped_frames,
+        stream_dropped_frames,
+        recording_encoder_speed,
+        stream_encoder_speed,
+    }
+}
+
 /// A compositor frame fed into the encoder FIFO on one tick.
 #[derive(Clone)]
 struct FedCompositorFrame {
@@ -582,11 +678,21 @@ pub struct EncoderBridgeRecordingSession {
     fifo_path: PathBuf,
     writer: Option<thread::JoinHandle<()>>,
     diagnostics_task: Option<TokioJoinHandle<()>>,
+    #[cfg(target_os = "windows")]
+    d3d11_input: Option<WindowsD3d11EncoderTicketSource>,
 }
 
 impl EncoderBridgeRecordingSession {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn stop_and_join_writer(&mut self) {
+        self.stop();
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
     }
 
     /// Returns the first terminal media-path failure reported by the bridge.
@@ -609,12 +715,49 @@ impl EncoderBridgeRecordingSession {
             Err(_) => bail!("Encoder bridge first-frame priming timed out"),
         }
     }
+
+    #[cfg(target_os = "windows")]
+    #[allow(dead_code)]
+    pub(crate) fn latest_d3d11_input_ticket(
+        &self,
+    ) -> Option<crate::windows_d3d11_device::WindowsD3d11TextureLeaseTicket> {
+        self.d3d11_input
+            .as_ref()?
+            .latest_ticket()
+            .map(|(_, _, ticket)| ticket)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn replace_d3d11_input_generation(
+        &self,
+        expected_generation: u64,
+        replacement: &WindowsD3d11EncoderTicketSource,
+    ) -> Result<bool, String> {
+        self.d3d11_input
+            .as_ref()
+            .ok_or_else(|| "encoder bridge has no unified D3D11 ticket source".to_string())?
+            .replace_generation(expected_generation, replacement)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn can_replace_d3d11_input_generation(
+        &self,
+        expected_generation: u64,
+        replacement: &WindowsD3d11EncoderTicketSource,
+    ) -> Result<bool, String> {
+        self.d3d11_input
+            .as_ref()
+            .ok_or_else(|| "encoder bridge has no unified D3D11 ticket source".to_string())?
+            .can_replace_generation(expected_generation, replacement)
+    }
 }
 
 impl Drop for EncoderBridgeRecordingSession {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        let _ = self.writer.take();
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
         if let Some(task) = self.diagnostics_task.take() {
             task.abort();
         }
@@ -814,6 +957,7 @@ pub fn start_synthetic_recording_bridge(
     frame_store: Option<CompositorFrameStore>,
     direct_d3d11_source: Option<PreviewScreenD3D11FrameSource>,
     #[cfg(target_os = "windows")] direct_d3d11_camera_overlay: Option<DirectD3D11CameraOverlay>,
+    #[cfg(target_os = "windows")] d3d11_input: Option<WindowsD3d11EncoderTicketSource>,
     video_output: EncoderBridgeVideoOutput,
     bitrate_kbps: Option<u32>,
     // True when a live leg consumes this output (streaming posture: speed over
@@ -832,6 +976,8 @@ pub fn start_synthetic_recording_bridge(
     let writer_stop = stop.clone();
     let writer_terminal_failure = terminal_failure.clone();
     let writer_fifo_path = fifo_path.clone();
+    #[cfg(target_os = "windows")]
+    let writer_d3d11_input = d3d11_input.clone();
     let (diagnostics_tx, mut diagnostics_rx) =
         watch::channel::<Option<EncoderBridgeWriterEvent>>(None);
     let diagnostics_state = state.clone();
@@ -865,6 +1011,8 @@ pub fn start_synthetic_recording_bridge(
                 direct_d3d11_source,
                 #[cfg(target_os = "windows")]
                 direct_d3d11_camera_overlay,
+                #[cfg(target_os = "windows")]
+                d3d11_input: writer_d3d11_input,
                 video_output,
                 bitrate_kbps,
                 low_latency,
@@ -886,6 +1034,8 @@ pub fn start_synthetic_recording_bridge(
         fifo_path,
         writer: Some(writer),
         diagnostics_task: Some(diagnostics_task),
+        #[cfg(target_os = "windows")]
+        d3d11_input,
     })
 }
 
@@ -1067,6 +1217,8 @@ struct SyntheticRecordingWriterParams {
     direct_d3d11_source: Option<PreviewScreenD3D11FrameSource>,
     #[cfg(target_os = "windows")]
     direct_d3d11_camera_overlay: Option<DirectD3D11CameraOverlay>,
+    #[cfg(target_os = "windows")]
+    d3d11_input: Option<WindowsD3d11EncoderTicketSource>,
     video_output: EncoderBridgeVideoOutput,
     bitrate_kbps: Option<u32>,
     low_latency: bool,
@@ -1102,6 +1254,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             direct_d3d11_source: _,
         #[cfg(target_os = "windows")]
         direct_d3d11_camera_overlay,
+        #[cfg(target_os = "windows")]
+        d3d11_input,
         video_output,
         bitrate_kbps,
         low_latency,
@@ -1142,6 +1296,38 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             return;
         }
     };
+    #[cfg(target_os = "windows")]
+    if let Some(d3d11_input) = d3d11_input {
+        if !video_output.uses_media_foundation() {
+            let error = record_encoder_bridge_terminal_failure(
+                &terminal_failure,
+                "D3D11 encoder tickets require the Media Foundation H.264 output".to_string(),
+            );
+            signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
+            emit_encoder_bridge_diagnostics_from_thread(
+                &diagnostics_tx,
+                session_id,
+                target_fps,
+                EncoderBridgeRuntimeStats::default(),
+                diagnostics_context,
+                Some(error),
+            );
+            return;
+        }
+        write_windows_d3d11_recording_frames(WindowsD3d11RecordingWriterParams {
+            session_id,
+            target_fps,
+            fifo,
+            input: d3d11_input,
+            stop,
+            terminal_failure,
+            startup_ready_tx,
+            diagnostics_tx,
+            diagnostics_context,
+            video_epoch,
+        });
+        return;
+    }
     #[cfg(target_os = "macos")]
     let (mut raw_fifo_writer, mut video_toolbox_fifo_writer) = if video_output.uses_video_toolbox()
     {
@@ -3665,6 +3851,487 @@ fn write_all_until<W: StdWrite>(
 }
 
 #[cfg(target_os = "windows")]
+struct WindowsD3d11RecordingWriterParams {
+    session_id: String,
+    target_fps: u32,
+    fifo: File,
+    input: WindowsD3d11EncoderTicketSource,
+    stop: Arc<AtomicBool>,
+    terminal_failure: Arc<StdMutex<Option<String>>>,
+    startup_ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
+    diagnostics_tx: watch::Sender<Option<EncoderBridgeWriterEvent>>,
+    diagnostics_context: EncoderBridgeDiagnosticsContext,
+    video_epoch: Arc<OnceLock<Instant>>,
+}
+
+#[cfg(target_os = "windows")]
+fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParams) {
+    let WindowsD3d11RecordingWriterParams {
+        session_id,
+        target_fps,
+        mut fifo,
+        input,
+        stop,
+        terminal_failure,
+        mut startup_ready_tx,
+        diagnostics_tx,
+        diagnostics_context,
+        video_epoch,
+    } = params;
+    let target_fps = target_fps.max(1);
+    let frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps));
+    let encoder_started_at = Instant::now();
+    let mut generation_started_at = encoder_started_at;
+    let mut next_frame_at = encoder_started_at;
+    let mut schedule_index = 0_u64;
+    let mut last_submitted_sequence = None;
+    let mut first_output_written = false;
+    let mut window_started_at = Instant::now();
+    let mut input_frames = 0_u64;
+    let mut output_frames = 0_u64;
+    let mut output_bytes = 0_u64;
+    let mut fifo_write_times_ms = Vec::with_capacity(128);
+    let mut ts_writer = MpegTsH264Writer::new();
+    let mut pressure_skips = 0_u64;
+    let mut max_source_age_ms = None;
+    let mut source_age_times_ms = Vec::with_capacity(128);
+    let mut terminal_error = None;
+    let mut current_input = input.current();
+    let mut recovery_wait_started_at = None;
+
+    if let Err(error) = validate_windows_d3d11_encoder_input(&current_input) {
+        finish_windows_d3d11_writer_failure(
+            &terminal_failure,
+            &mut startup_ready_tx,
+            &diagnostics_tx,
+            &session_id,
+            target_fps,
+            diagnostics_context,
+            error,
+        );
+        return;
+    }
+
+    while !stop.load(Ordering::Relaxed) {
+        if let Some(error) = current_input.terminal_error() {
+            match wait_for_windows_d3d11_generation_replacement(
+                &input,
+                &current_input,
+                &mut recovery_wait_started_at,
+                format!(
+                    "Unified D3D11 media pump stopped before the {:?} encoder input: {error}",
+                    current_input.role
+                ),
+            ) {
+                Ok(Some(replacement)) => {
+                    current_input = replacement;
+                    last_submitted_sequence = None;
+                    recovery_wait_started_at = None;
+                    generation_started_at = Instant::now();
+                    next_frame_at = generation_started_at;
+                    schedule_index =
+                        windows_d3d11_schedule_index_at(encoder_started_at.elapsed(), target_fps);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    terminal_error = Some(error);
+                    break;
+                }
+            }
+            continue;
+        }
+        let now = Instant::now();
+        if now < next_frame_at {
+            thread::sleep(next_frame_at - now);
+        }
+        next_frame_at += frame_interval;
+        schedule_index = schedule_index.saturating_add(1);
+
+        let mut queue_depth = match current_input.client.poll_encoder(current_input.role) {
+            Ok(progress) => {
+                let queue_depth = progress.status.pending_frame_count as u64;
+                if let Err(error) = write_windows_d3d11_encoder_progress(
+                    progress,
+                    &mut fifo,
+                    &mut ts_writer,
+                    &stop,
+                    &mut output_frames,
+                    &mut output_bytes,
+                    &mut fifo_write_times_ms,
+                ) {
+                    terminal_error = Some(format!(
+                        "{:?} D3D11 Media Foundation output stopped: {error}",
+                        current_input.role
+                    ));
+                    break;
+                }
+                queue_depth
+            }
+            Err(error) => {
+                match wait_for_windows_d3d11_generation_replacement(
+                    &input,
+                    &current_input,
+                    &mut recovery_wait_started_at,
+                    format!(
+                        "Polling the {:?} D3D11 Media Foundation encoder failed: {error}",
+                        current_input.role
+                    ),
+                ) {
+                    Ok(Some(replacement)) => {
+                        current_input = replacement;
+                        last_submitted_sequence = None;
+                        recovery_wait_started_at = None;
+                        generation_started_at = Instant::now();
+                        next_frame_at = generation_started_at;
+                        schedule_index = windows_d3d11_schedule_index_at(
+                            encoder_started_at.elapsed(),
+                            target_fps,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => terminal_error = Some(error),
+                }
+                if terminal_error.is_some() {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        if let Some((sequence, captured_at, ticket)) = current_input.latest_ticket()
+            && last_submitted_sequence != Some(sequence)
+        {
+            let source_age_ms = captured_at.elapsed().as_millis() as u64;
+            max_source_age_ms = Some(
+                max_source_age_ms.map_or(source_age_ms, |current: u64| current.max(source_age_ms)),
+            );
+            source_age_times_ms.push(source_age_ms as f64);
+            let pts_100ns =
+                scheduled_windows_d3d11_time_100ns(schedule_index.saturating_sub(1), target_fps);
+            let next_pts_100ns = scheduled_windows_d3d11_time_100ns(schedule_index, target_fps);
+            let duration_100ns = next_pts_100ns.saturating_sub(pts_100ns).max(1);
+            match current_input.client.submit_encoder_texture(
+                ticket,
+                pts_100ns,
+                duration_100ns,
+                encoder_started_at.elapsed().as_micros() as u64,
+            ) {
+                Ok(progress) => {
+                    last_submitted_sequence = Some(sequence);
+                    input_frames = input_frames.saturating_add(1);
+                    queue_depth = progress.status.pending_frame_count as u64;
+                    if let Err(error) = write_windows_d3d11_encoder_progress(
+                        progress,
+                        &mut fifo,
+                        &mut ts_writer,
+                        &stop,
+                        &mut output_frames,
+                        &mut output_bytes,
+                        &mut fifo_write_times_ms,
+                    ) {
+                        terminal_error = Some(format!(
+                            "{:?} D3D11 Media Foundation output stopped: {error}",
+                            current_input.role
+                        ));
+                        break;
+                    }
+                }
+                Err(failure) => {
+                    if let Some(progress) = failure.progress
+                        && let Err(error) = write_windows_d3d11_encoder_progress(
+                            *progress,
+                            &mut fifo,
+                            &mut ts_writer,
+                            &stop,
+                            &mut output_frames,
+                            &mut output_bytes,
+                            &mut fifo_write_times_ms,
+                        )
+                    {
+                        terminal_error = Some(format!(
+                            "{:?} D3D11 Media Foundation output stopped: {error}",
+                            current_input.role
+                        ));
+                        break;
+                    }
+                    if matches!(
+                        failure.error.code,
+                        WindowsD3d11ErrorCode::CommandQueueFull
+                            | WindowsD3d11ErrorCode::EncoderBackpressure
+                    ) {
+                        pressure_skips = pressure_skips.saturating_add(1);
+                    } else {
+                        match wait_for_windows_d3d11_generation_replacement(
+                            &input,
+                            &current_input,
+                            &mut recovery_wait_started_at,
+                            format!(
+                                "{:?} D3D11 Media Foundation surface submission failed: {}",
+                                current_input.role, failure.error
+                            ),
+                        ) {
+                            Ok(Some(replacement)) => {
+                                current_input = replacement;
+                                last_submitted_sequence = None;
+                                recovery_wait_started_at = None;
+                                generation_started_at = Instant::now();
+                                next_frame_at = generation_started_at;
+                                schedule_index = windows_d3d11_schedule_index_at(
+                                    encoder_started_at.elapsed(),
+                                    target_fps,
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(error) => terminal_error = Some(error),
+                        }
+                        if terminal_error.is_some() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+        // A complete poll/submission iteration proves that the current media
+        // generation is responsive again; only consecutive failures share a
+        // bounded recovery deadline.
+        recovery_wait_started_at = None;
+
+        if !first_output_written && output_frames > 0 {
+            first_output_written = true;
+            let _ = video_epoch.set(Instant::now());
+            signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+        }
+        if !first_output_written
+            && generation_started_at.elapsed() >= RAW_VIDEO_FIFO_STARTUP_PRIME_TIMEOUT
+        {
+            terminal_error = Some(format!(
+                "{:?} D3D11 Media Foundation encoder did not deliver a startup access unit within {}ms",
+                current_input.role,
+                RAW_VIDEO_FIFO_STARTUP_PRIME_TIMEOUT.as_millis()
+            ));
+            break;
+        }
+        if window_started_at.elapsed() >= ENCODER_BRIDGE_DIAGNOSTIC_WINDOW {
+            emit_encoder_bridge_diagnostics_from_thread(
+                &diagnostics_tx,
+                session_id.clone(),
+                target_fps,
+                EncoderBridgeRuntimeStats {
+                    queue_depth,
+                    output_queue_capacity_pressure_events: pressure_skips,
+                    input_fps: measured_input_fps(input_frames, window_started_at),
+                    source_to_encode_age_ms: max_source_age_ms,
+                    source_to_encode_age_p95_ms: p95_ms(&source_age_times_ms),
+                    zero_copy_frames: output_frames,
+                    video_toolbox_output_frames: output_frames,
+                    video_toolbox_output_bytes: output_bytes,
+                    video_toolbox_fifo_write_p95_ms: p95_ms(&fifo_write_times_ms),
+                    ..Default::default()
+                },
+                diagnostics_context,
+                None,
+            );
+            input_frames = 0;
+            output_frames = 0;
+            output_bytes = 0;
+            pressure_skips = 0;
+            max_source_age_ms = None;
+            source_age_times_ms.clear();
+            fifo_write_times_ms.clear();
+            window_started_at = Instant::now();
+        }
+    }
+
+    if terminal_error.is_none() {
+        match current_input.client.drain_encoder(
+            current_input.role,
+            u32::try_from(MEDIA_FOUNDATION_DRAIN_TIMEOUT.as_millis()).unwrap_or(2_000),
+        ) {
+            Ok(progress) => {
+                if let Err(error) = write_windows_d3d11_encoder_progress(
+                    progress,
+                    &mut fifo,
+                    &mut ts_writer,
+                    &stop,
+                    &mut output_frames,
+                    &mut output_bytes,
+                    &mut fifo_write_times_ms,
+                ) {
+                    terminal_error = Some(format!(
+                        "Draining {:?} D3D11 Media Foundation output failed: {error}",
+                        current_input.role
+                    ));
+                }
+            }
+            Err(error) => {
+                terminal_error = Some(format!(
+                    "Draining the {:?} D3D11 Media Foundation encoder failed: {error}",
+                    current_input.role
+                ));
+            }
+        }
+    }
+    let _ = current_input
+        .client
+        .shutdown_encoder(current_input.role, 2_000);
+    if terminal_error.is_none()
+        && let Err(error) = fifo.flush()
+    {
+        terminal_error = Some(format!(
+            "Flushing {:?} D3D11 Media Foundation FIFO failed: {error}",
+            current_input.role
+        ));
+    }
+    if let Some(error) = terminal_error {
+        if io_error_message_is_downstream_closed(&error) && stop.load(Ordering::Relaxed) {
+            signal_encoder_bridge_startup(
+                &mut startup_ready_tx,
+                Err("D3D11 encoder bridge stopped before startup completed".to_string()),
+            );
+            return;
+        }
+        finish_windows_d3d11_writer_failure(
+            &terminal_failure,
+            &mut startup_ready_tx,
+            &diagnostics_tx,
+            &session_id,
+            target_fps,
+            diagnostics_context,
+            error,
+        );
+    } else if !first_output_written {
+        signal_encoder_bridge_startup(
+            &mut startup_ready_tx,
+            Err("D3D11 encoder bridge stopped before startup completed".to_string()),
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_windows_d3d11_generation_replacement(
+    input: &WindowsD3d11EncoderTicketSource,
+    current: &WindowsD3d11EncoderTicketSourceSnapshot,
+    recovery_wait_started_at: &mut Option<Instant>,
+    cause: String,
+) -> Result<Option<WindowsD3d11EncoderTicketSourceSnapshot>, String> {
+    if current.recovery_count() != 0 {
+        return Err(format!(
+            "Recovered unified D3D11 generation {} failed again before the {:?} encoder input: {cause}",
+            current.generation(),
+            current.role
+        ));
+    }
+    let recovery_started_at = recovery_wait_started_at.get_or_insert_with(Instant::now);
+    let observed_generation = current.generation();
+    if recovery_started_at.elapsed() >= WINDOWS_D3D11_GENERATION_RECOVERY_TIMEOUT {
+        return Err(format!(
+            "Unified D3D11 generation {observed_generation} was not replaced before the {:?} encoder recovery deadline: {cause}",
+            current.role
+        ));
+    }
+    let Some(replacement) = input
+        .wait_for_generation_change(observed_generation, WINDOWS_D3D11_GENERATION_RECOVERY_POLL)
+    else {
+        return Ok(None);
+    };
+    validate_windows_d3d11_encoder_input(&replacement)?;
+    Ok(Some(replacement))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_d3d11_schedule_index_at(elapsed: Duration, fps: u32) -> u64 {
+    let frame_index = elapsed.as_nanos().saturating_mul(u128::from(fps.max(1))) / 1_000_000_000;
+    u64::try_from(frame_index).unwrap_or(u64::MAX)
+}
+
+#[cfg(target_os = "windows")]
+fn validate_windows_d3d11_encoder_input(
+    input: &WindowsD3d11EncoderTicketSourceSnapshot,
+) -> Result<(), String> {
+    match input.client.encoder_status(input.role) {
+        Ok(status)
+            if status.role == input.role
+                && status.diagnostics.d3d11_aware
+                && status.diagnostics.dxgi_manager_bound =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err(format!(
+            "{:?} Media Foundation encoder did not confirm D3D11/DXGI authority",
+            input.role
+        )),
+        Err(error) => Err(format!(
+            "Could not inspect the {:?} D3D11 Media Foundation encoder: {error}",
+            input.role
+        )),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn scheduled_windows_d3d11_time_100ns(frame_index: u64, fps: u32) -> i64 {
+    let value = u128::from(frame_index)
+        .saturating_mul(10_000_000)
+        .checked_div(u128::from(fps.max(1)))
+        .unwrap_or_default();
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn write_windows_d3d11_encoder_progress<W: StdWrite>(
+    progress: WindowsD3d11EncoderProgress,
+    sink: &mut W,
+    ts_writer: &mut MpegTsH264Writer,
+    stop: &AtomicBool,
+    output_frames: &mut u64,
+    output_bytes: &mut u64,
+    fifo_write_times_ms: &mut Vec<f64>,
+) -> io::Result<()> {
+    let mut zero_copy_frames = 0;
+    write_media_foundation_frames(
+        progress.encoded_frames,
+        sink,
+        ts_writer,
+        stop,
+        &mut zero_copy_frames,
+        output_frames,
+        output_bytes,
+        fifo_write_times_ms,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn finish_windows_d3d11_writer_failure(
+    terminal_failure: &Arc<StdMutex<Option<String>>>,
+    startup_ready_tx: &mut Option<oneshot::Sender<std::result::Result<(), String>>>,
+    diagnostics_tx: &watch::Sender<Option<EncoderBridgeWriterEvent>>,
+    session_id: &str,
+    target_fps: u32,
+    diagnostics_context: EncoderBridgeDiagnosticsContext,
+    error: String,
+) {
+    let error = record_encoder_bridge_terminal_failure(terminal_failure, error);
+    signal_encoder_bridge_startup(startup_ready_tx, Err(error.clone()));
+    emit_encoder_bridge_diagnostics_from_thread(
+        diagnostics_tx,
+        session_id.to_string(),
+        target_fps,
+        EncoderBridgeRuntimeStats::default(),
+        diagnostics_context,
+        Some(error),
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn io_error_message_is_downstream_closed(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("broken pipe")
+        || message.contains("write zero")
+        || message.contains("unexpected eof")
+}
+
+#[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 fn write_media_foundation_frames<W: StdWrite>(
     frames: Vec<MediaFoundationEncodedFrame>,
@@ -4241,6 +4908,8 @@ async fn emit_encoder_bridge_diagnostics(
         };
         let recording_output = diagnostics_context.recording_output;
         let stream_output = diagnostics_context.stream_output;
+        let role_process_diagnostics =
+            merge_encoder_bridge_role_process_diagnostics(&base, runtime, diagnostics_context);
         let (
             recording_output_frames,
             recording_output_bytes,
@@ -4428,8 +5097,12 @@ async fn emit_encoder_bridge_diagnostics(
                 output_queue_capacity_pressure_events,
                 output_queue_dropped_frames,
                 input_fps: runtime.input_fps,
-                dropped_frames: runtime.dropped_frames,
-                encoder_speed: runtime.encoder_speed,
+                dropped_frames: role_process_diagnostics.dropped_frames,
+                encoder_speed: role_process_diagnostics.encoder_speed,
+                recording_dropped_frames: role_process_diagnostics.recording_dropped_frames,
+                stream_dropped_frames: role_process_diagnostics.stream_dropped_frames,
+                recording_encoder_speed: role_process_diagnostics.recording_encoder_speed,
+                stream_encoder_speed: role_process_diagnostics.stream_encoder_speed,
                 repeated_fed_frames: runtime.repeated_fed_frames,
                 repeated_frame_bursts: runtime.repeated_frame_bursts,
                 max_repeated_frame_run: runtime.max_repeated_frame_run,
@@ -4439,7 +5112,11 @@ async fn emit_encoder_bridge_diagnostics(
                 repeated_frame_age_p95_ms: runtime.repeated_frame_age_p95_ms,
                 repeated_frame_age_max_ms: runtime.repeated_frame_age_max_ms,
                 metal_target_frames: runtime.metal_target_frames,
-                raw_video_copied_frames: runtime.raw_video_copied_frames,
+                raw_video_copied_frames: role_process_diagnostics.raw_video_copied_frames,
+                recording_raw_video_copied_frames: role_process_diagnostics
+                    .recording_raw_video_copied_frames,
+                stream_raw_video_copied_frames: role_process_diagnostics
+                    .stream_raw_video_copied_frames,
                 metal_target_copied_frames: runtime.metal_target_copied_frames,
                 metal_target_handle_frames: runtime.metal_target_handle_frames,
                 zero_copy_frames: runtime.zero_copy_frames,
@@ -4551,6 +5228,7 @@ fn frame_count(duration_ms: u64, fps: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostics::idle_diagnostics;
 
     #[test]
     fn diagnostics_channel_is_latest_wins_without_losing_terminal_error() {
@@ -4783,6 +5461,90 @@ mod tests {
     }
 
     #[test]
+    fn split_output_process_diagnostics_preserve_both_roles_and_use_conservative_aggregate() {
+        let mut base = idle_diagnostics();
+        base.encoder_bridge_recording_raw_video_copied_frames = 120;
+        base.encoder_bridge_recording_dropped_frames = 3;
+        base.encoder_bridge_recording_encoder_speed = Some(0.82);
+
+        let merged = merge_encoder_bridge_role_process_diagnostics(
+            &base,
+            EncoderBridgeRuntimeStats {
+                raw_video_copied_frames: 90,
+                dropped_frames: 1,
+                encoder_speed: Some(1.03),
+                ..Default::default()
+            },
+            EncoderBridgeDiagnosticsContext {
+                role: EncoderBridgeOutputRole::Stream,
+                recording_output: Some(EncoderBridgeOutputProfile {
+                    width: 3840,
+                    height: 2160,
+                    fps: 30,
+                    bitrate_kbps: 30_000,
+                }),
+                stream_output: Some(EncoderBridgeOutputProfile {
+                    width: 1920,
+                    height: 1080,
+                    fps: 30,
+                    bitrate_kbps: 6_000,
+                }),
+                separate_output_encoders_active: true,
+                ..EncoderBridgeDiagnosticsContext::default()
+            },
+        );
+
+        assert_eq!(merged.recording_raw_video_copied_frames, 120);
+        assert_eq!(merged.stream_raw_video_copied_frames, 90);
+        assert_eq!(merged.raw_video_copied_frames, 210);
+        assert_eq!(merged.recording_dropped_frames, 3);
+        assert_eq!(merged.stream_dropped_frames, 1);
+        assert_eq!(merged.dropped_frames, 4);
+        assert_eq!(merged.recording_encoder_speed, Some(0.82));
+        assert_eq!(merged.stream_encoder_speed, Some(1.03));
+        assert_eq!(merged.encoder_speed, Some(0.82));
+    }
+
+    #[test]
+    fn shared_output_attributes_runtime_to_each_active_role_without_double_counting() {
+        let merged = merge_encoder_bridge_role_process_diagnostics(
+            &idle_diagnostics(),
+            EncoderBridgeRuntimeStats {
+                raw_video_copied_frames: 60,
+                dropped_frames: 2,
+                encoder_speed: Some(0.91),
+                ..Default::default()
+            },
+            EncoderBridgeDiagnosticsContext {
+                role: EncoderBridgeOutputRole::Shared,
+                recording_output: Some(EncoderBridgeOutputProfile {
+                    width: 1920,
+                    height: 1080,
+                    fps: 30,
+                    bitrate_kbps: 8_000,
+                }),
+                stream_output: Some(EncoderBridgeOutputProfile {
+                    width: 1920,
+                    height: 1080,
+                    fps: 30,
+                    bitrate_kbps: 8_000,
+                }),
+                ..EncoderBridgeDiagnosticsContext::default()
+            },
+        );
+
+        assert_eq!(merged.recording_raw_video_copied_frames, 60);
+        assert_eq!(merged.stream_raw_video_copied_frames, 60);
+        assert_eq!(merged.raw_video_copied_frames, 60);
+        assert_eq!(merged.recording_dropped_frames, 2);
+        assert_eq!(merged.stream_dropped_frames, 2);
+        assert_eq!(merged.dropped_frames, 2);
+        assert_eq!(merged.recording_encoder_speed, Some(0.91));
+        assert_eq!(merged.stream_encoder_speed, Some(0.91));
+        assert_eq!(merged.encoder_speed, Some(0.91));
+    }
+
+    #[test]
     fn bounded_fifo_offer_reports_pressure_without_blocking_the_realtime_bridge() {
         let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
         frame_tx.send(1_u64).expect("fill bounded queue");
@@ -4846,6 +5608,8 @@ mod tests {
             )),
             writer: None,
             diagnostics_task: None,
+            #[cfg(target_os = "windows")]
+            d3d11_input: None,
         };
 
         assert_eq!(session.terminal_failure(), None);

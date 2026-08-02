@@ -249,6 +249,189 @@ describe('validateSupportBundle', () => {
     assert.equal(result.ok, true)
   })
 
+  it('requires final and peak stream counters plus the effective encoder path', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    bundle.sessions[0].finalDiagnostics = validWindowsStreamDiagnostics()
+
+    assert.equal(validateSupportBundle(bundle, { windowsAcceptance: true }).ok, true)
+
+    delete bundle.sessions[0].finalDiagnostics.streamMeasuredBitrateMinKbps
+    delete bundle.sessions[0].finalDiagnostics.encoderBridgeEffectiveVideoOutput
+    bundle.sessions[0].finalDiagnostics.encoderBridgeRequestedVideoOutput =
+      'windows-media-foundation-h264-mpegts'
+    bundle.sessions[0].finalDiagnostics.encoderBridgeEffectiveVideoOutput = 'raw-yuv420p'
+    delete bundle.sessions[0].finalDiagnostics.encoderBridgeEncodedOutputFallbackReason
+
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /streamMeasuredBitrateMinKbps/)
+    assert.match(result.failures.join('\n'), /fallback reason/)
+  })
+
+  it('requires stable zero-copy D3D11 diagnostics for forced and automatic live paths', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    const first = {
+      ...validWindowsStreamDiagnostics(),
+      compositorBackend: 'd3d11',
+      previewTransport: 'd3d11-shared-texture',
+      previewSurfaceBacking: 'directcomposition-swapchain',
+      windowsD3d11Media: validWindowsD3d11Diagnostics({
+        textureImportFrames: 1,
+        encoderGpuSamples: 1
+      })
+    }
+    const terminal = {
+      ...validWindowsStreamDiagnostics(),
+      compositorBackend: 'd3d11',
+      previewTransport: 'd3d11-shared-texture',
+      previewSurfaceBacking: 'directcomposition-swapchain',
+      windowsD3d11Media: validWindowsD3d11Diagnostics()
+    }
+    bundle.diagnostics = first
+    bundle.sessions[0].finalDiagnostics = terminal
+    bundle.rendererDiagnostics.nativePreviewSurfaceStatus = validWindowsD3d11PreviewSurfaceStatus()
+    assert.equal(validateSupportBundle(bundle, { windowsAcceptance: true }).ok, true)
+
+    terminal.windowsD3d11Media.captureReadbackFrames = 2
+    terminal.windowsD3d11Media.previewBmpRequests = 1
+    terminal.windowsD3d11Media.fallbackReason = 'unexpected-readback'
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /captureReadbackFrames=0/)
+    assert.match(result.failures.join('\n'), /previewBmpRequests=0/)
+    assert.match(result.failures.join('\n'), /must not contain a fallbackReason/)
+
+    const automatic = validWindowsAcceptanceBundle()
+    automatic.diagnostics = {
+      ...first,
+      windowsD3d11Media: validWindowsD3d11Diagnostics({
+        required: false,
+        captureReadbackFrames: 1
+      })
+    }
+    const automaticResult = validateSupportBundle(automatic, { windowsAcceptance: true })
+    assert.equal(automaticResult.ok, false)
+    assert.match(automaticResult.failures.join('\n'), /captureReadbackFrames=0/)
+
+    automatic.diagnostics.windowsD3d11Media.captureReadbackFrames = 0
+    automatic.diagnostics.windowsD3d11Media.requested = false
+    assert.match(
+      validateSupportBundle(automatic, { windowsAcceptance: true }).failures.join('\n'),
+      /requested=true/
+    )
+  })
+
+  it('requires a named natural fallback when a Windows stream does not use live D3D11', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    bundle.sessions[0].finalDiagnostics = validWindowsStreamDiagnostics()
+    assert.equal(validateSupportBundle(bundle, { windowsAcceptance: true }).ok, true)
+
+    delete bundle.sessions[0].finalDiagnostics.windowsD3d11Media.fallbackReason
+    bundle.sessions[0].finalDiagnostics.windowsD3d11Media.adapterLuid = '00000000000003f1'
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /named fallbackReason/)
+    assert.match(result.failures.join('\n'), /must not claim adapterLuid/)
+  })
+
+  it('requires scheduler fairness and a zero synchronization-timeout counter', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    bundle.diagnostics = {
+      ...validWindowsStreamDiagnostics(),
+      windowsD3d11Media: validWindowsD3d11Diagnostics({
+        mediaCommandLagP95Ms: 51,
+        maximumConsecutiveMediaBatch: 33,
+        synchronizationTimeouts: 1
+      })
+    }
+
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /mediaCommandLagP95Ms within 50 ms/)
+    assert.match(result.failures.join('\n'), /maximumConsecutiveMediaBatch within 32/)
+    assert.match(result.failures.join('\n'), /synchronizationTimeouts=0/)
+  })
+
+  it('validates Desktop Duplication cursor-on and cursor-excluded WGC without inverting exclusion', () => {
+    const desktop = validWindowsAcceptanceBundle()
+    desktop.diagnostics = {
+      ...validWindowsStreamDiagnostics(),
+      windowsD3d11Media: validWindowsD3d11Diagnostics()
+    }
+    assert.equal(validateSupportBundle(desktop, { windowsAcceptance: true }).ok, true)
+
+    const wgc = validWindowsAcceptanceBundle()
+    wgc.diagnostics = {
+      ...validWindowsStreamDiagnostics(),
+      windowsD3d11Media: validWindowsD3d11Diagnostics({
+        captureBackend: 'windows-graphics-capture-monitor',
+        cursorRequested: false,
+        cursorMode: 'excluded-wgc',
+        cursorPixelsSource: 'excluded-by-windows-graphics-capture',
+        cursorExclusionGuaranteed: true,
+        cursorShapeUploads: 0,
+        cursorCompositedFrames: 0
+      })
+    }
+    assert.equal(validateSupportBundle(wgc, { windowsAcceptance: true }).ok, true)
+
+    wgc.diagnostics.windowsD3d11Media.cursorRequested = true
+    const inverted = validateSupportBundle(wgc, { windowsAcceptance: true })
+    assert.equal(inverted.ok, false)
+    assert.match(inverted.failures.join('\n'), /cursorRequested=false/)
+
+    desktop.diagnostics.windowsD3d11Media.cursorMode = 'embedded'
+    const doubleDrawn = validateSupportBundle(desktop, { windowsAcceptance: true })
+    assert.equal(doubleDrawn.ok, false)
+    assert.match(doubleDrawn.failures.join('\n'), /cursorCompositedFrames=0 for embedded/)
+  })
+
+  it('requires every present D3D11 role adapter to equal the media authority', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    bundle.diagnostics = {
+      ...validWindowsStreamDiagnostics(),
+      windowsD3d11Media: validWindowsD3d11Diagnostics({
+        compositorAdapterLuid: '00000000000003f2'
+      })
+    }
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /compositorAdapterLuid to equal adapterLuid/)
+  })
+
+  it('requires sanitized D3D11 presenter style, owner, adapter, and liveness proof', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    bundle.diagnostics = {
+      ...validWindowsStreamDiagnostics(),
+      compositorBackend: 'd3d11',
+      previewTransport: 'd3d11-shared-texture',
+      previewSurfaceBacking: 'directcomposition-swapchain',
+      windowsD3d11Media: validWindowsD3d11Diagnostics()
+    }
+    bundle.rendererDiagnostics.nativePreviewSurfaceStatus = validWindowsD3d11PreviewSurfaceStatus()
+    assert.equal(validateSupportBundle(bundle, { windowsAcceptance: true }).ok, true)
+
+    const presenter = bundle.rendererDiagnostics.nativePreviewSurfaceStatus.windowsD3d11Presenter
+    presenter.sameAdapter = false
+    presenter.windowFocused = true
+    presenter.actualBounds.width = 0
+    presenter.fallbackReason = 'adapter-crossed'
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /sameAdapter=true/)
+    assert.match(result.failures.join('\n'), /windowFocused=false/)
+    assert.match(result.failures.join('\n'), /positive integral actualBounds/)
+    assert.match(result.failures.join('\n'), /must not contain a fallbackReason/)
+  })
+
+  it('rejects a privileged HWND from any support-bundle section', () => {
+    const bundle = validBundle()
+    bundle.diagnostics.orderAboveWindowHandle = '0x0000000000001234'
+    const result = validateSupportBundle(bundle)
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /leaked a privileged native window handle/)
+  })
+
   it('accepts visible persisted software rendering with recovery evidence', () => {
     const bundle = validWindowsAcceptanceBundle()
     bundle.rendererDiagnostics.runtimeInfo.hardwareAccelerationDisabled = true
@@ -412,4 +595,125 @@ function validWindowsAcceptanceBundle(overrides = {}) {
     },
     ...overrides
   })
+}
+
+function validWindowsStreamDiagnostics() {
+  return {
+    activeOutputMode: 'stream',
+    encodeBackend: 'hardware-media-foundation',
+    compositorBackend: 'cpu',
+    streamMeasuredBitrateKbps: 11_980,
+    streamMeasuredBitrateMinKbps: 10_900,
+    streamMeasuredBitrateMaxKbps: 12_090,
+    streamOutputTotalBytes: 200_000_000,
+    streamDuplicatedFrames: 0,
+    encoderBridgeRequestedVideoOutput: 'windows-media-foundation-h264-mpegts',
+    encoderBridgeEffectiveVideoOutput: 'windows-media-foundation-h264-mpegts',
+    encoderBridgeEncodedOutputBackend: 'windows-media-foundation',
+    windowsD3d11Media: validWindowsNaturalD3d11FallbackDiagnostics()
+  }
+}
+
+function validWindowsNaturalD3d11FallbackDiagnostics(overrides = {}) {
+  return {
+    state: 'fallback',
+    requested: false,
+    required: false,
+    adapterLuid: null,
+    captureAdapterLuid: null,
+    compositorAdapterLuid: null,
+    primaryEncoderAdapterLuid: null,
+    auxiliaryEncoderAdapterLuid: null,
+    captureBackend: 'legacy-ffmpeg',
+    fallbackReason: 'd3d11-fence-interface-unavailable',
+    messagePumpLagP95Ms: 0,
+    messagePumpLagMaxMs: 0,
+    mediaCommandLagP95Ms: 0,
+    mediaCommandLagMaxMs: 0,
+    maximumConsecutiveMessageBatch: 0,
+    maximumConsecutiveMediaBatch: 0,
+    synchronizationTimeouts: 0,
+    ...overrides
+  }
+}
+
+function validWindowsD3d11Diagnostics(overrides = {}) {
+  return {
+    state: 'live',
+    requested: true,
+    required: true,
+    adapterLuid: '00000000000003f1',
+    captureAdapterLuid: '00000000000003f1',
+    compositorAdapterLuid: '00000000000003f1',
+    primaryEncoderAdapterLuid: '00000000000003f1',
+    auxiliaryEncoderAdapterLuid: null,
+    generation: 4,
+    captureBackend: 'desktop-duplication',
+    captureReadbackFrames: 0,
+    compositorCpuFallbackFrames: 0,
+    encoderSystemMemorySamples: 0,
+    rawVideoCopiedFrames: 0,
+    previewBmpRequests: 0,
+    previewBmpBytes: 0,
+    texturePoolPressureEvents: 0,
+    adapterMismatches: 0,
+    deviceResets: 0,
+    staleGenerationCallbacks: 0,
+    cameraUploadFrames: 0,
+    texturePoolCapacity: 8,
+    texturePoolInUse: 2,
+    messagePumpLagP95Ms: 10,
+    messagePumpLagMaxMs: 20,
+    mediaCommandLagP95Ms: 8,
+    mediaCommandLagMaxMs: 16,
+    maximumConsecutiveMessageBatch: 12,
+    maximumConsecutiveMediaBatch: 10,
+    synchronizationTimeouts: 0,
+    cursorRequested: true,
+    cursorMode: 'separate',
+    cursorPixelsSource: 'duplication-pointer-shape',
+    cursorExclusionGuaranteed: false,
+    cursorCompositedFrames: 900,
+    textureImportFrames: 9000,
+    encoderGpuSamples: 8990,
+    fallbackReason: null,
+    ...overrides
+  }
+}
+
+function validWindowsD3d11PreviewSurfaceStatus(overrides = {}) {
+  return {
+    state: 'live',
+    transport: 'd3d11-shared-texture',
+    backing: 'directcomposition-swapchain',
+    sourcePixelsPresent: true,
+    framePollingSuppressed: true,
+    windowsD3d11Presenter: {
+      layered: true,
+      transparent: true,
+      noActivate: true,
+      excludedFromCapture: true,
+      windowActive: false,
+      windowFocused: false,
+      generationMatches: true,
+      ownerProcessMatches: true,
+      sameAdapter: true,
+      sourceLive: true,
+      firstPresentSucceeded: true,
+      successfulPresents: 9000,
+      lastPresentedSequence: 9000,
+      latestWinsDrops: 0,
+      hiddenDrops: 0,
+      busyDrops: 0,
+      staleFrameDrops: 0,
+      actualBounds: {
+        x: -1920,
+        y: 0,
+        width: 960,
+        height: 540
+      },
+      fallbackReason: null
+    },
+    ...overrides
+  }
 }

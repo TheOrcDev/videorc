@@ -5,6 +5,9 @@
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: MED
+- **Execution status**: IN PROGRESS — PR #161 bounded the proof transport;
+  Plan 039 owns on-air window exclusion and Plan 040 owns its native D3D11
+  replacement.
 - **Depends on**: Plan 038 Windows metrics
 - **Category**: perf
 - **Planned at**: commit `54229f8f`, 2026-07-18
@@ -16,10 +19,20 @@ Windows production preview is an Electron proof surface rather than CAMetalLayer
 
 ## Current state
 
-- `apps/desktop/src/shared/native-preview-proof-polling.ts` uses a fixed 1920px/40ms idle profile and 960px/125ms recording profile.
-- `crates/videorc-backend/src/preview_bmp.rs` copies 4K bytes before Triangle resizing to `maxWidth`.
-- `apps/desktop/src/main/index.ts:5454-5465` injects a full `effectiveStatus` payload then reads metrics after paint.
-- The renderer fallback timer can resubmit an unchanged compositor status at 60Hz while main-pump ownership is unavailable.
+- PR #161 added geometry/DPR-aware proof polling, compact presentation
+  authority, duplicate suppression, proof request/byte/latency measurement, and
+  bounded recording-time work.
+- `apps/desktop/src/shared/native-preview-proof-polling.ts` still uses
+  uncompressed BMP and retains an idle ceiling of 1920px/40ms plus the lower
+  960px/125ms recording/stream profile.
+- `crates/videorc-backend/src/preview_bmp.rs` still CPU-converts/downscales BGRA
+  into a BMP when a new proof frame is requested.
+- The transport must continue to identify itself as
+  `electron-proof-surface` / `electron-browser-window`; it is not native
+  OBS-parity evidence.
+- Plan 039 measures this work in a real RTMP scenario and excludes the proof
+  window from captured pixels. Plan 040 replaces BMP polling with a D3D11
+  presenter.
 
 ## Scope
 
@@ -47,4 +60,8 @@ Stop if geometry-derived caps visibly underfill a large proof surface, if compac
 
 ## Maintenance notes
 
-The proof surface remains a supported Windows production transport but must continue to identify itself as `electron-proof-surface` / `electron-browser-window`. New status fields do not automatically belong in the frame-cadence payload.
+The proof surface remains a supported Windows production transport but must
+continue to identify itself as `electron-proof-surface` /
+`electron-browser-window`. New status fields do not automatically belong in the
+frame-cadence payload. Do not reopen the already-landed bounding work; use Plan
+039 for release performance/exclusion and Plan 040 for the native replacement.

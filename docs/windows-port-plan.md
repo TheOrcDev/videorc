@@ -4,7 +4,44 @@ Goal: ship a Windows version of Videorc that hits the project's real bar — a
 smooth preview and a correct recording (docs/, memory: OBS parity is dropped).
 Dark-glass UI carries over; macOS-only niceties degrade gracefully.
 
-## Current status (reconciled 2026-07-14)
+## D3D11 livestream path (in progress 2026-07-30)
+
+Plan 040 is replacing the display livestream hot path, not relabeling the
+existing proof path. The target keeps the selected display on one
+adapter-owned D3D11 device through Desktop Duplication or cursor-excluded
+Windows Graphics Capture, scene composition, a DirectComposition presenter,
+and Media Foundation NV12 surface input. FFmpeg remains the downstream
+mux/provider process.
+
+The branch has portable contracts, in-progress runtime integration, staged
+gates, and explicit fallback diagnostics. The interim pure JavaScript
+D3D11/stream/budget contract suite passes 81 tests, but final Windows x64 Rust
+discovery/build/test/clippy have not yet been recorded. It is not
+release-qualified. Until the signed NVIDIA, Intel, and natural-fallback
+hardware matrix passes:
+
+- `d3d11-shared-texture` + `directcomposition-swapchain` +
+  `backend-d3d11-presenter` is the only Windows native-preview identity;
+- `electron-proof-surface` + `electron-browser-window` is the named BMP
+  fallback and is never OBS-parity evidence;
+- a D3D11 success requires zero capture readbacks, compositor CPU fallback
+  frames, raw-video copies, system-memory encoder samples, and BMP
+  requests/bytes;
+- capture, compositor, presenter, and every encoder role must report one
+  adapter LUID and generation; and
+- Windows livestream qualification is limited to 1080p30/60 on the two
+  reviewed supported classes. Natural fallback is 1080p30 only and explicitly
+  `obsParityQualified: false`.
+
+The current evidence record is
+[`2026-07-30-windows-d3d11-media.md`](acceptance/2026-07-30-windows-d3d11-media.md).
+It remains BLOCKED until physical Windows candidate evidence exists. The raw
+FFmpeg/BMP implementation described below remains the production fallback for
+the transition release and must keep its legacy identity. There is no final
+source commit, signed installer, installed-app digest, active D3D11 budget, or
+physical presenter/performance PASS at this checkpoint.
+
+## Prior production status (reconciled 2026-07-14)
 
 Windows has crossed the tracer-bullet milestone: the tester build compiles,
 launches, discovers working audio, and records real media. The 0.9.30 timing
@@ -22,11 +59,11 @@ single-flight/latest-wins in the renderer, acknowledged by every matching
 output graph, and fail closed for the rest of the capture if FFmpeg cannot
 confirm either the requested state or a rollback.
 
-What remains is release acceptance, not first implementation: rerun the full
-packaged Windows 11 device matrix, retain analyzer/support-bundle evidence, and
-make the signing/distribution decision. The older phase notes below are
-implementation history; where they conflict with this section or `AGENTS.md`'s
-recording-studio gates, those current sources are authoritative.
+For the legacy CPU/raw/BMP path, what remains is release acceptance rather than
+first implementation. It is retained as a diagnosed fallback while the D3D11
+path above is implemented and qualified. The older phase notes below are
+implementation history; where they conflict with the D3D11 section,
+`AGENTS.md`, or Plan 040, those current sources are authoritative.
 
 This plan is still a follow-through track, not a claim that public Windows
 release acceptance is complete:

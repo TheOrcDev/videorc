@@ -1,6 +1,12 @@
 export function previewWindowSurfaceReady(
   { windowState, surfaceStatus } = {},
-  { expectedTransport, expectedBacking, expectNativeMetalPreview } = {}
+  {
+    expectedTransport,
+    expectedBacking,
+    expectedHostKind,
+    expectNativeMetalPreview,
+    expectNativePresenter = expectNativeMetalPreview
+  } = {}
 ) {
   const bounds = surfaceStatus?.bounds
   const positiveBounds =
@@ -8,8 +14,10 @@ export function previewWindowSurfaceReady(
     bounds.width > 0 &&
     Number.isFinite(bounds?.height) &&
     bounds.height > 0
-  const placementReady = expectNativeMetalPreview
-    ? windowState?.nativeOwnsPlacement === true
+  const placementReady = expectNativePresenter
+    ? windowState?.nativeOwnsPlacement === true &&
+      surfaceStatus?.nativePreviewHostKind === expectedHostKind &&
+      surfaceStatus?.framePollingSuppressed === true
     : windowState?.surface?.visible === true &&
       surfaceStatus?.nativePreviewHostKind === 'proof-surface' &&
       surfaceStatus?.framePollingSuppressed === false

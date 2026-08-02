@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-const repoRoot = resolve(import.meta.dirname, '..', '..')
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const scriptsRoot = join(repoRoot, 'scripts')
 const securitySourcePath = join(
   repoRoot,
@@ -14,6 +15,60 @@ const securitySourcePath = join(
   'smoke-command-security.ts'
 )
 const mainSourcePath = join(repoRoot, 'apps', 'desktop', 'src', 'main', 'index.ts')
+
+test('the maintained preview-lifecycle probe uses its supported gate argument', () => {
+  const packageDocument = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
+  assert.equal(
+    packageDocument.scripts['probe:preview-lifecycle'],
+    'node scripts/preview-lifecycle-probe.mjs --gate'
+  )
+  const parserSource = readFileSync(
+    join(scriptsRoot, 'lib', 'windows-preview-lifecycle-gates.mjs'),
+    'utf8'
+  )
+  assert.match(parserSource, /\['--gate', '--report-only'\]/)
+})
+
+test('the Windows local gate fresh-verifies the full installed candidate before PASS', () => {
+  const source = readFileSync(join(scriptsRoot, 'smoke-local-gates-windows.mjs'), 'utf8')
+  assert.match(
+    source,
+    /manifest\.status = 'passed'[\s\S]*?await revalidateInstalledWindowsCandidate\(\{[\s\S]*?expectedCandidate: candidateIdentity[\s\S]*?repoRoot,[\s\S]*?env: process\.env,[\s\S]*?platform: process\.platform[\s\S]*?\}\)[\s\S]*?await writeManifest\(\)[\s\S]*?windows-local-gates: PASS/
+  )
+})
+
+test('Windows release PASS artifacts are prepared before final verification and never post-hashed', () => {
+  const d3d = readFileSync(join(scriptsRoot, 'smoke-windows-d3d11-media.mjs'), 'utf8')
+  const obs = readFileSync(join(scriptsRoot, 'smoke-windows-obs-side-by-side.mjs'), 'utf8')
+  const stream = readFileSync(join(scriptsRoot, 'smoke-windows-stream-performance.mjs'), 'utf8')
+
+  assert.equal((d3d.match(/await prepareExclusiveJsonArtifact\(/g) ?? []).length, 4)
+  assert.equal((d3d.match(/await finalizePreparedJsonArtifact\(/g) ?? []).length, 4)
+  assert.match(
+    d3d,
+    /finalizePreparedJsonArtifact\(preparedReport, async \(\) => \{[\s\S]*?assertArtifactsUnchanged[\s\S]*?revalidateD3dFinalCandidate\(candidate\)[\s\S]*?\}\)/
+  )
+  assert.match(
+    d3d,
+    /finalizePreparedJsonArtifact\(preparedAggregate, async \(\) => \{[\s\S]*?assertArtifactsUnchanged[\s\S]*?revalidateD3dFinalCandidate\(aggregate\.candidate\)[\s\S]*?\}\)[\s\S]*?aggregate evidence PASS/
+  )
+
+  assert.match(
+    obs,
+    /prepareExclusiveJsonArtifact\(plan\.aggregatePath, aggregate\)[\s\S]*?finalizePreparedJsonArtifact\([\s\S]*?revalidateCandidate[\s\S]*?aggregateSha256: publishedAggregate\.sha256/
+  )
+  assert.match(
+    obs,
+    /prepareExclusiveJsonArtifact\(runPlan\.reportPath, report\)[\s\S]*?finalizePreparedJsonArtifact\(preparedReport, revalidateCandidate\)[\s\S]*?reportSha256: publishedReport\.sha256/
+  )
+  assert.doesNotMatch(obs, /sha256File\((?:plan\.aggregatePath|runPlan\.reportPath)\)/)
+
+  assert.match(
+    stream,
+    /prepareExclusiveJsonArtifact\(artifacts\.verdict,[\s\S]*?finalizePreparedJsonArtifact\([\s\S]*?result\.verdict === 'PASS' \? revalidateCandidate[\s\S]*?reportSha256: publishedReport\.sha256/
+  )
+  assert.doesNotMatch(stream, /sha256File\(artifacts\.verdict\)/)
+})
 
 test('every direct smoke command HTTP caller sends the per-run bearer capability', () => {
   const unauthenticated = []

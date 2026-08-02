@@ -75,15 +75,20 @@ import { runNativePreviewDriverReset } from './native-preview-driver-reset'
 import {
   nativePreviewClosedWindowUnsuppressStatus,
   nativePreviewDriverFailureFallbackStatus,
+  nativePreviewFramePollingSuppressionGenerationMatches,
   nativePreviewFramePollingSuppressionStatus,
   nativePreviewHelperFallbackAllowed,
+  nativePreviewLifecycleFramePollingSuppressed,
   nativePreviewPlacementOwnedByNativeSurface,
   nativePreviewPresentFailureDisposition,
   nativePreviewProofPollingSuppressed,
+  reconcileWindowsD3d11PresenterStatus,
   nativePreviewSurfaceHasAttachedNativePixels,
   nativePreviewSupervisorFallbackReason,
   nativePreviewSupervisorDisposition,
-  nativePreviewValidatedHandoffStatus
+  nativePreviewValidatedHandoffStatus,
+  windowsD3d11BackendEventAuthority,
+  windowsD3d11BackendStatusIsStale
 } from './native-preview-host-policy'
 import { loadNativePreviewInProcessDriver } from './native-preview-in-process-loader'
 import { resolveNativePreviewInProcessModule } from './native-preview-in-process-module-path'
@@ -101,6 +106,7 @@ import {
 import { NativePreviewRunAuthority } from './native-preview-run-authority'
 import { loadNativePreviewRealSurfaceDriver } from './native-preview-real-surface-loader'
 import { compositorSceneConflictsWithCommitted } from '../shared/native-preview-scene-authority'
+import { isCanonicalWindowsD3d11PreviewStatus } from '../shared/native-preview-capability'
 import { applyCommentsSnapshotDelta } from '../shared/comments-snapshot-delta'
 import {
   CommentsHistoryCache,
@@ -117,6 +123,8 @@ import {
   parseMainBackendWireMessage,
   parseMainCompositorFrameReadyEvent,
   parseMainCompositorStatusEvent,
+  parseMainPreviewSurfaceStatus,
+  parseMainPreviewSurfaceStatusEvent,
   parseMainRecordingStatus,
   parseMainRecordingStatusEvent
 } from './backend-event-message'
@@ -198,6 +206,11 @@ import {
   avatarHostAllowed
 } from './avatar-cache'
 import { DARK_WINDOW_PALETTE, windowPalette } from './window-palette'
+import {
+  applyVideorcWindowCaptureProtection,
+  type VideorcWindowRole,
+  WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS
+} from './window-capture-protection'
 import {
   assessProofPresentationWatch,
   assessProofSourceFrame,
@@ -290,8 +303,10 @@ import {
   normalizePreviewSurfaceBounds,
   previewSurfaceBoundsChanged,
   previewSurfaceDrawableBoundsChanged,
-  previewSurfaceNativeDrawableMatchesBounds
+  previewSurfaceNativeDrawableMatchesBounds,
+  sanitizeRendererPreviewSurfaceStatus
 } from '../shared/native-preview-bounds'
+import { withTrustedPreviewWindowStacking } from './native-preview-window-stacking'
 import {
   accountCoalescedPreviewFrame,
   accountSkippedPreviewFrame
@@ -501,7 +516,12 @@ const nativePreviewPlacementQueue = new NativePreviewPlacementQueue(
   }
 )
 let nativePreviewSurfaceStatus: PreviewSurfaceStatus = idleNativePreviewSurfaceStatus()
-let nativePreviewSurfaceFramePollingSuppressed = false
+// Armed only after Electron main has sent a freshly-read preview HWND for the
+// current lifecycle generation. Backend presenter events cannot claim native
+// ownership across close/reopen without this authority.
+let nativePreviewBackendD3d11TrustedGeneration: number | null = null
+let nativePreviewBackendD3d11LastStatus: PreviewSurfaceStatus | null = null
+let nativePreviewSurfaceFramePollingSuppressed = nativePreviewLifecycleFramePollingSuppressed(false)
 let nativePreviewProofPollingRecordingActive = false
 let nativePreviewAppliedProofPollingProfile: string | null = null
 let nativePreviewProofPollingProfileSerial = 0
@@ -568,6 +588,77 @@ const isMac = process.platform === 'darwin'
 const isWindows = process.platform === 'win32'
 
 installWebContentsSecurity(app)
+
+function installCaptureProtectionSmokeMarker(window: BrowserWindow, role: VideorcWindowRole): void {
+  if (!isWindows || !notesWindowSmokeMarkerEnabled) {
+    return
+  }
+  captureProtectionMarkerStates.set(window, false)
+  const color = WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS[role]
+  window.webContents.on('did-finish-load', () => {
+    if (window.isDestroyed() || window.webContents.isDestroyed()) {
+      return
+    }
+    captureProtectionMarkerStates.set(window, false)
+    const markerId = `videorc-capture-protection-marker-${role}`
+    void window.webContents
+      .executeJavaScript(
+        `(() => {
+          const markerId = ${JSON.stringify(markerId)};
+          const role = ${JSON.stringify(role)};
+          const color = ${JSON.stringify(color)};
+          let marker = document.getElementById(markerId);
+          if (!marker) {
+            marker = document.createElement('div');
+            marker.id = markerId;
+            document.documentElement.appendChild(marker);
+          }
+          marker.dataset.videorcCaptureProtectionRole = role;
+          marker.style.cssText =
+            'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;background:' +
+            color;
+          return { role, color, installed: true };
+        })()`,
+        true
+      )
+      .then((result) => {
+        captureProtectionMarkerStates.set(
+          window,
+          result?.installed === true && result?.role === role && result?.color === color
+        )
+      })
+      .catch((error) => {
+        captureProtectionMarkerStates.set(window, false)
+        safeConsole.warn(`Capture-protection marker could not be installed for ${role}:`, error)
+      })
+  })
+}
+
+const captureProtectionMarkerStates = new WeakMap<BrowserWindow, boolean>()
+
+function captureProtectionMarkerInstalled(window: BrowserWindow | null): boolean {
+  return Boolean(window && !window.isDestroyed() && captureProtectionMarkerStates.get(window))
+}
+
+function smokeNativeWindowIdentity(window: BrowserWindow | null): {
+  nativeWindowHandle: string | null
+  processId: number | null
+} {
+  if (process.platform !== 'win32' || !window || window.isDestroyed()) {
+    return { nativeWindowHandle: null, processId: null }
+  }
+  try {
+    const handle = window.getNativeWindowHandle()
+    const value = handle.length >= 8 ? handle.readBigUInt64LE(0) : BigInt(handle.readUInt32LE(0))
+    return {
+      nativeWindowHandle: `0x${value.toString(16).padStart(16, '0')}`,
+      processId: process.pid
+    }
+  } catch {
+    return { nativeWindowHandle: null, processId: null }
+  }
+}
+
 const glassVibrancyEnabled = process.env.VIDEORC_GLASS_VIBRANCY !== '0'
 const glassVibrancyRaw = process.env.VIDEORC_GLASS_VIBRANCY
 const glassVibrancyMaterial: GlassVibrancyMaterial =
@@ -828,7 +919,8 @@ function nativeSurfaceOwnsPlacement(
     status,
     driverKind: nativePreviewRealSurfaceDriverKind,
     recentPresent:
-      Date.now() - nativePreviewNativePresentConfirmedAtMs < NATIVE_PREVIEW_NATIVE_AUTHORITY_MS
+      Date.now() - nativePreviewNativePresentConfirmedAtMs < NATIVE_PREVIEW_NATIVE_AUTHORITY_MS,
+    generation: previewWindowSurfaceGeneration()
   })
 }
 
@@ -1442,6 +1534,11 @@ function createWindow(): void {
       backgroundThrottling: backgroundThrottlingFor('main', electronBackgroundPolicy)
     }
   })
+  applyVideorcWindowCaptureProtection(mainWindow, 'main', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Main window content protection could not be enabled: ${reason}`)
+  })
+  installCaptureProtectionSmokeMarker(mainWindow, 'main')
   registerRendererWindow(mainWindow, 'main')
 
   let mainWindowShown = false
@@ -1878,6 +1975,7 @@ function notesWindowState(message?: string): NotesWindowState {
     windowId: notesWindowGlobalId(),
     alwaysOnTop: notesWindowAlwaysOnTop,
     protected: notesWindowContentProtected,
+    captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     enabled: notesWindowFeatureEnabled,
     message:
       message ??
@@ -2216,13 +2314,11 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   notesWindow = window
   attachAuxWindowShortcuts(window)
   notesWindowAlwaysOnTop = notesWindowAlwaysOnTopPreference(prefs)
-  notesWindowContentProtected = false
-  try {
-    window.setContentProtection(true)
-    notesWindowContentProtected = true
-  } catch (error) {
-    safeConsole.warn('Notes window content protection could not be enabled:', error)
-  }
+  notesWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'notes', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Notes window content protection could not be enabled: ${reason}`)
+  }).protected
+  installCaptureProtectionSmokeMarker(window, 'notes')
   if (notesWindowAlwaysOnTop) {
     applyNotesWindowAlwaysOnTop(window, true)
   }
@@ -2399,6 +2495,7 @@ function commentsWindowState(message?: string): CommentsWindowState {
     windowId: commentsWindowGlobalId(),
     alwaysOnTop: commentsWindowAlwaysOnTop,
     protected: open ? commentsWindowContentProtected : false,
+    captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     enabled: commentsWindowFeatureEnabled,
     message:
       message ??
@@ -2759,13 +2856,11 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
   commentsWindowClosing = false
   commentsWindow = window
   attachAuxWindowShortcuts(window)
-  commentsWindowContentProtected = false
-  try {
-    window.setContentProtection(true)
-    commentsWindowContentProtected = true
-  } catch (error) {
-    safeConsole.warn('Comments window content protection could not be enabled:', error)
-  }
+  commentsWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'comments', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Comments window content protection could not be enabled: ${reason}`)
+  }).protected
+  installCaptureProtectionSmokeMarker(window, 'comments')
   commentsWindowAlwaysOnTop = commentsWindowAlwaysOnTopPreference(prefs)
   if (commentsWindowAlwaysOnTop) {
     applyNotesWindowAlwaysOnTop(window, true)
@@ -2911,6 +3006,7 @@ function captionsWindowState(message?: string): CaptionsWindowState {
     bounds: open ? window!.getBounds() : null,
     windowId: captionsWindowGlobalId(),
     alwaysOnTop: captionsWindowAlwaysOnTop,
+    captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     enabled: captionsWindowFeatureEnabled,
     message:
       message ??
@@ -2976,6 +3072,11 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
       backgroundThrottling: backgroundThrottlingFor('captions', electronBackgroundPolicy)
     }
   })
+  applyVideorcWindowCaptureProtection(window, 'captions', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Captions window content protection could not be enabled: ${reason}`)
+  })
+  installCaptureProtectionSmokeMarker(window, 'captions')
   registerRendererWindow(window, 'captions')
   captionsWindowClosing = false
   captionsWindow = window
@@ -3089,7 +3190,9 @@ function previewSurfacePresentationAllowed(generation = previewWindowSurfaceGene
 type PreviewWindowState = {
   open: boolean
   visible: boolean
+  bounds: Electron.Rectangle | null
   contentBounds: Electron.Rectangle | null
+  captureProtectionMarkerInstalled: boolean
   scaleFactor: number
   // Primary display height: the native helper needs it to flip top-left screen
   // coordinates into AppKit's bottom-left-origin global space.
@@ -3114,7 +3217,9 @@ function previewWindowState(): PreviewWindowState {
   return {
     open,
     visible: open ? window!.isVisible() && !window!.isMinimized() : false,
+    bounds: open ? window!.getBounds() : null,
     contentBounds,
+    captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     scaleFactor: contentBounds ? screen.getDisplayMatching(contentBounds).scaleFactor : 1,
     screenHeight: screen.getPrimaryDisplay().bounds.height,
     alwaysOnTop: previewWindowAlwaysOnTop,
@@ -3374,6 +3479,19 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   }
 
   previewSupervisor.openWindow()
+  nativePreviewBackendD3d11TrustedGeneration = null
+  nativePreviewBackendD3d11LastStatus = null
+  nativePreviewSurfaceStatus = reconcileWindowsD3d11PresenterStatus(
+    nativePreviewSurfaceStatus,
+    null,
+    {
+      platform: process.platform,
+      previewWindowOpen: previewWindowIsOpenForSurface(),
+      proofSurfaceAvailable: nativePreviewSurfaceWindowExists(),
+      generation: previewWindowSurfaceGeneration(),
+      trustedGeneration: null
+    }
+  )
   const prefs = loadPreviewWindowPrefs()
   const mode = currentPreviewWindowMode()
   const docked = mode === 'docked'
@@ -3405,8 +3523,21 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
       backgroundThrottling: backgroundThrottlingFor('preview', electronBackgroundPolicy)
     }
   })
+  applyVideorcWindowCaptureProtection(window, 'preview', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Preview window content protection could not be enabled: ${reason}`)
+  })
+  installCaptureProtectionSmokeMarker(window, 'preview')
   previewWindowClosing = false
   previewWindow = window
+  if (process.platform === 'win32') {
+    // A new BrowserWindow generation starts in proof mode until its fresh HWND
+    // has been accepted and a live D3D11 present is reported. Never inherit
+    // proof suppression or placement authority from the retired window.
+    nativePreviewNativeOwnsProofPollingSuppression = false
+    nativePreviewNativeFailureFallbackActive = true
+    clearNativePreviewNativePlacementAuthority()
+  }
   previewWindowFloatingFrame = frame
   previewSupervisor.windowOpened(window.isVisible() && !window.isMinimized())
   previewWindowAlwaysOnTop = prefs.alwaysOnTop === true
@@ -3490,7 +3621,9 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
       if (nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed()) {
         nativePreviewSurfaceWindow.destroy()
       }
-      void setNativePreviewSurfaceFramePollingSuppressed(true)
+      void setNativePreviewSurfaceFramePollingSuppressed(
+        nativePreviewLifecycleFramePollingSuppressed(false)
+      )
       void runNativePreviewSurfaceMutation(
         () => applyNativePreviewHostCommands([{ kind: 'destroy' }]),
         'close-teardown'
@@ -3516,7 +3649,9 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     setDockedPreviewChromeClass(window, true)
     engageDockedPreviewPlacement(window)
   }
-  void setNativePreviewSurfaceFramePollingSuppressed(false)
+  void setNativePreviewSurfaceFramePollingSuppressed(
+    nativePreviewLifecycleFramePollingSuppressed(true)
+  )
   pushPreviewWindowPlacement()
   emitPreviewWindowState()
   // The first-frame watchdog proves and heals the macOS CAMetalLayer chain.
@@ -4867,6 +5002,11 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
         backgroundThrottling: backgroundThrottlingFor('proof-surface', electronBackgroundPolicy)
       }
     })
+    applyVideorcWindowCaptureProtection(surfaceWindow, 'proof-surface', {
+      onFailure: (reason) =>
+        safeConsole.warn(`Proof-surface content protection could not be enabled: ${reason}`)
+    })
+    installCaptureProtectionSmokeMarker(surfaceWindow, 'proof-surface')
     nativePreviewSurfaceWindow = surfaceWindow
     surfaceWindow.setIgnoreMouseEvents(true)
     // Geometry changes re-derive the DPR-aware frame width cap; moving across
@@ -5133,6 +5273,17 @@ async function updateNativePreviewSurfaceBounds(
 }
 
 async function showNativePreviewProofSurfaceIfVisible(): Promise<void> {
+  if (
+    process.platform === 'win32' &&
+    isCanonicalWindowsD3d11PreviewStatus(
+      nativePreviewSurfaceStatus,
+      previewWindowSurfaceGeneration()
+    )
+  ) {
+    nativePreviewNativeOwnsProofPollingSuppression = true
+    await syncNativePreviewProofPollingSuppression()
+    return
+  }
   nativePreviewNativeOwnsProofPollingSuppression = false
   await syncNativePreviewProofPollingSuppression()
   await setNativePreviewProofAnimationSuspended(false)
@@ -5174,22 +5325,67 @@ async function applyNativePreviewHostCommands(
   if (!previewSurfacePresentationAllowed(generation)) {
     return destroyNativePreviewSurfaceForBlockedPresentation(generation)
   }
-  // Every bounds command carries the Electron preview window's global number so
-  // the native surface stacks as one app with it (normal level; floating only
-  // when always-on-top is on).
+  // Every bounds command is normalized first so renderer/backend supplied
+  // identities are deleted before main adds any trusted stacking metadata.
   const orderAboveWindowId = previewWindowGlobalId()
-  if (orderAboveWindowId !== undefined) {
-    // Docked previews are part of the app: never elevated above other apps,
-    // whatever the (floating-mode) always-on-top preference says.
-    const elevated = previewWindowAlwaysOnTop && currentPreviewWindowMode() !== 'docked'
-    commands = commands.map((command) =>
-      command.bounds
-        ? {
-            ...command,
-            bounds: { ...command.bounds, orderAboveWindowId, elevated }
+  const elevated = previewWindowAlwaysOnTop && currentPreviewWindowMode() !== 'docked'
+  commands = commands.map((command) => {
+    if (!command.bounds) {
+      return command
+    }
+    return { ...command, bounds: normalizePreviewSurfaceBounds(command.bounds) }
+  })
+  if (process.platform === 'win32') {
+    for (const command of commands) {
+      if (!command.bounds) {
+        continue
+      }
+      await withTrustedPreviewWindowStacking(
+        {
+          platform: process.platform,
+          bounds: command.bounds,
+          generation,
+          currentGeneration: previewWindowSurfaceGeneration(),
+          previewWindowOpen: previewWindowIsOpenForSurface(),
+          previewWindow,
+          elevated
+        },
+        async (request) => {
+          const status = parseMainPreviewSurfaceStatus(
+            await requestBackendAdmin<unknown>('resource.admin.preview_surface_bounds', {
+              ...request
+            })
+          )
+          if (
+            previewWindowSurfaceGenerationIsCurrent(generation) &&
+            previewWindowIsOpenForSurface()
+          ) {
+            nativePreviewBackendD3d11TrustedGeneration = generation
+            applyBackendWindowsD3d11PresenterStatus(status, generation)
           }
-        : command
-    )
+          return status
+        }
+      )
+    }
+  } else {
+    commands = commands.map((command) => {
+      if (!command.bounds) {
+        return command
+      }
+      return withTrustedPreviewWindowStacking(
+        {
+          platform: process.platform,
+          bounds: command.bounds,
+          generation,
+          currentGeneration: previewWindowSurfaceGeneration(),
+          previewWindowOpen: previewWindowIsOpenForSurface(),
+          previewWindow,
+          orderAboveWindowId,
+          elevated
+        },
+        (request) => ({ ...command, bounds: request.bounds })
+      )
+    })
   }
   await applyNativePreviewRealSurfaceHostCommands(commands)
   if (!previewWindowIsOpenForSurface()) {
@@ -5565,7 +5761,8 @@ async function presentNativePreviewSurfaceCompositor(
     previewSupervisor.surfaceLive({
       generation: previewWindowSurfaceGeneration(),
       transport: realSurfaceAttempt.status.transport,
-      backing: realSurfaceAttempt.status.backing
+      backing: realSurfaceAttempt.status.backing,
+      nativePreviewHostKind: realSurfaceAttempt.status.nativePreviewHostKind
     })
     return realSurfaceAttempt.status
   }
@@ -5588,12 +5785,13 @@ async function presentNativePreviewSurfaceCompositor(
       updatedAt: new Date().toISOString(),
       message:
         realSurfaceAttempt.reason ??
-        'Native preview skipped a compositor frame without downgrading the active CAMetalLayer surface.'
+        'Native preview skipped a compositor frame without downgrading the active platform presenter.'
     }
     previewSupervisor.surfaceLive({
       generation: previewWindowSurfaceGeneration(),
       transport: nativePreviewSurfaceStatus.transport,
-      backing: nativePreviewSurfaceStatus.backing
+      backing: nativePreviewSurfaceStatus.backing,
+      nativePreviewHostKind: nativePreviewSurfaceStatus.nativePreviewHostKind
     })
     return nativePreviewSurfaceStatus
   }
@@ -5728,7 +5926,22 @@ function syncPreviewSupervisorSurface(
   generation: number,
   fallbackReason: string
 ): void {
+  if (process.platform === 'win32') {
+    if (nativePreviewProofWatchdogEnabled(process.platform, status)) {
+      if (!firstFrameWatchdogTimer && previewWindowIsOpenForSurface()) {
+        startWindowsProofFrameWatchdog()
+      }
+    } else if (firstFrameWatchdogTimer) {
+      // The backend-owned D3D11 presenter carries its own first-present/source
+      // liveness contract. Never keep reading the hidden BMP proof window.
+      stopFirstFrameWatchdog()
+    }
+  }
   const disposition = nativePreviewSupervisorDisposition(status, process.platform)
+  if (disposition === 'failed') {
+    previewSupervisor.surfaceFailed({ generation, message: fallbackReason })
+    return
+  }
   if (disposition === 'pending') {
     previewSupervisor.requestSurface()
     return
@@ -5737,7 +5950,8 @@ function syncPreviewSupervisorSurface(
     previewSupervisor.surfaceLive({
       generation,
       transport: status.transport,
-      backing: status.backing
+      backing: status.backing,
+      nativePreviewHostKind: status.nativePreviewHostKind
     })
     return
   }
@@ -5745,6 +5959,167 @@ function syncPreviewSupervisorSurface(
     generation,
     nativePreviewSupervisorFallbackReason(status, process.platform, fallbackReason)
   )
+}
+
+function applyBackendWindowsD3d11PresenterStatus(
+  backendStatus: PreviewSurfaceStatus,
+  generation: number
+): void {
+  if (process.platform !== 'win32') {
+    return
+  }
+  if (!previewWindowSurfaceGenerationIsCurrent(generation)) {
+    return
+  }
+  const generationIsTrusted =
+    previewWindowIsOpenForSurface() && nativePreviewBackendD3d11TrustedGeneration === generation
+  if (
+    generationIsTrusted &&
+    windowsD3d11BackendStatusIsStale(nativePreviewBackendD3d11LastStatus, backendStatus, generation)
+  ) {
+    return
+  }
+  if (generationIsTrusted) {
+    nativePreviewBackendD3d11LastStatus = backendStatus
+  }
+  const previousWasCanonical = isCanonicalWindowsD3d11PreviewStatus(
+    nativePreviewSurfaceStatus,
+    generation
+  )
+  nativePreviewSurfaceStatus = reconcileWindowsD3d11PresenterStatus(
+    nativePreviewSurfaceStatus,
+    backendStatus,
+    {
+      platform: process.platform,
+      previewWindowOpen: previewWindowIsOpenForSurface(),
+      proofSurfaceAvailable: nativePreviewSurfaceWindowExists(),
+      generation,
+      trustedGeneration: nativePreviewBackendD3d11TrustedGeneration
+    }
+  )
+  const canonical = isCanonicalWindowsD3d11PreviewStatus(nativePreviewSurfaceStatus, generation)
+  const proofFallbackActive =
+    !canonical &&
+    previewWindowIsOpenForSurface() &&
+    nativePreviewSurfaceWindowExists() &&
+    nativePreviewSurfaceStatus.state === 'live' &&
+    nativePreviewSurfaceStatus.transport === 'electron-proof-surface' &&
+    nativePreviewSurfaceStatus.backing === 'electron-browser-window' &&
+    nativePreviewSurfaceStatus.nativePreviewHostKind === 'proof-surface'
+  nativePreviewNativeOwnsProofPollingSuppression = canonical
+  nativePreviewNativeFailureFallbackActive = proofFallbackActive
+  if (canonical) {
+    nativePreviewNativePresentConfirmedAtMs = Date.now()
+    updatePreviewWindowWaitDetail(null)
+  } else {
+    clearNativePreviewNativePlacementAuthority()
+  }
+  syncPreviewSupervisorSurface(
+    nativePreviewSurfaceStatus,
+    generation,
+    nativePreviewSurfaceStatus.windowsD3d11Presenter?.fallbackReason ??
+      nativePreviewSurfaceStatus.message ??
+      'Backend D3D11 presenter is unavailable.'
+  )
+
+  void runNativePreviewSurfaceMutation(async () => {
+    if (!previewWindowSurfaceGenerationIsCurrent(generation) || !previewWindowIsOpenForSurface()) {
+      return nativePreviewSurfaceStatus
+    }
+    const takeoverStillMatches = (): boolean =>
+      isCanonicalWindowsD3d11PreviewStatus(nativePreviewSurfaceStatus, generation) === canonical
+    if (!takeoverStillMatches()) {
+      return nativePreviewSurfaceStatus
+    }
+    if (canonical) {
+      await syncNativePreviewProofPollingSuppression()
+      if (!takeoverStillMatches()) {
+        return nativePreviewSurfaceStatus
+      }
+      await setNativePreviewProofAnimationSuspended(true)
+      if (!takeoverStillMatches()) {
+        return nativePreviewSurfaceStatus
+      }
+      if (
+        nativePreviewSurfaceWindow &&
+        !nativePreviewSurfaceWindow.isDestroyed() &&
+        nativePreviewSurfaceWindow.isVisible()
+      ) {
+        nativePreviewSurfaceWindow.hide()
+      }
+    } else {
+      await syncNativePreviewProofPollingSuppression()
+      if (!takeoverStillMatches() || !nativePreviewNativeFailureFallbackActive) {
+        return nativePreviewSurfaceStatus
+      }
+      if (
+        previousWasCanonical ||
+        nativePreviewProofAnimationSuspended === true ||
+        (nativePreviewSurfaceWindow &&
+          !nativePreviewSurfaceWindow.isDestroyed() &&
+          !nativePreviewSurfaceWindow.isVisible())
+      ) {
+        await showNativePreviewProofSurfaceIfVisible()
+      }
+    }
+    return nativePreviewSurfaceStatus
+  }, 'backend-d3d11-presenter-status').catch((error) => {
+    logBackend(
+      'warn',
+      `Backend D3D11 presenter status reconciliation failed: ${errorMessageText(error)}`
+    )
+  })
+}
+
+function clearBackendWindowsD3d11PresenterAuthority(reason: string): void {
+  const hadAuthority =
+    nativePreviewBackendD3d11TrustedGeneration !== null ||
+    nativePreviewSurfaceStatus.nativePreviewHostKind === 'backend-d3d11-presenter' ||
+    nativePreviewSurfaceStatus.windowsD3d11Presenter !== undefined
+  nativePreviewBackendD3d11TrustedGeneration = null
+  nativePreviewBackendD3d11LastStatus = null
+  if (!hadAuthority) {
+    return
+  }
+  const generation = previewWindowSurfaceGeneration()
+  nativePreviewSurfaceStatus = reconcileWindowsD3d11PresenterStatus(
+    nativePreviewSurfaceStatus,
+    null,
+    {
+      platform: process.platform,
+      previewWindowOpen: previewWindowIsOpenForSurface(),
+      proofSurfaceAvailable: nativePreviewSurfaceWindowExists(),
+      generation,
+      trustedGeneration: null
+    }
+  )
+  nativePreviewSurfaceStatus = {
+    ...nativePreviewSurfaceStatus,
+    message: reason,
+    updatedAt: new Date().toISOString()
+  }
+  nativePreviewNativeOwnsProofPollingSuppression = false
+  nativePreviewNativeFailureFallbackActive =
+    previewWindowIsOpenForSurface() &&
+    nativePreviewSurfaceWindowExists() &&
+    nativePreviewSurfaceStatus.state === 'live' &&
+    nativePreviewSurfaceStatus.transport === 'electron-proof-surface'
+  clearNativePreviewNativePlacementAuthority()
+  if (!previewWindowIsOpenForSurface()) {
+    return
+  }
+  syncPreviewSupervisorSurface(nativePreviewSurfaceStatus, generation, reason)
+  void runNativePreviewSurfaceMutation(async () => {
+    if (previewWindowSurfaceGenerationIsCurrent(generation) && previewWindowIsOpenForSurface()) {
+      await showNativePreviewProofSurfaceIfVisible()
+    }
+    return nativePreviewSurfaceStatus
+  }, 'backend-d3d11-presenter-clear').catch((error) => {
+    logBackend(
+      'warn',
+      `Backend D3D11 presenter teardown reconciliation failed: ${errorMessageText(error)}`
+    )
+  })
 }
 
 type NativePreviewRealSurfacePresentAttempt =
@@ -6062,8 +6437,17 @@ async function tryPresentNativePreviewRealSurfaceCompositor(
 
 async function setNativePreviewSurfaceFramePollingSuppressed(
   suppressed: boolean,
-  recordingActive?: boolean
+  recordingActive?: boolean,
+  generation = previewWindowSurfaceGeneration()
 ): Promise<PreviewSurfaceStatus> {
+  if (
+    !nativePreviewFramePollingSuppressionGenerationMatches(
+      generation,
+      previewWindowSurfaceGeneration()
+    )
+  ) {
+    return nativePreviewSurfaceStatus
+  }
   if (typeof recordingActive === 'boolean') {
     nativePreviewProofPollingRecordingActive = recordingActive
   }
@@ -6074,10 +6458,18 @@ async function setNativePreviewSurfaceFramePollingSuppressed(
     nativePreviewRealSurfaceDriver?.resetMetrics?.()
   }
   await syncNativePreviewProofPollingProfile()
+  if (!previewWindowSurfaceGenerationIsCurrent(generation)) {
+    return nativePreviewSurfaceStatus
+  }
   const effectiveSuppression = await syncNativePreviewProofPollingSuppression()
+  if (!previewWindowSurfaceGenerationIsCurrent(generation)) {
+    return nativePreviewSurfaceStatus
+  }
   nativePreviewSurfaceStatus = nativePreviewFramePollingSuppressionStatus(
     nativePreviewSurfaceStatus,
-    effectiveSuppression
+    effectiveSuppression,
+    process.platform,
+    generation
   )
   return nativePreviewSurfaceStatus
 }
@@ -6586,6 +6978,8 @@ function destroyNativePreviewSurface(
     return nativePreviewSurfaceStatus
   }
   nativePreviewPlacementQueue.cancelPending()
+  nativePreviewBackendD3d11TrustedGeneration = null
+  nativePreviewBackendD3d11LastStatus = null
   resetNativePreviewStaleHandoffDiagnostic()
   resetNativePreviewMainHandoffMetrics()
   nativePreviewSurfaceCompositorRequestSerial += 1
@@ -7576,6 +7970,7 @@ function disconnectBackendEventSocket(): void {
   }
   const socket = backendEventSocket
   backendEventSocket = null
+  clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
   clearNativePreviewMainPumpWork()
   void setNativePreviewMainPumpActive(false)
@@ -7609,6 +8004,7 @@ function retireBackendEventSocket(
     return
   }
   backendEventSocket = null
+  clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
   nativePreviewMainPumpDisconnectCount += 1
   nativePreviewMainPumpLastDisconnectReason = reason
@@ -7634,11 +8030,16 @@ function connectBackendEventSocket(connection: BackendConnection): void {
   )
   const eventFilterRequestId = `main-event-filter-${Date.now()}`
   const recordingStatusRequestId = `main-recording-status-${Date.now()}`
+  const previewSurfaceStatusRequestId = `main-preview-surface-status-${Date.now()}`
+  let previewSurfaceStatusRequestGeneration: number | null = null
   backendEventSocket = socket
   socket.onopen = () => {
     if (backendEventSocket === socket) {
       logBackend('info', 'Main process connected to backend events.')
       const includedEvents = ['recording.status']
+      if (process.platform === 'win32') {
+        includedEvents.push('preview.surface.status')
+      }
       if (mainPresentPumpEnabled) {
         includedEvents.push('preview.frameReady', 'compositor.status')
       }
@@ -7667,6 +8068,15 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             socket.send(
               JSON.stringify({ id: recordingStatusRequestId, method: 'recording.status' })
             )
+            if (process.platform === 'win32') {
+              previewSurfaceStatusRequestGeneration = previewWindowSurfaceGeneration()
+              socket.send(
+                JSON.stringify({
+                  id: previewSurfaceStatusRequestId,
+                  method: 'preview.surface.status'
+                })
+              )
+            }
             if (mainPresentPumpEnabled) {
               nativePreviewMainStatusPump.cancelPending()
               void setNativePreviewMainPumpActive(true)
@@ -7682,12 +8092,31 @@ function connectBackendEventSocket(connection: BackendConnection): void {
           }
           updateMainCaptureState(parseMainRecordingStatus(parsed.payload))
         }
+        if (parsed.id === previewSurfaceStatusRequestId) {
+          if (parsed.ok !== true) {
+            throw new Error('Initial preview surface status request was rejected.')
+          }
+          if (previewSurfaceStatusRequestGeneration !== null) {
+            applyBackendWindowsD3d11PresenterStatus(
+              parseMainPreviewSurfaceStatus(parsed.payload),
+              previewSurfaceStatusRequestGeneration
+            )
+          }
+        }
         // Responses to fire-and-forget present reports are deliberately ignored.
         return
       }
 
       if (parsed.event === 'recording.status') {
         updateMainCaptureState(parseMainRecordingStatusEvent(parsed.payload))
+        return
+      }
+      if (parsed.event === 'preview.surface.status') {
+        const status = parseMainPreviewSurfaceStatusEvent(parsed.payload)
+        const authority = windowsD3d11BackendEventAuthority(status)
+        if (authority) {
+          applyBackendWindowsD3d11PresenterStatus(status, authority.previewGeneration)
+        }
         return
       }
       if (
@@ -7755,6 +8184,7 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.admin.resolve_session_path',
   'resource.admin.resolve_screen_path',
   'resource.admin.resolve_background_path',
+  'resource.admin.preview_surface_bounds',
   'preview.surface.take_native_host_commands',
   'sessions.comments.list',
   'sessions.delete.resolve',
@@ -8628,6 +9058,11 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
+    previewWindow.show()
+    previewWindow.moveTop()
+    if (nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed()) {
+      nativePreviewSurfaceWindow.moveTop()
+    }
     // macOS does not reliably emit 'move' for programmatic position-only
     // setBounds, so push placement and state explicitly.
     pushPreviewWindowPlacement()
@@ -8660,6 +9095,8 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
+    mainWindow.show()
+    mainWindow.moveTop()
     // Position-only programmatic setBounds does not reliably emit 'move' on
     // macOS; kick the docked follower directly like preview-window-set-bounds.
     if (currentPreviewWindowMode() === 'docked') {
@@ -8731,13 +9168,29 @@ async function runSmokePreviewMotionCommand(
   }
 
   if (command === 'main-window-state') {
+    const displays = screen.getAllDisplays().map((display) => ({
+      id: String(display.id),
+      bounds: display.bounds,
+      scaleFactor: display.scaleFactor
+    }))
     if (!mainWindow || mainWindow.isDestroyed()) {
-      return { open: false, bounds: null, contentBounds: null }
+      return {
+        open: false,
+        visible: false,
+        bounds: null,
+        contentBounds: null,
+        captureProtectionMarkerInstalled: false,
+        displays
+      }
     }
     return {
       open: true,
+      visible: mainWindow.isVisible() && !mainWindow.isMinimized(),
       bounds: mainWindow.getBounds(),
-      contentBounds: mainWindow.getContentBounds()
+      ...smokeNativeWindowIdentity(mainWindow),
+      contentBounds: mainWindow.getContentBounds(),
+      captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(mainWindow),
+      displays
     }
   }
 
@@ -8746,10 +9199,13 @@ async function runSmokePreviewMotionCommand(
     const mutationQueue = nativePreviewSurfaceMutationQueue.metrics()
     return {
       ...previewWindowState(),
+      ...smokeNativeWindowIdentity(previewWindow),
       surface: {
         exists: Boolean(surface && !surface.isDestroyed()),
         visible: Boolean(surface && !surface.isDestroyed() && surface.isVisible()),
-        bounds: surface && !surface.isDestroyed() ? surface.getBounds() : null
+        bounds: surface && !surface.isDestroyed() ? surface.getBounds() : null,
+        ...smokeNativeWindowIdentity(surface),
+        captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(surface)
       },
       nativeOwnsPlacement: nativeSurfaceOwnsPlacement(),
       framePollingSuppressedFlag: nativePreviewSurfaceFramePollingSuppressed,
@@ -8761,11 +9217,18 @@ async function runSmokePreviewMotionCommand(
       surfaceStatus: {
         state: nativePreviewSurfaceStatus.state,
         transport: nativePreviewSurfaceStatus.transport,
+        backing: nativePreviewSurfaceStatus.backing,
         framePollingSuppressed: nativePreviewSurfaceStatus.framePollingSuppressed,
         nativePreviewHostKind: nativePreviewSurfaceStatus.nativePreviewHostKind,
+        nativePreviewHostAttached: nativePreviewSurfaceStatus.nativePreviewHostAttached,
+        firstFrameContract: nativePreviewSurfaceStatus.firstFrameContract,
+        firstFrameReason: nativePreviewSurfaceStatus.firstFrameReason,
+        sourcePixelsPresent: nativePreviewSurfaceStatus.sourcePixelsPresent,
+        message: nativePreviewSurfaceStatus.message,
         nativePreviewDrawableWidth: nativePreviewSurfaceStatus.nativePreviewDrawableWidth,
         nativePreviewDrawableHeight: nativePreviewSurfaceStatus.nativePreviewDrawableHeight,
-        nativePreviewContentsScale: nativePreviewSurfaceStatus.nativePreviewContentsScale
+        nativePreviewContentsScale: nativePreviewSurfaceStatus.nativePreviewContentsScale,
+        windowsD3d11Presenter: nativePreviewSurfaceStatus.windowsD3d11Presenter
       }
     }
   }
@@ -8791,12 +9254,16 @@ async function runSmokePreviewMotionCommand(
       height: typeof params.height === 'number' ? params.height : current.height
     })
     window.show()
+    window.moveTop()
     emitNotesWindowState()
     return notesWindowState()
   }
 
   if (command === 'notes-window-state') {
-    return notesWindowState()
+    return {
+      ...notesWindowState(),
+      ...smokeNativeWindowIdentity(notesWindow)
+    }
   }
 
   if (command === 'comments-window-open') {
@@ -8823,11 +9290,16 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
+    window.show()
+    window.moveTop()
     return captionsWindowState()
   }
 
   if (command === 'captions-window-state') {
-    return captionsWindowState()
+    return {
+      ...captionsWindowState(),
+      ...smokeNativeWindowIdentity(captionsWindow)
+    }
   }
 
   if (command === 'comments-window-close') {
@@ -8851,12 +9323,16 @@ async function runSmokePreviewMotionCommand(
       height: typeof params.height === 'number' ? params.height : current.height
     })
     window.show()
+    window.moveTop()
     emitCommentsWindowState()
     return commentsWindowState()
   }
 
   if (command === 'comments-window-state') {
-    return commentsWindowState()
+    return {
+      ...commentsWindowState(),
+      ...smokeNativeWindowIdentity(commentsWindow)
+    }
   }
 
   if (command === 'comments-window-push-snapshot') {
@@ -9268,6 +9744,108 @@ async function runSmokePreviewMotionCommand(
     return nativePreviewSurfaceStatus
   }
 
+  if (command === 'windows-preview-os-input-probe') {
+    if (process.platform !== 'win32') {
+      throw new Error('The Windows preview OS-input probe is available only on Windows.')
+    }
+    if (!previewWindowIsOpenForSurface() || !previewWindow || previewWindow.isDestroyed()) {
+      throw new Error('Preview window must be open before preparing the Windows OS-input probe.')
+    }
+    const action = params.action
+    if (action === 'cleanup') {
+      await previewWindow.webContents.executeJavaScript(
+        `document.getElementById('videorc-windows-preview-input-probe')?.remove();
+         delete window.__videorcWindowsPreviewInputProbe;
+         true`,
+        true
+      )
+      return { cleaned: true }
+    }
+    if (action === 'prepare') {
+      const presenter = nativePreviewSurfaceStatus.windowsD3d11Presenter
+      if (
+        nativePreviewSurfaceStatus.state !== 'live' ||
+        presenter?.firstPresentSucceeded !== true ||
+        presenter.sourceLive !== true
+      ) {
+        throw new Error('The D3D11 presenter must be live before preparing the OS-input probe.')
+      }
+      const rects = (await previewWindow.webContents.executeJavaScript(
+        `(() => {
+          document.getElementById('videorc-windows-preview-input-probe')?.remove()
+          const state = { clicks: 0, focusEvents: 0, inputEvents: 0, value: '' }
+          window.__videorcWindowsPreviewInputProbe = state
+          const root = document.createElement('div')
+          root.id = 'videorc-windows-preview-input-probe'
+          root.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none'
+          const drag = document.createElement('div')
+          drag.id = 'videorc-windows-preview-drag-target'
+          drag.style.cssText = 'position:fixed;left:260px;top:24px;width:280px;height:48px;pointer-events:auto;opacity:.01;background:#fff;-webkit-app-region:drag'
+          const input = document.createElement('input')
+          input.id = 'videorc-windows-preview-input-target'
+          input.type = 'text'
+          input.autocomplete = 'off'
+          input.style.cssText = 'position:fixed;left:80px;top:112px;width:240px;height:44px;pointer-events:auto;opacity:.01;-webkit-app-region:no-drag'
+          input.addEventListener('click', () => { state.clicks += 1 })
+          input.addEventListener('focus', () => { state.focusEvents += 1 })
+          input.addEventListener('input', () => {
+            state.inputEvents += 1
+            state.value = input.value
+          })
+          root.append(drag, input)
+          document.body.append(root)
+          const serialize = (rect) => ({
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height
+          })
+          return {
+            input: serialize(input.getBoundingClientRect()),
+            drag: serialize(drag.getBoundingClientRect())
+          }
+        })()`,
+        true
+      )) as {
+        input: { x: number; y: number; width: number; height: number }
+        drag: { x: number; y: number; width: number; height: number }
+      }
+      const contentBounds = previewWindow.getContentBounds()
+      const physicalPoint = (rect: { x: number; y: number; width: number; height: number }) =>
+        screen.dipToScreenPoint({
+          x: Math.round(contentBounds.x + rect.x + rect.width / 2),
+          y: Math.round(contentBounds.y + rect.y + rect.height / 2)
+        })
+      return {
+        prepared: true,
+        inputPoint: physicalPoint(rects.input),
+        dragPoint: physicalPoint(rects.drag),
+        initialBounds: previewWindow.getBounds(),
+        presenter,
+        previewFocused: previewWindow.isFocused(),
+        webContentsFocused: previewWindow.webContents.isFocused()
+      }
+    }
+    if (action === 'read') {
+      const state = await previewWindow.webContents.executeJavaScript(
+        `(() => ({
+          ...(window.__videorcWindowsPreviewInputProbe ?? {}),
+          activeElementId: document.activeElement?.id ?? null
+        }))()`,
+        true
+      )
+      return {
+        state,
+        bounds: previewWindow.getBounds(),
+        contentBounds: previewWindow.getContentBounds(),
+        previewFocused: previewWindow.isFocused(),
+        webContentsFocused: previewWindow.webContents.isFocused(),
+        presenter: nativePreviewSurfaceStatus.windowsD3d11Presenter
+      }
+    }
+    throw new Error('windows-preview-os-input-probe requires action prepare, read, or cleanup.')
+  }
+
   if (command === 'exercise-preview-click-focus') {
     if (!previewWindowIsOpenForSurface() || !previewWindow || previewWindow.isDestroyed()) {
       throw new Error('Preview window must be open before exercising click/focus.')
@@ -9543,7 +10121,11 @@ async function runSmokePreviewMotionCommand(
 }
 
 function nativePreviewSurfaceStatusIsRealSurface(status: PreviewSurfaceStatus): boolean {
-  return nativePreviewSurfaceHasAttachedNativePixels(status)
+  return nativePreviewSurfaceHasAttachedNativePixels(
+    status,
+    process.platform,
+    previewWindowSurfaceGeneration()
+  )
 }
 
 function nativePreviewSurfaceStatusMetrics(status: PreviewSurfaceStatus): Record<string, unknown> {
@@ -10120,9 +10702,12 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
           hasNativePlaceholder: Boolean(previewWindowState?.open && surfaceStatus?.transport && surfaceStatus.transport !== 'unavailable'),
           previewWindowOpen: Boolean(previewWindowState?.open),
           previewWindowVisible: Boolean(previewWindowState?.visible),
-          surfaceTransport: surfaceStatus?.transport ?? null,
-          surfaceBacking: surfaceStatus?.backing ?? null,
-          previewImageCount: previewImages.length,
+	          surfaceTransport: surfaceStatus?.transport ?? null,
+	          surfaceBacking: surfaceStatus?.backing ?? null,
+	          nativePreviewHostKind: surfaceStatus?.nativePreviewHostKind ?? null,
+	          firstFrameContract: surfaceStatus?.firstFrameContract ?? null,
+	          framePollingSuppressed: Boolean(surfaceStatus?.framePollingSuppressed),
+	          previewImageCount: previewImages.length,
           previewImageSrcs,
           hasJpegPollingPreviewImage: previewImageSrcs.some((src) => src.includes('/preview/live.jpg') || src.includes('/preview/live.mjpeg')),
           surfaceWidth,
@@ -11597,18 +12182,19 @@ app.whenReady().then(async () => {
   secureIpcHandle('preview-surface:create', (_event, bounds: PreviewSurfaceBounds, generation) => {
     const requestedGeneration = previewSurfaceGenerationFromIpc(generation)
     return runNativePreviewSurfaceMutation(
-      () => createNativePreviewSurface(bounds, requestedGeneration),
+      () => applyNativePreviewHostCommands([{ kind: 'create', bounds }], requestedGeneration),
       'ipc-create-surface'
-    )
+    ).then(sanitizeRendererPreviewSurfaceStatus)
   })
   secureIpcHandle(
     'preview-surface:update-bounds',
     (_event, bounds: PreviewSurfaceBounds, generation) => {
       const requestedGeneration = previewSurfaceGenerationFromIpc(generation)
       return runNativePreviewSurfaceMutation(
-        () => updateNativePreviewSurfaceBounds(bounds, requestedGeneration),
+        () =>
+          applyNativePreviewHostCommands([{ kind: 'update-bounds', bounds }], requestedGeneration),
         'ipc-update-bounds'
-      )
+      ).then(sanitizeRendererPreviewSurfaceStatus)
     }
   )
   secureIpcHandle(
@@ -11618,15 +12204,18 @@ app.whenReady().then(async () => {
       return runNativePreviewSurfaceMutation(
         () => applyNativePreviewHostCommands(commands, requestedGeneration),
         'ipc-apply-host-commands'
-      )
+      ).then(sanitizeRendererPreviewSurfaceStatus)
     }
   )
   secureIpcHandle('preview-surface:drain-host-commands', (_event, generation) =>
-    drainBackendNativePreviewHostCommands(previewSurfaceGenerationFromIpc(generation))
+    drainBackendNativePreviewHostCommands(previewSurfaceGenerationFromIpc(generation)).then(
+      sanitizeRendererPreviewSurfaceStatus
+    )
   )
   secureIpcHandle(
     'preview-surface:update-scene',
-    (_event, scene: PreviewSurfaceSceneUpdateParams) => updateNativePreviewSurfaceScene(scene)
+    (_event, scene: PreviewSurfaceSceneUpdateParams) =>
+      updateNativePreviewSurfaceScene(scene).then(sanitizeRendererPreviewSurfaceStatus)
   )
   secureIpcHandle(
     'preview-surface:update-compositor',
@@ -11634,16 +12223,29 @@ app.whenReady().then(async () => {
       const ownershipTicket = nativePreviewPumpOwnership.ticket('renderer')
       return nativePreviewPumpOwnership.accepts(ownershipTicket)
         ? updateNativePreviewSurfaceCompositor(status, { ownershipTicket }).then((result) =>
-            result.compositorUpdateAccepted === false
-              ? result
-              : { ...result, compositorUpdateAccepted: true }
+            sanitizeRendererPreviewSurfaceStatus(
+              result.compositorUpdateAccepted === false
+                ? result
+                : { ...result, compositorUpdateAccepted: true }
+            )
           )
-        : rejectedNativePreviewCompositorUpdateStatus()
+        : sanitizeRendererPreviewSurfaceStatus(rejectedNativePreviewCompositorUpdateStatus())
     }
   )
   secureIpcHandle(
     'preview-surface:set-frame-polling-suppressed',
-    (_event, suppressed: boolean, recordingActive?: boolean) => {
+    (_event, suppressed: boolean, generation: number, recordingActive?: boolean) => {
+      if (
+        !nativePreviewFramePollingSuppressionGenerationMatches(
+          generation,
+          previewWindowSurfaceGeneration()
+        )
+      ) {
+        return sanitizeRendererPreviewSurfaceStatus({
+          ...nativePreviewSurfaceStatus,
+          ...nativePreviewPlacementStatusFields()
+        })
+      }
       if (typeof recordingActive === 'boolean') {
         nativePreviewProofPollingRecordingActive = recordingActive
       }
@@ -11657,12 +12259,16 @@ app.whenReady().then(async () => {
         nativePreviewSurfaceStatus = nativePreviewClosedWindowUnsuppressStatus(
           nativePreviewSurfaceStatus
         )
-        return {
+        return sanitizeRendererPreviewSurfaceStatus({
           ...nativePreviewSurfaceStatus,
           ...nativePreviewPlacementStatusFields()
-        }
+        })
       }
-      return setNativePreviewSurfaceFramePollingSuppressed(suppressed, recordingActive)
+      return setNativePreviewSurfaceFramePollingSuppressed(
+        suppressed,
+        recordingActive,
+        generation
+      ).then(sanitizeRendererPreviewSurfaceStatus)
     }
   )
   secureIpcHandle('preview-surface:destroy', (_event, generation) => {
@@ -11670,12 +12276,14 @@ app.whenReady().then(async () => {
     return runNativePreviewSurfaceMutation(
       () => destroyNativePreviewSurface(previewSurfaceGenerationFromIpc(generation)),
       'ipc-destroy-surface'
-    )
+    ).then(sanitizeRendererPreviewSurfaceStatus)
   })
-  secureIpcHandle('preview-surface:status', () => ({
-    ...nativePreviewSurfaceStatus,
-    ...nativePreviewPlacementStatusFields()
-  }))
+  secureIpcHandle('preview-surface:status', () =>
+    sanitizeRendererPreviewSurfaceStatus({
+      ...nativePreviewSurfaceStatus,
+      ...nativePreviewPlacementStatusFields()
+    })
+  )
 
   createWindow()
   setDockIcon()

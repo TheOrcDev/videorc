@@ -6,18 +6,86 @@ import { pathToFileURL } from 'node:url'
 
 const DEFAULT_CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const MOTION_STIMULUS_TITLE = 'Videorc Motion Stimulus'
-const SIGNATURE_COLORS = Object.freeze(['cyan', 'magenta', 'yellow', 'red', 'green', 'blue', 'white', 'dark'])
+const SIGNATURE_COLORS = Object.freeze([
+  'cyan',
+  'magenta',
+  'yellow',
+  'red',
+  'green',
+  'blue',
+  'white',
+  'dark'
+])
+
+export function resolveWindowsStimulusBrowser({
+  env = process.env,
+  exists = existsSync,
+  requestedPath,
+  legacyEnvironmentVariable
+} = {}) {
+  const candidates = []
+  appendBrowserCandidate(candidates, requestedPath, 'option')
+  appendBrowserCandidate(candidates, env.VIDEORC_STIMULUS_BROWSER, 'VIDEORC_STIMULUS_BROWSER')
+  if (legacyEnvironmentVariable) {
+    appendBrowserCandidate(candidates, env[legacyEnvironmentVariable], legacyEnvironmentVariable)
+  }
+
+  const programFiles = [env.ProgramFiles, env['ProgramFiles(x86)']].filter(nonEmptyString)
+  const localAppData = nonEmptyString(env.LOCALAPPDATA) ? [env.LOCALAPPDATA] : []
+  for (const root of [...programFiles, ...localAppData]) {
+    appendBrowserCandidate(
+      candidates,
+      join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      `${root}:edge`
+    )
+  }
+  for (const root of [...programFiles, ...localAppData]) {
+    appendBrowserCandidate(
+      candidates,
+      join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      `${root}:chrome`
+    )
+  }
+
+  const searchedPaths = []
+  for (const candidate of candidates) {
+    if (searchedPaths.includes(candidate.executablePath)) continue
+    searchedPaths.push(candidate.executablePath)
+    if (exists(candidate.executablePath)) {
+      return { ...candidate, searchedPaths }
+    }
+  }
+  return { executablePath: null, source: null, searchedPaths }
+}
+
+export function resolveScreenMotionStimulusBrowser(options = {}) {
+  return resolveStimulusBrowser({
+    ...options,
+    legacyEnvironmentVariable: 'VIDEORC_SCREEN_MOTION_BROWSER_PATH'
+  })
+}
 
 export async function launchScreenMotionStimulus(options = {}) {
   const displayOptions = stimulusWindowOptionsForSource(options.screenSource) ?? {}
   const x = Number(options.x ?? process.env.VIDEORC_SCREEN_MOTION_X ?? displayOptions.x ?? 32)
   const y = Number(options.y ?? process.env.VIDEORC_SCREEN_MOTION_Y ?? displayOptions.y ?? 32)
-  const width = Number(options.width ?? process.env.VIDEORC_SCREEN_MOTION_WIDTH ?? displayOptions.width ?? 1360)
-  const height = Number(options.height ?? process.env.VIDEORC_SCREEN_MOTION_HEIGHT ?? displayOptions.height ?? 820)
-  const verifyVisible = Boolean(options.verifyVisible ?? process.env.VIDEORC_SCREEN_MOTION_VERIFY_VISIBLE === '1')
-  const driver = options.driver ?? process.env.VIDEORC_SCREEN_MOTION_DRIVER ?? (process.platform === 'darwin' ? 'native' : 'chromium')
+  const width = Number(
+    options.width ?? process.env.VIDEORC_SCREEN_MOTION_WIDTH ?? displayOptions.width ?? 1360
+  )
+  const height = Number(
+    options.height ?? process.env.VIDEORC_SCREEN_MOTION_HEIGHT ?? displayOptions.height ?? 820
+  )
+  const verifyVisible = Boolean(
+    options.verifyVisible ?? process.env.VIDEORC_SCREEN_MOTION_VERIFY_VISIBLE === '1'
+  )
+  const driver =
+    options.driver ??
+    process.env.VIDEORC_SCREEN_MOTION_DRIVER ??
+    (process.platform === 'darwin' ? 'native' : 'chromium')
   const settleMs = Number(
-    options.settleMs ?? process.env.VIDEORC_SCREEN_MOTION_SETTLE_MS ?? (driver === 'native' ? 5000 : 1800)
+    options.settleMs ??
+      process.env.VIDEORC_SCREEN_MOTION_SETTLE_MS ??
+      (driver === 'native' ? 5000 : 1800)
   )
 
   if (driver === 'native' && process.platform === 'darwin') {
@@ -30,15 +98,21 @@ export async function launchScreenMotionStimulus(options = {}) {
       verifyVisible,
       outputDirectory: options.outputDirectory,
       ffmpegPath: options.ffmpegPath,
+      teardownOptions: options.teardownOptions
     })
   }
 
-  const browserPath = options.browserPath ?? process.env.VIDEORC_SCREEN_MOTION_BROWSER_PATH ?? DEFAULT_CHROME_PATH
+  const browserResolution = resolveScreenMotionStimulusBrowser({
+    requestedPath: options.browserPath,
+    platform: process.platform
+  })
+  const browserPath = browserResolution.executablePath
 
-  if (!existsSync(browserPath)) {
+  if (!browserPath) {
     throw new Error(
       `Screen motion stimulus requires a Chromium-compatible browser. ` +
-        `Set VIDEORC_SCREEN_MOTION_BROWSER_PATH, or install Google Chrome at ${browserPath}.`
+        `Set VIDEORC_STIMULUS_BROWSER, or install Edge/Chrome. ` +
+        `Checked: ${browserResolution.searchedPaths.join(', ') || 'no Windows browser roots were available'}.`
     )
   }
 
@@ -62,15 +136,28 @@ export async function launchScreenMotionStimulus(options = {}) {
       '--force-device-scale-factor=1',
       `--window-position=${x},${y}`,
       `--window-size=${width},${height}`,
-      `--app=${pathToFileURL(htmlPath).href}`,
+      `--app=${pathToFileURL(htmlPath).href}`
     ],
     {
       detached: true,
-      stdio: 'ignore',
+      stdio: 'ignore'
     }
   )
   child.unref()
-  const stimulus = { child, dir, htmlPath, browserPath, driver: 'chromium', x, y, width, height, activation: null, visibility: null }
+  const stimulus = {
+    child,
+    dir,
+    htmlPath,
+    browserPath,
+    browserSource: browserResolution.source,
+    driver: 'chromium',
+    x,
+    y,
+    width,
+    height,
+    activation: null,
+    visibility: null
+  }
   try {
     await sleep(settleMs)
     if (child.exitCode !== null) {
@@ -80,7 +167,7 @@ export async function launchScreenMotionStimulus(options = {}) {
       ? await refreshScreenMotionStimulusVisibility(stimulus, {
           outputDirectory: options.outputDirectory ?? dir,
           ffmpegPath: options.ffmpegPath,
-          settleMs: options.focusSettleMs ?? 500,
+          settleMs: options.focusSettleMs ?? 500
         })
       : null
     if (visibility && !visibility.visible) {
@@ -91,22 +178,67 @@ export async function launchScreenMotionStimulus(options = {}) {
     }
     return stimulus
   } catch (error) {
-    signal(child.pid, 'SIGTERM')
-    await sleep(250)
-    signal(child.pid, 'SIGKILL')
-    rmSync(dir, { recursive: true, force: true })
+    await stopScreenMotionStimulus(stimulus, options.teardownOptions)
     throw error
   }
 }
 
-async function launchNativeScreenMotionStimulus({ x, y, width, height, settleMs, verifyVisible, outputDirectory, ffmpegPath }) {
+function resolveStimulusBrowser({
+  platform = process.platform,
+  env = process.env,
+  exists = existsSync,
+  requestedPath,
+  legacyEnvironmentVariable
+} = {}) {
+  if (platform === 'win32') {
+    return resolveWindowsStimulusBrowser({
+      env,
+      exists,
+      requestedPath,
+      legacyEnvironmentVariable
+    })
+  }
+  const candidates = []
+  appendBrowserCandidate(candidates, requestedPath, 'option')
+  appendBrowserCandidate(candidates, env.VIDEORC_STIMULUS_BROWSER, 'VIDEORC_STIMULUS_BROWSER')
+  appendBrowserCandidate(candidates, env[legacyEnvironmentVariable], legacyEnvironmentVariable)
+  appendBrowserCandidate(candidates, DEFAULT_CHROME_PATH, 'macOS Chrome default')
+  const searchedPaths = []
+  for (const candidate of candidates) {
+    if (searchedPaths.includes(candidate.executablePath)) continue
+    searchedPaths.push(candidate.executablePath)
+    if (exists(candidate.executablePath)) return { ...candidate, searchedPaths }
+  }
+  return { executablePath: null, source: null, searchedPaths }
+}
+
+function appendBrowserCandidate(candidates, executablePath, source) {
+  if (!nonEmptyString(executablePath)) return
+  candidates.push({ executablePath: executablePath.trim(), source })
+}
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+async function launchNativeScreenMotionStimulus({
+  x,
+  y,
+  width,
+  height,
+  settleMs,
+  verifyVisible,
+  outputDirectory,
+  ffmpegPath,
+  teardownOptions
+}) {
   const dir = mkdtempSync(join(tmpdir(), 'videorc-screen-motion-'))
   const swiftPath = join(dir, 'stimulus.swift')
   writeFileSync(swiftPath, nativeStimulusSwift(), 'utf8')
 
   const child = spawn('swift', [swiftPath, String(x), String(y), String(width), String(height)], {
     detached: true,
-    stdio: ['ignore', 'ignore', 'pipe'],
+    stdio: ['ignore', 'ignore', 'pipe']
   })
   const stderr = []
   child.stderr?.on('data', (chunk) => {
@@ -125,7 +257,7 @@ async function launchNativeScreenMotionStimulus({ x, y, width, height, settleMs,
     height,
     activation: { attempted: true, appName: MOTION_STIMULUS_TITLE, success: true },
     visibility: null,
-    stderr,
+    stderr
   }
   try {
     await sleep(settleMs)
@@ -141,7 +273,7 @@ async function launchNativeScreenMotionStimulus({ x, y, width, height, settleMs,
           width,
           height,
           outputDirectory: outputDirectory ?? dir,
-          ffmpegPath,
+          ffmpegPath
         })
       : null
     stimulus.visibility = visibility
@@ -153,10 +285,7 @@ async function launchNativeScreenMotionStimulus({ x, y, width, height, settleMs,
     }
     return stimulus
   } catch (error) {
-    signal(child.pid, 'SIGTERM')
-    await sleep(250)
-    signal(child.pid, 'SIGKILL')
-    rmSync(dir, { recursive: true, force: true })
+    await stopScreenMotionStimulus(stimulus, teardownOptions)
     throw error
   }
 }
@@ -183,7 +312,7 @@ export function stimulusWindowOptionsFromDisplayBounds(bounds, margin = 16) {
     x: Math.round((bounds.x ?? 0) + margin),
     y: Math.round((bounds.y ?? 0) + margin),
     width: Math.max(640, Math.round(bounds.width - margin * 2)),
-    height: Math.max(480, Math.round(bounds.height - margin * 2)),
+    height: Math.max(480, Math.round(bounds.height - margin * 2))
   }
 }
 
@@ -200,7 +329,7 @@ function queryMacDisplayBounds(displayId) {
       `import CoreGraphics
 let id = CGDirectDisplayID(${displayId})
 let bounds = CGDisplayBounds(id)
-print("\\(bounds.origin.x),\\(bounds.origin.y),\\(bounds.width),\\(bounds.height)")`,
+print("\\(bounds.origin.x),\\(bounds.origin.y),\\(bounds.width),\\(bounds.height)")`
     ],
     { encoding: 'utf8', timeout: 5000 }
   )
@@ -263,7 +392,7 @@ export function stimulusVisibilityFromRgb(rgb, options = {}) {
           ? `missing required stimulus color signature: ${missingRequiredColors.join(', ')}`
           : passingColors.length < minimumDistinctColors
             ? `only ${passingColors.length}/${minimumDistinctColors} stimulus signature colors present`
-          : 'stimulus color signature present',
+            : 'stimulus color signature present',
     totalPixels,
     minimumColorPixels,
     minimumDistinctColors,
@@ -271,14 +400,222 @@ export function stimulusVisibilityFromRgb(rgb, options = {}) {
     colorRatios,
     passingColors,
     missingColors,
-    missingRequiredColors,
+    missingRequiredColors
   }
+}
+
+export function stimulusTemporalVisibilityFromRgb(rgb, options = {}) {
+  const aggregateVisibility = stimulusVisibilityFromRgb(rgb, options)
+  const width = Number(options.width)
+  const height = Number(options.height)
+  const minimumVisibleFrameRatio = Number(options.minimumVisibleFrameRatio ?? 0.95)
+  // The capture-protection proof is intentionally strict: a static screenshot
+  // repeated for an entire stream must not qualify as a live capture. A
+  // transition counts only when at least one pixel (or 0.1% at larger sizes)
+  // changes by a meaningful channel delta, and at least 95% of adjacent frame
+  // pairs must contain that motion.
+  const minimumChangedFrameRatio = Number(options.minimumChangedFrameRatio ?? 0.95)
+  const minimumChangedPixelRatio = Number(options.minimumChangedPixelRatio ?? 0.001)
+  const minimumChangedChannelDelta = Number(options.minimumChangedChannelDelta ?? 12)
+  const expectedFrames =
+    options.expectedFrames === undefined ? null : Number(options.expectedFrames)
+  const byteLength = Number.isSafeInteger(rgb?.length) ? rgb.length : 0
+  const configurationFailures = []
+
+  if (!Number.isSafeInteger(width) || width <= 0) {
+    configurationFailures.push('width must be a positive integer')
+  }
+  if (!Number.isSafeInteger(height) || height <= 0) {
+    configurationFailures.push('height must be a positive integer')
+  }
+  if (
+    !Number.isFinite(minimumVisibleFrameRatio) ||
+    minimumVisibleFrameRatio < 0.95 ||
+    minimumVisibleFrameRatio > 1
+  ) {
+    configurationFailures.push('minimumVisibleFrameRatio must be between 0.95 and 1')
+  }
+  if (
+    !Number.isFinite(minimumChangedFrameRatio) ||
+    minimumChangedFrameRatio < 0.95 ||
+    minimumChangedFrameRatio > 1
+  ) {
+    configurationFailures.push('minimumChangedFrameRatio must be between 0.95 and 1')
+  }
+  if (
+    !Number.isFinite(minimumChangedPixelRatio) ||
+    minimumChangedPixelRatio <= 0 ||
+    minimumChangedPixelRatio > 1
+  ) {
+    configurationFailures.push('minimumChangedPixelRatio must be greater than 0 and at most 1')
+  }
+  if (
+    !Number.isSafeInteger(minimumChangedChannelDelta) ||
+    minimumChangedChannelDelta <= 0 ||
+    minimumChangedChannelDelta > 255
+  ) {
+    configurationFailures.push(
+      'minimumChangedChannelDelta must be a positive integer no greater than 255'
+    )
+  }
+  if (expectedFrames !== null && (!Number.isSafeInteger(expectedFrames) || expectedFrames <= 0)) {
+    configurationFailures.push('expectedFrames must be a positive integer when provided')
+  }
+  if (!rgb || typeof rgb.subarray !== 'function' || !Number.isSafeInteger(rgb.length)) {
+    configurationFailures.push('rgb must be a byte array')
+  }
+
+  const frameBytes =
+    configurationFailures.length === 0 && Number.isSafeInteger(width * height * 3)
+      ? width * height * 3
+      : null
+  if (configurationFailures.length === 0 && (!frameBytes || frameBytes <= 0)) {
+    configurationFailures.push('fixed RGB frame size is invalid')
+  }
+
+  const completeFrames = frameBytes ? Math.floor(byteLength / frameBytes) : 0
+  const trailingBytes = frameBytes ? byteLength % frameBytes : byteLength
+  const frameCountMatches =
+    expectedFrames === null ? completeFrames > 0 : completeFrames === expectedFrames
+  let visibleFrames = 0
+  const invisibleFrameIndices = []
+  let changedFramePairs = 0
+  const staticTransitionIndices = []
+  const changedPixelsPerTransition = []
+  const minimumChangedPixels =
+    Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(height) && height > 0
+      ? Math.max(1, Math.ceil(width * height * minimumChangedPixelRatio))
+      : null
+
+  if (frameBytes) {
+    for (let index = 0; index < completeFrames; index += 1) {
+      const offset = index * frameBytes
+      const frame = rgb.subarray(offset, offset + frameBytes)
+      const frameVisibility = stimulusVisibilityFromRgb(frame, options)
+      if (frameVisibility.visible) {
+        visibleFrames += 1
+      } else {
+        invisibleFrameIndices.push(index)
+      }
+      if (index > 0 && minimumChangedPixels !== null) {
+        const previousFrame = rgb.subarray(offset - frameBytes, offset)
+        const changedPixels = countMeaningfullyChangedPixels(
+          previousFrame,
+          frame,
+          minimumChangedChannelDelta
+        )
+        changedPixelsPerTransition.push(changedPixels)
+        if (changedPixels >= minimumChangedPixels) {
+          changedFramePairs += 1
+        } else {
+          staticTransitionIndices.push(index)
+        }
+      }
+    }
+  }
+
+  const visibleFrameRatio = completeFrames > 0 ? visibleFrames / completeFrames : 0
+  const requiredVisibleFrames =
+    completeFrames > 0 && Number.isFinite(minimumVisibleFrameRatio)
+      ? Math.ceil(completeFrames * minimumVisibleFrameRatio)
+      : null
+  const frameTransitions = Math.max(0, completeFrames - 1)
+  const changedFrameRatio = frameTransitions > 0 ? changedFramePairs / frameTransitions : 0
+  const requiredChangedFramePairs =
+    frameTransitions > 0 && Number.isFinite(minimumChangedFrameRatio)
+      ? Math.ceil(frameTransitions * minimumChangedFrameRatio)
+      : null
+  const structuralFailures = [...configurationFailures]
+  if (configurationFailures.length === 0 && completeFrames === 0) {
+    structuralFailures.push('no complete RGB frames decoded')
+  }
+  if (configurationFailures.length === 0 && trailingBytes !== 0) {
+    structuralFailures.push(
+      `${trailingBytes} trailing RGB bytes do not form a complete ${frameBytes}-byte frame`
+    )
+  }
+  if (
+    configurationFailures.length === 0 &&
+    expectedFrames !== null &&
+    completeFrames !== expectedFrames
+  ) {
+    structuralFailures.push(`decoded ${completeFrames} frames, expected ${expectedFrames}`)
+  }
+  if (configurationFailures.length === 0 && completeFrames < 2) {
+    structuralFailures.push('at least 2 complete RGB frames are required to prove temporal motion')
+  }
+
+  const visible =
+    structuralFailures.length === 0 &&
+    frameCountMatches &&
+    aggregateVisibility.visible &&
+    requiredVisibleFrames !== null &&
+    visibleFrames >= requiredVisibleFrames &&
+    requiredChangedFramePairs !== null &&
+    changedFramePairs >= requiredChangedFramePairs
+  const reason = structuralFailures.length
+    ? structuralFailures.join('; ')
+    : !aggregateVisibility.visible
+      ? `aggregate stimulus signature missing (${aggregateVisibility.reason})`
+      : visibleFrames < requiredVisibleFrames
+        ? `stimulus visible in ${visibleFrames}/${completeFrames} frames (${(
+            visibleFrameRatio * 100
+          ).toFixed(2)}%); requires at least ${(minimumVisibleFrameRatio * 100).toFixed(2)}%`
+        : changedFramePairs < requiredChangedFramePairs
+          ? `stimulus changed in ${changedFramePairs}/${frameTransitions} adjacent frame pairs (${(
+              changedFrameRatio * 100
+            ).toFixed(2)}%); requires at least ${(minimumChangedFrameRatio * 100).toFixed(2)}%`
+          : `stimulus signature present in ${visibleFrames}/${completeFrames} frames`
+
+  return {
+    visible,
+    reason,
+    width: Number.isSafeInteger(width) && width > 0 ? width : null,
+    height: Number.isSafeInteger(height) && height > 0 ? height : null,
+    frameBytes,
+    expectedFrames,
+    completeFrames,
+    trailingBytes,
+    minimumVisibleFrameRatio,
+    requiredVisibleFrames,
+    visibleFrames,
+    invisibleFrames: completeFrames - visibleFrames,
+    visibleFrameRatio,
+    invisibleFrameIndices,
+    frameTransitions,
+    minimumChangedFrameRatio,
+    minimumChangedPixelRatio,
+    minimumChangedChannelDelta,
+    minimumChangedPixels,
+    requiredChangedFramePairs,
+    changedFramePairs,
+    changedFrameRatio,
+    staticTransitionIndices,
+    changedPixelsPerTransition,
+    frameCountMatches,
+    structuralFailures,
+    aggregateVisibility
+  }
+}
+
+function countMeaningfullyChangedPixels(previousFrame, frame, minimumChannelDelta) {
+  let changedPixels = 0
+  for (let offset = 0; offset + 2 < frame.length; offset += 3) {
+    const changed =
+      Math.abs(frame[offset] - previousFrame[offset]) >= minimumChannelDelta ||
+      Math.abs(frame[offset + 1] - previousFrame[offset + 1]) >= minimumChannelDelta ||
+      Math.abs(frame[offset + 2] - previousFrame[offset + 2]) >= minimumChannelDelta
+    if (changed) changedPixels += 1
+  }
+  return changedPixels
 }
 
 export async function refreshScreenMotionStimulusVisibility(stimulus, options = {}) {
   if (!stimulus) return null
   const activation = focusScreenMotionStimulus(stimulus)
-  const settleMs = Number(options.settleMs ?? process.env.VIDEORC_SCREEN_MOTION_REFOCUS_SETTLE_MS ?? 750)
+  const settleMs = Number(
+    options.settleMs ?? process.env.VIDEORC_SCREEN_MOTION_REFOCUS_SETTLE_MS ?? 750
+  )
   if (settleMs > 0) await sleep(settleMs)
   const visibility = verifyScreenMotionStimulusVisible({
     x: stimulus.x,
@@ -286,7 +623,7 @@ export async function refreshScreenMotionStimulusVisibility(stimulus, options = 
     width: stimulus.width,
     height: stimulus.height,
     outputDirectory: options.outputDirectory ?? stimulus.dir,
-    ffmpegPath: options.ffmpegPath,
+    ffmpegPath: options.ffmpegPath
   })
   stimulus.activation = activation
   stimulus.visibility = visibility
@@ -309,7 +646,12 @@ function verifyScreenMotionStimulusVisible({ x, y, width, height, outputDirector
   const screenshotPath = join(dir, 'screen-motion-stimulus-visibility.png')
   const capture = spawnSync(
     'screencapture',
-    ['-x', '-R', `${Math.round(x)},${Math.round(y)},${Math.round(width)},${Math.round(height)}`, screenshotPath],
+    [
+      '-x',
+      '-R',
+      `${Math.round(x)},${Math.round(y)},${Math.round(width)},${Math.round(height)}`,
+      screenshotPath
+    ],
     { encoding: 'utf8', timeout: 10_000 }
   )
   if (capture.status !== 0 || !existsSync(screenshotPath)) {
@@ -323,7 +665,7 @@ function verifyScreenMotionStimulusVisible({ x, y, width, height, outputDirector
       height,
       dir,
       screenshotPath,
-      ffmpegPath,
+      ffmpegPath
     })
     if (!fallback.ok) {
       return {
@@ -331,7 +673,7 @@ function verifyScreenMotionStimulusVisible({ x, y, width, height, outputDirector
         reason:
           `screencapture failed${capture.stderr ? `: ${capture.stderr.trim()}` : ''}` +
           `; full-display fallback failed: ${fallback.reason}`,
-        screenshotPath,
+        screenshotPath
       }
     }
   }
@@ -344,21 +686,29 @@ function verifyScreenMotionStimulusVisible({ x, y, width, height, outputDirector
       x: Math.round(x),
       y: Math.round(y),
       width: Math.round(width),
-      height: Math.round(height),
-    },
+      height: Math.round(height)
+    }
   }
 }
 
-function captureStimulusRectViaFullDisplay({ x, y, width, height, dir, screenshotPath, ffmpegPath }) {
+function captureStimulusRectViaFullDisplay({
+  x,
+  y,
+  width,
+  height,
+  dir,
+  screenshotPath,
+  ffmpegPath
+}) {
   const fullPath = join(dir, 'screen-motion-stimulus-full-display.png')
   const fullCapture = spawnSync('screencapture', ['-x', '-m', fullPath], {
     encoding: 'utf8',
-    timeout: 10_000,
+    timeout: 10_000
   })
   if (fullCapture.status !== 0 || !existsSync(fullPath)) {
     return {
       ok: false,
-      reason: `full screencapture failed${fullCapture.stderr ? `: ${fullCapture.stderr.trim()}` : ''}`,
+      reason: `full screencapture failed${fullCapture.stderr ? `: ${fullCapture.stderr.trim()}` : ''}`
     }
   }
   const displayBounds = queryMacMainDisplayBounds()
@@ -375,13 +725,25 @@ function captureStimulusRectViaFullDisplay({ x, y, width, height, dir, screensho
   const ffmpeg = ffmpegPath ?? process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
   const cropResult = spawnSync(
     ffmpeg,
-    ['-hide_banner', '-loglevel', 'error', '-y', '-i', fullPath, '-vf', crop, '-frames:v', '1', screenshotPath],
+    [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-i',
+      fullPath,
+      '-vf',
+      crop,
+      '-frames:v',
+      '1',
+      screenshotPath
+    ],
     { encoding: 'utf8', timeout: 10_000 }
   )
   if (cropResult.status !== 0 || !existsSync(screenshotPath)) {
     return {
       ok: false,
-      reason: `ffmpeg crop failed${cropResult.stderr ? `: ${cropResult.stderr.trim()}` : ''}`,
+      reason: `ffmpeg crop failed${cropResult.stderr ? `: ${cropResult.stderr.trim()}` : ''}`
     }
   }
   return { ok: true }
@@ -394,7 +756,7 @@ function queryMacMainDisplayBounds() {
       '-e',
       `import CoreGraphics
 let bounds = CGDisplayBounds(CGMainDisplayID())
-print("\\(bounds.origin.x),\\(bounds.origin.y),\\(bounds.width),\\(bounds.height)")`,
+print("\\(bounds.origin.x),\\(bounds.origin.y),\\(bounds.width),\\(bounds.height)")`
     ],
     { encoding: 'utf8', timeout: 15_000 }
   )
@@ -422,14 +784,14 @@ function decodeVisibilityScreenshot(screenshotPath, ffmpegPath) {
       'scale=160:-1:flags=area,format=rgb24',
       '-f',
       'rawvideo',
-      'pipe:1',
+      'pipe:1'
     ],
     { encoding: 'buffer', maxBuffer: 1024 * 1024, timeout: 10_000 }
   )
   if (result.status !== 0) {
     return {
       visible: false,
-      reason: `ffmpeg could not decode visibility screenshot${result.stderr ? `: ${result.stderr.toString().trim()}` : ''}`,
+      reason: `ffmpeg could not decode visibility screenshot${result.stderr ? `: ${result.stderr.toString().trim()}` : ''}`
     }
   }
   return stimulusVisibilityFromRgb(result.stdout)
@@ -452,13 +814,13 @@ end tell`
     : `tell application ${JSON.stringify(appName)} to activate`
   const result = spawnSync('osascript', ['-e', script], {
     encoding: 'utf8',
-    timeout: 5000,
+    timeout: 5000
   })
   return {
     attempted: true,
     appName,
     success: result.status === 0,
-    stderr: result.stderr?.trim() ?? '',
+    stderr: result.stderr?.trim() ?? ''
   }
 }
 
@@ -637,29 +999,196 @@ app.run()
 `
 }
 
-export async function stopScreenMotionStimulus(stimulus) {
-  if (!stimulus) return
-  const pid = stimulus.child?.pid
-  if (pid) {
-    signal(pid, 'SIGTERM')
-    await sleep(800)
-    signal(pid, 'SIGKILL')
+export async function stopScreenMotionStimulus(stimulus, options = {}) {
+  return await stopStimulusBrowserTree(stimulus, options)
+}
+
+/**
+ * Stop an exact stimulus browser tree and return auditable teardown proof.
+ *
+ * Windows first uses `taskkill /PID <pid> /T` so the browser receives a
+ * graceful tree close. `/F` is reserved for bounded recovery when that tree is
+ * still live. POSIX retains process-group SIGTERM -> SIGKILL escalation.
+ */
+export async function stopStimulusBrowserTree(stimulus, options = {}) {
+  const platform = options.platform ?? process.platform
+  const pid = Number(stimulus?.child?.pid)
+  const gracefulWaitMs = finiteNonNegative(options.gracefulWaitMs, 800)
+  const forceWaitMs = finiteNonNegative(options.forceWaitMs, 800)
+  const isTreeAlive = options.isTreeAlive ?? processTreeIsAlive
+  const waitForTreeExit = options.waitForTreeExit ?? waitForStimulusTreeExit
+  const taskkill = options.taskkill ?? runWindowsTaskkill
+  const signalTree = options.signalTree ?? signal
+  const removeDirectory =
+    options.removeDirectory ??
+    ((directory) => {
+      rmSync(directory, { recursive: true, force: true })
+    })
+  const result = {
+    pid: Number.isInteger(pid) && pid > 0 ? pid : null,
+    platform,
+    state: 'skipped',
+    forced: false,
+    treeExited: true,
+    livenessScope: platform === 'win32' ? 'root-pid-after-taskkill-tree' : 'posix-process-group',
+    graceful: {
+      attempted: false,
+      method: platform === 'win32' ? 'taskkill-tree' : 'sigterm-process-group',
+      succeeded: null,
+      error: null
+    },
+    recovery: {
+      attempted: false,
+      method: platform === 'win32' ? 'taskkill-tree-force' : 'sigkill-process-group',
+      succeeded: null,
+      error: null
+    },
+    directoryRemoved: false
   }
-  if (stimulus.dir) {
-    rmSync(stimulus.dir, { recursive: true, force: true })
+
+  try {
+    if (!result.pid || !isTreeAlive(result.pid, stimulus?.child, platform)) {
+      return result
+    }
+
+    result.treeExited = false
+    result.graceful.attempted = true
+    if (platform === 'win32') {
+      Object.assign(result.graceful, await attemptTaskkill(taskkill, result.pid, false))
+    } else {
+      Object.assign(result.graceful, await attemptSignal(signalTree, result.pid, 'SIGTERM'))
+    }
+    result.treeExited = await waitForTreeExit({
+      pid: result.pid,
+      child: stimulus?.child,
+      platform,
+      timeoutMs: gracefulWaitMs,
+      isTreeAlive
+    })
+    if (result.treeExited) {
+      result.state = 'terminated'
+      return result
+    }
+
+    result.forced = true
+    result.recovery.attempted = true
+    if (platform === 'win32') {
+      Object.assign(result.recovery, await attemptTaskkill(taskkill, result.pid, true))
+    } else {
+      Object.assign(result.recovery, await attemptSignal(signalTree, result.pid, 'SIGKILL'))
+    }
+    result.treeExited = await waitForTreeExit({
+      pid: result.pid,
+      child: stimulus?.child,
+      platform,
+      timeoutMs: forceWaitMs,
+      isTreeAlive
+    })
+    result.state = result.treeExited
+      ? platform === 'win32'
+        ? 'force-terminated'
+        : 'killed'
+      : 'leaked'
+    return result
+  } finally {
+    if (stimulus?.dir) {
+      removeDirectory(stimulus.dir)
+      result.directoryRemoved = true
+    }
   }
+}
+
+async function attemptTaskkill(taskkill, pid, force) {
+  try {
+    const outcome = await taskkill(pid, { force })
+    return {
+      succeeded: outcome?.succeeded !== false,
+      error: outcome?.error ?? null
+    }
+  } catch (error) {
+    return { succeeded: false, error: error?.message ?? String(error) }
+  }
+}
+
+async function attemptSignal(signalTree, pid, requestedSignal) {
+  try {
+    const outcome = await signalTree(pid, requestedSignal)
+    return {
+      succeeded: outcome !== false && outcome?.succeeded !== false,
+      error: outcome?.error ?? null
+    }
+  } catch (error) {
+    return { succeeded: false, error: error?.message ?? String(error) }
+  }
+}
+
+function runWindowsTaskkill(pid, { force }) {
+  const args = windowsStimulusTaskkillArgs(pid, { force })
+  const outcome = spawnSync('taskkill', args, {
+    encoding: 'utf8',
+    stdio: 'ignore',
+    windowsHide: true
+  })
+  return {
+    succeeded: outcome.status === 0 && !outcome.error,
+    error:
+      outcome.error?.message ??
+      (outcome.status === 0 ? null : `taskkill exited with status ${outcome.status ?? 'unknown'}`)
+  }
+}
+
+export function windowsStimulusTaskkillArgs(pid, { force = false } = {}) {
+  if (!Number.isInteger(Number(pid)) || Number(pid) <= 0) {
+    throw new Error('Stimulus taskkill PID must be a positive integer.')
+  }
+  return ['/PID', String(pid), '/T', ...(force ? ['/F'] : [])]
 }
 
 function signal(pid, sig) {
   try {
     process.kill(-pid, sig)
+    return true
   } catch {
     try {
       process.kill(pid, sig)
+      return true
     } catch {
       // Already gone.
+      return false
     }
   }
+}
+
+function processTreeIsAlive(pid, _child, platform) {
+  const target = platform === 'win32' ? pid : -pid
+  try {
+    process.kill(target, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
+async function waitForStimulusTreeExit({
+  pid,
+  child,
+  platform,
+  timeoutMs,
+  isTreeAlive,
+  sleepFn = sleep
+}) {
+  const startedAt = Date.now()
+  while (isTreeAlive(pid, child, platform)) {
+    const remainingMs = timeoutMs - (Date.now() - startedAt)
+    if (remainingMs <= 0) return false
+    await sleepFn(Math.min(50, remainingMs))
+  }
+  return true
+}
+
+function finiteNonNegative(value, fallback) {
+  const number = Number(value ?? fallback)
+  return Number.isFinite(number) && number >= 0 ? number : fallback
 }
 
 function sleep(ms) {

@@ -58,6 +58,32 @@ pub fn list_native_capture_sources() -> NativeCaptureSources {
     windows_native::list_native_capture_sources()
 }
 
+/// Stable material for invalidating Windows GPU capability verdicts when the
+/// adapter or its user-mode D3D11 driver changes. On non-Windows platforms the
+/// explicit marker keeps shared key construction portable without pretending
+/// that a Windows adapter was inspected.
+#[cfg(target_os = "windows")]
+#[allow(dead_code)] // Reserved for the shared Windows GPU capability-cache key.
+pub(crate) fn graphics_adapter_driver_identity() -> String {
+    windows_native::graphics_adapter_driver_identity().unwrap_or_else(|reason| {
+        // A missing identity must disable cross-call cache reuse. Reusing a
+        // verdict under an unknown driver is less safe than probing again.
+        format!(
+            "windows-adapter-driver-unavailable:{reason}:{}",
+            uuid::Uuid::new_v4()
+        )
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)] // Portable counterpart for the shared capability-cache key.
+pub(crate) fn graphics_adapter_driver_identity() -> String {
+    format!(
+        "platform={};windows-adapter-driver=not-applicable",
+        std::env::consts::OS
+    )
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn list_native_capture_sources() -> NativeCaptureSources {
     NativeCaptureSources {
@@ -69,6 +95,44 @@ pub fn list_native_capture_sources() -> NativeCaptureSources {
 #[cfg(any(test, target_os = "windows"))]
 fn windows_dxgi_screen_device_id(adapter_luid: u64, output_index: u32) -> String {
     format!("{WINDOWS_DXGI_SCREEN_PREFIX}{adapter_luid:016x}:{output_index}")
+}
+
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct WindowsAdapterDriverIdentity {
+    adapter_luid: u64,
+    vendor_id: u32,
+    device_id: u32,
+    subsystem_id: u32,
+    revision: u32,
+    driver_version: u64,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_adapter_driver_identity_material(
+    mut adapters: Vec<WindowsAdapterDriverIdentity>,
+) -> Option<String> {
+    if adapters.is_empty() {
+        return None;
+    }
+    adapters.sort_unstable();
+    Some(
+        adapters
+            .into_iter()
+            .map(|adapter| {
+                format!(
+                    "luid={:016x};pci={:04x}:{:04x}:{:08x}:{:02x};d3d11-driver={:016x}",
+                    adapter.adapter_luid,
+                    adapter.vendor_id,
+                    adapter.device_id,
+                    adapter.subsystem_id,
+                    adapter.revision,
+                    adapter.driver_version,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|"),
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -128,9 +192,12 @@ pub(crate) fn is_foreign_session_window_app(app_name: Option<&str>) -> bool {
 mod windows_native {
     use super::*;
     use windows::Win32::Foundation::{LUID, RECT};
+    use windows::Win32::Graphics::Direct3D11::ID3D11Device;
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, DXGI_ERROR_NOT_FOUND, IDXGIAdapter1, IDXGIFactory1,
+        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIAdapter1,
+        IDXGIFactory1,
     };
+    use windows::core::Interface;
 
     pub fn list_native_capture_sources() -> NativeCaptureSources {
         match list_dxgi_displays() {
@@ -152,6 +219,41 @@ mod windows_native {
                 )],
             },
         }
+    }
+
+    pub fn graphics_adapter_driver_identity() -> Result<String, String> {
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(windows_error_code)?;
+        let mut identities = Vec::new();
+        let mut adapter_index = 0;
+        loop {
+            let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
+                Ok(adapter) => adapter,
+                Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+                Err(error) => return Err(windows_error_code(error)),
+            };
+            adapter_index += 1;
+
+            let description = unsafe { adapter.GetDesc1() }.map_err(windows_error_code)?;
+            if description.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+                continue;
+            }
+            let driver_version = unsafe { adapter.CheckInterfaceSupport(&ID3D11Device::IID) }
+                .map_err(windows_error_code)?;
+            identities.push(WindowsAdapterDriverIdentity {
+                adapter_luid: adapter_luid_u64(description.AdapterLuid),
+                vendor_id: description.VendorId,
+                device_id: description.DeviceId,
+                subsystem_id: description.SubSysId,
+                revision: description.Revision,
+                driver_version: driver_version as u64,
+            });
+        }
+        windows_adapter_driver_identity_material(identities)
+            .ok_or_else(|| "no-hardware-dxgi-adapter".to_string())
+    }
+
+    fn windows_error_code(error: windows::core::Error) -> String {
+        format!("hresult-{:08x}", error.code().0 as u32)
     }
 
     fn list_dxgi_displays() -> windows::core::Result<Vec<Device>> {
@@ -688,6 +790,44 @@ mod tests {
             windows_dxgi_display_detail(None, r"\\.\DISPLAY1"),
             r"Windows DXGI output \\.\DISPLAY1."
         );
+    }
+
+    #[test]
+    fn windows_adapter_driver_identity_is_order_stable_and_driver_sensitive() {
+        let integrated = WindowsAdapterDriverIdentity {
+            adapter_luid: 0x0000_0001_0000_0002,
+            vendor_id: 0x8086,
+            device_id: 0x46a6,
+            subsystem_id: 0x0000_0001,
+            revision: 3,
+            driver_version: 0x0001_0002_0003_0004,
+        };
+        let discrete = WindowsAdapterDriverIdentity {
+            adapter_luid: 0x0000_0003_0000_0004,
+            vendor_id: 0x10de,
+            device_id: 0x2684,
+            subsystem_id: 0x0000_0002,
+            revision: 1,
+            driver_version: 0x0005_0006_0007_0008,
+        };
+        let first =
+            windows_adapter_driver_identity_material(vec![discrete.clone(), integrated.clone()])
+                .unwrap();
+        assert_eq!(
+            first,
+            windows_adapter_driver_identity_material(vec![integrated.clone(), discrete.clone()])
+                .unwrap(),
+            "DXGI enumeration order must not perturb a capability key"
+        );
+
+        let mut updated = discrete;
+        updated.driver_version += 1;
+        assert_ne!(
+            first,
+            windows_adapter_driver_identity_material(vec![integrated, updated]).unwrap(),
+            "a driver update must invalidate cached GPU capability verdicts"
+        );
+        assert_eq!(windows_adapter_driver_identity_material(Vec::new()), None);
     }
 
     #[test]

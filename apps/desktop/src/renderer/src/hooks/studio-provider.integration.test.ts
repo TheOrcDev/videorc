@@ -28,11 +28,16 @@ import type {
   Scene,
   SessionLogEntry,
   SessionSummary,
+  StreamOutputTopologyProbeResult,
   VideorcApi
 } from '../../../shared/backend'
 import { BackgroundAssetsProvider } from './use-background-assets'
 import {
   StudioProvider,
+  buildStreamOutputTopologyProbeParams,
+  resolvedStreamingProfileEntitlementGate,
+  streamOutputTopologyBlockReason,
+  streamOutputTopologyProbeRequestKey,
   useStudioAudio,
   useStudioCore,
   useStudioRecording,
@@ -40,7 +45,7 @@ import {
   type StudioRecordingContextValue
 } from './use-studio'
 import { DEFAULT_BASIC_ENTITLEMENTS } from '../lib/entitlements'
-import { defaultCaptureConfig } from '../lib/capture'
+import { defaultCaptureConfig, videoPresets } from '../lib/capture'
 import { deriveNoiseCleanupView } from '../lib/noise-cleanup-view'
 import type {
   WindowsLiveAudioSmokeRequest,
@@ -407,6 +412,17 @@ class StudioBackend {
         return this.audioMeterResult
       case 'recording.status':
         return { state: this.recordingState, message: 'Ready.' }
+      case 'stream.output.topology.probe':
+        return {
+          capabilityKey: `stream-output-topology-v1:${'0'.repeat(64)}`,
+          streamProfile: params.streamProfile,
+          ...(params.recordingProfile ? { recordingProfile: params.recordingProfile } : {}),
+          outputRoles: params.outputRoles,
+          requestedBridgeOutput: 'raw-yuv420p',
+          effectiveBridgeOutput: 'raw-yuv420p',
+          effectiveEncodeBackend: 'software-open-h264',
+          probeState: 'not-required'
+        }
       case 'diagnostics.stats':
         return {
           activeFfmpegProcesses: 0,
@@ -513,6 +529,14 @@ class StudioBackend {
         }
       case 'streamTargets.metadata.validate':
         return { valid: true, issues: [] }
+      case 'streamTargets.manualKey.store':
+        return {
+          targetId: params.targetId,
+          streamKeySecretRef: `stream-key:${String(params.targetId)}`,
+          streamKeyPresent: Boolean(params.streamKey),
+          streamKeyHint: params.streamKey ? String(params.streamKey).slice(-4) : undefined,
+          previousStreamKeyPresent: false
+        }
       case 'sessions.list':
         return { items: this.sessionSummaries, nextCursor: this.sessionListNextCursor }
       case 'sessions.healthEvents.list':
@@ -790,6 +814,334 @@ describe('real StudioProvider lifecycle', () => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
     vi.useRealTimers()
+  })
+
+  it('builds the exact secret-free shared and split output topology shapes', () => {
+    const streamVideo = {
+      preset: 'stream-safe-1080p30' as const,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      bitrateKbps: 6000
+    }
+    const sharedConfig = {
+      ...defaultCaptureConfig,
+      recordEnabled: true,
+      streamEnabled: true,
+      video: streamVideo,
+      streaming: {
+        ...defaultCaptureConfig.streaming,
+        enabled: true,
+        defaultOutputPreset: streamVideo.preset,
+        defaultBitrateKbps: streamVideo.bitrateKbps
+      },
+      captions: {
+        ...defaultCaptureConfig.captions,
+        enabled: false,
+        burnTarget: 'off' as const
+      }
+    }
+
+    const shared = buildStreamOutputTopologyProbeParams(sharedConfig)
+    expect(shared).toEqual({
+      streamProfile: streamVideo,
+      recordingProfile: streamVideo,
+      outputRoles: ['shared']
+    })
+
+    const captionSplit = buildStreamOutputTopologyProbeParams({
+      ...sharedConfig,
+      captions: { ...sharedConfig.captions, burnTarget: 'stream' }
+    })
+    expect(captionSplit.outputRoles).toEqual(['recording', 'stream'])
+
+    const streamOnly = buildStreamOutputTopologyProbeParams({
+      ...sharedConfig,
+      recordEnabled: false
+    })
+    expect(streamOnly).toEqual({
+      streamProfile: streamVideo,
+      outputRoles: ['shared']
+    })
+
+    const youtubeHighRate = buildStreamOutputTopologyProbeParams({
+      ...sharedConfig,
+      streaming: {
+        ...sharedConfig.streaming,
+        defaultOutputPreset: 'stream-youtube-1080p60',
+        defaultBitrateKbps: 12000,
+        enabledTargetIds: ['youtube'],
+        targets: sharedConfig.streaming.targets.map((target) =>
+          target.id === 'youtube'
+            ? {
+                ...target,
+                enabled: true,
+                outputPreset: 'stream-youtube-1080p60',
+                outputBitrateKbps: 12000
+              }
+            : target
+        )
+      }
+    })
+    expect(youtubeHighRate).toMatchObject({
+      streamProfile: {
+        preset: 'stream-youtube-1080p60',
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        bitrateKbps: 12000
+      },
+      recordingProfile: streamVideo,
+      outputRoles: ['recording', 'stream']
+    })
+
+    for (const platform of ['twitch', 'x'] as const) {
+      const providerSafe = buildStreamOutputTopologyProbeParams({
+        ...sharedConfig,
+        recordEnabled: false,
+        streaming: {
+          ...sharedConfig.streaming,
+          defaultOutputPreset: 'stream-youtube-1080p30',
+          defaultBitrateKbps: 10000,
+          enabledTargetIds: [platform],
+          targets: sharedConfig.streaming.targets.map((target) => ({
+            ...target,
+            enabled: target.platform === platform
+          }))
+        }
+      })
+      expect(providerSafe).toEqual({
+        streamProfile: videoPresets['stream-safe-1080p30'],
+        outputRoles: ['shared']
+      })
+    }
+
+    expect(JSON.stringify(streamOnly).toLowerCase()).not.toMatch(
+      /streamkey|serverurl|oauth|accesstoken|refreshtoken/
+    )
+  })
+
+  it('gates the provider-resolved profile for Basic Twitch/X and high-rate YouTube', () => {
+    for (const platform of ['twitch', 'x'] as const) {
+      const captureConfig = {
+        ...defaultCaptureConfig,
+        recordEnabled: false,
+        streamEnabled: true,
+        streaming: {
+          ...defaultCaptureConfig.streaming,
+          enabled: true,
+          defaultOutputPreset: 'stream-youtube-1080p30' as const,
+          defaultBitrateKbps: 10000,
+          enabledTargetIds: [platform],
+          targets: defaultCaptureConfig.streaming.targets.map((target) => ({
+            ...target,
+            enabled: target.platform === platform
+          }))
+        }
+      }
+
+      expect(
+        resolvedStreamingProfileEntitlementGate(captureConfig, DEFAULT_BASIC_ENTITLEMENTS)
+      ).toEqual({ allowed: true })
+    }
+
+    for (const preset of ['stream-youtube-1080p30', 'stream-youtube-1080p60'] as const) {
+      const captureConfig = {
+        ...defaultCaptureConfig,
+        recordEnabled: false,
+        streamEnabled: true,
+        streaming: {
+          ...defaultCaptureConfig.streaming,
+          enabled: true,
+          defaultOutputPreset: preset,
+          defaultBitrateKbps: videoPresets[preset].bitrateKbps,
+          enabledTargetIds: ['youtube'],
+          targets: defaultCaptureConfig.streaming.targets.map((target) => ({
+            ...target,
+            enabled: target.platform === 'youtube'
+          }))
+        }
+      }
+
+      expect(
+        resolvedStreamingProfileEntitlementGate(captureConfig, DEFAULT_BASIC_ENTITLEMENTS)
+      ).toMatchObject({
+        allowed: false,
+        featureId: 'livestreaming',
+        reason: expect.stringContaining('Videorc Premium')
+      })
+    }
+  })
+
+  it('keeps pending, failed, and stale topology verdicts start-blocking', () => {
+    const params = buildStreamOutputTopologyProbeParams({
+      ...defaultCaptureConfig,
+      recordEnabled: false,
+      streamEnabled: true
+    })
+    const requestKey = streamOutputTopologyProbeRequestKey(params)
+    const result = {
+      capabilityKey: `stream-output-topology-v1:${'a'.repeat(64)}`,
+      streamProfile: params.streamProfile,
+      outputRoles: params.outputRoles,
+      requestedBridgeOutput: 'windows-media-foundation-h264-mpegts',
+      effectiveBridgeOutput: 'raw-yuv420p',
+      effectiveEncodeBackend: 'software-open-h264',
+      probeState: 'rejected',
+      fallbackReason: 'Hardware topology rejected this exact profile.'
+    } satisfies StreamOutputTopologyProbeResult
+
+    expect(streamOutputTopologyBlockReason({ state: 'pending', requestKey }, requestKey)).toContain(
+      'Checking'
+    )
+    expect(
+      streamOutputTopologyBlockReason(
+        { state: 'failed', requestKey, message: 'probe timed out' },
+        requestKey
+      )
+    ).toContain('probe timed out')
+    expect(
+      streamOutputTopologyBlockReason({ state: 'ready', requestKey, result }, requestKey)
+    ).toBeNull()
+
+    const splitResult = {
+      ...result,
+      recordingProfile: params.streamProfile,
+      outputRoles: ['recording', 'stream']
+    } satisfies StreamOutputTopologyProbeResult
+    expect(
+      streamOutputTopologyBlockReason(
+        { state: 'ready', requestKey, result: splitResult },
+        requestKey
+      )
+    ).toContain('Use one shared provider-safe profile')
+    expect(
+      streamOutputTopologyBlockReason(
+        { state: 'ready', requestKey: `${requestKey}:stale`, result },
+        requestKey
+      )
+    ).toContain('Checking')
+  })
+
+  it('keeps the real Go Live action blocked until its exact topology probe resolves', async () => {
+    const backend = new StudioBackend()
+    backend.entitlements = premiumEntitlements
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' && latest()?.core.health?.ffmpeg.available === true
+    )
+
+    const streamVideo = {
+      preset: 'stream-safe-1080p30' as const,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      bitrateKbps: 6000
+    }
+    const streamConfig = {
+      ...defaultCaptureConfig,
+      recordEnabled: false,
+      streamEnabled: true,
+      video: streamVideo,
+      streaming: {
+        ...defaultCaptureConfig.streaming,
+        enabled: true,
+        defaultOutputPreset: streamVideo.preset,
+        defaultBitrateKbps: streamVideo.bitrateKbps,
+        enabledTargetIds: ['youtube'],
+        targets: defaultCaptureConfig.streaming.targets.map((target) =>
+          target.id === 'youtube'
+            ? {
+                ...target,
+                enabled: true,
+                streamKey: 'secret-test-key',
+                streamKeyPresent: false,
+                status: { state: 'ready' as const }
+              }
+            : target
+        )
+      }
+    }
+    const topologyParams = buildStreamOutputTopologyProbeParams(streamConfig)
+    const topologyResult = {
+      capabilityKey: `stream-output-topology-v1:${'a'.repeat(64)}`,
+      streamProfile: topologyParams.streamProfile,
+      outputRoles: topologyParams.outputRoles,
+      requestedBridgeOutput: 'windows-media-foundation-h264-mpegts',
+      effectiveBridgeOutput: 'raw-yuv420p',
+      effectiveEncodeBackend: 'software-open-h264',
+      probeState: 'rejected',
+      fallbackReason: 'Media Foundation rejected this exact stream profile.'
+    } satisfies StreamOutputTopologyProbeResult
+    const releaseTopology = backend.deferResponse('stream.output.topology.probe', topologyResult)
+
+    await act(async () => {
+      latest()!.core.setCaptureConfig(streamConfig)
+    })
+    await waitForObservation(() => latest()?.core.streamOutputTopologyPreflight.state === 'pending')
+    expect(latest()?.core.startBlockedReason).toContain('Checking the exact livestream')
+
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+    expect(backend.sentCommands.some((command) => command.method === 'session.start')).toBe(false)
+
+    await act(async () => {
+      releaseTopology()
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.core.streamOutputTopologyPreflight.state === 'ready')
+
+    expect(latest()?.core.streamOutputTopologyPreflight).toMatchObject({
+      state: 'ready',
+      result: {
+        effectiveBridgeOutput: 'raw-yuv420p',
+        effectiveEncodeBackend: 'software-open-h264',
+        fallbackReason: 'Media Foundation rejected this exact stream profile.'
+      }
+    })
+    expect(latest()?.core.startBlockedReason).toBeNull()
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'stream.output.topology.probe')
+    ).toHaveLength(1)
+    expect(
+      JSON.stringify(
+        backend.sentCommands.find((command) => command.method === 'stream.output.topology.probe')
+          ?.params
+      ).toLowerCase()
+    ).not.toMatch(/streamkey|serverurl|oauth|accesstoken|refreshtoken/)
   })
 
   it('coalesces duplicate session-detail refreshes and settles a retryable error', async () => {

@@ -1,7 +1,7 @@
 // First-frame contract for the detached native preview (Definitive Fix Plan P2).
 //
 // From the moment the preview window opens, the app OWES the user one of three
-// outcomes within budget: a native CAMetalLayer frame of the app's committed
+// outcomes within budget: a platform-native frame of the app's committed
 // scene, a self-heal that gets there, or a declared fallback with the exact
 // blocked link. "Waiting for preview" forever is not an outcome.
 //
@@ -9,6 +9,9 @@
 // snapshot of the chain each tick, it says whether the contract is met, which
 // healing action to fire next, and the truthful reason string for the preview
 // window's waiting hint. index.ts owns the timers and executes the actions.
+
+import type { PreviewSurfaceStatus } from '../shared/backend'
+import { isWindowsD3d11PreviewCapability } from '../shared/native-preview-capability'
 
 export interface FirstFrameSnapshot {
   elapsedMs: number
@@ -64,13 +67,60 @@ export function nativePreviewFirstFrameWatchdogEnabled(platform: NodeJS.Platform
   return platform === 'darwin'
 }
 
-export function nativePreviewProofWatchdogEnabled(platform: NodeJS.Platform): boolean {
-  return platform === 'win32'
+export function nativePreviewProofWatchdogEnabled(
+  platform: NodeJS.Platform,
+  status?: Pick<PreviewSurfaceStatus, 'transport' | 'backing' | 'nativePreviewHostKind'>
+): boolean {
+  return platform === 'win32' && (!status || !isWindowsD3d11PreviewCapability(status, platform))
 }
 
 export const DEFAULT_PROOF_SOURCE_FRAME_STALE_MS = 1500
 export const DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS = 15_000
 export const DEFAULT_PROOF_WATCHDOG_READ_TIMEOUT_MS = 500
+export const DEFAULT_D3D11_FIRST_PRESENT_TIMEOUT_MS = 15_000
+
+export type WindowsD3d11FirstPresentAssessment = 'not-applicable' | 'pending' | 'met' | 'fallback'
+
+/**
+ * Windows native truth starts only after the backend-owned presenter has both
+ * completed a swap-chain present and confirmed live source pixels. The BMP
+ * proof fallback remains separate and can never satisfy this contract.
+ */
+export function assessWindowsD3d11FirstPresent(params: {
+  status: Pick<
+    PreviewSurfaceStatus,
+    | 'state'
+    | 'transport'
+    | 'backing'
+    | 'nativePreviewHostKind'
+    | 'nativePreviewHostAttached'
+    | 'sourcePixelsPresent'
+    | 'presentedFrameId'
+    | 'firstFrameContract'
+  >
+  elapsedMs: number
+  timeoutMs?: number
+}): WindowsD3d11FirstPresentAssessment {
+  if (!isWindowsD3d11PreviewCapability(params.status, 'win32')) {
+    return 'not-applicable'
+  }
+  if (params.status.firstFrameContract === 'fallback') {
+    return 'fallback'
+  }
+  if (
+    params.status.state === 'live' &&
+    params.status.nativePreviewHostAttached === true &&
+    params.status.sourcePixelsPresent === true &&
+    typeof params.status.presentedFrameId === 'number' &&
+    Number.isSafeInteger(params.status.presentedFrameId) &&
+    params.status.presentedFrameId > 0
+  ) {
+    return 'met'
+  }
+  return params.elapsedMs >= (params.timeoutMs ?? DEFAULT_D3D11_FIRST_PRESENT_TIMEOUT_MS)
+    ? 'fallback'
+    : 'pending'
+}
 
 export type ProofSourceFrameAssessment = 'not-applicable' | 'paused' | 'pending' | 'met' | 'stalled'
 

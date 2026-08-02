@@ -19,10 +19,13 @@ const BASIC_STREAMING_MAX_HEIGHT: u32 = 1080;
 const BASIC_STREAMING_MAX_FPS: u32 = 30;
 const BASIC_STREAMING_MAX_BITRATE_KBPS: u32 = 6000;
 const BASIC_STREAMING_MAX_DESTINATIONS: u32 = 1;
-// Premium streams up to 4K30 (the YouTube 4K30 preset); basic stays HD.
+// Premium streams up to the supported 1080p60 profiles and 4K30; Basic stays
+// at one 1080p30 destination. The rectangular 4K×60 entitlement ceiling does
+// not make 4K60 a supported stream profile — recording validation still
+// rejects it.
 const PREMIUM_STREAMING_MAX_WIDTH: u32 = 3840;
 const PREMIUM_STREAMING_MAX_HEIGHT: u32 = 2160;
-const PREMIUM_STREAMING_MAX_FPS: u32 = 30;
+const PREMIUM_STREAMING_MAX_FPS: u32 = 60;
 const PREMIUM_STREAMING_MAX_BITRATE_KBPS: u32 = 30_000;
 const PREMIUM_STREAMING_MAX_DESTINATIONS: u32 = 3;
 
@@ -492,13 +495,13 @@ mod tests {
     }
 
     #[test]
-    fn premium_streaming_allows_4k30_and_basic_stays_hd() {
+    fn premium_streaming_allows_supported_1080p60_and_4k30_while_basic_stays_hd() {
         let basic = basic_entitlements();
         let premium = premium_entitlements(EntitlementSource::Creem);
 
         assert_eq!(premium.limits.streaming.max_width, 3840);
         assert_eq!(premium.limits.streaming.max_height, 2160);
-        assert_eq!(premium.limits.streaming.max_fps, 30);
+        assert_eq!(premium.limits.streaming.max_fps, 60);
         assert_eq!(premium.limits.streaming.max_bitrate_kbps, 30_000);
         assert_eq!(basic.limits.streaming.max_height, 1080);
     }

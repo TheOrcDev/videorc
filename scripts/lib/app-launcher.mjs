@@ -10,7 +10,7 @@
 // still use the normal app data path unless a smoke explicitly opts into this helper.
 
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, realpathSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -31,37 +31,107 @@ export function performanceAppSpawnSpec(env = process.env) {
   return { command, args: [], cwd: dirname(command) }
 }
 
-export function resolveSmokeAppDirs({ env = {}, statePrefix = 'videorc-smoke' } = {}) {
+export function windowsAcceptanceProfileDir({
+  env = {},
+  platform = process.platform,
+  ownerProbe = windowsPathOwnerProbe
+} = {}) {
+  const configured = explicitSmokeEnvValue(env, 'VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR')
+  if (!configured) return undefined
+
+  if (env.VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED !== '1') {
+    throw new Error(
+      'VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR is acceptance-only and requires VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED=1.'
+    )
+  }
+  if (platform !== 'win32') {
+    throw new Error('VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR is supported only on Windows.')
+  }
+  if (!isAbsolute(configured)) {
+    throw new Error('VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR must be absolute.')
+  }
+
+  const profileDir = realpathSync(resolve(configured))
+  if (!statSync(profileDir).isDirectory()) {
+    throw new Error('VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR must name an existing directory.')
+  }
+
+  const evidenceValue =
+    explicitSmokeEnvValue(env, 'VIDEORC_WINDOWS_ACCEPTANCE_DIR') ??
+    explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_OUTPUT_DIR')
+  if (!evidenceValue || !isAbsolute(evidenceValue)) {
+    throw new Error(
+      'A preserved acceptance profile requires an absolute VIDEORC_WINDOWS_ACCEPTANCE_DIR or VIDEORC_SMOKE_OUTPUT_DIR.'
+    )
+  }
+  const evidenceDir = realpathSync(resolve(evidenceValue))
+  if (pathsOverlap(profileDir, evidenceDir)) {
+    throw new Error(
+      'VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR must be outside the acceptance evidence directory.'
+    )
+  }
+
+  const ownership = ownerProbe(profileDir)
+  const current = ownership?.current?.trim().toLocaleLowerCase('en-US')
+  const owner = ownership?.owner?.trim().toLocaleLowerCase('en-US')
+  if (!current || !owner || current !== owner) {
+    throw new Error(
+      'VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR must be owned by the current Windows user.'
+    )
+  }
+  return profileDir
+}
+
+export function resolveSmokeAppDirs({
+  env = {},
+  statePrefix = 'videorc-smoke',
+  platform = process.platform,
+  ownerProbe
+} = {}) {
+  const acceptanceProfileDir = windowsAcceptanceProfileDir({ env, platform, ownerProbe })
   const stateDir =
     explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_STATE_DIR') ??
     explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_OUTPUT_DIR')
   const appDataDir =
-    explicitSmokeEnvValue(env, 'VIDEORC_APP_DATA_DIR') ??
-    (stateDir
-      ? join(resolve(stateDir), 'app-data')
-      : mkdtempSync(join(tmpdir(), `${statePrefix}-app-data-`)))
+    acceptanceProfileDir === undefined
+      ? (explicitSmokeEnvValue(env, 'VIDEORC_APP_DATA_DIR') ??
+        (stateDir
+          ? join(resolve(stateDir), 'app-data')
+          : mkdtempSync(join(tmpdir(), `${statePrefix}-app-data-`))))
+      : join(acceptanceProfileDir, 'app-data')
   const userDataDir =
-    explicitSmokeEnvValue(env, 'VIDEORC_USER_DATA_DIR') ??
-    (stateDir
-      ? join(resolve(stateDir), 'user-data')
-      : mkdtempSync(join(tmpdir(), `${statePrefix}-user-data-`)))
+    acceptanceProfileDir === undefined
+      ? (explicitSmokeEnvValue(env, 'VIDEORC_USER_DATA_DIR') ??
+        (stateDir
+          ? join(resolve(stateDir), 'user-data')
+          : mkdtempSync(join(tmpdir(), `${statePrefix}-user-data-`))))
+      : join(acceptanceProfileDir, 'user-data')
   return { appDataDir, userDataDir }
 }
 
 export function smokeAppEnv(env = {}, options = {}) {
+  const acceptanceProfileDir = windowsAcceptanceProfileDir({
+    env,
+    platform: options.platform,
+    ownerProbe: options.ownerProbe
+  })
   const { appDataDir, userDataDir } = resolveSmokeAppDirs({
     env,
-    statePrefix: options.statePrefix
+    statePrefix: options.statePrefix,
+    platform: options.platform,
+    ownerProbe: options.ownerProbe
   })
   const explicitStateDir = explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_STATE_DIR')
   const explicitOutputDir = explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_OUTPUT_DIR')
-  const isolationRoots = Array.from(
-    new Set(
-      [explicitStateDir, explicitOutputDir, appDataDir, userDataDir]
-        .filter(Boolean)
-        .map((path) => resolve(path))
-    )
-  )
+  const isolationRoots = acceptanceProfileDir
+    ? [acceptanceProfileDir]
+    : Array.from(
+        new Set(
+          [explicitStateDir, explicitOutputDir, appDataDir, userDataDir]
+            .filter(Boolean)
+            .map((path) => resolve(path))
+        )
+      )
   const result = {
     ...process.env,
     ...env,
@@ -123,6 +193,40 @@ function isPathInsideAnyRoot(candidate, roots) {
       !isAbsolute(relativePath)
     )
   })
+}
+
+function pathsOverlap(left, right) {
+  const leftPath = resolve(left)
+  const rightPath = resolve(right)
+  if (leftPath === rightPath) return true
+  return isPathInsideOrEqual(leftPath, rightPath) || isPathInsideOrEqual(rightPath, leftPath)
+}
+
+function isPathInsideOrEqual(candidate, root) {
+  const relativePath = relative(resolve(root), resolve(candidate))
+  return (
+    relativePath === '' ||
+    (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
+  )
+}
+
+function windowsPathOwnerProbe(path) {
+  const literalPath = path.replaceAll("'", "''")
+  const script =
+    `$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().Name;` +
+    `$owner=(Get-Acl -LiteralPath '${literalPath}').Owner;` +
+    `[Console]::Out.Write($current + [Environment]::NewLine + $owner)`
+  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  const output = execFileSync(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+    {
+      encoding: 'utf8',
+      windowsHide: true
+    }
+  )
+  const [current, owner] = output.trim().split(/\r?\n/, 2)
+  return { current, owner }
 }
 
 function explicitSmokeEnvValue(env, name) {
@@ -338,6 +442,7 @@ export async function stopProcess(child, beforeStopOrOptions, maybeOptions) {
       childExited: true,
       processGroupExited: true,
       escalated: false,
+      forced: false,
       signals: []
     }
   }
@@ -348,7 +453,13 @@ export async function stopProcess(child, beforeStopOrOptions, maybeOptions) {
     childExited: isChildExited(child),
     processGroupExited: !options.processGroupExists(pid),
     escalated: false,
+    forced: false,
     signals: []
+  }
+
+  if (result.childExited && result.processGroupExited) {
+    result.state = 'skipped'
+    return result
   }
 
   options.beforeStop?.()
@@ -368,9 +479,11 @@ export async function stopProcess(child, beforeStopOrOptions, maybeOptions) {
   result.processGroupExited = !options.processGroupExists(pid)
   result.state =
     result.childExited && result.processGroupExited
-      ? result.escalated
-        ? 'killed'
-        : 'terminated'
+      ? result.forced
+        ? 'force-terminated'
+        : result.escalated
+          ? 'killed'
+          : 'terminated'
       : 'leaked'
 
   if (result.state === 'leaked' && options.throwOnLeak) {
@@ -443,7 +556,10 @@ async function finishForcedStop({ child, pid, result, options }) {
 
 function sendStopSignal({ child, pid, signal, result, signalProcessGroup }) {
   result.signals.push(signal)
-  signalProcessGroup(pid, child, signal)
+  const signalResult = signalProcessGroup(pid, child, signal)
+  if (signalResult === true || signalResult?.forced === true) {
+    result.forced = true
+  }
 }
 
 function isChildExited(child) {
@@ -459,6 +575,7 @@ function signalProcessGroup(pid, child, sig) {
     // left to walk, orphaning electron/cargo/backend (observed 2026-07-08).
     try {
       execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+      return { forced: true }
     } catch {
       try {
         child?.kill(sig)
@@ -466,7 +583,7 @@ function signalProcessGroup(pid, child, sig) {
         // Nothing left to signal.
       }
     }
-    return
+    return { forced: false }
   }
   try {
     process.kill(-pid, sig)
@@ -477,6 +594,7 @@ function signalProcessGroup(pid, child, sig) {
       // Nothing left to signal.
     }
   }
+  return { forced: false }
 }
 
 function waitForChildExit(child, timeoutMs) {

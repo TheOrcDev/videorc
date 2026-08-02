@@ -4,13 +4,19 @@
 //! Windows capture path submits retained D3D11 textures without a CPU readback.
 
 use std::collections::VecDeque;
+use std::fmt;
+use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ptr;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use windows::Win32::Foundation::{HMODULE, RECT, VARIANT_BOOL};
+use windows::Win32::Foundation::{E_NOTIMPL, HMODULE, RECT, VARIANT_BOOL};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VIDEO_ENCODER,
@@ -36,7 +42,8 @@ use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVEncCommonLowLatency, CODECAPI_AVEncCommonMeanBitRate,
     CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncCommonRealTime,
     CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize, ICodecAPI, IMF2DBuffer2,
-    IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFSample,
+    IMFActivate, IMFAsyncCallback, IMFAsyncCallback_Impl, IMFAsyncResult, IMFAttributes,
+    IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFSample, IMFTrackedSample,
     IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
     MF_E_NO_EVENTS_AVAILABLE, MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
     MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
@@ -44,17 +51,17 @@ use windows::Win32::Media::MediaFoundation::{
     MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
     MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC,
     MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MF2DBuffer_LockFlags_Write, MFCreate2DMediaBuffer,
-    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer,
-    MFCreateSample, MFMediaType_Video, MFNominalRange_16_235, MFSTARTUP_FULL, MFShutdown,
-    MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG,
-    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute,
-    MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264,
-    MFVideoFormat_I420, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709,
-    MFVideoTransFunc_709, MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR,
-    eAVEncH264VProfile_High,
+    MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFCreateTrackedSample, MFMediaType_Video,
+    MFNominalRange_16_235, MFSTARTUP_FULL, MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER,
+    MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+    MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+    MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_I420, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoTransFunc_709,
+    MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_High,
 };
 use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -62,14 +69,71 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Variant::{
     VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_UI4,
 };
-use windows::core::{IUnknown, Interface};
+use windows::core::{ComObject, GUID, IUnknown, Interface, Ref};
 
 use crate::frame_store::RetainedD3D11Texture;
+use crate::windows_d3d11_device::WindowsD3d11Device;
+use crate::windows_d3d11_encoder_contract::{
+    WindowsD3d11EncoderContractErrorCode, WindowsD3d11EncoderDiagnostics,
+    WindowsD3d11EncoderLeaseRelease, WindowsD3d11EncoderOwnershipState,
+    WindowsD3d11EncoderReleaseCallback, WindowsD3d11EncoderReleaseDisposition,
+    WindowsD3d11EncoderRole, WindowsD3d11EncoderSubmissionMetadata, WindowsD3d11EncoderWaitStatus,
+};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const EVENT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const D3D11_INPUT_SURFACE_COUNT: usize = 4;
+const TRACKED_SAMPLE_CALLBACK_QUEUE_MULTIPLIER: usize = 4;
+const TRACKED_SAMPLE_GENERATION_KEY: GUID = GUID::from_u128(0xc243c261_ba33_46fd_b45f_3b03013c26d1);
+const TRACKED_SAMPLE_ROLE_KEY: GUID = GUID::from_u128(0x1d73f584_e106_457a_b3f6_b237f8770db4);
+const TRACKED_SAMPLE_LEASE_KEY: GUID = GUID::from_u128(0x066587c6_6714_4d93_882e_87c573b2ae63);
+
+#[windows::core::implement(IMFAsyncCallback)]
+struct TrackedSampleReleaseCallback {
+    sender: SyncSender<WindowsD3d11EncoderReleaseCallback>,
+    decode_failures: Arc<AtomicU64>,
+    queue_failures: Arc<AtomicU64>,
+}
+
+#[allow(non_snake_case)]
+impl IMFAsyncCallback_Impl for TrackedSampleReleaseCallback_Impl {
+    fn GetParameters(&self, _flags: *mut u32, _queue: *mut u32) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn Invoke(&self, result: Ref<IMFAsyncResult>) -> windows::core::Result<()> {
+        let decoded = (|| {
+            let result = result.as_ref()?;
+            let state = unsafe { result.GetState().ok()? };
+            let attributes: IMFAttributes = state.cast().ok()?;
+            let generation = unsafe { attributes.GetUINT64(&TRACKED_SAMPLE_GENERATION_KEY).ok()? };
+            let role_value = unsafe { attributes.GetUINT64(&TRACKED_SAMPLE_ROLE_KEY).ok()? };
+            let role = match role_value {
+                1 => WindowsD3d11EncoderRole::Record,
+                2 => WindowsD3d11EncoderRole::Stream,
+                _ => return None,
+            };
+            let lease_id = unsafe { attributes.GetUINT64(&TRACKED_SAMPLE_LEASE_KEY).ok()? };
+            Some(WindowsD3d11EncoderReleaseCallback {
+                generation,
+                role,
+                lease_id,
+            })
+        })();
+        let Some(callback) = decoded else {
+            self.decode_failures.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        };
+        match self.sender.try_send(callback) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                self.queue_failures.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MediaFoundationInputSubtype {
@@ -230,6 +294,123 @@ struct D3D11ProcessorConfig {
     output_width: u32,
     output_height: u32,
     fps: u32,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MediaFoundationD3d11EncoderProgress {
+    pub(crate) encoded_frames: Vec<MediaFoundationEncodedFrame>,
+    pub(crate) released_leases: Vec<WindowsD3d11EncoderLeaseRelease>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MediaFoundationD3d11EncoderDiagnostics {
+    pub(crate) adapter_luid: u64,
+    pub(crate) d3d11_aware: bool,
+    pub(crate) dxgi_manager_bound: bool,
+    pub(crate) callback_decode_failures: u64,
+    pub(crate) callback_queue_failures: u64,
+    pub(crate) ownership: WindowsD3d11EncoderDiagnostics,
+}
+
+#[derive(Debug)]
+pub(crate) struct MediaFoundationD3d11SubmissionFailure {
+    pub(crate) release: WindowsD3d11EncoderLeaseRelease,
+    pub(crate) progress: MediaFoundationD3d11EncoderProgress,
+    pub(crate) kind: MediaFoundationD3d11SubmissionFailureKind,
+    error: anyhow::Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaFoundationD3d11SubmissionFailureKind {
+    Backpressure,
+    Rejected,
+}
+
+impl MediaFoundationD3d11SubmissionFailure {
+    fn new(
+        metadata: WindowsD3d11EncoderSubmissionMetadata,
+        progress: MediaFoundationD3d11EncoderProgress,
+        error: anyhow::Error,
+    ) -> Self {
+        Self {
+            release: lease_release(metadata),
+            progress,
+            kind: MediaFoundationD3d11SubmissionFailureKind::Rejected,
+            error,
+        }
+    }
+
+    fn from_contract(
+        metadata: WindowsD3d11EncoderSubmissionMetadata,
+        progress: MediaFoundationD3d11EncoderProgress,
+        error: crate::windows_d3d11_encoder_contract::WindowsD3d11EncoderContractError,
+    ) -> Self {
+        let kind = if matches!(
+            error.code,
+            WindowsD3d11EncoderContractErrorCode::NoInputCredit
+                | WindowsD3d11EncoderContractErrorCode::Backpressure
+        ) {
+            MediaFoundationD3d11SubmissionFailureKind::Backpressure
+        } else {
+            MediaFoundationD3d11SubmissionFailureKind::Rejected
+        };
+        Self {
+            release: lease_release(metadata),
+            progress,
+            kind,
+            error: anyhow!("Media Foundation D3D11 submission reservation: {error}"),
+        }
+    }
+
+    fn with_release(
+        release: WindowsD3d11EncoderLeaseRelease,
+        progress: MediaFoundationD3d11EncoderProgress,
+        error: anyhow::Error,
+    ) -> Self {
+        Self {
+            release,
+            progress,
+            kind: MediaFoundationD3d11SubmissionFailureKind::Rejected,
+            error,
+        }
+    }
+}
+
+impl fmt::Display for MediaFoundationD3d11SubmissionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.error)
+    }
+}
+
+impl std::error::Error for MediaFoundationD3d11SubmissionFailure {}
+
+/// Dedicated NV12 DXGI-surface encoder. This is intentionally separate from
+/// `MediaFoundationH264Encoder`: a surface lease can never enter the I420 byte
+/// API, and successful `ProcessInput` transfers recycling authority solely to
+/// the tracked-sample release callback.
+#[allow(dead_code)]
+pub(crate) struct MediaFoundationD3d11H264Encoder {
+    config: MediaFoundationEncoderConfig,
+    activation: ManuallyDrop<IMFActivate>,
+    transform: ManuallyDrop<IMFTransform>,
+    events: ManuallyDrop<IMFMediaEventGenerator>,
+    device_manager: ManuallyDrop<IMFDXGIDeviceManager>,
+    authority_device: ManuallyDrop<IUnknown>,
+    release_callback: ManuallyDrop<IMFAsyncCallback>,
+    release_receiver: Receiver<WindowsD3d11EncoderReleaseCallback>,
+    callback_decode_failures: Arc<AtomicU64>,
+    callback_queue_failures: Arc<AtomicU64>,
+    identity: String,
+    adapter_luid: u64,
+    ownership: WindowsD3d11EncoderOwnershipState,
+    sequence_header: Vec<u8>,
+    submitted_pts: VecDeque<i64>,
+    last_output_pts: Option<i64>,
+    started_at: Instant,
+    drained: bool,
+    mf_started: bool,
+    com_started: bool,
+    _thread_affinity: PhantomData<Rc<()>>,
 }
 
 impl MediaFoundationH264Encoder {
@@ -1696,6 +1877,908 @@ fn pixel_rect_to_win32(rect: crate::scene_geometry::PixelRect) -> Result<RECT> {
     })
 }
 
+#[allow(dead_code)]
+impl MediaFoundationD3d11H264Encoder {
+    /// Creates an NV12-only hardware encoder on the D3D11 media authority
+    /// thread. `authority` is also installed into the MFT's DXGI device
+    /// manager, so an encoder cannot silently use a second D3D11 device.
+    pub(crate) fn new_on_media_thread(
+        config: MediaFoundationEncoderConfig,
+        authority: &WindowsD3d11Device,
+        generation: u64,
+        role: WindowsD3d11EncoderRole,
+        in_flight_capacity: usize,
+    ) -> Result<Self> {
+        config.validate()?;
+        // Validate the pure ownership contract before initializing COM/MF.
+        WindowsD3d11EncoderOwnershipState::new(generation, role, in_flight_capacity)?;
+        let adapter_luid = authority.adapter_luid().as_u64();
+        let authority_device: IUnknown = authority
+            .raw_device()
+            .cast()
+            .context("D3D11 authority device did not expose IUnknown")?;
+        let profile = config.profile_label();
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+            if hr.is_err() {
+                return Err(stage_error(
+                    "d3d11-com-initialize",
+                    hr,
+                    "<not-enumerated>",
+                    Some(MediaFoundationInputSubtype::Nv12),
+                    &profile,
+                ));
+            }
+            if let Err(error) = MFStartup(MF_VERSION, MFSTARTUP_FULL) {
+                CoUninitialize();
+                return Err(stage_windows_error(
+                    "d3d11-mf-startup",
+                    &error,
+                    "<not-enumerated>",
+                    Some(MediaFoundationInputSubtype::Nv12),
+                    &profile,
+                ));
+            }
+        }
+
+        let result = Self::create_after_startup(
+            config.clone(),
+            authority_device,
+            adapter_luid,
+            generation,
+            role,
+            in_flight_capacity,
+            true,
+            true,
+        );
+        if result.is_err() {
+            unsafe {
+                let _ = MFShutdown();
+                CoUninitialize();
+            }
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_after_startup(
+        config: MediaFoundationEncoderConfig,
+        authority_device: IUnknown,
+        adapter_luid: u64,
+        generation: u64,
+        role: WindowsD3d11EncoderRole,
+        in_flight_capacity: usize,
+        com_started: bool,
+        mf_started: bool,
+    ) -> Result<Self> {
+        let profile = config.profile_label();
+        let activations = enumerate_hardware_h264_activations(&profile)?;
+        let mut failures = Vec::new();
+        for activation in activations {
+            let identity = activation_name(&activation)
+                .unwrap_or_else(|_| "<unnamed hardware H.264 MFT>".to_string());
+            match unsafe { activation.ActivateObject::<IMFTransform>() } {
+                Ok(transform) => match Self::configure_transform(
+                    config.clone(),
+                    activation,
+                    transform,
+                    identity.clone(),
+                    authority_device.clone(),
+                    adapter_luid,
+                    generation,
+                    role,
+                    in_flight_capacity,
+                    com_started,
+                    mf_started,
+                ) {
+                    Ok(encoder) => return Ok(encoder),
+                    Err(error) => failures.push(error.to_string()),
+                },
+                Err(error) => failures.push(
+                    stage_windows_error(
+                        "d3d11-activate",
+                        &error,
+                        &identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                        &profile,
+                    )
+                    .to_string(),
+                ),
+            }
+        }
+        bail!(
+            "Media Foundation NV12 DXGI-surface probe rejected every hardware activation for {profile}: {}",
+            failures.join(" | ")
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn configure_transform(
+        config: MediaFoundationEncoderConfig,
+        activation: IMFActivate,
+        transform: IMFTransform,
+        identity: String,
+        authority_device: IUnknown,
+        adapter_luid: u64,
+        generation: u64,
+        role: WindowsD3d11EncoderRole,
+        in_flight_capacity: usize,
+        com_started: bool,
+        mf_started: bool,
+    ) -> Result<Self> {
+        let profile = config.profile_label();
+        let attributes = unsafe {
+            transform.GetAttributes().map_err(|error| {
+                stage_windows_error(
+                    "d3d11-get-transform-attributes",
+                    &error,
+                    &identity,
+                    Some(MediaFoundationInputSubtype::Nv12),
+                    &profile,
+                )
+            })?
+        };
+        ensure!(
+            unsafe { attributes.GetUINT32(&MF_TRANSFORM_ASYNC) }.unwrap_or(0) != 0,
+            "Media Foundation probe stage=d3d11-async-contract encoder={identity:?} input=NV12 profile={profile}: hardware activation did not advertise an asynchronous MFT"
+        );
+        ensure!(
+            unsafe { attributes.GetUINT32(&MF_SA_D3D11_AWARE) }.unwrap_or(0) != 0,
+            "Media Foundation probe stage=d3d11-aware encoder={identity:?} input=NV12 profile={profile}: activation is not D3D11-aware"
+        );
+        unsafe {
+            attributes
+                .SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)
+                .map_err(|error| {
+                    stage_windows_error(
+                        "d3d11-async-unlock",
+                        &error,
+                        &identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                        &profile,
+                    )
+                })?;
+            let _ = attributes.SetUINT32(&MF_LOW_LATENCY, u32::from(config.low_latency));
+        }
+
+        let mut reset_token = 0_u32;
+        let mut device_manager = None;
+        unsafe { MFCreateDXGIDeviceManager(&mut reset_token, &mut device_manager) }.map_err(
+            |error| {
+                stage_windows_error(
+                    "d3d11-create-device-manager",
+                    &error,
+                    &identity,
+                    Some(MediaFoundationInputSubtype::Nv12),
+                    &profile,
+                )
+            },
+        )?;
+        let device_manager =
+            device_manager.context("MFCreateDXGIDeviceManager returned no manager")?;
+        unsafe {
+            device_manager
+                .ResetDevice(&authority_device, reset_token)
+                .map_err(|error| {
+                    stage_windows_error(
+                        "d3d11-reset-device-manager",
+                        &error,
+                        &identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                        &profile,
+                    )
+                })?;
+            transform
+                .ProcessMessage(
+                    MFT_MESSAGE_SET_D3D_MANAGER,
+                    Interface::as_raw(&device_manager) as usize,
+                )
+                .map_err(|error| {
+                    stage_windows_error(
+                        "d3d11-bind-device-manager",
+                        &error,
+                        &identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                        &profile,
+                    )
+                })?;
+        }
+
+        let output_type = create_video_type(
+            &config,
+            MFVideoFormat_H264,
+            Some(eAVEncH264VProfile_High.0 as u32),
+        )
+        .map_err(|error| anyhow!("Media Foundation output type for {profile}: {error}"))?;
+        unsafe {
+            transform
+                .SetOutputType(0, &output_type, 0)
+                .map_err(|error| {
+                    stage_windows_error(
+                        "d3d11-set-output-type",
+                        &error,
+                        &identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                        &profile,
+                    )
+                })?;
+        }
+        let input_type = create_video_type(&config, MFVideoFormat_NV12, None)?;
+        unsafe {
+            transform.SetInputType(0, &input_type, 0).map_err(|error| {
+                stage_windows_error(
+                    "d3d11-set-nv12-input-type",
+                    &error,
+                    &identity,
+                    Some(MediaFoundationInputSubtype::Nv12),
+                    &profile,
+                )
+            })?;
+        }
+        configure_codec_api(
+            &transform,
+            &config,
+            &identity,
+            MediaFoundationInputSubtype::Nv12,
+        )?;
+        let events: IMFMediaEventGenerator = transform.cast().map_err(|error| {
+            stage_windows_error(
+                "d3d11-event-generator",
+                &error,
+                &identity,
+                Some(MediaFoundationInputSubtype::Nv12),
+                &profile,
+            )
+        })?;
+        unsafe {
+            transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+                .map_err(|error| {
+                    stage_windows_error(
+                        "d3d11-begin-streaming",
+                        &error,
+                        &identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                        &profile,
+                    )
+                })?;
+            transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+                .map_err(|error| {
+                    stage_windows_error(
+                        "d3d11-start-stream",
+                        &error,
+                        &identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                        &profile,
+                    )
+                })?;
+        }
+
+        let callback_capacity = in_flight_capacity
+            .saturating_mul(TRACKED_SAMPLE_CALLBACK_QUEUE_MULTIPLIER)
+            .max(1);
+        let (release_sender, release_receiver) = sync_channel(callback_capacity);
+        let callback_decode_failures = Arc::new(AtomicU64::new(0));
+        let callback_queue_failures = Arc::new(AtomicU64::new(0));
+        let release_callback: IMFAsyncCallback = ComObject::new(TrackedSampleReleaseCallback {
+            sender: release_sender,
+            decode_failures: Arc::clone(&callback_decode_failures),
+            queue_failures: Arc::clone(&callback_queue_failures),
+        })
+        .into_interface();
+        let sequence_header = media_type_sequence_header(&output_type).unwrap_or_default();
+        Ok(Self {
+            config,
+            activation: ManuallyDrop::new(activation),
+            transform: ManuallyDrop::new(transform),
+            events: ManuallyDrop::new(events),
+            device_manager: ManuallyDrop::new(device_manager),
+            authority_device: ManuallyDrop::new(authority_device),
+            release_callback: ManuallyDrop::new(release_callback),
+            release_receiver,
+            callback_decode_failures,
+            callback_queue_failures,
+            identity,
+            adapter_luid,
+            ownership: WindowsD3d11EncoderOwnershipState::new(
+                generation,
+                role,
+                in_flight_capacity,
+            )?,
+            sequence_header,
+            submitted_pts: VecDeque::new(),
+            last_output_pts: None,
+            started_at: Instant::now(),
+            drained: false,
+            mf_started,
+            com_started,
+            _thread_affinity: PhantomData,
+        })
+    }
+
+    pub(crate) fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    pub(crate) fn diagnostics(&self) -> MediaFoundationD3d11EncoderDiagnostics {
+        MediaFoundationD3d11EncoderDiagnostics {
+            adapter_luid: self.adapter_luid,
+            d3d11_aware: true,
+            dxgi_manager_bound: true,
+            callback_decode_failures: self.callback_decode_failures.load(Ordering::Relaxed),
+            callback_queue_failures: self.callback_queue_failures.load(Ordering::Relaxed),
+            ownership: self.ownership.diagnostics(),
+        }
+    }
+
+    pub(crate) fn pending_frame_count(&self) -> usize {
+        self.submitted_pts.len()
+    }
+
+    /// Submits one texture-backed NV12 sample. Every rejection includes the
+    /// explicit unsubmitted lease release. Once `ProcessInput` succeeds, this
+    /// method drops every application-held sample/interface reference; only the
+    /// IMFTrackedSample allocator callback may return that lease.
+    pub(crate) fn submit_nv12_texture(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        metadata: WindowsD3d11EncoderSubmissionMetadata,
+    ) -> std::result::Result<
+        MediaFoundationD3d11EncoderProgress,
+        MediaFoundationD3d11SubmissionFailure,
+    > {
+        self.submit_nv12_texture_with_credit_policy(texture, metadata, true)
+    }
+
+    /// Reactor-safe variant of [`Self::submit_nv12_texture`]. This collects
+    /// already-queued MFT events but never waits for a future NeedInput event.
+    /// A missing credit is returned as an explicit unsubmitted lease so the
+    /// single D3D11 media thread cannot stall capture, composition, preview, or
+    /// the other encoder role.
+    pub(crate) fn try_submit_nv12_texture(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        metadata: WindowsD3d11EncoderSubmissionMetadata,
+    ) -> std::result::Result<
+        MediaFoundationD3d11EncoderProgress,
+        MediaFoundationD3d11SubmissionFailure,
+    > {
+        self.submit_nv12_texture_with_credit_policy(texture, metadata, false)
+    }
+
+    fn submit_nv12_texture_with_credit_policy(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        metadata: WindowsD3d11EncoderSubmissionMetadata,
+        wait_for_future_credit: bool,
+    ) -> std::result::Result<
+        MediaFoundationD3d11EncoderProgress,
+        MediaFoundationD3d11SubmissionFailure,
+    > {
+        let mut progress = MediaFoundationD3d11EncoderProgress::default();
+        if self.drained {
+            return Err(MediaFoundationD3d11SubmissionFailure::new(
+                metadata,
+                progress,
+                anyhow!(
+                    "Media Foundation NV12 DXGI encoder {:?} was already drained",
+                    self.identity
+                ),
+            ));
+        }
+        if let Err(error) = self.validate_nv12_surface(texture) {
+            return Err(MediaFoundationD3d11SubmissionFailure::new(
+                metadata, progress, error,
+            ));
+        }
+        let credit_result = if wait_for_future_credit {
+            self.wait_for_input_credit(EVENT_TIMEOUT, &mut progress)
+        } else {
+            self.drain_release_callbacks(&mut progress);
+            self.collect_available_events(&mut progress)
+        };
+        if let Err(error) = credit_result {
+            return Err(MediaFoundationD3d11SubmissionFailure::new(
+                metadata, progress, error,
+            ));
+        }
+        if let Err(error) = self.ownership.reserve_submission(metadata) {
+            return Err(MediaFoundationD3d11SubmissionFailure::from_contract(
+                metadata, progress, error,
+            ));
+        }
+        let (tracked_sample, sample) = match self.create_tracked_input_sample(texture, metadata) {
+            Ok(sample) => sample,
+            Err(error) => {
+                let release = self
+                    .ownership
+                    .fail_process_input(metadata.lease_id)
+                    .unwrap_or_else(|_| lease_release(metadata));
+                return Err(MediaFoundationD3d11SubmissionFailure::with_release(
+                    release, progress, error,
+                ));
+            }
+        };
+        let process_result = unsafe { self.transform.ProcessInput(0, &sample, 0) };
+        if let Err(error) = process_result {
+            let release = self
+                .ownership
+                .fail_process_input(metadata.lease_id)
+                .unwrap_or_else(|_| lease_release(metadata));
+            // The callback may run after these final application references are
+            // dropped. The reservation has already been removed, so that late
+            // callback is counted/ignored and cannot double-return the lease.
+            drop(sample);
+            drop(tracked_sample);
+            self.drain_release_callbacks(&mut progress);
+            return Err(MediaFoundationD3d11SubmissionFailure::with_release(
+                release,
+                progress,
+                stage_windows_error(
+                    "d3d11-process-input",
+                    &error,
+                    &self.identity,
+                    Some(MediaFoundationInputSubtype::Nv12),
+                    &self.config.profile_label(),
+                ),
+            ));
+        }
+        self.ownership
+            .commit_process_input(metadata.lease_id)
+            .expect("successful ProcessInput must have one reserved lease");
+        self.submitted_pts.push_back(metadata.input_pts_100ns);
+        // This is the ownership transfer point. No sample, buffer, attributes,
+        // texture, or tracked-sample COM reference remains in application code.
+        drop(sample);
+        drop(tracked_sample);
+        self.drain_release_callbacks(&mut progress);
+        Ok(progress)
+    }
+
+    pub(crate) const fn is_drained(&self) -> bool {
+        self.drained
+    }
+
+    pub(crate) fn poll(&mut self) -> Result<MediaFoundationD3d11EncoderProgress> {
+        let mut progress = MediaFoundationD3d11EncoderProgress::default();
+        self.drain_release_callbacks(&mut progress);
+        if !self.drained {
+            self.collect_available_events(&mut progress)?;
+        }
+        self.drain_release_callbacks(&mut progress);
+        Ok(progress)
+    }
+
+    pub(crate) fn drain(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<MediaFoundationD3d11EncoderProgress> {
+        if self.drained {
+            let mut progress = MediaFoundationD3d11EncoderProgress::default();
+            self.drain_release_callbacks(&mut progress);
+            return Ok(progress);
+        }
+        let now_micros = self.now_micros();
+        self.ownership
+            .begin_drain(now_micros, duration_micros(timeout))?;
+        unsafe {
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0)
+                .map_err(|error| {
+                    stage_windows_error(
+                        "d3d11-end-of-stream",
+                        &error,
+                        &self.identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                        &self.config.profile_label(),
+                    )
+                })?;
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)
+                .map_err(|error| {
+                    stage_windows_error(
+                        "d3d11-drain-command",
+                        &error,
+                        &self.identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                        &self.config.profile_label(),
+                    )
+                })?;
+        }
+
+        let mut progress = MediaFoundationD3d11EncoderProgress::default();
+        loop {
+            self.drain_release_callbacks(&mut progress);
+            while let Some(event_type) = self.next_event()? {
+                if event_type == METransformHaveOutput.0 as u32 {
+                    progress.encoded_frames.push(self.process_one_output()?);
+                } else if event_type == METransformDrainComplete.0 as u32 {
+                    self.ownership.note_transform_drain_complete()?;
+                }
+            }
+            self.drain_release_callbacks(&mut progress);
+            match self.ownership.drain_status(self.now_micros())? {
+                WindowsD3d11EncoderWaitStatus::Complete => {
+                    ensure!(
+                        self.submitted_pts.is_empty(),
+                        "Media Foundation probe stage=d3d11-drain encoder={:?} input=NV12 profile={}: transform completed with {} pending output timestamps",
+                        self.identity,
+                        self.config.profile_label(),
+                        self.submitted_pts.len()
+                    );
+                    self.drained = true;
+                    return Ok(progress);
+                }
+                WindowsD3d11EncoderWaitStatus::Pending { .. } => {
+                    thread::sleep(EVENT_POLL_INTERVAL);
+                }
+            }
+        }
+    }
+
+    /// Flushes the MFT and then waits only for tracked-sample callbacks. A
+    /// timeout never force-recycles a lease retained by the transform.
+    pub(crate) fn flush(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Vec<WindowsD3d11EncoderLeaseRelease>> {
+        let mut progress = MediaFoundationD3d11EncoderProgress::default();
+        if self.drained {
+            self.drain_release_callbacks(&mut progress);
+            return Ok(progress.released_leases);
+        }
+        unsafe {
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)
+                .map_err(|error| {
+                    stage_windows_error(
+                        "d3d11-flush-command",
+                        &error,
+                        &self.identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                        &self.config.profile_label(),
+                    )
+                })?;
+        }
+        self.ownership
+            .begin_flush(self.now_micros(), duration_micros(timeout))?;
+        loop {
+            self.drain_release_callbacks(&mut progress);
+            match self.ownership.flush_status(self.now_micros())? {
+                WindowsD3d11EncoderWaitStatus::Complete => {
+                    self.submitted_pts.clear();
+                    self.drained = true;
+                    return Ok(progress.released_leases);
+                }
+                WindowsD3d11EncoderWaitStatus::Pending { .. } => {
+                    thread::sleep(EVENT_POLL_INTERVAL);
+                }
+            }
+        }
+    }
+
+    fn validate_nv12_surface(&self, texture: &ID3D11Texture2D) -> Result<()> {
+        let mut descriptor = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut descriptor) };
+        validate_nv12_surface_descriptor(&self.config, &descriptor)?;
+        let texture_device: ID3D11Device = unsafe { texture.GetDevice() }
+            .context("NV12 encoder surface did not expose its D3D11 device")?;
+        let texture_identity: IUnknown = texture_device
+            .cast()
+            .context("NV12 encoder surface device did not expose IUnknown")?;
+        ensure!(
+            Interface::as_raw(&texture_identity) == Interface::as_raw(&*self.authority_device),
+            "Media Foundation probe stage=d3d11-device-identity encoder={:?} input=NV12 profile={}: surface belongs to a different D3D11 device",
+            self.identity,
+            self.config.profile_label()
+        );
+        Ok(())
+    }
+
+    fn create_tracked_input_sample(
+        &self,
+        texture: &ID3D11Texture2D,
+        metadata: WindowsD3d11EncoderSubmissionMetadata,
+    ) -> Result<(IMFTrackedSample, IMFSample)> {
+        let buffer = unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, false) }
+            .context("MFCreateDXGISurfaceBuffer rejected the NV12 texture")?;
+        let tracked_sample =
+            unsafe { MFCreateTrackedSample() }.context("MFCreateTrackedSample failed")?;
+        let sample: IMFSample = tracked_sample
+            .cast()
+            .context("IMFTrackedSample did not expose IMFSample")?;
+        unsafe {
+            sample.AddBuffer(&buffer)?;
+            sample.SetSampleTime(metadata.input_pts_100ns)?;
+            sample.SetSampleDuration(metadata.duration_100ns)?;
+        }
+        let mut state = None;
+        unsafe { MFCreateAttributes(&mut state, 3) }
+            .context("tracked-sample state attribute creation failed")?;
+        let state = state.context("MFCreateAttributes returned no tracked-sample state")?;
+        unsafe {
+            state.SetUINT64(&TRACKED_SAMPLE_GENERATION_KEY, metadata.generation)?;
+            state.SetUINT64(&TRACKED_SAMPLE_ROLE_KEY, encoder_role_value(metadata.role))?;
+            state.SetUINT64(&TRACKED_SAMPLE_LEASE_KEY, metadata.lease_id)?;
+        }
+        let state_unknown: IUnknown = state
+            .cast()
+            .context("tracked-sample attributes did not expose IUnknown")?;
+        unsafe {
+            tracked_sample.SetAllocator(&*self.release_callback, &state_unknown)?;
+        }
+        drop(state_unknown);
+        drop(state);
+        drop(buffer);
+        Ok((tracked_sample, sample))
+    }
+
+    fn wait_for_input_credit(
+        &mut self,
+        timeout: Duration,
+        progress: &mut MediaFoundationD3d11EncoderProgress,
+    ) -> Result<()> {
+        if self.ownership.has_input_credit() {
+            return Ok(());
+        }
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            self.drain_release_callbacks(progress);
+            match self.next_event()? {
+                Some(event_type) if event_type == METransformNeedInput.0 as u32 => {
+                    self.ownership.note_input_credit()?;
+                    return Ok(());
+                }
+                Some(event_type) if event_type == METransformHaveOutput.0 as u32 => {
+                    progress.encoded_frames.push(self.process_one_output()?);
+                }
+                Some(_) => {}
+                None => thread::sleep(EVENT_POLL_INTERVAL),
+            }
+        }
+        bail!(
+            "Media Foundation probe stage=d3d11-need-input encoder={:?} input=NV12 profile={}: no input credit within {}ms",
+            self.identity,
+            self.config.profile_label(),
+            timeout.as_millis()
+        )
+    }
+
+    fn collect_available_events(
+        &mut self,
+        progress: &mut MediaFoundationD3d11EncoderProgress,
+    ) -> Result<()> {
+        while let Some(event_type) = self.next_event()? {
+            if event_type == METransformHaveOutput.0 as u32 {
+                progress.encoded_frames.push(self.process_one_output()?);
+            } else if event_type == METransformNeedInput.0 as u32 {
+                self.ownership.note_input_credit()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn next_event(&self) -> Result<Option<u32>> {
+        let event = match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
+            Ok(event) => event,
+            Err(error) if error.code() == MF_E_NO_EVENTS_AVAILABLE => return Ok(None),
+            Err(error) => {
+                return Err(stage_windows_error(
+                    "d3d11-get-event",
+                    &error,
+                    &self.identity,
+                    Some(MediaFoundationInputSubtype::Nv12),
+                    &self.config.profile_label(),
+                ));
+            }
+        };
+        let status = unsafe { event.GetStatus() }.map_err(|error| {
+            stage_windows_error(
+                "d3d11-event-status",
+                &error,
+                &self.identity,
+                Some(MediaFoundationInputSubtype::Nv12),
+                &self.config.profile_label(),
+            )
+        })?;
+        if status.is_err() {
+            return Err(stage_error(
+                "d3d11-event-status",
+                status,
+                &self.identity,
+                Some(MediaFoundationInputSubtype::Nv12),
+                &self.config.profile_label(),
+            ));
+        }
+        unsafe { event.GetType() }
+            .map_err(|error| {
+                stage_windows_error(
+                    "d3d11-event-type",
+                    &error,
+                    &self.identity,
+                    Some(MediaFoundationInputSubtype::Nv12),
+                    &self.config.profile_label(),
+                )
+            })
+            .map(Some)
+    }
+
+    fn process_one_output(&mut self) -> Result<MediaFoundationEncodedFrame> {
+        let stream_info = unsafe { self.transform.GetOutputStreamInfo(0) }.map_err(|error| {
+            stage_windows_error(
+                "d3d11-output-stream-info",
+                &error,
+                &self.identity,
+                Some(MediaFoundationInputSubtype::Nv12),
+                &self.config.profile_label(),
+            )
+        })?;
+        let transform_provides_sample = stream_info.dwFlags
+            & ((MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
+                as u32)
+            != 0;
+        let supplied_sample = if transform_provides_sample {
+            None
+        } else {
+            let sample = unsafe { MFCreateSample() }?;
+            let buffer = unsafe { MFCreateMemoryBuffer(stream_info.cbSize.max(1)) }?;
+            unsafe { sample.AddBuffer(&buffer) }?;
+            Some(sample)
+        };
+        let mut output_buffer = MFT_OUTPUT_DATA_BUFFER {
+            dwStreamID: 0,
+            pSample: ManuallyDrop::new(supplied_sample),
+            dwStatus: 0,
+            pEvents: ManuallyDrop::new(None),
+        };
+        let mut status = 0_u32;
+        let process_result = unsafe {
+            self.transform
+                .ProcessOutput(0, std::slice::from_mut(&mut output_buffer), &mut status)
+        };
+        let sample = unsafe { ManuallyDrop::take(&mut output_buffer.pSample) };
+        let _events = unsafe { ManuallyDrop::take(&mut output_buffer.pEvents) };
+        process_result.map_err(|error| {
+            stage_windows_error(
+                "d3d11-process-output",
+                &error,
+                &self.identity,
+                Some(MediaFoundationInputSubtype::Nv12),
+                &self.config.profile_label(),
+            )
+        })?;
+        let sample = sample.context("Media Foundation HaveOutput event returned no sample")?;
+        let pts = unsafe { sample.GetSampleTime() }.map_err(|error| {
+            stage_windows_error(
+                "d3d11-output-timestamp",
+                &error,
+                &self.identity,
+                Some(MediaFoundationInputSubtype::Nv12),
+                &self.config.profile_label(),
+            )
+        })?;
+        let expected_pts = self.submitted_pts.pop_front().with_context(|| {
+            format!(
+                "Media Foundation D3D11 encoder {:?} produced output without a submitted timestamp",
+                self.identity
+            )
+        })?;
+        ensure!(
+            pts == expected_pts,
+            "Media Foundation probe stage=d3d11-timestamp-order encoder={:?} input=NV12 profile={}: expected PTS {}, got {}",
+            self.identity,
+            self.config.profile_label(),
+            expected_pts,
+            pts
+        );
+        if let Some(last) = self.last_output_pts {
+            ensure!(
+                pts > last,
+                "Media Foundation probe stage=d3d11-timestamp-regression encoder={:?} input=NV12 profile={}: output PTS {} followed {}",
+                self.identity,
+                self.config.profile_label(),
+                pts,
+                last
+            );
+        }
+        self.last_output_pts = Some(pts);
+        let _ = self.ownership.note_output(pts);
+        let duration = unsafe { sample.GetSampleDuration() }
+            .unwrap_or_else(|_| scheduled_duration_100ns(0, self.config.fps).unwrap_or(1));
+        let buffer = unsafe { sample.ConvertToContiguousBuffer() }?;
+        let encoded = copy_media_buffer(&buffer)?;
+        let mut bytes = normalize_annex_b(&encoded)?;
+        if self.sequence_header.is_empty()
+            && let Ok(output_type) = unsafe { self.transform.GetOutputCurrentType(0) }
+        {
+            self.sequence_header = media_type_sequence_header(&output_type).unwrap_or_default();
+        }
+        let contains_idr = annex_b_contains_nal_type(&bytes, 5);
+        if contains_idr && !annex_b_has_parameter_sets(&bytes) {
+            ensure!(
+                annex_b_has_parameter_sets(&self.sequence_header),
+                "Media Foundation probe stage=d3d11-sequence-header encoder={:?} input=NV12 profile={}: IDR had no SPS/PPS and MF_MT_MPEG_SEQUENCE_HEADER was unusable",
+                self.identity,
+                self.config.profile_label()
+            );
+            let mut with_header = Vec::with_capacity(self.sequence_header.len() + bytes.len());
+            with_header.extend_from_slice(&self.sequence_header);
+            with_header.extend_from_slice(&bytes);
+            bytes = with_header;
+        }
+        let frame_index = frame_index_from_100ns(pts, self.config.fps)?;
+        Ok(MediaFoundationEncodedFrame {
+            frame_index,
+            pts_100ns: pts,
+            duration_100ns: duration,
+            bytes,
+        })
+    }
+
+    fn drain_release_callbacks(&mut self, progress: &mut MediaFoundationD3d11EncoderProgress) {
+        while let Ok(callback) = self.release_receiver.try_recv() {
+            if let WindowsD3d11EncoderReleaseDisposition::Released(release) =
+                self.ownership.release_callback(callback)
+            {
+                progress.released_leases.push(release);
+            }
+        }
+    }
+
+    fn now_micros(&self) -> u64 {
+        u64::try_from(self.started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+}
+
+fn encoder_role_value(role: WindowsD3d11EncoderRole) -> u64 {
+    match role {
+        WindowsD3d11EncoderRole::Record => 1,
+        WindowsD3d11EncoderRole::Stream => 2,
+    }
+}
+
+fn lease_release(
+    metadata: WindowsD3d11EncoderSubmissionMetadata,
+) -> WindowsD3d11EncoderLeaseRelease {
+    WindowsD3d11EncoderLeaseRelease {
+        generation: metadata.generation,
+        role: metadata.role,
+        lease_id: metadata.lease_id,
+    }
+}
+
+fn duration_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn validate_nv12_surface_descriptor(
+    config: &MediaFoundationEncoderConfig,
+    descriptor: &D3D11_TEXTURE2D_DESC,
+) -> Result<()> {
+    ensure!(
+        descriptor.Format == DXGI_FORMAT_NV12,
+        "Media Foundation D3D11 input requires DXGI_FORMAT_NV12, got {:?}",
+        descriptor.Format
+    );
+    ensure!(
+        descriptor.Width == config.width && descriptor.Height == config.height,
+        "Media Foundation D3D11 input expected {}x{}, got {}x{}",
+        config.width,
+        config.height,
+        descriptor.Width,
+        descriptor.Height
+    );
+    ensure!(
+        descriptor.ArraySize == 1 && descriptor.MipLevels == 1 && descriptor.SampleDesc.Count == 1,
+        "Media Foundation D3D11 input requires one non-multisampled 2D subresource (array={}, mips={}, samples={})",
+        descriptor.ArraySize,
+        descriptor.MipLevels,
+        descriptor.SampleDesc.Count
+    );
+    Ok(())
+}
+
 fn configure_codec_api(
     transform: &IMFTransform,
     config: &MediaFoundationEncoderConfig,
@@ -1805,6 +2888,47 @@ impl Drop for MediaFoundationH264Encoder {
             drop(activation);
             drop(self.d3d11_input.take());
             drop(self.d3d11_cpu_upload.take());
+            if self.mf_started {
+                let _ = MFShutdown();
+                self.mf_started = false;
+            }
+            if self.com_started {
+                CoUninitialize();
+                self.com_started = false;
+            }
+        }
+    }
+}
+
+impl Drop for MediaFoundationD3d11H264Encoder {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.drained {
+                let _ = self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+                let _ = self
+                    .transform
+                    .ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+            }
+            let activation = ManuallyDrop::take(&mut self.activation);
+            let events = ManuallyDrop::take(&mut self.events);
+            let transform = ManuallyDrop::take(&mut self.transform);
+            let device_manager = ManuallyDrop::take(&mut self.device_manager);
+            let authority_device = ManuallyDrop::take(&mut self.authority_device);
+            let release_callback = ManuallyDrop::take(&mut self.release_callback);
+            let _ = activation.ShutdownObject();
+            drop(events);
+            drop(transform);
+
+            // Transform teardown can synchronously release its final tracked
+            // samples. Apply those scalar callbacks before dropping the
+            // callback object; never synthesize releases for anything retained.
+            let mut progress = MediaFoundationD3d11EncoderProgress::default();
+            self.drain_release_callbacks(&mut progress);
+
+            drop(activation);
+            drop(device_manager);
+            drop(authority_device);
+            drop(release_callback);
             if self.mf_started {
                 let _ = MFShutdown();
                 self.mf_started = false;
@@ -2256,5 +3380,64 @@ mod tests {
         let annex_b = normalize_annex_b(&avcc).unwrap();
         assert!(annex_b_has_parameter_sets(&annex_b));
         assert!(annex_b_contains_nal_type(&annex_b, 5));
+    }
+
+    #[test]
+    fn windows_d3d11_encoder_surface_descriptor_is_nv12_only() {
+        let config = MediaFoundationEncoderConfig {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: 9_000,
+            low_latency: true,
+        };
+        let mut descriptor = D3D11_TEXTURE2D_DESC {
+            Width: 1920,
+            Height: 1080,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_NV12,
+            ..D3D11_TEXTURE2D_DESC::default()
+        };
+        descriptor.SampleDesc.Count = 1;
+        validate_nv12_surface_descriptor(&config, &descriptor).expect("valid NV12 surface");
+        descriptor.Format = windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+        assert!(validate_nv12_surface_descriptor(&config, &descriptor).is_err());
+    }
+
+    #[test]
+    fn windows_d3d11_encoder_gpu_surface_api_is_separate_from_i420_bytes() {
+        let _create: fn(
+            MediaFoundationEncoderConfig,
+            &WindowsD3d11Device,
+            u64,
+            WindowsD3d11EncoderRole,
+            usize,
+        ) -> Result<MediaFoundationD3d11H264Encoder> =
+            MediaFoundationD3d11H264Encoder::new_on_media_thread;
+        let _submit: fn(
+            &mut MediaFoundationD3d11H264Encoder,
+            &ID3D11Texture2D,
+            WindowsD3d11EncoderSubmissionMetadata,
+        ) -> std::result::Result<
+            MediaFoundationD3d11EncoderProgress,
+            MediaFoundationD3d11SubmissionFailure,
+        > = MediaFoundationD3d11H264Encoder::submit_nv12_texture;
+        let _i420: fn(
+            &mut MediaFoundationH264Encoder,
+            &[u8],
+            u64,
+        ) -> Result<Vec<MediaFoundationEncodedFrame>> = MediaFoundationH264Encoder::encode_frame;
+    }
+
+    #[test]
+    fn windows_d3d11_encoder_tracked_callback_keys_and_roles_are_unambiguous() {
+        assert_ne!(TRACKED_SAMPLE_GENERATION_KEY, TRACKED_SAMPLE_ROLE_KEY);
+        assert_ne!(TRACKED_SAMPLE_GENERATION_KEY, TRACKED_SAMPLE_LEASE_KEY);
+        assert_ne!(TRACKED_SAMPLE_ROLE_KEY, TRACKED_SAMPLE_LEASE_KEY);
+        assert_ne!(
+            encoder_role_value(WindowsD3d11EncoderRole::Record),
+            encoder_role_value(WindowsD3d11EncoderRole::Stream)
+        );
     }
 }

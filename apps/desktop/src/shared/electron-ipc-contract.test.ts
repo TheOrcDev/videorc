@@ -39,7 +39,7 @@ describe('Electron IPC contract', () => {
   it('keeps the preload invoke and event surface exactly aligned with the maps', () => {
     expectTypeOf<ElectronEventChannelInvariant>().toEqualTypeOf<true>()
     const preload = readFileSync(new URL('../preload/index.ts', import.meta.url), 'utf8')
-    const invoked = [...preload.matchAll(/\binvoke\('([^']+)'/g)].map((match) => match[1]).sort()
+    const invoked = [...preload.matchAll(/\binvoke\(\s*'([^']+)'/g)].map((match) => match[1]).sort()
     const subscribed = [...preload.matchAll(/\bsubscribe\('([^']+)'/g)]
       .map((match) => match[1])
       .sort()
@@ -146,6 +146,12 @@ describe('Electron IPC contract', () => {
     expect(() =>
       validateElectronInvokeArgs('preview-surface:create', [{ ...bounds, width: Number.NaN }, 3])
     ).toThrow('finite number')
+    expect(() =>
+      validateElectronInvokeArgs('preview-surface:create', [
+        { ...bounds, orderAboveWindowHandle: '0x0000000000000001' },
+        3
+      ])
+    ).toThrow('orderAboveWindowHandle')
     expect(() =>
       validateElectronInvokeArgs('resource:trash-session-deletion', ['x'.repeat(1025)])
     ).toThrow('at most 1024')
@@ -264,6 +270,12 @@ describe('Electron IPC contract', () => {
     expect(validateElectronInvokeArgs('preview-surface:update-compositor', [compositor])).toEqual([
       compositor
     ])
+    expect(
+      validateElectronInvokeArgs('preview-surface:set-frame-polling-suppressed', [true, 7, true])
+    ).toEqual([true, 7, true])
+    expect(() =>
+      validateElectronInvokeArgs('preview-surface:set-frame-polling-suppressed', [true, true])
+    ).toThrow('set-frame-polling-suppressed.args')
     expect(() =>
       validateElectronInvokeArgs('preview-surface:update-compositor', [
         { ...compositor, state: 'attacker-controlled' }
@@ -283,6 +295,34 @@ describe('Electron IPC contract', () => {
     expect(
       validateElectronInvokeResult('preview-surface:set-frame-polling-suppressed', surfaceStatus)
     ).toEqual(surfaceStatus)
+    const d3d11SurfaceStatus = {
+      ...surfaceStatus,
+      transport: 'd3d11-shared-texture',
+      backing: 'directcomposition-swapchain',
+      nativePreviewHostKind: 'backend-d3d11-presenter'
+    }
+    expect(validateElectronInvokeResult('preview-surface:status', d3d11SurfaceStatus)).toEqual(
+      d3d11SurfaceStatus
+    )
+    for (const leaked of [
+      { ...d3d11SurfaceStatus, nativeWindowHandle: '0x0000000000000001' },
+      { ...d3d11SurfaceStatus, processId: 42 },
+      { ...d3d11SurfaceStatus, sharedTextureHandle: '0x0000000000000002' },
+      {
+        ...d3d11SurfaceStatus,
+        bounds: { ...bounds, orderAboveWindowHandle: '0x0000000000000001' }
+      },
+      {
+        ...d3d11SurfaceStatus,
+        windowsD3d11Presenter: {
+          resourceHandle: '0x0000000000000003'
+        }
+      }
+    ]) {
+      expect(() => validateElectronInvokeResult('preview-surface:status', leaked)).toThrow(
+        /renderer-facing/
+      )
+    }
     expect(() =>
       validateElectronInvokeResult('preview-surface:set-frame-polling-suppressed', true)
     ).toThrow('set-frame-polling-suppressed.result')
