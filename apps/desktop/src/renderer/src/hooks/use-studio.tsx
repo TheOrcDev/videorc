@@ -114,6 +114,7 @@ import {
 } from '@/lib/layout-transaction-policy'
 import {
   nativePreviewFramePollingShouldSuppress,
+  previewSurfaceStatusRequiresMainAuthority,
   nativePreviewSurfaceSyncCanCommit,
   nativePreviewSurfaceSyncNeedsCreate
 } from '@/lib/native-preview-surface-lifecycle'
@@ -664,7 +665,8 @@ async function waitForRenderedCompositorSceneRevision(
 }
 
 async function waitForNativePreviewSurfaceSceneRevision(
-  sceneRevision: number
+  sceneRevision: number,
+  platform: string
 ): Promise<PreviewSurfaceStatus | null> {
   const readStatus = window.videorc?.getNativePreviewSurfaceStatus
   if (!readStatus) {
@@ -679,7 +681,7 @@ async function waitForNativePreviewSurfaceSceneRevision(
     } catch {
       return lastStatus
     }
-    if (nativePreviewStatusProvesSceneRevision(lastStatus, sceneRevision)) {
+    if (nativePreviewStatusProvesSceneRevision(lastStatus, sceneRevision, platform)) {
       return lastStatus
     }
     await sleep(NATIVE_PREVIEW_SCENE_FRAME_WAIT_INTERVAL_MS)
@@ -2473,6 +2475,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [mainPumpActive, setMainPumpActive] = useState(false)
   const previewSurfaceStatusCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previewSurfaceStatusLastCommitAtRef = useRef(0)
+  const nativePreviewMainStatusReadSerialRef = useRef(0)
   const diagnosticStatsPendingRef = useRef<DiagnosticStats | null>(null)
   const diagnosticStatsCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const diagnosticStatsLastCommitAtRef = useRef(0)
@@ -2905,6 +2908,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               {
                 recordingActive: isActiveRecordingState(recordingRef.current.state),
                 windowOpen: previewWindowRef.current.open,
+                platform: runtimeInfo?.platform ?? 'darwin',
                 status: previewSurfaceStatusRef.current
               }
             )
@@ -3006,7 +3010,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applyPreviewSurfaceStatusThrottled,
       nativePreviewRendererTimingStatusFields,
       nativePreviewSurfaceEnabled,
-      queueNativePreviewSurfacePresentReport
+      queueNativePreviewSurfacePresentReport,
+      runtimeInfo?.platform
     ]
   )
 
@@ -4385,7 +4390,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('preview.surface.status', (payload) => {
         bootstrapGuard.mark('previewSurface')
-        applyPreviewSurfaceStatusThrottled(payload as PreviewSurfaceStatus)
+        const backendStatus = payload as PreviewSurfaceStatus
+        const readSerial = ++nativePreviewMainStatusReadSerialRef.current
+        if (
+          previewSurfaceStatusRequiresMainAuthority(backendStatus) &&
+          window.videorc?.getNativePreviewSurfaceStatus
+        ) {
+          void window.videorc
+            .getNativePreviewSurfaceStatus()
+            .then((mainStatus) => {
+              if (!disposed && readSerial === nativePreviewMainStatusReadSerialRef.current) {
+                applyPreviewSurfaceStatusThrottled(mainStatus)
+              }
+            })
+            .catch(() => {
+              if (!disposed && readSerial === nativePreviewMainStatusReadSerialRef.current) {
+                // The raw backend shape cannot claim Windows native authority,
+                // but remains truthful proof/fallback state if main is gone.
+                applyPreviewSurfaceStatusThrottled(backendStatus)
+              }
+            })
+          return
+        }
+        applyPreviewSurfaceStatusThrottled(backendStatus)
       }),
       nextClient.on('compositor.status', (payload) => {
         bootstrapGuard.mark('compositor')
@@ -4735,6 +4762,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return
         }
 
+        let resolvedPreviewSurface = nextPreviewSurface
+        if (
+          previewSurfaceStatusRequiresMainAuthority(nextPreviewSurface) &&
+          window.videorc?.getNativePreviewSurfaceStatus
+        ) {
+          resolvedPreviewSurface = await window.videorc
+            .getNativePreviewSurfaceStatus()
+            .catch(() => nextPreviewSurface)
+          if (!generationIsCurrent()) {
+            return
+          }
+        }
+
         // Commit the local, UI-critical snapshot before optional provider
         // validation. A slow or failing provider network call must not hold
         // devices, recording, or preview in the loading state.
@@ -4758,7 +4798,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           applyPreviewLiveStatus(nextPreview)
         }
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'previewSurface')) {
-          applyPreviewSurfaceStatus(nextPreviewSurface)
+          applyPreviewSurfaceStatus(resolvedPreviewSurface)
         }
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'previewCamera')) {
           applyPreviewCameraStatus(nextPreviewCamera)
@@ -4937,6 +4977,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       platformBootstrapClient.close()
       nativePreviewCompositorPendingRef.current = null
+      nativePreviewMainStatusReadSerialRef.current += 1
       nativePreviewCompositorLatestStatusRef.current = null
       nativePreviewFrameReadyLastEventAtRef.current = 0
       nativePreviewRendererFallbackActivatedAtRef.current = 0
@@ -5452,7 +5493,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
         const surfaceStatus =
           proofOwner === 'main-pump'
-            ? await waitForNativePreviewSurfaceSceneRevision(status.sceneRevision)
+            ? await waitForNativePreviewSurfaceSceneRevision(
+                status.sceneRevision,
+                runtimeInfo?.platform ?? 'darwin'
+              )
             : proofOwner === 'renderer-fallback' &&
                 window.videorc?.updateNativePreviewSurfaceCompositor
               ? await window.videorc.updateNativePreviewSurfaceCompositor(compositorStatus)
@@ -5465,7 +5509,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         applyPreviewSurfaceStatus(surfaceStatus)
         if (
           surfaceStatus.nativePreviewHostKind !== 'proof-surface' &&
-          !nativePreviewStatusProvesSceneRevision(surfaceStatus, status.sceneRevision)
+          !nativePreviewStatusProvesSceneRevision(
+            surfaceStatus,
+            status.sceneRevision,
+            runtimeInfo?.platform ?? 'darwin'
+          )
         ) {
           throw new NativePreviewPresentationProofError(
             `Native preview did not present committed scene revision ${status.sceneRevision}.`
@@ -5484,7 +5532,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       return true
     },
-    [applyPreviewSurfaceStatus, client, nativePreviewSurfaceEnabled]
+    [applyPreviewSurfaceStatus, client, nativePreviewSurfaceEnabled, runtimeInfo?.platform]
   )
 
   const rememberLiveLayoutCommit = useCallback(
@@ -6329,10 +6377,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [wsStatus])
 
-  // Frame polling serves the Electron proof surface. It is redundant during a
-  // recording only when an attached native layer owns presentation; Windows
-  // relies on proof polling for its visible preview. A closed window always
-  // suppresses polling — UI rewrite U2.
+  // Frame polling serves only the Electron proof surface. It is redundant
+  // during a recording when the platform's canonical native presenter owns
+  // pixels. A closed window always suppresses polling — UI rewrite U2.
   const syncFramePollingSuppression = useCallback(() => {
     if (
       !nativePreviewSurfaceEnabled ||
@@ -6344,6 +6391,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const suppress = nativePreviewFramePollingShouldSuppress({
       recordingActive,
       windowOpen: previewWindowRef.current.open,
+      platform: runtimeInfo?.platform ?? 'darwin',
       status: previewSurfaceStatusRef.current
     })
     const requestKey = `${suppress}:${recordingActive}`
@@ -6364,7 +6412,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         console.error('Native preview frame-polling suppression failed:', error)
       })
-  }, [applyPreviewSurfaceStatus, nativePreviewSurfaceEnabled])
+  }, [applyPreviewSurfaceStatus, nativePreviewSurfaceEnabled, runtimeInfo?.platform])
 
   syncFramePollingSuppressionRef.current = syncFramePollingSuppression
 
@@ -6591,7 +6639,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       rendererUpdaterAvailable: Boolean(window.videorc?.updateNativePreviewSurfaceCompositor)
     })
     if (proofOwner === 'main-pump') {
-      const status = await waitForNativePreviewSurfaceSceneRevision(revision)
+      const status = await waitForNativePreviewSurfaceSceneRevision(
+        revision,
+        runtimeInfo?.platform ?? 'darwin'
+      )
       if (status) {
         applyPreviewSurfaceStatus(status)
       }
@@ -6608,7 +6659,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       })
       return
     }
-  }, [applyPreviewSurfaceStatus, client, nativePreviewSurfaceEnabled, wsStatus])
+  }, [
+    applyPreviewSurfaceStatus,
+    client,
+    nativePreviewSurfaceEnabled,
+    runtimeInfo?.platform,
+    wsStatus
+  ])
 
   useEffect(() => {
     if (!nativePreviewSurfaceEnabled) {
@@ -6727,6 +6784,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         appVersion: runtimeInfo?.version,
         rendererDiagnostics: {
           automaticSourceFallbacks: automaticSourceFallbacks.current,
+          nativePreviewSurfaceStatus: previewSurfaceStatus,
           runtimeInfo: runtimeInfo ?? undefined
         }
       }
@@ -6742,7 +6800,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } finally {
       setSupportBundleExportPending(false)
     }
-  }, [client, reportError, runtimeInfo, supportBundleExportPending])
+  }, [client, previewSurfaceStatus, reportError, runtimeInfo, supportBundleExportPending])
 
   const scheduleHardwareAccelerationRetry = useCallback(async () => {
     if (!window.videorc?.retryHardwareAcceleration) {
@@ -10510,6 +10568,12 @@ function mergePreviewSurfaceHostStatus(
     framePollingSuppressed:
       hostStatus.framePollingSuppressed || backendStatus.framePollingSuppressed,
     sourcePixelsPresent: hostStatus.sourcePixelsPresent || backendStatus.sourcePixelsPresent,
+    nativePreviewHostKind: hostStatus.nativePreviewHostKind ?? backendStatus.nativePreviewHostKind,
+    nativePreviewHostAttached:
+      hostStatus.nativePreviewHostAttached ?? backendStatus.nativePreviewHostAttached,
+    windowsD3d11Presenter: hostStatus.windowsD3d11Presenter ?? backendStatus.windowsD3d11Presenter,
+    firstFrameContract: hostStatus.firstFrameContract ?? backendStatus.firstFrameContract,
+    firstFrameReason: hostStatus.firstFrameReason ?? backendStatus.firstFrameReason,
     pendingHostCommandCount: backendStatus.pendingHostCommandCount,
     bounds: hostStatus.bounds ?? backendStatus.bounds,
     startedAt: hostStatus.startedAt ?? backendStatus.startedAt,

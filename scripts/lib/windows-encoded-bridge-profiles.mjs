@@ -42,23 +42,34 @@ export const WINDOWS_ENCODED_BRIDGE_PROFILES = Object.freeze([
 ])
 
 export function selectWindowsEncodedBridgeProfiles(argv = []) {
-  if (argv.length === 0) {
-    return [...WINDOWS_ENCODED_BRIDGE_PROFILES]
-  }
-  if (argv[0] !== '--profiles') {
-    throw new Error(`Unknown Windows encoded-bridge argument: ${argv[0]}`)
-  }
+  return parseWindowsEncodedBridgeArgs(argv).profiles
+}
 
-  const value = argv[1]
-  if (value === undefined || value.startsWith('--')) {
-    throw new Error('--profiles requires a comma-separated value.')
+export function parseWindowsEncodedBridgeArgs(argv = []) {
+  const values = [...argv]
+  const d3d11 = takeFlag(values, '--d3d11')
+  const requireD3d11 = takeFlag(values, '--require-d3d11')
+  const expectFallback = takeOption(values, '--expect-fallback')
+  const value = takeOption(values, '--profiles')
+  if (values.length > 0) {
+    throw new Error(`Unknown Windows encoded-bridge argument: ${values[0]}`)
   }
-  const trailing = argv.slice(2)
-  if (trailing.length > 0) {
-    if (trailing[0] === '--profiles') {
-      throw new Error('--profiles may be supplied only once.')
+  if (requireD3d11 && !d3d11) {
+    throw new Error('--require-d3d11 requires --d3d11.')
+  }
+  if (expectFallback !== undefined && expectFallback !== 'natural') {
+    throw new Error(`--expect-fallback must be natural; received ${expectFallback}.`)
+  }
+  if (expectFallback === 'natural' && (d3d11 || requireD3d11)) {
+    throw new Error('--expect-fallback natural cannot be combined with an explicit D3D11 path.')
+  }
+  if (value === undefined) {
+    return {
+      profiles: [...WINDOWS_ENCODED_BRIDGE_PROFILES],
+      d3d11,
+      requireD3d11,
+      expectFallback: expectFallback ?? null
     }
-    throw new Error(`Unknown Windows encoded-bridge argument: ${trailing[0]}`)
   }
 
   const requested = value.split(',').map((id) => id.trim())
@@ -77,5 +88,33 @@ export function selectWindowsEncodedBridgeProfiles(argv = []) {
   }
 
   const requestedIds = new Set(requested)
-  return WINDOWS_ENCODED_BRIDGE_PROFILES.filter((profile) => requestedIds.has(profile.id))
+  return {
+    profiles: WINDOWS_ENCODED_BRIDGE_PROFILES.filter((profile) => requestedIds.has(profile.id)),
+    d3d11,
+    requireD3d11,
+    expectFallback: expectFallback ?? null
+  }
+}
+
+function takeFlag(values, name) {
+  const matches = values.reduce((count, value) => count + (value === name ? 1 : 0), 0)
+  if (matches > 1) throw new Error(`${name} may be supplied only once.`)
+  if (matches === 0) return false
+  values.splice(values.indexOf(name), 1)
+  return true
+}
+
+function takeOption(values, name) {
+  const indexes = values
+    .map((value, index) => (value === name ? index : -1))
+    .filter((index) => index >= 0)
+  if (indexes.length > 1) throw new Error(`${name} may be supplied only once.`)
+  if (indexes.length === 0) return undefined
+  const index = indexes[0]
+  const value = values[index + 1]
+  if (value === undefined || value.startsWith('--')) {
+    throw new Error(`${name} requires a comma-separated value.`)
+  }
+  values.splice(index, 2)
+  return value
 }

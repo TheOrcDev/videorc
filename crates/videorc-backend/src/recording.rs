@@ -115,9 +115,18 @@ use crate::streaming::{
     StreamTargetsSnapshot, StreamUrlMode, StreamingSettings, stream_platform_from_preset,
     stream_platform_id, stream_platform_label,
 };
+#[cfg(any(target_os = "windows", test))]
+use crate::windows_d3d11_session::WindowsD3d11MediaMode;
+#[cfg(target_os = "windows")]
+use crate::windows_d3d11_session::{
+    WindowsD3d11CameraInput, WindowsD3d11OverlayInput, WindowsD3d11SessionDiagnosticsSnapshot,
+    WindowsD3d11SessionMonitor, WindowsD3d11SessionPump, WindowsD3d11SessionRequest,
+    WindowsD3d11SessionSelection, WindowsD3d11VideoPlan, select_windows_d3d11_session,
+    validate_windows_d3d11_startup_evidence,
+};
 #[cfg(target_os = "windows")]
 use crate::windows_media_foundation_encoder::{
-    MediaFoundationEncoderConfig, MediaFoundationInputSubtype, probe_hardware_encoder,
+    MediaFoundationEncoderConfig, probe_hardware_encoder,
 };
 
 const PREVIEW_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -800,6 +809,15 @@ pub struct ActiveRecording {
     pub screen_overlay: Option<ScreenOverlaySession>,
     pub encoder_bridge: Option<EncoderBridgeRecordingSession>,
     pub encoder_bridge_stream: Option<EncoderBridgeRecordingSession>,
+    /// One generation-scoped D3D11 capture/compositor/MF authority. This field
+    /// follows both bridge sessions so their ticket-store clones are dropped
+    /// before the role leases and media thread are drained.
+    #[cfg(target_os = "windows")]
+    windows_d3d11_media: Option<WindowsD3d11SessionPump>,
+    #[cfg(target_os = "windows")]
+    windows_d3d11_monitor_stop: Option<Arc<AtomicBool>>,
+    #[cfg(target_os = "windows")]
+    windows_d3d11_monitor_task: Option<tokio::task::JoinHandle<()>>,
     /// Authoritative, generation-scoped runtime state for this session's
     /// destinations. The stderr monitor updates this exact snapshot before
     /// publishing `stream.targets`, and polling RPCs clone it from the active
@@ -1623,6 +1641,221 @@ pub async fn start_session(
     } else {
         None
     };
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_media_mode =
+        WindowsD3d11MediaMode::from_process_env().map_err(anyhow::Error::msg)?;
+    #[cfg(target_os = "windows")]
+    let mut windows_d3d11_initial_diagnostics =
+        crate::protocol::WindowsD3d11MediaDiagnostics::default();
+    #[cfg(target_os = "windows")]
+    let mut windows_d3d11_media = {
+        let media_mode = windows_d3d11_media_mode;
+        windows_d3d11_initial_diagnostics.requested = media_mode != WindowsD3d11MediaMode::Disabled;
+        windows_d3d11_initial_diagnostics.required = media_mode.is_required();
+        windows_d3d11_initial_diagnostics.state = if media_mode == WindowsD3d11MediaMode::Disabled {
+            crate::protocol::WindowsD3d11MediaState::Unavailable
+        } else {
+            crate::protocol::WindowsD3d11MediaState::Probing
+        };
+        let layout_capability = windows_d3d11_display_camera_layout(&params.layout.layout_preset);
+        let camera_required = layout_capability.unwrap_or(false);
+        let camera_input = if camera_required {
+            preview_camera_frame_source(&state)
+                .await
+                .map(|source| WindowsD3d11CameraInput {
+                    source,
+                    layout: params.layout.clone(),
+                })
+        } else {
+            None
+        };
+        let selected_screen = match params.sources.screen_id.as_deref() {
+            Some(screen_id) => crate::devices::list_devices(&ffmpeg_path)
+                .await
+                .devices
+                .into_iter()
+                .find(|device| device.id == screen_id),
+            None => None,
+        };
+        let mut unsupported_scene_features = Vec::new();
+        if params.sources.test_pattern {
+            unsupported_scene_features.push("test-pattern".to_string());
+        }
+        let request = WindowsD3d11SessionRequest {
+            platform_supported: true,
+            screen_id: params.sources.screen_id.clone(),
+            window_selected: params.sources.window_id.is_some(),
+            screen_available: selected_screen
+                .as_ref()
+                .is_some_and(|device| device.status == crate::protocol::DeviceStatus::Available),
+            source_width: selected_screen.as_ref().and_then(|device| device.width),
+            source_height: selected_screen.as_ref().and_then(|device| device.height),
+            supported_layout: layout_capability.is_some(),
+            camera_required,
+            camera_source_available: !camera_required || camera_input.is_some(),
+            explicit_scene: params.scene.is_some(),
+            unsupported_scene_features,
+            media_foundation_selected: use_encoder_bridge
+                && matches!(
+                    encoder_bridge_video_output,
+                    EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+                ),
+            record_enabled: params.output.record_enabled,
+            stream_enabled: params.output.stream_enabled,
+            primary: WindowsD3d11VideoPlan {
+                width: params.output.video.width,
+                height: params.output.video.height,
+                fps: params.output.video.fps,
+                bitrate_kbps: params.output.video.bitrate_kbps,
+            },
+            auxiliary: encoder_bridge_stream_profile.as_ref().map(|profile| {
+                WindowsD3d11VideoPlan {
+                    width: profile.width,
+                    height: profile.height,
+                    fps: profile.fps,
+                    bitrate_kbps: profile.bitrate_kbps,
+                }
+            }),
+        };
+        match select_windows_d3d11_session(media_mode, request).map_err(anyhow::Error::msg)? {
+            WindowsD3d11SessionSelection::Disabled => {
+                windows_d3d11_initial_diagnostics =
+                    crate::protocol::WindowsD3d11MediaDiagnostics::default();
+                None
+            }
+            WindowsD3d11SessionSelection::NaturalFallback(fallback) => {
+                windows_d3d11_initial_diagnostics = windows_d3d11_fallback_diagnostics(
+                    media_mode,
+                    format!("{}: {}", fallback.code, fallback.detail),
+                );
+                state.emit_log(
+                    "warn",
+                    format!(
+                        "Unified Windows D3D11 media path selected its named fallback: {fallback}"
+                    ),
+                );
+                emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    fallback.code,
+                    &fallback.detail,
+                )?;
+                None
+            }
+            WindowsD3d11SessionSelection::Candidate(plan) => {
+                let (highlight_on_primary, highlight_on_auxiliary) =
+                    crate::captions::highlight_overlay_leg_plan(
+                        params.output.record_enabled,
+                        params.output.stream_enabled,
+                        plan.auxiliary.is_some(),
+                    );
+                match WindowsD3d11SessionPump::start(
+                    &state.windows_d3d11_media,
+                    plan.clone(),
+                    camera_input.clone(),
+                    WindowsD3d11OverlayInput {
+                        captions: state.caption_overlay.clone(),
+                        highlight: state.highlight_overlay.clone(),
+                        caption_on_primary: session_caption_plan.primary,
+                        caption_on_auxiliary: session_caption_plan.aux,
+                        highlight_on_primary,
+                        highlight_on_auxiliary,
+                    },
+                ) {
+                    Ok(pump) => {
+                        match validate_windows_d3d11_startup_evidence(
+                            media_mode,
+                            &plan,
+                            pump.startup_evidence(),
+                        )
+                        .map_err(anyhow::Error::msg)?
+                        {
+                            None => {
+                                match pump.monitor().diagnostics_snapshot() {
+                                    Ok(snapshot) => {
+                                        windows_d3d11_initial_diagnostics =
+                                            windows_d3d11_live_diagnostics(
+                                                media_mode,
+                                                &snapshot,
+                                                Default::default(),
+                                            );
+                                    }
+                                    Err(error) => {
+                                        windows_d3d11_initial_diagnostics =
+                                            windows_d3d11_fallback_diagnostics(
+                                                media_mode,
+                                                format!(
+                                                    "windows-d3d11-media-diagnostics-unavailable: {error}"
+                                                ),
+                                            );
+                                    }
+                                }
+                                state.emit_log(
+                                    "info",
+                                    format!(
+                                        "Unified Windows D3D11 capture/compositor/Media Foundation authority is ready (generation {}).",
+                                        pump.snapshot().generation
+                                    ),
+                                );
+                                Some(pump)
+                            }
+                            Some(fallback) => {
+                                windows_d3d11_initial_diagnostics =
+                                    windows_d3d11_fallback_diagnostics(
+                                        media_mode,
+                                        format!("{}: {}", fallback.code, fallback.detail),
+                                    );
+                                state.emit_log(
+                                    "warn",
+                                    format!(
+                                        "Unified Windows D3D11 media startup selected its named fallback: {fallback}"
+                                    ),
+                                );
+                                emit_health_event(
+                                    &state,
+                                    Some(&session_id),
+                                    HealthLevel::Warn,
+                                    fallback.code,
+                                    &fallback.detail,
+                                )?;
+                                None
+                            }
+                        }
+                    }
+                    Err(error) if media_mode.is_required() => {
+                        if let Some(path) = encoder_bridge_fifo.as_ref() {
+                            let _ = crate::fifo::cleanup(path);
+                        }
+                        if let Some(path) = encoder_bridge_stream_fifo.as_ref() {
+                            let _ = crate::fifo::cleanup(path);
+                        }
+                        bail!(
+                            "VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA=1 rejected session startup: windows-d3d11-media-startup-failed: {error}"
+                        );
+                    }
+                    Err(error) => {
+                        let message = format!(
+                            "Unified Windows D3D11 media startup failed; using the named legacy bridge fallback: {error}"
+                        );
+                        windows_d3d11_initial_diagnostics = windows_d3d11_fallback_diagnostics(
+                            media_mode,
+                            format!("windows-d3d11-media-startup-failed: {error}"),
+                        );
+                        state.emit_log("warn", &message);
+                        emit_health_event(
+                            &state,
+                            Some(&session_id),
+                            HealthLevel::Warn,
+                            "windows-d3d11-media-startup-failed",
+                            &message,
+                        )?;
+                        None
+                    }
+                }
+            }
+        }
+    };
     let screen_overlay_fifo =
         if !use_encoder_bridge && (active_screen.is_some() || params.output.stream_enabled) {
             let fifo_path = screen_overlay_fifo_path(&session_id);
@@ -1669,6 +1902,18 @@ pub async fn start_session(
     initial_diagnostics.encoder_bridge_encoded_output_fallback_reason =
         windows_encoded_bridge_decision.fallback_reason.clone();
     initial_diagnostics.recording_protected = use_encoder_bridge;
+    #[cfg(target_os = "windows")]
+    {
+        initial_diagnostics.windows_d3d11_media = windows_d3d11_initial_diagnostics.clone();
+        if windows_d3d11_media.is_some() {
+            initial_diagnostics.compositor_backend = Some(CompositorBackend::D3d11);
+            initial_diagnostics.compositor_fallback_reason = None;
+        } else if windows_d3d11_initial_diagnostics.requested {
+            initial_diagnostics.compositor_backend = Some(CompositorBackend::CpuFallback);
+            initial_diagnostics.compositor_fallback_reason =
+                windows_d3d11_initial_diagnostics.fallback_reason.clone();
+        }
+    }
     {
         let mut diagnostics = state.diagnostics.lock().await;
         *diagnostics = initial_diagnostics.clone();
@@ -1685,13 +1930,18 @@ pub async fn start_session(
             height: params.output.video.height,
             fps: SCREEN_OVERLAY_FPS,
         });
+    #[cfg(target_os = "windows")]
+    let use_windows_d3d11_media = windows_d3d11_media.is_some();
+    #[cfg(not(target_os = "windows"))]
+    let use_windows_d3d11_media = false;
     let highlight_overlay_plan = crate::captions::highlight_overlay_leg_plan(
         params.output.record_enabled,
         params.output.stream_enabled,
         encoder_bridge_stream_output.is_some(),
     );
     #[cfg(target_os = "windows")]
-    let (direct_d3d11_recording_source, direct_d3d11_camera_overlay) = if use_encoder_bridge
+    let (direct_d3d11_recording_source, direct_d3d11_camera_overlay) = if !use_windows_d3d11_media
+        && use_encoder_bridge
         && matches!(
             encoder_bridge_video_output,
             EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
@@ -1805,7 +2055,7 @@ pub async fn start_session(
             // the bridge clock. Starting the CPU compositor here would retain
             // the full-frame BGRA -> I420 cost even though its output is unused.
             (None, None)
-        } else if use_encoder_bridge {
+        } else if use_encoder_bridge && !use_windows_d3d11_media {
             let target_fps = recording_compositor_target_fps(&state, &params.output.video)
                 .await
                 .max(
@@ -1934,6 +2184,10 @@ pub async fn start_session(
             };
             (recording_store, stream_store)
         } else {
+            // A live Windows D3D11 pump owns capture, composition, preview
+            // surfaces, and both NV12 outputs. Starting the synthetic CPU
+            // compositor here would duplicate capture/GPU work even though
+            // the bridge writer consumes only D3D11 tickets.
             (None, None)
         };
     let args = if use_encoder_bridge {
@@ -2077,6 +2331,14 @@ pub async fn start_session(
             use_encoder_bridge.then(|| video_epoch.clone()),
         )
     });
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_primary_input = windows_d3d11_media
+        .as_ref()
+        .map(WindowsD3d11SessionPump::primary_encoder_source);
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_auxiliary_input = windows_d3d11_media
+        .as_ref()
+        .and_then(WindowsD3d11SessionPump::auxiliary_encoder_source);
     let (encoder_bridge, encoder_bridge_stream) = if use_encoder_bridge {
         let bridge_fifo_path = encoder_bridge_fifo
             .clone()
@@ -2103,6 +2365,8 @@ pub async fn start_session(
             direct_d3d11_recording_source,
             #[cfg(target_os = "windows")]
             direct_d3d11_camera_overlay,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_primary_input,
             encoder_bridge_video_output,
             Some(params.output.video.bitrate_kbps),
             // Low latency only when live legs consume THIS output (shared
@@ -2116,9 +2380,18 @@ pub async fn start_session(
         let mut stream_bridge = match (
             encoder_bridge_stream_fifo.clone(),
             encoder_bridge_stream_profile.as_ref(),
-            encoder_bridge_stream_frame_store.clone(),
         ) {
-            (Some(stream_fifo_path), Some(stream_profile), Some(stream_frame_store)) => {
+            (Some(stream_fifo_path), Some(stream_profile)) => {
+                #[cfg(target_os = "windows")]
+                let has_stream_source = encoder_bridge_stream_frame_store.is_some()
+                    || windows_d3d11_auxiliary_input.is_some();
+                #[cfg(not(target_os = "windows"))]
+                let has_stream_source = encoder_bridge_stream_frame_store.is_some();
+                if !has_stream_source {
+                    bail!(
+                        "Split-output encoder bridge has neither a compositor frame store nor a D3D11 auxiliary ticket source"
+                    );
+                }
                 let stream_diagnostics_context = encoder_bridge_diagnostics_context(
                     EncoderBridgeOutputRole::Stream,
                     Some(&params.output.video),
@@ -2133,10 +2406,12 @@ pub async fn start_session(
                     stream_profile.width,
                     stream_profile.height,
                     stream_fifo_path,
-                    Some(stream_frame_store),
+                    encoder_bridge_stream_frame_store.clone(),
                     None,
                     #[cfg(target_os = "windows")]
                     None,
+                    #[cfg(target_os = "windows")]
+                    windows_d3d11_auxiliary_input,
                     encoder_bridge_video_output,
                     Some(stream_profile.bitrate_kbps),
                     true,
@@ -2180,6 +2455,26 @@ pub async fn start_session(
         session_id: session_id.clone(),
         targets: stream_runtime,
     }));
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_monitor = windows_d3d11_media
+        .as_ref()
+        .map(WindowsD3d11SessionPump::monitor);
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_monitor_stop = windows_d3d11_monitor
+        .as_ref()
+        .map(|_| Arc::new(AtomicBool::new(false)));
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_monitor_task =
+        match (windows_d3d11_monitor, windows_d3d11_monitor_stop.clone()) {
+            (Some(monitor), Some(stop)) => Some(tokio::spawn(run_windows_d3d11_session_monitor(
+                state.clone(),
+                session_id.clone(),
+                windows_d3d11_media_mode,
+                monitor,
+                stop,
+            ))),
+            _ => None,
+        };
     let active = ActiveRecording {
         session_id: session_id.clone(),
         pid,
@@ -2206,6 +2501,12 @@ pub async fn start_session(
         },
         encoder_bridge,
         encoder_bridge_stream,
+        #[cfg(target_os = "windows")]
+        windows_d3d11_media: windows_d3d11_media.take(),
+        #[cfg(target_os = "windows")]
+        windows_d3d11_monitor_stop: windows_d3d11_monitor_stop.clone(),
+        #[cfg(target_os = "windows")]
+        windows_d3d11_monitor_task,
         stream_targets_snapshot: stream_targets_snapshot.clone(),
         captioned_copy_requested: session_caption_plan.captioned_copy,
         keep_original_media: params.output.keep_original_mkv,
@@ -2700,6 +3001,37 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     active
         .pipeline
         .mark_finalizing("Waiting for FFmpeg to flush and close output files.");
+    #[cfg(target_os = "windows")]
+    if let Some(pump) = active.windows_d3d11_media.as_ref()
+        && let Some(error) = pump.snapshot().terminal_error
+    {
+        state.emit_log(
+            "error",
+            format!("Unified Windows D3D11 media pump stopped unexpectedly: {error}"),
+        );
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(stop) = active.windows_d3d11_monitor_stop.take() {
+            stop.store(true, Ordering::Release);
+        }
+        if let Some(task) = active.windows_d3d11_monitor_task.take() {
+            let _ = task.await;
+        }
+        if let Some(pump) = active.windows_d3d11_media.as_ref() {
+            let _ = pump.destroy_preview();
+        }
+        crate::preview_surface::teardown_windows_d3d11_presenter_status(
+            &state,
+            "windows-d3d11-recording-session-stopping",
+        )
+        .await;
+        let mut diagnostics = state.diagnostics.lock().await;
+        if diagnostics.windows_d3d11_media.state == crate::protocol::WindowsD3d11MediaState::Live {
+            diagnostics.windows_d3d11_media.state =
+                crate::protocol::WindowsD3d11MediaState::Draining;
+        }
+    }
     let uses_encoder_bridge = active.encoder_bridge.is_some();
     if let Some(session) = active.ffmpeg_live_audio_session.take() {
         // Make the stop edge visible to updates that cloned the handle before
@@ -6962,6 +7294,7 @@ fn h264_bt709_color_tag_args() -> [String; 8] {
 fn compositor_backend_label(backend: Option<CompositorBackend>) -> &'static str {
     match backend {
         Some(CompositorBackend::Metal) => "metal",
+        Some(CompositorBackend::D3d11) => "d3d11",
         Some(CompositorBackend::Cpu) => "cpu",
         Some(CompositorBackend::CpuFallback) => "cpu-fallback",
         None => "unknown",
@@ -7242,6 +7575,33 @@ fn requested_compositor_bridge_fps(params: &StartSessionParams) -> u32 {
     params.output.video.fps.max(stream_fps)
 }
 
+/// The Windows GPU session owns DXGI acquisition directly and therefore must
+/// not be gated on a legacy preview-screen frame store that it never consumes.
+/// This is deliberately only a preflight candidate check: device discovery,
+/// camera availability, encoder probing, and the generation-scoped startup
+/// evidence remain authoritative later in `select_windows_d3d11_session`.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_screen_preflight_candidate(
+    params: &StartSessionParams,
+    mode: WindowsD3d11MediaMode,
+    requested_video_output: EncoderBridgeVideoOutput,
+) -> bool {
+    mode != WindowsD3d11MediaMode::Disabled
+        && matches!(
+            requested_video_output,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        )
+        && params.scene.is_none()
+        && !params.sources.test_pattern
+        && params.sources.window_id.is_none()
+        && params
+            .sources
+            .screen_id
+            .as_deref()
+            .is_some_and(|screen_id| parse_windows_dxgi_output_index(screen_id).is_some())
+        && windows_d3d11_display_camera_layout(&params.layout.layout_preset).is_some()
+}
+
 async fn should_use_compositor_encoder_bridge(
     state: &AppState,
     params: &StartSessionParams,
@@ -7276,7 +7636,25 @@ async fn should_use_compositor_encoder_bridge(
         })
     });
     let screen_image_usable = stream_screen_image_usable(active_screen);
-    if wait_for_recording_encoder_bridge_sources_ready(state, &scene, screen_image_usable).await {
+    #[cfg(target_os = "windows")]
+    let d3d11_screen_source_authoritative = windows_d3d11_screen_preflight_candidate(
+        params,
+        WindowsD3d11MediaMode::from_process_env().map_err(anyhow::Error::msg)?,
+        recording_encoder_bridge_video_output(
+            params.output.record_enabled,
+            params.output.stream_enabled,
+        ),
+    );
+    #[cfg(not(target_os = "windows"))]
+    let d3d11_screen_source_authoritative = false;
+    if wait_for_recording_encoder_bridge_sources_ready(
+        state,
+        &scene,
+        screen_image_usable,
+        d3d11_screen_source_authoritative,
+    )
+    .await
+    {
         return Ok(true);
     }
     // No silent downgrade (master plan, locked): falling back to the legacy FFmpeg
@@ -7288,10 +7666,25 @@ async fn should_use_compositor_encoder_bridge(
     let has_screen_frame = !screen_preview_is_failed(&screen_status)
         && preview_screen_latest_frame_info(state).await.is_some();
     let mut missing = Vec::new();
-    if !has_screen_frame {
+    let visible_camera_required = scene
+        .sources
+        .iter()
+        .any(|source| source.visible && source.kind == SceneSourceKind::Camera);
+    let visible_screen_required = scene.sources.iter().any(|source| {
+        source.visible
+            && matches!(
+                source.kind,
+                SceneSourceKind::Screen | SceneSourceKind::Window
+            )
+    });
+    if visible_screen_required
+        && !screen_image_usable
+        && !has_screen_frame
+        && !d3d11_screen_source_authoritative
+    {
         missing.push("screen");
     }
-    if !has_camera_frame {
+    if visible_camera_required && !has_camera_frame {
         missing.push("camera");
     }
     let detail = if screen_preview_is_failed(&screen_status) {
@@ -7331,6 +7724,7 @@ async fn wait_for_recording_encoder_bridge_sources_ready(
     state: &AppState,
     scene: &Scene,
     screen_image_usable: bool,
+    d3d11_screen_source_authoritative: bool,
 ) -> bool {
     let deadline = Instant::now() + RECORDING_ENCODER_BRIDGE_SOURCE_READY_TIMEOUT;
     loop {
@@ -7346,6 +7740,7 @@ async fn wait_for_recording_encoder_bridge_sources_ready(
             screen_image_usable,
             has_camera_frame,
             has_screen_frame,
+            d3d11_screen_source_authoritative,
         ) {
             return true;
         }
@@ -8298,12 +8693,419 @@ fn default_encoder_bridge_video_output_for_outputs(
     default_encoder_bridge_video_output()
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_display_camera_layout(layout: &LayoutPreset) -> Option<bool> {
+    match layout {
+        LayoutPreset::ScreenOnly | LayoutPreset::VerticalScreenOnly => Some(false),
+        LayoutPreset::ScreenCamera
+        | LayoutPreset::SideBySide
+        | LayoutPreset::VerticalCameraTop
+        | LayoutPreset::VerticalCameraBottom
+        | LayoutPreset::VerticalSplit
+        | LayoutPreset::VerticalScreenCamera => Some(true),
+        LayoutPreset::CameraOnly | LayoutPreset::VerticalCameraOnly => None,
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_fallback_diagnostics(
+    mode: WindowsD3d11MediaMode,
+    reason: impl Into<String>,
+) -> crate::protocol::WindowsD3d11MediaDiagnostics {
+    crate::protocol::WindowsD3d11MediaDiagnostics {
+        state: crate::protocol::WindowsD3d11MediaState::Fallback,
+        requested: mode != WindowsD3d11MediaMode::Disabled,
+        required: mode.is_required(),
+        capture_backend: Some(crate::protocol::WindowsD3d11CaptureBackend::LegacyFfmpeg),
+        cursor_mode: Some(crate::protocol::WindowsD3d11CursorMode::DisabledFallback),
+        fallback_reason: Some(reason.into()),
+        ..Default::default()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_d3d11_live_diagnostics(
+    mode: WindowsD3d11MediaMode,
+    snapshot: &WindowsD3d11SessionDiagnosticsSnapshot,
+    polls: crate::protocol::PreviewImagePollCounts,
+) -> crate::protocol::WindowsD3d11MediaDiagnostics {
+    use crate::windows_d3d11_capture::{
+        WindowsD3d11CaptureBackend as CaptureBackend, WindowsD3d11CursorMode as CursorMode,
+    };
+
+    let capture = snapshot.device.runtime.capture;
+    let compositor = snapshot.device.runtime.compositor;
+    let presenter = snapshot
+        .presenter
+        .as_ref()
+        .map(|status| &status.diagnostics);
+    let terminal_error = snapshot.pump.terminal_error.clone();
+    let capture_fallback = capture
+        .and_then(|diagnostics| diagnostics.fallback_reason)
+        .map(|reason| reason.as_str().to_string());
+    let state = if terminal_error.is_some() || snapshot.device.device_loss_code.is_some() {
+        crate::protocol::WindowsD3d11MediaState::Failed
+    } else {
+        crate::protocol::WindowsD3d11MediaState::Live
+    };
+    let capture_backend = capture.and_then(|diagnostics| {
+        diagnostics.capture_backend.map(|backend| match backend {
+            CaptureBackend::DesktopDuplication => {
+                crate::protocol::WindowsD3d11CaptureBackend::DesktopDuplication
+            }
+            CaptureBackend::WindowsGraphicsCaptureMonitor => {
+                crate::protocol::WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor
+            }
+        })
+    });
+    let cursor_mode = capture.and_then(|diagnostics| {
+        diagnostics.cursor_mode.map(|mode| match mode {
+            CursorMode::Embedded => crate::protocol::WindowsD3d11CursorMode::Embedded,
+            CursorMode::Separate => crate::protocol::WindowsD3d11CursorMode::Separate,
+            CursorMode::ExcludedWgc => crate::protocol::WindowsD3d11CursorMode::ExcludedWgc,
+            CursorMode::DisabledFallback => {
+                crate::protocol::WindowsD3d11CursorMode::DisabledFallback
+            }
+        })
+    });
+    let preview_drops = presenter.map_or(0, |presenter| {
+        presenter
+            .latest_wins_drops
+            .saturating_add(presenter.hidden_drops)
+            .saturating_add(presenter.busy_drops)
+            .saturating_add(presenter.stale_frame_drops)
+    });
+    let pump = snapshot.device.pump;
+    crate::protocol::WindowsD3d11MediaDiagnostics {
+        state,
+        requested: mode != WindowsD3d11MediaMode::Disabled,
+        required: mode.is_required(),
+        adapter_luid: Some(format!("{:016x}", snapshot.pump.authority_adapter_luid)),
+        capture_adapter_luid: Some(format!("{:016x}", snapshot.pump.capture_adapter_luid)),
+        compositor_adapter_luid: Some(format!("{:016x}", snapshot.pump.compositor_adapter_luid)),
+        primary_encoder_adapter_luid: Some(format!(
+            "{:016x}",
+            snapshot.pump.primary_encoder_adapter_luid
+        )),
+        auxiliary_encoder_adapter_luid: snapshot
+            .pump
+            .auxiliary_encoder_adapter_luid
+            .map(|luid| format!("{luid:016x}")),
+        generation: Some(snapshot.pump.generation),
+        capture_backend,
+        cursor_mode,
+        cursor_requested: capture.is_some_and(|diagnostics| diagnostics.cursor_requested),
+        cursor_pixels_source: capture.and_then(|diagnostics| {
+            diagnostics
+                .cursor_pixels_source
+                .map(|source| source.as_str().to_string())
+        }),
+        cursor_exclusion_guaranteed: capture
+            .is_some_and(|diagnostics| diagnostics.cursor_exclusion_guaranteed),
+        capture_readback_frames: capture
+            .map_or(0, |diagnostics| diagnostics.capture_readback_frames),
+        texture_import_frames: snapshot.pump.composed_frames,
+        camera_upload_frames: compositor
+            .map_or(snapshot.pump.camera_upload_frames, |diagnostics| {
+                diagnostics.camera_upload_frames
+            }),
+        cursor_shape_uploads: capture.map_or(0, |diagnostics| diagnostics.pointer_shape_uploads),
+        cursor_composited_frames: capture
+            .map_or(0, |diagnostics| diagnostics.pointer_composited_frames),
+        compositor_cpu_fallback_frames: 0,
+        preview_presents: presenter.map_or(0, |presenter| presenter.successful_presents),
+        preview_drops,
+        preview_bmp_requests: polls.camera_bmp.saturating_add(polls.screen_bmp),
+        preview_bmp_bytes: 0,
+        message_pump_lag_p95_ms: Some(pump.message_lag_p95_micros as f64 / 1_000.0),
+        message_pump_lag_max_ms: Some(pump.max_message_lag_micros as f64 / 1_000.0),
+        media_command_lag_p95_ms: Some(pump.command_lag_p95_micros as f64 / 1_000.0),
+        media_command_lag_max_ms: Some(pump.max_command_lag_micros as f64 / 1_000.0),
+        maximum_consecutive_message_batch: u64::from(pump.max_message_batch),
+        maximum_consecutive_media_batch: u64::from(pump.max_media_batch),
+        encoder_gpu_samples: snapshot.device.runtime.encoder_gpu_samples,
+        encoder_system_memory_samples: snapshot.device.runtime.encoder_system_memory_samples,
+        raw_video_copied_frames: 0,
+        texture_pool_capacity: snapshot.device.runtime.texture_pool_capacity,
+        texture_pool_in_use: snapshot.device.runtime.texture_pool_in_use,
+        texture_pool_pressure_events: snapshot
+            .device
+            .runtime
+            .texture_pool_pressure_events
+            .saturating_add(snapshot.pump.pressure_skips),
+        adapter_mismatches: snapshot.pump.adapter_mismatches,
+        device_resets: capture
+            .map_or(0, |diagnostics| diagnostics.device_resets)
+            .saturating_add(u64::from(snapshot.device.device_loss_code.is_some())),
+        stale_generation_callbacks: snapshot.device.runtime.stale_generation_callbacks,
+        fallback_reason: terminal_error.or(capture_fallback),
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn run_windows_d3d11_session_monitor(
+    state: AppState,
+    session_id: String,
+    mode: WindowsD3d11MediaMode,
+    monitor: WindowsD3d11SessionMonitor,
+    stop: Arc<AtomicBool>,
+) {
+    let mut configured_placement: Option<
+        crate::windows_d3d11_preview::WindowsD3d11PreviewPlacement,
+    > = None;
+    let mut last_presenter = None;
+    let mut last_placement_error = None;
+    let mut consecutive_snapshot_errors = 0_u8;
+    'monitor: while !stop.load(Ordering::Acquire) {
+        let snapshot = match monitor.diagnostics_snapshot() {
+            Ok(snapshot) => {
+                consecutive_snapshot_errors = 0;
+                snapshot
+            }
+            Err(error) => {
+                if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                    break;
+                }
+                consecutive_snapshot_errors = consecutive_snapshot_errors.saturating_add(1);
+                if consecutive_snapshot_errors >= 3 {
+                    let reason = format!("windows-d3d11-media-monitor-failed: {error}");
+                    if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                        break;
+                    }
+                    let mut diagnostics = state.diagnostics.lock().await;
+                    if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                        drop(diagnostics);
+                        break;
+                    }
+                    diagnostics.windows_d3d11_media.state =
+                        crate::protocol::WindowsD3d11MediaState::Failed;
+                    diagnostics.windows_d3d11_media.fallback_reason = Some(reason.clone());
+                    drop(diagnostics);
+                    state.emit_log(
+                        "error",
+                        format!(
+                            "D3D11 diagnostics monitor failed for session {session_id}: {error}"
+                        ),
+                    );
+                    let _ = monitor.destroy_preview();
+                    let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                        &state, reason,
+                    )
+                    .await;
+                    break;
+                }
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        };
+        if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+            break;
+        }
+
+        let trusted_placement = crate::preview_surface::trusted_windows_d3d11_preview_placement(
+            &state,
+            snapshot.pump.generation,
+            snapshot.device.adapter_luid,
+        )
+        .await;
+        if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+            break;
+        }
+        match trusted_placement {
+            Ok(placement) => {
+                last_placement_error = None;
+                if windows_d3d11_preview_monitor_target_action(
+                    configured_placement.is_some(),
+                    configured_placement.as_ref() != Some(&placement),
+                    true,
+                ) == WindowsD3d11PreviewMonitorTargetAction::Configure
+                {
+                    match monitor.configure_preview(placement) {
+                        Ok(status) => {
+                            if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                                break 'monitor;
+                            }
+                            configured_placement = Some(placement);
+                            if last_presenter.as_ref() != Some(&status.diagnostics) {
+                                if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                                    break 'monitor;
+                                }
+                                crate::preview_surface::update_windows_d3d11_presenter_status(
+                                    &state,
+                                    status.clone(),
+                                )
+                                .await;
+                                if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                                    break 'monitor;
+                                }
+                                last_presenter = Some(status.diagnostics);
+                            }
+                        }
+                        Err(error) => {
+                            let _ = monitor.destroy_preview();
+                            configured_placement = None;
+                            last_presenter = None;
+                            let reason = format!("windows-d3d11-preview-configure-failed: {error}");
+                            if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                                break 'monitor;
+                            }
+                            crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                                &state, reason,
+                            )
+                            .await;
+                            if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                                break 'monitor;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                let action = windows_d3d11_preview_monitor_target_action(
+                    configured_placement.is_some(),
+                    false,
+                    false,
+                );
+                if action == WindowsD3d11PreviewMonitorTargetAction::Destroy {
+                    let _ = monitor.destroy_preview();
+                }
+                configured_placement = None;
+                last_presenter = None;
+                if last_placement_error.as_deref() != Some(error.as_str()) {
+                    if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                        break;
+                    }
+                    crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                        &state,
+                        format!("windows-d3d11-preview-waiting-for-trusted-bounds: {error}"),
+                    )
+                    .await;
+                    if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                        break;
+                    }
+                    last_placement_error = Some(error);
+                }
+            }
+        }
+
+        if configured_placement.is_some() {
+            let status = monitor.preview_status();
+            if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                break;
+            }
+            if let Ok(status) = status
+                && last_presenter.as_ref() != Some(&status.diagnostics)
+            {
+                if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                    break;
+                }
+                crate::preview_surface::update_windows_d3d11_presenter_status(
+                    &state,
+                    status.clone(),
+                )
+                .await;
+                if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                    break;
+                }
+                last_presenter = Some(status.diagnostics);
+            }
+        }
+
+        if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+            break;
+        }
+        let public = windows_d3d11_live_diagnostics(
+            mode,
+            &snapshot,
+            crate::diagnostics::PREVIEW_POLL_COUNTS.snapshot(),
+        );
+        let terminal = public.state == crate::protocol::WindowsD3d11MediaState::Failed;
+        let emitted = {
+            let mut diagnostics = state.diagnostics.lock().await;
+            if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                drop(diagnostics);
+                break;
+            }
+            diagnostics.windows_d3d11_media = public;
+            diagnostics.compositor_backend = Some(CompositorBackend::D3d11);
+            diagnostics.compositor_fallback_reason = None;
+            diagnostics.clone()
+        };
+        if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+            break;
+        }
+        state.emit_event(
+            "diagnostics.stats",
+            apply_runtime_diagnostics_snapshot(emitted, state.ffmpeg_work.snapshot()),
+        );
+        if terminal {
+            let _ = monitor.destroy_preview();
+            crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                &state,
+                "windows-d3d11-media-terminal-failure",
+            )
+            .await;
+            break;
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    let _ = monitor.destroy_preview();
+}
+
+#[cfg(target_os = "windows")]
+fn windows_d3d11_monitor_stop_requested(
+    stop: &AtomicBool,
+    monitor: &WindowsD3d11SessionMonitor,
+) -> bool {
+    if !stop.load(Ordering::Acquire) {
+        return false;
+    }
+    let _ = monitor.destroy_preview();
+    true
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsD3d11PreviewMonitorTargetAction {
+    Wait,
+    Keep,
+    Configure,
+    Destroy,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_preview_monitor_target_action(
+    has_configured_target: bool,
+    trusted_target_changed: bool,
+    trusted_target_available: bool,
+) -> WindowsD3d11PreviewMonitorTargetAction {
+    if !trusted_target_available {
+        return if has_configured_target {
+            WindowsD3d11PreviewMonitorTargetAction::Destroy
+        } else {
+            WindowsD3d11PreviewMonitorTargetAction::Wait
+        };
+    }
+    if !has_configured_target || trusted_target_changed {
+        WindowsD3d11PreviewMonitorTargetAction::Configure
+    } else {
+        WindowsD3d11PreviewMonitorTargetAction::Keep
+    }
+}
+
 fn default_encoder_bridge_video_output() -> EncoderBridgeVideoOutput {
     #[cfg(target_os = "macos")]
     {
         EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        // Request the capability-probed Media Foundation topology by default.
+        // `resolve_windows_encoded_bridge_decision` owns the named software
+        // fallback when the runtime encoder/topology probe rejects it.
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         EncoderBridgeVideoOutput::RawYuv420p
     }
@@ -8329,6 +9131,7 @@ fn recording_encoder_bridge_sources_ready(
     has_active_screen_image: bool,
     has_camera_frame: bool,
     has_screen_frame: bool,
+    d3d11_screen_source_authoritative: bool,
 ) -> bool {
     scene
         .sources
@@ -8337,9 +9140,10 @@ fn recording_encoder_bridge_sources_ready(
         .all(|source| match source.kind {
             SceneSourceKind::TestPattern => true,
             SceneSourceKind::Camera => has_camera_frame,
-            SceneSourceKind::Screen | SceneSourceKind::Window => {
-                has_active_screen_image || has_screen_frame
+            SceneSourceKind::Screen => {
+                d3d11_screen_source_authoritative || has_active_screen_image || has_screen_frame
             }
+            SceneSourceKind::Window => has_active_screen_image || has_screen_frame,
         })
 }
 
@@ -12371,6 +13175,26 @@ mod tests {
     };
     use tokio::sync::broadcast;
 
+    #[test]
+    fn windows_d3d11_layout_capability_covers_shipping_display_camera_presets() {
+        for layout in [
+            LayoutPreset::ScreenCamera,
+            LayoutPreset::SideBySide,
+            LayoutPreset::VerticalCameraTop,
+            LayoutPreset::VerticalCameraBottom,
+            LayoutPreset::VerticalSplit,
+            LayoutPreset::VerticalScreenCamera,
+        ] {
+            assert_eq!(windows_d3d11_display_camera_layout(&layout), Some(true));
+        }
+        for layout in [LayoutPreset::ScreenOnly, LayoutPreset::VerticalScreenOnly] {
+            assert_eq!(windows_d3d11_display_camera_layout(&layout), Some(false));
+        }
+        for layout in [LayoutPreset::CameraOnly, LayoutPreset::VerticalCameraOnly] {
+            assert_eq!(windows_d3d11_display_camera_layout(&layout), None);
+        }
+    }
+
     // Plan 030 S1: progress spam flooded the 200-entry log ring during the
     // 2026-07-08 X incident, evicting every useful entry in ~60s. The filter
     // must catch both the combined status line and per-key counters while
@@ -13718,6 +14542,12 @@ mod tests {
             screen_overlay: None,
             encoder_bridge: None,
             encoder_bridge_stream: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_media: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_monitor_stop: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_monitor_task: None,
             stream_targets_snapshot: Arc::new(StdMutex::new(snapshot)),
             captioned_copy_requested: false,
             keep_original_media: false,
@@ -16667,7 +17497,8 @@ mod tests {
             &test_pattern,
             false,
             false,
-            false
+            false,
+            false,
         ));
 
         let camera = scene_with_sources(vec![scene_source(
@@ -16677,10 +17508,10 @@ mod tests {
             true,
         )]);
         assert!(!recording_encoder_bridge_sources_ready(
-            &camera, false, false, false
+            &camera, false, false, false, false
         ));
         assert!(recording_encoder_bridge_sources_ready(
-            &camera, false, true, false
+            &camera, false, true, false, false
         ));
 
         let screen = scene_with_sources(vec![scene_source(
@@ -16690,14 +17521,27 @@ mod tests {
             true,
         )]);
         assert!(!recording_encoder_bridge_sources_ready(
-            &screen, false, false, false
+            &screen, false, false, false, false
         ));
         assert!(recording_encoder_bridge_sources_ready(
-            &screen, false, false, true
+            &screen, false, false, true, false
         ));
         assert!(recording_encoder_bridge_sources_ready(
-            &screen, true, false, false
+            &screen, true, false, false, false
         ));
+        assert!(recording_encoder_bridge_sources_ready(
+            &screen, false, false, false, true
+        ));
+        let window = scene_with_sources(vec![scene_source(
+            "source:window",
+            SceneSourceKind::Window,
+            scene_transform(0.0, 0.0, 1.0, 1.0),
+            true,
+        )]);
+        assert!(
+            !recording_encoder_bridge_sources_ready(&window, false, false, false, true),
+            "the DXGI-monitor authority must never satisfy a window-capture source"
+        );
 
         // A takeover screen row only counts when its image file actually exists.
         assert!(!stream_screen_image_usable(None));
@@ -16725,6 +17569,12 @@ mod tests {
         assert!(encoder_bridge_disabled_setting(Some("0")));
         assert!(!encoder_bridge_recording_disabled(None));
         let default_output = default_encoder_bridge_video_output();
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            default_output,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "Windows must capability-probe the production Media Foundation path without an env override"
+        );
         assert_eq!(
             parse_encoder_bridge_video_output(None, default_output),
             default_output
@@ -16775,7 +17625,12 @@ mod tests {
             select_encoder_bridge_video_output(None, true, true),
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            select_encoder_bridge_video_output(None, true, true),
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(
             select_encoder_bridge_video_output(None, true, true),
             EncoderBridgeVideoOutput::RawYuv420p
@@ -16789,7 +17644,12 @@ mod tests {
             select_encoder_bridge_video_output(None, false, true),
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            select_encoder_bridge_video_output(None, false, true),
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(
             select_encoder_bridge_video_output(None, false, true),
             EncoderBridgeVideoOutput::RawYuv420p
@@ -16797,6 +17657,93 @@ mod tests {
         assert_eq!(
             select_encoder_bridge_video_output(Some("mpeg-ts"), true, true),
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+        );
+    }
+
+    #[test]
+    fn windows_d3d11_preflight_bypasses_only_the_dxgi_screen_store() {
+        let mut params = base_params(false, true);
+        params.sources.screen_id = Some("screen:dxgi:00000000000003f1:2".to_string());
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        assert!(windows_d3d11_screen_preflight_candidate(
+            &params,
+            WindowsD3d11MediaMode::Automatic,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        ));
+
+        let mut disabled = params.clone();
+        assert!(!windows_d3d11_screen_preflight_candidate(
+            &disabled,
+            WindowsD3d11MediaMode::Disabled,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        ));
+        assert!(!windows_d3d11_screen_preflight_candidate(
+            &disabled,
+            WindowsD3d11MediaMode::Automatic,
+            EncoderBridgeVideoOutput::RawYuv420p,
+        ));
+        disabled.sources.window_id = Some("window:test".to_string());
+        assert!(!windows_d3d11_screen_preflight_candidate(
+            &disabled,
+            WindowsD3d11MediaMode::Automatic,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        ));
+        disabled.sources.window_id = None;
+        disabled.scene = Some(scene_with_sources(Vec::new()));
+        assert!(!windows_d3d11_screen_preflight_candidate(
+            &disabled,
+            WindowsD3d11MediaMode::Automatic,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        ));
+    }
+
+    #[test]
+    fn windows_d3d11_fallback_diagnostics_name_the_legacy_path() {
+        let diagnostics = windows_d3d11_fallback_diagnostics(
+            WindowsD3d11MediaMode::Automatic,
+            "windows-d3d11-media-screen-unavailable",
+        );
+        assert_eq!(
+            diagnostics.state,
+            crate::protocol::WindowsD3d11MediaState::Fallback
+        );
+        assert_eq!(
+            diagnostics.capture_backend,
+            Some(crate::protocol::WindowsD3d11CaptureBackend::LegacyFfmpeg)
+        );
+        assert_eq!(
+            diagnostics.cursor_mode,
+            Some(crate::protocol::WindowsD3d11CursorMode::DisabledFallback)
+        );
+        assert_eq!(
+            diagnostics.fallback_reason.as_deref(),
+            Some("windows-d3d11-media-screen-unavailable")
+        );
+    }
+
+    #[test]
+    fn windows_d3d11_preview_monitor_closes_and_reopens_cleanly() {
+        use WindowsD3d11PreviewMonitorTargetAction as Action;
+
+        assert_eq!(
+            windows_d3d11_preview_monitor_target_action(true, false, false),
+            Action::Destroy
+        );
+        assert_eq!(
+            windows_d3d11_preview_monitor_target_action(false, false, false),
+            Action::Wait
+        );
+        assert_eq!(
+            windows_d3d11_preview_monitor_target_action(false, true, true),
+            Action::Configure
+        );
+        assert_eq!(
+            windows_d3d11_preview_monitor_target_action(true, false, true),
+            Action::Keep
+        );
+        assert_eq!(
+            windows_d3d11_preview_monitor_target_action(true, true, true),
+            Action::Configure
         );
     }
 
@@ -17895,6 +18842,12 @@ mod tests {
             screen_overlay: None,
             encoder_bridge: None,
             encoder_bridge_stream: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_media: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_monitor_stop: None,
+            #[cfg(target_os = "windows")]
+            windows_d3d11_monitor_task: None,
             stream_targets_snapshot: Arc::new(StdMutex::new(StreamTargetsSnapshot {
                 session_id: "live-audio-lock-test".to_string(),
                 targets: Vec::new(),

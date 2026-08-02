@@ -352,10 +352,8 @@ describe('Windows GPU sampler', () => {
         sample(),
         coherentSample({
           timestamp: start + 1_000,
-          beforeSnapshotStartedAt: start + 4_000,
-          beforeSnapshotCompletedAt: start + 4_100,
-          afterSnapshotStartedAt: start + 4_200,
-          afterSnapshotCompletedAt: start + 4_300,
+          snapshotStartedAt: start + 4_000,
+          snapshotCompletedAt: start + 4_100,
           processes: [processRow(101, 4, ROOT_CREATED)]
         })
       ],
@@ -367,59 +365,9 @@ describe('Windows GPU sampler', () => {
     })
 
     assert.equal(attributed.verdict, 'BLOCKED')
-    assert.match(attributed.blockers.join('\n'), /omitted its pre\/post timestamp-coherent/)
-    assert.match(attributed.blockers.join('\n'), /pre-counter.*was 3000ms/)
+    assert.match(attributed.blockers.join('\n'), /omitted its timestamp-coherent process snapshot/)
+    assert.match(attributed.blockers.join('\n'), /process snapshot was 3000ms/)
     assert.match(attributed.blockers.join('\n'), /coverage 0\/2/)
-  })
-
-  it('accepts the inclusive cadence bounds for one-second GPU samples', () => {
-    const start = Date.parse('2026-07-29T12:00:00.000Z')
-    for (const interval of [500, 1_500]) {
-      const attributed = attributeWindowsGpuSamplesToProcessTimeline({
-        samples: [
-          coherentSample({ timestamp: start }),
-          coherentSample({ timestamp: start + interval })
-        ],
-        candidateRootPid: 101,
-        candidateRootCreationDate: ROOT_CREATED,
-        expectedSamples: 2,
-        intervalMs: 1_000
-      })
-
-      assert.equal(attributed.verdict, 'PASS', attributed.blockers.join('\n'))
-    }
-  })
-
-  it('blocks clustered, stretched, and non-monotonic GPU sample timestamps', () => {
-    const start = Date.parse('2026-07-29T12:00:00.000Z')
-    const attributeTimestamps = (offsets) =>
-      attributeWindowsGpuSamplesToProcessTimeline({
-        samples: offsets.map((offset) => coherentSample({ timestamp: start + offset })),
-        candidateRootPid: 101,
-        candidateRootCreationDate: ROOT_CREATED,
-        expectedSamples: offsets.length,
-        intervalMs: 1_000
-      })
-
-    const clusteredInterval = attributeTimestamps([0, 499])
-    assert.equal(clusteredInterval.verdict, 'BLOCKED')
-    assert.match(clusteredInterval.blockers.join('\n'), /cadence interval 499ms/)
-
-    const stretchedInterval = attributeTimestamps([0, 1_501])
-    assert.equal(stretchedInterval.verdict, 'BLOCKED')
-    assert.match(stretchedInterval.blockers.join('\n'), /cadence interval 1501ms/)
-
-    const clusteredSpan = attributeTimestamps([0, 600, 1_200, 1_800])
-    assert.equal(clusteredSpan.verdict, 'BLOCKED')
-    assert.match(clusteredSpan.blockers.join('\n'), /timestamp span 1800ms/)
-
-    const stretchedSpan = attributeTimestamps([0, 1_400, 2_800, 4_200])
-    assert.equal(stretchedSpan.verdict, 'BLOCKED')
-    assert.match(stretchedSpan.blockers.join('\n'), /timestamp span 4200ms/)
-
-    const nonMonotonic = attributeTimestamps([0, 1_000, 500])
-    assert.equal(nonMonotonic.verdict, 'BLOCKED')
-    assert.match(nonMonotonic.blockers.join('\n'), /timestamp was not strictly monotonic/)
   })
 
   it('pins root CreationDate from the first coherent snapshot when the caller omits it', () => {
@@ -535,141 +483,59 @@ describe('Windows GPU sampler', () => {
     assert.match(script, /-SampleInterval 1 -MaxSamples 180/)
     assert.match(script, /Get-CimInstance -ClassName Win32_Process/)
     assert.match(script, /ProcessId, ParentProcessId, CreationDate/)
-    assert.match(script, /\$counterSet = \$_/)
-    assert.match(script, /\$counterSet\.CounterSamples/)
-    assert.match(script, /\$counterSet\.Timestamp/)
-    assert.match(script, /status = \[int64\]\$_.Status/)
-    assert.match(script, /processIdentityBracket =/)
-    assert.match(script, /before = \$beforeCounterSnapshot/)
-    assert.match(script, /after = \$afterCounterSnapshot/)
+    assert.match(script, /processSnapshot =/)
+    assert.match(script, /processSnapshotStartedAt/)
+    assert.match(script, /processSnapshotCompletedAt/)
   })
 
-  it('normalizes raw counters, statuses, and their coherent Win32_Process bracket', () => {
+  it('normalizes raw counters and their coherent Win32_Process snapshot', () => {
     const engineInstance = instance(101, '3D')
     const memoryInstance = instance(101, null)
-    const processIdentityBracket = {
-      before: snapshot('2026-07-29T11:59:59.990Z', [processRow(101, 4, ROOT_CREATED)]),
-      after: snapshot('2026-07-29T12:00:00.010Z', [processRow(101, 4, ROOT_CREATED)])
-    }
+    const processSnapshot = snapshot('2026-07-29T12:00:00.000Z', [processRow(101, 4, ROOT_CREATED)])
     assert.deepEqual(
       normalizeWindowsGpuCounterBatch({
         timestamp: 'now',
-        processIdentityBracket,
+        processSnapshot,
         counters: [
           {
             path: `\\\\host\\gpu engine(${engineInstance})\\utilization percentage`,
             instanceName: engineInstance,
-            value: 42,
-            status: 0
+            value: 42
           },
           {
             path: `\\\\host\\gpu process memory(${memoryInstance})\\dedicated usage`,
             instanceName: memoryInstance,
-            value: 100,
-            status: -1_073_738_824
+            value: 100
           },
           {
             path: `\\\\host\\gpu process memory(${memoryInstance})\\shared usage`,
             instanceName: memoryInstance,
-            value: 50,
-            status: 0
+            value: 50
           }
         ]
       }),
       {
         timestamp: 'now',
-        processIdentityBracket,
-        engineCounters: [{ instanceName: engineInstance, value: 42, status: 0 }],
-        memoryCounters: [
-          {
-            instanceName: memoryInstance,
-            dedicatedBytes: 100,
-            dedicatedStatus: 0xc000_0bb8,
-            sharedBytes: 50,
-            sharedStatus: 0
-          }
-        ]
+        processSnapshot,
+        engineCounters: [{ instanceName: engineInstance, value: 42 }],
+        memoryCounters: [{ instanceName: memoryInstance, dedicatedBytes: 100, sharedBytes: 50 }]
       }
     )
   })
 
-  it('rejects null, blank, missing, and non-finite counter values and statuses', () => {
-    const engineInstance = instance(101, '3D')
-    const memoryInstance = instance(101, null)
-    const invalidInputs = [null, undefined, '', '   ', Number.NaN, Infinity, -Infinity]
-
-    for (const invalid of invalidInputs) {
-      const normalized = normalizeWindowsGpuCounterBatch({
-        timestamp: 'now',
-        counters: [
-          {
-            path: `\\\\host\\gpu engine(${engineInstance})\\utilization percentage`,
-            instanceName: engineInstance,
-            value: invalid,
-            status: invalid
-          },
-          {
-            path: `\\\\host\\gpu process memory(${memoryInstance})\\dedicated usage`,
-            instanceName: memoryInstance,
-            value: invalid,
-            status: invalid
-          },
-          {
-            path: `\\\\host\\gpu process memory(${memoryInstance})\\shared usage`,
-            instanceName: memoryInstance,
-            value: invalid,
-            status: invalid
-          }
-        ]
-      })
-      assert.equal(Number.isNaN(normalized.engineCounters[0].value), true)
-      assert.equal(Number.isNaN(normalized.engineCounters[0].status), true)
-      assert.equal(Number.isNaN(normalized.memoryCounters[0].dedicatedBytes), true)
-      assert.equal(Number.isNaN(normalized.memoryCounters[0].dedicatedStatus), true)
-      assert.equal(Number.isNaN(normalized.memoryCounters[0].sharedBytes), true)
-      assert.equal(Number.isNaN(normalized.memoryCounters[0].sharedStatus), true)
-
-      const invalidValue = summarizeWindowsGpuSamples({
-        samples: [sample({ engines: [engine(101, '3D', invalid)] })],
-        expectedSamples: 1,
-        processIds: [101],
-        adapterLuid: ADAPTER
-      })
-      assert.equal(invalidValue.verdict, 'BLOCKED')
-
-      const invalidStatus = summarizeWindowsGpuSamples({
-        samples: [
-          sample({
-            engines: [{ ...engine(101, '3D', 10), status: invalid }]
-          })
-        ],
-        expectedSamples: 1,
-        processIds: [101],
-        adapterLuid: ADAPTER
-      })
-      assert.equal(invalidStatus.verdict, 'BLOCKED')
-    }
-  })
-
   it('retains invalid process identity fields for fail-closed attribution', () => {
     assert.deepEqual(
-      normalizeWindowsProcessIdentityBracket({
-        before: {
-          sampledAt: 'now',
-          startedAt: 'before',
-          completedAt: 'after',
-          processes: [{ pid: '202', parentPid: '101', creationDate: null }]
-        },
-        after: null
+      normalizeWindowsProcessSnapshot({
+        sampledAt: 'now',
+        startedAt: 'before',
+        completedAt: 'after',
+        processes: [{ pid: '202', parentPid: '101', creationDate: null }]
       }),
       {
-        before: {
-          sampledAt: 'now',
-          startedAt: 'before',
-          completedAt: 'after',
-          processes: [{ pid: 202, parentPid: 101, creationDate: null }]
-        },
-        after: null
+        sampledAt: 'now',
+        startedAt: 'before',
+        completedAt: 'after',
+        processes: [{ pid: 202, parentPid: 101, creationDate: null }]
       }
     )
   })

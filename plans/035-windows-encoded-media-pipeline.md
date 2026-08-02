@@ -48,7 +48,7 @@ The non-macOS encoder bridge defaults to `RawYuv420p`, so a 4K30 frame stream mo
 - [ ] Natural unsupported-device OpenH264 fallback record passes.
 - [ ] Windows default promoted from raw to probed encoded output.
 - [ ] Plan 039 physical RTMP matrix passes for stream-only and
-  record-plus-stream at 1080p30/60.
+      record-plus-stream at 1080p30/60.
 
 ## Scope
 

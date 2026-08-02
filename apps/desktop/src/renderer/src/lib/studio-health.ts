@@ -1,5 +1,7 @@
 import type { StatusTone } from '@/components/status-badge'
 import type { DiagnosticStats } from '@/lib/backend'
+import type { NativePreviewHostKind } from '../../../shared/backend'
+import { isNativePreviewCapability } from '../../../shared/native-preview-capability'
 
 /** The slice of diagnostics the compact Studio health badge reads. Full stats live in the
  * Diagnostics tab; this is the at-a-glance "is the live program healthy" signal. */
@@ -43,15 +45,19 @@ const PREVIEW_PRESENT_BUDGET_P99_MS = 150
 export function studioHealth(
   stats: StudioHealthInput,
   active: boolean,
-  platform?: string
+  platform?: string,
+  nativePreviewHostKind?: NativePreviewHostKind
 ): StudioHealth {
-  // Off macOS there is no Metal GPU compositor and no native preview surface,
-  // so the CPU compositor ('cpu') and image-polling preview ARE the intended
-  // paths — they must read healthy. Only macOS's 'cpu-fallback' (Metal asked
-  // for, not obtained) is a real degradation. The backend already reports
-  // 'cpu' vs 'cpu-fallback' per platform; this guard also protects the
-  // frame-count fast path (which counts both) and the transport check.
-  const nativePreviewExpected = platform === undefined || platform === 'darwin'
+  const effectivePlatform = platform ?? 'darwin'
+  const nativePreviewExpected = effectivePlatform === 'darwin' || effectivePlatform === 'win32'
+  const nativePreviewLive = isNativePreviewCapability(
+    {
+      transport: stats.previewTransport,
+      backing: stats.previewSurfaceBacking,
+      nativePreviewHostKind
+    },
+    effectivePlatform
+  )
 
   if (
     stats.compositorBackend === 'cpu-fallback' ||
@@ -72,9 +78,12 @@ export function studioHealth(
   // native surface, polling is not a fallback — it is the preview path — so it stays quiet.
   if (
     nativePreviewExpected &&
+    !nativePreviewLive &&
     (stats.previewTransport === 'latest-jpeg-polling' ||
       stats.previewTransport === 'mjpeg-stream' ||
-      stats.previewTransport === 'electron-proof-surface')
+      stats.previewTransport === 'electron-proof-surface' ||
+      stats.previewTransport === 'native-surface' ||
+      stats.previewTransport === 'd3d11-shared-texture')
   ) {
     return {
       tone: 'warn',

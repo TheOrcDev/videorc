@@ -22,6 +22,7 @@ import type {
   VideorcApi,
   ViewerSample
 } from './backend'
+import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { LAYOUT_PRESET_VALUES } from './backend'
 import {
   arraySchema,
@@ -703,34 +704,89 @@ const previewCompositorUpdateSchema = boundedSemanticValue(
   )
 )
 
-const previewSurfaceStatusSchema = boundedSemanticValue(
-  'a native preview surface status',
-  objectSchema(
-    {
-      state: enumSchema(['unavailable', 'starting', 'live', 'stopped', 'failed']),
-      source: enumSchema(['synthetic', 'camera', 'screen', 'window']),
-      transport: enumSchema([
-        'native-surface',
-        'electron-proof-surface',
-        'latest-jpeg-polling',
-        'mjpeg-stream',
-        'unavailable'
-      ]),
-      backing: enumSchema(['cametal-layer', 'electron-browser-window', 'none']),
-      targetFps: numberSchema({ min: 0, max: 1_000 }),
-      width: numberSchema({ min: 0, max: 65_536 }),
-      height: numberSchema({ min: 0, max: 65_536 }),
-      framesRendered: nonNegativeSafeIntegerSchema,
-      droppedFrames: nonNegativeSafeIntegerSchema,
-      framePollingSuppressed: booleanSchema,
-      sourcePixelsPresent: booleanSchema,
-      pendingHostCommandCount: nonNegativeSafeIntegerSchema,
-      bounds: optionalSchema(previewBoundsSchema),
-      updatedAt: stringSchema({ minLength: 1, maxLength: 128 })
-    },
-    { allowUnknown: true }
-  )
+const previewSurfaceStatusFieldsSchema = objectSchema(
+  {
+    state: enumSchema(['unavailable', 'starting', 'live', 'stopped', 'failed']),
+    source: enumSchema(['synthetic', 'camera', 'screen', 'window']),
+    transport: enumSchema([
+      'native-surface',
+      'd3d11-shared-texture',
+      'electron-proof-surface',
+      'latest-jpeg-polling',
+      'mjpeg-stream',
+      'unavailable'
+    ]),
+    backing: enumSchema([
+      'cametal-layer',
+      'directcomposition-swapchain',
+      'electron-browser-window',
+      'none'
+    ]),
+    targetFps: numberSchema({ min: 0, max: 1_000 }),
+    width: numberSchema({ min: 0, max: 65_536 }),
+    height: numberSchema({ min: 0, max: 65_536 }),
+    framesRendered: nonNegativeSafeIntegerSchema,
+    droppedFrames: nonNegativeSafeIntegerSchema,
+    framePollingSuppressed: booleanSchema,
+    sourcePixelsPresent: booleanSchema,
+    pendingHostCommandCount: nonNegativeSafeIntegerSchema,
+    nativePreviewHostKind: optionalSchema(
+      enumSchema([
+        'in-process',
+        'helper-process',
+        'external-module',
+        'proof-surface',
+        'backend-d3d11-presenter'
+      ])
+    ),
+    bounds: optionalSchema(previewBoundsSchema),
+    updatedAt: stringSchema({ minLength: 1, maxLength: 128 })
+  },
+  { allowUnknown: true }
 )
+
+const previewSurfaceStatusSchema = boundedSemanticValue(
+  'a renderer-safe native preview surface status',
+  runtimeSchema('a renderer-safe native preview surface status', (value, path) => {
+    rejectPrivilegedPreviewIdentity(value, path)
+    previewSurfaceStatusFieldsSchema.parse(value, path)
+    return value
+  })
+)
+
+function rejectPrivilegedPreviewIdentity(value: unknown, path: string): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return
+  }
+  const record = value as Record<string, unknown>
+  for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+    if (field in record) {
+      throw new RuntimeSchemaError(`${path}.${field}`, 'absent from renderer-facing state')
+    }
+  }
+  const bounds = record.bounds
+  if (typeof bounds === 'object' && bounds !== null && !Array.isArray(bounds)) {
+    for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+      if (field in bounds) {
+        throw new RuntimeSchemaError(
+          `${path}.bounds.${field}`,
+          'absent from renderer-facing bounds'
+        )
+      }
+    }
+  }
+  const presenter = record.windowsD3d11Presenter
+  if (typeof presenter === 'object' && presenter !== null && !Array.isArray(presenter)) {
+    for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+      if (field in presenter) {
+        throw new RuntimeSchemaError(
+          `${path}.windowsD3d11Presenter.${field}`,
+          'absent from renderer-facing presenter diagnostics'
+        )
+      }
+    }
+  }
+}
 
 const nativePreviewHostCommandSchema = runtimeSchema<unknown>(
   'a native preview host command',

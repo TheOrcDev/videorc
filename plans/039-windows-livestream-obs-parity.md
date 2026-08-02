@@ -53,13 +53,13 @@ real-time delivery regresses.
 
 ## Incident evidence and limits
 
-| Evidence | What it establishes | What it does not establish |
-|---|---|---|
-| [OBS testing](https://www.youtube.com/watch?v=K_sRXiqjnmA), 162.656 s | YouTube archived a regular 1920x1080 at 60 fps AVC High L4.2 stream with BT.709/video-range tags. | The OBS and Videorc inputs were not the same motion sequence, duration, bitrate, or audio setup. |
-| [Videorc testing](https://www.youtube.com/watch?v=Cf0rUGk0mDs), 81.084 s | YouTube archived the same nominal resolution, frame rate, codec profile, color tags, and 16.667 ms frame cadence; no long timestamp gaps or gross frame tearing were found. | A constant-frame-rate YouTube transcode can conceal repeated source frames. It cannot prove capture, compositor, or encoder cadence. |
-| Videorc frame/content sampling | The run was almost static and visibly included the Videorc control/preview windows in a hall-of-mirrors capture. Exact decoded-frame repeats were more common than in the OBS VOD, with a longest sampled run of about 83 ms. | Static scenes and YouTube re-encoding make exact-repeat counts non-causal. Do not call this a measured Videorc drop rate. |
-| Audio analysis | Both VOD audio tracks are effectively silent. The Videorc UI showed system audio unavailable and the microphone muted. | No A/V sync, drift, microphone, or system-audio comparison is possible from these two VODs. |
-| Release chronology | The Windows 0.9.47 alpha candidate merged before PR #169, which added the Media Foundation bridge. | The exact tester hardware, selected encoder, queue pressure, network state, and whether recording was also active require that session's support bundle. |
+| Evidence                                                                 | What it establishes                                                                                                                                                                                                           | What it does not establish                                                                                                                               |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [OBS testing](https://www.youtube.com/watch?v=K_sRXiqjnmA), 162.656 s    | YouTube archived a regular 1920x1080 at 60 fps AVC High L4.2 stream with BT.709/video-range tags.                                                                                                                             | The OBS and Videorc inputs were not the same motion sequence, duration, bitrate, or audio setup.                                                         |
+| [Videorc testing](https://www.youtube.com/watch?v=Cf0rUGk0mDs), 81.084 s | YouTube archived the same nominal resolution, frame rate, codec profile, color tags, and 16.667 ms frame cadence; no long timestamp gaps or gross frame tearing were found.                                                   | A constant-frame-rate YouTube transcode can conceal repeated source frames. It cannot prove capture, compositor, or encoder cadence.                     |
+| Videorc frame/content sampling                                           | The run was almost static and visibly included the Videorc control/preview windows in a hall-of-mirrors capture. Exact decoded-frame repeats were more common than in the OBS VOD, with a longest sampled run of about 83 ms. | Static scenes and YouTube re-encoding make exact-repeat counts non-causal. Do not call this a measured Videorc drop rate.                                |
+| Audio analysis                                                           | Both VOD audio tracks are effectively silent. The Videorc UI showed system audio unavailable and the microphone muted.                                                                                                        | No A/V sync, drift, microphone, or system-audio comparison is possible from these two VODs.                                                              |
+| Release chronology                                                       | The Windows 0.9.47 alpha candidate merged before PR #169, which added the Media Foundation bridge.                                                                                                                            | The exact tester hardware, selected encoder, queue pressure, network state, and whether recording was also active require that session's support bundle. |
 
 The VOD review rules out a simple "YouTube received a broken 30 fps stream"
 diagnosis. The ranked hypotheses to test are:
@@ -218,26 +218,26 @@ Run source-level gates from the repository root on every platform. Run commands
 marked "physical Windows" from an x64 Windows 11 acceptance machine against the
 packaged candidate.
 
-| Purpose | Command | Expected on success |
-|---|---|---|
-| Script tests | `pnpm test:scripts` | exit 0 |
-| Desktop tests | `pnpm --filter @videorc/desktop test` | exit 0 |
-| Typecheck | `pnpm typecheck` | exit 0 |
-| Lint | `pnpm lint` | exit 0 |
-| Format | `pnpm format:check` | exit 0 |
-| Rust format | `cargo fmt --check --all` | exit 0 |
-| Rust tests | `cargo test -p videorc-backend` | exit 0 |
-| Rust lint | `cargo clippy -p videorc-backend -- -D warnings` | exit 0 |
-| Desktop build | `pnpm build` | exit 0 |
-| Existing DXGI gate (physical Windows) | `pnpm smoke:windows-native-screen` | exit 0 and final artifact passes |
-| Focused MF matrix (physical Windows) | `pnpm smoke:windows-encoded-bridge -- --profiles 1080p30,1080p60` | exit 0 and selected MF runs report zero raw copied frames |
-| New RTMP gate (physical Windows) | `pnpm smoke:windows-stream-performance` | exit 0 and writes a PASS evidence bundle |
-| Windows OBS comparison (physical Windows) | `pnpm smoke:windows-obs-side-by-side` | exit 0 and writes a digest-bound comparison bundle |
-| Preview lifecycle regression | `pnpm probe:preview-lifecycle` | exit 0 |
-| Recording Studio regression | `pnpm smoke:recording-studio` | exit 0 |
-| Recording profile/color/FPS regression | `pnpm smoke:recording-matrix` | exit 0 |
-| Real-device Recording Studio regression | `pnpm smoke:recording-studio:devices` | exit 0 on a permitted macOS device host, or an explicit BLOCKED record plus the closest Windows native-preview/recording gates |
-| Protected candidate lane (physical Windows) | `pnpm smoke:local-gates:windows` | exit 0 and includes the RTMP gate |
+| Purpose                                     | Command                                                           | Expected on success                                                                                                            |
+| ------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Script tests                                | `pnpm test:scripts`                                               | exit 0                                                                                                                         |
+| Desktop tests                               | `pnpm --filter @videorc/desktop test`                             | exit 0                                                                                                                         |
+| Typecheck                                   | `pnpm typecheck`                                                  | exit 0                                                                                                                         |
+| Lint                                        | `pnpm lint`                                                       | exit 0                                                                                                                         |
+| Format                                      | `pnpm format:check`                                               | exit 0                                                                                                                         |
+| Rust format                                 | `cargo fmt --check --all`                                         | exit 0                                                                                                                         |
+| Rust tests                                  | `cargo test -p videorc-backend`                                   | exit 0                                                                                                                         |
+| Rust lint                                   | `cargo clippy -p videorc-backend -- -D warnings`                  | exit 0                                                                                                                         |
+| Desktop build                               | `pnpm build`                                                      | exit 0                                                                                                                         |
+| Existing DXGI gate (physical Windows)       | `pnpm smoke:windows-native-screen`                                | exit 0 and final artifact passes                                                                                               |
+| Focused MF matrix (physical Windows)        | `pnpm smoke:windows-encoded-bridge -- --profiles 1080p30,1080p60` | exit 0 and selected MF runs report zero raw copied frames                                                                      |
+| New RTMP gate (physical Windows)            | `pnpm smoke:windows-stream-performance`                           | exit 0 and writes a PASS evidence bundle                                                                                       |
+| Windows OBS comparison (physical Windows)   | `pnpm smoke:windows-obs-side-by-side`                             | exit 0 and writes a digest-bound comparison bundle                                                                             |
+| Preview lifecycle regression                | `pnpm probe:preview-lifecycle`                                    | exit 0                                                                                                                         |
+| Recording Studio regression                 | `pnpm smoke:recording-studio`                                     | exit 0                                                                                                                         |
+| Recording profile/color/FPS regression      | `pnpm smoke:recording-matrix`                                     | exit 0                                                                                                                         |
+| Real-device Recording Studio regression     | `pnpm smoke:recording-studio:devices`                             | exit 0 on a permitted macOS device host, or an explicit BLOCKED record plus the closest Windows native-preview/recording gates |
+| Protected candidate lane (physical Windows) | `pnpm smoke:local-gates:windows`                                  | exit 0 and includes the RTMP gate                                                                                              |
 
 ## Scope
 
@@ -418,20 +418,20 @@ packaged candidate.
    - A/V analysis thresholds from `scripts/lib/stream-av-sync.mjs`;
    - per-process CPU/RSS collection from
      `scripts/smoke-windows-native-screen-app.mjs`.
-   Extend `screen-motion-stimulus.mjs` and `av-sync-stimulus.mjs` with one
-   tested Windows browser resolver: explicit `VIDEORC_STIMULUS_BROWSER` first,
-   then installed Edge/Chrome under Program Files or Local AppData. The runner
-   records the resolved executable and returns BLOCKED before launch when
-   either the visible-motion or audible-alignment stimulus cannot start. Do
-   not inherit the helpers' macOS Chrome default on Windows.
+     Extend `screen-motion-stimulus.mjs` and `av-sync-stimulus.mjs` with one
+     tested Windows browser resolver: explicit `VIDEORC_STIMULUS_BROWSER` first,
+     then installed Edge/Chrome under Program Files or Local AppData. The runner
+     records the resolved executable and returns BLOCKED before launch when
+     either the visible-motion or audible-alignment stimulus cannot start. Do
+     not inherit the helpers' macOS Chrome default on Windows.
 3. The protected matrix must exercise the packaged app with a real DXGI
    display at:
    - 1920x1080 at 30 fps and 60 fps;
    - stream-only and record-plus-stream;
    - detached preview open and closed.
-   Use 60 seconds of warm-up followed by 180 seconds measured. Run three
-   repetitions of every release-blocking profile. Keep a single-scenario mode
-   for developer iteration; it must not generate release PASS evidence.
+     Use 60 seconds of warm-up followed by 180 seconds measured. Run three
+     repetitions of every release-blocking profile. Keep a single-scenario mode
+     for developer iteration; it must not generate release PASS evidence.
 4. Capture the local RTMP leg losslessly enough for frame hashes and retain:
    receiver media, ffprobe JSON, framemd5, analyzer report, app support bundle,
    process/GPU samples, selected settings, exact candidate digest, and a
@@ -478,7 +478,7 @@ Every measured run must evaluate all of these machine checks:
   without launching the app.
 - On physical Windows:
   `pnpm smoke:windows-stream-performance -- --calibrate --scenario
-  1080p30-stream-preview` → exit 0, every media correctness check passes, and
+1080p30-stream-preview` → exit 0, every media correctness check passes, and
   the aggregate verdict is `CALIBRATION` with retained evidence paths.
   Do not attempt release PASS or the entitlement-blocked 60 fps cases yet.
 
@@ -510,7 +510,7 @@ Every measured run must evaluate all of these machine checks:
 
 - `pnpm --filter @videorc/desktop test` → capture-protection tests pass.
 - `pnpm smoke:windows-stream-performance -- --calibrate --scenario
-  1080p30-stream-preview` on physical Windows → Videorc markers absent,
+1080p30-stream-preview` on physical Windows → Videorc markers absent,
   stimulus present, media checks pass, and the aggregate verdict is
   `CALIBRATION`. Repeat the pixel check at 60 fps in Step 5 after changing the
   entitlement.
@@ -562,7 +562,7 @@ Every measured run must evaluate all of these machine checks:
   Step 4 release gate.
 - On the second device:
   `pnpm smoke:windows-stream-performance -- --calibrate --scenario
-  1080p30-stream-preview --expect-fallback software-open-h264` → CALIBRATION completes,
+1080p30-stream-preview --expect-fallback software-open-h264` → CALIBRATION completes,
   fallback reason is nonempty, and the fallback media checks pass.
 
 ### Step 5: Unlock and make 1080p quality provider-aware without weakening mixed output
@@ -585,8 +585,8 @@ Every measured run must evaluate all of these machine checks:
      10,000 kbps CBR, two-second GOP;
    - `stream-youtube-1080p60`: YouTube-only 1920x1080 at 60 fps H.264,
      12,000 kbps CBR, two-second GOP.
-   Add both exact strings to Rust `VideoPreset`, the TypeScript union, preset
-   maps/options, normalization, and wire-contract tests.
+     Add both exact strings to Rust `VideoPreset`, the TypeScript union, preset
+     maps/options, normalization, and wire-contract tests.
 4. Keep the current stream-safe 6000 kbps profiles for Twitch, X, manual/mixed
    destinations, and any shared encode whose strictest destination has not
    validated a higher rate. Never globally relax `> 6000` checks.
@@ -626,7 +626,7 @@ Every measured run must evaluate all of these machine checks:
   `pnpm smoke:windows-stream-performance -- --prepare-premium-profile` reports
   a redacted Premium/Developer attestation for the installed candidate,
   `pnpm smoke:windows-stream-performance -- --calibrate --scenario
-  youtube-1080p60` on physical Windows → configured 12 Mbps/two-second GOP,
+youtube-1080p60` on physical Windows → configured 12 Mbps/two-second GOP,
   all media and capture-protection pixel checks pass, and aggregate verdict is
   CALIBRATION.
 
@@ -656,25 +656,25 @@ Every measured run must evaluate all of these machine checks:
      settings, full process-tree CPU/RSS, per-role Videorc metrics, GPU
      engine/VRAM, receiver artifacts, framemd5/analyzer/A/V reports, and every
      input report SHA-256.
-   Implement GPU collection in `windows-gpu-sampler.mjs` with vendor-neutral
-   Windows Performance Counters:
-   `GPU Engine(*)\Utilization Percentage`,
-   `GPU Process Memory(*)\Dedicated Usage`, and `Shared Usage`. Sample at one
-   second, attribute instances by PID and adapter LUID to the complete app
-   process tree, record bytes and percentages, and define per-sample engine
-   busy as the maximum relevant 3D/Copy/Video Encode/Video Decode engine
-   utilization (never sum mutually concurrent engine percentages). Report p95
-   engine busy and p95/max dedicated/shared MiB. Fewer than 90% expected
-   samples, unattributed live PIDs, missing counters, a different adapter, or
-   non-finite units makes the comparison BLOCKED; vendor-specific tools are
-   supplemental only.
-   Before building the candidate, also update
-   `scripts/lib/windows-local-gates.mjs` so its encoded-bridge step invokes the
-   accepted focused matrix exactly as
-   `smoke:windows-encoded-bridge -- --profiles 1080p30,1080p60`; retain the
-   broader 1440p60/4K command as report-only characterization outside the
-   protected lane. Add an argument-generation test in
-   `windows-local-gates.test.mjs`.
+     Implement GPU collection in `windows-gpu-sampler.mjs` with vendor-neutral
+     Windows Performance Counters:
+     `GPU Engine(*)\Utilization Percentage`,
+     `GPU Process Memory(*)\Dedicated Usage`, and `Shared Usage`. Sample at one
+     second, attribute instances by PID and adapter LUID to the complete app
+     process tree, record bytes and percentages, and define per-sample engine
+     busy as the maximum relevant 3D/Copy/Video Encode/Video Decode engine
+     utilization (never sum mutually concurrent engine percentages). Report p95
+     engine busy and p95/max dedicated/shared MiB. Fewer than 90% expected
+     samples, unattributed live PIDs, missing counters, a different adapter, or
+     non-finite units makes the comparison BLOCKED; vendor-specific tools are
+     supplemental only.
+     Before building the candidate, also update
+     `scripts/lib/windows-local-gates.mjs` so its encoded-bridge step invokes the
+     accepted focused matrix exactly as
+     `smoke:windows-encoded-bridge -- --profiles 1080p30,1080p60`; retain the
+     broader 1440p60/4K command as report-only characterization outside the
+     protected lane. Add an argument-generation test in
+     `windows-local-gates.test.mjs`.
 2. Change `default_encoder_bridge_video_output_for_outputs` so a supported
    Windows session requests the production-topology-probed Media Foundation
    path without an environment override; keep raw YUV/OpenH264 explicit and
@@ -737,6 +737,7 @@ Every measured run must evaluate all of these machine checks:
    copied frames are zero. Include the now-entitled 1080p60,
    stream-only/record-plus-stream, and preview open/closed scenarios. Every
    media check must pass, but every aggregate remains `CALIBRATION`.
+
 6. Activate `docs/acceptance/windows-stream-performance-budget.json` only if:
    - the median Videorc total-process CPU p95 is no greater than both 125% of
      OBS's median CPU p95 and OBS plus five CPU percentage points;
@@ -745,9 +746,9 @@ Every measured run must evaluate all of these machine checks:
      than OBS;
    - no Videorc role has an unbounded memory slope or persistent sub-real-time
      encoder speed.
-   Extend `windows-performance-budget.mjs` so the draft/active schema also
-   binds candidate digest and records the six comparison paths/hash. Derive
-   every required threshold deterministically:
+     Extend `windows-performance-budget.mjs` so the draft/active schema also
+     binds candidate digest and records the six comparison paths/hash. Derive
+     every required threshold deterministically:
    - total CPU p95 is
      `ceil(min(1.25 * obsMedianCpuP95, obsMedianCpuP95 + 5))`;
    - total RSS maximum is 105% of the worst Videorc calibration maximum, but
@@ -765,7 +766,7 @@ Every measured run must evaluate all of these machine checks:
    - preview-closed profiles use a new `bmp.mode = "disabled"` contract with
      zero requests and zero bytes rather than an impossible positive
      advanced-frame minimum.
-   After the comparisons meet those admission rules, derive the draft with:
+     After the comparisons meet those admission rules, derive the draft with:
 
    ```powershell
    pnpm smoke:windows-obs-side-by-side -- --derive-budget --comparison '<acceptance-dir>\windows-stream-obs\<candidate-sha>\aggregate.json' --stream-calibrations '<acceptance-dir>\windows-stream-performance\<candidate-sha>' --output 'docs\acceptance\windows-stream-performance-budget.json'
@@ -777,6 +778,7 @@ Every measured run must evaluate all of these machine checks:
    source reports, add `reviewedBy`/`reviewedAt`, and change it to
    `status: "active"`; script tests must reject self-activation, incomplete
    role thresholds, missing BMP mode, or a changed candidate/hardware/scenario.
+
 7. With Media Foundation still explicitly selected, set
    `VIDEORC_WINDOWS_PERF_BUDGET_PATH` to that active file and
    run the complete three-repetition Step 2 matrix under `--gate`. The runner
@@ -809,14 +811,14 @@ Every measured run must evaluate all of these machine checks:
    PASS/BLOCKED results. Add the RTMP gate and acceptance-note check to the
    protected Windows candidate lane. Keep hosted CI non-comparable.
 10. Run the full signed-candidate lane with all identity variables from item 4,
-   the active budget variables from item 7, and:
+    the active budget variables from item 7, and:
 
-   ```powershell
-   pnpm smoke:local-gates:windows
-   ```
+```powershell
+pnpm smoke:local-gates:windows
+```
 
-   A candidate that lacks applicable physical evidence is BLOCKED, never
-   implicitly green.
+A candidate that lacks applicable physical evidence is BLOCKED, never
+implicitly green.
 
 **Verify**:
 
@@ -895,41 +897,41 @@ Every measured run must evaluate all of these machine checks:
 All must hold:
 
 - [ ] `StreamHealth` exposes bitrate, total bytes, and duplicated frames in
-  Rust and TypeScript, with parser/merge tests.
+      Rust and TypeScript, with parser/merge tests.
 - [ ] Live Streaming UI and the support bundle identify capture, compositor,
-  encoder, queue, fallback, and provider/network health without leaking
-  secrets.
+      encoder, queue, fallback, and provider/network health without leaking
+      secrets.
 - [ ] Off-air topology preflight and session start use the same
-  capability-keyed selector; the UI never guesses an effective encoder.
+      capability-keyed selector; the UI never guesses an effective encoder.
 - [ ] `pnpm smoke:windows-stream-performance` exists, uses real DXGI motion and
-  a local RTMP receiver, and enforces every Step 2 threshold.
+      a local RTMP receiver, and enforces every Step 2 threshold.
 - [ ] Main, preview, Comments, Notes, and proof windows are absent from physical
-  Windows display-capture pixels while independent content remains visible.
+      Windows display-capture pixels while independent content remains visible.
 - [ ] Media Foundation is the Windows default only on a proven capability; raw
-  or software fallback is explicit and has natural second-device evidence.
+      or software fallback is explicit and has natural second-device evidence.
 - [ ] The OBS comparison, calibration, active budget, explicit-MF matrix,
-  no-override matrix, and protected local lane all bind the same signed
-  installed-app SHA-256; no source change occurs between them.
+      no-override matrix, and protected local lane all bind the same signed
+      installed-app SHA-256; no source change occurs between them.
 - [ ] YouTube-only 1080p30/60 uses provider-aware 10/12 Mbps output; shared or
-  mixed output remains constrained by its strictest validated destination.
+      mixed output remains constrained by its strictest validated destination.
 - [ ] Basic remains limited to one 1080p30/6000 destination;
-  Premium/Developer can use the tested 1080p60 profile, and 4K60 remains
-  rejected.
+      Premium/Developer can use the tested 1080p60 profile, and 4K60 remains
+      rejected.
 - [ ] Every 60 fps physical run uses a dedicated, normally authenticated
-  acceptance profile whose live Premium/Developer entitlement and redacted
-  attestation match the installed candidate; no credential enters evidence.
+      acceptance profile whose live Premium/Developer entitlement and redacted
+      attestation match the installed candidate; no credential enters evidence.
 - [ ] The controlled OBS A/B meets the relative CPU/RSS budget and all media
-  artifact gates, with physical display/audio mappings equal and vendor-neutral
-  GPU counter coverage complete.
+      artifact gates, with physical display/audio mappings equal and vendor-neutral
+      GPU counter coverage complete.
 - [ ] An applicable reviewed budget is active in the protected physical
-  Windows candidate lane; report-only evidence cannot release.
+      Windows candidate lane; report-only evidence cannot release.
 - [ ] All applicable commands in "Commands you will need" exit 0; if no
-  authorized macOS device host exists for `smoke:recording-studio:devices`,
-  the acceptance note records that exact blocker and the closest Windows
-  device gates pass.
+      authorized macOS device host exists for `smoke:recording-studio:devices`,
+      the acceptance note records that exact blocker and the closest Windows
+      device gates pass.
 - [ ] No files outside Scope are modified.
 - [ ] Plans 035, 036, 038, 039 and `plans/README.md` record the final evidence
-  and status.
+      and status.
 
 ## STOP conditions
 

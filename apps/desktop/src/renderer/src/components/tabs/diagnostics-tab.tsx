@@ -39,6 +39,7 @@ import type {
 } from '@/lib/backend'
 import { compactTime, formatDroppedFrames, formatMetric } from '@/lib/format'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import { isNativePreviewCapability } from '../../../../shared/native-preview-capability'
 
 export function DiagnosticsTab(): ReactElement {
   const {
@@ -117,6 +118,7 @@ export function DiagnosticsTab(): ReactElement {
         expectsCamera: Boolean(captureConfig.sources.cameraId),
         expectsScreen: Boolean(captureConfig.sources.screenId || captureConfig.sources.windowId),
         nativePreviewSurfaceEnabled,
+        platform: runtimeInfo?.platform ?? 'darwin',
         previewCameraStatus,
         previewLiveStatus,
         previewScreenStatus,
@@ -128,6 +130,7 @@ export function DiagnosticsTab(): ReactElement {
       captureConfig.sources.screenId,
       captureConfig.sources.windowId,
       nativePreviewSurfaceEnabled,
+      runtimeInfo?.platform,
       previewCameraStatus,
       previewLiveStatus,
       previewScreenStatus,
@@ -191,13 +194,17 @@ export function DiagnosticsTab(): ReactElement {
               tone={
                 previewPathBadge(
                   diagnosticStats.previewTransport,
-                  diagnosticStats.previewSurfaceBacking
+                  diagnosticStats.previewSurfaceBacking,
+                  previewSurfaceStatus.nativePreviewHostKind,
+                  runtimeInfo?.platform ?? 'darwin'
                 ).tone
               }
               value={
                 previewPathBadge(
                   diagnosticStats.previewTransport,
-                  diagnosticStats.previewSurfaceBacking
+                  diagnosticStats.previewSurfaceBacking,
+                  previewSurfaceStatus.nativePreviewHostKind,
+                  runtimeInfo?.platform ?? 'darwin'
                 ).label
               }
             />
@@ -1034,6 +1041,7 @@ function previewDiagnosisCopy({
   expectsCamera,
   expectsScreen,
   nativePreviewSurfaceEnabled,
+  platform,
   previewCameraStatus,
   previewLiveStatus,
   previewScreenStatus,
@@ -1043,6 +1051,7 @@ function previewDiagnosisCopy({
   expectsCamera: boolean
   expectsScreen: boolean
   nativePreviewSurfaceEnabled: boolean
+  platform: string
   previewCameraStatus: PreviewCameraStatus
   previewLiveStatus: PreviewLiveStatus
   previewScreenStatus: PreviewScreenStatus
@@ -1082,14 +1091,20 @@ function previewDiagnosisCopy({
   if (diagnosticStats.previewTransport === 'electron-proof-surface') {
     return { label: 'Proof surface', tone: 'warn' }
   }
-  if (diagnosticStats.previewTransport !== 'native-surface') {
+  if (
+    !isNativePreviewCapability(
+      {
+        transport: diagnosticStats.previewTransport,
+        backing: diagnosticStats.previewSurfaceBacking,
+        nativePreviewHostKind: previewSurfaceStatus.nativePreviewHostKind
+      },
+      platform
+    )
+  ) {
     return {
       label: 'Fallback',
       tone: diagnosticStats.previewTransport === 'unavailable' ? 'neutral' : 'warn'
     }
-  }
-  if (diagnosticStats.previewSurfaceBacking !== 'cametal-layer') {
-    return { label: 'Surface backing', tone: 'warn' }
   }
 
   const targetFps = diagnosticStats.previewTargetFps ?? previewSurfaceStatus.targetFps
@@ -1251,6 +1266,8 @@ function formatPreviewTransport(transport?: string): string {
   switch (transport) {
     case 'native-surface':
       return 'Native'
+    case 'd3d11-shared-texture':
+      return 'D3D11'
     case 'electron-proof-surface':
       return 'Proof'
     case 'latest-jpeg-polling':
@@ -1266,6 +1283,8 @@ function formatPreviewSurfaceBacking(backing?: string): string {
   switch (backing) {
     case 'cametal-layer':
       return 'CAMetalLayer'
+    case 'directcomposition-swapchain':
+      return 'DirectComposition swap chain'
     case 'electron-browser-window':
       return 'Electron BrowserWindow'
     case 'none':
@@ -1300,6 +1319,10 @@ function formatCompositorBackend(stats: DiagnosticStats): string {
   switch (stats.compositorBackend) {
     case 'metal':
       return 'Metal'
+    case 'd3d11':
+      return 'D3D11'
+    case 'cpu':
+      return 'CPU'
     case 'cpu-fallback': {
       const frames = stats.compositorCpuFallbackFrames ?? 0
       const reason = stats.compositorFallbackReason ? `: ${stats.compositorFallbackReason}` : ''
@@ -1320,17 +1343,33 @@ function formatImagePolls(counts?: DiagnosticStats['previewImagePollCounts']): s
     : `${total} (cam ${counts.cameraPng}, scr ${counts.screenPng}, jpg ${counts.liveJpeg}, mjpeg ${counts.liveMjpeg})`
 }
 
-// The plan's "OBS-native preview" vs "Fallback preview" badge. Only the real Metal
-// layer may report native-surface; the Electron proof window stays explicitly non-native.
+// The plan's "OBS-native preview" vs "Fallback preview" badge. Only the
+// platform-canonical Metal or D3D11 presenter may report native; the Electron
+// proof window stays explicitly non-native.
 function previewPathBadge(
   transport?: string,
-  backing?: string
+  backing?: string,
+  hostKind?: PreviewSurfaceStatus['nativePreviewHostKind'],
+  platform = 'darwin'
 ): { label: string; tone: StatusTone } {
+  if (
+    transport &&
+    backing &&
+    isNativePreviewCapability(
+      {
+        transport: transport as DiagnosticStats['previewTransport'],
+        backing: backing as DiagnosticStats['previewSurfaceBacking'],
+        nativePreviewHostKind: hostKind
+      },
+      platform
+    )
+  ) {
+    return { label: 'OBS-native', tone: 'good' }
+  }
   switch (transport) {
     case 'native-surface':
-      return backing === 'cametal-layer'
-        ? { label: 'OBS-native', tone: 'good' }
-        : { label: 'Surface proof', tone: 'warn' }
+    case 'd3d11-shared-texture':
+      return { label: 'Surface proof', tone: 'warn' }
     case 'electron-proof-surface':
       return { label: 'Proof surface', tone: 'warn' }
     case 'latest-jpeg-polling':

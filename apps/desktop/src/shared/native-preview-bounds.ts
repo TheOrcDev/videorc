@@ -1,4 +1,22 @@
-import type { PreviewSurfaceBounds } from './backend'
+import type {
+  MainOwnedPreviewSurfaceBounds,
+  MainOwnedPreviewSurfaceBoundsParams,
+  OpaqueNativeWindowHandle,
+  PreviewSurfaceBounds,
+  PreviewSurfaceStatus
+} from './backend'
+
+const OPAQUE_NATIVE_WINDOW_HANDLE = /^0x[0-9a-f]{16}$/
+export const PRIVILEGED_PREVIEW_FIELDS = [
+  'orderAboveWindowHandle',
+  'nativeWindowHandle',
+  'processId',
+  'sharedHandle',
+  'sharedTextureHandle',
+  'textureHandle',
+  'd3d11TextureHandle',
+  'resourceHandle'
+] as const
 
 export function normalizePreviewSurfaceBounds(bounds: PreviewSurfaceBounds): PreviewSurfaceBounds {
   const normalized = {
@@ -39,7 +57,67 @@ export function normalizePreviewSurfaceBounds(bounds: PreviewSurfaceBounds): Pre
   } else {
     delete normalized.elevated
   }
+  // Renderer-supplied bounds are never an HWND authority. The object spread
+  // above intentionally preserves unknown future geometry, so privileged
+  // fields must be deleted explicitly rather than relying on TypeScript.
+  for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+    delete normalized[field]
+  }
   return normalized
+}
+
+export function normalizeOpaqueNativeWindowHandle(value: unknown): OpaqueNativeWindowHandle {
+  if (typeof value !== 'string') {
+    throw new Error('Native window handle must be an opaque hexadecimal string.')
+  }
+  const normalized = value.toLowerCase()
+  if (!OPAQUE_NATIVE_WINDOW_HANDLE.test(normalized) || normalized === '0x0000000000000000') {
+    throw new Error('Native window handle must be a nonzero fixed-width 64-bit hexadecimal value.')
+  }
+  return normalized as OpaqueNativeWindowHandle
+}
+
+/**
+ * Build the only bounds shape allowed to carry a Windows HWND. Main supplies
+ * both the fresh handle and current lifecycle generation immediately before a
+ * backend/native-host request.
+ */
+export function mainOwnedPreviewSurfaceBoundsParams(
+  bounds: PreviewSurfaceBounds,
+  generation: number,
+  orderAboveWindowHandle?: unknown
+): MainOwnedPreviewSurfaceBoundsParams {
+  if (!Number.isSafeInteger(generation) || generation < 0) {
+    throw new Error('Native preview generation must be a non-negative safe integer.')
+  }
+  const trustedBounds: MainOwnedPreviewSurfaceBounds = normalizePreviewSurfaceBounds(bounds)
+  if (orderAboveWindowHandle !== undefined) {
+    trustedBounds.orderAboveWindowHandle = normalizeOpaqueNativeWindowHandle(orderAboveWindowHandle)
+  }
+  return { bounds: trustedBounds, generation }
+}
+
+/** Clone a status for renderer delivery and remove every privileged identity. */
+export function sanitizeRendererPreviewSurfaceStatus(
+  status: PreviewSurfaceStatus
+): PreviewSurfaceStatus {
+  const sanitized = { ...status } as PreviewSurfaceStatus & Record<string, unknown>
+  for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+    delete sanitized[field]
+  }
+  if (status.bounds) {
+    sanitized.bounds = normalizePreviewSurfaceBounds(status.bounds)
+  }
+  if (status.windowsD3d11Presenter) {
+    const presenter = {
+      ...status.windowsD3d11Presenter
+    } as PreviewSurfaceStatus['windowsD3d11Presenter'] & Record<string, unknown>
+    for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+      delete presenter[field]
+    }
+    sanitized.windowsD3d11Presenter = presenter
+  }
+  return sanitized
 }
 
 /**

@@ -1,6 +1,8 @@
 import { readFile } from 'node:fs/promises'
 
 import {
+  WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND,
+  attachWindowsNaturalFallbackPolicy,
   evaluateWindowsPerformanceBudget,
   loadWindowsPerformanceBudget,
   validateWindowsPerformanceBudget
@@ -17,6 +19,21 @@ import {
 const WINDOWS_PACKAGED_APP_PAYLOAD_SPECS = WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS.map(
   (relativePath) => ({ relativePath, requiresCodeSignature: false })
 )
+
+export const WINDOWS_STREAM_NATURAL_FALLBACK_SCENARIOS = Object.freeze([
+  '1080p30-stream-preview',
+  '1080p30-stream-no-preview',
+  '1080p30-record-stream-preview',
+  '1080p30-record-stream-no-preview'
+])
+
+export const WINDOWS_STREAM_D3D11_PREVIEW = Object.freeze({
+  transport: 'd3d11-shared-texture',
+  backing: 'directcomposition-swapchain',
+  hostKind: 'backend-d3d11-presenter'
+})
+
+export const WINDOWS_STREAM_NATURAL_FALLBACK_HARDWARE_CLASS = 'unsupported-natural-fallback'
 
 export const WINDOWS_STREAM_PERFORMANCE_TIMING = Object.freeze({
   warmupMs: 60_000,
@@ -93,30 +110,34 @@ export function windowsStreamSecretLeaks(value, secrets = []) {
 export function buildWindowsStreamPerformanceMatrix() {
   const scenarios = []
   for (const fps of [30, 60]) {
-    for (const topology of ['stream', 'record-stream']) {
-      for (const previewOpen of [true, false]) {
-        scenarios.push(
-          Object.freeze({
-            id: `1080p${fps}-${topology}-${previewOpen ? 'preview' : 'no-preview'}`,
-            width: 1920,
-            height: 1080,
-            fps,
-            // The Step 2 matrix is a local/manual RTMP qualification. Provider-
-            // specific YouTube 10/12 Mbps scenarios are added separately in Step 5;
-            // manual, Twitch, X, and mixed/shared output remain on the validated
-            // 6 Mbps ceiling.
-            bitrateKbps: 6_000,
-            provider: 'custom',
-            videoPreset: 'custom',
-            recordEnabled: topology === 'record-stream',
-            topology: topology === 'record-stream' ? 'record-plus-stream' : 'stream-only',
-            previewOpen,
-            warmupMs: WINDOWS_STREAM_PERFORMANCE_TIMING.warmupMs,
-            measurementMs: WINDOWS_STREAM_PERFORMANCE_TIMING.measurementMs,
-            sampleIntervalMs: WINDOWS_STREAM_PERFORMANCE_TIMING.sampleIntervalMs,
-            repetitions: WINDOWS_STREAM_PERFORMANCE_TIMING.repetitions
-          })
-        )
+    for (const sourceComposition of ['screen-only', 'screen-camera']) {
+      for (const topology of ['stream', 'record-stream']) {
+        for (const previewOpen of [true, false]) {
+          const sourceId = sourceComposition === 'screen-only' ? '' : 'screen-camera-'
+          scenarios.push(
+            Object.freeze({
+              id: `1080p${fps}-${sourceId}${topology}-${previewOpen ? 'preview' : 'no-preview'}`,
+              width: 1920,
+              height: 1080,
+              fps,
+              // The Step 2 matrix is a local/manual RTMP qualification. Provider-
+              // specific YouTube 10/12 Mbps scenarios are added separately in Step 5;
+              // manual, Twitch, X, and mixed/shared output remain on the validated
+              // 6 Mbps ceiling.
+              bitrateKbps: 6_000,
+              provider: 'custom',
+              videoPreset: 'custom',
+              sourceComposition,
+              recordEnabled: topology === 'record-stream',
+              topology: topology === 'record-stream' ? 'record-plus-stream' : 'stream-only',
+              previewOpen,
+              warmupMs: WINDOWS_STREAM_PERFORMANCE_TIMING.warmupMs,
+              measurementMs: WINDOWS_STREAM_PERFORMANCE_TIMING.measurementMs,
+              sampleIntervalMs: WINDOWS_STREAM_PERFORMANCE_TIMING.sampleIntervalMs,
+              repetitions: WINDOWS_STREAM_PERFORMANCE_TIMING.repetitions
+            })
+          )
+        }
       }
     }
   }
@@ -141,6 +162,7 @@ export function buildWindowsStreamPerformanceMatrix() {
       bitrateKbps: 6_000,
       provider: 'custom',
       videoPreset: 'custom',
+      sourceComposition: 'screen-only',
       recordEnabled: false,
       topology: 'stream-only',
       previewOpen: true,
@@ -160,6 +182,7 @@ function providerScenario({ id, fps, bitrateKbps, videoPreset }) {
     bitrateKbps,
     provider: 'youtube',
     videoPreset,
+    sourceComposition: 'screen-only',
     recordEnabled: false,
     topology: 'stream-only',
     previewOpen: true,
@@ -179,7 +202,7 @@ export function formatWindowsStreamPerformanceMatrix(
   ]
   for (const [index, scenario] of matrix.entries()) {
     lines.push(
-      `${index + 1}. ${scenario.id} — ${scenario.width}x${scenario.height}@${scenario.fps} | ` +
+      `${index + 1}. ${scenario.id} — ${scenario.width}x${scenario.height}@${scenario.fps} | ${scenario.sourceComposition} | ` +
         `${scenario.topology} | preview=${scenario.previewOpen ? 'open' : 'closed'} | ` +
         `measured=${scenario.measurementMs / 1000}s | runs=${scenario.repetitions}`
     )
@@ -198,8 +221,11 @@ export function parseWindowsStreamPerformanceArgs(
   const list = takeFlag(values, '--list')
   const gate = takeFlag(values, '--gate')
   const calibrate = takeFlag(values, '--calibrate')
+  const deriveNaturalFallbackPolicy = takeFlag(values, '--derive-natural-fallback-policy')
   const preparePremiumProfile = takeFlag(values, '--prepare-premium-profile')
   const requireBridge = takeFlag(values, '--require-bridge')
+  const d3d11 = takeFlag(values, '--d3d11')
+  const requireD3d11 = takeFlag(values, '--require-d3d11')
   const videoOnly = takeFlag(values, '--video-only')
   if (gate && calibrate) {
     throw new Error('--gate and --calibrate are mutually exclusive.')
@@ -208,10 +234,73 @@ export function parseWindowsStreamPerformanceArgs(
   const scenarioId = takeOption(values, '--scenario')
   const requestedRuns = takeOption(values, '--runs')
   const expectFallback = takeOption(values, '--expect-fallback')
-  const bridge = takeOption(values, '--bridge') ?? (expectFallback ? 'mf' : 'auto')
+  const requestedProfiles = takeOption(values, '--profiles')
+  const pathEvidence = takeOption(values, '--path-evidence')
+  const fallbackCalibrations = takeOption(values, '--fallback-calibrations')
+  const budget = takeOption(values, '--budget')
+  const bridge =
+    takeOption(values, '--bridge') ?? (expectFallback === 'software-open-h264' ? 'mf' : 'auto')
   const output = takeOption(values, '--output')
   if (values.length > 0) {
     throw new Error(`Unknown Windows stream performance argument: ${values[0]}`)
+  }
+  if (deriveNaturalFallbackPolicy) {
+    if (
+      list ||
+      gate ||
+      calibrate ||
+      preparePremiumProfile ||
+      requireBridge ||
+      d3d11 ||
+      requireD3d11 ||
+      videoOnly ||
+      scenarioId ||
+      requestedRuns !== undefined ||
+      expectFallback ||
+      requestedProfiles ||
+      pathEvidence ||
+      bridge !== 'auto' ||
+      output
+    ) {
+      throw new Error(
+        '--derive-natural-fallback-policy cannot be combined with launch or run-selection options.'
+      )
+    }
+    if (!fallbackCalibrations || !budget) {
+      throw new Error(
+        '--derive-natural-fallback-policy requires --fallback-calibrations and --budget.'
+      )
+    }
+    assertSinglePortableAbsolutePath(fallbackCalibrations, '--fallback-calibrations')
+    assertLiteralPath(budget, '--budget')
+    if (!budget.toLocaleLowerCase('en-US').endsWith('.json')) {
+      throw new Error('--budget must identify one JSON budget document.')
+    }
+    return {
+      list: false,
+      mode: 'derive-natural-fallback-policy',
+      deriveNaturalFallbackPolicy: true,
+      fallbackCalibrations,
+      budget,
+      preparePremiumProfile: false,
+      scenarios: [],
+      scenarioId: null,
+      repetitions: 0,
+      bridge: 'auto',
+      expectFallback: null,
+      requireBridge: false,
+      d3d11: false,
+      requireD3d11: false,
+      profiles: [],
+      pathEvidence: null,
+      videoOnly: false,
+      output: null
+    }
+  }
+  if (fallbackCalibrations !== undefined || budget !== undefined) {
+    throw new Error(
+      '--fallback-calibrations and --budget require --derive-natural-fallback-policy.'
+    )
   }
   if (!['auto', 'mf', 'raw'].includes(bridge)) {
     throw new Error(`--bridge must be auto, mf, or raw; received ${bridge}.`)
@@ -219,13 +308,35 @@ export function parseWindowsStreamPerformanceArgs(
   if (requireBridge && bridge !== 'mf') {
     throw new Error('--require-bridge requires --bridge mf.')
   }
-  if (expectFallback !== undefined && expectFallback !== 'software-open-h264') {
-    throw new Error(`--expect-fallback must be software-open-h264; received ${expectFallback}.`)
+  if (requireD3d11 && !d3d11) {
+    throw new Error('--require-d3d11 requires --d3d11.')
   }
-  if (expectFallback && (bridge !== 'mf' || requireBridge)) {
+  if (expectFallback !== undefined && !['software-open-h264', 'natural'].includes(expectFallback)) {
+    throw new Error(
+      `--expect-fallback must be software-open-h264 or natural; received ${expectFallback}.`
+    )
+  }
+  if (expectFallback === 'software-open-h264' && (bridge !== 'mf' || requireBridge)) {
     throw new Error(
       '--expect-fallback software-open-h264 requests --bridge mf without --require-bridge.'
     )
+  }
+  if (expectFallback === 'natural' && (d3d11 || requireD3d11)) {
+    throw new Error('--expect-fallback natural cannot be combined with an explicit D3D11 path.')
+  }
+  if (pathEvidence !== undefined && !['forced', 'default', 'natural'].includes(pathEvidence)) {
+    throw new Error(
+      `--path-evidence must be forced, default, or natural; received ${pathEvidence}.`
+    )
+  }
+  if (pathEvidence === 'forced' && (!d3d11 || !requireD3d11)) {
+    throw new Error('--path-evidence forced requires --d3d11 --require-d3d11.')
+  }
+  if (pathEvidence === 'natural' && expectFallback !== 'natural') {
+    throw new Error('--path-evidence natural requires --expect-fallback natural.')
+  }
+  if (pathEvidence === 'default' && (d3d11 || requireD3d11 || expectFallback)) {
+    throw new Error('--path-evidence default must use automatic capability selection.')
   }
   const mode = calibrate ? 'calibrate' : gate || !scenarioId ? 'gate' : 'diagnostic'
   if (mode === 'gate' && bridge === 'raw') {
@@ -233,7 +344,7 @@ export function parseWindowsStreamPerformanceArgs(
       'The protected gate cannot use --bridge raw; it must prove the Media Foundation production path.'
     )
   }
-  if (mode === 'gate' && expectFallback) {
+  if (mode === 'gate' && expectFallback === 'software-open-h264') {
     throw new Error('The protected gate cannot qualify an expected encoder fallback.')
   }
 
@@ -246,6 +357,10 @@ export function parseWindowsStreamPerformanceArgs(
       requestedRuns !== undefined ||
       expectFallback ||
       requireBridge ||
+      d3d11 ||
+      requireD3d11 ||
+      requestedProfiles ||
+      pathEvidence ||
       videoOnly ||
       bridge !== 'auto'
     ) {
@@ -256,6 +371,9 @@ export function parseWindowsStreamPerformanceArgs(
     return {
       list: false,
       mode: 'prepare-premium-profile',
+      deriveNaturalFallbackPolicy: false,
+      fallbackCalibrations: null,
+      budget: null,
       preparePremiumProfile: true,
       scenarios: [],
       scenarioId: null,
@@ -263,12 +381,38 @@ export function parseWindowsStreamPerformanceArgs(
       bridge: 'auto',
       expectFallback: null,
       requireBridge: false,
+      d3d11: false,
+      requireD3d11: false,
+      profiles: [],
+      pathEvidence: null,
       videoOnly: false,
       output: output ?? null
     }
   }
 
-  const scenarios = scenarioId ? matrix.filter((scenario) => scenario.id === scenarioId) : matrix
+  const profiles =
+    requestedProfiles === undefined
+      ? []
+      : requestedProfiles.split(',').map((profile) => profile.trim())
+  if (profiles.some((profile) => !profile)) {
+    throw new Error('--profiles must contain non-empty comma-separated values.')
+  }
+  const duplicateProfiles = profiles.filter((profile, index) => profiles.indexOf(profile) !== index)
+  if (duplicateProfiles.length > 0) {
+    throw new Error(`Duplicate Windows stream profile: ${duplicateProfiles[0]}.`)
+  }
+  const unknownProfile = profiles.find((profile) => !['1080p30', '1080p60'].includes(profile))
+  if (unknownProfile) {
+    throw new Error(`Unknown Windows stream profile: ${unknownProfile}.`)
+  }
+  if (scenarioId && profiles.length > 0) {
+    throw new Error('--scenario and --profiles are mutually exclusive.')
+  }
+  const scenarios = scenarioId
+    ? matrix.filter((scenario) => scenario.id === scenarioId)
+    : profiles.length > 0
+      ? matrix.filter((scenario) => profiles.includes(scenario.fps === 60 ? '1080p60' : '1080p30'))
+      : matrix
   if (scenarioId && scenarios.length === 0) {
     throw new Error(`Unknown Windows stream performance scenario: ${scenarioId}.`)
   }
@@ -284,20 +428,62 @@ export function parseWindowsStreamPerformanceArgs(
   if (!scenarioId && videoOnly) {
     throw new Error('The protected full matrix requires audible A/V evidence.')
   }
+  if (expectFallback === 'natural') {
+    if (
+      !['calibrate', 'gate'].includes(mode) ||
+      scenarioId ||
+      profiles.length !== 1 ||
+      profiles[0] !== '1080p30' ||
+      requestedRuns !== undefined ||
+      bridge !== 'auto' ||
+      requireBridge
+    ) {
+      throw new Error(
+        'Natural fallback runs require exactly --calibrate/--gate --profiles 1080p30 --expect-fallback natural.'
+      )
+    }
+  }
+
+  const selectedScenarios =
+    expectFallback === 'natural'
+      ? matrix.filter((scenario) => WINDOWS_STREAM_NATURAL_FALLBACK_SCENARIOS.includes(scenario.id))
+      : scenarios
+  if (
+    expectFallback === 'natural' &&
+    (selectedScenarios.length !== WINDOWS_STREAM_NATURAL_FALLBACK_SCENARIOS.length ||
+      selectedScenarios.some((scenario) => scenario.repetitions !== 3))
+  ) {
+    throw new Error(
+      'Natural fallback calibration matrix must contain exactly four 1080p30 contexts with three repetitions.'
+    )
+  }
 
   return {
     list,
     mode,
+    deriveNaturalFallbackPolicy: false,
+    fallbackCalibrations: null,
+    budget: null,
     preparePremiumProfile: false,
-    scenarios,
+    scenarios: selectedScenarios,
     scenarioId: scenarioId ?? null,
     repetitions,
     bridge,
     expectFallback: expectFallback ?? null,
     requireBridge,
+    d3d11,
+    requireD3d11,
+    profiles,
+    pathEvidence: pathEvidence ?? (expectFallback === 'natural' ? 'natural' : null),
     videoOnly,
     output: output ?? null
   }
+}
+
+export function resolveWindowsStreamPathEvidence(options) {
+  if (options?.pathEvidence) return options.pathEvidence
+  if (options?.expectFallback === 'natural') return 'natural'
+  return options?.d3d11 === true && options?.requireD3d11 === true ? 'forced' : 'default'
 }
 
 export function validateWindowsStreamRunEvidence(evidence) {
@@ -318,6 +504,12 @@ export function validateWindowsStreamRunEvidence(evidence) {
   }
   if (!/^[a-f0-9]{64}$/.test(evidence?.candidate?.sha256 ?? '')) {
     failures.push('candidate.sha256 must be a lowercase SHA-256 digest')
+  }
+  if (!/^[a-f0-9]{40}$/.test(evidence?.candidate?.sourceCommit ?? '')) {
+    failures.push('candidate.sourceCommit must be a lowercase 40-character commit')
+  }
+  if (!/^[a-f0-9]{64}$/.test(evidence?.candidate?.installerSha256 ?? '')) {
+    failures.push('candidate.installerSha256 must be a lowercase SHA-256 digest')
   }
   if (!/^[a-f0-9]{64}$/.test(evidence?.candidate?.packagePayload?.sha256 ?? '')) {
     failures.push('candidate.packagePayload.sha256 must be a lowercase SHA-256 digest')
@@ -630,6 +822,200 @@ export function evaluateWindowsStreamRun(
       failures.push('expected software-open-h264 fallback reason was missing')
     }
   }
+  if (
+    evidence?.pipeline?.requireD3d11 === true ||
+    ['forced', 'default'].includes(evidence?.pipeline?.expectedD3d11Path)
+  ) {
+    requireEqual(failures, 'D3D11 media state', evidence?.pipeline?.d3d11?.state, 'live')
+    requireEqual(failures, 'D3D11 media requested', evidence?.pipeline?.d3d11?.requested, true)
+    requireEqual(
+      failures,
+      'D3D11 media required mode',
+      evidence?.pipeline?.d3d11?.required,
+      evidence?.pipeline?.expectedD3d11Path === 'forced'
+    )
+    validateWindowsD3d11AdapterEvidence(evidence?.pipeline?.d3d11, failures, {
+      auxiliaryRequired: scenario?.recordEnabled === true
+    })
+    requireEqual(
+      failures,
+      'D3D11 capture readback frames',
+      evidence?.pipeline?.d3d11?.captureReadbackFrames,
+      0
+    )
+    requireEqual(
+      failures,
+      'D3D11 compositor CPU fallback frames',
+      evidence?.pipeline?.d3d11?.compositorCpuFallbackFrames,
+      0
+    )
+    requireEqual(
+      failures,
+      'D3D11 encoder system-memory samples',
+      evidence?.pipeline?.d3d11?.encoderSystemMemorySamples,
+      0
+    )
+    requireEqual(
+      failures,
+      'D3D11 raw video copied frames',
+      evidence?.pipeline?.d3d11?.rawVideoCopiedFrames,
+      0
+    )
+    requireEqual(
+      failures,
+      'D3D11 preview BMP requests',
+      evidence?.pipeline?.d3d11?.previewBmpRequests,
+      0
+    )
+    requireEqual(failures, 'D3D11 preview BMP bytes', evidence?.pipeline?.d3d11?.previewBmpBytes, 0)
+    requirePositive(
+      failures,
+      'D3D11 texture imports',
+      evidence?.pipeline?.d3d11?.textureImportFrames
+    )
+    requirePositive(
+      failures,
+      'D3D11 encoder GPU samples',
+      evidence?.pipeline?.d3d11?.encoderGpuSamples
+    )
+    if (scenario?.sourceComposition === 'screen-camera') {
+      requirePositive(
+        failures,
+        'D3D11 camera upload frames',
+        evidence?.pipeline?.d3d11?.cameraUploadFrames
+      )
+    } else {
+      requireEqual(
+        failures,
+        'D3D11 camera upload frames',
+        evidence?.pipeline?.d3d11?.cameraUploadFrames,
+        0
+      )
+    }
+    requireEqual(
+      failures,
+      'D3D11 cursor correctness',
+      evidence?.pipeline?.d3d11?.cursorCorrect,
+      true
+    )
+    if (scenario?.previewOpen === true) {
+      requireEqual(
+        failures,
+        'D3D11 preview input continuity',
+        evidence?.pipeline?.d3d11?.inputContinuity,
+        true
+      )
+      requireEqual(
+        failures,
+        'D3D11 preview physical-input evidence verdict',
+        evidence?.pipeline?.d3d11?.inputContinuityEvidence?.verdict,
+        'PASS'
+      )
+      requireEqual(
+        failures,
+        'D3D11 preview physical-input execution',
+        evidence?.pipeline?.d3d11?.inputContinuityEvidence?.physicalInput,
+        true
+      )
+      requireEqual(
+        failures,
+        'D3D11 preview input applicability',
+        evidence?.pipeline?.d3d11?.inputContinuityEvidence?.applicable,
+        true
+      )
+    } else {
+      requireEqual(
+        failures,
+        'D3D11 closed-preview input applicability',
+        evidence?.pipeline?.d3d11?.inputContinuityEvidence?.applicable,
+        false
+      )
+    }
+    requireAtMost(
+      failures,
+      'D3D11 message dispatch p95',
+      evidence?.pipeline?.d3d11?.messageDispatchP95Ms,
+      50
+    )
+    requireAtMost(
+      failures,
+      'D3D11 message dispatch maximum',
+      evidence?.pipeline?.d3d11?.messageDispatchMaxMs,
+      100
+    )
+    for (const [label, value] of [
+      ['D3D11 texture-pool pressure events', evidence?.pipeline?.d3d11?.texturePoolPressureEvents],
+      ['D3D11 adapter mismatches', evidence?.pipeline?.d3d11?.adapterMismatches],
+      ['D3D11 device resets', evidence?.pipeline?.d3d11?.deviceResets]
+    ]) {
+      requireEqual(failures, label, value, 0)
+    }
+    if (scenario?.previewOpen === true) {
+      requirePositive(
+        failures,
+        'D3D11 preview presents',
+        evidence?.pipeline?.d3d11?.previewPresents
+      )
+    }
+    if (nonEmptyString(evidence?.pipeline?.d3d11?.fallbackReason)) {
+      failures.push(
+        `D3D11-required run reported fallback: ${evidence.pipeline.d3d11.fallbackReason}`
+      )
+    }
+    if (
+      evidence?.pipeline?.d3d11?.stateChanged === true ||
+      evidence?.pipeline?.d3d11?.adapterChanged === true ||
+      evidence?.pipeline?.d3d11?.fallbackChanged === true
+    ) {
+      failures.push('D3D11 path identity changed during the measured run')
+    }
+  }
+  if (evidence?.pipeline?.expectedFallback === 'natural') {
+    requireEqual(
+      failures,
+      'natural D3D11 fallback state',
+      evidence?.pipeline?.d3d11?.state,
+      'fallback'
+    )
+    if (!nonEmptyString(evidence?.pipeline?.d3d11?.fallbackReason)) {
+      failures.push('natural D3D11 fallback reason was missing')
+    }
+    if (evidence?.pipeline?.d3d11?.captureBackend !== 'legacy-ffmpeg') {
+      failures.push('natural D3D11 fallback did not report the legacy capture backend')
+    }
+    for (const field of [
+      'adapterLuid',
+      'captureAdapterLuid',
+      'compositorAdapterLuid',
+      'primaryEncoderAdapterLuid',
+      'auxiliaryEncoderAdapterLuid'
+    ]) {
+      if (nonEmptyString(evidence?.pipeline?.d3d11?.[field])) {
+        failures.push(`natural D3D11 fallback must not claim ${field}`)
+      }
+    }
+    requireEqual(
+      failures,
+      'natural fallback media verdict',
+      evidence?.calibration?.mediaVerdict,
+      'PASS'
+    )
+    requireEqual(
+      failures,
+      'natural fallback lifecycle verdict',
+      evidence?.calibration?.lifecycleVerdict,
+      'PASS'
+    )
+    requireEqual(
+      failures,
+      'natural fallback proof-surface verdict',
+      evidence?.calibration?.previewProofSurfaceVerdict,
+      'PASS'
+    )
+    if (evidence?.context?.profile !== '1080p30') {
+      failures.push('natural fallback attempted to qualify a profile other than 1080p30')
+    }
+  }
   if (evidence?.pipeline?.fallbackChanged === true) {
     failures.push('effective encoder fallback changed mid-run')
   }
@@ -757,7 +1143,7 @@ export function evaluateWindowsStreamRun(
   return { verdict: 'PASS', failures, blockers }
 }
 
-export function evaluateWindowsStreamAggregate({ mode, runs }) {
+export function evaluateWindowsStreamAggregate({ mode, runs, scenarios }) {
   const failures = []
   const blockers = []
   for (const run of runs ?? []) {
@@ -781,7 +1167,7 @@ export function evaluateWindowsStreamAggregate({ mode, runs }) {
   if (mode === 'calibrate') return { verdict: 'CALIBRATION', failures, blockers }
 
   const expected = new Set(
-    buildWindowsStreamPerformanceMatrix().flatMap((scenario) =>
+    (scenarios ?? buildWindowsStreamPerformanceMatrix()).flatMap((scenario) =>
       Array.from({ length: scenario.repetitions }, (_, index) => `${scenario.id}#${index + 1}`)
     )
   )
@@ -1028,10 +1414,6 @@ export function summarizeWindowsStreamDiagnosticSamples(samples, options = {}) {
     measured,
     (sample) => sample.effectiveEncodeBackend ?? sample.encodeBackend
   )
-  const encodedOutputBackendStates = diagnosticStateSet(
-    measured,
-    (sample) => sample.encoderBridgeEncodedOutputBackend
-  )
   const fallbackStates = diagnosticStateSet(
     measured,
     (sample) => sample.encoderBridgeEncodedOutputFallbackReason
@@ -1073,6 +1455,23 @@ export function summarizeWindowsStreamDiagnosticSamples(samples, options = {}) {
     Number.isFinite(deliveredFrames) && Number.isFinite(droppedFrames)
       ? deliveredFrames + droppedFrames
       : null
+  const firstD3d11 = isRecord(first.windowsD3d11Media) ? first.windowsD3d11Media : {}
+  const lastD3d11 = isRecord(last.windowsD3d11Media) ? last.windowsD3d11Media : {}
+  const d3d11States = diagnosticStateSet(measured, (sample) => sample.windowsD3d11Media?.state)
+  const d3d11Adapters = diagnosticStateSet(
+    measured,
+    (sample) => sample.windowsD3d11Media?.adapterLuid
+  )
+  const d3d11RoleAdapters = [
+    'captureAdapterLuid',
+    'compositorAdapterLuid',
+    'primaryEncoderAdapterLuid',
+    'auxiliaryEncoderAdapterLuid'
+  ].map((field) => diagnosticStateSet(measured, (sample) => sample.windowsD3d11Media?.[field]))
+  const d3d11FallbackReasons = diagnosticStateSet(
+    measured,
+    (sample) => sample.windowsD3d11Media?.fallbackReason
+  )
   return {
     requestedBridgeOutput,
     effectiveBridgeOutput,
@@ -1098,9 +1497,91 @@ export function summarizeWindowsStreamDiagnosticSamples(samples, options = {}) {
       requestedOutputStates,
       effectiveOutputStates,
       encodeBackendStates,
-      encodedOutputBackendStates,
       fallbackStates
-    ].some((states) => states.size > 1)
+    ].some((states) => states.size > 1),
+    ...(measured.some((sample) => isRecord(sample.windowsD3d11Media))
+      ? {
+          d3d11: {
+            state: lastD3d11.state ?? null,
+            requested: lastD3d11.requested === true,
+            required: lastD3d11.required === true,
+            adapterLuid: lastD3d11.adapterLuid ?? null,
+            captureAdapterLuid: lastD3d11.captureAdapterLuid ?? null,
+            compositorAdapterLuid: lastD3d11.compositorAdapterLuid ?? null,
+            primaryEncoderAdapterLuid: lastD3d11.primaryEncoderAdapterLuid ?? null,
+            auxiliaryEncoderAdapterLuid: lastD3d11.auxiliaryEncoderAdapterLuid ?? null,
+            generation: lastD3d11.generation ?? null,
+            captureBackend: lastD3d11.captureBackend ?? null,
+            cursorMode: lastD3d11.cursorMode ?? null,
+            cursorRequested: lastD3d11.cursorRequested === true,
+            cursorPixelsSource: lastD3d11.cursorPixelsSource ?? null,
+            cursorExclusionGuaranteed: lastD3d11.cursorExclusionGuaranteed === true,
+            cursorShapeUploads: counterDelta(
+              firstD3d11.cursorShapeUploads,
+              lastD3d11.cursorShapeUploads
+            ),
+            cursorCompositedFrames: counterDelta(
+              firstD3d11.cursorCompositedFrames,
+              lastD3d11.cursorCompositedFrames
+            ),
+            captureReadbackFrames: counterDelta(
+              firstD3d11.captureReadbackFrames,
+              lastD3d11.captureReadbackFrames
+            ),
+            textureImportFrames: counterDelta(
+              firstD3d11.textureImportFrames,
+              lastD3d11.textureImportFrames
+            ),
+            cameraUploadFrames: counterDelta(
+              firstD3d11.cameraUploadFrames,
+              lastD3d11.cameraUploadFrames
+            ),
+            compositorCpuFallbackFrames: counterDelta(
+              firstD3d11.compositorCpuFallbackFrames,
+              lastD3d11.compositorCpuFallbackFrames
+            ),
+            previewPresents: counterDelta(firstD3d11.previewPresents, lastD3d11.previewPresents),
+            previewDrops: counterDelta(firstD3d11.previewDrops, lastD3d11.previewDrops),
+            previewBmpRequests: counterDelta(
+              firstD3d11.previewBmpRequests,
+              lastD3d11.previewBmpRequests
+            ),
+            previewBmpBytes: counterDelta(firstD3d11.previewBmpBytes, lastD3d11.previewBmpBytes),
+            encoderGpuSamples: counterDelta(
+              firstD3d11.encoderGpuSamples,
+              lastD3d11.encoderGpuSamples
+            ),
+            encoderSystemMemorySamples: counterDelta(
+              firstD3d11.encoderSystemMemorySamples,
+              lastD3d11.encoderSystemMemorySamples
+            ),
+            rawVideoCopiedFrames: counterDelta(
+              firstD3d11.rawVideoCopiedFrames,
+              lastD3d11.rawVideoCopiedFrames
+            ),
+            texturePoolPressureEvents: counterDelta(
+              firstD3d11.texturePoolPressureEvents,
+              lastD3d11.texturePoolPressureEvents
+            ),
+            adapterMismatches: counterDelta(
+              firstD3d11.adapterMismatches,
+              lastD3d11.adapterMismatches
+            ),
+            deviceResets: counterDelta(firstD3d11.deviceResets, lastD3d11.deviceResets),
+            messageDispatchP95Ms: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.messagePumpLagP95Ms)
+            ),
+            messageDispatchMaxMs: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.messagePumpLagMaxMs)
+            ),
+            fallbackReason: lastD3d11.fallbackReason ?? null,
+            stateChanged: d3d11States.size > 1,
+            adapterChanged:
+              d3d11Adapters.size > 1 || d3d11RoleAdapters.some((states) => states.size > 1),
+            fallbackChanged: d3d11FallbackReasons.size > 1
+          }
+        }
+      : {})
   }
 }
 
@@ -1171,19 +1652,11 @@ export function evaluateWindowsStreamDiagnosticTimeline(
     blockers.push('diagnostic timeline did not preserve one active session identity')
   }
 
-  const separateOutputEncoderStates = new Set(
-    measured.map((sample) => sample.encoderBridgeSeparateOutputEncodersActive)
-  )
-  const separateOutputEncoders = measured.every(
+  const separateOutputEncoders = measured.some(
     (sample) => sample.encoderBridgeSeparateOutputEncodersActive === true
   )
-  if (separateOutputEncoderStates.size > 1) {
-    blockers.push('diagnostic output-encoder topology changed during measurement')
-  }
   if (recordEnabled && !separateOutputEncoders) {
-    blockers.push(
-      'record-plus-stream diagnostics did not prove separate output encoders throughout'
-    )
+    blockers.push('record-plus-stream diagnostics did not prove separate output encoders')
   }
   const speedField = separateOutputEncoders ? 'encoderBridgeStreamEncoderSpeed' : 'encoderSpeed'
   const progressDroppedField = separateOutputEncoders
@@ -1201,23 +1674,13 @@ export function evaluateWindowsStreamDiagnosticTimeline(
     if (measured.some((sample) => !nonEmptyString(sample[field]))) {
       blockers.push(`diagnostic timeline field ${field} was missing`)
     }
-    if (diagnosticStateSet(measured, (sample) => sample[field]).size > 1) {
-      blockers.push(`diagnostic timeline field ${field} changed during measurement`)
-    }
   }
-  const effectiveEncodeBackendStates = diagnosticStateSet(
-    measured,
-    (sample) => sample.effectiveEncodeBackend ?? sample.encodeBackend
-  )
   if (
     measured.some(
       (sample) => !nonEmptyString(sample.effectiveEncodeBackend ?? sample.encodeBackend)
     )
   ) {
     blockers.push('diagnostic timeline effective encode backend was missing')
-  }
-  if (effectiveEncodeBackendStates.size > 1) {
-    blockers.push('diagnostic timeline effective encode backend changed during measurement')
   }
   if (measured.some((sample) => !Number.isFinite(sample[speedField]) || sample[speedField] <= 0)) {
     blockers.push(`diagnostic timeline field ${speedField} was missing or invalid`)
@@ -1322,13 +1785,11 @@ export function evaluateWindowsStreamProcessTelemetry(
 export function evaluateWindowsStreamTargetLifecycle({
   snapshots,
   targetId,
-  expectedSessionId,
   measurementStartedAtMs,
   measurementEndedAtMs,
   expectedMeasurementEndedAtMs,
   intervalMs,
-  receiverAlive,
-  pollingEvidence
+  receiverAlive
 } = {}) {
   const failures = []
   const blockers = []
@@ -1351,29 +1812,10 @@ export function evaluateWindowsStreamTargetLifecycle({
       (event) =>
         isRecord(event) &&
         Number.isFinite(event.receivedAtMs) &&
-        ['rpc', 'diagnostics-rpc'].includes(event.source) &&
         isRecord(event.snapshot) &&
         Array.isArray(event.snapshot.targets)
     )
     .sort((left, right) => left.receivedAtMs - right.receivedAtMs)
-  if (pollingEvidence?.verdict !== 'PASS') {
-    blockers.push(
-      ...(pollingEvidence?.blockers?.length
-        ? pollingEvidence.blockers.map((blocker) => `target polling: ${blocker}`)
-        : ['authoritative stream-target polling evidence was missing'])
-    )
-  }
-  const sessionIds = new Set(events.map((event) => event.snapshot.sessionId).filter(nonEmptyString))
-  if (events.some((event) => !nonEmptyString(event.snapshot.sessionId))) {
-    blockers.push('authoritative stream-target snapshot omitted its session identity')
-  }
-  if (sessionIds.size !== 1) {
-    blockers.push('authoritative stream-target snapshots did not preserve one session identity')
-  }
-  const observedSessionId = sessionIds.size === 1 ? [...sessionIds][0] : null
-  if (nonEmptyString(expectedSessionId) && observedSessionId !== expectedSessionId.trim()) {
-    blockers.push('stream-target and diagnostic timelines belonged to different sessions')
-  }
   const targetEvents = events
     .map((event) => ({
       receivedAtMs: event.receivedAtMs,
@@ -1386,30 +1828,10 @@ export function evaluateWindowsStreamTargetLifecycle({
   if (stateAtStart?.target?.state !== 'live') {
     blockers.push('selected stream target was not confirmed live at measurement start')
   }
-  const startObservationAgeMs = stateAtStart
-    ? measurementStartedAtMs - stateAtStart.receivedAtMs
-    : null
-  if (Number.isFinite(startObservationAgeMs) && startObservationAgeMs > intervalMs) {
-    blockers.push('selected stream target start observation was older than one interval')
-  }
   const measuredEvents = targetEvents.filter(
     (event) =>
       event.receivedAtMs >= measurementStartedAtMs && event.receivedAtMs <= measurementEndedAtMs
   )
-  if (measuredEvents.length === 0) {
-    blockers.push('selected stream target had no observations during measurement')
-  }
-  const coverageEvents = targetEvents.filter(
-    (event) =>
-      event.receivedAtMs >= (stateAtStart?.receivedAtMs ?? measurementStartedAtMs) &&
-      event.receivedAtMs <= measurementEndedAtMs
-  )
-  const coverageGaps = coverageEvents
-    .slice(1)
-    .map((event, index) => event.receivedAtMs - coverageEvents[index].receivedAtMs)
-  if (coverageGaps.some((gap) => gap > intervalMs)) {
-    blockers.push('selected stream target observation cadence exceeded one interval')
-  }
   for (const event of measuredEvents) {
     if (event.target.state !== 'live') {
       failures.push(
@@ -1417,17 +1839,9 @@ export function evaluateWindowsStreamTargetLifecycle({
       )
     }
   }
-  const stateAtEnd = [...targetEvents]
-    .reverse()
-    .find((event) => event.receivedAtMs <= measurementEndedAtMs)
-  if (!stateAtEnd) {
-    blockers.push('selected stream target had no observation at or before measurement end')
-  } else if (stateAtEnd.target.state !== 'live') {
+  const stateAtEnd = targetEvents.at(-1)
+  if (stateAtEnd?.target?.state !== 'live') {
     failures.push('selected stream target was not live immediately before stop')
-  }
-  const endObservationAgeMs = stateAtEnd ? measurementEndedAtMs - stateAtEnd.receivedAtMs : null
-  if (Number.isFinite(endObservationAgeMs) && endObservationAgeMs > intervalMs) {
-    blockers.push('selected stream target end observation was older than one interval')
   }
   const endSkewMs = Math.abs(measurementEndedAtMs - expectedMeasurementEndedAtMs)
   if (endSkewMs > intervalMs) {
@@ -1445,10 +1859,6 @@ export function evaluateWindowsStreamTargetLifecycle({
     stateAtStart: stateAtStart?.target?.state ?? null,
     stateAtEnd: stateAtEnd?.target?.state ?? null,
     measuredEvents: measuredEvents.length,
-    sessionId: observedSessionId,
-    maximumObservationGapMs: coverageGaps.length > 0 ? Math.max(...coverageGaps) : null,
-    startObservationAgeMs,
-    endObservationAgeMs,
     endSkewMs
   }
 }
@@ -2012,6 +2422,597 @@ export function validateWindowsStreamPerformanceBudget(document) {
 
 export function evaluateWindowsStreamResourceBudget(profile, metrics) {
   return evaluateWindowsPerformanceBudget(profile, metrics)
+}
+
+export function attachWindowsStreamNaturalFallbackPolicy({ document, calibration }) {
+  return attachWindowsNaturalFallbackPolicy({ document, calibration })
+}
+
+export function windowsStreamCandidateIdentity(candidate) {
+  const identity = {
+    sourceCommit: candidate?.sourceCommit,
+    installerSha256: candidate?.installerSha256,
+    executableSha256: candidate?.sha256,
+    packagePayloadSha256: candidate?.packagePayload?.sha256
+  }
+  if (!/^[a-f0-9]{40}$/.test(identity.sourceCommit ?? '')) {
+    throw new Error('candidate sourceCommit must be a lowercase 40-character commit.')
+  }
+  for (const field of ['installerSha256', 'executableSha256', 'packagePayloadSha256']) {
+    if (!/^[a-f0-9]{64}$/.test(identity[field] ?? '')) {
+      throw new Error(`candidate ${field} must be a lowercase SHA-256 digest.`)
+    }
+  }
+  return identity
+}
+
+export function windowsStreamCalibrationMetrics({
+  processTelemetry,
+  gpuEvidence,
+  bmp,
+  pipeline,
+  mediaVerdict,
+  lifecycleVerdict,
+  previewProofSurfaceVerdict,
+  inputContinuity
+}) {
+  const processTree = summarizeWindowsStreamBudgetProcessTelemetry(processTelemetry)
+  const memory = processTree?.memory?.summary
+  const cpu = processTree?.cpu?.summary
+  const roles = new Set([...Object.keys(memory?.roles ?? {}), ...Object.keys(cpu?.byRole ?? {})])
+  const gpu = gpuEvidence?.summary ?? gpuEvidence
+  const d3d11 = pipeline?.d3d11
+  return {
+    process: {
+      cpuP95Percent: finiteOrNull(cpu?.totalP95Percent ?? cpu?.total?.p95Percent),
+      rssMaxMiB: divideFinite(memory?.maxTotalRssKb, 1024),
+      rssSlopeMiBPerMinute: divideFinite(memory?.totalRss?.slopePerMinute, 1024),
+      roles: Object.fromEntries(
+        [...roles].sort().map((role) => [
+          role,
+          {
+            rssMaxMiB: divideFinite(memory?.roles?.[role]?.maxRssKb, 1024),
+            rssSlopeMiBPerMinute: divideFinite(memory?.roles?.[role]?.slopeRssKbPerMinute, 1024),
+            cpuAveragePercent: finiteOrNull(cpu?.byRole?.[role]?.averagePercent),
+            cpuP95Percent: finiteOrNull(cpu?.byRole?.[role]?.p95Percent)
+          }
+        ])
+      )
+    },
+    gpu: {
+      engineBusyP95Percent: finiteOrNull(gpu?.engineBusyP95Percent),
+      dedicatedMaxMiB: finiteOrNull(gpu?.dedicatedMaxMiB),
+      sharedMaxMiB: finiteOrNull(gpu?.sharedMaxMiB)
+    },
+    bmp: {
+      requestCount: finiteOrNull(bmp?.requestCount),
+      bytes: finiteOrNull(bmp?.bytes),
+      intervalP95Ms: finiteOrNull(bmp?.intervalP95Ms),
+      advancedFrames: finiteOrNull(bmp?.advancedFrames)
+    },
+    encoderSpeedP05: finiteOrNull(pipeline?.encoderSpeedP05),
+    mediaVerdict,
+    lifecycleVerdict,
+    previewProofSurfaceVerdict,
+    d3d11: {
+      captureReadbackFrames: finiteOrNull(d3d11?.captureReadbackFrames),
+      compositorCpuFallbackFrames: finiteOrNull(d3d11?.compositorCpuFallbackFrames),
+      rawVideoCopiedFrames: finiteOrNull(d3d11?.rawVideoCopiedFrames),
+      encoderSystemMemorySamples: finiteOrNull(d3d11?.encoderSystemMemorySamples),
+      cursorCorrect: windowsStreamD3d11CursorCorrect(d3d11),
+      inputContinuity: inputContinuity === true,
+      messageDispatchP95Ms: finiteOrNull(d3d11?.messageDispatchP95Ms),
+      messageDispatchMaxMs: finiteOrNull(d3d11?.messageDispatchMaxMs)
+    }
+  }
+}
+
+export function evaluateWindowsD3d11PreviewInputContinuity({
+  applicable,
+  before,
+  after,
+  minimumMovePx = 12
+}) {
+  if (applicable !== true) {
+    return {
+      verdict: 'NOT_REQUIRED',
+      applicable: false,
+      physicalInput: false,
+      blockers: []
+    }
+  }
+
+  const blockers = []
+  if (!(after?.state?.clicks > 0)) blockers.push('Electron did not receive the physical click')
+  if (!(after?.state?.focusEvents > 0)) {
+    blockers.push('Electron input did not receive focus')
+  }
+  if (!(after?.state?.inputEvents > 0) || after?.state?.value !== 'VIDEORC42') {
+    blockers.push('Electron input did not receive the physical keyboard sequence')
+  }
+  if (after?.state?.activeElementId !== 'videorc-windows-preview-input-target') {
+    blockers.push('Electron input did not remain the active element')
+  }
+  const electronWindowMoved =
+    isRecord(before?.initialBounds) &&
+    isRecord(after?.bounds) &&
+    (Math.abs(after.bounds.x - before.initialBounds.x) >= minimumMovePx ||
+      Math.abs(after.bounds.y - before.initialBounds.y) >= minimumMovePx)
+  if (!electronWindowMoved) {
+    blockers.push('Electron preview window did not move from the physical drag')
+  }
+  const electronFocused = after?.previewFocused === true && after?.webContentsFocused === true
+  if (!electronFocused) blockers.push('Electron preview/webContents did not retain focus')
+  const presenterNeverActivated =
+    after?.presenter?.windowActive === false && after?.presenter?.windowFocused === false
+  if (!presenterNeverActivated) blockers.push('D3D11 presenter activated or took focus')
+  const presenterSequenceBefore = before?.presenter?.lastPresentedSequence
+  const presenterSequenceAfter = after?.presenter?.lastPresentedSequence
+  if (
+    after?.presenter?.firstPresentSucceeded !== true ||
+    after?.presenter?.sourceLive !== true ||
+    !Number.isSafeInteger(presenterSequenceBefore) ||
+    !Number.isSafeInteger(presenterSequenceAfter) ||
+    presenterSequenceAfter <= presenterSequenceBefore
+  ) {
+    blockers.push('D3D11 presenter did not remain live and advance through physical input')
+  }
+
+  return {
+    verdict: blockers.length === 0 ? 'PASS' : 'FAIL',
+    applicable: true,
+    physicalInput: true,
+    blockers,
+    clickCount: after?.state?.clicks ?? 0,
+    focusEventCount: after?.state?.focusEvents ?? 0,
+    inputEventCount: after?.state?.inputEvents ?? 0,
+    typedValueMatched: after?.state?.value === 'VIDEORC42',
+    electronWindowMoved,
+    electronFocused,
+    presenterNeverActivated,
+    presenterSequenceBefore: Number.isSafeInteger(presenterSequenceBefore)
+      ? presenterSequenceBefore
+      : null,
+    presenterSequenceAfter: Number.isSafeInteger(presenterSequenceAfter)
+      ? presenterSequenceAfter
+      : null
+  }
+}
+
+export function normalizeWindowsNaturalFallbackCalibration({
+  aggregate,
+  aggregatePath,
+  aggregateSha256,
+  reports
+}) {
+  const failures = []
+  if (aggregate?.schemaVersion !== 1) failures.push('aggregate schemaVersion must be 1')
+  if (aggregate?.kind !== 'videorc.windows-stream-performance-aggregate') {
+    failures.push('aggregate kind was invalid')
+  }
+  if (aggregate?.mode !== 'calibrate' || aggregate?.status !== 'calibration') {
+    failures.push('aggregate must be a completed CALIBRATION')
+  }
+  if (!portableAbsolutePath(aggregatePath)) failures.push('aggregatePath must be absolute')
+  if (!lowercaseSha256(aggregateSha256)) failures.push('aggregateSha256 was invalid')
+  if (aggregate?.hardwareClass !== WINDOWS_STREAM_NATURAL_FALLBACK_HARDWARE_CLASS) {
+    failures.push(
+      `aggregate hardwareClass must be ${WINDOWS_STREAM_NATURAL_FALLBACK_HARDWARE_CLASS}`
+    )
+  }
+  if (!sameStringSet(aggregate?.scenarios, WINDOWS_STREAM_NATURAL_FALLBACK_SCENARIOS)) {
+    failures.push('aggregate scenarios did not match the exact natural-fallback matrix')
+  }
+  if (
+    aggregate?.profileClass !== 'release' ||
+    aggregate?.operatingSystem?.platform !== 'win32' ||
+    aggregate?.operatingSystem?.arch !== 'x64' ||
+    !nonEmptyString(aggregate?.operatingSystem?.release)
+  ) {
+    failures.push('aggregate release/Windows hardware context was invalid')
+  }
+  let candidate = null
+  try {
+    candidate = windowsStreamCandidateIdentity(aggregate?.candidate)
+  } catch (error) {
+    failures.push(error instanceof Error ? error.message : String(error))
+  }
+  const reportList = Array.isArray(reports) ? reports : []
+  if (reportList.length !== 12) {
+    failures.push('natural fallback derivation requires exactly twelve verdict reports')
+  }
+  const aggregateRuns = Array.isArray(aggregate?.runs) ? aggregate.runs : []
+  if (aggregateRuns.length !== 12) {
+    failures.push('aggregate did not retain exactly twelve run summaries')
+  }
+  const runs = []
+  const seenContexts = new Set()
+  const seenPaths = new Set()
+  const seenHashes = new Set()
+  for (const [index, report] of reportList.entries()) {
+    const label = `fallback report ${index + 1}`
+    const evidence = report?.document?.evidence
+    const result = report?.document?.result
+    const scenario = buildWindowsStreamPerformanceMatrix().find(
+      (entry) => entry.id === evidence?.scenarioId
+    )
+    if (!portableAbsolutePath(report?.path)) failures.push(`${label} path was not absolute`)
+    const canonicalPath = canonicalPortablePath(report?.path)
+    if (seenPaths.has(canonicalPath)) failures.push(`${label} path was duplicated`)
+    else seenPaths.add(canonicalPath)
+    if (!lowercaseSha256(report?.sha256) || seenHashes.has(report?.sha256)) {
+      failures.push(`${label} digest was invalid or duplicated`)
+    } else {
+      seenHashes.add(report.sha256)
+    }
+    if (!scenario || !WINDOWS_STREAM_NATURAL_FALLBACK_SCENARIOS.includes(scenario.id)) {
+      failures.push(`${label} scenario was outside the natural-fallback matrix`)
+      continue
+    }
+    if (evidence?.mode !== 'calibrate' || result?.verdict !== 'PASS') {
+      failures.push(`${label} was not a passing calibration run`)
+    }
+    const reevaluated = evaluateWindowsStreamRun(evidence)
+    if (reevaluated.verdict !== 'PASS') {
+      failures.push(
+        `${label} evidence did not independently re-evaluate to PASS: ${[
+          ...reevaluated.failures,
+          ...reevaluated.blockers
+        ].join('; ')}`
+      )
+    }
+    if (
+      !Number.isInteger(evidence?.repetition) ||
+      evidence.repetition < 1 ||
+      evidence.repetition > 3
+    ) {
+      failures.push(`${label} repetition was invalid`)
+    }
+    const contextKey = `${scenario.id}#${evidence?.repetition}`
+    if (seenContexts.has(contextKey)) failures.push(`${label} duplicated ${contextKey}`)
+    else seenContexts.add(contextKey)
+    let runCandidate = null
+    try {
+      runCandidate = windowsStreamCandidateIdentity(evidence?.candidate)
+    } catch (error) {
+      failures.push(`${label} ${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (candidate && stableJson(runCandidate) !== stableJson(candidate)) {
+      failures.push(`${label} candidate identity differed from the aggregate`)
+    }
+    if (
+      evidence?.context?.hardwareClass !== WINDOWS_STREAM_NATURAL_FALLBACK_HARDWARE_CLASS ||
+      evidence?.context?.profile !== '1080p30' ||
+      evidence?.context?.mediaPath !== 'legacy-fallback' ||
+      evidence?.context?.selectionMode !== 'natural' ||
+      evidence?.context?.sourceComposition !== 'screen-only' ||
+      evidence?.context?.topology !== scenario.topology ||
+      evidence?.context?.previewOpen !== scenario.previewOpen
+    ) {
+      failures.push(`${label} hardware/media/topology context did not match`)
+    }
+    if (
+      evidence?.timing?.warmupMs !== WINDOWS_STREAM_PERFORMANCE_TIMING.warmupMs ||
+      evidence?.timing?.measurementMs !== WINDOWS_STREAM_PERFORMANCE_TIMING.measurementMs ||
+      evidence?.timing?.sampleIntervalMs !== WINDOWS_STREAM_PERFORMANCE_TIMING.sampleIntervalMs
+    ) {
+      failures.push(`${label} timing context did not match the protected calibration`)
+    }
+    if (
+      evidence?.pipeline?.expectedFallback !== 'natural' ||
+      evidence?.pipeline?.d3d11?.state !== 'fallback' ||
+      evidence?.pipeline?.d3d11?.captureBackend !== 'legacy-ffmpeg' ||
+      !nonEmptyString(evidence?.pipeline?.d3d11?.fallbackReason)
+    ) {
+      failures.push(`${label} did not prove the named natural legacy fallback`)
+    }
+    const calibration = evidence?.calibration
+    if (
+      calibration?.mediaVerdict !== 'PASS' ||
+      calibration?.lifecycleVerdict !== 'PASS' ||
+      calibration?.previewProofSurfaceVerdict !== 'PASS'
+    ) {
+      failures.push(`${label} media/lifecycle/proof-surface evidence did not pass`)
+    }
+    const matchingSummary = aggregateRuns.find(
+      (run) => run?.scenarioId === scenario.id && run?.repetition === evidence?.repetition
+    )
+    if (
+      !matchingSummary ||
+      matchingSummary.verdict !== 'PASS' ||
+      canonicalPortablePath(matchingSummary.reportPath) !== canonicalPath ||
+      matchingSummary.reportSha256 !== report?.sha256
+    ) {
+      failures.push(`${label} did not match its aggregate run summary`)
+    }
+    runs.push({
+      topology: scenario.topology,
+      previewOpen: scenario.previewOpen,
+      repetition: evidence?.repetition,
+      verdict: result?.verdict,
+      reportPath: report?.path,
+      reportSha256: report?.sha256,
+      observed: {
+        fallbackReason: evidence?.pipeline?.d3d11?.fallbackReason ?? null,
+        effectiveCaptureBackend: evidence?.pipeline?.d3d11?.captureBackend ?? null,
+        effectiveEncoderBackend: evidence?.pipeline?.effectiveEncodeBackend ?? null
+      },
+      mediaVerdict: calibration?.mediaVerdict ?? null,
+      lifecycleVerdict: calibration?.lifecycleVerdict ?? null,
+      previewProofSurfaceVerdict: calibration?.previewProofSurfaceVerdict ?? null,
+      encoderSpeedP05: calibration?.encoderSpeedP05 ?? null,
+      process: calibration?.process ?? null,
+      gpu: calibration?.gpu ?? null,
+      bmp: {
+        intervalP95Ms: calibration?.bmp?.intervalP95Ms ?? null,
+        advancedFrames: calibration?.bmp?.advancedFrames ?? null
+      }
+    })
+  }
+  for (const scenarioId of WINDOWS_STREAM_NATURAL_FALLBACK_SCENARIOS) {
+    for (let repetition = 1; repetition <= 3; repetition += 1) {
+      if (!seenContexts.has(`${scenarioId}#${repetition}`)) {
+        failures.push(`natural fallback evidence omitted ${scenarioId}#${repetition}`)
+      }
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`Natural fallback calibration was invalid:\n${failures.join('\n')}`)
+  }
+  const firstEvidence = reports[0].document.evidence
+  return {
+    schemaVersion: 1,
+    kind: 'videorc.windows-natural-fallback-calibration',
+    status: 'CALIBRATION',
+    candidate,
+    aggregatePath,
+    aggregateSha256,
+    scope: {
+      scenario: '1080p30-natural-fallback-matrix',
+      profile: '1080p30',
+      fps: 30,
+      hardwareClass: WINDOWS_STREAM_NATURAL_FALLBACK_HARDWARE_CLASS,
+      profileClass: aggregate.profileClass,
+      buildMode: 'packaged',
+      operatingSystem: aggregate.operatingSystem,
+      timing: {
+        warmupMs: firstEvidence.timing.warmupMs,
+        measurementMs: firstEvidence.timing.measurementMs,
+        intervalMs: firstEvidence.timing.sampleIntervalMs
+      },
+      mediaPath: 'legacy-fallback',
+      selectionMode: 'natural',
+      d3d11Requested: false,
+      d3d11Required: false
+    },
+    runs: runs.sort(
+      (left, right) =>
+        WINDOWS_STREAM_NATURAL_FALLBACK_SCENARIOS.indexOf(scenarioIdForFallbackRun(left)) -
+          WINDOWS_STREAM_NATURAL_FALLBACK_SCENARIOS.indexOf(scenarioIdForFallbackRun(right)) ||
+        left.repetition - right.repetition
+    )
+  }
+}
+
+export function buildWindowsD3d11StreamCalibrations({ aggregate, aggregatePath }) {
+  if (aggregate?.mode !== 'calibrate') return []
+  const candidate = windowsStreamCandidateIdentity(aggregate.candidate)
+  const groups = new Map()
+  for (const run of aggregate.runs ?? []) {
+    if (run?.verdict !== 'PASS' || !run?.calibration) continue
+    if (!groups.has(run.scenarioId)) groups.set(run.scenarioId, [])
+    groups.get(run.scenarioId).push(run)
+  }
+  return [...groups.entries()]
+    .map(([scenarioId, runs]) => {
+      const scenario = buildWindowsStreamPerformanceMatrix().find(
+        (entry) => entry.id === scenarioId
+      )
+      if (!scenario) throw new Error(`Unknown D3D11 calibration scenario ${scenarioId}.`)
+      const expectedRuns = scenario.repetitions
+      if (
+        runs.length !== expectedRuns ||
+        runs.some(
+          (run) =>
+            !portableAbsolutePath(run.reportPath) ||
+            !lowercaseSha256(run.reportSha256) ||
+            run.calibration?.d3d11?.captureReadbackFrames !== 0 ||
+            run.calibration?.d3d11?.compositorCpuFallbackFrames !== 0 ||
+            run.calibration?.d3d11?.rawVideoCopiedFrames !== 0 ||
+            run.calibration?.d3d11?.encoderSystemMemorySamples !== 0 ||
+            run.calibration?.bmp?.requestCount !== 0 ||
+            run.calibration?.bmp?.bytes !== 0
+        )
+      ) {
+        throw new Error(
+          `D3D11 calibration ${scenarioId} did not retain ${expectedRuns} passing zero-copy runs.`
+        )
+      }
+      const previewOpen = scenario.previewOpen === true
+      return {
+        schemaVersion: 1,
+        kind: 'videorc.windows-d3d11-stream-calibration',
+        id: `${aggregate.hardwareClass}-${scenario.id}`,
+        scope: {
+          scenario: scenario.id,
+          hardwareClass: aggregate.hardwareClass,
+          profileClass: aggregate.profileClass,
+          buildMode: 'packaged',
+          operatingSystem: aggregate.operatingSystem,
+          timing: {
+            warmupMs: scenario.warmupMs,
+            measurementMs: scenario.measurementMs,
+            intervalMs: scenario.sampleIntervalMs
+          },
+          profile: scenario.fps === 60 ? '1080p60' : '1080p30',
+          mediaPath: 'd3d11-native',
+          sourceComposition: scenario.sourceComposition,
+          topology: scenario.topology,
+          previewOpen,
+          ...(previewOpen ? { preview: WINDOWS_STREAM_D3D11_PREVIEW } : {})
+        },
+        candidate: {
+          sourceCommit: candidate.sourceCommit,
+          installerSha256: candidate.installerSha256,
+          sha256: candidate.executableSha256,
+          packagePayload: {
+            sha256: candidate.packagePayloadSha256,
+            components: aggregate.candidate.packagePayload.components
+          }
+        },
+        aggregatePath,
+        aggregateSha256: null,
+        runs: runs
+          .sort((left, right) => left.repetition - right.repetition)
+          .map((run) => ({
+            verdict: run.verdict,
+            reportPath: run.reportPath,
+            reportSha256: run.reportSha256,
+            candidate: aggregate.candidate,
+            process: run.calibration.process,
+            gpu: { summary: run.calibration.gpu },
+            bmp: {
+              mode: 'disabled',
+              requests: run.calibration.bmp.requestCount,
+              bytes: run.calibration.bmp.bytes
+            },
+            pipeline: {
+              zeroCopyVerdict: 'PASS',
+              ...run.calibration.d3d11
+            }
+          }))
+      }
+    })
+    .sort((left, right) => left.id.localeCompare(right.id))
+}
+
+export function isWindowsD3d11StreamPerformanceBudget(document) {
+  return document?.kind === WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND
+}
+
+function assertSinglePortableAbsolutePath(value, label) {
+  assertLiteralPath(value, label)
+  if (String(value).includes(',')) {
+    throw new Error(`${label} accepts exactly one candidate root, not a path list.`)
+  }
+  if (!portableAbsolutePath(value)) {
+    throw new Error(`${label} must be one absolute candidate root.`)
+  }
+}
+
+function assertLiteralPath(value, label) {
+  if (!nonEmptyString(value) || /[*?\[\]{}<>]/.test(value) || /^~(?:[\\/]|$)/.test(value)) {
+    throw new Error(`${label} does not accept aliases or glob paths.`)
+  }
+}
+
+function portableAbsolutePath(value) {
+  return (
+    nonEmptyString(value) &&
+    (/^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/.test(value) || value.startsWith('/'))
+  )
+}
+
+function canonicalPortablePath(value) {
+  return String(value ?? '')
+    .replaceAll('\\', '/')
+    .replace(/\/+/g, '/')
+    .replace(/\/$/, '')
+    .toLocaleLowerCase('en-US')
+}
+
+function lowercaseSha256(value) {
+  return /^[a-f0-9]{64}$/.test(value ?? '')
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function sameStringSet(actual, expected) {
+  return (
+    Array.isArray(actual) &&
+    actual.length === expected.length &&
+    new Set(actual).size === expected.length &&
+    expected.every((value) => actual.includes(value))
+  )
+}
+
+function finiteOrNull(value) {
+  return Number.isFinite(value) ? value : null
+}
+
+function divideFinite(value, divisor) {
+  return Number.isFinite(value) ? value / divisor : null
+}
+
+function windowsStreamD3d11CursorCorrect(d3d11) {
+  if (!isRecord(d3d11)) return false
+  if (!nonEmptyString(d3d11.cursorPixelsSource) || !nonEmptyString(d3d11.cursorMode)) {
+    return false
+  }
+  if (d3d11.captureBackend === 'desktop-duplication') {
+    if (
+      d3d11.cursorRequested !== true ||
+      d3d11.cursorExclusionGuaranteed !== false ||
+      !['embedded', 'separate'].includes(d3d11.cursorMode)
+    ) {
+      return false
+    }
+    if (d3d11.cursorMode === 'separate') {
+      return Number.isFinite(d3d11.cursorCompositedFrames) && d3d11.cursorCompositedFrames > 0
+    }
+    return d3d11.cursorCompositedFrames === 0
+  }
+  return (
+    d3d11.captureBackend === 'windows-graphics-capture-monitor' &&
+    d3d11.cursorRequested === false &&
+    d3d11.cursorMode === 'excluded-wgc' &&
+    d3d11.cursorExclusionGuaranteed === true &&
+    d3d11.cursorCompositedFrames === 0
+  )
+}
+
+function validateWindowsD3d11AdapterEvidence(d3d11, failures, { auxiliaryRequired }) {
+  const authority = d3d11?.adapterLuid
+  if (!/^[0-9a-f]{16}$/.test(authority ?? '')) {
+    failures.push('D3D11 media authority adapterLuid was not canonical')
+  }
+  for (const field of [
+    'captureAdapterLuid',
+    'compositorAdapterLuid',
+    'primaryEncoderAdapterLuid'
+  ]) {
+    if (!/^[0-9a-f]{16}$/.test(d3d11?.[field] ?? '')) {
+      failures.push(`D3D11 ${field} was not canonical`)
+    } else if (d3d11[field] !== authority) {
+      failures.push(`D3D11 ${field} did not equal the media authority adapterLuid`)
+    }
+  }
+  const auxiliary = d3d11?.auxiliaryEncoderAdapterLuid
+  if (auxiliaryRequired && !/^[0-9a-f]{16}$/.test(auxiliary ?? '')) {
+    failures.push('D3D11 auxiliaryEncoderAdapterLuid was required for split output encoders')
+  } else if (auxiliary !== null && auxiliary !== undefined) {
+    if (!/^[0-9a-f]{16}$/.test(auxiliary)) {
+      failures.push('D3D11 auxiliaryEncoderAdapterLuid was not canonical')
+    } else if (auxiliary !== authority) {
+      failures.push(
+        'D3D11 auxiliaryEncoderAdapterLuid did not equal the media authority adapterLuid'
+      )
+    }
+  }
+}
+
+function scenarioIdForFallbackRun(run) {
+  const topology = run?.topology === 'record-plus-stream' ? 'record-stream' : 'stream'
+  return `1080p30-${topology}-${run?.previewOpen ? 'preview' : 'no-preview'}`
 }
 
 function takeFlag(values, name) {

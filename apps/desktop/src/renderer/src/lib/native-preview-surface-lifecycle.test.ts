@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
+import type { PreviewSurfaceStatus } from '../../../shared/backend'
 import {
   nativePreviewFramePollingShouldSuppress,
+  previewSurfaceStatusRequiresMainAuthority,
   nativePreviewSurfaceSyncCanCommit,
   nativePreviewSurfaceSyncNeedsCreate
 } from './native-preview-surface-lifecycle'
@@ -39,6 +41,65 @@ describe('native preview surface lifecycle', () => {
         }
       })
     ).toBe(true)
+  })
+
+  it('suppresses proof polling for the canonical Windows D3D11 presenter', () => {
+    expect(
+      nativePreviewFramePollingShouldSuppress({
+        recordingActive: true,
+        windowOpen: true,
+        platform: 'win32',
+        status: {
+          state: 'live',
+          transport: 'd3d11-shared-texture',
+          backing: 'directcomposition-swapchain',
+          sourcePixelsPresent: true,
+          nativePreviewHostAttached: true,
+          nativePreviewHostKind: 'backend-d3d11-presenter'
+        }
+      })
+    ).toBe(true)
+  })
+
+  it('does not mistake a Metal host for native Windows presentation', () => {
+    expect(
+      nativePreviewFramePollingShouldSuppress({
+        recordingActive: true,
+        windowOpen: true,
+        platform: 'win32',
+        status: {
+          state: 'live',
+          transport: 'native-surface',
+          backing: 'cametal-layer',
+          sourcePixelsPresent: true,
+          nativePreviewHostAttached: true,
+          nativePreviewHostKind: 'in-process'
+        }
+      })
+    ).toBe(false)
+  })
+
+  it('routes every D3D11 presenter transition through Electron main authority', () => {
+    expect(
+      previewSurfaceStatusRequiresMainAuthority({
+        transport: 'd3d11-shared-texture',
+        windowsD3d11Presenter: undefined
+      })
+    ).toBe(true)
+    expect(
+      previewSurfaceStatusRequiresMainAuthority({
+        transport: 'electron-proof-surface',
+        windowsD3d11Presenter: {
+          fallbackReason: 'presenter-stopped'
+        } as PreviewSurfaceStatus['windowsD3d11Presenter']
+      })
+    ).toBe(true)
+    expect(
+      previewSurfaceStatusRequiresMainAuthority({
+        transport: 'electron-proof-surface',
+        windowsD3d11Presenter: undefined
+      })
+    ).toBe(false)
   })
 
   it('always suppresses polling when the preview window is closed', () => {

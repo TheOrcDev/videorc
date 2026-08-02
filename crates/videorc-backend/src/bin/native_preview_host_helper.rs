@@ -13,7 +13,7 @@ mod native_preview_host;
 mod protocol {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+    #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct PreviewSurfaceBounds {
         pub screen_x: f64,
@@ -41,10 +41,100 @@ mod protocol {
         pub elevated: Option<bool>,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct WindowsD3d11PresenterBounds {
+        pub x: i32,
+        pub y: i32,
+        pub width: u32,
+        pub height: u32,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct WindowsD3d11PresenterDiagnostics {
+        pub layered: bool,
+        pub transparent: bool,
+        pub no_activate: bool,
+        pub excluded_from_capture: bool,
+        pub window_active: bool,
+        pub window_focused: bool,
+        pub preview_generation: Option<u64>,
+        pub generation_matches: bool,
+        pub owner_process_matches: bool,
+        pub same_adapter: bool,
+        pub source_live: bool,
+        pub first_present_succeeded: bool,
+        pub successful_presents: u64,
+        pub last_presented_sequence: Option<u64>,
+        pub latest_wins_drops: u64,
+        pub hidden_drops: u64,
+        pub busy_drops: u64,
+        pub stale_frame_drops: u64,
+        pub actual_bounds: Option<WindowsD3d11PresenterBounds>,
+        pub fallback_reason: Option<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct OpaqueNativeWindowHandle(String);
+
+    impl OpaqueNativeWindowHandle {
+        pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+            let value = value.into();
+            let bytes = value.as_bytes();
+            if bytes.len() != 18
+                || !value.starts_with("0x")
+                || !bytes[2..]
+                    .iter()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+                || value == "0x0000000000000000"
+            {
+                return Err(
+                    "native window handle must be a nonzero lowercase 0x-prefixed 64-bit value"
+                        .to_string(),
+                );
+            }
+            Ok(Self(value))
+        }
+
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl Serialize for OpaqueNativeWindowHandle {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_str(self.as_str())
+        }
+    }
+
+    impl<'de> Deserialize<'de> for OpaqueNativeWindowHandle {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let value = String::deserialize(deserializer)?;
+            Self::parse(value).map_err(serde::de::Error::custom)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct MainOwnedPreviewSurfaceBounds {
+        #[serde(flatten)]
+        pub bounds: PreviewSurfaceBounds,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub order_above_window_handle: Option<OpaqueNativeWindowHandle>,
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
     #[serde(rename_all = "kebab-case")]
     pub enum PreviewTransport {
         NativeSurface,
+        D3d11SharedTexture,
         ElectronProofSurface,
         LatestJpegPolling,
         MjpegStream,
@@ -56,6 +146,8 @@ mod protocol {
     pub enum PreviewSurfaceBacking {
         #[serde(rename = "cametal-layer")]
         CaMetalLayer,
+        #[serde(rename = "directcomposition-swapchain")]
+        DirectcompositionSwapChain,
         ElectronBrowserWindow,
         None,
     }

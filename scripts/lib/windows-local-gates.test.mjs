@@ -280,6 +280,9 @@ describe('buildWindowsLocalGateSteps', () => {
 
     assert.deepEqual(labels, [
       'desktop unit tests',
+      'exact Windows D3D11 Rust test discovery and focused tests',
+      'complete Windows backend test suite',
+      'complete Windows backend clippy',
       'backend capture-input seam tests',
       'backend FIFO seam tests',
       'owned process lifecycle cleanup smoke',
@@ -288,9 +291,9 @@ describe('buildWindowsLocalGateSteps', () => {
       'Windows package preflight',
       'package desktop Windows dir',
       'packaged recording and bundled-background smoke',
-      'native Windows ScreenOnly and BMP smoke',
-      'native Windows Media Foundation encoded-bridge matrix',
-      'recording-time Windows proof-surface smoke',
+      'native Windows ScreenOnly D3D11 zero-copy smoke',
+      'native Windows D3D11 Media Foundation encoded-bridge matrix',
+      'recording-time Windows D3D11 native-preview smoke',
       'protected physical Windows RTMP performance matrix',
       'physical Windows live microphone controls smoke',
       'strict Windows support-bundle verification'
@@ -308,17 +311,25 @@ describe('buildWindowsLocalGateSteps', () => {
       /C:\/repo\/docs\/acceptance\/artifacts\/windows\/\d{4}-\d{2}-\d{2}$/
     )
     assert.deepEqual(
-      steps.find((step) => step.label === 'native Windows ScreenOnly and BMP smoke').args,
-      ['smoke:windows-native-screen']
+      steps.find((step) => step.label === 'native Windows ScreenOnly D3D11 zero-copy smoke').args,
+      ['smoke:windows-native-screen', '--', '--d3d11', '--require-d3d11']
     )
     assert.deepEqual(
-      steps.find((step) => step.label === 'native Windows Media Foundation encoded-bridge matrix')
-        .args,
-      ['smoke:windows-encoded-bridge', '--', '--profiles', '1080p30,1080p60']
+      steps.find(
+        (step) => step.label === 'native Windows D3D11 Media Foundation encoded-bridge matrix'
+      ).args,
+      [
+        'smoke:windows-encoded-bridge',
+        '--',
+        '--profiles',
+        '1080p30,1080p60',
+        '--d3d11',
+        '--require-d3d11'
+      ]
     )
     assert.deepEqual(
-      steps.find((step) => step.label === 'recording-time Windows proof-surface smoke').args,
-      ['smoke:recording-native-preview']
+      steps.find((step) => step.label === 'recording-time Windows D3D11 native-preview smoke').args,
+      ['smoke:recording-native-preview', '--', '--d3d11', '--require-d3d11']
     )
     const streamPerformance = steps.find(
       (step) => step.label === 'protected physical Windows RTMP performance matrix'
@@ -329,7 +340,11 @@ describe('buildWindowsLocalGateSteps', () => {
       '--gate',
       '--bridge',
       'mf',
-      '--require-bridge'
+      '--require-bridge',
+      '--profiles',
+      '1080p30,1080p60',
+      '--path-evidence',
+      'default'
     ])
     assert.equal(streamPerformance.blockedExitCode, 2)
     assert.match(

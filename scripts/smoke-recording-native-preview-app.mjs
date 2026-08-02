@@ -19,8 +19,10 @@ import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
 import { previewWindowSurfaceReady } from './lib/native-preview-window-gates.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 import {
+  evaluateWindowsNativeScreenD3d11Diagnostics,
   nativeWindowsScreenCandidates,
-  nativeWindowsScreenRecordingActive
+  nativeWindowsScreenRecordingActive,
+  parseWindowsNativeScreenArgs
 } from './lib/windows-native-screen-gates.mjs'
 import {
   analyzeStartupResolution,
@@ -29,6 +31,13 @@ import {
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
+const windowsPreviewOptions = parseWindowsNativeScreenArgs(process.argv.slice(2))
+if (
+  process.platform !== 'win32' &&
+  (windowsPreviewOptions.d3d11 || windowsPreviewOptions.expectFallback)
+) {
+  throw new Error('Windows D3D11 preview options may only run on Windows.')
+}
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
     join(tmpdir(), `videorc-recording-native-preview-${Date.now()}`)
@@ -74,26 +83,39 @@ const reportOnly = process.env.VIDEORC_NATIVE_PREVIEW_REPORT_ONLY === '1'
 const expectNativeMetalPreview =
   process.env.VIDEORC_EXPECT_NATIVE_METAL_PREVIEW === '1' ||
   (process.env.VIDEORC_EXPECT_NATIVE_METAL_PREVIEW !== '0' && process.platform === 'darwin')
-const expectedSurfaceTransport = expectNativeMetalPreview
-  ? 'native-surface'
-  : 'electron-proof-surface'
-const expectedSurfaceBacking = expectNativeMetalPreview
-  ? 'cametal-layer'
-  : 'electron-browser-window'
+const expectWindowsD3d11Preview = windowsPreviewOptions.d3d11
+const expectNativePresenter = expectNativeMetalPreview || expectWindowsD3d11Preview
+const expectedSurfaceTransport = expectWindowsD3d11Preview
+  ? 'd3d11-shared-texture'
+  : expectNativeMetalPreview
+    ? 'native-surface'
+    : 'electron-proof-surface'
+const expectedSurfaceBacking = expectWindowsD3d11Preview
+  ? 'directcomposition-swapchain'
+  : expectNativeMetalPreview
+    ? 'cametal-layer'
+    : 'electron-browser-window'
+const expectedNativePreviewHostKind = expectWindowsD3d11Preview
+  ? 'backend-d3d11-presenter'
+  : expectNativeMetalPreview
+    ? undefined
+    : 'proof-surface'
 const exerciseProofFramePolling = process.env.VIDEORC_NATIVE_PREVIEW_EXERCISE_PROOF_POLLING === '1'
 const usePackagedWindowsScreen =
-  Boolean(packagedSpawnSpec) && process.platform === 'win32' && exerciseProofFramePolling
+  Boolean(packagedSpawnSpec) &&
+  process.platform === 'win32' &&
+  (exerciseProofFramePolling ||
+    windowsPreviewOptions.d3d11 ||
+    windowsPreviewOptions.expectFallback === 'natural')
 const recordingProofPollingIntervalMs = 125
 const recordingProofPollingMaxWidth = 960
 const previewLatencyBudgets = resolveNativePreviewLatencyBudgets({
   configuredP95Ms: maxPreviewInputToPresentLatencyP95Ms,
   configuredP99Ms: maxPreviewInputToPresentLatencyP99Ms,
   sourceCompleteScene,
-  expectNativeMetalPreview,
+  expectNativeMetalPreview: expectNativePresenter,
   exerciseProofFramePolling,
-  proofPollingIntervalMs: usePackagedWindowsScreen
-    ? recordingProofPollingIntervalMs
-    : undefined
+  proofPollingIntervalMs: usePackagedWindowsScreen ? recordingProofPollingIntervalMs : undefined
 })
 
 const visibleScenarios = [
@@ -367,12 +389,13 @@ async function runNativePreviewRecordingScenario(
       assertMainPumpReconnectDuringRecording(scenario, pumpReconnect)
     }
 
-    const measurementResultPromise = (expectsPreview
-      ? smokeCommand(smoke, 'measure-native-preview-surface', {
-          durationMs: previewMeasurementMs,
-          warmupMs
-        })
-      : Promise.resolve(null)
+    const measurementResultPromise = (
+      expectsPreview
+        ? smokeCommand(smoke, 'measure-native-preview-surface', {
+            durationMs: previewMeasurementMs,
+            warmupMs
+          })
+        : Promise.resolve(null)
     ).then(
       (value) => ({ ok: true, value }),
       (error) => ({ ok: false, error })
@@ -419,6 +442,11 @@ async function runNativePreviewRecordingScenario(
   }
 
   const stopRequestedAt = Date.now()
+  if (windowsPreviewOptions.d3d11 || windowsPreviewOptions.expectFallback) {
+    assertWindowsD3d11Diagnostics(await request(ws, timeoutMs, 'diagnostics.stats'), {
+      requireOutput: windowsPreviewOptions.d3d11
+    })
+  }
   const expectedDurationMs = stopRequestedAt - recordingStartedAt
   let stopped
   try {
@@ -815,6 +843,10 @@ async function waitForNativeSurface(ws, previousFrames = 0) {
       lastStatus.state === 'live' &&
       lastStatus.transport === expectedSurfaceTransport &&
       lastStatus.backing === expectedSurfaceBacking &&
+      (expectedNativePreviewHostKind === undefined ||
+        lastStatus.nativePreviewHostKind === expectedNativePreviewHostKind) &&
+      (!expectWindowsD3d11Preview ||
+        (lastStatus.firstFrameContract === 'met' && lastStatus.framePollingSuppressed === true)) &&
       (lastStatus.targetFps ?? 0) >= 60 &&
       lastStatus.framesRendered > previousFrames
     ) {
@@ -840,7 +872,9 @@ async function waitForPreviewWindowSurface(smoke) {
       previewWindowSurfaceReady(lastEvidence, {
         expectedTransport: expectedSurfaceTransport,
         expectedBacking: expectedSurfaceBacking,
-        expectNativeMetalPreview
+        expectedHostKind: expectedNativePreviewHostKind,
+        expectNativeMetalPreview,
+        expectNativePresenter
       })
     ) {
       return lastEvidence
@@ -898,7 +932,8 @@ async function waitForNativePreviewDiagnostics(samples) {
       if (
         sample.previewTransport === expectedSurfaceTransport &&
         sample.previewSurfaceBacking === expectedSurfaceBacking &&
-        (sample.previewPresentFps ?? 0) >= minPreviewFps
+        (sample.previewPresentFps ?? 0) >= minPreviewFps &&
+        windowsD3d11DiagnosticsHealthy(sample)
       ) {
         return sample
       }
@@ -909,6 +944,28 @@ async function waitForNativePreviewDiagnostics(samples) {
     `Passive diagnostics did not report ${expectedSurfaceTransport}/${expectedSurfaceBacking} preview before recording. Last diagnostics: ${JSON.stringify(lastDiagnostics)}`
   )
   return lastDiagnostics
+}
+
+function windowsD3d11DiagnosticsHealthy(diagnostics) {
+  if (!windowsPreviewOptions.d3d11 && !windowsPreviewOptions.expectFallback) {
+    return true
+  }
+  return (
+    evaluateWindowsNativeScreenD3d11Diagnostics(diagnostics, {
+      requireOutput: false,
+      expectFallback: windowsPreviewOptions.expectFallback
+    }).length === 0
+  )
+}
+
+function assertWindowsD3d11Diagnostics(diagnostics, { requireOutput }) {
+  const failures = evaluateWindowsNativeScreenD3d11Diagnostics(diagnostics, {
+    requireOutput,
+    expectFallback: windowsPreviewOptions.expectFallback
+  })
+  if (failures.length > 0) {
+    throw new Error(`Windows D3D11 preview diagnostics failed: ${failures.join('; ')}`)
+  }
 }
 
 function assertNativeBootstrap(result, options = {}) {
@@ -930,10 +987,20 @@ function assertNativeBootstrap(result, options = {}) {
     }
     if (
       result.surfaceTransport !== expectedSurfaceTransport ||
-      result.surfaceBacking !== expectedSurfaceBacking
+      result.surfaceBacking !== expectedSurfaceBacking ||
+      (expectedNativePreviewHostKind !== undefined &&
+        result.nativePreviewHostKind !== expectedNativePreviewHostKind)
     ) {
       throw new Error(
         `Preview stage reported ${result.surfaceTransport}/${result.surfaceBacking}, expected ${expectedSurfaceTransport}/${expectedSurfaceBacking}: ${JSON.stringify(result)}`
+      )
+    }
+    if (
+      expectWindowsD3d11Preview &&
+      (result.firstFrameContract !== 'met' || result.framePollingSuppressed !== true)
+    ) {
+      throw new Error(
+        `Windows D3D11 presenter did not prove first-frame/source ownership with proof polling suppressed: ${JSON.stringify(result)}`
       )
     }
     if ((result.previewImageCount ?? 0) !== 0 || result.hasJpegPollingPreviewImage) {
@@ -949,7 +1016,7 @@ function assertNativeMeasurement(scenario, measurement) {
   const maxMeasurementIntervalP95Ms = nativeMeasurementMaxIntervalP95Ms()
   const maxInputToPresentP95Ms = previewInputToPresentP95BudgetMs()
   const maxInputToPresentP99Ms = previewInputToPresentP99BudgetMs()
-  const requireAnimationCadence = expectNativeMetalPreview || !exerciseProofFramePolling
+  const requireAnimationCadence = expectNativePresenter || !exerciseProofFramePolling
 
   if (requireAnimationCadence && (measurement.measuredFps ?? 0) < minMeasurementFps) {
     throw new Error(
@@ -991,7 +1058,7 @@ function assertNativeMeasurement(scenario, measurement) {
   if ((measurement.blankFrames ?? 0) > 0) {
     throw new Error(`Native preview reported ${measurement.blankFrames} blank frame(s).`)
   }
-  if (!expectNativeMetalPreview && exerciseProofFramePolling) {
+  if (!expectNativePresenter && exerciseProofFramePolling) {
     const minimumSourceFrameDelta = minimumProofSourceFrameDelta({
       measurementMs: previewMeasurementMs,
       pollingIntervalMs: recordingProofPollingIntervalMs
@@ -1411,6 +1478,21 @@ function launchAndReadConnections() {
         VIDEORC_SMOKE_STATE_DIR: outputDirectory,
         VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
         VIDEORC_SMOKE_COMMAND_SERVER: '1',
+        ...(windowsPreviewOptions.d3d11
+          ? {
+              VIDEORC_WINDOWS_D3D11_MEDIA: '1',
+              VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts'
+            }
+          : {}),
+        ...(windowsPreviewOptions.requireD3d11
+          ? {
+              VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1',
+              VIDEORC_WINDOWS_REQUIRE_ENCODED_BRIDGE: '1'
+            }
+          : {}),
+        ...(windowsPreviewOptions.expectFallback === 'natural'
+          ? { VIDEORC_WINDOWS_EXPECT_D3D11_FALLBACK: 'natural' }
+          : {}),
         ...(usePackagedWindowsScreen ? { VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1' } : {}),
         ...(packagedSmokeCapability
           ? {

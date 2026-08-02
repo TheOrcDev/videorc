@@ -1,11 +1,19 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, it } from 'node:test'
 
 import {
   WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS,
   packagedAppPayloadManifestSha256
 } from './performance-contract.mjs'
+import {
+  WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND,
+  WINDOWS_D3D11_PERFORMANCE_SCENARIOS
+} from './windows-performance-budget.mjs'
 import {
   WINDOWS_STREAM_PERFORMANCE_THRESHOLDS,
   WINDOWS_STREAM_PERFORMANCE_TIMING,
@@ -19,6 +27,7 @@ import {
   evaluateWindowsCaptureProtectionEvidence,
   evaluateWindowsCaptureProtectionPlacement,
   evaluateWindowsCaptureProtectionPlacementTimeline,
+  evaluateWindowsD3d11PreviewInputContinuity,
   evaluateWindowsStreamDiagnosticTimeline,
   evaluateWindowsStreamCollectorBoundaries,
   evaluateWindowsStreamProcessTelemetry,
@@ -32,6 +41,7 @@ import {
   parseWindowsStreamDisplayBounds,
   redactWindowsStreamSecrets,
   resolveWindowsStreamElectronDisplay,
+  resolveWindowsStreamPathEvidence,
   receiverBitrateEvidence,
   summarizeWindowsStreamBmpBudgetMetrics,
   summarizeWindowsStreamBudgetProcessTelemetry,
@@ -39,6 +49,7 @@ import {
   validateWindowsStreamPerformanceBudget,
   validateWindowsStreamRunEvidence,
   windowsStreamAvDriftFitOptions,
+  windowsStreamCalibrationMetrics,
   windowsStreamSecretLeaks,
   windowsStreamCaptureProtectionPlacement
 } from './windows-stream-performance.mjs'
@@ -47,7 +58,7 @@ describe('Windows stream performance matrix', () => {
   it('lists every release-blocking 1080p topology, cadence, and preview state three times', () => {
     const matrix = buildWindowsStreamPerformanceMatrix()
 
-    assert.equal(matrix.length, 11)
+    assert.equal(matrix.length, 19)
     assert.deepEqual(
       matrix.map((scenario) => scenario.id),
       [
@@ -55,10 +66,18 @@ describe('Windows stream performance matrix', () => {
         '1080p30-stream-no-preview',
         '1080p30-record-stream-preview',
         '1080p30-record-stream-no-preview',
+        '1080p30-screen-camera-stream-preview',
+        '1080p30-screen-camera-stream-no-preview',
+        '1080p30-screen-camera-record-stream-preview',
+        '1080p30-screen-camera-record-stream-no-preview',
         '1080p60-stream-preview',
         '1080p60-stream-no-preview',
         '1080p60-record-stream-preview',
         '1080p60-record-stream-no-preview',
+        '1080p60-screen-camera-stream-preview',
+        '1080p60-screen-camera-stream-no-preview',
+        '1080p60-screen-camera-record-stream-preview',
+        '1080p60-screen-camera-record-stream-no-preview',
         'youtube-1080p30',
         'youtube-1080p60',
         '1080p60-av-endurance'
@@ -69,6 +88,7 @@ describe('Windows stream performance matrix', () => {
         (scenario) =>
           scenario.width === 1920 &&
           scenario.height === 1080 &&
+          ['screen-only', 'screen-camera'].includes(scenario.sourceComposition) &&
           (scenario.avEndurance === true
             ? scenario.repetitions === 1
             : scenario.repetitions === 3) &&
@@ -82,21 +102,15 @@ describe('Windows stream performance matrix', () => {
   })
 
   it('formats the exact protected matrix and total without launching the app', () => {
+    const matrix = buildWindowsStreamPerformanceMatrix()
     const expected = [
       'windows-stream-performance: protected matrix',
       'matrix timing: warm-up 60s, measured 180s, 3 repetitions; A/V endurance measured 600s once',
-      '1. 1080p30-stream-preview — 1920x1080@30 | stream-only | preview=open | measured=180s | runs=3',
-      '2. 1080p30-stream-no-preview — 1920x1080@30 | stream-only | preview=closed | measured=180s | runs=3',
-      '3. 1080p30-record-stream-preview — 1920x1080@30 | record-plus-stream | preview=open | measured=180s | runs=3',
-      '4. 1080p30-record-stream-no-preview — 1920x1080@30 | record-plus-stream | preview=closed | measured=180s | runs=3',
-      '5. 1080p60-stream-preview — 1920x1080@60 | stream-only | preview=open | measured=180s | runs=3',
-      '6. 1080p60-stream-no-preview — 1920x1080@60 | stream-only | preview=closed | measured=180s | runs=3',
-      '7. 1080p60-record-stream-preview — 1920x1080@60 | record-plus-stream | preview=open | measured=180s | runs=3',
-      '8. 1080p60-record-stream-no-preview — 1920x1080@60 | record-plus-stream | preview=closed | measured=180s | runs=3',
-      '9. youtube-1080p30 — 1920x1080@30 | stream-only | preview=open | measured=180s | runs=3',
-      '10. youtube-1080p60 — 1920x1080@60 | stream-only | preview=open | measured=180s | runs=3',
-      '11. 1080p60-av-endurance — 1920x1080@60 | stream-only | preview=open | measured=600s | runs=1',
-      'total: 11 scenarios, 31 measured runs'
+      ...matrix.map(
+        (scenario, index) =>
+          `${index + 1}. ${scenario.id} — ${scenario.width}x${scenario.height}@${scenario.fps} | ${scenario.sourceComposition} | ${scenario.topology} | preview=${scenario.previewOpen ? 'open' : 'closed'} | measured=${scenario.measurementMs / 1000}s | runs=${scenario.repetitions}`
+      ),
+      'total: 19 scenarios, 55 measured runs'
     ].join('\n')
 
     assert.equal(formatWindowsStreamPerformanceMatrix(), expected)
@@ -108,6 +122,21 @@ describe('Windows stream performance matrix', () => {
     )
     assert.equal(command.status, 0, command.stderr)
     assert.equal(command.stdout.trim(), expected)
+  })
+
+  it('matches the active D3D11 budget contract context for context', () => {
+    const projection = buildWindowsStreamPerformanceMatrix().map((scenario) => ({
+      id: scenario.id,
+      profile: scenario.fps === 60 ? '1080p60' : '1080p30',
+      sourceComposition: scenario.sourceComposition,
+      topology: scenario.topology,
+      previewOpen: scenario.previewOpen,
+      warmupMs: scenario.warmupMs,
+      measurementMs: scenario.measurementMs,
+      intervalMs: scenario.sampleIntervalMs,
+      repetitions: scenario.repetitions
+    }))
+    assert.deepEqual(projection, WINDOWS_D3D11_PERFORMANCE_SCENARIOS)
   })
 })
 
@@ -305,6 +334,124 @@ describe('Windows stream measurement aggregation', () => {
     ])
     assert.equal(fallback.rawVideoCopiedFrames, 1_000)
     assert.equal(fallback.submittedFrames, 901)
+  })
+
+  it('summarizes D3D11 zero-copy counters as measurement-window deltas', () => {
+    const summary = summarizeWindowsStreamDiagnosticSamples([
+      {
+        windowsD3d11Media: {
+          state: 'live',
+          requested: true,
+          required: true,
+          adapterLuid: '0000000000000042',
+          captureAdapterLuid: '0000000000000042',
+          compositorAdapterLuid: '0000000000000042',
+          primaryEncoderAdapterLuid: '0000000000000042',
+          auxiliaryEncoderAdapterLuid: null,
+          generation: 7,
+          captureBackend: 'desktop-duplication',
+          captureReadbackFrames: 0,
+          textureImportFrames: 10,
+          encoderGpuSamples: 10,
+          encoderSystemMemorySamples: 0,
+          previewPresents: 5,
+          previewBmpRequests: 0,
+          previewBmpBytes: 0
+        }
+      },
+      {
+        windowsD3d11Media: {
+          state: 'live',
+          requested: true,
+          required: true,
+          adapterLuid: '0000000000000042',
+          captureAdapterLuid: '0000000000000042',
+          compositorAdapterLuid: '0000000000000042',
+          primaryEncoderAdapterLuid: '0000000000000042',
+          auxiliaryEncoderAdapterLuid: null,
+          generation: 7,
+          captureBackend: 'desktop-duplication',
+          captureReadbackFrames: 0,
+          textureImportFrames: 110,
+          encoderGpuSamples: 105,
+          encoderSystemMemorySamples: 0,
+          previewPresents: 65,
+          previewBmpRequests: 0,
+          previewBmpBytes: 0
+        }
+      }
+    ])
+
+    assert.equal(summary.d3d11.state, 'live')
+    assert.equal(summary.d3d11.textureImportFrames, 100)
+    assert.equal(summary.d3d11.encoderGpuSamples, 95)
+    assert.equal(summary.d3d11.previewPresents, 60)
+    assert.equal(summary.d3d11.captureReadbackFrames, 0)
+    assert.equal(summary.d3d11.captureAdapterLuid, '0000000000000042')
+    assert.equal(summary.d3d11.compositorAdapterLuid, '0000000000000042')
+    assert.equal(summary.d3d11.primaryEncoderAdapterLuid, '0000000000000042')
+    assert.equal(summary.d3d11.auxiliaryEncoderAdapterLuid, null)
+    assert.equal(summary.d3d11.adapterChanged, false)
+    assert.equal(summary.d3d11.stateChanged, false)
+  })
+
+  it('models Desktop Duplication cursor-on and cursor-excluded WGC as distinct contracts', () => {
+    const metrics = (d3d11) =>
+      windowsStreamCalibrationMetrics({
+        processTelemetry: {},
+        gpuEvidence: {},
+        bmp: {},
+        pipeline: { d3d11 },
+        mediaVerdict: 'PASS',
+        lifecycleVerdict: 'PASS',
+        previewProofSurfaceVerdict: 'PASS',
+        inputContinuity: true
+      }).d3d11
+
+    assert.equal(
+      metrics({
+        captureBackend: 'desktop-duplication',
+        cursorRequested: true,
+        cursorMode: 'separate',
+        cursorPixelsSource: 'duplication-pointer-shape',
+        cursorExclusionGuaranteed: false,
+        cursorCompositedFrames: 20
+      }).cursorCorrect,
+      true
+    )
+    assert.equal(
+      metrics({
+        captureBackend: 'windows-graphics-capture-monitor',
+        cursorRequested: false,
+        cursorMode: 'excluded-wgc',
+        cursorPixelsSource: 'excluded-by-windows-graphics-capture',
+        cursorExclusionGuaranteed: true,
+        cursorCompositedFrames: 0
+      }).cursorCorrect,
+      true
+    )
+    assert.equal(
+      metrics({
+        captureBackend: 'desktop-duplication',
+        cursorRequested: true,
+        cursorMode: 'separate',
+        cursorPixelsSource: 'duplication-pointer-shape',
+        cursorExclusionGuaranteed: true,
+        cursorCompositedFrames: 20
+      }).cursorCorrect,
+      false
+    )
+    assert.equal(
+      metrics({
+        captureBackend: 'windows-graphics-capture-monitor',
+        cursorRequested: true,
+        cursorMode: 'excluded-wgc',
+        cursorPixelsSource: 'excluded-by-windows-graphics-capture',
+        cursorExclusionGuaranteed: true,
+        cursorCompositedFrames: 0
+      }).cursorCorrect,
+      false
+    )
   })
 
   it('marks requested output and encode-backend changes as unstable', () => {
@@ -677,8 +824,9 @@ describe('Windows stream performance modes and evidence verdicts', () => {
   it('defaults to the complete protected gate and keeps calibration/single-scenario non-release', () => {
     const gate = parseWindowsStreamPerformanceArgs([])
     assert.equal(gate.mode, 'gate')
-    assert.equal(gate.scenarios.length, 11)
+    assert.equal(gate.scenarios.length, 19)
     assert.equal(gate.repetitions, null)
+    assert.equal(resolveWindowsStreamPathEvidence(gate), 'default')
 
     const calibration = parseWindowsStreamPerformanceArgs([
       '--calibrate',
@@ -711,6 +859,46 @@ describe('Windows stream performance modes and evidence verdicts', () => {
     assert.equal(fallback.bridge, 'mf')
     assert.equal(fallback.expectFallback, 'software-open-h264')
 
+    const forcedD3d11 = parseWindowsStreamPerformanceArgs([
+      '--calibrate',
+      '--profiles',
+      '1080p30,1080p60',
+      '--bridge',
+      'mf',
+      '--require-bridge',
+      '--d3d11',
+      '--require-d3d11',
+      '--path-evidence',
+      'forced'
+    ])
+    assert.equal(forcedD3d11.scenarios.length, 19)
+    assert.deepEqual(forcedD3d11.profiles, ['1080p30', '1080p60'])
+    assert.equal(forcedD3d11.requireD3d11, true)
+    assert.equal(forcedD3d11.pathEvidence, 'forced')
+    assert.equal(resolveWindowsStreamPathEvidence(forcedD3d11), 'forced')
+
+    const naturalD3d11Fallback = parseWindowsStreamPerformanceArgs([
+      '--gate',
+      '--profiles',
+      '1080p30',
+      '--expect-fallback',
+      'natural',
+      '--path-evidence',
+      'natural'
+    ])
+    assert.equal(naturalD3d11Fallback.expectFallback, 'natural')
+    assert.equal(naturalD3d11Fallback.d3d11, false)
+    assert.equal(resolveWindowsStreamPathEvidence(naturalD3d11Fallback), 'natural')
+    assert.deepEqual(
+      naturalD3d11Fallback.scenarios.map((scenario) => scenario.id),
+      [
+        '1080p30-stream-preview',
+        '1080p30-stream-no-preview',
+        '1080p30-record-stream-preview',
+        '1080p30-record-stream-no-preview'
+      ]
+    )
+
     const prepare = parseWindowsStreamPerformanceArgs(['--prepare-premium-profile'])
     assert.equal(prepare.mode, 'prepare-premium-profile')
     assert.equal(prepare.scenarios.length, 0)
@@ -726,7 +914,7 @@ describe('Windows stream performance modes and evidence verdicts', () => {
       '--require-bridge'
     ])
     assert.equal(fullCalibration.mode, 'calibrate')
-    assert.equal(fullCalibration.scenarios.length, 11)
+    assert.equal(fullCalibration.scenarios.length, 19)
     assert.equal(fullCalibration.repetitions, null)
     assert.throws(
       () => parseWindowsStreamPerformanceArgs(['--runs', '1']),
@@ -750,6 +938,21 @@ describe('Windows stream performance modes and evidence verdicts', () => {
         ]),
       /must be software-open-h264/
     )
+    assert.throws(() => parseWindowsStreamPerformanceArgs(['--require-d3d11']), /requires --d3d11/)
+    assert.throws(
+      () =>
+        parseWindowsStreamPerformanceArgs([
+          '--d3d11',
+          '--require-d3d11',
+          '--path-evidence',
+          'default'
+        ]),
+      /automatic capability selection/
+    )
+    assert.throws(
+      () => parseWindowsStreamPerformanceArgs(['--profiles', '1080p30,1080p30']),
+      /Duplicate Windows stream profile/
+    )
     assert.throws(
       () =>
         parseWindowsStreamPerformanceArgs([
@@ -762,6 +965,55 @@ describe('Windows stream performance modes and evidence verdicts', () => {
     assert.throws(
       () => parseWindowsStreamPerformanceArgs(['--scenario', 'missing']),
       /Unknown Windows stream performance scenario/
+    )
+  })
+
+  it('parses only one literal absolute natural-fallback derivation root', () => {
+    const parsed = parseWindowsStreamPerformanceArgs([
+      '--derive-natural-fallback-policy',
+      '--fallback-calibrations',
+      '/evidence/fallback/windows-stream-performance/' + '3'.repeat(64),
+      '--budget',
+      'docs/acceptance/windows-d3d11-performance-budget.json'
+    ])
+    assert.equal(parsed.mode, 'derive-natural-fallback-policy')
+    assert.equal(parsed.deriveNaturalFallbackPolicy, true)
+    assert.equal(parsed.scenarios.length, 0)
+
+    for (const root of [
+      'evidence/candidate',
+      '/evidence/*/candidate',
+      '/evidence/one,/evidence/two',
+      '~/evidence/candidate',
+      '<evidence>/candidate'
+    ]) {
+      assert.throws(
+        () =>
+          parseWindowsStreamPerformanceArgs([
+            '--derive-natural-fallback-policy',
+            '--fallback-calibrations',
+            root,
+            '--budget',
+            'budget.json'
+          ]),
+        /absolute|aliases|exactly one/
+      )
+    }
+    assert.throws(
+      () =>
+        parseWindowsStreamPerformanceArgs([
+          '--derive-natural-fallback-policy',
+          '--fallback-calibrations',
+          '/evidence/' + '3'.repeat(64),
+          '--budget',
+          'budget.json',
+          '--gate'
+        ]),
+      /cannot be combined/
+    )
+    assert.throws(
+      () => parseWindowsStreamPerformanceArgs(['--fallback-calibrations', '/evidence/root']),
+      /require --derive-natural-fallback-policy/
     )
   })
 
@@ -979,6 +1231,119 @@ describe('Windows stream performance modes and evidence verdicts', () => {
     }
   })
 
+  it('binds camera uploads to the protected source-composition scenario', () => {
+    const screenOnly = passingD3d11Evidence('1080p30-stream-preview')
+    assert.equal(evaluateWindowsStreamRun(screenOnly).verdict, 'PASS')
+    screenOnly.pipeline.d3d11.cameraUploadFrames = 1
+    assert.match(
+      evaluateWindowsStreamRun(screenOnly).failures.join('\n'),
+      /D3D11 camera upload frames/
+    )
+
+    const screenCamera = passingD3d11Evidence('1080p30-screen-camera-stream-preview')
+    assert.equal(evaluateWindowsStreamRun(screenCamera).verdict, 'PASS')
+    screenCamera.pipeline.d3d11.cameraUploadFrames = 0
+    assert.match(
+      evaluateWindowsStreamRun(screenCamera).failures.join('\n'),
+      /D3D11 camera upload frames/
+    )
+  })
+
+  it('validates automatic live D3D11 and every role adapter when required=false', () => {
+    const automatic = passingD3d11Evidence('1080p30-stream-preview')
+    automatic.pipeline.requireD3d11 = false
+    automatic.pipeline.expectedD3d11Path = 'default'
+    automatic.pipeline.d3d11.required = false
+    assert.equal(evaluateWindowsStreamRun(automatic).verdict, 'PASS')
+
+    automatic.pipeline.d3d11.captureAdapterLuid = '0000000000000043'
+    const mismatch = evaluateWindowsStreamRun(automatic)
+    assert.equal(mismatch.verdict, 'FAIL')
+    assert.match(mismatch.failures.join('\n'), /captureAdapterLuid.*media authority/)
+  })
+
+  it('requires the auxiliary adapter identity only for split record-plus-stream output', () => {
+    const split = passingD3d11Evidence('1080p30-record-stream-preview')
+    assert.equal(evaluateWindowsStreamRun(split).verdict, 'PASS')
+    split.pipeline.d3d11.auxiliaryEncoderAdapterLuid = null
+    assert.match(
+      evaluateWindowsStreamRun(split).failures.join('\n'),
+      /auxiliaryEncoderAdapterLuid.*split output/
+    )
+
+    const streamOnly = passingD3d11Evidence('1080p30-stream-preview')
+    streamOnly.pipeline.d3d11.auxiliaryEncoderAdapterLuid = null
+    assert.equal(evaluateWindowsStreamRun(streamOnly).verdict, 'PASS')
+  })
+
+  it('requires real OS input evidence only when the D3D11 preview is open', () => {
+    const open = passingD3d11Evidence('1080p30-stream-preview')
+    assert.equal(evaluateWindowsStreamRun(open).verdict, 'PASS')
+    open.pipeline.d3d11.inputContinuityEvidence.physicalInput = false
+    assert.match(evaluateWindowsStreamRun(open).failures.join('\n'), /physical-input execution/)
+
+    const closed = passingD3d11Evidence('1080p30-stream-no-preview')
+    assert.equal(evaluateWindowsStreamRun(closed).verdict, 'PASS')
+    closed.pipeline.d3d11.inputContinuityEvidence.applicable = true
+    assert.match(
+      evaluateWindowsStreamRun(closed).failures.join('\n'),
+      /closed-preview input applicability/
+    )
+  })
+
+  it('derives preview input PASS only from click, type, drag, focus, and advancing presenter proof', () => {
+    const before = {
+      initialBounds: { x: 100, y: 100, width: 960, height: 540 },
+      presenter: { lastPresentedSequence: 50 }
+    }
+    const after = {
+      state: {
+        clicks: 1,
+        focusEvents: 1,
+        inputEvents: 9,
+        value: 'VIDEORC42',
+        activeElementId: 'videorc-windows-preview-input-target'
+      },
+      bounds: { x: 148, y: 136, width: 960, height: 540 },
+      previewFocused: true,
+      webContentsFocused: true,
+      presenter: {
+        windowActive: false,
+        windowFocused: false,
+        firstPresentSucceeded: true,
+        sourceLive: true,
+        lastPresentedSequence: 60
+      }
+    }
+    assert.equal(
+      evaluateWindowsD3d11PreviewInputContinuity({
+        applicable: true,
+        before,
+        after
+      }).verdict,
+      'PASS'
+    )
+
+    after.presenter.windowFocused = true
+    after.presenter.lastPresentedSequence = 50
+    after.state.value = 'not-the-probe-value'
+    const failed = evaluateWindowsD3d11PreviewInputContinuity({
+      applicable: true,
+      before,
+      after
+    })
+    assert.equal(failed.verdict, 'FAIL')
+    assert.match(failed.blockers.join('\n'), /keyboard sequence/)
+    assert.match(failed.blockers.join('\n'), /activated or took focus/)
+    assert.match(failed.blockers.join('\n'), /did not remain live and advance/)
+    assert.deepEqual(evaluateWindowsD3d11PreviewInputContinuity({ applicable: false }), {
+      verdict: 'NOT_REQUIRED',
+      applicable: false,
+      physicalInput: false,
+      blockers: []
+    })
+  })
+
   it('refuses a gate PASS when requested or effective bridge is raw', () => {
     const requestedRaw = passingEvidence()
     requestedRaw.pipeline.requestedBridgeOutput = 'raw-yuv420p'
@@ -1042,6 +1407,60 @@ describe('Windows stream performance modes and evidence verdicts', () => {
       evaluateWindowsStreamAggregate({ mode: 'gate', runs: [fullRuns[0]] }).blockers.join('\n'),
       /complete fixed matrix/
     )
+  })
+})
+
+describe('Windows natural fallback policy derivation', () => {
+  it('atomically attaches immutable twelve-run evidence without self-activation', async () => {
+    const fixture = await naturalFallbackDerivationFixture()
+    try {
+      const command = runNaturalFallbackDerivation(fixture)
+      assert.equal(command.status, 0, command.stderr)
+      const updatedBytes = await readFile(fixture.budgetPath)
+      const updated = JSON.parse(updatedBytes)
+      assert.equal(updated.status, 'draft')
+      assert.equal(updated.activation.allowed, false)
+      assert.equal(updated.naturalFallbackPolicy.evidence.reportPaths.length, 12)
+      assert.deepEqual(updated.naturalFallbackPolicy.scope.topologies, [
+        'stream-only',
+        'record-plus-stream'
+      ])
+      assert.deepEqual(updated.naturalFallbackPolicy.scope.previewModes, ['open', 'closed'])
+
+      const duplicate = runNaturalFallbackDerivation(fixture)
+      assert.equal(duplicate.status, 1)
+      assert.match(duplicate.stderr, /already attached/)
+      assert.deepEqual(await readFile(fixture.budgetPath), updatedBytes)
+    } finally {
+      await rm(fixture.directory, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects candidate-root, hardware, and retained-report digest mismatches', async () => {
+    for (const mutation of ['candidate-root', 'hardware', 'report-digest']) {
+      const fixture = await naturalFallbackDerivationFixture()
+      try {
+        if (mutation === 'candidate-root') {
+          const wrongRoot = join(fixture.directory, 'wrong-candidate-root')
+          await rename(fixture.root, wrongRoot)
+          fixture.root = wrongRoot
+        } else {
+          const aggregate = JSON.parse(await readFile(fixture.aggregatePath, 'utf8'))
+          if (mutation === 'hardware') {
+            aggregate.hardwareClass = 'nvidia-turing-floor'
+          } else {
+            aggregate.runs[0].reportSha256 = 'f'.repeat(64)
+          }
+          await writeFile(fixture.aggregatePath, `${JSON.stringify(aggregate, null, 2)}\n`)
+        }
+        const before = await readFile(fixture.budgetPath)
+        const command = runNaturalFallbackDerivation(fixture)
+        assert.equal(command.status, 1, `${mutation}: ${command.stderr}`)
+        assert.deepEqual(await readFile(fixture.budgetPath), before)
+      } finally {
+        await rm(fixture.directory, { recursive: true, force: true })
+      }
+    }
   })
 })
 
@@ -1633,6 +2052,8 @@ function passingEvidence(scenarioId = '1080p30-stream-preview') {
     scenarioId: scenario.id,
     repetition: 1,
     candidate: {
+      sourceCommit: '1'.repeat(40),
+      installerSha256: '2'.repeat(64),
       executablePath: 'C:/Program Files/Videorc/Videorc.exe',
       sha256: 'a'.repeat(64),
       packagePayload: windowsPackagePayload()
@@ -1764,6 +2185,388 @@ function passingEvidence(scenarioId = '1080p30-stream-preview') {
       failures: []
     }
   }
+}
+
+function passingD3d11Evidence(scenarioId = '1080p30-stream-preview') {
+  const evidence = passingEvidence(scenarioId)
+  const scenario = buildWindowsStreamPerformanceMatrix().find(
+    (candidate) => candidate.id === scenarioId
+  )
+  assert.ok(scenario)
+  evidence.pipeline.requireD3d11 = true
+  evidence.pipeline.expectedD3d11Path = 'forced'
+  const adapterLuid = '0000000000000042'
+  evidence.pipeline.d3d11 = {
+    state: 'live',
+    requested: true,
+    required: true,
+    adapterLuid,
+    captureAdapterLuid: adapterLuid,
+    compositorAdapterLuid: adapterLuid,
+    primaryEncoderAdapterLuid: adapterLuid,
+    auxiliaryEncoderAdapterLuid: scenario.recordEnabled ? adapterLuid : null,
+    captureReadbackFrames: 0,
+    compositorCpuFallbackFrames: 0,
+    encoderSystemMemorySamples: 0,
+    rawVideoCopiedFrames: 0,
+    previewBmpRequests: 0,
+    previewBmpBytes: 0,
+    textureImportFrames: 1_000,
+    cameraUploadFrames: scenario.sourceComposition === 'screen-camera' ? 1_000 : 0,
+    encoderGpuSamples: 1_000,
+    cursorCorrect: true,
+    inputContinuity: scenario.previewOpen,
+    inputContinuityEvidence: scenario.previewOpen
+      ? {
+          verdict: 'PASS',
+          applicable: true,
+          physicalInput: true,
+          blockers: []
+        }
+      : {
+          verdict: 'NOT_REQUIRED',
+          applicable: false,
+          physicalInput: false,
+          blockers: []
+        },
+    messageDispatchP95Ms: 50,
+    messageDispatchMaxMs: 100,
+    texturePoolPressureEvents: 0,
+    adapterMismatches: 0,
+    deviceResets: 0,
+    previewPresents: scenario.previewOpen ? 1_000 : 0,
+    fallbackReason: null,
+    stateChanged: false,
+    adapterChanged: false,
+    fallbackChanged: false
+  }
+  return evidence
+}
+
+async function naturalFallbackDerivationFixture() {
+  const directory = await mkdtemp(join(tmpdir(), 'videorc-natural-fallback-'))
+  const packagePayload = windowsPackagePayload()
+  const streamCandidate = {
+    sourceCommit: '1'.repeat(40),
+    installerSha256: '2'.repeat(64),
+    executablePath: 'C:/Program Files/Videorc/Videorc.exe',
+    sha256: '3'.repeat(64),
+    packagePayload
+  }
+  const root = join(directory, streamCandidate.sha256)
+  await mkdir(root, { recursive: true })
+  const aggregateRuns = []
+  for (const scenarioId of [
+    '1080p30-stream-preview',
+    '1080p30-stream-no-preview',
+    '1080p30-record-stream-preview',
+    '1080p30-record-stream-no-preview'
+  ]) {
+    const scenario = buildWindowsStreamPerformanceMatrix().find((entry) => entry.id === scenarioId)
+    assert.ok(scenario)
+    for (let repetition = 1; repetition <= 3; repetition += 1) {
+      const runDirectory = join(root, scenarioId, `run-${String(repetition).padStart(2, '0')}`)
+      await mkdir(runDirectory, { recursive: true })
+      const reportPath = join(runDirectory, 'verdict.json')
+      const evidence = passingEvidence(scenarioId)
+      evidence.mode = 'calibrate'
+      evidence.repetition = repetition
+      evidence.candidate = structuredClone(streamCandidate)
+      evidence.context = {
+        scenario: scenario.id,
+        hardwareClass: 'unsupported-natural-fallback',
+        profileClass: 'release',
+        buildMode: 'packaged',
+        profile: '1080p30',
+        mediaPath: 'legacy-fallback',
+        selectionMode: 'natural',
+        sourceComposition: 'screen-only',
+        topology: scenario.topology,
+        previewOpen: scenario.previewOpen
+      }
+      evidence.pipeline.expectedFallback = 'natural'
+      evidence.pipeline.expectedD3d11Path = 'natural'
+      evidence.pipeline.d3d11 = {
+        state: 'fallback',
+        requested: false,
+        required: false,
+        captureBackend: 'legacy-ffmpeg',
+        fallbackReason: 'd3d11-fence-interface-unavailable'
+      }
+      evidence.calibration = naturalFallbackRunMetrics()
+      evidence.budget = {
+        required: false,
+        active: false,
+        applicable: false,
+        failures: []
+      }
+      const result = evaluateWindowsStreamRun(evidence)
+      assert.equal(result.verdict, 'PASS', [...result.failures, ...result.blockers].join('\n'))
+      await writeFile(reportPath, `${JSON.stringify({ evidence, result }, null, 2)}\n`)
+      const reportSha256 = sha256(await readFile(reportPath))
+      aggregateRuns.push({
+        scenarioId,
+        repetition,
+        verdict: 'PASS',
+        failures: [],
+        blockers: [],
+        evidencePath: reportPath,
+        reportPath,
+        reportSha256,
+        candidate: streamCandidate,
+        context: evidence.context,
+        topology: scenario.topology,
+        previewOpen: scenario.previewOpen,
+        profile: '1080p30',
+        calibration: evidence.calibration
+      })
+    }
+  }
+  const aggregatePath = join(root, 'aggregate.json')
+  const aggregate = {
+    schemaVersion: 1,
+    kind: 'videorc.windows-stream-performance-aggregate',
+    status: 'calibration',
+    mode: 'calibrate',
+    startedAt: '2026-07-30T10:00:00.000Z',
+    finishedAt: '2026-07-30T11:00:00.000Z',
+    timing: WINDOWS_STREAM_PERFORMANCE_TIMING,
+    scenarios: [
+      '1080p30-stream-preview',
+      '1080p30-stream-no-preview',
+      '1080p30-record-stream-preview',
+      '1080p30-record-stream-no-preview'
+    ],
+    repetitions: {
+      '1080p30-stream-preview': 3,
+      '1080p30-stream-no-preview': 3,
+      '1080p30-record-stream-preview': 3,
+      '1080p30-record-stream-no-preview': 3
+    },
+    candidate: streamCandidate,
+    hardwareClass: 'unsupported-natural-fallback',
+    profileClass: 'release',
+    operatingSystem: {
+      platform: 'win32',
+      arch: 'x64',
+      release: '10.0.26100'
+    },
+    pathEvidence: 'natural',
+    runs: aggregateRuns,
+    failures: [],
+    blockers: [],
+    error: null
+  }
+  await writeFile(aggregatePath, `${JSON.stringify(aggregate, null, 2)}\n`)
+  const budgetPath = join(directory, 'windows-d3d11-performance-budget.json')
+  await writeFile(
+    budgetPath,
+    `${JSON.stringify(draftD3d11Budget(streamCandidate, directory), null, 2)}\n`
+  )
+  return { directory, root, aggregatePath, budgetPath }
+}
+
+function runNaturalFallbackDerivation(fixture) {
+  return spawnSync(
+    process.execPath,
+    [
+      'scripts/smoke-windows-stream-performance.mjs',
+      '--derive-natural-fallback-policy',
+      '--fallback-calibrations',
+      fixture.root,
+      '--budget',
+      fixture.budgetPath
+    ],
+    {
+      cwd: new URL('../..', import.meta.url),
+      encoding: 'utf8'
+    }
+  )
+}
+
+function naturalFallbackRunMetrics() {
+  const roles = ['backend', 'electron-main', 'electron-renderer', 'electron-gpu', 'ffmpeg']
+  return {
+    process: {
+      cpuP95Percent: 65,
+      rssMaxMiB: 900,
+      rssSlopeMiBPerMinute: 4,
+      roles: Object.fromEntries(
+        roles.map((role, index) => [
+          role,
+          {
+            rssMaxMiB: 100 + index,
+            rssSlopeMiBPerMinute: 1.5,
+            cpuAveragePercent: 12 + index,
+            cpuP95Percent: 18 + index
+          }
+        ])
+      )
+    },
+    gpu: {
+      engineBusyP95Percent: 55,
+      dedicatedMaxMiB: 400,
+      sharedMaxMiB: 200
+    },
+    bmp: {
+      requestCount: 20,
+      bytes: 100_000,
+      intervalP95Ms: 125,
+      advancedFrames: 200
+    },
+    encoderSpeedP05: 0.99,
+    mediaVerdict: 'PASS',
+    lifecycleVerdict: 'PASS',
+    previewProofSurfaceVerdict: 'PASS',
+    d3d11: {
+      captureReadbackFrames: null,
+      compositorCpuFallbackFrames: null,
+      rawVideoCopiedFrames: null,
+      encoderSystemMemorySamples: null,
+      cursorCorrect: false,
+      inputContinuity: true,
+      messageDispatchP95Ms: null,
+      messageDispatchMaxMs: null
+    }
+  }
+}
+
+function draftD3d11Budget(streamCandidate, directory) {
+  const candidate = {
+    sourceCommit: streamCandidate.sourceCommit,
+    installerSha256: streamCandidate.installerSha256,
+    executableSha256: streamCandidate.sha256,
+    packagePayloadSha256: streamCandidate.packagePayload.sha256
+  }
+  const hardwareClasses = ['nvidia-turing-floor', 'intel-xe-integrated']
+  const profiles = hardwareClasses.flatMap((hardwareClass, classIndex) =>
+    WINDOWS_D3D11_PERFORMANCE_SCENARIOS.map((scenario, scenarioIndex) => {
+      const ordinal = classIndex * WINDOWS_D3D11_PERFORMANCE_SCENARIOS.length + scenarioIndex
+      const evidenceRoot = join(directory, hardwareClass, scenario.id)
+      return {
+        id: `${hardwareClass}-${scenario.id}`,
+        scope: {
+          scenario: scenario.id,
+          profile: scenario.profile,
+          hardwareClass,
+          profileClass: 'release',
+          buildMode: 'packaged',
+          operatingSystem: {
+            platform: 'win32',
+            arch: 'x64',
+            release: '10.0.26100'
+          },
+          timing: {
+            warmupMs: scenario.warmupMs,
+            measurementMs: scenario.measurementMs,
+            intervalMs: scenario.intervalMs
+          },
+          mediaPath: 'd3d11-native',
+          sourceComposition: scenario.sourceComposition,
+          topology: scenario.topology,
+          previewOpen: scenario.previewOpen,
+          ...(scenario.previewOpen
+            ? {
+                preview: {
+                  transport: 'd3d11-shared-texture',
+                  backing: 'directcomposition-swapchain',
+                  hostKind: 'backend-d3d11-presenter'
+                }
+              }
+            : {})
+        },
+        candidate,
+        evidence: {
+          calibrationPath: join(evidenceRoot, 'aggregate.json'),
+          calibrationSha256: digest(`calibration-${ordinal}`),
+          reportPaths: Array.from({ length: scenario.repetitions }, (_, index) =>
+            join(evidenceRoot, `run-${index + 1}.json`)
+          ),
+          reportSha256: Array.from({ length: scenario.repetitions }, (_, index) =>
+            digest(`report-${ordinal}-${index}`)
+          ),
+          comparisonPath: join(directory, hardwareClass, 'obs', 'aggregate.json'),
+          comparisonSha256: digest(`comparison-${classIndex}`)
+        },
+        invariants: {
+          mediaPath: 'd3d11-native',
+          captureReadbackFrames: 0,
+          compositorCpuFallbackFrames: 0,
+          rawVideoCopiedFrames: 0,
+          encoderSystemMemorySamples: 0,
+          previewBmpRequests: 0,
+          previewBmpBytes: 0,
+          cursorCorrect: true,
+          inputContinuity: true,
+          maximumMessageDispatchP95Ms: 50,
+          maximumMessageDispatchMs: 100
+        },
+        thresholds: d3d11TestThresholds()
+      }
+    })
+  )
+  return {
+    schemaVersion: 1,
+    kind: WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND,
+    status: 'draft',
+    generatedBy: 'smoke-windows-obs-side-by-side --derive-d3d11-budget',
+    candidate,
+    qualifiedProfiles: {
+      'nvidia-turing-floor': ['1080p30', '1080p60'],
+      'intel-xe-integrated': ['1080p30', '1080p60']
+    },
+    unqualifiedLivestreamProfiles: ['1440p30', '1440p60', '4k30', '4k60'],
+    comparisonEvidence: hardwareClasses.map((hardwareClass, index) => ({
+      hardwareClass,
+      aggregatePath: join(directory, hardwareClass, 'obs', 'aggregate.json'),
+      aggregateSha256: digest(`comparison-${index}`),
+      manifestSha256: digest(`manifest-${index}`),
+      obsSha256: digest(`obs-${index}`),
+      obsVersion: '31.1.2',
+      bootId: `boot-${index + 1}`,
+      fingerprint: digest(`fingerprint-${index}`)
+    })),
+    profiles,
+    naturalFallbackPolicy: null,
+    activation: {
+      allowed: false,
+      reason: 'Draft requires natural fallback evidence and independent human review.'
+    }
+  }
+}
+
+function d3d11TestThresholds() {
+  const role = {
+    maximumRssMiB: 512,
+    maximumRssSlopeMiBPerMinute: 2,
+    maximumAverageCpuPercent: 80,
+    maximumP95CpuPercent: 90
+  }
+  return {
+    maximumTotalCpuP95Percent: 90,
+    maximumTotalRssMiB: 2048,
+    maximumTotalRssSlopeMiBPerMinute: 5,
+    gpu: {
+      maximumEngineP95Percent: 80,
+      maximumDedicatedMiB: 600,
+      maximumSharedMiB: 200
+    },
+    bmp: { mode: 'disabled', maximumRequests: 0, maximumBytes: 0 },
+    roles: Object.fromEntries(
+      ['backend', 'electron-main', 'electron-renderer', 'electron-gpu', 'ffmpeg'].map((name) => [
+        name,
+        role
+      ])
+    )
+  }
+}
+
+function digest(value) {
+  return createHash('sha256').update(String(value)).digest('hex')
+}
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex')
 }
 
 async function trustExpectedArtifactDigest({ expectedSha256 }) {

@@ -1,4 +1,5 @@
 import type { PreviewSurfaceStatus } from '../../../shared/backend'
+import { isNativePreviewCapability } from '../../../shared/native-preview-capability'
 
 interface NativePreviewWindowLifecycleSnapshot {
   open: boolean
@@ -20,13 +21,24 @@ type PreviewPresentationSnapshot = Pick<
 export interface NativePreviewFramePollingSuppressionInput {
   recordingActive: boolean
   windowOpen: boolean
+  platform?: string
   status: PreviewPresentationSnapshot
 }
 
 /**
- * The Electron proof surface is Windows' production pixel transport, so an
- * active recording must not suppress it. Only an attached native surface can
- * make proof polling redundant while the preview window remains open.
+ * Backend D3D11 status intentionally omits Electron-main authority fields.
+ * Renderer consumers must resolve these events through main before treating
+ * them as presentation truth.
+ */
+export function previewSurfaceStatusRequiresMainAuthority(
+  status: Pick<PreviewSurfaceStatus, 'transport' | 'windowsD3d11Presenter'>
+): boolean {
+  return status.transport === 'd3d11-shared-texture' || status.windowsD3d11Presenter !== undefined
+}
+
+/**
+ * Only a platform-canonical attached native presenter can make proof polling
+ * redundant while the preview window remains open.
  */
 export function nativePreviewFramePollingShouldSuppress(
   input: NativePreviewFramePollingSuppressionInput
@@ -38,8 +50,7 @@ export function nativePreviewFramePollingShouldSuppress(
   const status = input.status
   const attachedNativePixels =
     status.state === 'live' &&
-    status.transport === 'native-surface' &&
-    status.backing === 'cametal-layer' &&
+    isNativePreviewCapability(status, input.platform ?? 'darwin') &&
     status.sourcePixelsPresent === true &&
     status.nativePreviewHostAttached === true &&
     status.nativePreviewHostKind !== 'proof-surface'

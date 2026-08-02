@@ -227,7 +227,12 @@ function StudioPreviewPanel(): ReactElement {
   const { previewLiveStatus } = useStudioPreview()
   const { diagnosticStats, previewSurfaceStatus } = useStudioDiagnostics()
   const active = isSessionTransportActive(recording.state)
-  const previewHealth = studioHealth(diagnosticStats, active, runtimeInfo?.platform)
+  const previewHealth = studioHealth(
+    diagnosticStats,
+    active,
+    runtimeInfo?.platform,
+    previewSurfaceStatus.nativePreviewHostKind
+  )
   const docked =
     nativePreviewSurfaceEnabled && previewWindow.open && previewWindow.mode === 'docked'
 

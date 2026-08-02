@@ -246,10 +246,10 @@ function inspectWindowsAcceptance(bundle, failures, warnings) {
       'windows acceptance bundle does not include compositor backend/fallback diagnostics; device backend proof is still required.'
     )
   }
-  inspectWindowsStreamDiagnostics(diagnostics, failures)
+  inspectWindowsStreamDiagnostics(diagnostics, failures, bundle)
 }
 
-function inspectWindowsStreamDiagnostics(diagnostics, failures) {
+function inspectWindowsStreamDiagnostics(diagnostics, failures, bundle) {
   const streamSnapshots = diagnostics.filter(
     (snapshot) =>
       typeof snapshot?.activeOutputMode === 'string' && snapshot.activeOutputMode.includes('stream')
@@ -291,6 +291,256 @@ function inspectWindowsStreamDiagnostics(diagnostics, failures) {
       failures.push(`${label} requires a fallback reason for a requested/effective mismatch.`)
     }
   }
+
+  const d3d11Snapshots = streamSnapshots.filter((snapshot) => {
+    const media = snapshot?.windowsD3d11Media
+    return media?.required === true || media?.state === 'live'
+  })
+  if (d3d11Snapshots.length === 0) return
+  const adapterLuids = new Set()
+  const generations = new Set()
+  for (const [index, snapshot] of d3d11Snapshots.entries()) {
+    const label = `windows D3D11 stream diagnostics ${index + 1}`
+    const media = snapshot.windowsD3d11Media
+    if (media.state !== 'live') failures.push(`${label} requires state=live.`)
+    if (media.requested !== true) failures.push(`${label} requires requested=true.`)
+    if (!/^[0-9a-f]{16}$/.test(media.adapterLuid ?? '')) {
+      failures.push(`${label} requires a canonical adapterLuid.`)
+    } else {
+      adapterLuids.add(media.adapterLuid)
+    }
+    for (const field of [
+      'captureAdapterLuid',
+      'compositorAdapterLuid',
+      'primaryEncoderAdapterLuid'
+    ]) {
+      if (!/^[0-9a-f]{16}$/.test(media[field] ?? '')) {
+        failures.push(`${label} requires a canonical ${field}.`)
+      } else if (media[field] !== media.adapterLuid) {
+        failures.push(`${label} requires ${field} to equal adapterLuid.`)
+      }
+    }
+    if (
+      media.auxiliaryEncoderAdapterLuid !== null &&
+      media.auxiliaryEncoderAdapterLuid !== undefined
+    ) {
+      if (!/^[0-9a-f]{16}$/.test(media.auxiliaryEncoderAdapterLuid)) {
+        failures.push(`${label} requires a canonical auxiliaryEncoderAdapterLuid when present.`)
+      } else if (media.auxiliaryEncoderAdapterLuid !== media.adapterLuid) {
+        failures.push(`${label} requires auxiliaryEncoderAdapterLuid to equal adapterLuid.`)
+      }
+    }
+    if (
+      snapshot.encoderBridgeSeparateOutputEncodersActive === true &&
+      !/^[0-9a-f]{16}$/.test(media.auxiliaryEncoderAdapterLuid ?? '')
+    ) {
+      failures.push(`${label} requires auxiliaryEncoderAdapterLuid for split output encoders.`)
+    }
+    if (!Number.isSafeInteger(media.generation) || media.generation <= 0) {
+      failures.push(`${label} requires a positive generation.`)
+    } else {
+      generations.add(media.generation)
+    }
+    if (
+      !['desktop-duplication', 'windows-graphics-capture-monitor'].includes(media.captureBackend)
+    ) {
+      failures.push(`${label} requires a native captureBackend.`)
+    }
+    for (const field of [
+      'captureReadbackFrames',
+      'compositorCpuFallbackFrames',
+      'encoderSystemMemorySamples',
+      'rawVideoCopiedFrames',
+      'previewBmpRequests',
+      'previewBmpBytes',
+      'texturePoolPressureEvents',
+      'adapterMismatches',
+      'deviceResets',
+      'staleGenerationCallbacks'
+    ]) {
+      if (media[field] !== 0) failures.push(`${label} requires ${field}=0.`)
+    }
+    if (!Number.isInteger(media.cameraUploadFrames) || media.cameraUploadFrames < 0) {
+      failures.push(`${label} requires non-negative integer cameraUploadFrames.`)
+    }
+    if (!Number.isInteger(media.texturePoolCapacity) || media.texturePoolCapacity <= 0) {
+      failures.push(`${label} requires positive texturePoolCapacity.`)
+    }
+    if (
+      !Number.isInteger(media.texturePoolInUse) ||
+      media.texturePoolInUse < 0 ||
+      media.texturePoolInUse > media.texturePoolCapacity
+    ) {
+      failures.push(`${label} requires texturePoolInUse within the fixed pool capacity.`)
+    }
+    if (
+      !Number.isFinite(media.messagePumpLagP95Ms) ||
+      media.messagePumpLagP95Ms < 0 ||
+      media.messagePumpLagP95Ms > 50
+    ) {
+      failures.push(`${label} requires messagePumpLagP95Ms within 50 ms.`)
+    }
+    if (
+      !Number.isFinite(media.messagePumpLagMaxMs) ||
+      media.messagePumpLagMaxMs < 0 ||
+      media.messagePumpLagMaxMs > 100
+    ) {
+      failures.push(`${label} requires messagePumpLagMaxMs within 100 ms.`)
+    }
+    inspectWindowsD3d11CursorDiagnostics(media, label, failures)
+    if (typeof media.fallbackReason === 'string' && media.fallbackReason.trim()) {
+      failures.push(`${label} must not contain a fallbackReason.`)
+    }
+  }
+  if (adapterLuids.size !== 1) {
+    failures.push('windows D3D11 stream diagnostics did not preserve one adapter LUID.')
+  }
+  if (generations.size !== 1) {
+    failures.push('windows D3D11 stream diagnostics did not preserve one generation.')
+  }
+  const terminal = d3d11Snapshots.at(-1)?.windowsD3d11Media
+  if (!(terminal?.textureImportFrames > 0)) {
+    failures.push('windows D3D11 stream diagnostics require positive textureImportFrames.')
+  }
+  if (!(terminal?.encoderGpuSamples > 0)) {
+    failures.push('windows D3D11 stream diagnostics require positive encoderGpuSamples.')
+  }
+  if (
+    terminal?.cursorRequested === true &&
+    terminal?.cursorMode === 'separate' &&
+    !(terminal?.cursorCompositedFrames > 0)
+  ) {
+    failures.push(
+      'windows D3D11 stream diagnostics require positive cursorCompositedFrames for separate cursor composition.'
+    )
+  }
+
+  const previewWasD3d11 = d3d11Snapshots.some(
+    (snapshot) =>
+      snapshot.previewTransport === 'd3d11-shared-texture' ||
+      snapshot.previewSurfaceBacking === 'directcomposition-swapchain'
+  )
+  if (previewWasD3d11) {
+    inspectWindowsD3d11PresenterDiagnostics(
+      bundle?.rendererDiagnostics?.nativePreviewSurfaceStatus,
+      failures
+    )
+  }
+}
+
+function inspectWindowsD3d11CursorDiagnostics(media, label, failures) {
+  if (typeof media.cursorRequested !== 'boolean') {
+    failures.push(`${label} requires cursorRequested.`)
+    return
+  }
+  if (typeof media.cursorPixelsSource !== 'string' || !media.cursorPixelsSource.trim()) {
+    failures.push(`${label} requires cursorPixelsSource.`)
+  }
+  if (media.captureBackend === 'desktop-duplication') {
+    if (media.cursorRequested !== true) {
+      failures.push(`${label} requires cursorRequested=true for Desktop Duplication.`)
+    }
+    if (!['embedded', 'separate'].includes(media.cursorMode)) {
+      failures.push(`${label} requires embedded or separate Desktop Duplication cursorMode.`)
+    }
+    if (media.cursorExclusionGuaranteed !== false) {
+      failures.push(`${label} requires cursorExclusionGuaranteed=false for Desktop Duplication.`)
+    }
+    if (media.cursorMode === 'embedded' && media.cursorCompositedFrames !== 0) {
+      failures.push(`${label} requires cursorCompositedFrames=0 for embedded cursor ownership.`)
+    }
+    return
+  }
+  if (media.captureBackend === 'windows-graphics-capture-monitor') {
+    if (media.cursorRequested !== false) {
+      failures.push(`${label} requires cursorRequested=false for cursor-excluded WGC.`)
+    }
+    if (media.cursorMode !== 'excluded-wgc') {
+      failures.push(`${label} requires cursorMode=excluded-wgc for cursor-excluded WGC.`)
+    }
+    if (media.cursorExclusionGuaranteed !== true) {
+      failures.push(`${label} requires cursorExclusionGuaranteed=true for cursor-excluded WGC.`)
+    }
+    if (media.cursorCompositedFrames !== 0) {
+      failures.push(`${label} requires cursorCompositedFrames=0 for cursor-excluded WGC.`)
+    }
+  }
+}
+
+function inspectWindowsD3d11PresenterDiagnostics(status, failures) {
+  const label = 'rendererDiagnostics.nativePreviewSurfaceStatus'
+  if (!isPlainObject(status)) {
+    failures.push(`${label} is required for an active D3D11 presenter.`)
+    return
+  }
+  if (status.state !== 'live') failures.push(`${label} requires state=live.`)
+  if (status.transport !== 'd3d11-shared-texture') {
+    failures.push(`${label} requires transport=d3d11-shared-texture.`)
+  }
+  if (status.backing !== 'directcomposition-swapchain') {
+    failures.push(`${label} requires backing=directcomposition-swapchain.`)
+  }
+  if (status.sourcePixelsPresent !== true) {
+    failures.push(`${label} requires sourcePixelsPresent=true.`)
+  }
+  if (status.framePollingSuppressed !== true) {
+    failures.push(`${label} requires framePollingSuppressed=true.`)
+  }
+
+  const presenter = status.windowsD3d11Presenter
+  if (!isPlainObject(presenter)) {
+    failures.push(`${label}.windowsD3d11Presenter is required.`)
+    return
+  }
+  for (const field of [
+    'layered',
+    'transparent',
+    'noActivate',
+    'excludedFromCapture',
+    'generationMatches',
+    'ownerProcessMatches',
+    'sameAdapter',
+    'sourceLive',
+    'firstPresentSucceeded'
+  ]) {
+    if (presenter[field] !== true) {
+      failures.push(`${label}.windowsD3d11Presenter requires ${field}=true.`)
+    }
+  }
+  for (const field of ['windowActive', 'windowFocused']) {
+    if (presenter[field] !== false) {
+      failures.push(`${label}.windowsD3d11Presenter requires ${field}=false.`)
+    }
+  }
+  if (!Number.isSafeInteger(presenter.successfulPresents) || presenter.successfulPresents <= 0) {
+    failures.push(`${label}.windowsD3d11Presenter requires positive successfulPresents.`)
+  }
+  if (
+    !Number.isSafeInteger(presenter.lastPresentedSequence) ||
+    presenter.lastPresentedSequence <= 0
+  ) {
+    failures.push(`${label}.windowsD3d11Presenter requires a positive lastPresentedSequence.`)
+  }
+  for (const field of ['latestWinsDrops', 'hiddenDrops', 'busyDrops', 'staleFrameDrops']) {
+    if (!Number.isSafeInteger(presenter[field]) || presenter[field] < 0) {
+      failures.push(`${label}.windowsD3d11Presenter requires non-negative integer ${field}.`)
+    }
+  }
+  const bounds = presenter.actualBounds
+  if (
+    !isPlainObject(bounds) ||
+    !Number.isSafeInteger(bounds.x) ||
+    !Number.isSafeInteger(bounds.y) ||
+    !Number.isSafeInteger(bounds.width) ||
+    bounds.width <= 0 ||
+    !Number.isSafeInteger(bounds.height) ||
+    bounds.height <= 0
+  ) {
+    failures.push(`${label}.windowsD3d11Presenter requires positive integral actualBounds.`)
+  }
+  if (typeof presenter.fallbackReason === 'string' && presenter.fallbackReason.trim()) {
+    failures.push(`${label}.windowsD3d11Presenter must not contain a fallbackReason.`)
+  }
 }
 
 function inspectValue(value, path, failures, warnings) {
@@ -316,6 +566,10 @@ function inspectScalar(value, path, failures, warnings) {
   const key = path[path.length - 1] ?? ''
   const normalizedKey = normalizeKey(key)
   const location = path.join('.')
+
+  if (normalizedKey === 'orderabovewindowhandle') {
+    failures.push(`${location} leaked a privileged native window handle.`)
+  }
 
   if (isAiArtifactBody(path, normalizedKey) && !isRedacted(value)) {
     failures.push(

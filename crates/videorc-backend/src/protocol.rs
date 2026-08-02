@@ -1112,6 +1112,7 @@ pub enum PreviewLiveSource {
 #[serde(rename_all = "kebab-case")]
 pub enum PreviewTransport {
     NativeSurface,
+    D3d11SharedTexture,
     ElectronProofSurface,
     LatestJpegPolling,
     MjpegStream,
@@ -1122,7 +1123,9 @@ impl PreviewTransport {
     pub fn is_surface(self) -> bool {
         matches!(
             self,
-            PreviewTransport::NativeSurface | PreviewTransport::ElectronProofSurface
+            PreviewTransport::NativeSurface
+                | PreviewTransport::D3d11SharedTexture
+                | PreviewTransport::ElectronProofSurface
         )
     }
 }
@@ -1135,6 +1138,8 @@ impl PreviewTransport {
 pub enum PreviewSurfaceBacking {
     #[serde(rename = "cametal-layer")]
     CaMetalLayer,
+    #[serde(rename = "directcomposition-swapchain")]
+    DirectcompositionSwapChain,
     ElectronBrowserWindow,
     #[default]
     None,
@@ -1300,17 +1305,137 @@ pub struct StreamOutputTopologyProbeResult {
 /// Which compositor rendered the active shared-compositor frame.
 ///
 /// - `Metal`: the GPU path (macOS OBS-parity target).
-/// - `Cpu`: the CPU compositor as the EXPECTED path — platforms without a
-///   Metal backend (Windows/Linux) have no GPU compositor to fall back from,
-///   so this is normal, not a degradation, and carries no fallback reason.
+/// - `D3d11`: the Windows GPU path when the complete capture/compositor/encoder
+///   capability probe agrees on one adapter and generation.
+/// - `Cpu`: the CPU compositor as the expected path on platforms without a
+///   supported GPU backend, and as the named Windows legacy path before a
+///   D3D11 session starts.
 /// - `CpuFallback`: macOS asked for Metal and could not get it — a real
-///   degradation, kept honest with a reason and count.
+///   degradation, or Windows rejected D3D11 before session start. Both stay
+///   honest with a reason and count.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CompositorBackend {
     Metal,
+    D3d11,
     Cpu,
     CpuFallback,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsD3d11MediaState {
+    #[default]
+    Unavailable,
+    Probing,
+    Live,
+    Draining,
+    Fallback,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsD3d11CaptureBackend {
+    DesktopDuplication,
+    WindowsGraphicsCaptureMonitor,
+    LegacyFfmpeg,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsD3d11CursorMode {
+    Embedded,
+    Separate,
+    ExcludedWgc,
+    DisabledFallback,
+}
+
+/// One truthful, wire-safe snapshot of the Windows GPU media authority. It
+/// contains scalar diagnostics only: no COM pointer, shared texture handle, or
+/// HWND may cross this boundary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11MediaDiagnostics {
+    pub state: WindowsD3d11MediaState,
+    #[serde(default)]
+    pub requested: bool,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_encoder_adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auxiliary_encoder_adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_backend: Option<WindowsD3d11CaptureBackend>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_mode: Option<WindowsD3d11CursorMode>,
+    #[serde(default)]
+    pub cursor_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_pixels_source: Option<String>,
+    #[serde(default)]
+    pub cursor_exclusion_guaranteed: bool,
+    #[serde(default)]
+    pub capture_readback_frames: u64,
+    #[serde(default)]
+    pub texture_import_frames: u64,
+    #[serde(default)]
+    pub camera_upload_frames: u64,
+    #[serde(default)]
+    pub cursor_shape_uploads: u64,
+    #[serde(default)]
+    pub cursor_composited_frames: u64,
+    #[serde(default)]
+    pub compositor_cpu_fallback_frames: u64,
+    #[serde(default)]
+    pub preview_presents: u64,
+    #[serde(default)]
+    pub preview_drops: u64,
+    #[serde(default)]
+    pub preview_bmp_requests: u64,
+    #[serde(default)]
+    pub preview_bmp_bytes: u64,
+    #[serde(default)]
+    pub message_pump_lag_p95_ms: Option<f64>,
+    #[serde(default)]
+    pub message_pump_lag_max_ms: Option<f64>,
+    #[serde(default)]
+    pub media_command_lag_p95_ms: Option<f64>,
+    #[serde(default)]
+    pub media_command_lag_max_ms: Option<f64>,
+    #[serde(default)]
+    pub maximum_consecutive_message_batch: u64,
+    #[serde(default)]
+    pub maximum_consecutive_media_batch: u64,
+    #[serde(default)]
+    pub encoder_gpu_samples: u64,
+    #[serde(default)]
+    pub encoder_system_memory_samples: u64,
+    #[serde(default)]
+    pub raw_video_copied_frames: u64,
+    #[serde(default)]
+    pub texture_pool_capacity: u64,
+    #[serde(default)]
+    pub texture_pool_in_use: u64,
+    #[serde(default)]
+    pub texture_pool_pressure_events: u64,
+    #[serde(default)]
+    pub adapter_mismatches: u64,
+    #[serde(default)]
+    pub device_resets: u64,
+    #[serde(default)]
+    pub stale_generation_callbacks: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
 }
 
 /// Cumulative request counts (since backend start) for the HTTP image-polling preview
@@ -1652,6 +1777,11 @@ pub struct DiagnosticStats {
     /// Cumulative frames rendered by CPU fallback during the active compositor run.
     #[serde(default)]
     pub compositor_cpu_fallback_frames: u64,
+    /// Scalar-only state for the Windows D3D11 capture/compositor/presenter/MF
+    /// authority. This remains present (with `unavailable`) on other platforms
+    /// so support-bundle and renderer contracts stay deterministic.
+    #[serde(default)]
+    pub windows_d3d11_media: WindowsD3d11MediaDiagnostics,
     #[serde(default)]
     pub websocket_transport: WebSocketTransportDiagnosticStats,
     /// Cumulative HTTP image-poll request counts. The transport-honesty gate fails when
@@ -2079,6 +2209,80 @@ pub struct PreviewSurfaceBounds {
     pub elevated: Option<bool>,
 }
 
+/// Validated opaque HWND identity used only by Electron main and the backend
+/// presenter. The fixed-width string form prevents JavaScript precision loss
+/// and is never embedded in renderer-visible status or events.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OpaqueNativeWindowHandle(String);
+
+impl OpaqueNativeWindowHandle {
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        let bytes = value.as_bytes();
+        if bytes.len() != 18
+            || !value.starts_with("0x")
+            || !bytes[2..]
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+            || value == "0x0000000000000000"
+        {
+            return Err(
+                "native window handle must be a nonzero lowercase 0x-prefixed 64-bit value"
+                    .to_string(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub fn as_u64(&self) -> u64 {
+        u64::from_str_radix(&self.0[2..], 16)
+            .expect("validated native window handles always contain hexadecimal digits")
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for OpaqueNativeWindowHandle {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for OpaqueNativeWindowHandle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Privileged request-only bounds. Flattening preserves the established
+/// geometry wire shape while keeping the HWND out of `PreviewSurfaceBounds`
+/// and therefore out of renderer-visible `PreviewSurfaceStatus`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MainOwnedPreviewSurfaceBounds {
+    #[serde(flatten)]
+    pub bounds: PreviewSurfaceBounds,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_above_window_handle: Option<OpaqueNativeWindowHandle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MainOwnedPreviewSurfaceBoundsParams {
+    pub bounds: MainOwnedPreviewSurfaceBounds,
+    pub generation: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewSurfaceCreateParams {
@@ -2127,6 +2331,46 @@ pub struct PreviewSurfacePresentParams {
     pub frame_polling_suppressed: bool,
     #[serde(default)]
     pub source_pixels_present: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11PresenterBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Renderer-safe readback from the backend-owned Windows presenter. Raw HWNDs
+/// and process IDs intentionally never enter this status object.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11PresenterDiagnostics {
+    pub layered: bool,
+    pub transparent: bool,
+    pub no_activate: bool,
+    pub excluded_from_capture: bool,
+    pub window_active: bool,
+    pub window_focused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_generation: Option<u64>,
+    pub generation_matches: bool,
+    pub owner_process_matches: bool,
+    pub same_adapter: bool,
+    pub source_live: bool,
+    pub first_present_succeeded: bool,
+    pub successful_presents: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_presented_sequence: Option<u64>,
+    pub latest_wins_drops: u64,
+    pub hidden_drops: u64,
+    pub busy_drops: u64,
+    pub stale_frame_drops: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_bounds: Option<WindowsD3d11PresenterBounds>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2180,6 +2424,8 @@ pub struct PreviewSurfaceStatus {
     pub pending_host_command_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bounds: Option<PreviewSurfaceBounds>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_d3d11_presenter: Option<WindowsD3d11PresenterDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     pub updated_at: String,
@@ -3878,6 +4124,69 @@ mod tests {
             shared_high_risk_contract_fixture_value("/previewSurfaceBounds/legacyNormalized");
         let legacy: PreviewSurfaceBounds = serde_json::from_value(legacy_wire).unwrap();
         assert_eq!(serde_json::to_value(legacy).unwrap(), legacy_expected);
+    }
+
+    #[test]
+    fn windows_d3d11_main_owned_preview_bounds_preserve_opaque_hwnd_and_generation() {
+        let wire = serde_json::json!({
+            "bounds": {
+                "screenX": 12.0,
+                "screenY": 34.0,
+                "width": 1280.0,
+                "height": 720.0,
+                "scaleFactor": 1.25,
+                "visible": true,
+                "orderAboveWindowId": 42,
+                "orderAboveWindowHandle": "0x000000001234abcd",
+                "elevated": false
+            },
+            "generation": 9
+        });
+        let request: MainOwnedPreviewSurfaceBoundsParams =
+            serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(request.generation, 9);
+        assert_eq!(
+            request
+                .bounds
+                .order_above_window_handle
+                .as_ref()
+                .map(OpaqueNativeWindowHandle::as_u64),
+            Some(0x1234_abcd)
+        );
+        assert_eq!(request.bounds.bounds.order_above_window_id, Some(42));
+        assert_eq!(request.bounds.bounds.elevated, Some(false));
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+    }
+
+    #[test]
+    fn windows_d3d11_opaque_hwnd_rejects_unsafe_wire_values() {
+        for value in [
+            serde_json::json!("0x0000000000000000"),
+            serde_json::json!("0x1234"),
+            serde_json::json!("0X0000000000000001"),
+            serde_json::json!("0x00000000000000AF"),
+            serde_json::json!(1234),
+        ] {
+            assert!(
+                serde_json::from_value::<OpaqueNativeWindowHandle>(value).is_err(),
+                "unsafe HWND wire value was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_d3d11_renderer_preview_bounds_never_serialize_an_hwnd() {
+        let ordinary: PreviewSurfaceBounds = serde_json::from_value(serde_json::json!({
+            "screenX": 0.0,
+            "screenY": 0.0,
+            "width": 640.0,
+            "height": 360.0,
+            "scaleFactor": 1.0,
+            "orderAboveWindowHandle": "0x000000001234abcd"
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(ordinary).unwrap();
+        assert!(serialized.get("orderAboveWindowHandle").is_none());
     }
 
     #[test]

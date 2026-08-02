@@ -202,6 +202,7 @@ export interface AutomaticSourceFallbackEvent {
 
 export interface RendererDiagnosticsSnapshot {
   automaticSourceFallbacks: AutomaticSourceFallbackEvent[]
+  nativePreviewSurfaceStatus?: PreviewSurfaceStatus
   runtimeInfo?: RuntimeInfo
 }
 
@@ -1223,6 +1224,7 @@ export type PreviewLiveState = 'connecting' | 'live' | 'reconnecting' | 'unavail
 export type PreviewLiveSource = 'idle-preview' | 'recording-session' | 'unavailable'
 export type PreviewTransport =
   | 'native-surface'
+  | 'd3d11-shared-texture'
   | 'electron-proof-surface'
   | 'latest-jpeg-polling'
   | 'mjpeg-stream'
@@ -1274,7 +1276,66 @@ export interface StreamOutputTopologyProbeResult {
   fallbackReason?: string
 }
 
-export type CompositorBackend = 'metal' | 'cpu' | 'cpu-fallback'
+export type CompositorBackend = 'metal' | 'd3d11' | 'cpu' | 'cpu-fallback'
+
+export type WindowsD3d11MediaState =
+  | 'unavailable'
+  | 'probing'
+  | 'live'
+  | 'draining'
+  | 'fallback'
+  | 'failed'
+
+export type WindowsD3d11CaptureBackend =
+  | 'desktop-duplication'
+  | 'windows-graphics-capture-monitor'
+  | 'legacy-ffmpeg'
+
+export type WindowsD3d11CursorMode = 'embedded' | 'separate' | 'excluded-wgc' | 'disabled-fallback'
+
+/** Scalar-only diagnostics. No COM pointer, texture/shared handle, or HWND is wire-safe. */
+export interface WindowsD3d11MediaDiagnostics {
+  state: WindowsD3d11MediaState
+  requested: boolean
+  required: boolean
+  adapterLuid?: string
+  captureAdapterLuid?: string
+  compositorAdapterLuid?: string
+  primaryEncoderAdapterLuid?: string
+  auxiliaryEncoderAdapterLuid?: string
+  generation?: number
+  captureBackend?: WindowsD3d11CaptureBackend
+  cursorMode?: WindowsD3d11CursorMode
+  cursorRequested: boolean
+  cursorPixelsSource?: string
+  cursorExclusionGuaranteed: boolean
+  captureReadbackFrames: number
+  textureImportFrames: number
+  cameraUploadFrames: number
+  cursorShapeUploads: number
+  cursorCompositedFrames: number
+  compositorCpuFallbackFrames: number
+  previewPresents: number
+  previewDrops: number
+  previewBmpRequests: number
+  previewBmpBytes: number
+  messagePumpLagP95Ms?: number
+  messagePumpLagMaxMs?: number
+  mediaCommandLagP95Ms?: number
+  mediaCommandLagMaxMs?: number
+  maximumConsecutiveMessageBatch: number
+  maximumConsecutiveMediaBatch: number
+  encoderGpuSamples: number
+  encoderSystemMemorySamples: number
+  rawVideoCopiedFrames: number
+  texturePoolCapacity: number
+  texturePoolInUse: number
+  texturePoolPressureEvents: number
+  adapterMismatches: number
+  deviceResets: number
+  staleGenerationCallbacks: number
+  fallbackReason?: string
+}
 
 /** Cumulative request counts for the HTTP image-polling preview transports. A native
  * preview never fetches these, so a session in which they climb is not actually native. */
@@ -1320,6 +1381,22 @@ export interface PreviewSurfaceBounds {
   elevated?: boolean
 }
 
+/** Canonical lowercase, fixed-width pointer value. It is never renderer-facing. */
+export type OpaqueNativeWindowHandle = `0x${string}`
+
+/**
+ * Main-owned request shape for backend/native-host commands. Renderer bounds
+ * never include the Windows HWND; main injects it immediately before dispatch.
+ */
+export interface MainOwnedPreviewSurfaceBounds extends PreviewSurfaceBounds {
+  orderAboveWindowHandle?: OpaqueNativeWindowHandle
+}
+
+export interface MainOwnedPreviewSurfaceBoundsParams {
+  bounds: MainOwnedPreviewSurfaceBounds
+  generation: number
+}
+
 export type NativePreviewHostCommandKind = 'create' | 'update-bounds' | 'destroy'
 
 export interface NativePreviewHostCommand {
@@ -1329,7 +1406,17 @@ export interface NativePreviewHostCommand {
 
 export type PreviewSurfaceState = 'unavailable' | 'starting' | 'live' | 'stopped' | 'failed'
 export type PreviewSurfaceSource = 'synthetic' | 'camera' | 'screen' | 'window'
-export type PreviewSurfaceBacking = 'cametal-layer' | 'electron-browser-window' | 'none'
+export type PreviewSurfaceBacking =
+  | 'cametal-layer'
+  | 'directcomposition-swapchain'
+  | 'electron-browser-window'
+  | 'none'
+export type NativePreviewHostKind =
+  | 'in-process'
+  | 'helper-process'
+  | 'external-module'
+  | 'proof-surface'
+  | 'backend-d3d11-presenter'
 export type CompositorState = 'stopped' | 'starting' | 'live' | 'failed'
 export type CompositorSourceKind = 'camera' | 'screen' | 'window'
 export type CompositorSceneSourceKind = SceneSourceKind | 'screen-image' | 'background-image'
@@ -1547,7 +1634,7 @@ export interface PreviewSurfaceStatus {
   nativePreviewMainSceneMismatchAgeMs?: number
   nativePreviewMainLastSkippedSceneRevision?: number
   nativePreviewMainLastSkippedFrameSceneRevision?: number
-  nativePreviewHostKind?: 'in-process' | 'helper-process' | 'external-module' | 'proof-surface'
+  nativePreviewHostKind?: NativePreviewHostKind
   nativePreviewHostAttached?: boolean
   nativePreviewPlacementEventsReceived?: number
   nativePreviewPlacementsCoalesced?: number
@@ -1567,6 +1654,9 @@ export interface PreviewSurfaceStatus {
   sourcePixelsPresent: boolean
   pendingHostCommandCount: number
   bounds?: PreviewSurfaceBounds
+  /** Sanitized readback from the backend-owned Windows DirectComposition
+   * presenter. This intentionally contains no HWND or process ID. */
+  windowsD3d11Presenter?: WindowsD3d11PresenterDiagnostics
   startedAt?: string
   updatedAt: string
   message?: string
@@ -1576,6 +1666,36 @@ export interface PreviewSurfaceStatus {
   // unexplained indefinite wait.
   firstFrameContract?: 'pending' | 'healing' | 'met' | 'fallback'
   firstFrameReason?: string
+}
+
+export interface WindowsD3d11PresenterBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface WindowsD3d11PresenterDiagnostics {
+  layered: boolean
+  transparent: boolean
+  noActivate: boolean
+  excludedFromCapture: boolean
+  windowActive: boolean
+  windowFocused: boolean
+  previewGeneration?: number
+  generationMatches: boolean
+  ownerProcessMatches: boolean
+  sameAdapter: boolean
+  sourceLive: boolean
+  firstPresentSucceeded: boolean
+  successfulPresents: number
+  lastPresentedSequence?: number
+  latestWinsDrops: number
+  hiddenDrops: number
+  busyDrops: number
+  staleFrameDrops: number
+  actualBounds?: WindowsD3d11PresenterBounds
+  fallbackReason?: string
 }
 
 export interface PreviewSurfacePresentParams {
@@ -2002,6 +2122,8 @@ export interface DiagnosticStats {
   compositorFallbackReason?: string
   /** Cumulative frames rendered by CPU fallback during the active compositor run. */
   compositorCpuFallbackFrames: number
+  /** Scalar-only state for the Windows D3D11 media authority. */
+  windowsD3d11Media?: WindowsD3d11MediaDiagnostics
   websocketTransport: WebSocketTransportDiagnosticStats
   /** Cumulative HTTP image-poll request counts; the transport-honesty gate fails when these climb during a "native" preview session. */
   previewImagePollCounts: PreviewImagePollCounts
@@ -2848,6 +2970,7 @@ export interface PreviewSupervisorState {
   surfaceActive: boolean
   transport: PreviewLifecycleTransport
   backing: PreviewLifecycleBacking
+  nativePreviewHostKind?: NativePreviewHostKind
   permissionStatus: PreviewPermissionStatus
   fallbackReason?: string
   lastError?: string

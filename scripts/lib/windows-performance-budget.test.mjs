@@ -6,8 +6,11 @@ import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
 
 import {
+  attachWindowsNaturalFallbackPolicy,
   evaluateWindowsPerformanceBudget,
   loadWindowsPerformanceBudget,
+  WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND,
+  WINDOWS_D3D11_PERFORMANCE_SCENARIOS,
   validateWindowsPerformanceBudget
 } from './windows-performance-budget.mjs'
 
@@ -310,6 +313,146 @@ describe('Windows performance budgets', () => {
   })
 })
 
+describe('Windows D3D11 performance budgets', () => {
+  it('keeps derived evidence draft and rejects activation without natural fallback review', () => {
+    const document = d3d11BudgetDocument({ active: false })
+    assert.deepEqual(validateWindowsPerformanceBudget(document, { allowDraft: true }), [])
+    assert.deepEqual(validateWindowsPerformanceBudget(document), ['status must be active'])
+
+    document.status = 'active'
+    document.activation = { allowed: true, reason: 'independent review complete' }
+    assert.match(validateWindowsPerformanceBudget(document).join('\n'), /reviewedBy was missing/)
+    assert.match(
+      validateWindowsPerformanceBudget(document).join('\n'),
+      /naturalFallbackPolicy was missing/
+    )
+  })
+
+  it('accepts only the candidate-bound two-class 1080p30/60 active contract', () => {
+    const document = d3d11BudgetDocument()
+    assert.equal(document.kind, WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND)
+    assert.deepEqual(validateWindowsPerformanceBudget(document), [])
+
+    const positiveBmp = structuredClone(document)
+    positiveBmp.profiles[0].thresholds.bmp.maximumRequests = 1
+    assert.match(
+      validateWindowsPerformanceBudget(positiveBmp).join('\n'),
+      /disabled BMP thresholds must require zero/
+    )
+
+    const broaderProfile = structuredClone(document)
+    broaderProfile.profiles[0].scope.profile = '1440p30'
+    assert.match(
+      validateWindowsPerformanceBudget(broaderProfile).join('\n'),
+      /scope profile was not qualified/
+    )
+
+    const reusedHost = structuredClone(document)
+    reusedHost.comparisonEvidence[1].fingerprint = reusedHost.comparisonEvidence[0].fingerprint
+    assert.match(
+      validateWindowsPerformanceBudget(reusedHost).join('\n'),
+      /reused another physical host/
+    )
+
+    const endurance = document.profiles.find(
+      ({ scope }) => scope.scenario === '1080p60-av-endurance'
+    )
+    assert.equal(endurance.evidence.reportPaths.length, 1)
+  })
+
+  it('resolves a D3D profile and natural fallback policy only for exact contexts', async () => {
+    const document = d3d11BudgetDocument()
+    const d3dProfile = document.profiles[0]
+    const d3dContext = d3d11RuntimeContext(d3dProfile.scope, document.candidate)
+    const loaded = await loadWindowsPerformanceBudget({
+      path: '/tmp/windows-d3d11-budget.json',
+      context: d3dContext,
+      read: async () => JSON.stringify(document),
+      verifyArtifact: async ({ expectedSha256 }) => expectedSha256
+    })
+    assert.equal(loaded.profile.id, d3dProfile.id)
+
+    const fallback = await loadWindowsPerformanceBudget({
+      path: '/tmp/windows-d3d11-budget.json',
+      context: d3d11RuntimeContext(document.naturalFallbackPolicy.scope, document.candidate),
+      read: async () => JSON.stringify(document),
+      verifyArtifact: async ({ expectedSha256 }) => expectedSha256
+    })
+    assert.equal(fallback.profile.id, 'unsupported-natural-fallback-1080p30')
+
+    await assert.rejects(
+      loadWindowsPerformanceBudget({
+        path: '/tmp/windows-d3d11-budget.json',
+        context: { ...d3dContext, candidateSha256: 'f'.repeat(64) },
+        read: async () => JSON.stringify(document),
+        verifyArtifact: async ({ expectedSha256 }) => expectedSha256
+      }),
+      /runtime candidate identity did not match/
+    )
+    await assert.rejects(
+      loadWindowsPerformanceBudget({
+        path: '/tmp/windows-d3d11-budget.json',
+        context: { ...d3dContext, profile: '4k30' },
+        read: async () => JSON.stringify(document),
+        verifyArtifact: async ({ expectedSha256 }) => expectedSha256
+      }),
+      /did not contain a profile/
+    )
+    await assert.rejects(
+      loadWindowsPerformanceBudget({
+        path: '/tmp/windows-d3d11-budget.json',
+        context: { ...d3dContext, topology: 'record-plus-stream' },
+        read: async () => JSON.stringify(document),
+        verifyArtifact: async ({ expectedSha256 }) => expectedSha256
+      }),
+      /did not contain a profile/
+    )
+  })
+
+  it('enforces zero-copy, cursor, input, and pump-latency invariants at evaluation', () => {
+    const profile = d3d11BudgetDocument().profiles[0]
+    const metrics = d3d11PassingMetrics()
+    assert.deepEqual(evaluateWindowsPerformanceBudget(profile, metrics), [])
+
+    metrics.d3d11.captureReadbackFrames = 1
+    metrics.d3d11.cursorCorrect = false
+    metrics.d3d11.messageDispatchMaxMs = 101
+    assert.deepEqual(evaluateWindowsPerformanceBudget(profile, metrics), [
+      'captureReadbackFrames 1 exceeded 0',
+      'cursor correctness false did not equal true',
+      'message dispatch maximum 101 exceeded 100'
+    ])
+  })
+
+  it('derives but never self-activates the natural fallback policy from the full matrix', () => {
+    const draft = d3d11BudgetDocument({ active: false })
+    const calibration = naturalFallbackCalibration(draft.candidate)
+    const updated = attachWindowsNaturalFallbackPolicy({
+      document: draft,
+      calibration
+    })
+    assert.equal(updated.status, 'draft')
+    assert.equal(updated.activation.allowed, false)
+    assert.equal(updated.naturalFallbackPolicy.evidence.reportPaths.length, 12)
+    assert.deepEqual(updated.naturalFallbackPolicy.scope.topologies, [
+      'stream-only',
+      'record-plus-stream'
+    ])
+    assert.deepEqual(validateWindowsPerformanceBudget(updated, { allowDraft: true }), [])
+
+    const incomplete = structuredClone(calibration)
+    incomplete.runs.pop()
+    assert.throws(
+      () => attachWindowsNaturalFallbackPolicy({ document: draft, calibration: incomplete }),
+      /exactly twelve matrix runs/
+    )
+    assert.throws(
+      () => attachWindowsNaturalFallbackPolicy({ document: updated, calibration }),
+      /already attached/
+    )
+  })
+})
+
 function context() {
   return {
     scenario: 'windows-proof-recording-1080p',
@@ -319,6 +462,342 @@ function context() {
     candidatePayloadSha256: 'd'.repeat(64),
     operatingSystem: { platform: 'win32', arch: 'x64' },
     timing: { warmupMs: 60_000, measurementMs: 600_000, intervalMs: 1_000 }
+  }
+}
+
+function d3d11BudgetDocument({ active = true } = {}) {
+  const candidate = {
+    sourceCommit: '1'.repeat(40),
+    installerSha256: '2'.repeat(64),
+    executableSha256: '3'.repeat(64),
+    packagePayloadSha256: '4'.repeat(64)
+  }
+  const hardwareClasses = ['nvidia-turing-floor', 'intel-xe-integrated']
+  const profiles = hardwareClasses.flatMap((hardwareClass, classIndex) =>
+    WINDOWS_D3D11_PERFORMANCE_SCENARIOS.map((scenario, scenarioIndex) => {
+      const ordinal = classIndex * WINDOWS_D3D11_PERFORMANCE_SCENARIOS.length + scenarioIndex
+      return {
+        id: `${hardwareClass}-${scenario.id}`,
+        scope: {
+          scenario: scenario.id,
+          profile: scenario.profile,
+          hardwareClass,
+          profileClass: 'release',
+          buildMode: 'packaged',
+          operatingSystem: {
+            platform: 'win32',
+            arch: 'x64',
+            release: '10.0.26100'
+          },
+          timing: {
+            warmupMs: scenario.warmupMs,
+            measurementMs: scenario.measurementMs,
+            intervalMs: scenario.intervalMs
+          },
+          mediaPath: 'd3d11-native',
+          topology: scenario.topology,
+          sourceComposition: scenario.sourceComposition,
+          previewOpen: scenario.previewOpen,
+          ...(scenario.previewOpen
+            ? {
+                preview: {
+                  transport: 'd3d11-shared-texture',
+                  backing: 'directcomposition-swapchain',
+                  hostKind: 'backend-d3d11-presenter'
+                }
+              }
+            : {})
+        },
+        candidate,
+        evidence: {
+          calibrationPath: `C:\\evidence\\${hardwareClass}\\${scenario.id}\\aggregate.json`,
+          calibrationSha256: `${5 + ordinal}`.repeat(64).slice(0, 64),
+          reportPaths: Array.from(
+            { length: scenario.repetitions },
+            (_, index) => `C:\\evidence\\${hardwareClass}\\${scenario.id}\\run-${index + 1}.json`
+          ),
+          reportSha256: Array.from({ length: scenario.repetitions }, (_, index) =>
+            `${10 + ordinal * 3 + index}`.repeat(64).slice(0, 64)
+          ),
+          comparisonPath: `C:\\evidence\\${hardwareClass}\\obs\\aggregate.json`,
+          comparisonSha256: `${20 + classIndex}`.repeat(64).slice(0, 64)
+        },
+        invariants: {
+          mediaPath: 'd3d11-native',
+          captureReadbackFrames: 0,
+          compositorCpuFallbackFrames: 0,
+          rawVideoCopiedFrames: 0,
+          encoderSystemMemorySamples: 0,
+          previewBmpRequests: 0,
+          previewBmpBytes: 0,
+          cursorCorrect: true,
+          inputContinuity: true,
+          maximumMessageDispatchP95Ms: 50,
+          maximumMessageDispatchMs: 100
+        },
+        thresholds: d3d11Thresholds()
+      }
+    })
+  )
+  return {
+    schemaVersion: 1,
+    kind: WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND,
+    status: active ? 'active' : 'draft',
+    generatedBy: 'smoke-windows-obs-side-by-side --derive-d3d11-budget',
+    candidate,
+    qualifiedProfiles: {
+      'nvidia-turing-floor': ['1080p30', '1080p60'],
+      'intel-xe-integrated': ['1080p30', '1080p60']
+    },
+    unqualifiedLivestreamProfiles: ['1440p30', '1440p60', '4k30', '4k60'],
+    comparisonEvidence: hardwareClasses.map((hardwareClass, index) => ({
+      hardwareClass,
+      aggregatePath: `C:\\evidence\\${hardwareClass}\\obs\\aggregate.json`,
+      aggregateSha256: `${20 + index}`.repeat(64).slice(0, 64),
+      manifestSha256: `${22 + index}`.repeat(64).slice(0, 64),
+      obsSha256: `${24 + index}`.repeat(64).slice(0, 64),
+      obsVersion: '31.1.2',
+      bootId: `boot-${index + 1}`,
+      fingerprint: `${26 + index}`.repeat(64).slice(0, 64)
+    })),
+    profiles,
+    naturalFallbackPolicy: active ? d3d11NaturalFallbackPolicy(candidate) : null,
+    activation: active
+      ? { allowed: true, reason: 'independent human review complete' }
+      : {
+          allowed: false,
+          reason:
+            'Draft requires retained natural-fallback policy evidence and independent human review.'
+        },
+    ...(active
+      ? {
+          reviewedBy: 'Windows release reviewer',
+          reviewedAt: '2026-07-30T12:00:00.000Z'
+        }
+      : {})
+  }
+}
+
+function d3d11NaturalFallbackPolicy(candidate) {
+  return {
+    id: 'unsupported-natural-fallback-1080p30',
+    scope: {
+      scenario: '1080p30-screen-only-stream',
+      profile: '1080p30',
+      hardwareClass: 'unsupported-natural-fallback',
+      profileClass: 'release',
+      buildMode: 'packaged',
+      operatingSystem: {
+        platform: 'win32',
+        arch: 'x64',
+        release: '10.0.26100'
+      },
+      timing: {
+        warmupMs: 60_000,
+        measurementMs: 180_000,
+        intervalMs: 1_000
+      },
+      mediaPath: 'legacy-fallback',
+      selectionMode: 'natural',
+      topologies: ['stream-only', 'record-plus-stream'],
+      previewModes: ['open', 'closed']
+    },
+    candidate,
+    evidence: {
+      calibrationPath: 'C:\\evidence\\fallback\\aggregate.json',
+      calibrationSha256: 'a'.repeat(64),
+      reportPaths: Array.from(
+        { length: 12 },
+        (_, index) => `C:\\evidence\\fallback\\run-${index + 1}.json`
+      ),
+      reportSha256: Array.from({ length: 12 }, (_, index) =>
+        `${30 + index}`.repeat(64).slice(0, 64)
+      )
+    },
+    observed: {
+      fallbackReason: 'd3d11-fence-interface-unavailable',
+      effectiveCaptureBackend: 'legacy-ffmpeg',
+      effectiveEncoderBackend: 'software-x264'
+    },
+    invariants: {
+      obsParityQualified: false,
+      maximumFps: 30,
+      maximumTotalRssSlopeMiBPerMinute: 5,
+      maximumRoleRssSlopeMiBPerMinute: 2,
+      minimumEncoderSpeedP05: 0.98,
+      mediaVerdict: 'PASS',
+      lifecycleVerdict: 'PASS',
+      previewProofSurfaceVerdict: 'PASS'
+    },
+    thresholds: {
+      ...d3d11Thresholds(),
+      bmp: {
+        mode: 'required',
+        maximumIntervalP95Ms: 175,
+        minimumAdvancedFrames: 10
+      }
+    }
+  }
+}
+
+function d3d11Thresholds() {
+  const role = {
+    maximumRssMiB: 512,
+    maximumRssSlopeMiBPerMinute: 2,
+    maximumAverageCpuPercent: 80,
+    maximumP95CpuPercent: 90
+  }
+  return {
+    maximumTotalCpuP95Percent: 90,
+    maximumTotalRssMiB: 2048,
+    maximumTotalRssSlopeMiBPerMinute: 5,
+    gpu: {
+      maximumEngineP95Percent: 80,
+      maximumDedicatedMiB: 600,
+      maximumSharedMiB: 200
+    },
+    bmp: {
+      mode: 'disabled',
+      maximumRequests: 0,
+      maximumBytes: 0
+    },
+    roles: Object.fromEntries(
+      ['backend', 'electron-main', 'electron-renderer', 'electron-gpu', 'ffmpeg'].map((name) => [
+        name,
+        role
+      ])
+    )
+  }
+}
+
+function d3d11RuntimeContext(scope, candidate) {
+  return {
+    ...scope,
+    ...(scope.hardwareClass === 'unsupported-natural-fallback'
+      ? {
+          scenario: '1080p30-stream-preview',
+          topology: 'stream-only',
+          previewOpen: true
+        }
+      : {}),
+    sourceCommit: candidate.sourceCommit,
+    installerSha256: candidate.installerSha256,
+    candidateSha256: candidate.executableSha256,
+    candidatePayloadSha256: candidate.packagePayloadSha256
+  }
+}
+
+function d3d11PassingMetrics() {
+  const metrics = passingMetrics()
+  metrics.processTree.memory.summary.totalRss.slopePerMinute = 1024
+  for (const role of Object.values(metrics.processTree.memory.summary.roles)) {
+    role.slopeRssKbPerMinute = 1024
+  }
+  metrics.bmp = { requestCount: 0, bytes: 0 }
+  metrics.gpu = {
+    summary: {
+      engineBusyP95Percent: 50,
+      dedicatedMaxMiB: 400,
+      sharedMaxMiB: 100
+    }
+  }
+  metrics.processTree.cpu.summary.totalP95Percent = 70
+  metrics.d3d11 = {
+    captureReadbackFrames: 0,
+    compositorCpuFallbackFrames: 0,
+    rawVideoCopiedFrames: 0,
+    encoderSystemMemorySamples: 0,
+    cursorCorrect: true,
+    inputContinuity: true,
+    messageDispatchP95Ms: 30,
+    messageDispatchMaxMs: 80
+  }
+  return metrics
+}
+
+function naturalFallbackCalibration(candidate) {
+  const roles = ['backend', 'electron-main', 'electron-renderer', 'electron-gpu', 'ffmpeg']
+  const runs = []
+  let index = 0
+  for (const topology of ['stream-only', 'record-plus-stream']) {
+    for (const previewOpen of [true, false]) {
+      for (let repetition = 1; repetition <= 3; repetition += 1) {
+        index += 1
+        runs.push({
+          topology,
+          previewOpen,
+          repetition,
+          verdict: 'PASS',
+          reportPath: `C:\\evidence\\fallback\\${topology}-${previewOpen ? 'open' : 'closed'}-${repetition}.json`,
+          reportSha256: `${50 + index}`.repeat(64).slice(0, 64),
+          observed: {
+            fallbackReason: 'd3d11-fence-interface-unavailable',
+            effectiveCaptureBackend: 'legacy-ffmpeg',
+            effectiveEncoderBackend: 'software-x264'
+          },
+          mediaVerdict: 'PASS',
+          lifecycleVerdict: 'PASS',
+          previewProofSurfaceVerdict: 'PASS',
+          encoderSpeedP05: 0.99,
+          process: {
+            cpuP95Percent: 65,
+            rssMaxMiB: 900,
+            rssSlopeMiBPerMinute: 4,
+            roles: Object.fromEntries(
+              roles.map((role, roleIndex) => [
+                role,
+                {
+                  rssMaxMiB: 100 + roleIndex,
+                  rssSlopeMiBPerMinute: 1.5,
+                  cpuAveragePercent: 12 + roleIndex,
+                  cpuP95Percent: 18 + roleIndex
+                }
+              ])
+            )
+          },
+          gpu: {
+            engineBusyP95Percent: 55,
+            dedicatedMaxMiB: 400,
+            sharedMaxMiB: 200
+          },
+          bmp: {
+            intervalP95Ms: 125,
+            advancedFrames: 200
+          }
+        })
+      }
+    }
+  }
+  return {
+    schemaVersion: 1,
+    kind: 'videorc.windows-natural-fallback-calibration',
+    status: 'CALIBRATION',
+    candidate,
+    aggregatePath: 'C:\\evidence\\fallback\\aggregate.json',
+    aggregateSha256: '9'.repeat(64),
+    scope: {
+      scenario: '1080p30-natural-fallback-matrix',
+      profile: '1080p30',
+      fps: 30,
+      hardwareClass: 'unsupported-natural-fallback',
+      profileClass: 'release',
+      buildMode: 'packaged',
+      operatingSystem: {
+        platform: 'win32',
+        arch: 'x64',
+        release: '10.0.26100'
+      },
+      timing: {
+        warmupMs: 60_000,
+        measurementMs: 180_000,
+        intervalMs: 1_000
+      },
+      mediaPath: 'legacy-fallback',
+      selectionMode: 'natural',
+      d3d11Requested: false,
+      d3d11Required: false
+    },
+    runs
   }
 }
 

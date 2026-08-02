@@ -18,6 +18,7 @@ import type {
 import {
   parseBackendWireMessage,
   runtimeValidatedBackendRpcMethods,
+  validateMainOwnedPreviewSurfaceBoundsParams,
   validateBackendEventPayload,
   validateBackendRpcParams,
   validateBackendRpcResult,
@@ -27,6 +28,36 @@ import {
 } from './backend-rpc-contract'
 
 describe('backend RPC contract', () => {
+  it('keeps the Windows HWND in an exact generation-bound main-owned request', () => {
+    const request = {
+      bounds: {
+        screenX: 10,
+        screenY: 20,
+        width: 1280,
+        height: 720,
+        scaleFactor: 1.25,
+        visible: true,
+        orderAboveWindowHandle: '0x000000000000abcd',
+        elevated: false
+      },
+      generation: 7
+    }
+    expect(validateMainOwnedPreviewSurfaceBoundsParams(request)).toEqual(request)
+
+    for (const malformed of [
+      { ...request, generation: undefined },
+      { ...request, generation: Number.MAX_SAFE_INTEGER + 1 },
+      {
+        ...request,
+        bounds: { ...request.bounds, orderAboveWindowHandle: '0x0000000000000000' }
+      },
+      { ...request, bounds: { ...request.bounds, orderAboveWindowHandle: '0x1234' } },
+      { ...request, bounds: { ...request.bounds, nativeWindowHandle: '0x0000000000000001' } }
+    ]) {
+      expect(() => validateMainOwnedPreviewSurfaceBoundsParams(malformed)).toThrow()
+    }
+  })
+
   it('types role-authoritative encoder bridge process diagnostics', () => {
     expectTypeOf<
       DiagnosticStats['encoderBridgeRecordingRawVideoCopiedFrames']
@@ -563,6 +594,73 @@ describe('backend RPC contract', () => {
     expect(validateBackendEventPayload('preview.surface.status', surfaceStatus)).toEqual(
       surfaceStatus
     )
+    const d3d11SurfaceStatus = {
+      ...surfaceStatus,
+      transport: 'd3d11-shared-texture',
+      backing: 'directcomposition-swapchain',
+      nativePreviewHostKind: 'backend-d3d11-presenter',
+      windowsD3d11Presenter: {
+        layered: true,
+        transparent: true,
+        noActivate: true,
+        excludedFromCapture: true,
+        windowActive: false,
+        windowFocused: false,
+        previewGeneration: 7,
+        generationMatches: true,
+        ownerProcessMatches: true,
+        sameAdapter: true,
+        sourceLive: true,
+        firstPresentSucceeded: true,
+        successfulPresents: 42,
+        lastPresentedSequence: 42,
+        latestWinsDrops: 2,
+        hiddenDrops: 0,
+        busyDrops: 1,
+        staleFrameDrops: 0,
+        actualBounds: { x: 10, y: 20, width: 1280, height: 720 }
+      }
+    }
+    expect(validateBackendRpcResult('preview.surface.status', d3d11SurfaceStatus)).toEqual(
+      d3d11SurfaceStatus
+    )
+    for (const leaked of [
+      { ...d3d11SurfaceStatus, nativeWindowHandle: '0x0000000000000001' },
+      { ...d3d11SurfaceStatus, processId: 42 },
+      { ...d3d11SurfaceStatus, sharedTextureHandle: '0x0000000000000002' },
+      {
+        ...d3d11SurfaceStatus,
+        windowsD3d11Presenter: {
+          ...d3d11SurfaceStatus.windowsD3d11Presenter,
+          processId: 42
+        }
+      },
+      {
+        ...d3d11SurfaceStatus,
+        windowsD3d11Presenter: {
+          ...d3d11SurfaceStatus.windowsD3d11Presenter,
+          resourceHandle: '0x0000000000000003'
+        }
+      },
+      {
+        ...d3d11SurfaceStatus,
+        bounds: {
+          screenX: 0,
+          screenY: 0,
+          width: 1280,
+          height: 720,
+          scaleFactor: 1,
+          orderAboveWindowHandle: '0x0000000000000001'
+        }
+      }
+    ]) {
+      expect(() => validateBackendRpcResult('preview.surface.status', leaked)).toThrow(
+        /renderer-facing/
+      )
+      expect(() => validateBackendEventPayload('preview.surface.status', leaked)).toThrow(
+        /renderer-facing/
+      )
+    }
     for (const malformed of [{}, null]) {
       expect(() => validateBackendRpcResult('preview.surface.status', malformed)).toThrow(
         'backend.preview.surface.status.result'
@@ -580,6 +678,67 @@ describe('backend RPC contract', () => {
     expect(() => validateBackendRpcResult('diagnostics.stats', { skippedFrames: -1 })).toThrow(
       'diagnostics.stats'
     )
+  })
+
+  it('validates scalar-only Windows D3D11 media diagnostics', () => {
+    const windowsD3d11Media = {
+      state: 'live',
+      requested: true,
+      required: true,
+      adapterLuid: '00000000:00001234',
+      captureAdapterLuid: '00000000:00001234',
+      compositorAdapterLuid: '00000000:00001234',
+      primaryEncoderAdapterLuid: '00000000:00001234',
+      auxiliaryEncoderAdapterLuid: '00000000:00001234',
+      generation: 3,
+      captureBackend: 'desktop-duplication',
+      cursorMode: 'separate',
+      cursorRequested: true,
+      cursorPixelsSource: 'desktop-duplication-shape',
+      cursorExclusionGuaranteed: false,
+      captureReadbackFrames: 0,
+      textureImportFrames: 120,
+      cameraUploadFrames: 0,
+      cursorShapeUploads: 2,
+      cursorCompositedFrames: 30,
+      compositorCpuFallbackFrames: 0,
+      previewPresents: 120,
+      previewDrops: 1,
+      previewBmpRequests: 0,
+      previewBmpBytes: 0,
+      messagePumpLagP95Ms: 2,
+      messagePumpLagMaxMs: 8,
+      mediaCommandLagP95Ms: 3,
+      mediaCommandLagMaxMs: 9,
+      maximumConsecutiveMessageBatch: 4,
+      maximumConsecutiveMediaBatch: 8,
+      encoderGpuSamples: 120,
+      encoderSystemMemorySamples: 0,
+      rawVideoCopiedFrames: 0,
+      texturePoolCapacity: 8,
+      texturePoolInUse: 3,
+      texturePoolPressureEvents: 0,
+      adapterMismatches: 0,
+      deviceResets: 0,
+      staleGenerationCallbacks: 0
+    }
+    const diagnostics = {
+      skippedFrames: 0,
+      droppedFrames: 0,
+      compositorBackend: 'd3d11',
+      windowsD3d11Media
+    }
+
+    expect(validateBackendRpcResult('diagnostics.stats', diagnostics)).toEqual(diagnostics)
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...diagnostics,
+        windowsD3d11Media: {
+          ...windowsD3d11Media,
+          sharedTextureHandle: '0x0000000000000001'
+        }
+      })
+    ).toThrow('sharedTextureHandle')
   })
 
   it('parses response and event envelopes before dispatch', () => {

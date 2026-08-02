@@ -64,6 +64,20 @@ mod twitch_chat;
 mod video_toolbox_encoder;
 mod videorc_api;
 mod viewer_stats;
+#[allow(dead_code)]
+mod windows_d3d11_capture;
+#[allow(dead_code)]
+mod windows_d3d11_compositor;
+#[allow(dead_code)]
+mod windows_d3d11_device;
+#[allow(dead_code)]
+mod windows_d3d11_encoder_contract;
+#[allow(dead_code)]
+mod windows_d3d11_preview;
+#[allow(dead_code)]
+mod windows_d3d11_session;
+#[allow(dead_code)]
+mod windows_d3d11_test_pattern;
 #[cfg(target_os = "windows")]
 mod windows_graphics_capture;
 #[cfg(target_os = "windows")]
@@ -103,8 +117,8 @@ use preview_screen::{
     start_preview_screen, stop_preview_screen,
 };
 use preview_surface::{
-    create_preview_surface, destroy_preview_surface, preview_surface_status,
-    register_preview_surface_resize, take_native_preview_host_commands,
+    apply_main_owned_preview_surface_bounds, create_preview_surface, destroy_preview_surface,
+    preview_surface_status, register_preview_surface_resize, take_native_preview_host_commands,
     update_preview_surface_bounds, update_preview_surface_present,
 };
 use protocol::{
@@ -399,6 +413,18 @@ async fn shutdown_signal(state: AppState) {
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
     shutdown_capture_processes(state.clone()).await;
+    {
+        let mut windows_media = state
+            .windows_d3d11_media
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(error) = windows_media.shutdown() {
+            state.emit_log(
+                "warn",
+                format!("Could not drain the Windows D3D11 media authority: {error}"),
+            );
+        }
+    }
     captions::shutdown_caption_artifacts(&state).await;
 }
 
@@ -5298,6 +5324,23 @@ async fn handle_text_message_with_role(
             let commands = take_native_preview_host_commands(state).await;
             ServerResponse::ok(command.id, commands)
         }
+        "resource.admin.preview_surface_bounds" => {
+            match serde_json::from_value::<protocol::MainOwnedPreviewSurfaceBoundsParams>(
+                command.params,
+            ) {
+                Ok(params) => match apply_main_owned_preview_surface_bounds(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "preview-surface-stacking-rejected",
+                        error,
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "remote.control.status" => ServerResponse::ok(command.id, remote_control_status(state)),
         "remote.control.enable" => match enable_remote_control(state) {
             Ok(status) => ServerResponse::ok(command.id, status),
@@ -8604,6 +8647,36 @@ mod tests {
                 .message
                 .contains("raw outputDirectory is not accepted")
         );
+    }
+
+    #[tokio::test]
+    async fn windows_d3d11_main_owned_preview_bounds_are_admin_only() {
+        let state = test_state();
+        let response = handle_text_message_with_role(
+            &state,
+            &serde_json::json!({
+                "id": "forged-preview-hwnd",
+                "method": "resource.admin.preview_surface_bounds",
+                "params": {
+                    "bounds": {
+                        "screenX": 0.0,
+                        "screenY": 0.0,
+                        "width": 640.0,
+                        "height": 360.0,
+                        "scaleFactor": 1.0,
+                        "orderAboveWindowHandle": "0x000000001234abcd"
+                    },
+                    "generation": 7
+                }
+            })
+            .to_string(),
+            BackendRole::Renderer,
+        )
+        .await;
+
+        assert!(!response.ok);
+        let error = response.error.expect("renderer HWND request rejection");
+        assert_eq!(error.code, "forbidden-method");
     }
 
     #[tokio::test]

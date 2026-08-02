@@ -4,15 +4,19 @@ use crate::compositor::{
 };
 use crate::diagnostics::{apply_preview_surface_resize, apply_runtime_diagnostics_snapshot};
 use crate::native_preview_host::{
-    NativePreviewHostActivation, NativePreviewHostCommand, NativePreviewHostLifecycle,
-    NativePreviewHostLifecycleUpdate,
+    NativePreviewHostActivation, NativePreviewHostBounds, NativePreviewHostCommand,
+    NativePreviewHostLifecycle, NativePreviewHostLifecycleUpdate,
 };
 use crate::protocol::{
-    PreviewSurfaceBacking, PreviewSurfaceBoundsParams, PreviewSurfaceCreateParams,
-    PreviewSurfacePresentParams, PreviewSurfaceSource, PreviewSurfaceState, PreviewSurfaceStatus,
-    PreviewTransport,
+    MainOwnedPreviewSurfaceBounds, MainOwnedPreviewSurfaceBoundsParams, PreviewSurfaceBacking,
+    PreviewSurfaceBoundsParams, PreviewSurfaceCreateParams, PreviewSurfacePresentParams,
+    PreviewSurfaceSource, PreviewSurfaceState, PreviewSurfaceStatus, PreviewTransport,
 };
 use crate::state::AppState;
+#[cfg(target_os = "windows")]
+use crate::windows_d3d11_device::DxgiAdapterLuid;
+#[cfg(target_os = "windows")]
+use crate::windows_d3d11_preview::{WindowsD3d11PresenterStatus, WindowsD3d11PreviewPlacement};
 use chrono::Utc;
 
 pub type PreviewSurfaceSlot = std::sync::Arc<tokio::sync::Mutex<PreviewSurfaceRuntime>>;
@@ -23,6 +27,11 @@ pub struct PreviewSurfaceRuntime {
     run_id: Option<String>,
     native_host: NativePreviewHostLifecycle,
     pending_native_host_commands: Vec<NativePreviewHostCommand>,
+    /// Privileged Electron-main identity for the backend-owned Windows
+    /// presenter. It is deliberately separate from `status.bounds`.
+    pub(crate) main_owned_bounds: Option<MainOwnedPreviewSurfaceBounds>,
+    pub(crate) main_owned_host_bounds: Option<NativePreviewHostBounds>,
+    pub(crate) main_owned_generation: Option<u64>,
 }
 
 pub fn initial_preview_surface_state() -> PreviewSurfaceRuntime {
@@ -31,7 +40,100 @@ pub fn initial_preview_surface_state() -> PreviewSurfaceRuntime {
         run_id: None,
         native_host: NativePreviewHostLifecycle::default(),
         pending_native_host_commands: Vec::new(),
+        main_owned_bounds: None,
+        main_owned_host_bounds: None,
+        main_owned_generation: None,
     }
+}
+
+pub async fn apply_main_owned_preview_surface_bounds(
+    state: &AppState,
+    params: MainOwnedPreviewSurfaceBoundsParams,
+) -> Result<PreviewSurfaceStatus, String> {
+    let _lifecycle = state.preview_surface_lifecycle.lock().await;
+    validate_main_owned_preview_window(&params.bounds)?;
+
+    let mut slot = state.preview_surface.lock().await;
+    if !matches!(
+        slot.status.state,
+        PreviewSurfaceState::Starting | PreviewSurfaceState::Live
+    ) {
+        return Err("preview presenter bounds require an active preview surface".to_string());
+    }
+    if let Some(active_generation) = slot.main_owned_generation {
+        if params.generation < active_generation {
+            return Err(format!(
+                "stale preview generation {} cannot replace active generation {active_generation}",
+                params.generation
+            ));
+        }
+        if params.generation > active_generation {
+            slot.main_owned_bounds = None;
+            slot.main_owned_host_bounds = None;
+        }
+    }
+
+    let safe_bounds = params.bounds.bounds.clone();
+    let host_bounds = NativePreviewHostBounds::from_main_owned(&params.bounds, params.generation);
+    slot.main_owned_generation = Some(params.generation);
+    slot.main_owned_bounds = Some(params.bounds);
+    slot.main_owned_host_bounds = Some(host_bounds);
+    slot.status.width = surface_dimension(safe_bounds.width);
+    slot.status.height = surface_dimension(safe_bounds.height);
+    slot.status.bounds = Some(safe_bounds);
+    slot.status.updated_at = Utc::now().to_rfc3339();
+    let status = slot.status.clone();
+    drop(slot);
+
+    // The stored status is renderer-safe by construction: the trusted HWND
+    // lives only in `main_owned_bounds`.
+    state.emit_event("preview.surface.status", status.clone());
+    Ok(status)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn validate_main_owned_preview_window(
+    bounds: &MainOwnedPreviewSurfaceBounds,
+) -> Result<(), String> {
+    if bounds.order_above_window_handle.is_some() {
+        return Err("a Windows HWND is not accepted on this platform".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn validate_main_owned_preview_window(
+    bounds: &MainOwnedPreviewSurfaceBounds,
+) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
+
+    let handle = bounds
+        .order_above_window_handle
+        .as_ref()
+        .ok_or_else(|| "the Windows preview presenter requires a main-owned HWND".to_string())?;
+    let pointer = usize::try_from(handle.as_u64())
+        .map_err(|_| "the preview HWND does not fit this process pointer width".to_string())?;
+    let hwnd = HWND(pointer as *mut core::ffi::c_void);
+    // SAFETY: these calls only inspect the opaque HWND. `IsWindow` is checked
+    // before ownership is queried, and the handle is never dereferenced.
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return Err("the main-owned preview HWND is no longer a live window".to_string());
+    }
+    let expected_pid = std::env::var("VIDEORC_SUPERVISOR_PID")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|pid| *pid != 0)
+        .ok_or_else(|| "the authenticated Electron supervisor PID is unavailable".to_string())?;
+    let mut owner_pid = 0_u32;
+    // SAFETY: `owner_pid` is a live writable u32 for the duration of the call.
+    let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner_pid)) };
+    if thread_id == 0 || owner_pid != expected_pid {
+        return Err(format!(
+            "the preview HWND belongs to process {owner_pid}, expected Electron supervisor {expected_pid}"
+        ));
+    }
+    Ok(())
 }
 
 pub async fn create_preview_surface(
@@ -89,6 +191,7 @@ pub async fn create_preview_surface(
         source_pixels_present: false,
         pending_host_command_count: 0,
         bounds: Some(bounds.clone()),
+        windows_d3d11_presenter: None,
         started_at: Some(now.clone()),
         updated_at: now,
         message: Some(message.to_string()),
@@ -259,6 +362,8 @@ pub async fn destroy_preview_surface(state: &AppState) -> PreviewSurfaceStatus {
         next.started_at = None;
         next.updated_at = Utc::now().to_rfc3339();
         next.message = Some("Native preview surface stopped.".to_string());
+        slot.main_owned_bounds = None;
+        slot.main_owned_host_bounds = None;
         slot.status = next.clone();
         next
     };
@@ -392,6 +497,106 @@ pub async fn activate_native_preview_host(
     status
 }
 
+/// Mirrors every backend presenter transition into renderer-safe preview
+/// status. Canonical D3D identifiers are claimed only after the presenter
+/// contract proves a live source and first successful present.
+#[cfg(target_os = "windows")]
+pub async fn update_windows_d3d11_presenter_status(
+    state: &AppState,
+    presenter: WindowsD3d11PresenterStatus,
+) -> PreviewSurfaceStatus {
+    let status = {
+        let mut slot = state.preview_surface.lock().await;
+        let mut next = slot.status.clone();
+        next.windows_d3d11_presenter = Some(presenter.diagnostics.clone());
+        if presenter.canonical_claim_ready {
+            let presented_frame_id = presenter
+                .diagnostics
+                .last_presented_sequence
+                .unwrap_or(presenter.diagnostics.successful_presents);
+            next.transport = PreviewTransport::D3d11SharedTexture;
+            next.backing = PreviewSurfaceBacking::DirectcompositionSwapChain;
+            next.presented_frame_id = Some(presented_frame_id);
+            next.frames_rendered = next.frames_rendered.max(presented_frame_id);
+            next.frame_polling_suppressed = true;
+            next.source_pixels_present = true;
+            next.message =
+                Some("Backend D3D11 DirectComposition preview is presenting.".to_string());
+        } else {
+            next.transport = PreviewTransport::ElectronProofSurface;
+            next.backing = PreviewSurfaceBacking::ElectronBrowserWindow;
+            next.frame_polling_suppressed = false;
+            next.source_pixels_present = false;
+            next.message = Some(format!(
+                "Windows native preview is using the Electron proof fallback: {}.",
+                presenter
+                    .diagnostics
+                    .fallback_reason
+                    .as_deref()
+                    .unwrap_or("waiting-first-present")
+            ));
+        }
+        next.updated_at = Utc::now().to_rfc3339();
+        slot.status = next.clone();
+        next
+    };
+    emit_preview_surface_present_diagnostics(state, &status).await;
+    state.emit_event("preview.surface.status", status.clone());
+    status
+}
+
+#[cfg(target_os = "windows")]
+pub async fn trusted_windows_d3d11_preview_placement(
+    state: &AppState,
+    media_generation: u64,
+    adapter_luid: DxgiAdapterLuid,
+) -> Result<WindowsD3d11PreviewPlacement, String> {
+    let trusted_bounds = state
+        .preview_surface
+        .lock()
+        .await
+        .main_owned_host_bounds
+        .clone()
+        .ok_or_else(|| {
+            "Electron main has not supplied trusted Windows preview bounds".to_string()
+        })?;
+    WindowsD3d11PreviewPlacement::from_trusted_host_bounds(
+        media_generation,
+        adapter_luid,
+        &trusted_bounds,
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub async fn teardown_windows_d3d11_presenter_status(
+    state: &AppState,
+    fallback_reason: impl Into<String>,
+) -> PreviewSurfaceStatus {
+    let fallback_reason = fallback_reason.into();
+    let status = {
+        let mut slot = state.preview_surface.lock().await;
+        let mut next = slot.status.clone();
+        let mut diagnostics = next.windows_d3d11_presenter.take().unwrap_or_default();
+        diagnostics.source_live = false;
+        diagnostics.first_present_succeeded = false;
+        diagnostics.fallback_reason = Some(fallback_reason.clone());
+        next.windows_d3d11_presenter = Some(diagnostics);
+        next.transport = PreviewTransport::ElectronProofSurface;
+        next.backing = PreviewSurfaceBacking::ElectronBrowserWindow;
+        next.frame_polling_suppressed = false;
+        next.source_pixels_present = false;
+        next.message = Some(format!(
+            "Windows native preview presenter stopped; Electron proof fallback is active: {fallback_reason}."
+        ));
+        next.updated_at = Utc::now().to_rfc3339();
+        slot.status = next.clone();
+        next
+    };
+    emit_preview_surface_present_diagnostics(state, &status).await;
+    state.emit_event("preview.surface.status", status.clone());
+    status
+}
+
 fn is_stale_present_update(
     current: &PreviewSurfaceStatus,
     params: &PreviewSurfacePresentParams,
@@ -486,6 +691,7 @@ fn apply_native_host_activation(
         presented_frame_id,
         frame_polling_suppressed,
         source_pixels_present,
+        windows_d3d11_presenter,
         message,
     }: NativePreviewHostActivation,
 ) {
@@ -499,6 +705,7 @@ fn apply_native_host_activation(
     status.frames_rendered = status.frames_rendered.max(presented_frame_id);
     status.frame_polling_suppressed = frame_polling_suppressed;
     status.source_pixels_present = source_pixels_present;
+    status.windows_d3d11_presenter = windows_d3d11_presenter;
     if let Some(message) = message {
         status.message = Some(message);
     }
@@ -568,6 +775,7 @@ fn unavailable_status(message: Option<String>) -> PreviewSurfaceStatus {
         source_pixels_present: false,
         pending_host_command_count: 0,
         bounds: None,
+        windows_d3d11_presenter: None,
         started_at: None,
         updated_at: Utc::now().to_rfc3339(),
         message,
@@ -606,6 +814,62 @@ mod tests {
             screen_height: Some(1080.0),
             ..Default::default()
         }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn windows_d3d11_main_owned_preview_bounds_are_generation_bound_and_redacted() {
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(640.0, 360.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await;
+
+        let first = apply_main_owned_preview_surface_bounds(
+            &state,
+            MainOwnedPreviewSurfaceBoundsParams {
+                bounds: MainOwnedPreviewSurfaceBounds {
+                    bounds: bounds(1280.0, 720.0),
+                    order_above_window_handle: None,
+                },
+                generation: 7,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.width, 1280);
+        assert_eq!(first.height, 720);
+        assert!(
+            serde_json::to_value(&first)
+                .unwrap()
+                .pointer("/bounds/orderAboveWindowHandle")
+                .is_none()
+        );
+
+        let stale = apply_main_owned_preview_surface_bounds(
+            &state,
+            MainOwnedPreviewSurfaceBoundsParams {
+                bounds: MainOwnedPreviewSurfaceBounds {
+                    bounds: bounds(320.0, 180.0),
+                    order_above_window_handle: None,
+                },
+                generation: 6,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(stale.contains("stale preview generation"));
+        assert_eq!(
+            state.preview_surface.lock().await.main_owned_generation,
+            Some(7)
+        );
+
+        destroy_preview_surface(&state).await;
     }
 
     #[tokio::test]

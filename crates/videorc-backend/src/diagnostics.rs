@@ -258,6 +258,7 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         compositor_backend: None,
         compositor_fallback_reason: None,
         compositor_cpu_fallback_frames: 0,
+        windows_d3d11_media: Default::default(),
         websocket_transport: Default::default(),
         preview_image_poll_counts: PreviewImagePollCounts::default(),
         preview_target_fps: None,

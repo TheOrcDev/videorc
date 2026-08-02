@@ -324,7 +324,8 @@ function DetachedPreviewCard({
     ? (supervisorStatus.transportLabel ??
       previewTransportLabel(
         previewSurfaceStatus?.transport ?? 'unavailable',
-        previewSurfaceStatus?.backing
+        previewSurfaceStatus?.backing,
+        previewSurfaceStatus?.nativePreviewHostKind
       ))
     : null
   const disabledMessage =
@@ -454,14 +455,22 @@ export function previewSupervisorDisplay(
       return {
         title: 'Preview is live in its own window',
         detail: 'Drag, resize, or close it anytime',
-        transportLabel: previewTransportLabel(supervisor.transport, supervisor.backing),
+        transportLabel: previewTransportLabel(
+          supervisor.transport,
+          supervisor.backing,
+          supervisor.nativePreviewHostKind
+        ),
         tone: 'normal'
       }
     case 'surface-fallback':
       return {
         title: 'Preview is using fallback rendering',
         detail: supervisor.fallbackReason ?? 'Native surface is not available yet.',
-        transportLabel: previewTransportLabel(supervisor.transport, supervisor.backing),
+        transportLabel: previewTransportLabel(
+          supervisor.transport,
+          supervisor.backing,
+          supervisor.nativePreviewHostKind
+        ),
         tone: 'warn'
       }
     case 'permission-required':
@@ -561,11 +570,18 @@ export function previewPermissionPane(
 
 function previewTransportLabel(
   transport: PreviewLiveStatus['transport'] | PreviewSupervisorState['transport'],
-  backing?: PreviewSurfaceStatus['backing'] | PreviewSupervisorState['backing']
+  backing?: PreviewSurfaceStatus['backing'] | PreviewSupervisorState['backing'],
+  hostKind?:
+    | PreviewSurfaceStatus['nativePreviewHostKind']
+    | PreviewSupervisorState['nativePreviewHostKind']
 ): string | null {
   switch (transport) {
     case 'native-surface':
       return backing === 'cametal-layer' ? 'Native preview' : 'Surface proof'
+    case 'd3d11-shared-texture':
+      return backing === 'directcomposition-swapchain' && hostKind === 'backend-d3d11-presenter'
+        ? 'Native preview'
+        : 'Surface proof'
     case 'electron-proof-surface':
       return 'Electron proof'
     case 'latest-jpeg-polling':

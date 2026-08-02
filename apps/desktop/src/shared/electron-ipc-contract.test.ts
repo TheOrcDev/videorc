@@ -147,6 +147,12 @@ describe('Electron IPC contract', () => {
       validateElectronInvokeArgs('preview-surface:create', [{ ...bounds, width: Number.NaN }, 3])
     ).toThrow('finite number')
     expect(() =>
+      validateElectronInvokeArgs('preview-surface:create', [
+        { ...bounds, orderAboveWindowHandle: '0x0000000000000001' },
+        3
+      ])
+    ).toThrow('orderAboveWindowHandle')
+    expect(() =>
       validateElectronInvokeArgs('resource:trash-session-deletion', ['x'.repeat(1025)])
     ).toThrow('at most 1024')
   })
@@ -283,6 +289,34 @@ describe('Electron IPC contract', () => {
     expect(
       validateElectronInvokeResult('preview-surface:set-frame-polling-suppressed', surfaceStatus)
     ).toEqual(surfaceStatus)
+    const d3d11SurfaceStatus = {
+      ...surfaceStatus,
+      transport: 'd3d11-shared-texture',
+      backing: 'directcomposition-swapchain',
+      nativePreviewHostKind: 'backend-d3d11-presenter'
+    }
+    expect(validateElectronInvokeResult('preview-surface:status', d3d11SurfaceStatus)).toEqual(
+      d3d11SurfaceStatus
+    )
+    for (const leaked of [
+      { ...d3d11SurfaceStatus, nativeWindowHandle: '0x0000000000000001' },
+      { ...d3d11SurfaceStatus, processId: 42 },
+      { ...d3d11SurfaceStatus, sharedTextureHandle: '0x0000000000000002' },
+      {
+        ...d3d11SurfaceStatus,
+        bounds: { ...bounds, orderAboveWindowHandle: '0x0000000000000001' }
+      },
+      {
+        ...d3d11SurfaceStatus,
+        windowsD3d11Presenter: {
+          resourceHandle: '0x0000000000000003'
+        }
+      }
+    ]) {
+      expect(() => validateElectronInvokeResult('preview-surface:status', leaked)).toThrow(
+        /renderer-facing/
+      )
+    }
     expect(() =>
       validateElectronInvokeResult('preview-surface:set-frame-polling-suppressed', true)
     ).toThrow('set-frame-polling-suppressed.result')

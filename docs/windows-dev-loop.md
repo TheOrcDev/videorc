@@ -95,19 +95,75 @@ Packaged native-screen acceptance (requires `VIDEORC_PERF_APP_EXECUTABLE` plus
 the bundled FFmpeg/FFprobe paths, as configured in `.github/workflows/windows.yml`):
 
 ```powershell
-pnpm smoke:windows-native-screen
-pnpm smoke:recording-native-preview
+pnpm smoke:windows-native-screen -- --d3d11 --require-d3d11
+pnpm smoke:recording-native-preview -- --d3d11 --require-d3d11
 pnpm smoke:windows-live-audio-controls
 ```
 
-The first command selects DXGI (gdigrab fallback), validates decoded BMP pixels
-and frame advancement during a real ScreenOnly recording, then inspects the final
-artifact. The second keeps the detached Electron proof surface mounted and fed by
-that real source throughout recording. The third requires a physical DirectShow
-microphone and a steady, unclipped calibration tone. It records and streams while
-checking acknowledged gain, mute, unmute, and stop-during-update behavior against
-the resulting audio artifacts. No available physical microphone is an explicit
-blocked gate, not a synthetic pass.
+On supported hardware, the first two commands require D3D11 capture/composition,
+Media Foundation GPU input, the canonical DirectComposition preview triple, and
+zero production readbacks/raw copies/system-memory encoder samples/BMP work.
+They fail closed instead of silently running the legacy proof path. The third
+requires a physical DirectShow microphone and a steady, unclipped calibration
+tone. It records and streams while checking acknowledged gain, mute, unmute,
+and stop-during-update behavior against the resulting audio artifacts. No
+available physical microphone is an explicit blocked gate, not a synthetic
+pass.
+
+Use the legacy proof path only for the distinct machine where the production
+capability probe naturally rejects the unified D3D11 topology:
+
+```powershell
+pnpm smoke:windows-native-screen -- --expect-fallback natural
+pnpm smoke:recording-native-preview -- --expect-fallback natural
+```
+
+Never use forced failure injection as natural-fallback acceptance evidence.
+
+## D3D11 source and physical gates
+
+Plan 040 is currently an implementation branch, not a qualified Windows
+release. The pure runner-policy suite can run on other platforms, but the
+commands in this section must remain BLOCKED until they run from the final
+source state on Windows x64 and, where noted, against the same signed installed
+candidate. The live record is
+[`2026-07-30-windows-d3d11-media.md`](acceptance/2026-07-30-windows-d3d11-media.md).
+
+The Windows-only Rust discovery command is intentionally unsupported on macOS
+or Linux because those hosts compile `cfg(target_os = "windows")` code out:
+
+```powershell
+pnpm smoke:windows-d3d11-media -- --verify-windows-rust
+cargo test -p videorc-backend --no-fail-fast
+cargo clippy -p videorc-backend --all-targets -- -D warnings
+```
+
+Run the physical stages and placement probes against the packaged candidate:
+
+```powershell
+pnpm smoke:windows-d3d11-media -- --stage capture
+pnpm smoke:windows-d3d11-media -- --stage compositor
+pnpm smoke:windows-d3d11-media -- --stage encoder
+pnpm smoke:windows-d3d11-media -- --stage preview
+$env:VIDEORC_EXPECT_WINDOWS_D3D11 = '1'
+pnpm probe:preview-lifecycle
+pnpm probe:preview-window
+Remove-Item Env:VIDEORC_EXPECT_WINDOWS_D3D11 -ErrorAction SilentlyContinue
+```
+
+The preview probes require the full
+`d3d11-shared-texture` / `directcomposition-swapchain` /
+`backend-d3d11-presenter` identity, first-present/source liveness, zero BMP
+requests/bytes, move/resize/DPI/reattach behavior, and Electron click/focus
+continuity through the no-activate presenter.
+
+The same installed-app digest must be used for OBS comparison, stream
+calibration, budget derivation, forced-path gates, automatic-default reruns,
+and host-manifest merge. See
+[`2026-07-30-windows-d3d11-media.md`](acceptance/2026-07-30-windows-d3d11-media.md)
+for the required NVIDIA, Intel, and natural-fallback evidence chain. A
+portable test or a different installer cannot substitute for any physical
+row.
 
 ## Packaged Windows performance calibration
 

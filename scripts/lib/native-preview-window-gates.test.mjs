@@ -6,6 +6,7 @@ import { previewWindowSurfaceReady } from './native-preview-window-gates.mjs'
 const windowsOptions = {
   expectedTransport: 'electron-proof-surface',
   expectedBacking: 'electron-browser-window',
+  expectedHostKind: 'proof-surface',
   expectNativeMetalPreview: false
 }
 
@@ -96,8 +97,31 @@ test('native Metal readiness accepts hidden proof host only with native placemen
     previewWindowSurfaceReady(evidence, {
       expectedTransport: 'native-surface',
       expectedBacking: 'cametal-layer',
+      expectedHostKind: 'in-process',
       expectNativeMetalPreview: true
     }),
     true
   )
+})
+
+test('native Windows D3D11 readiness requires the canonical presenter triple and polling suppression', () => {
+  const evidence = windowsEvidence()
+  evidence.windowState.surface.visible = false
+  evidence.windowState.nativeOwnsPlacement = true
+  evidence.surfaceStatus.transport = 'd3d11-shared-texture'
+  evidence.surfaceStatus.backing = 'directcomposition-swapchain'
+  evidence.surfaceStatus.nativePreviewHostKind = 'backend-d3d11-presenter'
+  evidence.surfaceStatus.framePollingSuppressed = true
+
+  const options = {
+    expectedTransport: 'd3d11-shared-texture',
+    expectedBacking: 'directcomposition-swapchain',
+    expectedHostKind: 'backend-d3d11-presenter',
+    expectNativeMetalPreview: false,
+    expectNativePresenter: true
+  }
+
+  assert.equal(previewWindowSurfaceReady(evidence, options), true)
+  evidence.surfaceStatus.nativePreviewHostKind = 'proof-surface'
+  assert.equal(previewWindowSurfaceReady(evidence, options), false)
 })

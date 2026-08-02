@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  assessWindowsD3d11FirstPresent,
   assessProofPresentationWatch,
   assessProofSourceFrame,
   assessFirstFrame,
@@ -47,10 +48,60 @@ describe('nativePreviewFirstFrameWatchdogEnabled', () => {
 })
 
 describe('nativePreviewProofWatchdogEnabled', () => {
-  it('runs the independent proof liveness watch only on Windows', () => {
+  it('runs the independent proof liveness watch only for the Windows fallback', () => {
     expect(nativePreviewProofWatchdogEnabled('win32')).toBe(true)
+    expect(
+      nativePreviewProofWatchdogEnabled('win32', {
+        transport: 'd3d11-shared-texture',
+        backing: 'directcomposition-swapchain',
+        nativePreviewHostKind: 'backend-d3d11-presenter'
+      })
+    ).toBe(false)
     expect(nativePreviewProofWatchdogEnabled('darwin')).toBe(false)
     expect(nativePreviewProofWatchdogEnabled('linux')).toBe(false)
+  })
+})
+
+describe('assessWindowsD3d11FirstPresent', () => {
+  const status = {
+    state: 'live' as const,
+    transport: 'd3d11-shared-texture' as const,
+    backing: 'directcomposition-swapchain' as const,
+    nativePreviewHostKind: 'backend-d3d11-presenter' as const,
+    nativePreviewHostAttached: true,
+    sourcePixelsPresent: true,
+    presentedFrameId: 1,
+    firstFrameContract: 'pending' as const
+  }
+
+  it('requires first present and source liveness before Windows native is met', () => {
+    expect(assessWindowsD3d11FirstPresent({ status, elapsedMs: 100 })).toBe('met')
+    expect(
+      assessWindowsD3d11FirstPresent({
+        status: { ...status, presentedFrameId: undefined },
+        elapsedMs: 100
+      })
+    ).toBe('pending')
+    expect(
+      assessWindowsD3d11FirstPresent({
+        status: { ...status, sourcePixelsPresent: false },
+        elapsedMs: 15_000
+      })
+    ).toBe('fallback')
+  })
+
+  it('never lets the Electron proof fallback satisfy the D3D11 contract', () => {
+    expect(
+      assessWindowsD3d11FirstPresent({
+        status: {
+          ...status,
+          transport: 'electron-proof-surface',
+          backing: 'electron-browser-window',
+          nativePreviewHostKind: 'proof-surface'
+        },
+        elapsedMs: 15_000
+      })
+    ).toBe('not-applicable')
   })
 })
 

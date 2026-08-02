@@ -23,6 +23,10 @@ async function main() {
   )
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
   const priorAcceptedReleaseIds = await loadPriorAcceptedAlphaIds(manifest.releaseId)
+  const installedAppSha256 =
+    process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256?.trim() || null
+  const packagePayloadSha256 =
+    process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256?.trim() || null
   const resolved = await resolveWindowsAcceptanceRecord({
     expectations: {
       filename: manifest.filename,
@@ -31,14 +35,23 @@ async function main() {
       releasedAt: manifest.releasedAt,
       releaseId: requiredEnv('VIDEORC_RELEASE_ID'),
       sourceCommit: requiredEnv('VIDEORC_RELEASE_SOURCE_COMMIT'),
+      ...(installedAppSha256 ? { installedAppSha256 } : {}),
+      ...(packagePayloadSha256 ? { packagePayloadSha256 } : {}),
       priorAcceptedReleaseIds
     },
     url: acceptanceRecordUrl
   })
+  if (resolved.record.schemaVersion === 3 && (!installedAppSha256 || !packagePayloadSha256)) {
+    throw new Error(
+      'Schema 3 D3D11 acceptance requires VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256 and VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256.'
+    )
+  }
   assertRecordCommitOnTrustedMain(resolved.recordCommit)
   const accepted = applyWindowsAcceptanceRecord({
     acceptanceRecordUrl: resolved.publicUrl,
+    ...(installedAppSha256 ? { installedAppSha256 } : {}),
     manifest,
+    ...(packagePayloadSha256 ? { packagePayloadSha256 } : {}),
     priorAcceptedReleaseIds,
     record: resolved.record
   })

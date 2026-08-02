@@ -27,6 +27,9 @@
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: HIGH
+- **Execution status**: IN PROGRESS — source implementation and portable
+  contract gates are active; Windows source-lane, installed-candidate,
+  presenter, performance, and hardware qualification remain BLOCKED
 - **Depends on**: Plan 039 Steps 1-5 at commit
   `d85f9b4c1fc2eb3e7f084ad62a80f4f6375497ce` (observability, RTMP harness,
   self-capture exclusion, MF topology/fallback, entitlement and provider
@@ -39,6 +42,31 @@ Step 0 reconciled this plan against the exact Plan 039 Steps 1-5 dependency
 commit above. The implementation branch starts from that commit plus this
 plan-only reconciliation; any later unexplained in-scope drift remains a STOP
 condition.
+
+### Implementation checkpoint (2026-07-30)
+
+Source work is underway on the branch. The D3D11 authority, lease and protocol
+types, capture/compositor/session/presenter modules, Electron-main presenter
+authority, diagnostics contracts, and fail-closed evidence runners exist in
+the working tree. Runtime integration and the final verification sweep are not
+yet declared complete.
+
+The following interim portable contract command is evidenced at this
+checkpoint:
+
+```text
+node --test scripts/lib/windows-d3d11-media.test.mjs scripts/lib/windows-stream-performance.test.mjs scripts/lib/windows-performance-budget.test.mjs
+81 passed, 0 failed
+```
+
+This is pure contract/runner evidence only. It does not compile the
+Windows-only Rust bodies and does not exercise D3D11, Desktop Duplication,
+Windows Graphics Capture, DirectComposition, Media Foundation GPU input, an
+installed app, or a physical performance workload. The exact Windows Rust
+manifest/full suite/clippy, signed installed candidate, NVIDIA and Intel
+matrices, natural-fallback host, presenter lifecycle/input checks, OBS
+comparisons, active performance budget, and deterministic host merge all
+remain BLOCKED. No done criterion below is satisfied by the portable result.
 
 ### Post-Plan-039 reconciliation
 
@@ -232,25 +260,25 @@ compile all `cfg(target_os = "windows")` modules out and is not evidence for
 this plan. Run the hardware gates on that physical Windows machine with the
 packaged candidate.
 
-| Purpose | Command | Expected on success |
-|---|---|---|
-| Script tests | `pnpm test:scripts` | exit 0 |
-| Desktop tests | `pnpm --filter @videorc/desktop test` | exit 0 |
-| Typecheck/lint/format | `pnpm typecheck && pnpm lint && pnpm format:check` | exit 0 |
-| Rust format | `cargo fmt --check --all` | exit 0 |
-| Portable Rust tests | `cargo test -p videorc-backend` | exit 0, but does not replace the Windows lane |
-| Windows D3D Rust discovery | `pnpm smoke:windows-d3d11-media -- --verify-windows-rust --list-only` | exact maintained D3D test manifest/count is discovered and count is greater than zero |
-| Full Rust tests (Windows source checkout) | `cargo test -p videorc-backend --no-fail-fast` | exit 0 with Windows-only modules compiled and run |
-| Rust lint (Windows source checkout) | `cargo clippy -p videorc-backend --all-targets -- -D warnings` | exit 0 |
-| Desktop build | `pnpm build` | exit 0 |
-| New D3D11 gate (physical Windows) | `pnpm smoke:windows-d3d11-media` | exit 0 and every zero-copy counter passes |
-| Preview lifecycle (physical Windows) | `pnpm probe:preview-lifecycle` | exit 0 with D3D11 presenter selected |
-| Preview placement (physical Windows) | `pnpm probe:preview-window` | exit 0 with move/resize/DPI/stacking assertions |
-| Stream performance (physical Windows) | `pnpm smoke:windows-stream-performance` | exit 0 with D3D11 capture/compositor/MF input selected |
-| Recording Studio regression | `pnpm smoke:recording-studio` | exit 0 |
-| Recording profile/color/FPS regression | `pnpm smoke:recording-matrix` | exit 0 |
-| Real-device Recording Studio regression | `pnpm smoke:recording-studio:devices` | exit 0 on a permitted macOS device host, or an explicit BLOCKED record plus the closest Windows D3D11/native-preview gates |
-| Protected Windows lane | `pnpm smoke:local-gates:windows` | exit 0 |
+| Purpose                                   | Command                                                               | Expected on success                                                                                                        |
+| ----------------------------------------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Script tests                              | `pnpm test:scripts`                                                   | exit 0                                                                                                                     |
+| Desktop tests                             | `pnpm --filter @videorc/desktop test`                                 | exit 0                                                                                                                     |
+| Typecheck/lint/format                     | `pnpm typecheck && pnpm lint && pnpm format:check`                    | exit 0                                                                                                                     |
+| Rust format                               | `cargo fmt --check --all`                                             | exit 0                                                                                                                     |
+| Portable Rust tests                       | `cargo test -p videorc-backend`                                       | exit 0, but does not replace the Windows lane                                                                              |
+| Windows D3D Rust discovery                | `pnpm smoke:windows-d3d11-media -- --verify-windows-rust --list-only` | exact maintained D3D test manifest/count is discovered and count is greater than zero                                      |
+| Full Rust tests (Windows source checkout) | `cargo test -p videorc-backend --no-fail-fast`                        | exit 0 with Windows-only modules compiled and run                                                                          |
+| Rust lint (Windows source checkout)       | `cargo clippy -p videorc-backend --all-targets -- -D warnings`        | exit 0                                                                                                                     |
+| Desktop build                             | `pnpm build`                                                          | exit 0                                                                                                                     |
+| New D3D11 gate (physical Windows)         | `pnpm smoke:windows-d3d11-media`                                      | exit 0 and every zero-copy counter passes                                                                                  |
+| Preview lifecycle (physical Windows)      | `pnpm probe:preview-lifecycle`                                        | exit 0 with D3D11 presenter selected                                                                                       |
+| Preview placement (physical Windows)      | `pnpm probe:preview-window`                                           | exit 0 with move/resize/DPI/stacking assertions                                                                            |
+| Stream performance (physical Windows)     | `pnpm smoke:windows-stream-performance`                               | exit 0 with D3D11 capture/compositor/MF input selected                                                                     |
+| Recording Studio regression               | `pnpm smoke:recording-studio`                                         | exit 0                                                                                                                     |
+| Recording profile/color/FPS regression    | `pnpm smoke:recording-matrix`                                         | exit 0                                                                                                                     |
+| Real-device Recording Studio regression   | `pnpm smoke:recording-studio:devices`                                 | exit 0 on a permitted macOS device host, or an explicit BLOCKED record plus the closest Windows D3D11/native-preview gates |
+| Protected Windows lane                    | `pnpm smoke:local-gates:windows`                                      | exit 0                                                                                                                     |
 
 Any change touching Windows async/process tests must additionally run each
 affected filter at least 25 times and the full Windows Rust suite three times
@@ -262,6 +290,7 @@ child cleanup as required by `AGENTS.md`.
 **In scope** (the only files to modify):
 
 - `crates/videorc-backend/Cargo.toml`
+- `Cargo.lock`
 - `crates/videorc-backend/src/main.rs`
 - `crates/videorc-backend/src/state.rs`
 - `crates/videorc-backend/src/protocol.rs`
@@ -281,10 +310,14 @@ child cleanup as required by `AGENTS.md`.
 - `crates/videorc-backend/src/windows_d3d11_device.rs` (create)
 - `crates/videorc-backend/src/windows_d3d11_capture.rs` (create)
 - `crates/videorc-backend/src/windows_d3d11_compositor.rs` (create)
+- `crates/videorc-backend/src/windows_d3d11_encoder_contract.rs` (create)
+- `crates/videorc-backend/src/windows_d3d11_session.rs` (create)
 - `crates/videorc-backend/src/windows_d3d11_shaders.hlsl` (create)
 - `crates/videorc-backend/src/windows_d3d11_preview.rs` (create)
 - `crates/videorc-backend/src/windows_d3d11_test_pattern.rs` (create)
 - `apps/desktop/src/main/index.ts`
+- `apps/desktop/src/main/backend-event-message.ts`
+- `apps/desktop/src/main/backend-event-message.test.ts`
 - `apps/desktop/src/main/native-preview-window-stacking.ts` (create)
 - `apps/desktop/src/main/native-preview-window-stacking.test.ts` (create)
 - `apps/desktop/src/main/native-preview-first-frame.ts`
@@ -294,6 +327,7 @@ child cleanup as required by `AGENTS.md`.
 - `apps/desktop/src/main/native-preview-scene-authority.test.ts`
 - `apps/desktop/src/main/preview-supervisor.ts`
 - `apps/desktop/src/main/preview-supervisor.test.ts`
+- `apps/desktop/src/main/smoke-command-security.ts`
 - `apps/desktop/src/shared/backend.ts`
 - `apps/desktop/src/shared/backend-rpc-contract.ts`
 - `apps/desktop/src/shared/backend-rpc-contract.test.ts`
@@ -311,6 +345,7 @@ child cleanup as required by `AGENTS.md`.
 - `apps/desktop/src/renderer/src/components/preview-stage.tsx`
 - `apps/desktop/src/renderer/src/components/preview-stage.test.ts`
 - `apps/desktop/src/renderer/src/components/tabs/diagnostics-tab.tsx`
+- `apps/desktop/src/renderer/src/components/tabs/studio-tab.tsx`
 - `apps/desktop/src/renderer/src/hooks/use-studio.tsx`
 - `apps/desktop/src/renderer/src/hooks/studio-provider.integration.test.ts`
 - `apps/desktop/src/renderer/src/hooks/use-studio-context-partition.test.ts`
@@ -353,6 +388,8 @@ child cleanup as required by `AGENTS.md`.
 - `scripts/lib/support-bundle-verifier.mjs`
 - `scripts/lib/support-bundle-verifier.test.mjs`
 - `scripts/preview-lifecycle-probe.mjs`
+- `scripts/lib/windows-preview-lifecycle-gates.mjs` (create)
+- `scripts/lib/windows-preview-lifecycle-gates.test.mjs` (create)
 - `scripts/preview-window-probe.mjs`
 - `scripts/smoke-preview-surface-app.mjs`
 - `scripts/smoke-recording-native-preview-app.mjs`
@@ -442,27 +479,27 @@ child cleanup as required by `AGENTS.md`.
      unavailable, reject the capability and use the named fallback;
    - no manual `Send`/`Sync` implementation for COM/D3D/MF owners. Only command
      values and opaque IDs cross threads.
-   `AppState` in `state.rs` owns the sole
-   `WindowsD3d11MediaCoordinator` slot: a bounded command sender, join handle,
-   adapter LUID, generation, and ref-counted preview/record/stream role leases,
-   never COM objects. `acquire_windows_d3d11_media` lazily starts the thread or
-   reuses it only for the same adapter/generation; a different-adapter request
-   while any role is active is rejected with a named fallback. Closing preview
-   releases only its role and cannot stop an active record/stream. The last
-   role drains and joins the thread; app shutdown always drains/joins. Device
-   reset atomically closes the old generation, rejects stale callbacks, and
-   permits exactly one recreated coordinator.
-   The thread also owns the presenter's Win32 message queue and WndProc. Back
-   the bounded media-command queue with a Win32 event and multiplex that event,
-   waitable timers, and `QS_ALLINPUT` through
-   `MsgWaitForMultipleObjectsEx(..., MWMO_INPUTAVAILABLE)`. Drain a bounded
-   batch with `PeekMessage`/`TranslateMessage`/`DispatchMessage`, then a bounded
-   media-work batch, so move/DPI/close/input traffic cannot starve capture or
-   encode and media work cannot starve the window pump. Desktop Duplication
-   acquisition must be timeout-bounded/nonblocking inside this loop. Record
-   message-pump lag, media-command lag, and maximum consecutive batch sizes.
-   MF callbacks perform no GPU/window work: they enqueue scalar events and
-   signal the same command event for the media thread to consume.
+     `AppState` in `state.rs` owns the sole
+     `WindowsD3d11MediaCoordinator` slot: a bounded command sender, join handle,
+     adapter LUID, generation, and ref-counted preview/record/stream role leases,
+     never COM objects. `acquire_windows_d3d11_media` lazily starts the thread or
+     reuses it only for the same adapter/generation; a different-adapter request
+     while any role is active is rejected with a named fallback. Closing preview
+     releases only its role and cannot stop an active record/stream. The last
+     role drains and joins the thread; app shutdown always drains/joins. Device
+     reset atomically closes the old generation, rejects stale callbacks, and
+     permits exactly one recreated coordinator.
+     The thread also owns the presenter's Win32 message queue and WndProc. Back
+     the bounded media-command queue with a Win32 event and multiplex that event,
+     waitable timers, and `QS_ALLINPUT` through
+     `MsgWaitForMultipleObjectsEx(..., MWMO_INPUTAVAILABLE)`. Drain a bounded
+     batch with `PeekMessage`/`TranslateMessage`/`DispatchMessage`, then a bounded
+     media-work batch, so move/DPI/close/input traffic cannot starve capture or
+     encode and media work cannot starve the window pump. Desktop Duplication
+     acquisition must be timeout-bounded/nonblocking inside this loop. Record
+     message-pump lag, media-command lag, and maximum consecutive batch sizes.
+     MF callbacks perform no GPU/window work: they enqueue scalar events and
+     signal the same command event for the media thread to consume.
 4. Extend the existing compositor/wire types rather than replacing them:
    - `CompositorBackend::D3d11`;
    - D3D11 BGRA/NV12 `CompositorPixelFormat` variants;
@@ -481,9 +518,9 @@ child cleanup as required by `AGENTS.md`.
      cursor-shape uploads/composited frames, compositor CPU fallbacks, preview
      presents/drops, message-pump/media-command lag, encoder GPU samples,
      adapter mismatches, device resets, and fallback reason.
-   Never serialize a D3D11 texture/shared handle to Electron or the renderer.
-   Only the process-local Rust owner may access it; wire diagnostics may expose
-   a generation/token that cannot be reopened as an OS resource.
+     Never serialize a D3D11 texture/shared handle to Electron or the renderer.
+     Only the process-local Rust owner may access it; wire diagnostics may expose
+     a generation/token that cannot be reopened as an OS resource.
 5. Add an optional `orderAboveWindowHandle` to `PreviewSurfaceBounds` for the
    Windows presenter. Encode the 64-bit HWND as a validated opaque hexadecimal
    string such as `0x000000000012ABCD`; never cast it to a JavaScript number or
@@ -511,13 +548,13 @@ child cleanup as required by `AGENTS.md`.
      `directcomposition-swapchain` +
      `backend-d3d11-presenter`;
    - proof/JPEG transports are never native.
-   Update backend RPC validation, host policy, supervisor, scene authority,
-   renderer lifecycle/present policy/health/badges, and the listed scripts.
-   `PreviewSupervisorModel.surfaceLive` must require explicit
-   transport/backing instead of defaulting every platform to Metal. Keep the
-   Metal first-frame watchdog macOS-only; add a Windows D3D first-present +
-   source-liveness contract, and run the proof watchdog only after an explicit
-   fallback. Audit every branch with:
+     Update backend RPC validation, host policy, supervisor, scene authority,
+     renderer lifecycle/present policy/health/badges, and the listed scripts.
+     `PreviewSupervisorModel.surfaceLive` must require explicit
+     transport/backing instead of defaulting every platform to Metal. Keep the
+     Metal first-frame watchdog macOS-only; add a Windows D3D first-present +
+     source-liveness contract, and run the proof watchdog only after an explicit
+     fallback. Audit every branch with:
 
    ```bash
    rg -n "native-surface|electron-proof-surface|cametal-layer|electron-browser-window" apps/desktop/src scripts
@@ -525,6 +562,7 @@ child cleanup as required by `AGENTS.md`.
 
    Classify each hit as macOS-only, proof-only, or platform-aware in its test;
    never globally treat either native pair as native on the other platform.
+
 8. Create `windows_d3d11_test_pattern.rs` to produce deterministic, every-frame
    changing GPU textures plus expected color/hash metadata. This is the
    hardware-test source for later steps; do not make physical desktop pixels
@@ -551,8 +589,8 @@ child cleanup as required by `AGENTS.md`.
      focused tests. Unit tests cover zero, compiled-out, missing, duplicate,
      and extra discovery results;
    - `package.json` exposes `smoke:windows-d3d11-media`.
-   At this step only `--stage contract` is runnable; later steps extend the
-   same schema/runner without replacing it.
+     At this step only `--stage contract` is runnable; later steps extend the
+     same schema/runner without replacing it.
 
 **Verify**:
 
@@ -574,7 +612,7 @@ child cleanup as required by `AGENTS.md`.
 
 1. Create `windows_d3d11_capture.rs` with an explicit
    `WindowsD3d11CaptureBackend::{DesktopDuplication,
-   WindowsGraphicsCaptureMonitor}` selection for `screen:dxgi:*` sources.
+WindowsGraphicsCaptureMonitor}` selection for `screen:dxgi:*` sources.
    Both backends use the session's `WindowsD3d11Device` and selected adapter
    LUID; capture must not silently create another adapter/device. Desktop
    Duplication is the cursor-enabled path. For `capture_cursor = false`, map
@@ -595,7 +633,7 @@ child cleanup as required by `AGENTS.md`.
    never add a pointer overlay; `embedded` here means surface-owned and does
    not itself assert that cursor pixels are visible. Record
    `captureBackend`, `cursorMode =
-   embedded|separate|excluded-wgc|disabled-fallback`,
+embedded|separate|excluded-wgc|disabled-fallback`,
    `cursorRequested`, `cursorPixelsSource`, and
    `cursorExclusionGuaranteed`, plus adapter/generation and fallback reason.
    A D3D11-native success claim with cursor disabled requires
@@ -918,10 +956,10 @@ child cleanup as required by `AGENTS.md`.
      against the retained aggregate/candidate identity, selecting the exact
      NVIDIA or Intel profile set from `VIDEORC_WINDOWS_HARDWARE_CLASS` and
      rejecting an unknown class before launch.
-   Add argument/order/failure tests in `windows-local-gates.test.mjs`,
-   `windows-native-screen-gates.test.mjs`,
-   `windows-encoded-bridge-profiles.test.mjs`, and
-   `smoke-command-callers.test.mjs`.
+     Add argument/order/failure tests in `windows-local-gates.test.mjs`,
+     `windows-native-screen-gates.test.mjs`,
+     `windows-encoded-bridge-profiles.test.mjs`, and
+     `smoke-command-callers.test.mjs`.
 2. Build, sign, install, and identity-verify one private Windows candidate from
    that final source state; do not publish it. Every OBS comparison,
    calibration, budget derivation, explicit-path gate, automatic-default
@@ -965,9 +1003,9 @@ child cleanup as required by `AGENTS.md`.
    - under the maintained move/DPI/click stress, Win32 message dispatch p95 is
      at most 50 ms and maximum is at most 100 ms, Electron keeps focus/input,
      and media cadence still passes.
-   A generic "hardware encoder" result is insufficient.
-   Set these inputs on each host, substituting only that host's observed
-   identity and device mappings:
+     A generic "hardware encoder" result is insufficient.
+     Set these inputs on each host, substituting only that host's observed
+     identity and device mappings:
 
    ```powershell
    $env:VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED = '1'
@@ -991,13 +1029,14 @@ child cleanup as required by `AGENTS.md`.
    $env:VIDEORC_WINDOWS_ACCEPTANCE_AUDIO_DEVICE_ID = '<videorc-audio-device-id>'
    $env:VIDEORC_OBS_AUDIO_DEVICE_ID = '<matching-obs-wasapi-device-id>'
    ```
+
 4. On both supported reference classes, run a fresh controlled OBS comparison
    against this final D3D candidate after one clean reboot, three repetitions
    per application in Plan 039's alternating order:
    - `nvidia-turing-floor`: Intel Core i5-8400 + NVIDIA GTX 1650 SUPER;
    - `intel-xe-integrated`: 11th-generation-or-newer Intel Core with Iris Xe.
-   Resolve Videorc/OBS to the same physical display and audio endpoint on each
-   host. The exact command on each is:
+     Resolve Videorc/OBS to the same physical display and audio endpoint on each
+     host. The exact command on each is:
 
    ```powershell
    pnpm smoke:windows-obs-side-by-side -- --calibrate --scenario youtube-1080p60 --runs 3 --order obs,videorc,videorc,obs,obs,videorc --d3d11 --require-d3d11
@@ -1009,6 +1048,7 @@ child cleanup as required by `AGENTS.md`.
    exact paths. Do not reuse the Plan 039 CPU/raw candidate's comparison or
    budget: both are candidate/context-bound and its preview-open BMP thresholds
    contradict the zero-BMP D3D contract.
+
 5. On the same digest, run the class-specific D3D stream matrices in
    calibration mode:
 
@@ -1029,6 +1069,7 @@ child cleanup as required by `AGENTS.md`.
    the Intel runner writes beneath the corresponding `intel` root. Their
    manifests must repeat and verify hardware class and candidate SHA before
    derivation consumes them.
+
 6. Derive
    `docs/acceptance/windows-d3d11-performance-budget.json` from those two new
    OBS aggregates and D3D calibrations using the Plan 039 deterministic
@@ -1038,7 +1079,7 @@ child cleanup as required by `AGENTS.md`.
    digest, both comparison hashes, hardware provenance, and one profile per
    exact
    `{scenario, hardwareClass, profileClass, buildMode, OS, timing, mediaPath,
-   previewMode}` context. Every D3D profile requires
+previewMode}` context. Every D3D profile requires
    `mediaPath = "d3d11-native"`, the canonical preview triple when open, and
    `bmp.mode = "disabled"` with exactly zero requests/bytes whether preview is
    open or closed. Treat cursor correctness, input continuity, and the hard
@@ -1058,6 +1099,7 @@ child cleanup as required by `AGENTS.md`.
    NVIDIA/Intel class, candidate SHA, app digest, and aggregate hashes before
    emitting `status: "draft"`. It remains draft until the natural fallback
    policy in item 7 is derived.
+
 7. Give natural fallback an explicit, non-OBS-parity policy in that same
    schema, never a D3D profile. On a distinct physical Windows 11 x64 host
    where the production probe naturally rejects the unified D3D topology, run
@@ -1077,7 +1119,7 @@ child cleanup as required by `AGENTS.md`.
    candidate, the observed named
    fallback reason/path, Plan 039's absolute artifact/A/V/cadence/bitrate/queue
    checks, encoder speed `>= 0.98x`, total/per-role RSS slopes `<= 5/2
-   MiB/minute`, and preview proof-surface behavior. It must label
+MiB/minute`, and preview proof-surface behavior. It must label
    `obsParityQualified: false`, may not authorize 60 fps, and cannot satisfy a
    D3D profile lookup. If a natural host is unavailable, promotion is BLOCKED;
    forced failure injection is not a substitute.
@@ -1086,6 +1128,7 @@ child cleanup as required by `AGENTS.md`.
    `reviewedBy`/`reviewedAt`, and change the whole file to `status: "active"`.
    Script tests reject self-activation, missing/ambiguous profiles, a missing
    fallback policy, or edits to generated thresholds.
+
 8. Set `VIDEORC_WINDOWS_PERF_BUDGET_PATH` to the reviewed D3D file and leave
    `VIDEORC_WINDOWS_PERF_BUDGET_PROFILE` unset. Run the supported matrices with
    `--gate --bridge mf --require-bridge --d3d11 --require-d3d11`, then run the
@@ -1143,6 +1186,7 @@ child cleanup as required by `AGENTS.md`.
    retains the child manifest hashes, candidate identities, sanitized
    fingerprint, exact `qualifiedProfiles`, budget/profile hashes, and all
    artifact/support/lifecycle counters needed to audit HOST_PASS.
+
 10. Merge the three host manifests on a clean checkout:
 
     ```powershell
@@ -1155,6 +1199,7 @@ child cleanup as required by `AGENTS.md`.
     forced/default/natural child hashes, scenario/artifact/comparison hashes,
     forced fallback, an OBS-parity claim on fallback, or any failed invariant.
     Only this command writes aggregate PASS.
+
 11. The private candidate contains the intended automatic capability-probed
     default so item 9 can test the actual release behavior, but do not
     merge/publish/roll it out until the aggregate passes. At rollout, select by
@@ -1185,15 +1230,16 @@ child cleanup as required by `AGENTS.md`.
 
       These commands must use the class-specific profiles and the installed
       candidate where their contract requires it.
+
     - On a macOS checkout of the exact same source commit, with every
       Windows acceptance/budget/selection variable absent, run
       `pnpm smoke:recording-studio`. On an authorized macOS device host also
       run `pnpm smoke:recording-studio:devices`. The ordinary Recording Studio
       gate is mandatory on macOS; only the device variant may carry the
       explicit permissions/hardware BLOCKED record described by AGENTS.md.
-    Retain both host reports in the acceptance record. Never call Windows a
-    substitute for either macOS gate or try to make the Darwin-only preview
-    interaction stress pass on Windows.
+      Retain both host reports in the acceptance record. Never call Windows a
+      substitute for either macOS gate or try to make the Darwin-only preview
+      interaction stress pass on Windows.
 
 **Verify**:
 
@@ -1288,48 +1334,48 @@ child cleanup as required by `AGENTS.md`.
 All must hold:
 
 - [ ] A single session D3D11 device/adapter authority is used by display
-  capture, compositor, preview, and every Media Foundation encoder role, all
-  GPU calls run on its dedicated media thread, and no COM owner has an
-  unproven manual `Send`/`Sync`.
+      capture, compositor, preview, and every Media Foundation encoder role, all
+      GPU calls run on its dedicated media thread, and no COM owner has an
+      unproven manual `Send`/`Sync`.
 - [ ] That media thread pumps its Win32 presenter messages and media commands
-  with bounded fairness and passes the 50/100-ms dispatch limits under
-  move/DPI/click stress without degrading encoded cadence.
+      with bounded fairness and passes the 50/100-ms dispatch limits under
+      move/DPI/click stress without degrading encoded cadence.
 - [ ] Supported display capture publishes D3D11 textures without production
-  CPU readback or FFmpeg `hwdownload`; cursor-enabled Desktop Duplication
-  distinguishes embedded from separate pointer ownership and preserves the
-  requested cursor with correct shape/hotspot/transform semantics, while
-  cursor-disabled D3D capture uses confirmed WGC monitor exclusion.
+      CPU readback or FFmpeg `hwdownload`; cursor-enabled Desktop Duplication
+      distinguishes embedded from separate pointer ownership and preserves the
+      requested cursor with correct shape/hotspot/transform semantics, while
+      cursor-disabled D3D capture uses confirmed WGC monitor exclusion.
 - [ ] Every shipping scene used by the Windows release renders on the D3D11
-  compositor with no CPU fallback; a camera incurs only its explicit upload.
+      compositor with no CPU fallback; a camera incurs only its explicit upload.
 - [ ] Media Foundation consumes NV12 DXGI-surface samples with zero
-  system-memory encoder submissions and zero raw-video bridge copies.
+      system-memory encoder submissions and zero raw-video bridge copies.
 - [ ] Detached preview uses the D3D11 presenter with zero BMP requests/bytes and
-  passes every lifecycle/placement/stacking gate; its host kind and
-  transport/backing survive RPC validation, suppress proof polling, and never
-  intercept Electron preview input/focus.
+      passes every lifecycle/placement/stacking gate; its host kind and
+      transport/backing survive RPC validation, suppress proof polling, and never
+      intercept Electron preview input/focus.
 - [ ] Timestamp, frame, freeze, GOP, color, bitrate, A/V, queue, CPU/RSS, and
-  OBS-relative threshold formulas from Plan 039 pass through the new
-  candidate-bound D3D11 budget on both supported hardware classes; fallback
-  passes only its explicitly non-OBS-parity policy.
+      OBS-relative threshold formulas from Plan 039 pass through the new
+      candidate-bound D3D11 budget on both supported hardware classes; fallback
+      passes only its explicitly non-OBS-parity policy.
 - [ ] Device loss, unsupported hardware, window-capture fallback, and adapter
-  mismatch are truthful, recoverable where specified, and present in the
-  support bundle.
+      mismatch are truthful, recoverable where specified, and present in the
+      support bundle.
 - [ ] `nvidia-turing-floor`, `intel-xe-integrated`, and
-  `unsupported-natural-fallback` have distinct, retained, digest-bound
-  HOST_PASS evidence and the deterministic merge reports aggregate PASS;
-  both NVIDIA and Intel qualify exactly 1080p30/60, no broader livestream
-  profile claim is emitted, and each supported host binds both its forced-path
-  and automatic-default PATH_PASS hashes.
+      `unsupported-natural-fallback` have distinct, retained, digest-bound
+      HOST_PASS evidence and the deterministic merge reports aggregate PASS;
+      both NVIDIA and Intel qualify exactly 1080p30/60, no broader livestream
+      profile claim is emitted, and each supported host binds both its forced-path
+      and automatic-default PATH_PASS hashes.
 - [ ] The protected Windows source lane discovers the maintained nonzero D3D
-  Rust test set and passes the full backend suite plus clippy.
+      Rust test set and passes the full backend suite plus clippy.
 - [ ] The old path remains explicitly labeled during the fallback release
-  train; no code reports D3D11-native while any zero-copy invariant is false.
+      train; no code reports D3D11-native while any zero-copy invariant is false.
 - [ ] All applicable commands in "Commands you will need" exit 0; an
-  unavailable authorized macOS device host is recorded exactly as the
-  permitted BLOCKED exception, with the closest Windows physical gates green.
+      unavailable authorized macOS device host is recorded exactly as the
+      permitted BLOCKED exception, with the closest Windows physical gates green.
 - [ ] No files outside Scope are modified.
 - [ ] `plans/README.md`, the ADR, Windows port plan, and acceptance record are
-  current.
+      current.
 
 ## STOP conditions
 

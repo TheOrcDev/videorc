@@ -1,4 +1,5 @@
 import type { PreviewSurfaceSceneState, PreviewSurfaceStatus } from './backend'
+import { isNativePreviewCapability } from './native-preview-capability'
 
 export interface CompositorSceneAuthorityContext {
   committedRunId?: string
@@ -25,12 +26,12 @@ export function compositorSceneConflictsWithCommitted(
 
 export function nativePreviewStatusProvesSceneRevision(
   status: PreviewSurfaceStatus,
-  sceneRevision: number
+  sceneRevision: number,
+  platform = 'darwin'
 ): boolean {
   return (
     status.state === 'live' &&
-    status.transport === 'native-surface' &&
-    status.backing === 'cametal-layer' &&
+    isNativePreviewCapability(status, platform) &&
     status.sourcePixelsPresent === true &&
     status.nativePreviewHostKind !== 'proof-surface' &&
     status.nativePreviewHostAttached === true &&

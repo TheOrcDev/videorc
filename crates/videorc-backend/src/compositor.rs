@@ -46,6 +46,10 @@ use crate::scene_geometry::{
     scene_source_render_transform,
 };
 use crate::state::AppState;
+use crate::windows_d3d11_device::{
+    DxgiAdapterLuid, WindowsD3d11MediaRole, WindowsD3d11TextureFormat,
+    WindowsD3d11TextureLeaseTicket,
+};
 
 #[cfg(test)]
 use crate::protocol::{LayoutPreset, SceneSource};
@@ -81,6 +85,7 @@ pub type CompositorFrameStore =
 pub struct CompositorFrameExportHandle {
     #[cfg(target_os = "macos")]
     metal_target: Option<Arc<crate::metal_compositor::MetalCompositorTargetPixelBuffer>>,
+    d3d11_texture: Option<WindowsD3d11TextureLeaseTicket>,
 }
 
 impl CompositorFrameExportHandle {
@@ -90,6 +95,16 @@ impl CompositorFrameExportHandle {
     ) -> Self {
         Self {
             metal_target: Some(Arc::new(target)),
+            d3d11_texture: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn d3d11_texture(ticket: WindowsD3d11TextureLeaseTicket) -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            metal_target: None,
+            d3d11_texture: Some(ticket),
         }
     }
 
@@ -122,6 +137,35 @@ impl CompositorFrameExportHandle {
         }
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn has_d3d11_texture(&self) -> bool {
+        self.d3d11_texture.is_some()
+    }
+
+    pub(crate) fn d3d11_texture_handoff(&self) -> Option<CompositorD3d11TextureHandoff> {
+        let metadata = self.d3d11_texture.as_ref()?.metadata();
+        Some(CompositorD3d11TextureHandoff {
+            adapter_luid: metadata.adapter_luid,
+            generation: metadata.generation,
+            lease_id: metadata.lease_id.as_u64(),
+            width: metadata.width,
+            height: metadata.height,
+            format: metadata.format,
+            sequence: metadata.sequence,
+            fence_value: metadata.synchronization.fence_value,
+            role: metadata.role,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn d3d11_texture_for_role(
+        &self,
+        role: WindowsD3d11MediaRole,
+    ) -> Option<WindowsD3d11TextureLeaseTicket> {
+        let ticket = self.d3d11_texture.as_ref()?;
+        (ticket.metadata().role == role).then(|| ticket.clone())
+    }
+
     fn metal_target_handoff(&self) -> Option<CompositorMetalTargetHandoff> {
         let (width, height) = self.metal_target_dimensions()?;
         Some(CompositorMetalTargetHandoff {
@@ -147,17 +191,43 @@ pub(crate) struct CompositorMetalTargetHandoff {
     height: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompositorD3d11TextureHandoff {
+    pub(crate) adapter_luid: DxgiAdapterLuid,
+    pub(crate) generation: u64,
+    pub(crate) lease_id: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) format: WindowsD3d11TextureFormat,
+    pub(crate) sequence: u64,
+    pub(crate) fence_value: u64,
+    pub(crate) role: WindowsD3d11MediaRole,
+}
+
 impl fmt::Debug for CompositorFrameExportHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CompositorFrameExportHandle")
             .field("metal_target_dimensions", &self.metal_target_dimensions())
+            .field("d3d11_texture", &self.d3d11_texture_handoff())
             .finish()
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompositorPixelFormat {
-    Yuv420p { export: CompositorFrameExportKind },
+    Yuv420p {
+        export: CompositorFrameExportKind,
+    },
+    #[allow(dead_code)]
+    D3d11Bgra8 {
+        width: u32,
+        height: u32,
+    },
+    #[allow(dead_code)]
+    D3d11Nv12 {
+        width: u32,
+        height: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +256,31 @@ impl CompositorPixelFormat {
                 export: CompositorFrameExportKind::MetalIosurfaceTarget { .. },
             }
         )
+    }
+
+    #[allow(dead_code)]
+    pub const fn d3d11_bgra8(width: u32, height: u32) -> Self {
+        Self::D3d11Bgra8 { width, height }
+    }
+
+    #[allow(dead_code)]
+    pub const fn d3d11_nv12(width: u32, height: u32) -> Self {
+        Self::D3d11Nv12 { width, height }
+    }
+
+    #[allow(dead_code)]
+    pub const fn d3d11_dimensions(self) -> Option<(u32, u32)> {
+        match self {
+            Self::D3d11Bgra8 { width, height } | Self::D3d11Nv12 { width, height } => {
+                Some((width, height))
+            }
+            Self::Yuv420p { .. } => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub const fn has_d3d11_texture(self) -> bool {
+        self.d3d11_dimensions().is_some()
     }
 }
 
@@ -4152,7 +4247,7 @@ const OVERLAY_COLLISION_GAP: f64 = 0.02;
 /// creator also chooses captions on that edge, reserve the complete highlight
 /// bitmap plus a small title-safe gap. Both CPU and Metal paths consume this
 /// value, so the live stream cannot diverge from preview/recording output.
-fn caption_overlay_safe_inset(
+pub(crate) fn caption_overlay_safe_inset(
     caption: Option<&crate::captions::CaptionOverlay>,
     highlight: Option<&crate::captions::CaptionOverlay>,
     canvas_height: u32,
@@ -4194,7 +4289,7 @@ pub(crate) fn caption_overlay_layout(
     )
 }
 
-fn caption_overlay_layout_with_inset(
+pub(crate) fn caption_overlay_layout_with_inset(
     overlay_width: usize,
     overlay_height: usize,
     canvas_width: usize,
@@ -4936,6 +5031,10 @@ mod tests {
         SceneConfigParams, SourceSelection, StreamScreenStatus, VideoPreset, VideoSettings,
     };
     use crate::storage::Database;
+    use crate::windows_d3d11_device::{
+        WindowsD3d11SynchronizationToken, WindowsD3d11TextureLeaseId,
+        WindowsD3d11TextureLeaseMetadata, WindowsD3d11TextureLeaseReleaseSender,
+    };
     use tokio::sync::broadcast;
 
     fn fp(camera: Option<u64>, screen: Option<u64>) -> SourceFrameFingerprint {
@@ -4951,6 +5050,64 @@ mod tests {
             (actual - expected).abs() < 0.000_001,
             "expected {actual} to be close to {expected}"
         );
+    }
+
+    #[test]
+    fn windows_d3d11_export_handle_is_role_bound_and_releases_on_final_clone() {
+        let (release_sender, release_receiver) =
+            WindowsD3d11TextureLeaseReleaseSender::bounded(2).unwrap();
+        let ticket = WindowsD3d11TextureLeaseTicket::new(
+            WindowsD3d11TextureLeaseMetadata {
+                generation: 3,
+                lease_id: WindowsD3d11TextureLeaseId::from_u64(11),
+                adapter_luid: DxgiAdapterLuid::from_u64(0x89ab_cdef_0123_4567),
+                width: 1920,
+                height: 1080,
+                format: WindowsD3d11TextureFormat::Nv12,
+                sequence: 27,
+                synchronization: WindowsD3d11SynchronizationToken {
+                    generation: 3,
+                    fence_value: 31,
+                },
+                role: WindowsD3d11MediaRole::Stream,
+            },
+            release_sender,
+        )
+        .unwrap();
+        let export = CompositorFrameExportHandle::d3d11_texture(ticket);
+        let retained = export.clone();
+
+        assert!(export.has_d3d11_texture());
+        assert!(
+            export
+                .d3d11_texture_for_role(WindowsD3d11MediaRole::Preview)
+                .is_none()
+        );
+        let handoff = export.d3d11_texture_handoff().unwrap();
+        assert_eq!(handoff.generation, 3);
+        assert_eq!(handoff.lease_id, 11);
+        assert_eq!(handoff.format, WindowsD3d11TextureFormat::Nv12);
+        assert_eq!(handoff.sequence, 27);
+        assert_eq!(handoff.fence_value, 31);
+
+        drop(export);
+        assert!(release_receiver.try_recv().is_err());
+        drop(retained);
+        let release = release_receiver.try_recv().unwrap();
+        assert_eq!(release.generation, 3);
+        assert_eq!(release.lease_id.as_u64(), 11);
+        assert_eq!(release.role, WindowsD3d11MediaRole::Stream);
+    }
+
+    #[test]
+    fn windows_d3d11_pixel_formats_keep_preview_and_encoder_surfaces_distinct() {
+        let bgra = CompositorPixelFormat::d3d11_bgra8(1280, 720);
+        let nv12 = CompositorPixelFormat::d3d11_nv12(1920, 1080);
+        assert_eq!(bgra.d3d11_dimensions(), Some((1280, 720)));
+        assert_eq!(nv12.d3d11_dimensions(), Some((1920, 1080)));
+        assert!(bgra.has_d3d11_texture());
+        assert!(nv12.has_d3d11_texture());
+        assert!(!CompositorPixelFormat::yuv420p_cpu_buffer().has_d3d11_texture());
     }
 
     #[test]
@@ -5007,6 +5164,7 @@ mod tests {
             source_pixels_present: false,
             pending_host_command_count: 0,
             bounds: None,
+            windows_d3d11_presenter: None,
             started_at: None,
             updated_at: "2026-06-06T00:00:00Z".to_string(),
             message: None,

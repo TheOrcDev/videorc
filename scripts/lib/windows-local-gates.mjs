@@ -279,6 +279,21 @@ export function buildWindowsLocalGateSteps({
       args: ['--filter', '@videorc/desktop', 'test']
     },
     {
+      label: 'exact Windows D3D11 Rust test discovery and focused tests',
+      command: 'pnpm',
+      args: ['smoke:windows-d3d11-media', '--', '--verify-windows-rust']
+    },
+    {
+      label: 'complete Windows backend test suite',
+      command: 'cargo',
+      args: ['test', '-p', 'videorc-backend', '--no-fail-fast']
+    },
+    {
+      label: 'complete Windows backend clippy',
+      command: 'cargo',
+      args: ['clippy', '-p', 'videorc-backend', '--all-targets', '--', '-D', 'warnings']
+    },
+    {
       label: 'backend capture-input seam tests',
       command: 'cargo',
       args: ['test', '-p', 'videorc-backend', 'capture_input']
@@ -335,9 +350,9 @@ export function buildWindowsLocalGateSteps({
       }
     },
     {
-      label: 'native Windows ScreenOnly and BMP smoke',
+      label: 'native Windows ScreenOnly D3D11 zero-copy smoke',
       command: 'pnpm',
-      args: ['smoke:windows-native-screen'],
+      args: ['smoke:windows-native-screen', '--', '--d3d11', '--require-d3d11'],
       env: {
         VIDEORC_PERF_APP_EXECUTABLE: executable,
         VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'native-screen'),
@@ -348,9 +363,16 @@ export function buildWindowsLocalGateSteps({
       }
     },
     {
-      label: 'native Windows Media Foundation encoded-bridge matrix',
+      label: 'native Windows D3D11 Media Foundation encoded-bridge matrix',
       command: 'pnpm',
-      args: ['smoke:windows-encoded-bridge', '--', '--profiles', '1080p30,1080p60'],
+      args: [
+        'smoke:windows-encoded-bridge',
+        '--',
+        '--profiles',
+        '1080p30,1080p60',
+        '--d3d11',
+        '--require-d3d11'
+      ],
       env: {
         VIDEORC_PERF_APP_EXECUTABLE: executable,
         VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'encoded-bridge'),
@@ -361,12 +383,12 @@ export function buildWindowsLocalGateSteps({
       }
     },
     {
-      label: 'recording-time Windows proof-surface smoke',
+      label: 'recording-time Windows D3D11 native-preview smoke',
       command: 'pnpm',
-      args: ['smoke:recording-native-preview'],
+      args: ['smoke:recording-native-preview', '--', '--d3d11', '--require-d3d11'],
       env: {
         VIDEORC_PERF_APP_EXECUTABLE: executable,
-        VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'proof-preview'),
+        VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'd3d11-preview'),
         VIDEORC_SMOKE_FFMPEG_PATH: packagedFfmpeg,
         VIDEORC_SMOKE_FFPROBE_PATH: packagedFfprobe,
         VIDEORC_SMOKE_TIMEOUT_MS: '180000',
@@ -374,8 +396,8 @@ export function buildWindowsLocalGateSteps({
         VIDEORC_NATIVE_PREVIEW_WARMUP_MS: '2000',
         VIDEORC_NATIVE_PREVIEW_MEASUREMENT_MS: '4000',
         VIDEORC_EXPECT_NATIVE_METAL_PREVIEW: '0',
-        VIDEORC_NATIVE_PREVIEW_EXERCISE_PROOF_POLLING: '1',
-        VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'raw-yuv420p'
+        VIDEORC_NATIVE_PREVIEW_EXERCISE_PROOF_POLLING: '0',
+        VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts'
       }
     },
     {
@@ -387,7 +409,11 @@ export function buildWindowsLocalGateSteps({
         '--gate',
         '--bridge',
         'mf',
-        '--require-bridge'
+        '--require-bridge',
+        '--profiles',
+        '1080p30,1080p60',
+        '--path-evidence',
+        'default'
       ],
       blockedExitCode: 2,
       blockedReportPath: join(outputDir, 'stream-performance', 'aggregate.json'),

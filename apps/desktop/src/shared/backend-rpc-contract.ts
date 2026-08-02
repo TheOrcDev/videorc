@@ -8,6 +8,7 @@ import type {
   FileAssessment,
   GateStatus,
   LiveLayoutApplyStatus,
+  MainOwnedPreviewSurfaceBoundsParams,
   NoiseCleanupJob,
   OAuthCallbackResult,
   OAuthCompleteParams,
@@ -38,6 +39,7 @@ import type {
   VideoSettings,
   VideorcAccountSnapshot
 } from './backend'
+import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { LAYOUT_PRESET_VALUES } from './backend'
 import {
   arraySchema,
@@ -659,12 +661,18 @@ const previewLiveStatusSchema = objectSchema(
     source: enumSchema(['idle-preview', 'recording-session', 'unavailable']),
     transport: enumSchema([
       'native-surface',
+      'd3d11-shared-texture',
       'electron-proof-surface',
       'latest-jpeg-polling',
       'mjpeg-stream',
       'unavailable'
     ]),
-    backing: enumSchema(['cametal-layer', 'electron-browser-window', 'none']),
+    backing: enumSchema([
+      'cametal-layer',
+      'directcomposition-swapchain',
+      'electron-browser-window',
+      'none'
+    ]),
     targetFps: optionalSchema(numberSchema({ min: 0, max: 1000 })),
     width: optionalSchema(nonNegativeInteger),
     height: optionalSchema(nonNegativeInteger),
@@ -674,33 +682,197 @@ const previewLiveStatusSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<PreviewLiveStatus>
 
+const rendererSafePreviewBoundsSchema = objectSchema(
+  {
+    screenX: numberSchema(),
+    screenY: numberSchema(),
+    width: numberSchema({ min: 0, max: 65_536 }),
+    height: numberSchema({ min: 0, max: 65_536 }),
+    scaleFactor: numberSchema({ min: 0.1, max: 16 }),
+    screenHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipX: optionalSchema(numberSchema()),
+    clipY: optionalSchema(numberSchema()),
+    clipWidth: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    visible: optionalSchema(booleanSchema),
+    orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    elevated: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+)
+
+const opaqueNativeWindowHandleSchema = runtimeSchema<string>(
+  'a nonzero fixed-width 64-bit hexadecimal window handle',
+  (value, path) => {
+    const handle = stringSchema({ minLength: 18, maxLength: 18 }).parse(value, path)
+    if (!/^0x[0-9a-f]{16}$/.test(handle) || handle === '0x0000000000000000') {
+      throw new RuntimeSchemaError(path, 'a nonzero lowercase 0x-prefixed 64-bit handle')
+    }
+    return handle
+  }
+)
+
+const mainOwnedPreviewBoundsSchema = objectSchema(
+  {
+    screenX: numberSchema(),
+    screenY: numberSchema(),
+    width: numberSchema({ min: 0, max: 65_536 }),
+    height: numberSchema({ min: 0, max: 65_536 }),
+    scaleFactor: numberSchema({ min: 0.1, max: 16 }),
+    screenHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipX: optionalSchema(numberSchema()),
+    clipY: optionalSchema(numberSchema()),
+    clipWidth: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    visible: optionalSchema(booleanSchema),
+    orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    orderAboveWindowHandle: optionalSchema(opaqueNativeWindowHandleSchema),
+    elevated: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+)
+
+const mainOwnedPreviewSurfaceBoundsParamsSchema = objectSchema(
+  {
+    bounds: mainOwnedPreviewBoundsSchema,
+    generation: numberSchema({ integer: true, min: 0, max: Number.MAX_SAFE_INTEGER })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<MainOwnedPreviewSurfaceBoundsParams>
+
+/** Validate the privileged main-to-backend shape without registering a renderer-callable RPC. */
+export function validateMainOwnedPreviewSurfaceBoundsParams(
+  value: unknown
+): MainOwnedPreviewSurfaceBoundsParams {
+  return mainOwnedPreviewSurfaceBoundsParamsSchema.parse(
+    value,
+    'main.previewSurfaceBounds'
+  ) as MainOwnedPreviewSurfaceBoundsParams
+}
+
+const windowsD3d11PresenterBoundsSchema = objectSchema(
+  {
+    x: numberSchema({ integer: true }),
+    y: numberSchema({ integer: true }),
+    width: nonNegativeInteger,
+    height: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+
+const windowsD3d11PresenterDiagnosticsSchema = objectSchema(
+  {
+    layered: booleanSchema,
+    transparent: booleanSchema,
+    noActivate: booleanSchema,
+    excludedFromCapture: booleanSchema,
+    windowActive: booleanSchema,
+    windowFocused: booleanSchema,
+    previewGeneration: optionalSchema(nonNegativeInteger),
+    generationMatches: booleanSchema,
+    ownerProcessMatches: booleanSchema,
+    sameAdapter: booleanSchema,
+    sourceLive: booleanSchema,
+    firstPresentSucceeded: booleanSchema,
+    successfulPresents: nonNegativeInteger,
+    lastPresentedSequence: optionalSchema(nonNegativeInteger),
+    latestWinsDrops: nonNegativeInteger,
+    hiddenDrops: nonNegativeInteger,
+    busyDrops: nonNegativeInteger,
+    staleFrameDrops: nonNegativeInteger,
+    actualBounds: optionalSchema(windowsD3d11PresenterBoundsSchema),
+    fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 1024 }))
+  },
+  { allowUnknown: false }
+)
+
+const previewSurfaceStatusFieldsSchema = objectSchema(
+  {
+    state: enumSchema(['unavailable', 'starting', 'live', 'stopped', 'failed']),
+    source: enumSchema(['synthetic', 'camera', 'screen', 'window']),
+    transport: enumSchema([
+      'native-surface',
+      'd3d11-shared-texture',
+      'electron-proof-surface',
+      'latest-jpeg-polling',
+      'mjpeg-stream',
+      'unavailable'
+    ]),
+    backing: enumSchema([
+      'cametal-layer',
+      'directcomposition-swapchain',
+      'electron-browser-window',
+      'none'
+    ]),
+    targetFps: numberSchema({ min: 0, max: 1000 }),
+    width: nonNegativeInteger,
+    height: nonNegativeInteger,
+    framesRendered: nonNegativeInteger,
+    droppedFrames: nonNegativeInteger,
+    framePollingSuppressed: booleanSchema,
+    sourcePixelsPresent: booleanSchema,
+    pendingHostCommandCount: nonNegativeInteger,
+    nativePreviewHostKind: optionalSchema(
+      enumSchema([
+        'in-process',
+        'helper-process',
+        'external-module',
+        'proof-surface',
+        'backend-d3d11-presenter'
+      ])
+    ),
+    bounds: optionalSchema(rendererSafePreviewBoundsSchema),
+    windowsD3d11Presenter: optionalSchema(windowsD3d11PresenterDiagnosticsSchema),
+    updatedAt: timestamp
+  },
+  { allowUnknown: true }
+)
+
 const previewSurfaceStatusSchema = boundedSemanticValue(
-  'a native preview surface status',
-  objectSchema(
-    {
-      state: enumSchema(['unavailable', 'starting', 'live', 'stopped', 'failed']),
-      source: enumSchema(['synthetic', 'camera', 'screen', 'window']),
-      transport: enumSchema([
-        'native-surface',
-        'electron-proof-surface',
-        'latest-jpeg-polling',
-        'mjpeg-stream',
-        'unavailable'
-      ]),
-      backing: enumSchema(['cametal-layer', 'electron-browser-window', 'none']),
-      targetFps: numberSchema({ min: 0, max: 1000 }),
-      width: nonNegativeInteger,
-      height: nonNegativeInteger,
-      framesRendered: nonNegativeInteger,
-      droppedFrames: nonNegativeInteger,
-      framePollingSuppressed: booleanSchema,
-      sourcePixelsPresent: booleanSchema,
-      pendingHostCommandCount: nonNegativeInteger,
-      updatedAt: timestamp
-    },
-    { allowUnknown: true }
+  'a renderer-safe native preview surface status',
+  runtimeSchema<PreviewSurfaceStatus>(
+    'a renderer-safe native preview surface status',
+    (value, path) => {
+      rejectPrivilegedPreviewIdentity(value, path)
+      return previewSurfaceStatusFieldsSchema.parse(value, path) as PreviewSurfaceStatus
+    }
   )
 ) as RuntimeSchema<PreviewSurfaceStatus>
+
+function rejectPrivilegedPreviewIdentity(value: unknown, path: string): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return
+  }
+  const record = value as Record<string, unknown>
+  for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+    if (field in record) {
+      throw new RuntimeSchemaError(`${path}.${field}`, 'absent from renderer-facing state')
+    }
+  }
+  const bounds = record.bounds
+  if (typeof bounds === 'object' && bounds !== null && !Array.isArray(bounds)) {
+    const boundsRecord = bounds as Record<string, unknown>
+    for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+      if (field in boundsRecord) {
+        throw new RuntimeSchemaError(
+          `${path}.bounds.${field}`,
+          'absent from renderer-facing bounds'
+        )
+      }
+    }
+  }
+  const presenter = record.windowsD3d11Presenter
+  if (typeof presenter === 'object' && presenter !== null && !Array.isArray(presenter)) {
+    for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+      if (field in presenter) {
+        throw new RuntimeSchemaError(
+          `${path}.windowsD3d11Presenter.${field}`,
+          'absent from renderer-facing presenter diagnostics'
+        )
+      }
+    }
+  }
+}
 
 const previewCameraStatusSchema = boundedSemanticValue(
   'a preview camera status',
@@ -735,12 +907,64 @@ const previewScreenStatusSchema = boundedSemanticValue(
   )
 ) as RuntimeSchema<PreviewScreenStatus>
 
+const windowsD3d11MediaDiagnosticsSchema = objectSchema(
+  {
+    state: enumSchema(['unavailable', 'probing', 'live', 'draining', 'fallback', 'failed']),
+    requested: booleanSchema,
+    required: booleanSchema,
+    adapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    captureAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    compositorAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    primaryEncoderAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    auxiliaryEncoderAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    generation: optionalSchema(nonNegativeInteger),
+    captureBackend: optionalSchema(
+      enumSchema(['desktop-duplication', 'windows-graphics-capture-monitor', 'legacy-ffmpeg'])
+    ),
+    cursorMode: optionalSchema(
+      enumSchema(['embedded', 'separate', 'excluded-wgc', 'disabled-fallback'])
+    ),
+    cursorRequested: booleanSchema,
+    cursorPixelsSource: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    cursorExclusionGuaranteed: booleanSchema,
+    captureReadbackFrames: nonNegativeInteger,
+    textureImportFrames: nonNegativeInteger,
+    cameraUploadFrames: nonNegativeInteger,
+    cursorShapeUploads: nonNegativeInteger,
+    cursorCompositedFrames: nonNegativeInteger,
+    compositorCpuFallbackFrames: nonNegativeInteger,
+    previewPresents: nonNegativeInteger,
+    previewDrops: nonNegativeInteger,
+    previewBmpRequests: nonNegativeInteger,
+    previewBmpBytes: nonNegativeInteger,
+    messagePumpLagP95Ms: optionalSchema(numberSchema({ min: 0 })),
+    messagePumpLagMaxMs: optionalSchema(numberSchema({ min: 0 })),
+    mediaCommandLagP95Ms: optionalSchema(numberSchema({ min: 0 })),
+    mediaCommandLagMaxMs: optionalSchema(numberSchema({ min: 0 })),
+    maximumConsecutiveMessageBatch: nonNegativeInteger,
+    maximumConsecutiveMediaBatch: nonNegativeInteger,
+    encoderGpuSamples: nonNegativeInteger,
+    encoderSystemMemorySamples: nonNegativeInteger,
+    rawVideoCopiedFrames: nonNegativeInteger,
+    texturePoolCapacity: nonNegativeInteger,
+    texturePoolInUse: nonNegativeInteger,
+    texturePoolPressureEvents: nonNegativeInteger,
+    adapterMismatches: nonNegativeInteger,
+    deviceResets: nonNegativeInteger,
+    staleGenerationCallbacks: nonNegativeInteger,
+    fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 16_384 }))
+  },
+  { allowUnknown: false }
+)
+
 const diagnosticStatsSchema = boundedSemanticValue(
   'bounded diagnostic statistics',
   objectSchema(
     {
       skippedFrames: nonNegativeInteger,
       droppedFrames: nonNegativeInteger,
+      compositorBackend: optionalSchema(enumSchema(['metal', 'd3d11', 'cpu', 'cpu-fallback'])),
+      windowsD3d11Media: optionalSchema(windowsD3d11MediaDiagnosticsSchema),
       updatedAt: optionalSchema(timestamp)
     },
     { allowUnknown: true }

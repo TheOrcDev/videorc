@@ -63,6 +63,10 @@ credential, presigned URL, or support-bundle contents.
 - `pnpm smoke:local-gates:windows` against the installed signed candidate: PASS / FAIL / BLOCKED
 - Windows local-gates manifest:
 - Local-gates manifest candidate binding `verified: true`: PASS / FAIL / BLOCKED
+- `pnpm smoke:windows-d3d11-media -- --verify-windows-rust`: PASS / FAIL / BLOCKED
+- Windows D3D11 exact Rust test count:
+- `cargo test -p videorc-backend --no-fail-fast` on Windows source checkout: PASS / FAIL / BLOCKED
+- `cargo clippy -p videorc-backend --all-targets -- -D warnings` on Windows source checkout: PASS / FAIL / BLOCKED
 - Gate logs:
 
 ## Candidate Identity And Integrity
@@ -96,6 +100,47 @@ Get-FileHash -Algorithm SHA256 .\Videorc-*-win-x64.exe | Format-List
 - Installed `Videorc.exe` ProductVersion:
 - ProductVersion matches the release ID core version: PASS / FAIL / BLOCKED
 - Installed-app binding evidence ID:
+
+## D3D11 Livestream Qualification
+
+Schema 3 public acceptance must bind all entries below to the same source
+commit, installer SHA-256, installed `Videorc.exe` SHA-256, and packaged-app
+payload SHA-256. A portable macOS test run is not Windows D3D evidence.
+Leave every affected row BLOCKED when the final Windows source lane, signed
+installed candidate, or physical host evidence is unavailable; never promote
+a portable or cross-compiled PASS into this section.
+
+- D3D budget status: active / draft / missing
+- Active `videorc.windows-d3d11-performance-budget` SHA-256:
+- NVIDIA OBS comparison aggregate SHA-256:
+- Intel OBS comparison aggregate SHA-256:
+- NVIDIA forced-path manifest SHA-256:
+- NVIDIA automatic-default manifest SHA-256:
+- NVIDIA HOST_PASS manifest SHA-256:
+- Intel forced-path manifest SHA-256:
+- Intel automatic-default manifest SHA-256:
+- Intel HOST_PASS manifest SHA-256:
+- Natural-fallback PATH_PASS manifest SHA-256:
+- Natural-fallback HOST_PASS manifest SHA-256:
+- Three-host aggregate PASS SHA-256:
+- `nvidia-turing-floor` qualified profiles exactly `1080p30,1080p60`: PASS / FAIL / BLOCKED
+- `intel-xe-integrated` qualified profiles exactly `1080p30,1080p60`: PASS / FAIL / BLOCKED
+- Natural fallback qualified only for non-OBS-parity `1080p30`: PASS / FAIL / BLOCKED
+- 1440p/4K livestream launch rejected before measurement: PASS / FAIL / BLOCKED
+- Automatic product default selected D3D11 without test-selection variables: PASS / FAIL / BLOCKED
+- Supported runs had zero capture readbacks, CPU compositor fallbacks, raw copies, system-memory encoder samples, and BMP work: PASS / FAIL / BLOCKED
+- Supported runs preserved one capture/compositor/presenter/MFT adapter LUID: PASS / FAIL / BLOCKED
+- Cursor correctness and presenter click/focus continuity: PASS / FAIL / BLOCKED
+- Win32 message dispatch p95 `<= 50 ms` and maximum `<= 100 ms`: PASS / FAIL / BLOCKED
+
+The ordinary macOS Recording Studio regression is mandatory on the exact same
+source commit. Only the device variant may be explicitly blocked by unavailable
+permissions or hardware.
+
+- macOS `pnpm smoke:recording-studio`: PASS / FAIL / BLOCKED
+- macOS `pnpm smoke:recording-studio:devices`: PASS / FAIL / BLOCKED
+- Device-gate BLOCKED reason, if applicable:
+- macOS regression report IDs:
 
 ## Required Public-Gate Scenarios
 
@@ -164,6 +209,39 @@ private and record only sanitized evidence IDs here.
 - Test sink confirmed expected video/audio and no secret was captured in evidence: PASS / FAIL / BLOCKED
 - If no RTMP workflow will be advertised, the release owner removed the claim instead of marking this gate not applicable: PASS / FAIL / BLOCKED
 - Advertised RTMP evidence ID:
+
+### Windows D3D11 Aggregate (`windowsD3d11Aggregate`)
+
+- Both supported HOST_PASS manifests and the natural-fallback HOST_PASS manifest were merged: PASS / FAIL / BLOCKED
+- Aggregate candidate/source/installer/app/payload identity matched this record: PASS / FAIL / BLOCKED
+- Three-host aggregate evidence ID:
+
+### Windows D3D11 Automatic Default (`windowsD3d11AutomaticDefault`)
+
+- NVIDIA automatic-default PATH_PASS retained: PASS / FAIL / BLOCKED
+- Intel automatic-default PATH_PASS retained: PASS / FAIL / BLOCKED
+- Neither automatic-default run inherited D3D selection/requirement variables: PASS / FAIL / BLOCKED
+- Automatic-default evidence IDs:
+
+### Windows D3D11 Natural Fallback (`windowsD3d11NaturalFallback`)
+
+- Production capability probe naturally rejected the unified D3D topology: PASS / FAIL / BLOCKED
+- Complete 1080p30 stream/record-plus-stream × preview open/closed matrix passed three repetitions: PASS / FAIL / BLOCKED
+- Policy reports `obsParityQualified: false` and does not authorize 60 fps: PASS / FAIL / BLOCKED
+- Natural-fallback evidence ID:
+
+### Windows D3D11 Source Lane (`windowsD3d11SourceLane`)
+
+- Exact nonzero Windows-only D3D Rust manifest discovered: PASS / FAIL / BLOCKED
+- Full backend Rust suite passed on Windows: PASS / FAIL / BLOCKED
+- Full backend clippy passed on Windows: PASS / FAIL / BLOCKED
+- Windows source-lane evidence ID:
+
+### macOS Recording Studio Regression (`macosRecordingStudioRegression`)
+
+- Ordinary Recording Studio gate passed on macOS at the same source commit: PASS / FAIL / BLOCKED
+- Device gate passed, or carries only the permitted permissions/hardware BLOCKED record: PASS / FAIL / BLOCKED
+- macOS regression evidence ID:
 
 ## Packaged App
 

@@ -25,16 +25,20 @@ import {
   assertBmpHeaders,
   assertNonblankBmp,
   assertWindowsGraphicsCaptureTexture,
+  evaluateWindowsNativeScreenD3d11Diagnostics,
   nativeWindowsCompositorUsesScreen,
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive,
+  parseWindowsNativeScreenArgs,
   requiredBmpPreviewAdvances,
   windowsNativeScreenPerformanceBudgetContext
 } from './lib/windows-native-screen-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
+const options = parseWindowsNativeScreenArgs(process.argv.slice(2))
+
 if (process.platform !== 'win32') {
-  throw new Error('The native Windows screen/BMP smoke must run on Windows.')
+  throw new Error('The native Windows screen smoke must run on Windows.')
 }
 
 const performanceModeValue = performanceMode()
@@ -60,7 +64,8 @@ const performanceMeasurementMs = Number(
 const performanceIntervalMs = Number(process.env.VIDEORC_PERF_SAMPLE_INTERVAL_MS ?? 1_000)
 const performanceReportRequested = Boolean(process.env.VIDEORC_PERF_REPORT_PATH)
 const measureOccludedAuxWindows = process.env.VIDEORC_PERF_OCCLUDED_AUX_WINDOWS === '1'
-const requireEncodedBridge = process.env.VIDEORC_WINDOWS_REQUIRE_ENCODED_BRIDGE === '1'
+const requireEncodedBridge =
+  process.env.VIDEORC_WINDOWS_REQUIRE_ENCODED_BRIDGE === '1' || options.requireD3d11
 const requireGraphicsCapture = process.env.VIDEORC_WINDOWS_REQUIRE_GRAPHICS_CAPTURE === '1'
 const requireDirectD3D11Recording =
   process.env.VIDEORC_WINDOWS_REQUIRE_DIRECT_D3D11_RECORDING === '1'
@@ -93,6 +98,21 @@ const launched = await launchDevApp({
     VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
     VIDEORC_DISABLE_AUTO_PREVIEW: '1',
     ...(requireGraphicsCapture ? { VIDEORC_WINDOWS_GRAPHICS_CAPTURE: '1' } : {}),
+    ...(options.d3d11
+      ? {
+          VIDEORC_WINDOWS_D3D11_MEDIA: '1',
+          VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts'
+        }
+      : {}),
+    ...(options.requireD3d11
+      ? {
+          VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1',
+          VIDEORC_WINDOWS_REQUIRE_ENCODED_BRIDGE: '1'
+        }
+      : {}),
+    ...(options.expectFallback === 'natural'
+      ? { VIDEORC_WINDOWS_EXPECT_D3D11_FALLBACK: 'natural' }
+      : {}),
     ...(measureOccludedAuxWindows
       ? {
           VIDEORC_SMOKE_COMMAND_SERVER: '1',
@@ -172,7 +192,7 @@ try {
     )
   }
 
-  const firstBmp = await waitForNonblankBmpFrame(connection)
+  const firstBmp = options.d3d11 ? null : await waitForNonblankBmpFrame(connection)
 
   const started = await request(ws, timeoutMs, 'session.start', sessionParams(sources))
   if (started?.state !== 'recording') {
@@ -189,8 +209,12 @@ try {
       requireNoCpuCompositor: includeCamera
     })
   }
+  if (options.d3d11 || options.expectFallback) {
+    assertD3d11Diagnostics(activeRecording.diagnostics, { requireOutput: false })
+  }
   if (
     !requireDirectD3D11Recording &&
+    !options.d3d11 &&
     !nativeWindowsCompositorUsesScreen(activeRecording.compositor, screen.id)
   ) {
     throw new Error(
@@ -213,7 +237,9 @@ try {
     : Promise.resolve(null)
   const [telemetryResult, bmpResult] = await Promise.allSettled([
     telemetryPromise,
-    pollBmpDuringRecording(connection, firstBmp.cursor, recordingMs, minimumBmpPreviewAdvances)
+    options.d3d11
+      ? monitorD3d11DuringRecording(ws, recordingMs)
+      : pollBmpDuringRecording(connection, firstBmp.cursor, recordingMs, minimumBmpPreviewAdvances)
   ])
   if (telemetryResult.status === 'fulfilled') {
     performanceTelemetry = telemetryResult.value
@@ -229,13 +255,15 @@ try {
   } else {
     if (!collectorFailed) collectorFailure = bmpResult.reason
     collectorFailed = true
-    collectorHardFailures.push(`BMP proof polling failed: ${failureMessage(bmpResult.reason)}`)
+    collectorHardFailures.push(
+      `${options.d3d11 ? 'D3D11 diagnostics monitoring' : 'BMP proof polling'} failed: ${failureMessage(bmpResult.reason)}`
+    )
   }
   if (collectorFailed && !performanceEvaluationRequested) throw collectorFailure
   const stopRequestedAt = Date.now()
+  const finalDiagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
   if (requireEncodedBridge) {
-    const diagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
-    assertEncodedBridgeDiagnostics(diagnostics, {
+    assertEncodedBridgeDiagnostics(finalDiagnostics, {
       requireOutput: true,
       requireDirectD3D11Recording,
       requireNoCpuCompositor: includeCamera
@@ -259,6 +287,9 @@ try {
   if (requireGraphicsCapture) {
     previewStatus = await request(ws, timeoutMs, 'preview.screen.status')
     assertWindowsGraphicsCaptureTexture(previewStatus)
+  }
+  if (options.d3d11 || options.expectFallback) {
+    assertD3d11Diagnostics(finalDiagnostics, { requireOutput: options.d3d11 })
   }
   const stopped = await request(ws, timeoutMs, 'session.stop')
   const outputPath = stopped?.outputPath ?? started?.outputPath
@@ -298,7 +329,7 @@ try {
 
   if (!collectorFailed) {
     console.log(
-      `Windows native screen/BMP PASS: ${screen.id}, ${bmpEvidence.advancedFrames} BMP frame advances, ` +
+      `Windows native screen ${options.d3d11 ? 'D3D11' : 'BMP'} PASS: ${screen.id}, ${bmpEvidence.advancedFrames} ${options.d3d11 ? 'GPU sample' : 'BMP frame'} advances, ` +
         `${report.metrics.observedFrames ?? 'n/a'} recorded frames, ${report.metrics.durationSeconds.toFixed(2)}s, ` +
         `${camera ? `camera source ${cameraEvidence?.sourceFps?.toFixed?.(2) ?? 'n/a'} fps, ` : ''}` +
         `${previewStatus?.d3d11TextureAvailable === true ? 'retained D3D11 texture, ' : ''}` +
@@ -345,9 +376,11 @@ if (performanceEvaluationRequested) {
     ...(telemetryFailures.length > 0
       ? [`Windows process telemetry did not continuously identify: ${telemetryFailures.join(', ')}`]
       : []),
-    ...(bmpEvidence?.advancedFrames > 0
+    ...(bmpEvidence?.advancedFrames > 0 || options.expectFallback === 'natural'
       ? []
-      : ['BMP proof polling did not observe frame progress']),
+      : [
+          `${options.d3d11 ? 'D3D11 GPU diagnostics' : 'BMP proof polling'} did not observe frame progress`
+        ]),
     ...(recordingEvidence?.verdict?.pass === true
       ? []
       : ['final recording media validity was missing'])
@@ -406,7 +439,7 @@ if (performanceEvaluationRequested) {
       ...(hardFailures.length === 0
         ? [
             passingCheck(
-              'packaged Windows source, media, BMP, and per-role process evidence passed'
+              `packaged Windows source, media, ${options.d3d11 ? 'D3D11 zero-copy' : 'BMP'}, and per-role process evidence passed`
             )
           ]
         : []),
@@ -663,6 +696,47 @@ function sessionParams(sources) {
       microphoneMuted: true,
       microphoneSyncOffsetMs: 0
     }
+  }
+}
+
+async function monitorD3d11DuringRecording(ws, durationMs) {
+  const samples = []
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < durationMs) {
+    const diagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
+    assertD3d11Diagnostics(diagnostics, { requireOutput: false })
+    samples.push(diagnostics.windowsD3d11Media)
+    await sleep(Math.min(250, Math.max(1, durationMs - (Date.now() - startedAt))))
+  }
+  const first = samples[0] ?? {}
+  const last = samples.at(-1) ?? {}
+  const textureAdvances = Math.max(
+    0,
+    Number(last.textureImportFrames ?? 0) - Number(first.textureImportFrames ?? 0)
+  )
+  const encoderAdvances = Math.max(
+    0,
+    Number(last.encoderGpuSamples ?? 0) - Number(first.encoderGpuSamples ?? 0)
+  )
+  return {
+    mode: 'disabled-d3d11',
+    requests: 0,
+    bytes: 0,
+    advancedFrames: Math.max(textureAdvances, encoderAdvances),
+    nonblankFrames: 0,
+    sampleCount: samples.length,
+    textureAdvances,
+    encoderAdvances
+  }
+}
+
+function assertD3d11Diagnostics(diagnostics, { requireOutput }) {
+  const failures = evaluateWindowsNativeScreenD3d11Diagnostics(diagnostics, {
+    requireOutput,
+    expectFallback: options.expectFallback
+  })
+  if (failures.length > 0) {
+    throw new Error(`Windows D3D11 media diagnostics failed: ${failures.join('; ')}`)
   }
 }
 
