@@ -27,9 +27,11 @@
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: HIGH
-- **Execution status**: IN PROGRESS — source implementation and portable
-  contract gates are active; Windows source-lane, installed-candidate,
-  presenter, performance, and hardware qualification remain BLOCKED
+- **Execution status**: BLOCKED — source implementation and fail-closed
+  evidence tooling are complete at
+  `f2eaaf253a0502e68b42720f18d693f2f95ad529`; the physical Windows source
+  lane, signed installed candidate, presenter/GPU/OBS matrices, active
+  performance budget, and natural-fallback qualification remain unavailable
 - **Depends on**: Plan 039 Steps 1-5 at commit
   `d85f9b4c1fc2eb3e7f084ad62a80f4f6375497ce` (observability, RTMP harness,
   self-capture exclusion, MF topology/fallback, entitlement and provider
@@ -43,30 +45,43 @@ commit above. The implementation branch starts from that commit plus this
 plan-only reconciliation; any later unexplained in-scope drift remains a STOP
 condition.
 
-### Implementation checkpoint (2026-07-30)
+### Final source checkpoint (2026-08-02)
 
-Source work is underway on the branch. The D3D11 authority, lease and protocol
-types, capture/compositor/session/presenter modules, Electron-main presenter
-authority, diagnostics contracts, and fail-closed evidence runners exist in
-the working tree. Runtime integration and the final verification sweep are not
-yet declared complete.
+The source implementation and fail-closed evidence tooling are frozen at
+`f2eaaf253a0502e68b42720f18d693f2f95ad529`. The generation- and
+adapter-bound D3D11 authority, capture/compositor/session/presenter path,
+DXGI-surface Media Foundation input, Electron-main presenter lifecycle,
+diagnostics, protected Windows runners, immutable evidence publication, and
+candidate payload verification are implemented.
 
-The following interim portable contract command is evidenced at this
-checkpoint:
+Verification on that source state includes:
 
-```text
-node --test scripts/lib/windows-d3d11-media.test.mjs scripts/lib/windows-stream-performance.test.mjs scripts/lib/windows-performance-budget.test.mjs
-81 passed, 0 failed
-```
+- `pnpm test:scripts`: 1,009 passed across 185 suites;
+- `pnpm --filter @videorc/desktop test`: 1,322 passed across 147 files, with
+  one pre-existing skip;
+- `cargo test -p videorc-backend`: 1,521 passed in total, with eight ignored;
+- Rust format/check/clippy, TypeScript typecheck/lint/format, and the desktop
+  production build: PASS;
+- the Windows xwin compile-only check (`x86_64-pc-windows-msvc`, tests
+  enabled): PASS;
+- the 100-cycle preview lifecycle and placement probes: PASS;
+- the comment-highlight RTMP artifact smoke: PASS for stream-only, split
+  record/stream, and legacy compatibility; and
+- the recording matrix: 12/12 combinations PASS, including hard-content
+  1080p60 and 4K30.
 
-This is pure contract/runner evidence only. It does not compile the
-Windows-only Rust bodies and does not exercise D3D11, Desktop Duplication,
+The maintained Recording Studio sweep passed gates 1-24. Its real
+ScreenCaptureKit recording and Notes-window gates are explicitly BLOCKED on
+this host because macOS exposed no authorized native screen source. The device
+variant is blocked by the same permission prerequisite.
+
+The xwin result is compile-only. It does not replace the protected physical
+x64 Windows Rust/clippy source lane or exercise D3D11, Desktop Duplication,
 Windows Graphics Capture, DirectComposition, Media Foundation GPU input, an
-installed app, or a physical performance workload. The exact Windows Rust
-manifest/full suite/clippy, signed installed candidate, NVIDIA and Intel
-matrices, natural-fallback host, presenter lifecycle/input checks, OBS
-comparisons, active performance budget, and deterministic host merge all
-remain BLOCKED. No done criterion below is satisfied by the portable result.
+installed candidate, OBS, or a physical performance workload. The signed
+candidate, NVIDIA and Intel matrices, natural-fallback host, presenter
+lifecycle/input checks, active budget, and deterministic host merge therefore
+remain BLOCKED. No physical done criterion below is claimed.
 
 ### Post-Plan-039 reconciliation
 
@@ -328,6 +343,7 @@ child cleanup as required by `AGENTS.md`.
 - `apps/desktop/src/main/preview-supervisor.ts`
 - `apps/desktop/src/main/preview-supervisor.test.ts`
 - `apps/desktop/src/main/smoke-command-security.ts`
+- `apps/desktop/src/preload/index.ts`
 - `apps/desktop/src/shared/backend.ts`
 - `apps/desktop/src/shared/backend-rpc-contract.ts`
 - `apps/desktop/src/shared/backend-rpc-contract.test.ts`
@@ -387,6 +403,8 @@ child cleanup as required by `AGENTS.md`.
 - `scripts/lib/native-preview-window-gates.test.mjs`
 - `scripts/lib/support-bundle-verifier.mjs`
 - `scripts/lib/support-bundle-verifier.test.mjs`
+- `scripts/lib/exclusive-json-artifact.mjs` (create)
+- `scripts/lib/exclusive-json-artifact.test.mjs` (create)
 - `scripts/preview-lifecycle-probe.mjs`
 - `scripts/lib/windows-preview-lifecycle-gates.mjs` (create)
 - `scripts/lib/windows-preview-lifecycle-gates.test.mjs` (create)
@@ -396,10 +414,13 @@ child cleanup as required by `AGENTS.md`.
 - `scripts/lib/smoke-command-callers.test.mjs`
 - `scripts/lib/windows-local-gates.mjs`
 - `scripts/lib/windows-local-gates.test.mjs`
+- `scripts/smoke-comment-highlight-stream-app.mjs`
+- `scripts/smoke-local-gates-windows.mjs`
 - `package.json`
 - `docs/adr/0001-obs-parity-native-capture-architecture.md`
 - `docs/windows-port-plan.md`
 - `docs/windows-dev-loop.md`
+- `docs/releases/windows-alpha-runbook.md`
 - `docs/acceptance/windows-app-acceptance-template.md`
 - `docs/acceptance/windows-d3d11-performance-budget.json` (create)
 - `docs/acceptance/2026-07-30-windows-d3d11-media.md` (create)
@@ -1014,6 +1035,7 @@ embedded|separate|excluded-wgc|disabled-fallback`,
    $env:VIDEORC_RELEASE_SOURCE_COMMIT = '<40-hex-source-commit>'
    $env:VIDEORC_RELEASE_EXPECTED_SHA256 = '<installer-sha256>'
    $env:VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256 = '<installed-app-sha256>'
+   $env:VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256 = '<verified-staged-payload-sha256>'
    $env:VIDEORC_WINDOWS_PUBLISHER_NAME = '<authenticode-publisher>'
    # Set per host to exactly one of:
    #   <absolute-evidence-directory>\nvidia

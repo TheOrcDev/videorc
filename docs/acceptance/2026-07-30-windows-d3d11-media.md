@@ -2,9 +2,12 @@
 
 ## Status
 
-**BLOCKED — source implementation is in progress and one interim portable
-contract suite passes; no final Windows source-lane, physical Windows
-qualification, installed candidate, or release claim exists.**
+**BLOCKED — the D3D11 source path and fail-closed evidence tooling are
+implemented. Portable/macOS verification and an x86_64-pc-windows-msvc xwin
+compile check pass on the frozen source commit. The physical Windows source
+lane, signed candidate, GPU/OBS/presenter/performance matrices, active budget,
+and natural-fallback evidence remain unavailable; no release or OBS-parity
+claim exists.**
 
 This record tracks Plan 040 without turning source-level or cross-compiled
 checks into hardware evidence. The D3D11 path may not be promoted, published,
@@ -13,7 +16,7 @@ has produced retained PASS evidence.
 
 ## Candidate identity
 
-- Source commit: pending final implementation commit
+- Source commit: `f2eaaf253a0502e68b42720f18d693f2f95ad529`
 - Installer SHA-256: not built
 - Installed `Videorc.exe` SHA-256: not built
 - Packaged-app payload SHA-256: not built
@@ -24,8 +27,7 @@ digest change after physical evidence begins invalidates that evidence.
 
 ## Source implementation and portable evidence
 
-The implementation branch currently contains source contracts and in-progress
-runtime integration for:
+The frozen source commit contains:
 
 - a generation- and adapter-bound D3D11 media authority and lease model;
 - bounded D3D11 capture/compositor texture leases and deterministic GPU
@@ -35,44 +37,50 @@ runtime integration for:
 - platform-aware Metal/D3D11/proof preview claims;
 - exact staged Windows-only Rust discovery;
 - strict D3D11 budget, natural-fallback, three-host merge, support-bundle, and
-  public-acceptance contracts; and
+  public-acceptance contracts with failure-atomic PASS publication; and
 - a protected OBS side-by-side runner that binds the signed process, display,
   audio endpoint, stimulus, loopback RTMP target, artifacts, A/V, process tree,
   GPU samples, and D3D11 invariants.
 
-Runtime wiring and the final source verification sweep are still underway.
-The following command was run from the working implementation tree on
-2026-07-30:
+The following verification was run on the source state frozen by the commit
+above:
 
-| Command                                                                                                                                                | Result                     | What it proves                                                                           |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------- | ---------------------------------------------------------------------------------------- |
-| `node --test scripts/lib/windows-d3d11-media.test.mjs scripts/lib/windows-stream-performance.test.mjs scripts/lib/windows-performance-budget.test.mjs` | PASS — 81 passed, 0 failed | Pure evidence-schema, runner-policy, matrix, budget, fallback, and fail-closed contracts |
+| Command / gate                                                                | Result                                                                  | What it proves                                                                                        |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `pnpm test:scripts`                                                           | PASS — 1,009 tests across 185 suites                                    | Portable evidence schemas, runners, candidate binding, immutable publication, fallback, and artifacts |
+| `pnpm --filter @videorc/desktop test`                                         | PASS — 1,322 tests across 147 files; one pre-existing skip              | Desktop protocol, lifecycle, renderer, and main-process contracts                                     |
+| `cargo test -p videorc-backend`                                               | PASS — 1,521 tests in total; eight ignored                              | Backend implementation and lifecycle contracts                                                        |
+| Rust format/check/clippy; TypeScript typecheck/lint/format; desktop build     | PASS                                                                    | Native and desktop static/build gates                                                                 |
+| `cargo xwin check -p videorc-backend --target x86_64-pc-windows-msvc --tests` | PASS — compile-only                                                     | Windows-only Rust bodies cross-compile; this is not physical execution                                |
+| `pnpm probe:preview-lifecycle`; `pnpm probe:preview-window`                   | PASS — 100/100 cycles and full placement/dock/occlusion flow            | macOS preview lifecycle regression                                                                    |
+| `pnpm smoke:comment-highlight-stream`                                         | PASS — stream-only, split record/stream, and legacy RTMP artifacts      | Viewer-facing comment highlight and caption coexistence                                               |
+| `pnpm smoke:recording-matrix`                                                 | PASS — 12/12, including hard-content 1080p60 and 4K30                   | Shipping profile, color, level, cadence, stop-tail, and bridge-pressure contracts                     |
+| `pnpm smoke:recording-studio`                                                 | BLOCKED after gates 1-24 passed — no authorized ScreenCaptureKit source | Maintained non-device gates passed; physical macOS screen/Notes gates could not execute               |
+| `pnpm smoke:recording-studio:devices`                                         | NOT RUN — BLOCKED by the same missing native screen permission/source   | No real-device qualification claim                                                                    |
 
-This interim PASS is not tied to a final source commit and must be rerun before
-handoff. It does not compile the `cfg(target_os = "windows")` Rust bodies and
-does not exercise a GPU, presenter HWND, encoder MFT, signed executable, or
-installed app. Windows x64 Rust discovery, the full backend suite, clippy, and
-all physical rows remain BLOCKED. No cross-compiled or physical PASS is
-recorded in this note.
+The xwin check does not run a Windows binary or replace the protected physical
+x64 Windows test/clippy lane. None of these results exercises a Windows GPU,
+presenter HWND, encoder MFT, signed executable, installed app, or OBS workload.
+All physical rows therefore remain BLOCKED.
 
 ## Required physical Windows evidence
 
-| Evidence                                    | Required result                                                                                | Current state                                                      |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| Signed/private installed candidate identity | One source/installer/app/payload identity                                                      | BLOCKED — candidate not built                                      |
-| `nvidia-turing-floor` OBS comparison        | 3 OBS + 3 Videorc runs, PASS                                                                   | BLOCKED — physical host required                                   |
-| `intel-xe-integrated` OBS comparison        | 3 OBS + 3 Videorc runs, PASS                                                                   | BLOCKED — physical host required                                   |
-| NVIDIA D3D11 profile matrix                 | Exactly 1080p30/60, PASS                                                                       | BLOCKED — physical host required                                   |
-| Intel D3D11 profile matrix                  | Exactly 1080p30/60, PASS                                                                       | BLOCKED — physical host required                                   |
-| Natural unsupported host                    | 1080p30 non-OBS-parity fallback policy, PASS                                                   | BLOCKED — natural fallback host required                           |
-| D3D11 performance budget                    | Derived from retained physical comparison/calibration evidence, independently reviewed, active | BLOCKED — physical comparison and calibration evidence unavailable |
-| Forced-path manifests                       | NVIDIA + Intel PATH_PASS                                                                       | BLOCKED                                                            |
-| Automatic-default manifests                 | NVIDIA + Intel PATH_PASS without selection variables                                           | BLOCKED                                                            |
-| Natural-fallback manifest                   | One 1080p30 PATH_PASS                                                                          | BLOCKED                                                            |
-| Three host manifests                        | NVIDIA + Intel + fallback HOST_PASS                                                            | BLOCKED                                                            |
-| Deterministic aggregate                     | Aggregate PASS                                                                                 | BLOCKED                                                            |
-| Preview lifecycle/placement                 | D3D11 triple, zero BMP, click/focus continuity                                                 | BLOCKED — physical Windows required                                |
-| Windows source lane                         | Exact D3D tests + full Rust + clippy                                                           | BLOCKED — final source state and Windows x64 source host required  |
+| Evidence                                    | Required result                                                                                | Current state                                                               |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Signed/private installed candidate identity | One source/installer/app/payload identity                                                      | BLOCKED — candidate not built                                               |
+| `nvidia-turing-floor` OBS comparison        | 3 OBS + 3 Videorc runs, PASS                                                                   | BLOCKED — physical host required                                            |
+| `intel-xe-integrated` OBS comparison        | 3 OBS + 3 Videorc runs, PASS                                                                   | BLOCKED — physical host required                                            |
+| NVIDIA D3D11 profile matrix                 | Exactly 1080p30/60, PASS                                                                       | BLOCKED — physical host required                                            |
+| Intel D3D11 profile matrix                  | Exactly 1080p30/60, PASS                                                                       | BLOCKED — physical host required                                            |
+| Natural unsupported host                    | 1080p30 non-OBS-parity fallback policy, PASS                                                   | BLOCKED — natural fallback host required                                    |
+| D3D11 performance budget                    | Derived from retained physical comparison/calibration evidence, independently reviewed, active | BLOCKED — physical comparison and calibration evidence unavailable          |
+| Forced-path manifests                       | NVIDIA + Intel PATH_PASS                                                                       | BLOCKED                                                                     |
+| Automatic-default manifests                 | NVIDIA + Intel PATH_PASS without selection variables                                           | BLOCKED                                                                     |
+| Natural-fallback manifest                   | One 1080p30 PATH_PASS                                                                          | BLOCKED                                                                     |
+| Three host manifests                        | NVIDIA + Intel + fallback HOST_PASS                                                            | BLOCKED                                                                     |
+| Deterministic aggregate                     | Aggregate PASS                                                                                 | BLOCKED                                                                     |
+| Preview lifecycle/placement                 | D3D11 triple, zero BMP, click/focus continuity                                                 | BLOCKED — physical Windows required                                         |
+| Windows source lane                         | Exact D3D tests + full Rust + clippy                                                           | BLOCKED — xwin compile-only passed; physical Windows x64 execution required |
 
 Supported-host evidence must prove all of the following, not merely a
 “hardware encoder” label:
@@ -91,13 +99,16 @@ Supported-host evidence must prove all of the following, not merely a
 
 ## macOS regressions on the same source commit
 
-| Gate                                  | Current state                                                     |
-| ------------------------------------- | ----------------------------------------------------------------- |
-| `pnpm smoke:recording-studio`         | BLOCKED — final source commit not available                       |
-| `pnpm smoke:recording-studio:devices` | BLOCKED — final source commit and authorized device host required |
+| Gate                                  | Current state                                                                  |
+| ------------------------------------- | ------------------------------------------------------------------------------ |
+| `pnpm smoke:recording-studio`         | Gates 1-24 PASS; BLOCKED at real ScreenCaptureKit because no source is exposed |
+| `pnpm smoke:recording-studio:devices` | NOT RUN — BLOCKED by the same missing native screen permission/source          |
+| `pnpm smoke:recording-matrix`         | PASS — 12/12                                                                   |
 
-The ordinary Recording Studio gate is mandatory. Only the device variant may
-retain an explicit permissions/hardware BLOCKED result.
+The ScreenCaptureKit recording and Notes-window gates were each attempted and
+reported the same explicit missing-native-screen blocker. The maintained
+synthetic/artifact, comment-highlight, preview-surface, lifecycle, placement,
+and interaction gates all passed before that blocker.
 
 ## Evidence hashes
 
