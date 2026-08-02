@@ -3212,6 +3212,12 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     let mut windows_d3d11_final_snapshot;
     #[cfg(target_os = "windows")]
     let mut windows_d3d11_final_snapshot_phase = WindowsD3d11FinalSnapshotPhase::default();
+    #[cfg(target_os = "windows")]
+    let windows_encoder_bridge_shutdown_order = windows_encoder_bridge_shutdown_order(
+        active.windows_d3d11_monitor.is_some(),
+        active.windows_d3d11_recovery.is_some(),
+        active.windows_d3d11_media.is_some(),
+    );
     if !active.stop_requested {
         // Send before touching FFmpeg stdin. The monitor gives an already-ready
         // process exit priority over this signal, closing the old wait -> lock
@@ -3245,18 +3251,26 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
         }
         drop(diagnostics);
 
-        // The writers own MF drain/flush. Join them while the media authority
-        // and diagnostics monitor are still live so their final timeout
-        // counters are retained in the authoritative shutdown snapshot.
-        if let Some(stream_bridge) = active.encoder_bridge_stream.as_mut() {
-            stream_bridge.stop_and_join_writer();
+        // Unified D3D11 writers own MF drain/flush. Join them while the media
+        // authority and diagnostics monitor are still live so their final
+        // timeout counters survive in the authoritative snapshot. A raw
+        // fallback writer must stay on the normal FFmpeg stop edge: joining it
+        // here leaves a wall-clock input idle while later async cleanup runs,
+        // stretching the final frame and lowering cadence.
+        if matches!(
+            windows_encoder_bridge_shutdown_order,
+            WindowsEncoderBridgeShutdownOrder::JoinBeforeD3d11FinalSnapshot
+        ) {
+            if let Some(stream_bridge) = active.encoder_bridge_stream.as_mut() {
+                stream_bridge.stop_and_join_writer();
+            }
+            if let Some(recording_bridge) = active.encoder_bridge.as_mut() {
+                recording_bridge.stop_and_join_writer();
+            }
+            windows_d3d11_final_snapshot_phase
+                .writers_joined()
+                .expect("Windows D3D11 writers join exactly once before final diagnostics");
         }
-        if let Some(recording_bridge) = active.encoder_bridge.as_mut() {
-            recording_bridge.stop_and_join_writer();
-        }
-        windows_d3d11_final_snapshot_phase
-            .writers_joined()
-            .expect("Windows D3D11 writers join exactly once before final diagnostics");
         windows_d3d11_monitor_to_join = active.windows_d3d11_monitor.take();
         if let Some(monitor) = windows_d3d11_monitor_to_join.as_ref() {
             // Do not await while holding `state.recording`: recovery may be
@@ -3322,18 +3336,23 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     }
     #[cfg(target_os = "windows")]
     {
-        windows_d3d11_final_snapshot_phase
-            .monitor_joined()
-            .expect("Windows D3D11 monitor joins after writers");
-        if let Some(snapshot) = windows_d3d11_final_snapshot {
-            publish_final_windows_d3d11_diagnostics(
-                &state,
-                &session_id,
-                windows_d3d11_final_mode,
-                snapshot,
-                windows_d3d11_final_snapshot_phase,
-            )
-            .await;
+        if matches!(
+            windows_encoder_bridge_shutdown_order,
+            WindowsEncoderBridgeShutdownOrder::JoinBeforeD3d11FinalSnapshot
+        ) {
+            windows_d3d11_final_snapshot_phase
+                .monitor_joined()
+                .expect("Windows D3D11 monitor joins after writers");
+            if let Some(snapshot) = windows_d3d11_final_snapshot {
+                publish_final_windows_d3d11_diagnostics(
+                    &state,
+                    &session_id,
+                    windows_d3d11_final_mode,
+                    snapshot,
+                    windows_d3d11_final_snapshot_phase,
+                )
+                .await;
+            }
         }
         // No monitor callback can resurrect a retired presenter after this
         // exact teardown because the task is joined above.
@@ -9189,6 +9208,26 @@ enum WindowsD3d11FinalSnapshotPhase {
     Running,
     WritersJoined,
     MonitorJoined,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsEncoderBridgeShutdownOrder {
+    StopWithFfmpeg,
+    JoinBeforeD3d11FinalSnapshot,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_encoder_bridge_shutdown_order(
+    has_d3d11_monitor: bool,
+    has_d3d11_recovery_context: bool,
+    has_d3d11_media_authority: bool,
+) -> WindowsEncoderBridgeShutdownOrder {
+    if has_d3d11_monitor || has_d3d11_recovery_context || has_d3d11_media_authority {
+        WindowsEncoderBridgeShutdownOrder::JoinBeforeD3d11FinalSnapshot
+    } else {
+        WindowsEncoderBridgeShutdownOrder::StopWithFfmpeg
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -18998,6 +19037,26 @@ mod tests {
         phase.monitor_joined().unwrap();
         assert!(phase.permits_final_snapshot());
         assert!(phase.monitor_joined().is_err());
+    }
+
+    #[test]
+    fn windows_writer_shutdown_order_covers_raw_fallback_and_d3d11_recovery() {
+        assert_eq!(
+            windows_encoder_bridge_shutdown_order(false, false, false),
+            WindowsEncoderBridgeShutdownOrder::StopWithFfmpeg
+        );
+        assert_eq!(
+            windows_encoder_bridge_shutdown_order(true, true, true),
+            WindowsEncoderBridgeShutdownOrder::JoinBeforeD3d11FinalSnapshot
+        );
+        assert_eq!(
+            windows_encoder_bridge_shutdown_order(true, true, false),
+            WindowsEncoderBridgeShutdownOrder::JoinBeforeD3d11FinalSnapshot
+        );
+        assert_eq!(
+            windows_encoder_bridge_shutdown_order(false, true, false),
+            WindowsEncoderBridgeShutdownOrder::JoinBeforeD3d11FinalSnapshot
+        );
     }
 
     // Rounded camera bubble (2026-07-06): the FFmpeg mask derives from the same
