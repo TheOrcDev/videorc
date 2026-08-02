@@ -10,7 +10,7 @@
 > **Drift check (run first)**:
 >
 > ```powershell
-> git diff --stat 1fc1355b964d5690bf3b5992ddcb08131f0c58b6..HEAD -- crates/videorc-backend/Cargo.toml crates/videorc-backend/src apps/desktop/src/main apps/desktop/src/shared apps/desktop/src/renderer/src scripts docs/adr docs/acceptance docs/windows-dev-loop.md docs/windows-port-plan.md package.json plans
+> git diff --stat d85f9b4c1fc2eb3e7f084ad62a80f4f6375497ce..HEAD -- crates/videorc-backend/Cargo.toml crates/videorc-backend/src apps/desktop/src/main apps/desktop/src/shared apps/desktop/src/renderer/src scripts docs/adr docs/acceptance docs/windows-dev-loop.md docs/windows-port-plan.md package.json plans
 > ```
 >
 > The command scans containing directories so it also catches new neighboring
@@ -28,12 +28,12 @@
 - **Effort**: L
 - **Risk**: HIGH
 - **Depends on**: Plan 039 Steps 1-5 at commit
-  `1fc1355b964d5690bf3b5992ddcb08131f0c58b6` (observability, RTMP harness,
+  `d85f9b4c1fc2eb3e7f084ad62a80f4f6375497ce` (observability, RTMP harness,
   self-capture exclusion, MF topology/fallback, entitlement and provider
   profiles); Plan 039 may remain BLOCKED on 1080p60 performance acceptance
 - **Category**: perf / direction / migration
-- **Planned at**: commit `1fc1355b964d5690bf3b5992ddcb08131f0c58b6`,
-  reconciled 2026-07-30
+- **Planned at**: commit `d85f9b4c1fc2eb3e7f084ad62a80f4f6375497ce`,
+  reconciled 2026-08-02
 
 Step 0 reconciled this plan against the exact Plan 039 Steps 1-5 dependency
 commit above. The implementation branch starts from that commit plus this
@@ -45,8 +45,13 @@ condition.
 - Plan 039 landed authoritative stream-target snapshots and topology
   observability, exact Videorc-window content protection, payload-bound
   performance gates, provider-aware profiles, and the protected physical
-  Windows runner. It intentionally did not change the CPU/raw/BMP media path,
-  so the architectural diagnosis below remains current.
+  Windows runner. Current `origin/main` also contains the `de4c1f88`
+  direct-recording predecessor: eligible record-only ScreenOnly/ScreenCamera
+  sessions retain WGC D3D11 textures, convert BGRA to NV12 with a D3D11 video
+  processor, and submit DXGI-backed Media Foundation samples. That predecessor
+  is reusable groundwork, not this plan's end state: it crosses retained COM
+  textures between workers, has no single media-thread/fence authority, uses a
+  specialized record-only scene bypass, and retains CPU/BMP preview readback.
 - `PreviewSurfaceBounds` is already a non-`Copy` owned protocol type. Its
   `NativePreviewHostBounds`, host-command, and helper mirrors still derive
   `Copy`; adding the opaque Windows HWND removes those remaining derives and
@@ -89,10 +94,15 @@ CPU/raw path.
 
 ## Current state
 
-### Capture downloads every display frame
+### Streaming and preview still download display frames
 
-- `crates/videorc-backend/src/capture_input.rs:122-130` uses FFmpeg
-  `ddagrab`, then `hwdownload,format=bgra`.
+- `windows_graphics_capture.rs` can retain a WGC `ID3D11Texture2D` in
+  `frame_store.rs::RetainedD3D11Texture` for the direct record-only path. Plan
+  040 must move that ownership onto its single media authority rather than
+  create another capture implementation or keep COM textures crossing worker
+  threads.
+- The ordinary streaming/fallback path in `capture_input.rs` still uses
+  FFmpeg `ddagrab` plus `hwdownload,format=bgra`.
 - `crates/videorc-backend/src/preview_screen.rs:1125-1163` scales/pads to BGRA
   and writes raw video to stdout.
 - `crates/videorc-backend/src/preview_screen.rs:1639-1715` blocks on
@@ -102,13 +112,17 @@ CPU/raw path.
   `screen:dxgi:<adapter-luid>:<output-index>`. Preserve that stable source
   identity instead of introducing a second display namespace.
 
-### Composition is CPU-only on Windows
+### The authoritative scene compositor is still CPU-only on Windows
 
 - `crates/videorc-backend/src/compositor.rs:3271-3342` treats
   `CompositorBackend::Cpu` as the expected non-macOS backend. That comment and
   selection must become fallback-specific once D3D11 is supported.
 - `compositor.rs:3610-3648` converts BGRA screen pixels into a CPU YUV420p
   output via `blit_rgba_to_yuv420p`.
+- The direct record-only predecessor bypasses that compositor for a bounded
+  ScreenOnly/ScreenCamera subset. It is not a second scene graph to extend;
+  replace it with the shared D3D scene path while preserving its tested WGC
+  mapping, camera overlay geometry, and eligibility fallback.
 - The compositor protocol already has platform-neutral concepts for backend,
   pixel format, export handle, source-import counters, and primary/auxiliary
   outputs. Its export handle is a struct with an optional Metal target, not an
@@ -116,13 +130,16 @@ CPU/raw path.
   export and make downstream consumer selection explicit/path-aware; do not
   create a parallel scene graph.
 
-### The encoded bridge still receives system-memory I420
+### Only the direct record-only predecessor receives DXGI-backed NV12
 
-- `crates/videorc-backend/src/windows_media_foundation_encoder.rs:1-120`
-  owns the asynchronous hardware H.264 MFT, but its profile validates an I420
-  byte length.
-- `windows_media_foundation_encoder.rs:356-383` accepts a full I420 byte slice
-  and creates an input sample backed by system memory.
+- `windows_media_foundation_encoder.rs` now owns both the established
+  system-memory I420 input and the direct-recording NV12 D3D11 input. Reuse its
+  MFT activation, DXGI manager, video processor, NV12 pool, BT.709 tagging,
+  asynchronous credit, timestamps, tee, and drain contracts.
+- Ordinary stream and composed record/stream sessions still enter through the
+  I420 API. The direct path's `zeroCopyFrames` is an encoded-output counter and
+  increments even after CPU-I420 upload, so it is not Plan 040 end-to-end
+  zero-copy evidence.
 - PR #169 proves that the MFT/tee/timestamp/MPEG-TS output design works for
   selected 1080p modes; preserve its asynchronous credit, timestamp-order,
   sequence-header, drain, and fallback contracts.
@@ -235,6 +252,11 @@ packaged candidate.
 | Real-device Recording Studio regression | `pnpm smoke:recording-studio:devices` | exit 0 on a permitted macOS device host, or an explicit BLOCKED record plus the closest Windows D3D11/native-preview gates |
 | Protected Windows lane | `pnpm smoke:local-gates:windows` | exit 0 |
 
+Any change touching Windows async/process tests must additionally run each
+affected filter at least 25 times and the full Windows Rust suite three times
+from PowerShell 7, using explicit readiness/spawn evidence and bounded owned
+child cleanup as required by `AGENTS.md`.
+
 ## Scope
 
 **In scope** (the only files to modify):
@@ -244,6 +266,7 @@ packaged candidate.
 - `crates/videorc-backend/src/state.rs`
 - `crates/videorc-backend/src/protocol.rs`
 - `crates/videorc-backend/src/diagnostics.rs`
+- `crates/videorc-backend/src/frame_store.rs`
 - `crates/videorc-backend/src/capture_input.rs`
 - `crates/videorc-backend/src/screen_capture.rs`
 - `crates/videorc-backend/src/preview_screen.rs`
@@ -254,6 +277,7 @@ packaged candidate.
 - `crates/videorc-backend/src/encoder_bridge.rs`
 - `crates/videorc-backend/src/recording.rs`
 - `crates/videorc-backend/src/windows_media_foundation_encoder.rs`
+- `crates/videorc-backend/src/windows_graphics_capture.rs`
 - `crates/videorc-backend/src/windows_d3d11_device.rs` (create)
 - `crates/videorc-backend/src/windows_d3d11_capture.rs` (create)
 - `crates/videorc-backend/src/windows_d3d11_compositor.rs` (create)

@@ -57,8 +57,8 @@ row when done.
 | 036 | Bound Windows proof-surface transport and presentation work | P1 | M | 038 | TODO ([#157](https://github.com/TheOrcDev/videorc/issues/157)) |
 | 037 | Make Windows Electron fallback and background work recoverable and scoped | P1 | M | 038 | DONE (2026-07-28; implementation [#167](https://github.com/TheOrcDev/videorc/pull/167), physical Windows A/B and recovery acceptance recorded; closes [#158](https://github.com/TheOrcDev/videorc/issues/158)) |
 | 038 | Establish an enforceable Windows packaged-performance baseline | P0 | M | Plan 019 physical Windows acceptance evidence | DONE (2026-07-23; implementation [#160](https://github.com/TheOrcDev/videorc/pull/160), [#155](https://github.com/TheOrcDev/videorc/issues/155) closed) |
-| 039 | Make Windows 1080p livestreaming measurable and OBS-competitive | P0 | L | landed PRs #160, #161, #169 | TODO |
-| 040 | Replace the Windows display media path with D3D11 shared textures | P1 | L | 039 Steps 1-5 | TODO |
+| 039 | Make Windows 1080p livestreaming measurable and OBS-competitive | P0 | L | landed PRs #160, #161, #169 | IN PROGRESS (2026-08-02; Steps 1-5 rebased at `d85f9b4c`; physical OBS/performance acceptance remains pending) |
+| 040 | Replace the Windows display media path with D3D11 shared textures | P1 | L | 039 Steps 1-5 | IN PROGRESS (2026-08-02; Step 0 reconciled against `d85f9b4c` and direct-recording predecessor `de4c1f88`) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) |
 REJECTED (with one-line rationale).
