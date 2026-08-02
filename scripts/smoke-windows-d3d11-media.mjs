@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -21,15 +21,26 @@ import {
   normalizeWindowsD3d11InvariantSummary,
   parseWindowsD3d11MediaArgs,
   parseWindowsD3d11RustTestList,
+  requiredWindowsD3d11StageAssertionIds,
   sha256Bytes,
   sha256CanonicalJson,
-  validateWindowsD3d11StageReport,
+  validateWindowsD3d11HostManifest,
+  validateWindowsD3d11PathManifest,
+  windowsD3d11StageProducerSpec,
   windowsD3d11RustDiscoveryCommand
 } from './lib/windows-d3d11-media.mjs'
+import { evaluateWindowsStreamRun } from './lib/windows-stream-performance.mjs'
+import {
+  finalizePreparedJsonArtifact,
+  prepareExclusiveJsonArtifact
+} from './lib/exclusive-json-artifact.mjs'
 import {
   WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND,
-  validateWindowsPerformanceBudget
+  validateWindowsPerformanceBudget,
+  verifyWindowsD3d11PerformanceBudgetDerivation
 } from './lib/windows-performance-budget.mjs'
+import { validateSupportBundle } from './lib/support-bundle-verifier.mjs'
+import { verifyInstalledWindowsCandidate } from './lib/windows-local-gates.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const options = parseWindowsD3d11MediaArgs(process.argv.slice(2))
@@ -159,34 +170,208 @@ async function runStage({ stage, output }) {
     return
   }
 
-  const reportPath = process.env.VIDEORC_WINDOWS_D3D11_STAGE_REPORT
-  if (!reportPath) {
+  requireAbsolute(output, '--output')
+  assertSelectionEnvironmentIsRunnerOwned()
+  const expectedCandidate = requiredPhysicalStageCandidateEnvironment()
+  const producerRoot = resolve(output, 'installed-app-producer')
+  const producerSpec = windowsD3d11StageProducerSpec({ stage, output: producerRoot })
+  const producer = spawnSync(
+    process.execPath,
+    [resolve(repoRoot, 'scripts/smoke-windows-stream-performance.mjs'), ...producerSpec.args],
+    {
+      cwd: repoRoot,
+      env: process.env,
+      stdio: 'inherit',
+      shell: false
+    }
+  )
+  if (producer.error) throw producer.error
+  if (producer.status !== 0) {
     throw new Error(
-      `VIDEORC_WINDOWS_D3D11_STAGE_REPORT is required for the physical ${stage} stage.`
+      `Installed packaged-app ${stage} producer did not pass (exit ${producer.status}).`
     )
   }
-  const artifact = await readExactJsonArtifact(reportPath, `${stage} stage report`)
-  const failures = validateWindowsD3d11StageReport(artifact.document, {
-    expectedStage: stage
+
+  const aggregateArtifact = await readExactJsonArtifact(
+    resolve(producerRoot, 'aggregate.json'),
+    `${stage} installed-app producer aggregate`
+  )
+  const aggregate = aggregateArtifact.document
+  if (
+    aggregate?.kind !== 'videorc.windows-stream-performance-aggregate' ||
+    aggregate?.status !== 'diagnostic' ||
+    aggregate?.mode !== 'diagnostic' ||
+    !equalStringArrays(aggregate?.scenarios, [producerSpec.scenario]) ||
+    aggregate?.runs?.length !== 1
+  ) {
+    throw new Error(`${stage} installed-app producer aggregate was incomplete or mismatched.`)
+  }
+  const candidate = normalizeCandidate(aggregate.candidate)
+  if (sha256CanonicalJson(candidate) !== sha256CanonicalJson(expectedCandidate)) {
+    throw new Error(`${stage} installed-app producer used a different candidate identity.`)
+  }
+  const runSummary = aggregate.runs[0]
+  if (
+    runSummary?.verdict !== 'PASS' ||
+    runSummary?.scenarioId !== producerSpec.scenario ||
+    runSummary?.repetition !== 1 ||
+    !isAbsolute(runSummary?.reportPath ?? '') ||
+    !lowercaseSha256(runSummary?.reportSha256)
+  ) {
+    throw new Error(`${stage} installed-app producer did not retain one exact PASS report.`)
+  }
+  const producerReport = await readExactJsonArtifact(
+    runSummary.reportPath,
+    `${stage} installed-app producer report`
+  )
+  if (producerReport.sha256 !== runSummary.reportSha256) {
+    throw new Error(`${stage} installed-app producer report digest did not match the aggregate.`)
+  }
+  const evidence = producerReport.document?.evidence
+  const reevaluated = evaluateWindowsStreamRun(evidence)
+  if (
+    producerReport.document?.result?.verdict !== 'PASS' ||
+    reevaluated.verdict !== 'PASS' ||
+    evidence?.scenarioId !== producerSpec.scenario ||
+    evidence?.mode !== 'diagnostic'
+  ) {
+    throw new Error(`${stage} installed-app producer evidence did not re-evaluate to PASS.`)
+  }
+  const assertions = physicalStageAssertions({ stage, source, evidence, candidate })
+  const failedAssertions = assertions.filter((assertion) => !assertion.passed)
+  const report = createWindowsD3d11StageReport({
+    stage,
+    status: failedAssertions.length === 0 ? 'PASS' : 'FAIL',
+    sourceCommit: candidate.sourceCommit,
+    installerSha256: candidate.installerSha256,
+    appSha256: candidate.appSha256,
+    payloadSha256: candidate.payloadSha256,
+    assertions,
+    metrics: {
+      scenario: producerSpec.scenario,
+      pipeline: evidence.pipeline,
+      media: evidence.media
+    },
+    host: {
+      platform: aggregate.operatingSystem?.platform,
+      arch: aggregate.operatingSystem?.arch,
+      release: aggregate.operatingSystem?.release,
+      hardwareClass: aggregate.hardwareClass
+    },
+    sourceEvidence: {
+      producer: producerSpec.producer,
+      producerAggregatePath: aggregateArtifact.path,
+      producerAggregateSha256: aggregateArtifact.sha256,
+      producerReportPath: producerReport.path,
+      producerReportSha256: producerReport.sha256,
+      listingSha256: source.listingSha256,
+      testOutputSha256: source.testOutputSha256
+    }
   })
-  if (failures.length > 0) throw new Error(`Invalid ${stage} stage report: ${failures.join('; ')}`)
-  if (artifact.document.status !== 'PASS') {
-    throw new Error(`${stage} stage status was ${artifact.document.status}.`)
+  if (failedAssertions.length > 0) {
+    await writeJsonExclusive(resolve(output, `${stage}-stage.json`), report)
+    throw new Error(
+      `Windows D3D11 ${stage} stage failed: ${failedAssertions.map(({ id }) => id).join(', ')}.`
+    )
   }
-  if (output) {
-    requireAbsolute(output, '--output')
-    await writeJsonExclusive(resolve(output, `${stage}-stage.json`), {
-      ...artifact.document,
-      sourceEvidence: {
-        ...artifact.document.sourceEvidence,
-        exactReportSha256: artifact.sha256,
-        listingSha256: source.listingSha256,
-        testOutputSha256: source.testOutputSha256
-      }
-    })
-  }
-  await assertArtifactsUnchanged([artifact])
+  const preparedReport = await prepareExclusiveJsonArtifact(
+    resolve(output, `${stage}-stage.json`),
+    report
+  )
+  await finalizePreparedJsonArtifact(preparedReport, async () => {
+    await assertArtifactsUnchanged([aggregateArtifact, producerReport])
+    await revalidateD3dFinalCandidate(candidate)
+  })
   console.log(`Windows D3D11 ${stage} stage PASS.`)
+}
+
+function physicalStageAssertions({ stage, source, evidence, candidate }) {
+  const d3d11 = evidence?.pipeline?.d3d11
+  const zeroCounterFields = [
+    'captureReadbackFrames',
+    'compositorCpuFallbackFrames',
+    'encoderSystemMemorySamples',
+    'rawVideoCopiedFrames',
+    'previewBmpRequests',
+    'previewBmpBytes',
+    'texturePoolPressureEvents',
+    'adapterMismatches',
+    'deviceResets',
+    'staleGenerationCallbacks',
+    'synchronizationTimeouts'
+  ]
+  const boundedFairness = [
+    ['messageDispatchP95Ms', 50],
+    ['messageDispatchMaxMs', 100],
+    ['mediaCommandLagP95Ms', 50],
+    ['mediaCommandLagMaxMs', 100],
+    ['maximumConsecutiveMessageBatch', 32],
+    ['maximumConsecutiveMediaBatch', 32]
+  ].every(([field, maximum]) => {
+    const value = d3d11?.[field]
+    const integral = field.startsWith('maximumConsecutive') ? Number.isInteger(value) : true
+    return integral && Number.isFinite(value) && value >= 0 && value <= maximum
+  })
+  const assertions = [
+    {
+      id: 'installed-packaged-candidate',
+      passed:
+        /^[a-f0-9]{40}$/.test(candidate?.sourceCommit ?? '') &&
+        ['installerSha256', 'appSha256', 'payloadSha256'].every((field) =>
+          lowercaseSha256(candidate?.[field])
+        )
+    },
+    { id: 'exact-windows-rust-discovery', passed: source.discovered.length > 0 },
+    { id: 'focused-windows-rust-tests', passed: lowercaseSha256(source.testOutputSha256) },
+    {
+      id: 'd3d11-live-same-adapter',
+      passed:
+        d3d11?.state === 'live' &&
+        d3d11?.requested === true &&
+        d3d11?.required === true &&
+        d3d11RoleAdaptersMatchAuthority(d3d11, {
+          auxiliaryRequired: evidence?.context?.topology === 'record-plus-stream'
+        })
+    },
+    {
+      id: 'zero-copy-counters',
+      passed: zeroCounterFields.every((field) => d3d11?.[field] === 0)
+    },
+    { id: 'bounded-media-thread-fairness', passed: boundedFairness },
+    {
+      id: 'no-path-fallback',
+      passed:
+        !nonEmptyString(d3d11?.fallbackReason) &&
+        d3d11?.stateChanged !== true &&
+        d3d11?.adapterChanged !== true &&
+        d3d11?.fallbackChanged !== true
+    }
+  ]
+  const stagePassed =
+    stage === 'capture'
+      ? ['desktop-duplication', 'windows-graphics-capture-monitor'].includes(
+          d3d11?.captureBackend
+        ) && d3d11?.textureImportFrames > 0
+      : stage === 'compositor'
+        ? evidence?.context?.sourceComposition === 'screen-camera' &&
+          d3d11?.cameraUploadFrames > 0 &&
+          d3d11?.compositorCpuFallbackFrames === 0
+        : stage === 'encoder'
+          ? evidence?.pipeline?.effectiveBridgeOutput === 'windows-media-foundation-h264-mpegts' &&
+            evidence?.pipeline?.encodedOutputBackend === 'media-foundation' &&
+            d3d11?.encoderGpuSamples > 0 &&
+            d3d11?.encoderSystemMemorySamples === 0
+          : stage === 'preview'
+            ? evidence?.context?.previewOpen === true &&
+              d3d11?.previewPresents > 0 &&
+              d3d11?.previewBmpRequests === 0 &&
+              d3d11?.previewBmpBytes === 0 &&
+              d3d11?.inputContinuityEvidence?.verdict === 'PASS' &&
+              d3d11?.inputContinuityEvidence?.physicalInput === true
+            : false
+  const stageAssertionId = requiredWindowsD3d11StageAssertionIds(stage).at(-1)
+  assertions.push({ id: stageAssertionId, passed: stagePassed })
+  return assertions
 }
 
 async function runGate(gateOptions) {
@@ -197,6 +382,7 @@ async function runGate(gateOptions) {
   }
   requireAbsolute(gateOptions.output, '--output')
   await assertFreshGateDirectory(gateOptions.output)
+  const candidateRoot = windowsD3d11CandidateEvidenceRoot(gateOptions.output)
   assertSelectionEnvironmentIsRunnerOwned()
   if (process.env.VIDEORC_WINDOWS_PERF_BUDGET_PROFILE?.trim()) {
     throw new Error(
@@ -209,8 +395,7 @@ async function runGate(gateOptions) {
     )
   }
 
-  const budgetPath = process.env.VIDEORC_WINDOWS_PERF_BUDGET_PATH?.trim()
-  if (!budgetPath) throw new Error('VIDEORC_WINDOWS_PERF_BUDGET_PATH is required.')
+  const budgetPath = configuredWindowsD3d11BudgetPath()
   const budgetArtifact = await readExactJsonArtifact(budgetPath, 'active D3D11 budget')
   const budgetFailures = validateWindowsPerformanceBudget(budgetArtifact.document)
   if (
@@ -221,6 +406,16 @@ async function runGate(gateOptions) {
     throw new Error(
       `Active D3D11 budget was invalid: ${budgetFailures.join('; ') || 'wrong kind/status'}`
     )
+  }
+  const derivedBudgetArtifacts = []
+  const derivationFailures = await verifyWindowsD3d11PerformanceBudgetDerivation({
+    document: budgetArtifact.document,
+    budgetPath: budgetArtifact.path,
+    candidateRoot,
+    onArtifact: (artifact) => derivedBudgetArtifacts.push(artifact)
+  })
+  if (derivationFailures.length > 0) {
+    throw new Error(`Active D3D11 budget derivation was invalid: ${derivationFailures.join('; ')}`)
   }
   const budgetEvidence = await verifyBudgetEvidenceForPath(
     budgetArtifact.document,
@@ -259,16 +454,26 @@ async function runGate(gateOptions) {
     gateOptions,
     performanceRoot,
     budgetArtifact,
-    budgetEvidence
+    budgetEvidence,
+    candidateRoot
   })
   const tracked = [
     budgetArtifact,
+    ...derivedBudgetArtifacts,
     ...budgetEvidence.trackedArtifacts,
     ...pathManifest.trackedArtifacts
   ]
-  await assertArtifactsUnchanged(tracked)
-  await writeJsonExclusive(resolve(gateOptions.output, 'path-manifest.json'), pathManifest.document)
-  await assertArtifactsUnchanged(tracked)
+  assertArtifactsInsideCandidateRoot(tracked, candidateRoot, {
+    allowedExternalPaths: [budgetArtifact.path]
+  })
+  const preparedManifest = await prepareExclusiveJsonArtifact(
+    resolve(gateOptions.output, 'path-manifest.json'),
+    pathManifest.document
+  )
+  await finalizePreparedJsonArtifact(preparedManifest, async () => {
+    await assertArtifactsUnchanged(tracked)
+    await revalidateD3dFinalCandidate(pathManifest.document.candidate)
+  })
   console.log(`Windows D3D11 ${gateOptions.pathEvidence} PATH_PASS.`)
 }
 
@@ -276,7 +481,9 @@ async function buildPathManifestFromPerformanceEvidence({
   gateOptions,
   performanceRoot,
   budgetArtifact,
-  budgetEvidence
+  budgetEvidence,
+  candidateRoot,
+  createdAt = new Date().toISOString()
 }) {
   const trackedArtifacts = []
   const aggregateArtifact = await readExactJsonArtifact(
@@ -329,6 +536,7 @@ async function buildPathManifestFromPerformanceEvidence({
     }
     const report = reportArtifact.document
     const evidence = report?.evidence
+    const reevaluated = evaluateWindowsStreamRun(evidence)
     if (
       report?.result?.verdict !== 'PASS' ||
       report.result.failures?.length !== 0 ||
@@ -339,6 +547,14 @@ async function buildPathManifestFromPerformanceEvidence({
       evidence?.context?.hardwareClass !== gateOptions.hardwareClass
     ) {
       throw new Error('A retained verdict did not prove one matching PASS run.')
+    }
+    if (
+      reevaluated.verdict !== 'PASS' ||
+      sha256CanonicalJson(reevaluated) !== sha256CanonicalJson(report.result)
+    ) {
+      throw new Error(
+        'A retained verdict did not independently re-evaluate to its exact PASS result.'
+      )
     }
     const runCandidate = normalizeCandidate(evidence.candidate)
     if (sha256CanonicalJson(runCandidate) !== sha256CanonicalJson(candidate)) {
@@ -449,6 +665,7 @@ async function buildPathManifestFromPerformanceEvidence({
     })
 
     const artifactBindings = {}
+    let supportBundleArtifact = null
     for (const [name, artifactPath] of Object.entries({
       ...evidence.artifacts,
       diagnostics: diagnosticsArtifact.path
@@ -461,9 +678,23 @@ async function buildPathManifestFromPerformanceEvidence({
             ? settingsArtifact
             : resolve(artifactPath) === diagnosticsArtifact.path
               ? diagnosticsArtifact
-              : await readExactFileArtifact(artifactPath, `${evidence.scenarioId} ${name}`)
+              : name === 'supportBundle'
+                ? await readExactJsonArtifact(artifactPath, `${evidence.scenarioId} ${name}`)
+                : await readExactFileArtifact(artifactPath, `${evidence.scenarioId} ${name}`)
       if (!trackedArtifacts.includes(artifact)) trackedArtifacts.push(artifact)
       artifactBindings[name] = { path: artifact.path, sha256: artifact.sha256 }
+      if (name === 'supportBundle') supportBundleArtifact = artifact
+    }
+    if (!supportBundleArtifact) {
+      throw new Error('Support-bundle artifact was missing while constructing path evidence.')
+    }
+    const supportBundleValidation = validateSupportBundle(supportBundleArtifact.document, {
+      windowsAcceptance: true
+    })
+    if (!supportBundleValidation.ok) {
+      throw new Error(
+        `Support bundle did not pass strict Windows acceptance validation: ${supportBundleValidation.failures.join('; ')}`
+      )
     }
     const lifecycleSha256 = sha256CanonicalJson(evidence.network?.lifecycle)
     const faultProjection = {
@@ -621,7 +852,7 @@ async function buildPathManifestFromPerformanceEvidence({
     )
   }
   const document = createWindowsD3d11PathManifest({
-    createdAt: new Date().toISOString(),
+    createdAt,
     candidate,
     host,
     profiles: gateOptions.profiles,
@@ -659,8 +890,12 @@ async function buildPathManifestFromPerformanceEvidence({
     },
     invariants,
     evidence,
-    runtimeProofLimitations: ['dedicated-synchronization-timeout-counter-not-emitted']
+    runtimeProofLimitations: []
   })
+  assertArtifactsInsideCandidateRoot(
+    [...budgetEvidence.trackedArtifacts, ...trackedArtifacts],
+    candidateRoot
+  )
   return { document, trackedArtifacts }
 }
 
@@ -915,26 +1150,151 @@ function resolveBudgetProfile(document, hardwareClass, evidence) {
 
 async function combinePathEvidence({ inputPaths, hardwareClass, output, operation }) {
   requireAbsolute(output, '--output')
+  const candidateRoot = dirname(resolve(output))
   const artifacts = await Promise.all(
     inputPaths.map((path, index) => readExactJsonArtifact(path, `path manifest ${index + 1}`))
   )
+  assertArtifactsInsideCandidateRoot(artifacts, candidateRoot)
+  const verifiedTrees = []
+  for (const artifact of artifacts) {
+    verifiedTrees.push(await verifyPathManifestTree(artifact, candidateRoot))
+  }
   const host = combineWindowsD3d11PathEvidence(artifacts, { hardwareClass, operation })
-  await assertArtifactsUnchanged(artifacts)
-  await writeJsonExclusive(resolve(output, 'host-manifest.json'), host)
-  await assertArtifactsUnchanged(artifacts)
+  const tracked = deduplicateArtifacts([
+    ...artifacts,
+    ...verifiedTrees.flatMap((tree) => tree.trackedArtifacts)
+  ])
+  assertArtifactsInsideCandidateRoot(tracked, candidateRoot, {
+    allowedExternalPaths: verifiedTrees.flatMap((tree) => tree.externalAuthorityPaths)
+  })
+  const preparedManifest = await prepareExclusiveJsonArtifact(
+    resolve(output, 'host-manifest.json'),
+    host
+  )
+  await finalizePreparedJsonArtifact(preparedManifest, async () => {
+    await assertArtifactsUnchanged(tracked)
+    await revalidateD3dFinalCandidate(host.candidate)
+  })
   console.log(`Windows D3D11 ${hardwareClass} HOST_PASS.`)
 }
 
 async function mergeEvidence({ inputPaths, output }) {
   requireAbsolute(output, '--output')
+  const candidateRoot = dirname(resolve(output))
   const artifacts = await Promise.all(
     inputPaths.map((path, index) => readExactJsonArtifact(path, `host manifest ${index + 1}`))
   )
+  assertArtifactsInsideCandidateRoot(artifacts, candidateRoot)
+  const tracked = [...artifacts]
+  const externalAuthorityPaths = []
+  for (const [hostIndex, artifact] of artifacts.entries()) {
+    const failures = validateWindowsD3d11HostManifest(artifact.document)
+    if (failures.length > 0) {
+      throw new Error(`Host manifest ${hostIndex + 1} was invalid: ${failures.join('; ')}`)
+    }
+    const pathArtifacts = []
+    for (const [pathIndex, binding] of artifact.document.pathManifests.entries()) {
+      const child = await readExactJsonArtifact(
+        binding.path,
+        `host manifest ${hostIndex + 1} path manifest ${pathIndex + 1}`
+      )
+      if (child.sha256 !== binding.sha256) {
+        throw new Error(`Host manifest ${hostIndex + 1} child ${pathIndex + 1} bytes changed.`)
+      }
+      const verifiedTree = await verifyPathManifestTree(child, candidateRoot)
+      pathArtifacts.push(child)
+      tracked.push(child, ...verifiedTree.trackedArtifacts)
+      externalAuthorityPaths.push(...verifiedTree.externalAuthorityPaths)
+    }
+    const rebuilt = combineWindowsD3d11PathEvidence(pathArtifacts, {
+      hardwareClass: artifact.document.hardwareClass,
+      operation:
+        artifact.document.hardwareClass === 'unsupported-natural-fallback'
+          ? 'finalize-fallback-evidence'
+          : 'combine-path-evidence'
+    })
+    if (sha256CanonicalJson(rebuilt) !== sha256CanonicalJson(artifact.document)) {
+      throw new Error(`Host manifest ${hostIndex + 1} did not match its recursively rebuilt tree.`)
+    }
+  }
   const aggregate = mergeWindowsD3d11HostEvidence(artifacts)
-  await assertArtifactsUnchanged(artifacts)
-  await writeJsonExclusive(resolve(output, 'aggregate.json'), aggregate)
-  await assertArtifactsUnchanged(artifacts)
+  assertArtifactsInsideCandidateRoot(tracked, candidateRoot, {
+    allowedExternalPaths: externalAuthorityPaths
+  })
+  const preparedAggregate = await prepareExclusiveJsonArtifact(
+    resolve(output, 'aggregate.json'),
+    aggregate
+  )
+  await finalizePreparedJsonArtifact(preparedAggregate, async () => {
+    await assertArtifactsUnchanged(tracked)
+    await revalidateD3dFinalCandidate(aggregate.candidate)
+  })
   console.log('Windows D3D11 aggregate evidence PASS.')
+}
+
+async function verifyPathManifestTree(manifestArtifact, candidateRoot) {
+  assertArtifactsInsideCandidateRoot([manifestArtifact], candidateRoot)
+  const manifestFailures = validateWindowsD3d11PathManifest(manifestArtifact.document)
+  if (manifestFailures.length > 0) {
+    throw new Error(`Path manifest was invalid: ${manifestFailures.join('; ')}`)
+  }
+  const manifest = manifestArtifact.document
+  const configuredBudgetPath = configuredWindowsD3d11BudgetPath()
+  if (canonicalPath(resolve(manifest.budget.path)) !== canonicalPath(configuredBudgetPath)) {
+    throw new Error('Path manifest did not bind the exact configured active D3D11 budget.')
+  }
+  const budgetArtifact = await readExactJsonArtifact(manifest.budget.path, 'path budget')
+  if (budgetArtifact.sha256 !== manifest.budget.activeSha256) {
+    throw new Error('Path manifest active budget bytes changed.')
+  }
+  const budgetFailures = validateWindowsPerformanceBudget(budgetArtifact.document)
+  if (
+    budgetArtifact.document.kind !== WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND ||
+    budgetArtifact.document.status !== 'active' ||
+    budgetFailures.length > 0
+  ) {
+    throw new Error(`Path manifest active budget was invalid: ${budgetFailures.join('; ')}`)
+  }
+  const derivedBudgetArtifacts = []
+  const derivationFailures = await verifyWindowsD3d11PerformanceBudgetDerivation({
+    document: budgetArtifact.document,
+    budgetPath: budgetArtifact.path,
+    candidateRoot,
+    onArtifact: (artifact) => derivedBudgetArtifacts.push(artifact)
+  })
+  if (derivationFailures.length > 0) {
+    throw new Error(`Path budget derivation was invalid: ${derivationFailures.join('; ')}`)
+  }
+  const budgetEvidence = await verifyBudgetEvidenceForPath(
+    budgetArtifact.document,
+    manifest.host.declaredClass
+  )
+  const rebuilt = await buildPathManifestFromPerformanceEvidence({
+    gateOptions: {
+      hardwareClass: manifest.host.declaredClass,
+      pathEvidence: manifest.selection.mode,
+      profiles: manifest.profiles
+    },
+    performanceRoot: dirname(resolve(manifest.evidence.performanceAggregate.path)),
+    budgetArtifact,
+    budgetEvidence,
+    candidateRoot,
+    createdAt: manifest.createdAt
+  })
+  if (sha256CanonicalJson(rebuilt.document) !== sha256CanonicalJson(manifest)) {
+    throw new Error('Path manifest did not match its recursively rebuilt retained evidence tree.')
+  }
+  const trackedArtifacts = deduplicateArtifacts([
+    manifestArtifact,
+    budgetArtifact,
+    ...derivedBudgetArtifacts,
+    ...budgetEvidence.trackedArtifacts,
+    ...rebuilt.trackedArtifacts
+  ])
+  assertArtifactsInsideCandidateRoot(trackedArtifacts, candidateRoot, {
+    allowedExternalPaths: [budgetArtifact.path]
+  })
+  return { trackedArtifacts, externalAuthorityPaths: [budgetArtifact.path] }
 }
 
 async function readExactJsonArtifact(path, label) {
@@ -1024,6 +1384,35 @@ function assertSelectionEnvironmentIsRunnerOwned() {
   }
 }
 
+async function revalidateD3dFinalCandidate(expectedCandidate) {
+  const executable =
+    process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXECUTABLE?.trim() ||
+    process.env.VIDEORC_PERF_APP_EXECUTABLE?.trim()
+  if (!executable || !isAbsolute(executable)) {
+    throw new Error(
+      'D3D11 PASS finalization requires an absolute installed Videorc acceptance executable.'
+    )
+  }
+  const verified = await verifyInstalledWindowsCandidate({
+    executablePath: executable,
+    repoRoot,
+    env: process.env,
+    platform: process.platform
+  })
+  const actualCandidate = normalizeCandidate({
+    sourceCommit: verified.sourceCommit,
+    installerSha256: verified.installerSha256,
+    sha256: verified.executableSha256,
+    packagePayload: verified.packagePayload
+  })
+  if (sha256CanonicalJson(actualCandidate) !== sha256CanonicalJson(expectedCandidate)) {
+    throw new Error(
+      'Installed Windows candidate changed or differed immediately before D3D11 PASS finalization.'
+    )
+  }
+  return verified
+}
+
 function normalizeCandidate(value) {
   const candidate = {
     sourceCommit: value?.sourceCommit,
@@ -1065,6 +1454,44 @@ function nullableIdentity(value, length) {
   return new RegExp(`^[a-f0-9]{${length}}$`).test(normalized ?? '') ? normalized : null
 }
 
+function requiredPhysicalStageCandidateEnvironment() {
+  const candidate = {
+    sourceCommit: nullableIdentity(process.env.VIDEORC_RELEASE_SOURCE_COMMIT, 40),
+    installerSha256: nullableIdentity(process.env.VIDEORC_RELEASE_EXPECTED_SHA256, 64),
+    appSha256: nullableIdentity(process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256, 64),
+    payloadSha256: nullableIdentity(
+      process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256,
+      64
+    )
+  }
+  const missing = Object.entries(candidate)
+    .filter(([, value]) => value === null)
+    .map(([field]) => field)
+  if (missing.length > 0) {
+    throw new Error(
+      `Physical D3D11 stage producer requires final installed-candidate identity: ${missing.join(', ')}.`
+    )
+  }
+  const executable =
+    process.env.VIDEORC_PERF_APP_EXECUTABLE?.trim() ||
+    process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXECUTABLE?.trim()
+  if (!executable || !isAbsolute(executable)) {
+    throw new Error(
+      'Physical D3D11 stage producer requires an absolute installed Videorc executable.'
+    )
+  }
+  return candidate
+}
+
+function equalStringArrays(left, right) {
+  return (
+    Array.isArray(left) &&
+    Array.isArray(right) &&
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  )
+}
+
 function maximumCounter(samples, field) {
   const values = samples.map((sample) => sample?.[field])
   return values.every(Number.isFinite) ? Math.max(...values) : null
@@ -1084,6 +1511,47 @@ function deduplicateArtifacts(artifacts) {
 
 function canonicalPath(path) {
   return process.platform === 'win32' ? path.replaceAll('/', '\\').toLocaleLowerCase('en-US') : path
+}
+
+function windowsD3d11CandidateEvidenceRoot(output) {
+  const acceptanceRoot = process.env.VIDEORC_WINDOWS_ACCEPTANCE_DIR?.trim()
+  if (!acceptanceRoot || !isAbsolute(acceptanceRoot)) {
+    throw new Error(
+      'VIDEORC_WINDOWS_ACCEPTANCE_DIR must be the exact absolute hardware-class evidence root.'
+    )
+  }
+  assertPathInsideCandidateRoot(acceptanceRoot, output, '--output')
+  return dirname(resolve(acceptanceRoot))
+}
+
+function configuredWindowsD3d11BudgetPath() {
+  const value = process.env.VIDEORC_WINDOWS_PERF_BUDGET_PATH?.trim()
+  requireAbsolute(value, 'VIDEORC_WINDOWS_PERF_BUDGET_PATH')
+  return resolve(value)
+}
+
+function assertArtifactsInsideCandidateRoot(
+  artifacts,
+  candidateRoot,
+  { allowedExternalPaths = [] } = {}
+) {
+  requireAbsolute(candidateRoot, 'candidate evidence root')
+  const allowed = new Set(
+    allowedExternalPaths.filter(Boolean).map((path) => canonicalPath(resolve(path)))
+  )
+  for (const artifact of deduplicateArtifacts(artifacts)) {
+    if (allowed.has(canonicalPath(resolve(artifact.path)))) continue
+    assertPathInsideCandidateRoot(candidateRoot, artifact.path, 'evidence artifact')
+  }
+}
+
+function assertPathInsideCandidateRoot(candidateRoot, candidatePath, label) {
+  requireAbsolute(candidateRoot, 'candidate evidence root')
+  requireAbsolute(candidatePath, label)
+  const child = relative(resolve(candidateRoot), resolve(candidatePath))
+  if (child === '..' || child.startsWith('../') || child.startsWith('..\\') || isAbsolute(child)) {
+    throw new Error(`${label} escaped the candidate evidence root: ${candidatePath}`)
+  }
 }
 
 function requireAbsolute(value, label) {

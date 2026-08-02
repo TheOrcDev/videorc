@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "windows", test))]
+use crate::compositor::start_synthetic_compositor_if_idle;
 use crate::compositor::{
     CompositorFrameConsumer, CompositorStartParams, resize_preview_compositor_if_run_id,
     start_synthetic_compositor, stop_compositor_if_run_id,
@@ -25,6 +27,13 @@ pub type PreviewSurfaceSlot = std::sync::Arc<tokio::sync::Mutex<PreviewSurfaceRu
 pub struct PreviewSurfaceRuntime {
     pub status: PreviewSurfaceStatus,
     run_id: Option<String>,
+    #[cfg(any(target_os = "windows", test))]
+    d3d11_compositor_suspension: Option<PreviewCompositorSuspensionReservation>,
+    /// Exact presenter identity authorized by the most recent backend
+    /// configure attempt. Teardown clears it under the lifecycle lock so a
+    /// delayed monitor refresh cannot resurrect a retired presenter status.
+    #[cfg(any(target_os = "windows", test))]
+    d3d11_presenter_configuration: Option<(u64, u64)>,
     native_host: NativePreviewHostLifecycle,
     pending_native_host_commands: Vec<NativePreviewHostCommand>,
     /// Privileged Electron-main identity for the backend-owned Windows
@@ -34,10 +43,184 @@ pub struct PreviewSurfaceRuntime {
     pub(crate) main_owned_generation: Option<u64>,
 }
 
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone)]
+struct PreviewCompositorSuspensionReservation {
+    media_generation: u64,
+    surface_started_at: Option<String>,
+    params: CompositorStartParams,
+}
+
+/// Generation/run-scoped ownership token for a CPU preview compositor paused
+/// while the Windows D3D11 presenter owns preview pixels. Dropping the token
+/// schedules a best-effort restore, while `restore` provides an awaitable
+/// normal-shutdown path.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) struct PreviewCompositorSuspension {
+    state: AppState,
+    media_generation: u64,
+    restored: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl std::fmt::Debug for PreviewCompositorSuspension {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreviewCompositorSuspension")
+            .field("media_generation", &self.media_generation)
+            .field("restored", &self.restored)
+            .finish()
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl PreviewCompositorSuspension {
+    pub(crate) async fn restore(mut self) {
+        restore_suspended_preview_compositor(self.state.clone(), self.media_generation).await;
+        self.restored = true;
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl Drop for PreviewCompositorSuspension {
+    fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let state = self.state.clone();
+        let media_generation = self.media_generation;
+        runtime.spawn(async move {
+            restore_suspended_preview_compositor(state, media_generation).await;
+        });
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) async fn suspend_preview_compositor_for_d3d11(
+    state: &AppState,
+    media_generation: u64,
+) -> Option<PreviewCompositorSuspension> {
+    if media_generation == 0 {
+        return None;
+    }
+    let _surface_lifecycle = state.preview_surface_lifecycle.lock().await;
+    let (run_id, surface_started_at, params) = {
+        let mut surface = state.preview_surface.lock().await;
+        if surface.status.state != PreviewSurfaceState::Live {
+            return None;
+        }
+        if let Some(reservation) = surface.d3d11_compositor_suspension.as_ref() {
+            if media_generation <= reservation.media_generation {
+                return None;
+            }
+            let mut replacement = reservation.clone();
+            replacement.media_generation = media_generation;
+            surface.d3d11_compositor_suspension = Some(replacement);
+            return Some(PreviewCompositorSuspension {
+                state: state.clone(),
+                media_generation,
+                restored: false,
+            });
+        }
+        let run_id = surface.run_id.clone()?;
+        (
+            run_id,
+            surface.status.started_at.clone(),
+            CompositorStartParams {
+                target_fps: surface.status.target_fps,
+                width: surface.status.width,
+                height: surface.status.height,
+                frame_consumer: CompositorFrameConsumer::NativePreview,
+                stream_output: None,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: false,
+                highlight_overlay_on_aux: false,
+            },
+        )
+    };
+    stop_compositor_if_run_id(state, &run_id).await?;
+    if crate::compositor::compositor_status(state)
+        .await
+        .run_id
+        .as_deref()
+        == Some(run_id.as_str())
+    {
+        return None;
+    }
+    let mut surface = state.preview_surface.lock().await;
+    if surface.run_id.as_deref() != Some(run_id.as_str())
+        || surface.status.started_at != surface_started_at
+    {
+        return None;
+    }
+    surface.run_id = None;
+    surface.d3d11_compositor_suspension = Some(PreviewCompositorSuspensionReservation {
+        media_generation,
+        surface_started_at,
+        params,
+    });
+    Some(PreviewCompositorSuspension {
+        state: state.clone(),
+        media_generation,
+        restored: false,
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+async fn restore_suspended_preview_compositor(state: AppState, media_generation: u64) {
+    let _surface_lifecycle = state.preview_surface_lifecycle.lock().await;
+    let reservation = {
+        let mut surface = state.preview_surface.lock().await;
+        let Some(reservation) = surface.d3d11_compositor_suspension.as_ref() else {
+            return;
+        };
+        if reservation.media_generation != media_generation {
+            return;
+        }
+        if surface.status.state != PreviewSurfaceState::Live
+            || surface.status.started_at != reservation.surface_started_at
+            || surface.run_id.is_some()
+        {
+            surface.d3d11_compositor_suspension = None;
+            return;
+        }
+        surface
+            .d3d11_compositor_suspension
+            .take()
+            .expect("the exact D3D11 suspension reservation was just validated")
+    };
+    let Some(status) = start_synthetic_compositor_if_idle(state.clone(), reservation.params).await
+    else {
+        return;
+    };
+    let Some(run_id) = status.run_id else {
+        return;
+    };
+    let mut surface = state.preview_surface.lock().await;
+    if surface.status.state == PreviewSurfaceState::Live
+        && surface.status.started_at == reservation.surface_started_at
+        && surface.run_id.is_none()
+        && surface.d3d11_compositor_suspension.is_none()
+    {
+        surface.run_id = Some(run_id);
+    } else {
+        drop(surface);
+        let _ = stop_compositor_if_run_id(&state, &run_id).await;
+    }
+}
+
 pub fn initial_preview_surface_state() -> PreviewSurfaceRuntime {
     PreviewSurfaceRuntime {
         status: unavailable_status(Some("Native preview surface is not running.".to_string())),
         run_id: None,
+        #[cfg(any(target_os = "windows", test))]
+        d3d11_compositor_suspension: None,
+        #[cfg(any(target_os = "windows", test))]
+        d3d11_presenter_configuration: None,
         native_host: NativePreviewHostLifecycle::default(),
         pending_native_host_commands: Vec::new(),
         main_owned_bounds: None,
@@ -70,6 +253,23 @@ pub async fn apply_main_owned_preview_surface_bounds(
         if params.generation > active_generation {
             slot.main_owned_bounds = None;
             slot.main_owned_host_bounds = None;
+            #[cfg(any(target_os = "windows", test))]
+            {
+                slot.d3d11_presenter_configuration = None;
+                if let Some(presenter) = slot.status.windows_d3d11_presenter.as_mut() {
+                    let reason = "windows-d3d11-preview-generation-superseded";
+                    presenter.source_live = false;
+                    presenter.first_present_succeeded = false;
+                    presenter.fallback_reason = Some(reason.to_string());
+                    slot.status.transport = PreviewTransport::ElectronProofSurface;
+                    slot.status.backing = PreviewSurfaceBacking::ElectronBrowserWindow;
+                    slot.status.frame_polling_suppressed = false;
+                    slot.status.source_pixels_present = false;
+                    slot.status.message = Some(format!(
+                        "Windows native preview presenter stopped; Electron proof fallback is active: {reason}."
+                    ));
+                }
+            }
         }
     }
 
@@ -501,12 +701,90 @@ pub async fn activate_native_preview_host(
 /// status. Canonical D3D identifiers are claimed only after the presenter
 /// contract proves a live source and first successful present.
 #[cfg(target_os = "windows")]
+pub async fn begin_windows_d3d11_presenter_configuration(
+    state: &AppState,
+    media_generation: u64,
+    preview_generation: u64,
+) -> Result<(), String> {
+    let _surface_lifecycle = state.preview_surface_lifecycle.lock().await;
+    let mut slot = state.preview_surface.lock().await;
+    validate_windows_d3d11_presenter_update_identity(
+        media_generation,
+        Some(preview_generation),
+        slot.main_owned_generation,
+    )?;
+    if slot.status.state != PreviewSurfaceState::Live {
+        return Err("Windows D3D11 presenter configuration requires a live preview surface".into());
+    }
+    slot.d3d11_presenter_configuration = Some((media_generation, preview_generation));
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub async fn cancel_windows_d3d11_presenter_configuration(
+    state: &AppState,
+    media_generation: u64,
+    preview_generation: u64,
+) {
+    let _surface_lifecycle = state.preview_surface_lifecycle.lock().await;
+    let mut slot = state.preview_surface.lock().await;
+    if slot.d3d11_presenter_configuration == Some((media_generation, preview_generation)) {
+        slot.d3d11_presenter_configuration = None;
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn validate_windows_d3d11_presenter_update_identity(
+    media_generation: u64,
+    preview_generation: Option<u64>,
+    main_owned_generation: Option<u64>,
+) -> Result<(u64, u64), String> {
+    let preview_generation = preview_generation
+        .filter(|generation| *generation != 0)
+        .ok_or_else(|| {
+            "Windows D3D11 presenter update requires a nonzero preview generation".to_string()
+        })?;
+    if media_generation == 0 {
+        return Err("Windows D3D11 presenter update requires a nonzero media generation".into());
+    }
+    if main_owned_generation != Some(preview_generation) {
+        return Err(format!(
+            "stale Windows D3D11 presenter update for preview generation {preview_generation}; current main-owned generation is {main_owned_generation:?}"
+        ));
+    }
+    Ok((media_generation, preview_generation))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn validate_windows_d3d11_presenter_configuration_authority(
+    identity: (u64, u64),
+    configured_identity: Option<(u64, u64)>,
+) -> Result<(), String> {
+    if configured_identity != Some(identity) {
+        return Err(format!(
+            "Windows D3D11 presenter update {identity:?} has no current configuration authority"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 pub async fn update_windows_d3d11_presenter_status(
     state: &AppState,
     presenter: WindowsD3d11PresenterStatus,
-) -> PreviewSurfaceStatus {
+) -> Result<PreviewSurfaceStatus, String> {
+    let surface_lifecycle = state.preview_surface_lifecycle.lock().await;
     let status = {
         let mut slot = state.preview_surface.lock().await;
+        let identity = validate_windows_d3d11_presenter_update_identity(
+            presenter.diagnostics.media_generation,
+            presenter.diagnostics.preview_generation,
+            slot.main_owned_generation,
+        )?;
+        validate_windows_d3d11_presenter_configuration_authority(
+            identity,
+            slot.d3d11_presenter_configuration,
+        )?;
         let mut next = slot.status.clone();
         next.windows_d3d11_presenter = Some(presenter.diagnostics.clone());
         if presenter.canonical_claim_ready {
@@ -540,9 +818,10 @@ pub async fn update_windows_d3d11_presenter_status(
         slot.status = next.clone();
         next
     };
+    drop(surface_lifecycle);
     emit_preview_surface_present_diagnostics(state, &status).await;
     state.emit_event("preview.surface.status", status.clone());
-    status
+    Ok(status)
 }
 
 #[cfg(target_os = "windows")]
@@ -567,20 +846,73 @@ pub async fn trusted_windows_d3d11_preview_placement(
     )
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
+fn validate_windows_d3d11_presenter_teardown_identity(
+    media_generation: u64,
+    preview_generation: u64,
+    main_owned_generation: Option<u64>,
+    presenter: Option<&crate::protocol::WindowsD3d11PresenterDiagnostics>,
+) -> Result<(), String> {
+    if media_generation == 0 || preview_generation == 0 {
+        return Err(
+            "Windows D3D11 presenter teardown requires nonzero media and preview generations"
+                .to_string(),
+        );
+    }
+    if main_owned_generation != Some(preview_generation) {
+        return Err(format!(
+            "stale Windows D3D11 presenter teardown for preview generation {preview_generation}; current main-owned generation is {main_owned_generation:?}"
+        ));
+    }
+    let presenter = presenter.ok_or_else(|| {
+        "Windows D3D11 presenter teardown requires an existing presenter identity".to_string()
+    })?;
+    if presenter.media_generation != media_generation
+        || presenter.preview_generation != Some(preview_generation)
+    {
+        return Err(format!(
+            "stale Windows D3D11 presenter teardown for media/preview generation {media_generation}/{preview_generation}; current presenter identity is {}/{:?}",
+            presenter.media_generation, presenter.preview_generation
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
 pub async fn teardown_windows_d3d11_presenter_status(
     state: &AppState,
+    media_generation: u64,
+    preview_generation: u64,
     fallback_reason: impl Into<String>,
-) -> PreviewSurfaceStatus {
+) -> Result<PreviewSurfaceStatus, String> {
     let fallback_reason = fallback_reason.into();
+    let surface_lifecycle = state.preview_surface_lifecycle.lock().await;
     let status = {
         let mut slot = state.preview_surface.lock().await;
+        if !matches!(
+            slot.status.state,
+            PreviewSurfaceState::Starting | PreviewSurfaceState::Live
+        ) {
+            return Err(format!(
+                "Windows D3D11 presenter teardown requires an active preview surface, found {:?}",
+                slot.status.state
+            ));
+        }
+        validate_windows_d3d11_presenter_teardown_identity(
+            media_generation,
+            preview_generation,
+            slot.main_owned_generation,
+            slot.status.windows_d3d11_presenter.as_ref(),
+        )?;
+        slot.d3d11_presenter_configuration = None;
         let mut next = slot.status.clone();
-        let mut diagnostics = next.windows_d3d11_presenter.take().unwrap_or_default();
+        let diagnostics = next
+            .windows_d3d11_presenter
+            .as_mut()
+            .expect("the exact presenter identity was just validated");
         diagnostics.source_live = false;
         diagnostics.first_present_succeeded = false;
         diagnostics.fallback_reason = Some(fallback_reason.clone());
-        next.windows_d3d11_presenter = Some(diagnostics);
         next.transport = PreviewTransport::ElectronProofSurface;
         next.backing = PreviewSurfaceBacking::ElectronBrowserWindow;
         next.frame_polling_suppressed = false;
@@ -592,9 +924,10 @@ pub async fn teardown_windows_d3d11_presenter_status(
         slot.status = next.clone();
         next
     };
+    drop(surface_lifecycle);
     emit_preview_surface_present_diagnostics(state, &status).await;
     state.emit_event("preview.surface.status", status.clone());
-    status
+    Ok(status)
 }
 
 fn is_stale_present_update(
@@ -647,6 +980,11 @@ async fn stop_current_surface(state: &AppState) {
         let host_update = slot.native_host.destroy();
         if had_surface && let Some(command) = host_update.command {
             slot.pending_native_host_commands.push(command);
+        }
+        #[cfg(any(target_os = "windows", test))]
+        {
+            slot.d3d11_compositor_suspension = None;
+            slot.d3d11_presenter_configuration = None;
         }
         slot.run_id.take()
     };
@@ -1130,6 +1468,340 @@ mod tests {
             Some(NativePreviewHostCommandKind::UpdateBounds)
         );
         assert_eq!(drawable_size, Some((1280.0, 720.0)));
+    }
+
+    #[tokio::test]
+    async fn d3d11_preview_suspension_restores_only_its_live_surface() {
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(640.0, 360.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await;
+        let original_run = compositor_status(&state).await.run_id.unwrap();
+
+        let suspension = suspend_preview_compositor_for_d3d11(&state, 11)
+            .await
+            .expect("live preview owns a suspendable compositor");
+        assert!(compositor_status(&state).await.run_id.is_none());
+        assert!(state.preview_surface.lock().await.run_id.is_none());
+
+        suspension.restore().await;
+        let restored_run = compositor_status(&state).await.run_id.unwrap();
+        assert_ne!(restored_run, original_run);
+        assert_eq!(
+            state.preview_surface.lock().await.run_id.as_deref(),
+            Some(restored_run.as_str())
+        );
+        destroy_preview_surface(&state).await;
+    }
+
+    #[tokio::test]
+    async fn d3d11_preview_restore_never_replaces_a_newer_compositor_run() {
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(640.0, 360.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await;
+        let suspension = suspend_preview_compositor_for_d3d11(&state, 11)
+            .await
+            .expect("live preview owns a suspendable compositor");
+        let newer = start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                target_fps: 30,
+                width: 640,
+                height: 360,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                stream_output: None,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: false,
+                highlight_overlay_on_aux: false,
+            },
+        )
+        .await;
+
+        suspension.restore().await;
+        assert_eq!(compositor_status(&state).await.run_id, newer.run_id);
+        assert!(state.preview_surface.lock().await.run_id.is_none());
+        stop_compositor(&state).await;
+        destroy_preview_surface(&state).await;
+    }
+
+    #[tokio::test]
+    async fn newer_d3d11_generation_supersedes_suspended_preview_restoration() {
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(640.0, 360.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await;
+
+        let retired = suspend_preview_compositor_for_d3d11(&state, 21)
+            .await
+            .expect("the first D3D11 generation suspends CPU preview");
+        let current = suspend_preview_compositor_for_d3d11(&state, 22)
+            .await
+            .expect("a newer D3D11 generation supersedes the reservation");
+        assert!(compositor_status(&state).await.run_id.is_none());
+
+        retired.restore().await;
+        assert!(compositor_status(&state).await.run_id.is_none());
+        assert_eq!(
+            state
+                .preview_surface
+                .lock()
+                .await
+                .d3d11_compositor_suspension
+                .as_ref()
+                .map(|reservation| reservation.media_generation),
+            Some(22)
+        );
+
+        current.restore().await;
+        let restored_run = compositor_status(&state).await.run_id.unwrap();
+        assert_eq!(
+            state.preview_surface.lock().await.run_id.as_deref(),
+            Some(restored_run.as_str())
+        );
+        destroy_preview_surface(&state).await;
+    }
+
+    #[test]
+    fn d3d11_presenter_teardown_identity_requires_exact_nonzero_generations() {
+        let presenter = crate::protocol::WindowsD3d11PresenterDiagnostics {
+            media_generation: 31,
+            preview_generation: Some(41),
+            ..Default::default()
+        };
+
+        assert!(
+            validate_windows_d3d11_presenter_teardown_identity(31, 41, Some(41), Some(&presenter))
+                .is_ok()
+        );
+        assert!(
+            validate_windows_d3d11_presenter_teardown_identity(0, 41, Some(41), Some(&presenter))
+                .is_err()
+        );
+        assert!(
+            validate_windows_d3d11_presenter_teardown_identity(31, 0, Some(41), Some(&presenter))
+                .is_err()
+        );
+        assert!(
+            validate_windows_d3d11_presenter_teardown_identity(31, 41, Some(40), Some(&presenter))
+                .is_err()
+        );
+        assert!(
+            validate_windows_d3d11_presenter_teardown_identity(30, 41, Some(41), Some(&presenter))
+                .is_err()
+        );
+        assert!(
+            validate_windows_d3d11_presenter_teardown_identity(31, 40, Some(40), Some(&presenter))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn d3d11_presenter_update_requires_current_generation_and_configuration_authority() {
+        let identity = validate_windows_d3d11_presenter_update_identity(31, Some(41), Some(41))
+            .expect("exact nonzero identity is current");
+        assert_eq!(identity, (31, 41));
+        assert!(
+            validate_windows_d3d11_presenter_configuration_authority(identity, Some(identity))
+                .is_ok()
+        );
+        assert!(
+            validate_windows_d3d11_presenter_configuration_authority(identity, Some((30, 41)))
+                .is_err()
+        );
+        assert!(validate_windows_d3d11_presenter_configuration_authority(identity, None).is_err());
+        assert!(validate_windows_d3d11_presenter_update_identity(0, Some(41), Some(41)).is_err());
+        assert!(validate_windows_d3d11_presenter_update_identity(31, Some(0), Some(41)).is_err());
+        assert!(validate_windows_d3d11_presenter_update_identity(31, Some(41), Some(42)).is_err());
+    }
+
+    #[tokio::test]
+    async fn advancing_main_owned_generation_invalidates_old_canonical_presenter() {
+        let state = test_state();
+        {
+            let mut surface = state.preview_surface.lock().await;
+            surface.status.state = PreviewSurfaceState::Live;
+            surface.status.transport = PreviewTransport::D3d11SharedTexture;
+            surface.status.backing = PreviewSurfaceBacking::DirectcompositionSwapChain;
+            surface.status.frame_polling_suppressed = true;
+            surface.status.source_pixels_present = true;
+            surface.main_owned_generation = Some(41);
+            surface.d3d11_presenter_configuration = Some((31, 41));
+            surface.status.windows_d3d11_presenter =
+                Some(crate::protocol::WindowsD3d11PresenterDiagnostics {
+                    media_generation: 31,
+                    preview_generation: Some(41),
+                    source_live: true,
+                    first_present_succeeded: true,
+                    ..Default::default()
+                });
+        }
+
+        let status = apply_main_owned_preview_surface_bounds(
+            &state,
+            MainOwnedPreviewSurfaceBoundsParams {
+                bounds: MainOwnedPreviewSurfaceBounds {
+                    bounds: bounds(1280.0, 720.0),
+                    order_above_window_handle: None,
+                },
+                generation: 42,
+            },
+        )
+        .await
+        .expect("a newer trusted preview generation replaces the old one");
+
+        let presenter = status
+            .windows_d3d11_presenter
+            .expect("retired presenter diagnostics remain explicit");
+        assert!(!presenter.source_live);
+        assert!(!presenter.first_present_succeeded);
+        assert_eq!(
+            presenter.fallback_reason.as_deref(),
+            Some("windows-d3d11-preview-generation-superseded")
+        );
+        assert_eq!(status.transport, PreviewTransport::ElectronProofSurface);
+        assert_eq!(status.backing, PreviewSurfaceBacking::ElectronBrowserWindow);
+        assert!(!status.frame_polling_suppressed);
+        assert!(!status.source_pixels_present);
+        assert_eq!(
+            state
+                .preview_surface
+                .lock()
+                .await
+                .d3d11_presenter_configuration,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn d3d11_presenter_teardown_rejects_stale_identity_without_emitting() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let presenter = crate::protocol::WindowsD3d11PresenterDiagnostics {
+            media_generation: 31,
+            preview_generation: Some(41),
+            source_live: true,
+            first_present_succeeded: true,
+            ..Default::default()
+        };
+        {
+            let mut surface = state.preview_surface.lock().await;
+            surface.status.state = PreviewSurfaceState::Live;
+            surface.main_owned_generation = Some(41);
+            surface.status.windows_d3d11_presenter = Some(presenter);
+        }
+        let before = state.preview_surface.lock().await.status.clone();
+
+        let error =
+            teardown_windows_d3d11_presenter_status(&state, 30, 41, "retired-media-generation")
+                .await
+                .unwrap_err();
+
+        assert!(error.contains("stale Windows D3D11 presenter teardown"));
+        assert_eq!(state.preview_surface.lock().await.status, before);
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn d3d11_presenter_teardown_preserves_exact_nonzero_identity() {
+        let state = test_state();
+        {
+            let mut surface = state.preview_surface.lock().await;
+            surface.status.state = PreviewSurfaceState::Live;
+            surface.main_owned_generation = Some(41);
+            surface.d3d11_presenter_configuration = Some((31, 41));
+            surface.status.windows_d3d11_presenter =
+                Some(crate::protocol::WindowsD3d11PresenterDiagnostics {
+                    media_generation: 31,
+                    preview_generation: Some(41),
+                    source_live: true,
+                    first_present_succeeded: true,
+                    ..Default::default()
+                });
+        }
+
+        let status =
+            teardown_windows_d3d11_presenter_status(&state, 31, 41, "exact-generation-stopped")
+                .await
+                .expect("the exact current presenter may be torn down");
+        let diagnostics = status
+            .windows_d3d11_presenter
+            .expect("teardown preserves the presenter identity");
+
+        assert_eq!(diagnostics.media_generation, 31);
+        assert_eq!(diagnostics.preview_generation, Some(41));
+        assert!(!diagnostics.source_live);
+        assert!(!diagnostics.first_present_succeeded);
+        assert_eq!(
+            diagnostics.fallback_reason.as_deref(),
+            Some("exact-generation-stopped")
+        );
+        assert_eq!(
+            state
+                .preview_surface
+                .lock()
+                .await
+                .d3d11_presenter_configuration,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn destroyed_surface_rejects_late_exact_presenter_teardown() {
+        let state = test_state();
+        {
+            let mut surface = state.preview_surface.lock().await;
+            surface.status.state = PreviewSurfaceState::Live;
+            surface.status.transport = PreviewTransport::D3d11SharedTexture;
+            surface.status.backing = PreviewSurfaceBacking::DirectcompositionSwapChain;
+            surface.main_owned_generation = Some(41);
+            surface.d3d11_presenter_configuration = Some((31, 41));
+            surface.status.windows_d3d11_presenter =
+                Some(crate::protocol::WindowsD3d11PresenterDiagnostics {
+                    media_generation: 31,
+                    preview_generation: Some(41),
+                    source_live: true,
+                    first_present_succeeded: true,
+                    ..Default::default()
+                });
+        }
+
+        let destroyed = destroy_preview_surface(&state).await;
+        assert_eq!(destroyed.state, PreviewSurfaceState::Stopped);
+        assert_eq!(destroyed.transport, PreviewTransport::Unavailable);
+        assert_eq!(destroyed.backing, PreviewSurfaceBacking::None);
+
+        let error =
+            teardown_windows_d3d11_presenter_status(&state, 31, 41, "late-monitor-teardown")
+                .await
+                .unwrap_err();
+        assert!(
+            error.contains("requires an active preview surface"),
+            "{error}"
+        );
+        assert_eq!(state.preview_surface.lock().await.status, destroyed);
     }
 
     #[tokio::test]

@@ -1333,6 +1333,7 @@ export interface WindowsD3d11MediaDiagnostics {
   texturePoolPressureEvents: number
   adapterMismatches: number
   deviceResets: number
+  synchronizationTimeouts: number
   staleGenerationCallbacks: number
   fallbackReason?: string
 }
@@ -1342,6 +1343,9 @@ export interface WindowsD3d11MediaDiagnostics {
 export interface PreviewImagePollCounts {
   cameraPng: number
   screenPng: number
+  productionPng: number
+  cameraBmp: number
+  screenBmp: number
   liveJpeg: number
   liveMjpeg: number
 }
@@ -1683,6 +1687,7 @@ export interface WindowsD3d11PresenterDiagnostics {
   windowActive: boolean
   windowFocused: boolean
   previewGeneration?: number
+  mediaGeneration: number
   generationMatches: boolean
   ownerProcessMatches: boolean
   sameAdapter: boolean
@@ -3203,6 +3208,7 @@ export interface VideorcApi {
   onNativePreviewMainPumpActive: (callback: (active: boolean) => void) => () => void
   setNativePreviewSurfaceFramePollingSuppressed: (
     suppressed: boolean,
+    generation: number,
     recordingActive?: boolean
   ) => Promise<PreviewSurfaceStatus>
   destroyNativePreviewSurface: (generation?: number) => Promise<PreviewSurfaceStatus>

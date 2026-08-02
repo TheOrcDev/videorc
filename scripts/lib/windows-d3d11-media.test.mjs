@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
@@ -9,6 +10,8 @@ import {
   WINDOWS_D3D11_NATURAL_FALLBACK_SCENARIOS,
   WINDOWS_D3D11_PATH_SCHEMA,
   WINDOWS_D3D11_REQUIRED_RUST_TESTS,
+  WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS,
+  WINDOWS_D3D11_STAGE_PRODUCER_SCENARIOS,
   assertWindowsD3d11RustDiscovery,
   combineWindowsD3d11PathEvidence,
   createWindowsD3d11PathManifest,
@@ -19,11 +22,13 @@ import {
   normalizeWindowsD3d11InvariantSummary,
   parseWindowsD3d11MediaArgs,
   parseWindowsD3d11RustTestList,
+  requiredWindowsD3d11StageAssertionIds,
   sha256CanonicalJson,
   validateWindowsD3d11Aggregate,
   validateWindowsD3d11HostManifest,
   validateWindowsD3d11PathManifest,
-  validateWindowsD3d11StageReport
+  validateWindowsD3d11StageReport,
+  windowsD3d11StageProducerSpec
 } from './windows-d3d11-media.mjs'
 
 const SOURCE_COMMIT = '1'.repeat(40)
@@ -38,7 +43,44 @@ const CANDIDATE = Object.freeze({
   payloadSha256: PAYLOAD_SHA256
 })
 
+describe('Windows D3D11 selection environment contract', () => {
+  it('enumerates the exact complete runner-owned selector set', () => {
+    assert.deepEqual(WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS, [
+      'VIDEORC_WINDOWS_D3D11_MEDIA',
+      'VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA',
+      'VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT',
+      'VIDEORC_WINDOWS_REQUIRE_ENCODED_BRIDGE',
+      'VIDEORC_WINDOWS_EXPECT_D3D11_FALLBACK',
+      'VIDEORC_ENCODER_BRIDGE',
+      'VIDEORC_RECORDING_ENCODER_BRIDGE',
+      'VIDEORC_STREAMING_ENCODER_BRIDGE',
+      'VIDEORC_WINDOWS_GRAPHICS_CAPTURE'
+    ])
+  })
+
+  it('keeps the D3D11 runner rejection bound to the shared selector set', () => {
+    const script = fileURLToPath(new URL('../smoke-windows-d3d11-media.mjs', import.meta.url))
+    const source = readFileSync(script, 'utf8')
+    assert.match(
+      source,
+      /const inherited = WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS\.filter\(\(key\) =>[\s\S]*?process\.env\[key\]\?\.trim\(\)/
+    )
+    assert.match(source, /assertSelectionEnvironmentIsRunnerOwned\(\)/)
+  })
+})
+
 describe('Windows D3D11 media arguments', () => {
+  it('accepts the package-manager argument separator used by documented pnpm commands', () => {
+    assert.deepEqual(
+      parseWindowsD3d11MediaArgs(['--', '--list']),
+      parseWindowsD3d11MediaArgs(['--list'])
+    )
+    assert.throws(
+      () => parseWindowsD3d11MediaArgs(['--list', '--']),
+      /Only one D3D11 media operation|Unknown Windows D3D11 media argument/
+    )
+  })
+
   it('parses the exact forced, automatic-default, and natural gate forms', () => {
     const forced = parseWindowsD3d11MediaArgs([
       '--gate',
@@ -93,6 +135,7 @@ describe('Windows D3D11 media arguments', () => {
   it('rejects malformed and cross-mode gate options before launch', () => {
     const invalid = [
       [['--stage'], /requires a non-empty/],
+      [['--stage', 'capture'], /absolute --output/],
       [['--profiles', '1080p30,1080p30'], /duplicate/],
       [['--wat'], /Unknown/],
       [
@@ -250,6 +293,37 @@ describe('Windows D3D11 stage evidence', () => {
     failed.assertions[0].passed = false
     assert.match(validateWindowsD3d11StageReport(failed).join('\n'), /failed assertion/)
   })
+
+  it('binds every physical stage to the installed packaged-app stream producer', () => {
+    const script = fileURLToPath(new URL('../smoke-windows-d3d11-media.mjs', import.meta.url))
+    assert.doesNotMatch(readFileSync(script, 'utf8'), /VIDEORC_WINDOWS_D3D11_STAGE_REPORT/)
+
+    for (const [stage, scenario] of Object.entries(WINDOWS_D3D11_STAGE_PRODUCER_SCENARIOS)) {
+      const spec = windowsD3d11StageProducerSpec({
+        stage,
+        output: `/evidence/${stage}/producer`
+      })
+      assert.equal(spec.producer, 'installed-packaged-stream-performance')
+      assert.equal(spec.scenario, scenario)
+      assert.deepEqual(spec.args, [
+        '--scenario',
+        scenario,
+        '--runs',
+        '1',
+        '--bridge',
+        'mf',
+        '--require-bridge',
+        '--d3d11',
+        '--require-d3d11',
+        '--path-evidence',
+        'forced',
+        '--video-only',
+        '--output',
+        `/evidence/${stage}/producer`
+      ])
+      assert.equal(requiredWindowsD3d11StageAssertionIds(stage).length, 8)
+    }
+  })
 })
 
 describe('Windows D3D11 hardware proof', () => {
@@ -387,12 +461,17 @@ describe('Windows D3D11 PATH_PASS validation', () => {
       ['present count', (value) => (value.invariants.presenterPresentsPositive = false)],
       ['p95 dispatch', (value) => (value.invariants.messageDispatchP95Ms = 50.01)],
       ['max dispatch', (value) => (value.invariants.messageDispatchMaxMs = 100.01)],
+      ['media p95', (value) => (value.invariants.mediaCommandLagP95Ms = 50.01)],
+      ['media max', (value) => (value.invariants.mediaCommandLagMaxMs = 100.01)],
+      ['message batch', (value) => (value.invariants.maximumConsecutiveMessageBatch = 33)],
+      ['media batch', (value) => (value.invariants.maximumConsecutiveMediaBatch = 33)],
       ['pool capacity', (value) => (value.invariants.texturePoolCapacityMinimum = 0)],
       ['pool use', (value) => (value.invariants.texturePoolInUseMaximum = 9)],
       ['pool pressure', (value) => (value.invariants.texturePoolPressureEvents = 1)],
       ['adapter mismatch', (value) => (value.invariants.adapterMismatches = 1)],
       ['device reset', (value) => (value.invariants.deviceResets = 1)],
       ['stale callback', (value) => (value.invariants.staleGenerationCallbacks = 1)],
+      ['synchronization timeout', (value) => (value.invariants.synchronizationTimeouts = 1)],
       ['path transition', (value) => (value.invariants.pathIdentityChanges = 1)],
       ['fallback', (value) => (value.invariants.unexpectedFallbacks = 1)],
       ['aggregate evidence', (value) => (value.evidence.performanceAggregate.sha256 = null)],
@@ -424,7 +503,7 @@ describe('Windows D3D11 PATH_PASS validation', () => {
         'camera aggregate hash',
         (value) => (value.evidence.cameraUploadEvidenceSha256 = 'a'.repeat(64))
       ],
-      ['runtime limitation', (value) => value.runtimeProofLimitations.pop()]
+      ['runtime limitation', (value) => value.runtimeProofLimitations.push('missing-counter')]
     ]
     for (const [name, mutate] of mutations) {
       const value = structuredClone(pathManifest('nvidia-turing-floor', 'forced'))
@@ -873,7 +952,7 @@ function pathManifest(hardwareClass, mode) {
         },
     invariants: invariantFixture({ natural }),
     evidence,
-    runtimeProofLimitations: ['dedicated-synchronization-timeout-counter-not-emitted']
+    runtimeProofLimitations: []
   })
 }
 
@@ -901,12 +980,17 @@ function invariantFixture({ natural }) {
     cameraUploadsMatchScenarios: true,
     messageDispatchP95Ms: natural ? null : 49,
     messageDispatchMaxMs: natural ? null : 99,
+    mediaCommandLagP95Ms: natural ? null : 49,
+    mediaCommandLagMaxMs: natural ? null : 99,
+    maximumConsecutiveMessageBatch: natural ? null : 32,
+    maximumConsecutiveMediaBatch: natural ? null : 32,
     texturePoolCapacityMinimum: natural ? null : 8,
     texturePoolInUseMaximum: natural ? null : 7,
     texturePoolPressureEvents: 0,
     adapterMismatches: 0,
     deviceResets: 0,
     staleGenerationCallbacks: 0,
+    synchronizationTimeouts: 0,
     pathIdentityChanges: 0,
     unexpectedFallbacks: 0,
     namedNaturalFallback: natural

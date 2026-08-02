@@ -60,6 +60,7 @@ credential, presigned URL, or support-bundle contents.
 - `VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED=1`: set / missing
 - `VIDEORC_WINDOWS_ACCEPTANCE_EXECUTABLE`: set / missing
 - `VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256`: set from verified private candidate / missing
+- `VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256`: set from verified private candidate / missing
 - `pnpm smoke:local-gates:windows` against the installed signed candidate: PASS / FAIL / BLOCKED
 - Windows local-gates manifest:
 - Local-gates manifest candidate binding `verified: true`: PASS / FAIL / BLOCKED
@@ -97,6 +98,9 @@ Get-FileHash -Algorithm SHA256 .\Videorc-*-win-x64.exe | Format-List
 - Verified private candidate `win-unpacked/Videorc.exe` SHA-256:
 - Installed `Videorc.exe` SHA-256:
 - Private-candidate/installed-app SHA-256 exact match: PASS / FAIL / BLOCKED
+- Verified private-candidate canonical payload SHA-256:
+- Installed canonical payload SHA-256:
+- Private-candidate/installed-payload SHA-256 exact match: PASS / FAIL / BLOCKED
 - Installed `Videorc.exe` ProductVersion:
 - ProductVersion matches the release ID core version: PASS / FAIL / BLOCKED
 - Installed-app binding evidence ID:

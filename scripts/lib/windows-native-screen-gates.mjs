@@ -10,7 +10,7 @@ export function selectNativeWindowsScreen(devices) {
 }
 
 export function parseWindowsNativeScreenArgs(argv = []) {
-  const values = [...argv]
+  const values = [...(argv[0] === '--' ? argv.slice(1) : argv)]
   const d3d11 = takeFlag(values, '--d3d11')
   const requireD3d11 = takeFlag(values, '--require-d3d11')
   const expectFallback = takeOption(values, '--expect-fallback')

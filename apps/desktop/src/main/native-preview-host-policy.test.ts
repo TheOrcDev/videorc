@@ -8,11 +8,15 @@ import {
   nativePreviewPresentFailureDisposition,
   nativePreviewPlacementOwnedByNativeSurface,
   nativePreviewFramePollingSuppressionStatus,
+  nativePreviewFramePollingSuppressionGenerationMatches,
   nativePreviewHelperFallbackAllowed,
+  nativePreviewLifecycleFramePollingSuppressed,
   nativePreviewProofPollingSuppressed,
   reconcileWindowsD3d11PresenterStatus,
   nativePreviewSupervisorFallbackReason,
-  nativePreviewSupervisorDisposition
+  nativePreviewSupervisorDisposition,
+  windowsD3d11BackendEventAuthority,
+  windowsD3d11BackendStatusIsStale
 } from './native-preview-host-policy'
 
 describe('native preview host policy', () => {
@@ -92,12 +96,13 @@ describe('native preview host policy', () => {
   it('treats the Windows D3D11 presenter as live only after first-present liveness', () => {
     expect(
       nativePreviewSupervisorDisposition(
-        surfaceStatus({
-          transport: 'd3d11-shared-texture',
-          backing: 'directcomposition-swapchain',
+        {
+          ...d3d11BackendStatus(),
           nativePreviewHostKind: 'backend-d3d11-presenter',
+          nativePreviewHostAttached: true,
+          sourcePixelsPresent: true,
           firstFrameContract: 'met'
-        }),
+        },
         'win32'
       )
     ).toBe('live')
@@ -176,9 +181,23 @@ describe('native preview host policy', () => {
   })
 
   it('lets an attached backend D3D11 presenter own placement without a JS driver', () => {
-    const status = surfaceStatus({
-      transport: 'd3d11-shared-texture',
-      backing: 'directcomposition-swapchain',
+    const status = reconcileWindowsD3d11PresenterStatus(
+      surfaceStatus({
+        transport: 'electron-proof-surface',
+        backing: 'electron-browser-window',
+        nativePreviewHostKind: 'proof-surface',
+        nativePreviewHostAttached: false
+      }),
+      d3d11BackendStatus(),
+      {
+        platform: 'win32',
+        previewWindowOpen: true,
+        proofSurfaceAvailable: true,
+        generation: 7,
+        trustedGeneration: 7
+      }
+    )
+    expect(status).toMatchObject({
       nativePreviewHostKind: 'backend-d3d11-presenter',
       nativePreviewHostAttached: true,
       sourcePixelsPresent: true
@@ -188,9 +207,19 @@ describe('native preview host policy', () => {
         status,
         driverKind: null,
         recentPresent: false,
-        platform: 'win32'
+        platform: 'win32',
+        generation: 7
       })
     ).toBe(true)
+    expect(
+      nativePreviewPlacementOwnedByNativeSurface({
+        status,
+        driverKind: null,
+        recentPresent: false,
+        platform: 'win32',
+        generation: 8
+      })
+    ).toBe(false)
     expect(nativePreviewFramePollingSuppressionStatus(status, true, 'win32')).toMatchObject({
       framePollingSuppressed: true,
       sourcePixelsPresent: true,
@@ -239,6 +268,11 @@ describe('native preview host policy', () => {
     ).toBe(true)
   })
 
+  it('suppresses polling for a closed preview lifecycle and resumes it while open', () => {
+    expect(nativePreviewLifecycleFramePollingSuppressed(false)).toBe(true)
+    expect(nativePreviewLifecycleFramePollingSuppressed(true)).toBe(false)
+  })
+
   it('keeps the visible proof fallback polling after a native driver failure during recording', () => {
     expect(
       nativePreviewProofPollingSuppressed({
@@ -260,19 +294,20 @@ describe('native preview host policy', () => {
     )
 
     expect(closed).toMatchObject({
-      state: 'live',
-      transport: 'electron-proof-surface',
-      backing: 'electron-browser-window',
+      state: 'unavailable',
+      transport: 'unavailable',
+      backing: 'none',
       framePollingSuppressed: true,
-      sourcePixelsPresent: false
+      sourcePixelsPresent: false,
+      nativePreviewHostAttached: false
     })
     expect(typeof closed).toBe('object')
 
     const reopened = nativePreviewFramePollingSuppressionStatus(closed, false)
     expect(reopened).toMatchObject({
       framePollingSuppressed: false,
-      transport: 'electron-proof-surface',
-      backing: 'electron-browser-window'
+      transport: 'unavailable',
+      backing: 'none'
     })
   })
 
@@ -401,6 +436,26 @@ describe('native preview host policy', () => {
 
     expect(afterStaleFallback).toEqual(canonical)
     expect(afterStaleFallback.nativePreviewHostKind).toBe('backend-d3d11-presenter')
+
+    const afterStaleFailure = reconcileWindowsD3d11PresenterStatus(
+      canonical,
+      {
+        ...d3d11BackendStatus({
+          previewGeneration: 6,
+          sourceLive: false,
+          firstPresentSucceeded: false,
+          fallbackReason: 'retired-presenter-failed'
+        }),
+        state: 'failed'
+      },
+      {
+        platform: 'win32',
+        previewWindowOpen: true,
+        generation: 7,
+        trustedGeneration: 7
+      }
+    )
+    expect(afterStaleFailure).toEqual(canonical)
   })
 
   it('publishes an explicit first-frame fallback for a current-generation presenter failure', () => {
@@ -432,6 +487,170 @@ describe('native preview host policy', () => {
       firstFrameContract: 'fallback',
       firstFrameReason: 'windows-d3d11-preview-source-stalled'
     })
+  })
+
+  it('retires a canonical claim when a newer pre-present backend failure resets counters', () => {
+    const previousBackend = d3d11BackendStatus()
+    const canonical = reconcileWindowsD3d11PresenterStatus(
+      surfaceStatus({
+        transport: 'electron-proof-surface',
+        backing: 'electron-browser-window',
+        nativePreviewHostKind: 'proof-surface'
+      }),
+      previousBackend,
+      {
+        platform: 'win32',
+        previewWindowOpen: true,
+        proofSurfaceAvailable: true,
+        generation: 7,
+        trustedGeneration: 7
+      }
+    )
+    const failedBeforePresent = {
+      ...d3d11BackendStatus({
+        mediaGeneration: 12,
+        successfulPresents: 0,
+        lastPresentedSequence: undefined,
+        sourceLive: false,
+        firstPresentSucceeded: false,
+        fallbackReason: 'present-before-first-frame-failed'
+      }),
+      state: 'failed' as const,
+      updatedAt: '2026-07-09T00:00:01.000Z',
+      message: 'The D3D11 presenter failed before Present.'
+    }
+
+    expect(windowsD3d11BackendStatusIsStale(previousBackend, failedBeforePresent, 7)).toBe(false)
+    expect(
+      reconcileWindowsD3d11PresenterStatus(canonical, failedBeforePresent, {
+        platform: 'win32',
+        previewWindowOpen: true,
+        proofSurfaceAvailable: true,
+        generation: 7,
+        trustedGeneration: 7
+      })
+    ).toMatchObject({
+      state: 'failed',
+      transport: 'unavailable',
+      backing: 'none',
+      nativePreviewHostAttached: false,
+      sourcePixelsPresent: false,
+      message: 'The D3D11 presenter failed before Present.'
+    })
+  })
+
+  it('orders presenter authority by generation and progress, never wall-clock time', () => {
+    const current = d3d11BackendStatus({ mediaGeneration: 12 })
+    const lowerAuthorityWithFutureTimestamp = {
+      ...d3d11BackendStatus({
+        mediaGeneration: 11,
+        successfulPresents: 999,
+        lastPresentedSequence: 999
+      }),
+      updatedAt: '2099-01-01T00:00:00.000Z'
+    }
+    const newerAuthorityWithOldTimestamp = {
+      ...d3d11BackendStatus({
+        mediaGeneration: 13,
+        successfulPresents: 0,
+        lastPresentedSequence: undefined,
+        sourceLive: false,
+        firstPresentSucceeded: false,
+        fallbackReason: 'new-authority-failed-before-present'
+      }),
+      updatedAt: '2000-01-01T00:00:00.000Z'
+    }
+    const regressedProgressWithFutureTimestamp = {
+      ...d3d11BackendStatus({
+        mediaGeneration: 12,
+        successfulPresents: 41,
+        lastPresentedSequence: 41
+      }),
+      updatedAt: '2099-01-01T00:00:00.000Z'
+    }
+    const advancedProgressWithOldTimestamp = {
+      ...d3d11BackendStatus({
+        mediaGeneration: 12,
+        successfulPresents: 43,
+        lastPresentedSequence: 43
+      }),
+      updatedAt: '2000-01-01T00:00:00.000Z'
+    }
+
+    expect(windowsD3d11BackendStatusIsStale(current, lowerAuthorityWithFutureTimestamp, 7)).toBe(
+      true
+    )
+    expect(windowsD3d11BackendStatusIsStale(current, newerAuthorityWithOldTimestamp, 7)).toBe(false)
+    expect(windowsD3d11BackendStatusIsStale(current, regressedProgressWithFutureTimestamp, 7)).toBe(
+      true
+    )
+    expect(windowsD3d11BackendStatusIsStale(current, advancedProgressWithOldTimestamp, 7)).toBe(
+      false
+    )
+    expect(
+      windowsD3d11BackendStatusIsStale(current, d3d11BackendStatus({ previewGeneration: 6 }), 7)
+    ).toBe(true)
+  })
+
+  it('accepts an equal-progress explicit failure but rejects lower retired progress', () => {
+    const previousBackend = d3d11BackendStatus()
+    const canonical = reconcileWindowsD3d11PresenterStatus(
+      surfaceStatus({
+        transport: 'electron-proof-surface',
+        backing: 'electron-browser-window',
+        nativePreviewHostKind: 'proof-surface'
+      }),
+      previousBackend,
+      {
+        platform: 'win32',
+        previewWindowOpen: true,
+        proofSurfaceAvailable: true,
+        generation: 7,
+        trustedGeneration: 7
+      }
+    )
+    const explicitFailure = d3d11BackendStatus({
+      sourceLive: false,
+      firstPresentSucceeded: false,
+      fallbackReason: 'same-generation-presenter-failed'
+    })
+    const lowerRetiredFailure = d3d11BackendStatus({
+      successfulPresents: 41,
+      lastPresentedSequence: 41,
+      sourceLive: false,
+      firstPresentSucceeded: false,
+      fallbackReason: 'retired-presenter-failed'
+    })
+
+    expect(windowsD3d11BackendStatusIsStale(previousBackend, explicitFailure, 7)).toBe(false)
+    expect(windowsD3d11BackendStatusIsStale(previousBackend, lowerRetiredFailure, 7)).toBe(true)
+    expect(
+      reconcileWindowsD3d11PresenterStatus(canonical, explicitFailure, {
+        platform: 'win32',
+        previewWindowOpen: true,
+        proofSurfaceAvailable: true,
+        generation: 7,
+        trustedGeneration: 7
+      })
+    ).toMatchObject({
+      transport: 'electron-proof-surface',
+      backing: 'electron-browser-window',
+      nativePreviewHostKind: 'proof-surface',
+      firstFrameContract: 'fallback'
+    })
+  })
+
+  it('rejects generationless backend events and stale polling-suppression requests', () => {
+    expect(windowsD3d11BackendEventAuthority(surfaceStatus({}))).toBeNull()
+    expect(
+      windowsD3d11BackendEventAuthority(d3d11BackendStatus({ previewGeneration: undefined }))
+    ).toBeNull()
+    expect(windowsD3d11BackendEventAuthority(d3d11BackendStatus())).toEqual({
+      previewGeneration: 7,
+      mediaGeneration: 11
+    })
+    expect(nativePreviewFramePollingSuppressionGenerationMatches(7, 7)).toBe(true)
+    expect(nativePreviewFramePollingSuppressionGenerationMatches(7, 8)).toBe(false)
   })
 
   it('keeps same-generation presenter transitions monotonic across socket reordering', () => {
@@ -485,7 +704,7 @@ describe('native preview host policy', () => {
     expect(recovered.windowsD3d11Presenter?.successfulPresents).toBe(43)
   })
 
-  it('clears D3D11 presenter evidence on stop or lifecycle-generation change', () => {
+  it('clears D3D11 presenter evidence without inventing a headless proof fallback', () => {
     const canonical = reconcileWindowsD3d11PresenterStatus(
       surfaceStatus({
         transport: 'electron-proof-surface',
@@ -502,32 +721,92 @@ describe('native preview host policy', () => {
       }
     )
 
-    for (const input of [
+    const closed = reconcileWindowsD3d11PresenterStatus(canonical, null, {
+      platform: 'win32',
+      previewWindowOpen: false,
+      proofSurfaceAvailable: false,
+      generation: 7,
+      trustedGeneration: 7
+    })
+    expect(closed).toMatchObject({
+      state: 'unavailable',
+      transport: 'unavailable',
+      backing: 'none',
+      nativePreviewHostKind: undefined,
+      nativePreviewHostAttached: false,
+      framePollingSuppressed: true,
+      sourcePixelsPresent: false
+    })
+    expect(closed.windowsD3d11Presenter).toBeUndefined()
+
+    const reopened = reconcileWindowsD3d11PresenterStatus(canonical, null, {
+      platform: 'win32',
+      previewWindowOpen: true,
+      proofSurfaceAvailable: true,
+      generation: 8,
+      trustedGeneration: 7
+    })
+    expect(reopened).toMatchObject({
+      state: 'live',
+      transport: 'electron-proof-surface',
+      backing: 'electron-browser-window',
+      nativePreviewHostKind: 'proof-surface',
+      nativePreviewHostAttached: false,
+      framePollingSuppressed: false,
+      sourcePixelsPresent: false
+    })
+    expect(reopened.windowsD3d11Presenter).toBeUndefined()
+
+    const headless = reconcileWindowsD3d11PresenterStatus(canonical, null, {
+      platform: 'win32',
+      previewWindowOpen: true,
+      proofSurfaceAvailable: false,
+      generation: 7,
+      trustedGeneration: null
+    })
+    expect(headless).toMatchObject({
+      state: 'unavailable',
+      transport: 'unavailable',
+      backing: 'none',
+      nativePreviewHostKind: undefined,
+      nativePreviewHostAttached: false,
+      framePollingSuppressed: true,
+      sourcePixelsPresent: false
+    })
+  })
+
+  it('preserves stopped backend teardown truth instead of relabeling it as proof-live', () => {
+    const stopped = reconcileWindowsD3d11PresenterStatus(
+      d3d11BackendStatus(),
       {
-        platform: 'win32' as const,
-        previewWindowOpen: false,
-        generation: 7,
-        trustedGeneration: 7
+        ...surfaceStatus({}),
+        state: 'stopped',
+        transport: 'unavailable',
+        backing: 'none',
+        windowsD3d11Presenter: undefined,
+        sourcePixelsPresent: false,
+        updatedAt: '2026-07-09T00:00:03.000Z',
+        message: 'Preview surface stopped.'
       },
       {
-        platform: 'win32' as const,
+        platform: 'win32',
         previewWindowOpen: true,
-        generation: 8,
+        proofSurfaceAvailable: true,
+        generation: 7,
         trustedGeneration: 7
       }
-    ]) {
-      expect(reconcileWindowsD3d11PresenterStatus(canonical, null, input)).toMatchObject({
-        transport: 'electron-proof-surface',
-        backing: 'electron-browser-window',
-        nativePreviewHostKind: 'proof-surface',
-        nativePreviewHostAttached: false,
-        framePollingSuppressed: false,
-        sourcePixelsPresent: false
-      })
-      expect(
-        reconcileWindowsD3d11PresenterStatus(canonical, null, input).windowsD3d11Presenter
-      ).toBeUndefined()
-    }
+    )
+
+    expect(stopped).toMatchObject({
+      state: 'stopped',
+      transport: 'unavailable',
+      backing: 'none',
+      nativePreviewHostKind: undefined,
+      nativePreviewHostAttached: false,
+      sourcePixelsPresent: false,
+      message: 'Preview surface stopped.'
+    })
+    expect(nativePreviewSupervisorDisposition(stopped, 'win32')).toBe('failed')
   })
 })
 
@@ -566,6 +845,7 @@ function d3d11BackendStatus(
       windowActive: false,
       windowFocused: false,
       previewGeneration: 7,
+      mediaGeneration: 11,
       generationMatches: true,
       ownerProcessMatches: true,
       sameAdapter: true,

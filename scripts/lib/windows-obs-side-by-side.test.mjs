@@ -12,6 +12,7 @@ import {
   WINDOWS_OBS_TIMING,
   buildWindowsObsPortableProfile,
   buildWindowsObsRunPlan,
+  assertWindowsD3d11PerformanceBudgetCanonicalDraft,
   deriveWindowsD3d11PerformanceBudget,
   evaluateWindowsObsComparison,
   evaluateWindowsObsEndpointMapping,
@@ -21,8 +22,10 @@ import {
   parseWindowsObsOrder,
   parseWindowsObsSideBySideArgs,
   summarizeWindowsObsProcessTelemetry,
+  windowsObsSelectionEnvironment,
   windowsObsSettingsIdentity
 } from './windows-obs-side-by-side.mjs'
+import { WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS } from './windows-d3d11-media.mjs'
 import { buildWindowsStreamPerformanceMatrix } from './windows-stream-performance.mjs'
 
 const SHA = Object.freeze({
@@ -57,6 +60,44 @@ const RTMP_TARGET = Object.freeze({
 })
 
 describe('Windows OBS side-by-side protected arguments', () => {
+  it('rejects inherited media selection and clears every selector before CLI-owned flags', () => {
+    const inherited = Object.fromEntries(
+      WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS.map((name) => [name, 'ambient-selection'])
+    )
+    assert.throws(
+      () =>
+        windowsObsSelectionEnvironment({
+          env: inherited,
+          d3d11: false,
+          requireD3d11: false
+        }),
+      new RegExp(`stream runner owns it: ${WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS.join(', ')}`)
+    )
+    const automatic = windowsObsSelectionEnvironment({ env: {} })
+    assert.deepEqual(
+      automatic,
+      Object.fromEntries(WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS.map((name) => [name, undefined]))
+    )
+
+    const forced = windowsObsSelectionEnvironment({ env: {}, d3d11: true, requireD3d11: true })
+    assert.deepEqual(forced, {
+      ...automatic,
+      VIDEORC_WINDOWS_D3D11_MEDIA: '1',
+      VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1'
+    })
+  })
+
+  it('accepts the package-manager argument separator used by documented pnpm commands', () => {
+    assert.deepEqual(
+      parseWindowsObsSideBySideArgs(['--', '--list']),
+      parseWindowsObsSideBySideArgs(['--list'])
+    )
+    assert.throws(
+      () => parseWindowsObsSideBySideArgs(['--list', '--']),
+      /Unknown Windows OBS comparison argument/
+    )
+  })
+
   it('accepts only the exact six-trial order and three trials per app', () => {
     assert.deepEqual(
       parseWindowsObsOrder('obs,videorc,videorc,obs,obs,videorc'),
@@ -278,6 +319,32 @@ describe('Windows OBS evidence admission and merge', () => {
     assert.match(result.blockers.join('\n'), /manifest-locked local RTMP target/)
   })
 
+  it('requires exactly one validated secret-free support bundle for every Videorc run', () => {
+    const missing = passingComparison('nvidia-turing-floor')
+    const videorc = missing.runs.find((run) => run.app === 'videorc')
+    videorc.artifacts = videorc.artifacts.filter(
+      (artifact) => !artifact.path.endsWith('/support-bundle.json')
+    )
+    assert.match(
+      evaluateWindowsObsComparison(missing).blockers.join('\n'),
+      /exactly one validated, secret-free, hashed support bundle/
+    )
+
+    const duplicated = passingComparison('nvidia-turing-floor')
+    const duplicatedVideorc = duplicated.runs.find((run) => run.app === 'videorc')
+    duplicatedVideorc.artifacts.push({
+      ...duplicatedVideorc.supportBundle,
+      path: duplicatedVideorc.supportBundle.path.replace(
+        'support-bundle.json',
+        'copy/support-bundle.json'
+      )
+    })
+    assert.match(
+      evaluateWindowsObsComparison(duplicated).blockers.join('\n'),
+      /exactly one validated, secret-free, hashed support bundle/
+    )
+  })
+
   it('fails resource, media, order, and D3D zero-copy regressions', () => {
     const comparison = passingComparison('nvidia-turing-floor')
     for (const run of comparison.runs.filter(({ app }) => app === 'videorc')) {
@@ -408,6 +475,12 @@ describe('Windows D3D11 OBS-relative draft derivation', () => {
       () => deriveWindowsD3d11PerformanceBudget({ comparisons, calibrations: copied }),
       /zero-copy D3D11/
     )
+    const starved = structuredClone(calibrations)
+    starved[0].runs[0].pipeline.synchronizationTimeouts = 1
+    assert.throws(
+      () => deriveWindowsD3d11PerformanceBudget({ comparisons, calibrations: starved }),
+      /synchronizationTimeouts must be zero/
+    )
     const profile = structuredClone(calibrations)
     profile[0].scope.profile = '1440p30'
     assert.throws(
@@ -421,6 +494,36 @@ describe('Windows D3D11 OBS-relative draft derivation', () => {
           calibrations: calibrations.slice(1)
         }),
       /exact protected \d+-scenario matrix/
+    )
+  })
+
+  it('rejects reviewer-edited generated thresholds while allowing activation metadata only', () => {
+    const comparisons = WINDOWS_OBS_D3D11_HARDWARE_CLASSES.map((hardwareClass) =>
+      passingComparison(hardwareClass)
+    )
+    const calibrations = WINDOWS_OBS_D3D11_HARDWARE_CLASSES.flatMap(d3dCalibrations)
+    const derived = deriveWindowsD3d11PerformanceBudget({ comparisons, calibrations })
+    const active = {
+      ...structuredClone(derived),
+      status: 'active',
+      activation: { allowed: true, reviewedBy: 'independent-human', reviewedAt: '2026-08-02' }
+    }
+    assert.doesNotThrow(() =>
+      assertWindowsD3d11PerformanceBudgetCanonicalDraft({
+        document: active,
+        comparisons,
+        calibrations
+      })
+    )
+    active.profiles[0].thresholds.maximumTotalCpuP95Percent += 100
+    assert.throws(
+      () =>
+        assertWindowsD3d11PerformanceBudgetCanonicalDraft({
+          document: active,
+          comparisons,
+          calibrations
+        }),
+      /profiles did not byte-for-byte match canonical retained-evidence derivation/
     )
   })
 })
@@ -569,6 +672,16 @@ function passingRun({
       app === 'videorc'
         ? { verdict: 'PASS', zeroCopyVerdict: 'PASS' }
         : { verdict: 'PASS', zeroCopyVerdict: 'NOT_APPLICABLE' },
+    supportBundle:
+      app === 'videorc'
+        ? {
+            verdict: 'PASS',
+            validated: true,
+            secretFree: true,
+            path: `/evidence/${hardwareClass}/runs/${index}-${app}/support-bundle.json`,
+            sha256: '8'.repeat(64)
+          }
+        : { verdict: 'NOT_APPLICABLE' },
     receiver: { verdict: 'PASS', target: RTMP_TARGET },
     process: {
       telemetryVerdict: 'PASS',
@@ -607,7 +720,15 @@ function passingRun({
       {
         path: `/evidence/${hardwareClass}/runs/${index}-${app}/receiver.flv`,
         sha256: '9'.repeat(64)
-      }
+      },
+      ...(app === 'videorc'
+        ? [
+            {
+              path: `/evidence/${hardwareClass}/runs/${index}-${app}/support-bundle.json`,
+              sha256: '8'.repeat(64)
+            }
+          ]
+        : [])
     ],
     reportPath: `/evidence/${hardwareClass}/runs/${index}-${app}/report.json`,
     reportSha256: String(index).repeat(64)
@@ -689,7 +810,16 @@ function d3dCalibration(hardwareClass, scenario) {
     aggregateSha256: '7'.repeat(64),
     runs: Array.from({ length: scenario.repetitions }, (_, index) => ({
       verdict: 'PASS',
-      pipeline: { zeroCopyVerdict: 'PASS' },
+      pipeline: {
+        zeroCopyVerdict: 'PASS',
+        messageDispatchP95Ms: 20,
+        messageDispatchMaxMs: 40,
+        mediaCommandLagP95Ms: 18,
+        mediaCommandLagMaxMs: 35,
+        maximumConsecutiveMessageBatch: 12,
+        maximumConsecutiveMediaBatch: 10,
+        synchronizationTimeouts: 0
+      },
       bmp: { mode: 'disabled', requests: 0, bytes: 0 },
       reportPath: `/evidence/${hardwareClass}/stream/${id}/run-${index + 1}.json`,
       reportSha256: `${index + 6}`.repeat(64),

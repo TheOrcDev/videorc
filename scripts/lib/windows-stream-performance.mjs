@@ -8,6 +8,10 @@ import {
   validateWindowsPerformanceBudget
 } from './windows-performance-budget.mjs'
 import {
+  WINDOWS_D3D11_FAIRNESS_LIMITS,
+  WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS
+} from './windows-d3d11-media.mjs'
+import {
   performanceSamplingEvidenceFailures,
   performanceSamplingInvariants
 } from './performance-sampling-schedule.mjs'
@@ -34,6 +38,26 @@ export const WINDOWS_STREAM_D3D11_PREVIEW = Object.freeze({
 })
 
 export const WINDOWS_STREAM_NATURAL_FALLBACK_HARDWARE_CLASS = 'unsupported-natural-fallback'
+
+export function assertWindowsStreamSelectionEnvironmentIsRunnerOwned(env = {}) {
+  const inherited = WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS.filter(
+    (name) => typeof env[name] === 'string' && env[name].trim()
+  )
+  if (inherited.length > 0) {
+    throw new Error(
+      `Selection environment must be absent before launch; the stream runner owns it: ${inherited.join(', ')}`
+    )
+  }
+}
+
+export function windowsStreamSelectionEnvironmentOverlay(selection = {}) {
+  return {
+    ...Object.fromEntries(
+      WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS.map((name) => [name, undefined])
+    ),
+    ...selection
+  }
+}
 
 export const WINDOWS_STREAM_PERFORMANCE_TIMING = Object.freeze({
   warmupMs: 60_000,
@@ -217,7 +241,7 @@ export function parseWindowsStreamPerformanceArgs(
   argv,
   matrix = buildWindowsStreamPerformanceMatrix()
 ) {
-  const values = [...argv]
+  const values = [...(argv[0] === '--' ? argv.slice(1) : argv)]
   const list = takeFlag(values, '--list')
   const gate = takeFlag(values, '--gate')
   const calibrate = takeFlag(values, '--calibrate')
@@ -943,6 +967,32 @@ export function evaluateWindowsStreamRun(
       evidence?.pipeline?.d3d11?.messageDispatchMaxMs,
       100
     )
+    requireAtMost(
+      failures,
+      'D3D11 media command p95',
+      evidence?.pipeline?.d3d11?.mediaCommandLagP95Ms,
+      WINDOWS_D3D11_FAIRNESS_LIMITS.mediaCommandLagP95Ms
+    )
+    requireAtMost(
+      failures,
+      'D3D11 media command maximum',
+      evidence?.pipeline?.d3d11?.mediaCommandLagMaxMs,
+      WINDOWS_D3D11_FAIRNESS_LIMITS.mediaCommandLagMaxMs
+    )
+    for (const field of ['maximumConsecutiveMessageBatch', 'maximumConsecutiveMediaBatch']) {
+      const value = evidence?.pipeline?.d3d11?.[field]
+      if (!Number.isInteger(value) || value < 0 || value > WINDOWS_D3D11_FAIRNESS_LIMITS[field]) {
+        failures.push(
+          `D3D11 ${field} ${value ?? 'missing'} exceeded ${WINDOWS_D3D11_FAIRNESS_LIMITS[field]}`
+        )
+      }
+    }
+    requireEqual(
+      failures,
+      'D3D11 synchronization timeouts',
+      evidence?.pipeline?.d3d11?.synchronizationTimeouts,
+      0
+    )
     for (const [label, value] of [
       ['D3D11 texture-pool pressure events', evidence?.pipeline?.d3d11?.texturePoolPressureEvents],
       ['D3D11 adapter mismatches', evidence?.pipeline?.d3d11?.adapterMismatches],
@@ -1414,6 +1464,10 @@ export function summarizeWindowsStreamDiagnosticSamples(samples, options = {}) {
     measured,
     (sample) => sample.effectiveEncodeBackend ?? sample.encodeBackend
   )
+  const encodedOutputBackendStates = diagnosticStateSet(
+    measured,
+    (sample) => sample.encoderBridgeEncodedOutputBackend
+  )
   const fallbackStates = diagnosticStateSet(
     measured,
     (sample) => sample.encoderBridgeEncodedOutputFallbackReason
@@ -1497,6 +1551,7 @@ export function summarizeWindowsStreamDiagnosticSamples(samples, options = {}) {
       requestedOutputStates,
       effectiveOutputStates,
       encodeBackendStates,
+      encodedOutputBackendStates,
       fallbackStates
     ].some((states) => states.size > 1),
     ...(measured.some((sample) => isRecord(sample.windowsD3d11Media))
@@ -1524,9 +1579,8 @@ export function summarizeWindowsStreamDiagnosticSamples(samples, options = {}) {
               firstD3d11.cursorCompositedFrames,
               lastD3d11.cursorCompositedFrames
             ),
-            captureReadbackFrames: counterDelta(
-              firstD3d11.captureReadbackFrames,
-              lastD3d11.captureReadbackFrames
+            captureReadbackFrames: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.captureReadbackFrames)
             ),
             textureImportFrames: counterDelta(
               firstD3d11.textureImportFrames,
@@ -1536,43 +1590,59 @@ export function summarizeWindowsStreamDiagnosticSamples(samples, options = {}) {
               firstD3d11.cameraUploadFrames,
               lastD3d11.cameraUploadFrames
             ),
-            compositorCpuFallbackFrames: counterDelta(
-              firstD3d11.compositorCpuFallbackFrames,
-              lastD3d11.compositorCpuFallbackFrames
+            compositorCpuFallbackFrames: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.compositorCpuFallbackFrames)
             ),
             previewPresents: counterDelta(firstD3d11.previewPresents, lastD3d11.previewPresents),
             previewDrops: counterDelta(firstD3d11.previewDrops, lastD3d11.previewDrops),
-            previewBmpRequests: counterDelta(
-              firstD3d11.previewBmpRequests,
-              lastD3d11.previewBmpRequests
+            previewBmpRequests: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.previewBmpRequests)
             ),
-            previewBmpBytes: counterDelta(firstD3d11.previewBmpBytes, lastD3d11.previewBmpBytes),
+            previewBmpBytes: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.previewBmpBytes)
+            ),
             encoderGpuSamples: counterDelta(
               firstD3d11.encoderGpuSamples,
               lastD3d11.encoderGpuSamples
             ),
-            encoderSystemMemorySamples: counterDelta(
-              firstD3d11.encoderSystemMemorySamples,
-              lastD3d11.encoderSystemMemorySamples
+            encoderSystemMemorySamples: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.encoderSystemMemorySamples)
             ),
-            rawVideoCopiedFrames: counterDelta(
-              firstD3d11.rawVideoCopiedFrames,
-              lastD3d11.rawVideoCopiedFrames
+            rawVideoCopiedFrames: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.rawVideoCopiedFrames)
             ),
-            texturePoolPressureEvents: counterDelta(
-              firstD3d11.texturePoolPressureEvents,
-              lastD3d11.texturePoolPressureEvents
+            texturePoolPressureEvents: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.texturePoolPressureEvents)
             ),
-            adapterMismatches: counterDelta(
-              firstD3d11.adapterMismatches,
-              lastD3d11.adapterMismatches
+            adapterMismatches: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.adapterMismatches)
             ),
-            deviceResets: counterDelta(firstD3d11.deviceResets, lastD3d11.deviceResets),
+            deviceResets: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.deviceResets)
+            ),
+            staleGenerationCallbacks: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.staleGenerationCallbacks)
+            ),
+            synchronizationTimeouts: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.synchronizationTimeouts)
+            ),
             messageDispatchP95Ms: maxFinite(
               measured.map((sample) => sample.windowsD3d11Media?.messagePumpLagP95Ms)
             ),
             messageDispatchMaxMs: maxFinite(
               measured.map((sample) => sample.windowsD3d11Media?.messagePumpLagMaxMs)
+            ),
+            mediaCommandLagP95Ms: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.mediaCommandLagP95Ms)
+            ),
+            mediaCommandLagMaxMs: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.mediaCommandLagMaxMs)
+            ),
+            maximumConsecutiveMessageBatch: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.maximumConsecutiveMessageBatch)
+            ),
+            maximumConsecutiveMediaBatch: maxFinite(
+              measured.map((sample) => sample.windowsD3d11Media?.maximumConsecutiveMediaBatch)
             ),
             fallbackReason: lastD3d11.fallbackReason ?? null,
             stateChanged: d3d11States.size > 1,
@@ -1652,11 +1722,19 @@ export function evaluateWindowsStreamDiagnosticTimeline(
     blockers.push('diagnostic timeline did not preserve one active session identity')
   }
 
-  const separateOutputEncoders = measured.some(
+  const separateOutputEncoderStates = new Set(
+    measured.map((sample) => sample.encoderBridgeSeparateOutputEncodersActive)
+  )
+  const separateOutputEncoders = measured.every(
     (sample) => sample.encoderBridgeSeparateOutputEncodersActive === true
   )
+  if (separateOutputEncoderStates.size > 1) {
+    blockers.push('diagnostic output-encoder topology changed during measurement')
+  }
   if (recordEnabled && !separateOutputEncoders) {
-    blockers.push('record-plus-stream diagnostics did not prove separate output encoders')
+    blockers.push(
+      'record-plus-stream diagnostics did not prove separate output encoders throughout'
+    )
   }
   const speedField = separateOutputEncoders ? 'encoderBridgeStreamEncoderSpeed' : 'encoderSpeed'
   const progressDroppedField = separateOutputEncoders
@@ -1674,13 +1752,23 @@ export function evaluateWindowsStreamDiagnosticTimeline(
     if (measured.some((sample) => !nonEmptyString(sample[field]))) {
       blockers.push(`diagnostic timeline field ${field} was missing`)
     }
+    if (diagnosticStateSet(measured, (sample) => sample[field]).size > 1) {
+      blockers.push(`diagnostic timeline field ${field} changed during measurement`)
+    }
   }
+  const effectiveEncodeBackendStates = diagnosticStateSet(
+    measured,
+    (sample) => sample.effectiveEncodeBackend ?? sample.encodeBackend
+  )
   if (
     measured.some(
       (sample) => !nonEmptyString(sample.effectiveEncodeBackend ?? sample.encodeBackend)
     )
   ) {
     blockers.push('diagnostic timeline effective encode backend was missing')
+  }
+  if (effectiveEncodeBackendStates.size > 1) {
+    blockers.push('diagnostic timeline effective encode backend changed during measurement')
   }
   if (measured.some((sample) => !Number.isFinite(sample[speedField]) || sample[speedField] <= 0)) {
     blockers.push(`diagnostic timeline field ${speedField} was missing or invalid`)
@@ -1785,11 +1873,13 @@ export function evaluateWindowsStreamProcessTelemetry(
 export function evaluateWindowsStreamTargetLifecycle({
   snapshots,
   targetId,
+  expectedSessionId,
   measurementStartedAtMs,
   measurementEndedAtMs,
   expectedMeasurementEndedAtMs,
   intervalMs,
-  receiverAlive
+  receiverAlive,
+  pollingEvidence
 } = {}) {
   const failures = []
   const blockers = []
@@ -1812,10 +1902,29 @@ export function evaluateWindowsStreamTargetLifecycle({
       (event) =>
         isRecord(event) &&
         Number.isFinite(event.receivedAtMs) &&
+        ['rpc', 'diagnostics-rpc'].includes(event.source) &&
         isRecord(event.snapshot) &&
         Array.isArray(event.snapshot.targets)
     )
     .sort((left, right) => left.receivedAtMs - right.receivedAtMs)
+  if (pollingEvidence?.verdict !== 'PASS') {
+    blockers.push(
+      ...(pollingEvidence?.blockers?.length
+        ? pollingEvidence.blockers.map((blocker) => `target polling: ${blocker}`)
+        : ['authoritative stream-target polling evidence was missing'])
+    )
+  }
+  const sessionIds = new Set(events.map((event) => event.snapshot.sessionId).filter(nonEmptyString))
+  if (events.some((event) => !nonEmptyString(event.snapshot.sessionId))) {
+    blockers.push('authoritative stream-target snapshot omitted its session identity')
+  }
+  if (sessionIds.size !== 1) {
+    blockers.push('authoritative stream-target snapshots did not preserve one session identity')
+  }
+  const observedSessionId = sessionIds.size === 1 ? [...sessionIds][0] : null
+  if (nonEmptyString(expectedSessionId) && observedSessionId !== expectedSessionId.trim()) {
+    blockers.push('stream-target and diagnostic timelines belonged to different sessions')
+  }
   const targetEvents = events
     .map((event) => ({
       receivedAtMs: event.receivedAtMs,
@@ -1828,10 +1937,30 @@ export function evaluateWindowsStreamTargetLifecycle({
   if (stateAtStart?.target?.state !== 'live') {
     blockers.push('selected stream target was not confirmed live at measurement start')
   }
+  const startObservationAgeMs = stateAtStart
+    ? measurementStartedAtMs - stateAtStart.receivedAtMs
+    : null
+  if (Number.isFinite(startObservationAgeMs) && startObservationAgeMs > intervalMs) {
+    blockers.push('selected stream target start observation was older than one interval')
+  }
   const measuredEvents = targetEvents.filter(
     (event) =>
       event.receivedAtMs >= measurementStartedAtMs && event.receivedAtMs <= measurementEndedAtMs
   )
+  if (measuredEvents.length === 0) {
+    blockers.push('selected stream target had no observations during measurement')
+  }
+  const coverageEvents = targetEvents.filter(
+    (event) =>
+      event.receivedAtMs >= (stateAtStart?.receivedAtMs ?? measurementStartedAtMs) &&
+      event.receivedAtMs <= measurementEndedAtMs
+  )
+  const coverageGaps = coverageEvents
+    .slice(1)
+    .map((event, index) => event.receivedAtMs - coverageEvents[index].receivedAtMs)
+  if (coverageGaps.some((gap) => gap > intervalMs)) {
+    blockers.push('selected stream target observation cadence exceeded one interval')
+  }
   for (const event of measuredEvents) {
     if (event.target.state !== 'live') {
       failures.push(
@@ -1839,9 +1968,17 @@ export function evaluateWindowsStreamTargetLifecycle({
       )
     }
   }
-  const stateAtEnd = targetEvents.at(-1)
-  if (stateAtEnd?.target?.state !== 'live') {
+  const stateAtEnd = [...targetEvents]
+    .reverse()
+    .find((event) => event.receivedAtMs <= measurementEndedAtMs)
+  if (!stateAtEnd) {
+    blockers.push('selected stream target had no observation at or before measurement end')
+  } else if (stateAtEnd.target.state !== 'live') {
     failures.push('selected stream target was not live immediately before stop')
+  }
+  const endObservationAgeMs = stateAtEnd ? measurementEndedAtMs - stateAtEnd.receivedAtMs : null
+  if (Number.isFinite(endObservationAgeMs) && endObservationAgeMs > intervalMs) {
+    blockers.push('selected stream target end observation was older than one interval')
   }
   const endSkewMs = Math.abs(measurementEndedAtMs - expectedMeasurementEndedAtMs)
   if (endSkewMs > intervalMs) {
@@ -1859,6 +1996,10 @@ export function evaluateWindowsStreamTargetLifecycle({
     stateAtStart: stateAtStart?.target?.state ?? null,
     stateAtEnd: stateAtEnd?.target?.state ?? null,
     measuredEvents: measuredEvents.length,
+    sessionId: observedSessionId,
+    maximumObservationGapMs: coverageGaps.length > 0 ? Math.max(...coverageGaps) : null,
+    startObservationAgeMs,
+    endObservationAgeMs,
     endSkewMs
   }
 }
@@ -2404,7 +2545,9 @@ export async function loadWindowsStreamPerformanceBudget({
   context,
   profileId,
   read = readFile,
-  verifyArtifact
+  verifyArtifact,
+  verifyDerivation,
+  candidateRoot
 }) {
   return loadWindowsPerformanceBudget({
     path,
@@ -2412,7 +2555,9 @@ export async function loadWindowsStreamPerformanceBudget({
     profileId,
     read,
     requireComparison: true,
-    ...(verifyArtifact ? { verifyArtifact } : {})
+    ...(verifyArtifact ? { verifyArtifact } : {}),
+    ...(verifyDerivation ? { verifyDerivation } : {}),
+    ...(candidateRoot ? { candidateRoot } : {})
   })
 }
 
@@ -2502,7 +2647,12 @@ export function windowsStreamCalibrationMetrics({
       cursorCorrect: windowsStreamD3d11CursorCorrect(d3d11),
       inputContinuity: inputContinuity === true,
       messageDispatchP95Ms: finiteOrNull(d3d11?.messageDispatchP95Ms),
-      messageDispatchMaxMs: finiteOrNull(d3d11?.messageDispatchMaxMs)
+      messageDispatchMaxMs: finiteOrNull(d3d11?.messageDispatchMaxMs),
+      mediaCommandLagP95Ms: finiteOrNull(d3d11?.mediaCommandLagP95Ms),
+      mediaCommandLagMaxMs: finiteOrNull(d3d11?.mediaCommandLagMaxMs),
+      maximumConsecutiveMessageBatch: finiteOrNull(d3d11?.maximumConsecutiveMessageBatch),
+      maximumConsecutiveMediaBatch: finiteOrNull(d3d11?.maximumConsecutiveMediaBatch),
+      synchronizationTimeouts: finiteOrNull(d3d11?.synchronizationTimeouts)
     }
   }
 }
@@ -2820,6 +2970,8 @@ export function buildWindowsD3d11StreamCalibrations({ aggregate, aggregatePath }
             run.calibration?.d3d11?.compositorCpuFallbackFrames !== 0 ||
             run.calibration?.d3d11?.rawVideoCopiedFrames !== 0 ||
             run.calibration?.d3d11?.encoderSystemMemorySamples !== 0 ||
+            run.calibration?.d3d11?.synchronizationTimeouts !== 0 ||
+            !boundedD3d11FairnessMetrics(run.calibration?.d3d11) ||
             run.calibration?.bmp?.requestCount !== 0 ||
             run.calibration?.bmp?.bytes !== 0
         )
@@ -2888,6 +3040,24 @@ export function buildWindowsD3d11StreamCalibrations({ aggregate, aggregatePath }
 
 export function isWindowsD3d11StreamPerformanceBudget(document) {
   return document?.kind === WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND
+}
+
+function boundedD3d11FairnessMetrics(d3d11) {
+  return [
+    ['messageDispatchP95Ms', WINDOWS_D3D11_FAIRNESS_LIMITS.messagePumpLagP95Ms],
+    ['messageDispatchMaxMs', WINDOWS_D3D11_FAIRNESS_LIMITS.messagePumpLagMaxMs],
+    ['mediaCommandLagP95Ms', WINDOWS_D3D11_FAIRNESS_LIMITS.mediaCommandLagP95Ms],
+    ['mediaCommandLagMaxMs', WINDOWS_D3D11_FAIRNESS_LIMITS.mediaCommandLagMaxMs],
+    [
+      'maximumConsecutiveMessageBatch',
+      WINDOWS_D3D11_FAIRNESS_LIMITS.maximumConsecutiveMessageBatch
+    ],
+    ['maximumConsecutiveMediaBatch', WINDOWS_D3D11_FAIRNESS_LIMITS.maximumConsecutiveMediaBatch]
+  ].every(([field, maximum]) => {
+    const value = d3d11?.[field]
+    const integral = field.startsWith('maximumConsecutive') ? Number.isInteger(value) : true
+    return integral && Number.isFinite(value) && value >= 0 && value <= maximum
+  })
 }
 
 function assertSinglePortableAbsolutePath(value, label) {

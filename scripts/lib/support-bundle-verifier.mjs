@@ -1,3 +1,5 @@
+import { WINDOWS_D3D11_FAIRNESS_LIMITS } from './windows-d3d11-media.mjs'
+
 const REQUIRED_TOP_LEVEL_SECTIONS = [
   'schemaVersion',
   'generatedAt',
@@ -292,11 +294,28 @@ function inspectWindowsStreamDiagnostics(diagnostics, failures, bundle) {
     }
   }
 
-  const d3d11Snapshots = streamSnapshots.filter((snapshot) => {
-    const media = snapshot?.windowsD3d11Media
-    return media?.required === true || media?.state === 'live'
-  })
-  if (d3d11Snapshots.length === 0) return
+  const mediaSnapshots = streamSnapshots.filter((snapshot) =>
+    isPlainObject(snapshot?.windowsD3d11Media)
+  )
+  if (mediaSnapshots.length !== streamSnapshots.length) {
+    failures.push(
+      'windows stream diagnostics require either live D3D11 media or one named natural fallback in every snapshot.'
+    )
+    return
+  }
+  const d3d11Snapshots = mediaSnapshots.filter(
+    (snapshot) => snapshot.windowsD3d11Media.state === 'live'
+  )
+  const fallbackSnapshots = mediaSnapshots.filter(
+    (snapshot) => snapshot.windowsD3d11Media.state === 'fallback'
+  )
+  if (d3d11Snapshots.length === 0) {
+    inspectWindowsNaturalD3d11FallbackSnapshots(fallbackSnapshots, streamSnapshots, failures)
+    return
+  }
+  if (d3d11Snapshots.length !== streamSnapshots.length || fallbackSnapshots.length > 0) {
+    failures.push('windows D3D11 stream diagnostics changed between live and fallback states.')
+  }
   const adapterLuids = new Set()
   const generations = new Set()
   for (const [index, snapshot] of d3d11Snapshots.entries()) {
@@ -356,7 +375,8 @@ function inspectWindowsStreamDiagnostics(diagnostics, failures, bundle) {
       'texturePoolPressureEvents',
       'adapterMismatches',
       'deviceResets',
-      'staleGenerationCallbacks'
+      'staleGenerationCallbacks',
+      'synchronizationTimeouts'
     ]) {
       if (media[field] !== 0) failures.push(`${label} requires ${field}=0.`)
     }
@@ -373,20 +393,7 @@ function inspectWindowsStreamDiagnostics(diagnostics, failures, bundle) {
     ) {
       failures.push(`${label} requires texturePoolInUse within the fixed pool capacity.`)
     }
-    if (
-      !Number.isFinite(media.messagePumpLagP95Ms) ||
-      media.messagePumpLagP95Ms < 0 ||
-      media.messagePumpLagP95Ms > 50
-    ) {
-      failures.push(`${label} requires messagePumpLagP95Ms within 50 ms.`)
-    }
-    if (
-      !Number.isFinite(media.messagePumpLagMaxMs) ||
-      media.messagePumpLagMaxMs < 0 ||
-      media.messagePumpLagMaxMs > 100
-    ) {
-      failures.push(`${label} requires messagePumpLagMaxMs within 100 ms.`)
-    }
+    inspectWindowsD3d11SchedulerDiagnostics(media, label, failures)
     inspectWindowsD3d11CursorDiagnostics(media, label, failures)
     if (typeof media.fallbackReason === 'string' && media.fallbackReason.trim()) {
       failures.push(`${label} must not contain a fallbackReason.`)
@@ -425,6 +432,71 @@ function inspectWindowsStreamDiagnostics(diagnostics, failures, bundle) {
       bundle?.rendererDiagnostics?.nativePreviewSurfaceStatus,
       failures
     )
+  }
+}
+
+function inspectWindowsNaturalD3d11FallbackSnapshots(fallbackSnapshots, streamSnapshots, failures) {
+  if (fallbackSnapshots.length !== streamSnapshots.length || fallbackSnapshots.length === 0) {
+    failures.push(
+      'windows stream diagnostics did not prove a stable live D3D11 path or named natural fallback.'
+    )
+    return
+  }
+  const fallbackReasons = new Set()
+  for (const [index, snapshot] of fallbackSnapshots.entries()) {
+    const label = `windows natural D3D11 fallback diagnostics ${index + 1}`
+    const media = snapshot.windowsD3d11Media
+    if (media.state !== 'fallback') failures.push(`${label} requires state=fallback.`)
+    if (media.requested !== false) failures.push(`${label} requires requested=false.`)
+    if (media.required !== false) failures.push(`${label} requires required=false.`)
+    if (media.captureBackend !== 'legacy-ffmpeg') {
+      failures.push(`${label} requires captureBackend=legacy-ffmpeg.`)
+    }
+    if (typeof media.fallbackReason !== 'string' || !media.fallbackReason.trim()) {
+      failures.push(`${label} requires one named fallbackReason.`)
+    } else {
+      fallbackReasons.add(media.fallbackReason)
+    }
+    for (const field of [
+      'adapterLuid',
+      'captureAdapterLuid',
+      'compositorAdapterLuid',
+      'primaryEncoderAdapterLuid',
+      'auxiliaryEncoderAdapterLuid'
+    ]) {
+      if (media[field] !== null && media[field] !== undefined) {
+        failures.push(`${label} must not claim ${field}.`)
+      }
+    }
+    inspectWindowsD3d11SchedulerDiagnostics(media, label, failures)
+  }
+  if (fallbackReasons.size !== 1) {
+    failures.push('windows natural D3D11 fallback reason changed across stream diagnostics.')
+  }
+}
+
+function inspectWindowsD3d11SchedulerDiagnostics(media, label, failures) {
+  for (const [field, maximum] of [
+    ['messagePumpLagP95Ms', WINDOWS_D3D11_FAIRNESS_LIMITS.messagePumpLagP95Ms],
+    ['messagePumpLagMaxMs', WINDOWS_D3D11_FAIRNESS_LIMITS.messagePumpLagMaxMs],
+    ['mediaCommandLagP95Ms', WINDOWS_D3D11_FAIRNESS_LIMITS.mediaCommandLagP95Ms],
+    ['mediaCommandLagMaxMs', WINDOWS_D3D11_FAIRNESS_LIMITS.mediaCommandLagMaxMs]
+  ]) {
+    if (!Number.isFinite(media[field]) || media[field] < 0 || media[field] > maximum) {
+      failures.push(`${label} requires ${field} within ${maximum} ms.`)
+    }
+  }
+  for (const field of ['maximumConsecutiveMessageBatch', 'maximumConsecutiveMediaBatch']) {
+    if (
+      !Number.isInteger(media[field]) ||
+      media[field] < 0 ||
+      media[field] > WINDOWS_D3D11_FAIRNESS_LIMITS[field]
+    ) {
+      failures.push(`${label} requires ${field} within ${WINDOWS_D3D11_FAIRNESS_LIMITS[field]}.`)
+    }
+  }
+  if (media.synchronizationTimeouts !== 0) {
+    failures.push(`${label} requires synchronizationTimeouts=0.`)
   }
 }
 

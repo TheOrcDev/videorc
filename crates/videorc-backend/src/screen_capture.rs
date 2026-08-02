@@ -63,6 +63,7 @@ pub fn list_native_capture_sources() -> NativeCaptureSources {
 /// explicit marker keeps shared key construction portable without pretending
 /// that a Windows adapter was inspected.
 #[cfg(target_os = "windows")]
+#[allow(dead_code)] // Reserved for the shared Windows GPU capability-cache key.
 pub(crate) fn graphics_adapter_driver_identity() -> String {
     windows_native::graphics_adapter_driver_identity().unwrap_or_else(|reason| {
         // A missing identity must disable cross-call cache reuse. Reusing a
@@ -75,6 +76,7 @@ pub(crate) fn graphics_adapter_driver_identity() -> String {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(dead_code)] // Portable counterpart for the shared capability-cache key.
 pub(crate) fn graphics_adapter_driver_identity() -> String {
     format!(
         "platform={};windows-adapter-driver=not-applicable",

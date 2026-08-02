@@ -1432,6 +1432,11 @@ pub struct WindowsD3d11MediaDiagnostics {
     pub adapter_mismatches: u64,
     #[serde(default)]
     pub device_resets: u64,
+    /// Aggregate count of abnormal bounded D3D synchronization waits that
+    /// expired. Normal zero-time capture polls with no new desktop frame are
+    /// deliberately excluded.
+    #[serde(default)]
+    pub synchronization_timeouts: u64,
     #[serde(default)]
     pub stale_generation_callbacks: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2347,6 +2352,11 @@ pub struct WindowsD3d11PresenterBounds {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowsD3d11PresenterDiagnostics {
+    /// Generation of the backend-owned D3D11 media authority. This remains
+    /// scalar and renderer-safe while allowing Electron to reject a delayed
+    /// status callback from a retired authority deterministically.
+    #[serde(default)]
+    pub media_generation: u64,
     pub layered: bool,
     pub transparent: bool,
     pub no_activate: bool,
@@ -4354,5 +4364,40 @@ mod tests {
             rejected.is_err(),
             "unknown secret-bearing fields must be rejected"
         );
+    }
+
+    #[test]
+    fn windows_d3d11_synchronization_timeout_counter_is_stable_on_the_wire() {
+        let diagnostics = WindowsD3d11MediaDiagnostics {
+            synchronization_timeouts: 3,
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&diagnostics).unwrap();
+        assert_eq!(wire["synchronizationTimeouts"], 3);
+
+        let legacy: WindowsD3d11MediaDiagnostics = serde_json::from_value(serde_json::json!({
+            "state": "unavailable"
+        }))
+        .unwrap();
+        assert_eq!(legacy.synchronization_timeouts, 0);
+    }
+
+    #[test]
+    fn windows_d3d11_presenter_media_generation_is_stable_on_the_wire() {
+        let diagnostics = WindowsD3d11PresenterDiagnostics {
+            media_generation: 41,
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&diagnostics).unwrap();
+        assert_eq!(wire["mediaGeneration"], 41);
+
+        let mut legacy_wire =
+            serde_json::to_value(WindowsD3d11PresenterDiagnostics::default()).unwrap();
+        legacy_wire
+            .as_object_mut()
+            .expect("presenter diagnostics serialize as an object")
+            .remove("mediaGeneration");
+        let legacy: WindowsD3d11PresenterDiagnostics = serde_json::from_value(legacy_wire).unwrap();
+        assert_eq!(legacy.media_generation, 0);
     }
 }

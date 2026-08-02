@@ -769,6 +769,7 @@ const windowsD3d11PresenterDiagnosticsSchema = objectSchema(
     windowActive: booleanSchema,
     windowFocused: booleanSchema,
     previewGeneration: optionalSchema(nonNegativeInteger),
+    mediaGeneration: nonNegativeInteger,
     generationMatches: booleanSchema,
     ownerProcessMatches: booleanSchema,
     sameAdapter: booleanSchema,
@@ -951,8 +952,22 @@ const windowsD3d11MediaDiagnosticsSchema = objectSchema(
     texturePoolPressureEvents: nonNegativeInteger,
     adapterMismatches: nonNegativeInteger,
     deviceResets: nonNegativeInteger,
+    synchronizationTimeouts: nonNegativeInteger,
     staleGenerationCallbacks: nonNegativeInteger,
     fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 16_384 }))
+  },
+  { allowUnknown: false }
+)
+
+const previewImagePollCountsSchema = objectSchema(
+  {
+    cameraPng: nonNegativeInteger,
+    screenPng: nonNegativeInteger,
+    productionPng: nonNegativeInteger,
+    cameraBmp: nonNegativeInteger,
+    screenBmp: nonNegativeInteger,
+    liveJpeg: nonNegativeInteger,
+    liveMjpeg: nonNegativeInteger
   },
   { allowUnknown: false }
 )
@@ -965,6 +980,7 @@ const diagnosticStatsSchema = boundedSemanticValue(
       droppedFrames: nonNegativeInteger,
       compositorBackend: optionalSchema(enumSchema(['metal', 'd3d11', 'cpu', 'cpu-fallback'])),
       windowsD3d11Media: optionalSchema(windowsD3d11MediaDiagnosticsSchema),
+      previewImagePollCounts: optionalSchema(previewImagePollCountsSchema),
       updatedAt: optionalSchema(timestamp)
     },
     { allowUnknown: true }

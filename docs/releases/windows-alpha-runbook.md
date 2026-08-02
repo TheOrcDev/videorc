@@ -116,6 +116,11 @@ pnpm release:candidate:download:windows
 pnpm release:candidate:verify:windows
 $env:VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256 = `
   (Get-FileHash -Algorithm SHA256 .\apps\desktop\release\win-unpacked\Videorc.exe).Hash.ToLowerInvariant()
+$payloadSha256 = node --input-type=module -e "import { packagedAppPayloadIdentity } from './scripts/lib/performance-contract.mjs'; const identity = await packagedAppPayloadIdentity('./apps/desktop/release/win-unpacked/Videorc.exe', { osPlatform: 'win32' }); process.stdout.write(identity.sha256 ?? '')"
+if ($LASTEXITCODE -ne 0 -or $payloadSha256 -notmatch '^[0-9a-f]{64}$') {
+  throw 'Could not derive the verified candidate payload SHA-256.'
+}
+$env:VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256 = $payloadSha256
 
 # Candidate storage/signing authority must never reach the app under test.
 Get-ChildItem Env: | Where-Object {
@@ -128,13 +133,14 @@ Get-ChildItem Env: | Where-Object {
 
 Run that from a clean checkout of the candidate source. The downloader refuses
 to replace local files and verifies the immutable metadata for every object.
-The expected app hash above is therefore derived from the verified private
-candidate, not from the installed copy. Record it in private evidence, keep the
-non-secret identity variables for the installed-app gate, and never obtain the
-expected value by hashing the installed executable. Clear storage and signing
-authority exactly as shown before launching any candidate code. The smoke
-runner and packaged app independently strip those names from child processes as
-defense in depth. Then install the downloaded installer and prove:
+The expected app and canonical payload hashes above are therefore derived from
+the verified private candidate, not from the installed copy. Record both in
+private evidence, keep the non-secret identity variables for the installed-app
+gate, and never obtain either expected value by hashing the installed payload.
+Clear storage and signing authority exactly as shown before launching any
+candidate code. The smoke runner and packaged app independently strip those
+names from child processes as defense in depth. Then install the downloaded
+installer and prove:
 
 - clean install, protocol sign-in, sign-out/relaunch, uninstall, and reinstall;
 - screen-only, camera-only, and screen + camera + microphone finished artifacts
@@ -158,9 +164,12 @@ pnpm smoke:local-gates:windows
 Before any smoke runs, the gate hashes the installed `Videorc.exe` and requires
 an exact match with `VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256`. It also
 derives one canonical payload digest over that executable, `resources/app.asar`,
-the backend, FFmpeg, and FFprobe from the installed directory itself. The
-parent passes that verified payload digest to candidate-bound child gates and
-removes any inherited free-form expected payload digest. The gate also requires
+the backend, FFmpeg, and FFprobe from the installed directory itself and
+requires it to match
+`VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256`, which was derived from the
+verified staged candidate above. The parent passes that verified payload digest
+to candidate-bound child gates and removes any inherited free-form expected
+payload digest. The gate also requires
 the candidate release ID, source commit, installer SHA-256, exact publisher,
 `Valid` Authenticode status, timestamp countersignature, and matching file
 ProductVersion. The sanitized binding and component payload identity are

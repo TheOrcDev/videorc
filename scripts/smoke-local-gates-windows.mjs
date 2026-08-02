@@ -1,10 +1,9 @@
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { release } from 'node:os'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { resolve } from 'node:path'
 
 import {
-  assertInstalledWindowsCandidateIdentity,
   assertWindowsCandidateBindingUnchanged,
   assertWindowsCandidatePayloadIdentity,
   buildWindowsLocalGateSteps,
@@ -12,7 +11,9 @@ import {
   createWindowsLocalGateManifest,
   evaluateWindowsLocalGateHost,
   formatWindowsLocalGatePlan,
+  revalidateInstalledWindowsCandidate,
   sanitizeWindowsLocalGateChildEnvironment,
+  verifyInstalledWindowsCandidate,
   windowsCandidateBoundEnvironment,
   windowsLocalGateStepCandidateExecutable,
   windowsLocalGateOutputDir
@@ -49,7 +50,11 @@ if (installedCandidateExecutable && !requireInstalledCandidate) {
 }
 if (requireInstalledCandidate && installedCandidateExecutable) {
   try {
-    candidateIdentity = await inspectInstalledCandidateIdentity(installedCandidateExecutable)
+    candidateIdentity = await verifyInstalledWindowsCandidate({
+      executablePath: installedCandidateExecutable,
+      repoRoot,
+      env: process.env
+    })
     candidateBinding = {
       executablePath: candidateIdentity.executablePath,
       executableSha256: candidateIdentity.actualAppSha256,
@@ -139,6 +144,23 @@ if (blockedStep) {
 } else {
   manifest.status = 'passed'
   manifest.finishedAt = new Date().toISOString()
+  if (requireInstalledCandidate) {
+    try {
+      await revalidateInstalledWindowsCandidate({
+        expectedCandidate: candidateIdentity,
+        repoRoot,
+        env: process.env,
+        platform: process.platform
+      })
+    } catch (error) {
+      manifest.status = 'failed'
+      manifest.error = {
+        message: `final installed candidate revalidation failed: ${error?.message ?? String(error)}`
+      }
+      await writeManifest()
+      throw error
+    }
+  }
   await writeManifest()
   console.log('windows-local-gates: PASS')
 }
@@ -194,40 +216,6 @@ async function blockedStepReason(step) {
   return `${step.label} reported a blocked physical-device prerequisite.`
 }
 
-async function inspectInstalledCandidateIdentity(executablePath) {
-  if (process.platform !== 'win32') {
-    throw new Error('installed candidate identity can only be verified on Windows')
-  }
-  const stagingRoot = resolve(repoRoot, 'apps', 'desktop', 'release')
-  const resolvedExecutable = resolve(executablePath)
-  const stagingRelative = relative(stagingRoot, resolvedExecutable)
-  if (!stagingRelative.startsWith('..') && !isAbsolute(stagingRelative)) {
-    throw new Error('release staging files cannot substitute for an NSIS-installed candidate')
-  }
-  const facts = readInstalledExecutableFacts(executablePath)
-  const [actualAppSha256, packagePayload] = await Promise.all([
-    sha256File(executablePath),
-    packagedAppPayloadIdentity(executablePath, { osPlatform: 'win32' })
-  ])
-  const verifiedIdentity = assertInstalledWindowsCandidateIdentity({
-    executablePath,
-    releaseId: requiredEnv('VIDEORC_RELEASE_ID'),
-    sourceCommit: requiredEnv('VIDEORC_RELEASE_SOURCE_COMMIT'),
-    installerSha256: requiredEnv('VIDEORC_RELEASE_EXPECTED_SHA256'),
-    expectedAppSha256: requiredEnv('VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256'),
-    actualAppSha256,
-    expectedPublisher: requiredEnv('VIDEORC_WINDOWS_PUBLISHER_NAME'),
-    signature: facts.signature,
-    productVersion: facts.productVersion,
-    registration: facts.registration
-  })
-  return {
-    ...verifiedIdentity,
-    executablePath: resolvedExecutable,
-    packagePayload: assertWindowsCandidatePayloadIdentity(packagePayload)
-  }
-}
-
 async function bindCandidateStep(step, manifestStep) {
   const executablePath = windowsLocalGateStepCandidateExecutable(step)
   if (!executablePath) return
@@ -271,36 +259,4 @@ async function inspectPackagedCandidateBinding(executablePath) {
     executableSha256,
     packagePayload: assertWindowsCandidatePayloadIdentity(packagePayload)
   }
-}
-
-function readInstalledExecutableFacts(executablePath) {
-  const script = [
-    '$target = (Resolve-Path -LiteralPath $env:VIDEORC_SIGNATURE_TARGET).Path',
-    '$item = Get-Item -LiteralPath $target',
-    '$sig = Get-AuthenticodeSignature -LiteralPath $target',
-    '$publisher = if ($sig.SignerCertificate) { $sig.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } else { $null }',
-    '$registrations = @()',
-    '$roots = @(@{ path = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall"; scope = "HKCU" }, @{ path = "HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall"; scope = "HKLM" }, @{ path = "HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"; scope = "HKLM" })',
-    'foreach ($root in $roots) { if (-not (Test-Path $root.path)) { continue }; foreach ($key in Get-ChildItem -LiteralPath $root.path) { $entry = Get-ItemProperty -LiteralPath $key.PSPath; if ([string]$entry.DisplayName -ne "Videorc") { continue }; $command = [string]$entry.UninstallString; if ($command -notmatch "^\\s*`\"([^`\"]+\\.exe)`\"") { continue }; $uninstaller = [Environment]::ExpandEnvironmentVariables($Matches[1]); if (-not (Test-Path -LiteralPath $uninstaller)) { continue }; $registeredApp = Join-Path (Split-Path -Parent $uninstaller) "Videorc.exe"; if (-not (Test-Path -LiteralPath $registeredApp)) { continue }; if ((Resolve-Path -LiteralPath $registeredApp).Path -ine $target) { continue }; $uninstallerSig = Get-AuthenticodeSignature -LiteralPath $uninstaller; $uninstallerPublisher = if ($uninstallerSig.SignerCertificate) { $uninstallerSig.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } else { $null }; $registrations += [pscustomobject]@{ matched = $true; scope = $root.scope; displayName = [string]$entry.DisplayName; displayVersion = [string]$entry.DisplayVersion; uninstallCommandPresent = $true; uninstallerSignature = [pscustomobject]@{ status = [string]$uninstallerSig.Status; publisher = $uninstallerPublisher; timestampPresent = ($null -ne $uninstallerSig.TimeStamperCertificate) } } } }',
-    'if ($registrations.Count -ne 1) { throw "Expected exactly one registered Videorc NSIS install matching the target executable." }',
-    '[pscustomobject]@{ productVersion = [string]$item.VersionInfo.ProductVersion; signature = [pscustomobject]@{ status = [string]$sig.Status; publisher = $publisher; timestampPresent = ($null -ne $sig.TimeStamperCertificate) }; registration = $registrations[0] } | ConvertTo-Json -Compress -Depth 5'
-  ].join('; ')
-  const result = spawnSync(
-    'powershell.exe',
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-    {
-      encoding: 'utf8',
-      env: { ...process.env, VIDEORC_SIGNATURE_TARGET: executablePath }
-    }
-  )
-  if (result.status !== 0 || !result.stdout?.trim()) {
-    throw new Error('PowerShell could not read installed executable identity and signature facts.')
-  }
-  return JSON.parse(result.stdout.trim())
-}
-
-function requiredEnv(name) {
-  const value = process.env[name]?.trim()
-  if (!value) throw new Error(`Missing ${name}.`)
-  return value
 }

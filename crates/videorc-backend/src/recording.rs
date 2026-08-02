@@ -66,6 +66,8 @@ use crate::preview_camera::{
     preview_camera_latest_frame_info, reset_preview_camera_capture_timings,
 };
 use crate::preview_screen::preview_screen_latest_frame_info;
+#[cfg(target_os = "windows")]
+use crate::preview_surface::{PreviewCompositorSuspension, suspend_preview_compositor_for_d3d11};
 use crate::process_job::{
     process_is_running as process_is_running_by_pid, spawn_owned_tokio, status_owned_tokio,
     terminate_process,
@@ -120,9 +122,9 @@ use crate::windows_d3d11_session::WindowsD3d11MediaMode;
 #[cfg(target_os = "windows")]
 use crate::windows_d3d11_session::{
     WindowsD3d11CameraInput, WindowsD3d11OverlayInput, WindowsD3d11SessionDiagnosticsSnapshot,
-    WindowsD3d11SessionMonitor, WindowsD3d11SessionPump, WindowsD3d11SessionRequest,
-    WindowsD3d11SessionSelection, WindowsD3d11VideoPlan, select_windows_d3d11_session,
-    validate_windows_d3d11_startup_evidence,
+    WindowsD3d11SessionMonitor, WindowsD3d11SessionPlan, WindowsD3d11SessionPump,
+    WindowsD3d11SessionRequest, WindowsD3d11SessionSelection, WindowsD3d11VideoPlan,
+    select_windows_d3d11_session, validate_windows_d3d11_startup_evidence,
 };
 #[cfg(target_os = "windows")]
 use crate::windows_media_foundation_encoder::{
@@ -779,6 +781,98 @@ impl FfmpegLiveAudioSessionHandle {
 type SharedFfmpegLiveAudioSession = Arc<FfmpegLiveAudioSessionHandle>;
 type SharedStreamTargetsSnapshot = Arc<StdMutex<StreamTargetsSnapshot>>;
 
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsD3d11RecoveryPhase {
+    Armed { generation: u64 },
+    Recovering { failed_generation: u64 },
+    Recovered { generation: u64 },
+    Terminal,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsD3d11RecoveryPhase {
+    fn begin(&mut self, failed_generation: u64) -> Result<(), String> {
+        match *self {
+            Self::Armed { generation } if generation == failed_generation => {
+                *self = Self::Recovering { failed_generation };
+                Ok(())
+            }
+            Self::Recovered { generation } if generation == failed_generation => {
+                *self = Self::Terminal;
+                Err(format!(
+                    "recovered D3D11 generation {failed_generation} failed again"
+                ))
+            }
+            Self::Recovering {
+                failed_generation: active,
+            } if active == failed_generation => Err(format!(
+                "D3D11 generation {failed_generation} recovery is already in progress"
+            )),
+            Self::Terminal => Err("D3D11 recovery is already terminal".to_string()),
+            phase => Err(format!(
+                "stale D3D11 recovery callback for generation {failed_generation} while {phase:?}"
+            )),
+        }
+    }
+
+    fn complete(
+        &mut self,
+        failed_generation: u64,
+        recovered_generation: u64,
+    ) -> Result<(), String> {
+        if recovered_generation != failed_generation.saturating_add(1) {
+            *self = Self::Terminal;
+            return Err(format!(
+                "D3D11 recovery expected generation {}, received {recovered_generation}",
+                failed_generation.saturating_add(1)
+            ));
+        }
+        match *self {
+            Self::Recovering {
+                failed_generation: active,
+            } if active == failed_generation => {
+                *self = Self::Recovered {
+                    generation: recovered_generation,
+                };
+                Ok(())
+            }
+            phase => {
+                *self = Self::Terminal;
+                Err(format!(
+                    "D3D11 recovery completion raced invalid phase {phase:?}"
+                ))
+            }
+        }
+    }
+
+    fn fail(&mut self) {
+        *self = Self::Terminal;
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+struct WindowsD3d11RecoveryContext {
+    mode: WindowsD3d11MediaMode,
+    plan: WindowsD3d11SessionPlan,
+    camera: Option<WindowsD3d11CameraInput>,
+    overlays: WindowsD3d11OverlayInput,
+    phase: WindowsD3d11RecoveryPhase,
+}
+
+#[cfg(target_os = "windows")]
+impl std::fmt::Debug for WindowsD3d11RecoveryContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WindowsD3d11RecoveryContext")
+            .field("mode", &self.mode)
+            .field("plan", &self.plan)
+            .field("phase", &self.phase)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FfmpegLiveAudioStopMode {
     /// Legacy FFmpeg owns the recording lifecycle and accepts `q` on stdin.
@@ -809,15 +903,20 @@ pub struct ActiveRecording {
     pub screen_overlay: Option<ScreenOverlaySession>,
     pub encoder_bridge: Option<EncoderBridgeRecordingSession>,
     pub encoder_bridge_stream: Option<EncoderBridgeRecordingSession>,
+    /// Owns monitor cancellation and task lifetime. It is declared before the
+    /// pump so an unexpected `ActiveRecording` drop aborts the monitor before
+    /// releasing the generation-scoped media authority.
+    #[cfg(target_os = "windows")]
+    windows_d3d11_monitor: Option<WindowsD3d11SessionMonitorTask>,
     /// One generation-scoped D3D11 capture/compositor/MF authority. This field
     /// follows both bridge sessions so their ticket-store clones are dropped
     /// before the role leases and media thread are drained.
     #[cfg(target_os = "windows")]
     windows_d3d11_media: Option<WindowsD3d11SessionPump>,
     #[cfg(target_os = "windows")]
-    windows_d3d11_monitor_stop: Option<Arc<AtomicBool>>,
+    windows_d3d11_recovery: Option<WindowsD3d11RecoveryContext>,
     #[cfg(target_os = "windows")]
-    windows_d3d11_monitor_task: Option<tokio::task::JoinHandle<()>>,
+    windows_d3d11_preview_compositor_suspension: Option<PreviewCompositorSuspension>,
     /// Authoritative, generation-scoped runtime state for this session's
     /// destinations. The stderr monitor updates this exact snapshot before
     /// publishing `stream.targets`, and polling RPCs clone it from the active
@@ -843,6 +942,80 @@ pub struct ActiveRecording {
     /// Renderer/status hint only. Successful finalization uses the ordered
     /// monitor result above rather than sampling this flag after process exit.
     pub stop_requested: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+struct WindowsD3d11SessionMonitorTask {
+    stop: Arc<AtomicBool>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    /// Last generation-valid snapshot retained independently of
+    /// `ActiveRecording.windows_d3d11_media`. Recovery temporarily takes that
+    /// pump out of the recording slot, so shutdown needs this fallback to
+    /// publish authoritative diagnostics after the monitor joins.
+    last_snapshot: Arc<StdMutex<Option<WindowsD3d11SessionDiagnosticsSnapshot>>>,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsD3d11SessionMonitorTask {
+    fn spawn(
+        state: AppState,
+        session_id: String,
+        generation: u64,
+        mode: WindowsD3d11MediaMode,
+        monitor: WindowsD3d11SessionMonitor,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let task_stop = Arc::clone(&stop);
+        let initial_snapshot = monitor
+            .diagnostics_snapshot()
+            .ok()
+            .filter(|snapshot| snapshot.pump.generation == generation);
+        let last_snapshot = Arc::new(StdMutex::new(initial_snapshot));
+        let task_last_snapshot = Arc::clone(&last_snapshot);
+        let task = tokio::spawn(run_windows_d3d11_session_monitor(
+            state,
+            session_id,
+            generation,
+            mode,
+            monitor,
+            task_stop,
+            task_last_snapshot,
+        ));
+        Self {
+            stop,
+            task: Some(task),
+            last_snapshot,
+        }
+    }
+
+    async fn stop_and_join(&mut self) {
+        self.request_stop();
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+
+    fn request_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+
+    fn last_snapshot(&self) -> Option<WindowsD3d11SessionDiagnosticsSnapshot> {
+        self.last_snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsD3d11SessionMonitorTask {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1648,6 +1821,8 @@ pub async fn start_session(
     let mut windows_d3d11_initial_diagnostics =
         crate::protocol::WindowsD3d11MediaDiagnostics::default();
     #[cfg(target_os = "windows")]
+    let mut windows_d3d11_recovery = None;
+    #[cfg(target_os = "windows")]
     let mut windows_d3d11_media = {
         let media_mode = windows_d3d11_media_mode;
         windows_d3d11_initial_diagnostics.requested = media_mode != WindowsD3d11MediaMode::Disabled;
@@ -1750,18 +1925,19 @@ pub async fn start_session(
                         params.output.stream_enabled,
                         plan.auxiliary.is_some(),
                     );
+                let overlays = WindowsD3d11OverlayInput {
+                    captions: state.caption_overlay.clone(),
+                    highlight: state.highlight_overlay.clone(),
+                    caption_on_primary: session_caption_plan.primary,
+                    caption_on_auxiliary: session_caption_plan.aux,
+                    highlight_on_primary,
+                    highlight_on_auxiliary,
+                };
                 match WindowsD3d11SessionPump::start(
                     &state.windows_d3d11_media,
                     plan.clone(),
                     camera_input.clone(),
-                    WindowsD3d11OverlayInput {
-                        captions: state.caption_overlay.clone(),
-                        highlight: state.highlight_overlay.clone(),
-                        caption_on_primary: session_caption_plan.primary,
-                        caption_on_auxiliary: session_caption_plan.aux,
-                        highlight_on_primary,
-                        highlight_on_auxiliary,
-                    },
+                    overlays.clone(),
                 ) {
                     Ok(pump) => {
                         match validate_windows_d3d11_startup_evidence(
@@ -1780,25 +1956,70 @@ pub async fn start_session(
                                                 &snapshot,
                                                 Default::default(),
                                             );
+                                        state.emit_log(
+                                            "info",
+                                            format!(
+                                                "Unified Windows D3D11 capture/compositor/Media Foundation authority is ready (generation {}).",
+                                                pump.snapshot().generation
+                                            ),
+                                        );
+                                        windows_d3d11_recovery =
+                                            Some(WindowsD3d11RecoveryContext {
+                                                mode: media_mode,
+                                                plan: plan.clone(),
+                                                camera: camera_input.clone(),
+                                                overlays: overlays.clone(),
+                                                phase: WindowsD3d11RecoveryPhase::Armed {
+                                                    generation: pump.snapshot().generation,
+                                                },
+                                            });
+                                        Some(pump)
                                     }
                                     Err(error) => {
+                                        // The initial status snapshot is part
+                                        // of the production-path claim. Do not
+                                        // retain a live GPU pump while
+                                        // publishing fallback diagnostics: its
+                                        // capture/encoder roles would keep the
+                                        // authority alive beside the legacy
+                                        // compositor and duplicate all work.
+                                        drop(pump);
+                                        let reason = format!(
+                                            "windows-d3d11-media-diagnostics-unavailable: {error}"
+                                        );
+                                        if media_mode.is_required() {
+                                            if let Some(path) = encoder_bridge_fifo.as_ref() {
+                                                let _ = crate::fifo::cleanup(path);
+                                            }
+                                            if let Some(path) = encoder_bridge_stream_fifo.as_ref()
+                                            {
+                                                let _ = crate::fifo::cleanup(path);
+                                            }
+                                            bail!(
+                                                "VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA=1 rejected session startup: {reason}"
+                                            );
+                                        }
                                         windows_d3d11_initial_diagnostics =
                                             windows_d3d11_fallback_diagnostics(
                                                 media_mode,
-                                                format!(
-                                                    "windows-d3d11-media-diagnostics-unavailable: {error}"
-                                                ),
+                                                reason.clone(),
                                             );
+                                        state.emit_log(
+                                            "warn",
+                                            format!(
+                                                "Unified Windows D3D11 startup could not prove initial diagnostics; using the named legacy bridge fallback: {error}"
+                                            ),
+                                        );
+                                        emit_health_event(
+                                            &state,
+                                            Some(&session_id),
+                                            HealthLevel::Warn,
+                                            "windows-d3d11-media-diagnostics-unavailable",
+                                            &reason,
+                                        )?;
+                                        None
                                     }
                                 }
-                                state.emit_log(
-                                    "info",
-                                    format!(
-                                        "Unified Windows D3D11 capture/compositor/Media Foundation authority is ready (generation {}).",
-                                        pump.snapshot().generation
-                                    ),
-                                );
-                                Some(pump)
                             }
                             Some(fallback) => {
                                 windows_d3d11_initial_diagnostics =
@@ -1934,6 +2155,19 @@ pub async fn start_session(
     let use_windows_d3d11_media = windows_d3d11_media.is_some();
     #[cfg(not(target_os = "windows"))]
     let use_windows_d3d11_media = false;
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_preview_compositor_suspension = if use_windows_d3d11_media {
+        suspend_preview_compositor_for_d3d11(
+            &state,
+            windows_d3d11_media
+                .as_ref()
+                .map(|pump| pump.snapshot().generation)
+                .unwrap_or_default(),
+        )
+        .await
+    } else {
+        None
+    };
     let highlight_overlay_plan = crate::captions::highlight_overlay_leg_plan(
         params.output.record_enabled,
         params.output.stream_enabled,
@@ -2456,25 +2690,15 @@ pub async fn start_session(
         targets: stream_runtime,
     }));
     #[cfg(target_os = "windows")]
-    let windows_d3d11_monitor = windows_d3d11_media
-        .as_ref()
-        .map(WindowsD3d11SessionPump::monitor);
-    #[cfg(target_os = "windows")]
-    let windows_d3d11_monitor_stop = windows_d3d11_monitor
-        .as_ref()
-        .map(|_| Arc::new(AtomicBool::new(false)));
-    #[cfg(target_os = "windows")]
-    let windows_d3d11_monitor_task =
-        match (windows_d3d11_monitor, windows_d3d11_monitor_stop.clone()) {
-            (Some(monitor), Some(stop)) => Some(tokio::spawn(run_windows_d3d11_session_monitor(
-                state.clone(),
-                session_id.clone(),
-                windows_d3d11_media_mode,
-                monitor,
-                stop,
-            ))),
-            _ => None,
-        };
+    let windows_d3d11_monitor = windows_d3d11_media.as_ref().map(|pump| {
+        WindowsD3d11SessionMonitorTask::spawn(
+            state.clone(),
+            session_id.clone(),
+            pump.snapshot().generation,
+            windows_d3d11_media_mode,
+            pump.monitor(),
+        )
+    });
     let active = ActiveRecording {
         session_id: session_id.clone(),
         pid,
@@ -2502,11 +2726,13 @@ pub async fn start_session(
         encoder_bridge,
         encoder_bridge_stream,
         #[cfg(target_os = "windows")]
+        windows_d3d11_monitor,
+        #[cfg(target_os = "windows")]
         windows_d3d11_media: windows_d3d11_media.take(),
         #[cfg(target_os = "windows")]
-        windows_d3d11_monitor_stop: windows_d3d11_monitor_stop.clone(),
+        windows_d3d11_recovery,
         #[cfg(target_os = "windows")]
-        windows_d3d11_monitor_task,
+        windows_d3d11_preview_compositor_suspension,
         stream_targets_snapshot: stream_targets_snapshot.clone(),
         captioned_copy_requested: session_caption_plan.captioned_copy,
         keep_original_media: params.output.keep_original_mkv,
@@ -2986,6 +3212,14 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     let mut force_stop_now = false;
     let mut ffmpeg_live_audio_stop_session = None;
     let mut legacy_ffmpeg_stdin = None;
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_monitor_to_join;
+    #[cfg(target_os = "windows")]
+    let windows_d3d11_final_mode;
+    #[cfg(target_os = "windows")]
+    let mut windows_d3d11_final_snapshot;
+    #[cfg(target_os = "windows")]
+    let mut windows_d3d11_final_snapshot_phase = WindowsD3d11FinalSnapshotPhase::default();
     if !active.stop_requested {
         // Send before touching FFmpeg stdin. The monitor gives an already-ready
         // process exit priority over this signal, closing the old wait -> lock
@@ -3012,24 +3246,43 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     }
     #[cfg(target_os = "windows")]
     {
-        if let Some(stop) = active.windows_d3d11_monitor_stop.take() {
-            stop.store(true, Ordering::Release);
-        }
-        if let Some(task) = active.windows_d3d11_monitor_task.take() {
-            let _ = task.await;
-        }
-        if let Some(pump) = active.windows_d3d11_media.as_ref() {
-            let _ = pump.destroy_preview();
-        }
-        crate::preview_surface::teardown_windows_d3d11_presenter_status(
-            &state,
-            "windows-d3d11-recording-session-stopping",
-        )
-        .await;
         let mut diagnostics = state.diagnostics.lock().await;
         if diagnostics.windows_d3d11_media.state == crate::protocol::WindowsD3d11MediaState::Live {
             diagnostics.windows_d3d11_media.state =
                 crate::protocol::WindowsD3d11MediaState::Draining;
+        }
+        drop(diagnostics);
+
+        // The writers own MF drain/flush. Join them while the media authority
+        // and diagnostics monitor are still live so their final timeout
+        // counters are retained in the authoritative shutdown snapshot.
+        if let Some(stream_bridge) = active.encoder_bridge_stream.as_mut() {
+            stream_bridge.stop_and_join_writer();
+        }
+        if let Some(recording_bridge) = active.encoder_bridge.as_mut() {
+            recording_bridge.stop_and_join_writer();
+        }
+        windows_d3d11_final_snapshot_phase
+            .writers_joined()
+            .expect("Windows D3D11 writers join exactly once before final diagnostics");
+        windows_d3d11_monitor_to_join = active.windows_d3d11_monitor.take();
+        if let Some(monitor) = windows_d3d11_monitor_to_join.as_ref() {
+            // Do not await while holding `state.recording`: recovery may be
+            // waiting for this exact mutex. The stop bit prevents new monitor
+            // publications after its next boundary; the final snapshot is
+            // published only after the task has actually joined below.
+            monitor.request_stop();
+        }
+        windows_d3d11_final_mode = active
+            .windows_d3d11_recovery
+            .as_ref()
+            .map_or(WindowsD3d11MediaMode::Automatic, |recovery| recovery.mode);
+        windows_d3d11_final_snapshot = active
+            .windows_d3d11_media
+            .as_ref()
+            .and_then(|pump| pump.monitor().diagnostics_snapshot().ok());
+        if let Some(pump) = active.windows_d3d11_media.as_ref() {
+            let _ = pump.destroy_preview();
         }
     }
     let uses_encoder_bridge = active.encoder_bridge.is_some();
@@ -3067,6 +3320,37 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
         crate::comment_highlight::clear_comment_highlight_for_session_end(&state, &wait_session_id)
             .await;
     drop(guard);
+
+    #[cfg(target_os = "windows")]
+    if let Some(mut monitor) = windows_d3d11_monitor_to_join {
+        monitor.stop_and_join().await;
+        if windows_d3d11_final_snapshot.is_none() {
+            windows_d3d11_final_snapshot = monitor.last_snapshot();
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows_d3d11_final_snapshot_phase
+            .monitor_joined()
+            .expect("Windows D3D11 monitor joins after writers");
+        if let Some(snapshot) = windows_d3d11_final_snapshot {
+            publish_final_windows_d3d11_diagnostics(
+                &state,
+                &session_id,
+                windows_d3d11_final_mode,
+                snapshot,
+                windows_d3d11_final_snapshot_phase,
+            )
+            .await;
+        }
+        // No monitor callback can resurrect a retired presenter after this
+        // exact teardown because the task is joined above.
+        teardown_current_windows_d3d11_presenter(
+            &state,
+            "windows-d3d11-recording-session-stopping",
+        )
+        .await;
+    }
 
     // Publish the authoritative user-visible stop edge before any session
     // mutex or FFmpeg I/O can wait behind an in-flight command acknowledgement.
@@ -4899,14 +5183,77 @@ async fn monitor_session(
                 native_audio_stats,
             }
         });
-    if monitored_recording.is_some() {
-        guard.take();
-    }
+    let retired_active = monitored_recording
+        .is_some()
+        .then(|| guard.take())
+        .flatten();
     drop(guard);
 
     let Some(mut monitored_recording) = monitored_recording else {
         return;
     };
+
+    #[cfg(target_os = "windows")]
+    if let Some(mut active) = retired_active {
+        let mut final_snapshot_phase = WindowsD3d11FinalSnapshotPhase::default();
+        if let Some(stream_bridge) = active.encoder_bridge_stream.as_mut() {
+            stream_bridge.stop_and_join_writer();
+        }
+        if let Some(recording_bridge) = active.encoder_bridge.as_mut() {
+            recording_bridge.stop_and_join_writer();
+        }
+        final_snapshot_phase
+            .writers_joined()
+            .expect("Windows D3D11 writers join exactly once before final diagnostics");
+        // Terminal bridge failures may be published only as the writer exits;
+        // refresh them after the bounded MF drain/flush has completed.
+        monitored_recording.recording_bridge_terminal_failure =
+            active.recording_bridge_terminal_failure();
+        monitored_recording.stream_bridge_terminal_failure =
+            active.stream_bridge_terminal_failure();
+        let mut retained_snapshot = None;
+        if let Some(mut monitor) = active.windows_d3d11_monitor.take() {
+            monitor.request_stop();
+            monitor.stop_and_join().await;
+            retained_snapshot = monitor.last_snapshot();
+        }
+        final_snapshot_phase
+            .monitor_joined()
+            .expect("Windows D3D11 monitor joins after writers");
+        let final_snapshot = active
+            .windows_d3d11_media
+            .as_ref()
+            .and_then(|pump| pump.monitor().diagnostics_snapshot().ok())
+            .or(retained_snapshot);
+        if let Some(snapshot) = final_snapshot {
+            let mode = active
+                .windows_d3d11_recovery
+                .as_ref()
+                .map_or(WindowsD3d11MediaMode::Automatic, |recovery| recovery.mode);
+            publish_final_windows_d3d11_diagnostics(
+                &state,
+                &session_id,
+                mode,
+                snapshot,
+                final_snapshot_phase,
+            )
+            .await;
+        }
+        if let Some(pump) = active.windows_d3d11_media.as_ref() {
+            let _ = pump.destroy_preview();
+        }
+        teardown_current_windows_d3d11_presenter(&state, "windows-d3d11-recording-process-exited")
+            .await;
+        // The pump must release the D3D generation before the suspended CPU
+        // preview is eligible to restore its own compositor run.
+        drop(active.windows_d3d11_media.take());
+        if let Some(suspension) = active.windows_d3d11_preview_compositor_suspension.take() {
+            suspension.restore().await;
+        }
+        drop(active);
+    }
+    #[cfg(not(target_os = "windows"))]
+    drop(retired_active);
 
     // Dropping ActiveRecording stops the native post-controls audio producer.
     // Close the caption bus now, drain the provider's final utterance within a
@@ -8837,19 +9184,561 @@ fn windows_d3d11_live_diagnostics(
         device_resets: capture
             .map_or(0, |diagnostics| diagnostics.device_resets)
             .saturating_add(u64::from(snapshot.device.device_loss_code.is_some())),
+        synchronization_timeouts: snapshot.device.runtime.synchronization_timeouts,
         stale_generation_callbacks: snapshot.device.runtime.stale_generation_callbacks,
         fallback_reason: terminal_error.or(capture_fallback),
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum WindowsD3d11FinalSnapshotPhase {
+    #[default]
+    Running,
+    WritersJoined,
+    MonitorJoined,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsD3d11FinalSnapshotPhase {
+    fn writers_joined(&mut self) -> Result<(), &'static str> {
+        if *self != Self::Running {
+            return Err("Windows D3D11 writers were already finalized");
+        }
+        *self = Self::WritersJoined;
+        Ok(())
+    }
+
+    fn monitor_joined(&mut self) -> Result<(), &'static str> {
+        if *self != Self::WritersJoined {
+            return Err("Windows D3D11 monitor cannot join before all writers");
+        }
+        *self = Self::MonitorJoined;
+        Ok(())
+    }
+
+    fn permits_final_snapshot(self) -> bool {
+        self == Self::MonitorJoined
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn publish_final_windows_d3d11_diagnostics(
+    state: &AppState,
+    session_id: &str,
+    mode: WindowsD3d11MediaMode,
+    snapshot: crate::windows_d3d11_session::WindowsD3d11SessionDiagnosticsSnapshot,
+    phase: WindowsD3d11FinalSnapshotPhase,
+) {
+    if !phase.permits_final_snapshot() {
+        state.emit_log(
+            "error",
+            "Refusing to publish final Windows D3D11 diagnostics before the monitor joined.",
+        );
+        return;
+    }
+    let mut public = windows_d3d11_live_diagnostics(
+        mode,
+        &snapshot,
+        crate::diagnostics::PREVIEW_POLL_COUNTS.snapshot(),
+    );
+    if public.state == crate::protocol::WindowsD3d11MediaState::Live {
+        public.state = crate::protocol::WindowsD3d11MediaState::Draining;
+    }
+    let emitted = {
+        let mut diagnostics = state.diagnostics.lock().await;
+        if diagnostics.session_id.as_deref() != Some(session_id) {
+            return;
+        }
+        diagnostics.windows_d3d11_media = public;
+        diagnostics.clone()
+    };
+    state.emit_event(
+        "diagnostics.stats",
+        apply_runtime_diagnostics_snapshot(emitted, state.ffmpeg_work.snapshot()),
+    );
+}
+
+#[cfg(target_os = "windows")]
+async fn teardown_current_windows_d3d11_presenter(state: &AppState, reason: &str) {
+    let identity = {
+        let surface = state.preview_surface.lock().await;
+        surface
+            .status
+            .windows_d3d11_presenter
+            .as_ref()
+            .and_then(|presenter| {
+                presenter
+                    .preview_generation
+                    .map(|preview_generation| (presenter.media_generation, preview_generation))
+            })
+    };
+    if let Some((media_generation, preview_generation)) = identity {
+        let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+            state,
+            media_generation,
+            preview_generation,
+            reason,
+        )
+        .await;
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct RecoveredWindowsD3d11Session {
+    generation: u64,
+    monitor: WindowsD3d11SessionMonitor,
+    diagnostics_snapshot: WindowsD3d11SessionDiagnosticsSnapshot,
+    configured_placement: Option<crate::windows_d3d11_preview::WindowsD3d11PreviewPlacement>,
+    presenter_diagnostics: Option<crate::protocol::WindowsD3d11PresenterDiagnostics>,
+}
+
+#[cfg(target_os = "windows")]
+async fn fail_windows_d3d11_recovery(state: &AppState, session_id: &str) {
+    let mut recording = state.recording.lock().await;
+    if let Some(active) = recording
+        .as_mut()
+        .filter(|active| active.session_id == session_id)
+        && let Some(recovery) = active.windows_d3d11_recovery.as_mut()
+    {
+        recovery.phase.fail();
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn configure_recovered_windows_d3d11_presenter(
+    state: &AppState,
+    monitor: &WindowsD3d11SessionMonitor,
+    media_generation: u64,
+    adapter_luid: crate::windows_d3d11_device::DxgiAdapterLuid,
+    restore_presenter: bool,
+    stop: &AtomicBool,
+) -> Result<
+    Option<(
+        crate::windows_d3d11_preview::WindowsD3d11PreviewPlacement,
+        crate::windows_d3d11_preview::WindowsD3d11PresenterStatus,
+    )>,
+    String,
+> {
+    if !restore_presenter {
+        return Ok(None);
+    }
+    let placement = match crate::preview_surface::trusted_windows_d3d11_preview_placement(
+        state,
+        media_generation,
+        adapter_luid,
+    )
+    .await
+    {
+        // Hidden/minimized is still a real configured target. Rebind it inside
+        // the N -> N+1 transaction and publish an explicit Electron fallback
+        // instead of deferring presenter recreation to a later monitor tick.
+        Ok(placement) => placement,
+        Err(error) => {
+            state.emit_log(
+                "info",
+                format!(
+                    "Skipping replacement D3D11 presenter because no active trusted placement remains: {error}"
+                ),
+            );
+            return Ok(None);
+        }
+    };
+    let configured = async {
+        crate::preview_surface::begin_windows_d3d11_presenter_configuration(
+            state,
+            placement.media_generation,
+            placement.preview_generation,
+        )
+        .await?;
+        let mut status = monitor
+            .configure_preview(placement)
+            .map_err(|error| error.to_string())?;
+        let configured_hidden_drops = status.diagnostics.hidden_drops;
+        let proof_started_at = Instant::now();
+        if !placement.visible {
+            status.diagnostics.fallback_reason =
+                Some("windows-d3d11-preview-hidden-during-recovery".to_string());
+        }
+        while !status.canonical_claim_ready {
+            if !placement.visible {
+                break;
+            }
+            if stop.load(Ordering::Acquire) {
+                return Err(
+                    "replacement D3D11 presenter proof was cancelled by session stop".into(),
+                );
+            }
+            // A minimized/hidden Electron target cannot produce a first
+            // Present even though its trusted placement was visible when the
+            // replacement presenter was configured. That preview-only state
+            // must not make an otherwise healthy media recovery terminal.
+            // Publish an explicit proof fallback and keep the configured
+            // presenter alive; the monitor will promote it once the target is
+            // presentable again.
+            if status.diagnostics.hidden_drops > configured_hidden_drops {
+                status.diagnostics.fallback_reason =
+                    Some("windows-d3d11-preview-hidden-during-recovery".to_string());
+                break;
+            }
+            if proof_started_at.elapsed() >= Duration::from_secs(2) {
+                return Err(format!(
+                    "replacement D3D11 presenter did not prove first-present/source liveness: {}",
+                    status
+                        .diagnostics
+                        .fallback_reason
+                        .as_deref()
+                        .unwrap_or("waiting-first-present")
+                ));
+            }
+            sleep(Duration::from_millis(25)).await;
+            status = monitor
+                .preview_status()
+                .map_err(|error| error.to_string())?;
+        }
+        crate::preview_surface::update_windows_d3d11_presenter_status(state, status.clone())
+            .await?;
+        Ok::<_, String>(status)
+    }
+    .await;
+    match configured {
+        Ok(status) => Ok(Some((placement, status))),
+        Err(error) => {
+            let _ = monitor.destroy_preview();
+            crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                state,
+                placement.media_generation,
+                placement.preview_generation,
+            )
+            .await;
+            Err(error)
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn recover_windows_d3d11_session(
+    state: &AppState,
+    session_id: &str,
+    failed_generation: u64,
+    old_monitor: WindowsD3d11SessionMonitor,
+    configured_placement: Option<crate::windows_d3d11_preview::WindowsD3d11PreviewPlacement>,
+    stop: &AtomicBool,
+) -> Result<RecoveredWindowsD3d11Session, String> {
+    if stop.load(Ordering::Acquire) {
+        return Err("D3D11 recovery was cancelled by session stop".to_string());
+    }
+    // Backend presenter ownership is proved by the monitor's configured
+    // placement, not by whether renderer status teardown accepts the previous
+    // identity. Status can already have been invalidated by a newer preview
+    // generation while the old backend presenter still requires replacement.
+    let restore_presenter = configured_placement.is_some();
+    if let Some(placement) = configured_placement {
+        let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+            state,
+            placement.media_generation,
+            placement.preview_generation,
+            "windows-d3d11-media-generation-recovering",
+        )
+        .await;
+        crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+            state,
+            placement.media_generation,
+            placement.preview_generation,
+        )
+        .await;
+    }
+    let _ = old_monitor.destroy_preview();
+    // The monitor's media client must be gone before the authority is joined.
+    // Remaining writer/ticket clients own the shared wake event safely.
+    drop(old_monitor);
+
+    let (mut old_pump, recovery) = {
+        let mut recording = state.recording.lock().await;
+        let active = recording
+            .as_mut()
+            .filter(|active| active.session_id == session_id)
+            .ok_or_else(|| "recording ended before D3D11 recovery began".to_string())?;
+        if active.stop_requested || stop.load(Ordering::Acquire) {
+            return Err("D3D11 recovery was cancelled by session stop".to_string());
+        }
+        let recovery = active
+            .windows_d3d11_recovery
+            .as_mut()
+            .ok_or_else(|| "active recording has no D3D11 recovery context".to_string())?;
+        recovery.phase.begin(failed_generation)?;
+        let recovery = recovery.clone();
+        let Some(pump) = active.windows_d3d11_media.take() else {
+            active
+                .windows_d3d11_recovery
+                .as_mut()
+                .expect("recovery context was just validated")
+                .phase
+                .fail();
+            return Err("active recording lost its D3D11 session pump".to_string());
+        };
+        if pump.snapshot().generation != failed_generation {
+            active.windows_d3d11_media = Some(pump);
+            active
+                .windows_d3d11_recovery
+                .as_mut()
+                .expect("recovery context was just validated")
+                .phase
+                .fail();
+            return Err(format!(
+                "active D3D11 pump generation does not match failed generation {failed_generation}"
+            ));
+        }
+        (pump, recovery)
+    };
+
+    let retired = match crate::state::retire_windows_d3d11_media_for_device_loss(
+        &state.windows_d3d11_media,
+        failed_generation,
+    ) {
+        Ok(retired) => retired,
+        Err(error) => {
+            fail_windows_d3d11_recovery(state, session_id).await;
+            return Err(format!(
+                "could not retire D3D11 generation {failed_generation}: {error}"
+            ));
+        }
+    };
+    if !retired {
+        fail_windows_d3d11_recovery(state, session_id).await;
+        return Err(format!(
+            "D3D11 generation {failed_generation} was already retired before recovery ownership was acquired"
+        ));
+    }
+    // Join the capture/compositor worker after the media thread is retired.
+    old_pump.stop();
+    drop(old_pump);
+
+    if stop.load(Ordering::Acquire) {
+        fail_windows_d3d11_recovery(state, session_id).await;
+        return Err("D3D11 recovery was cancelled after authority retirement".to_string());
+    }
+
+    let pump = match WindowsD3d11SessionPump::start(
+        &state.windows_d3d11_media,
+        recovery.plan.clone(),
+        recovery.camera.clone(),
+        recovery.overlays.clone(),
+    ) {
+        Ok(pump) => pump,
+        Err(error) => {
+            fail_windows_d3d11_recovery(state, session_id).await;
+            return Err(format!(
+                "could not recreate the D3D11 session pump: {error}"
+            ));
+        }
+    };
+    let recovered_generation = pump.snapshot().generation;
+    if recovered_generation != failed_generation.saturating_add(1) {
+        drop(pump);
+        fail_windows_d3d11_recovery(state, session_id).await;
+        return Err(format!(
+            "D3D11 recovery expected generation {}, received {recovered_generation}",
+            failed_generation.saturating_add(1)
+        ));
+    }
+    let startup_fallback = match validate_windows_d3d11_startup_evidence(
+        recovery.mode,
+        &recovery.plan,
+        pump.startup_evidence(),
+    ) {
+        Ok(fallback) => fallback,
+        Err(error) => {
+            drop(pump);
+            fail_windows_d3d11_recovery(state, session_id).await;
+            return Err(format!("recovered D3D11 startup evidence failed: {error}"));
+        }
+    };
+    if let Some(fallback) = startup_fallback {
+        drop(pump);
+        fail_windows_d3d11_recovery(state, session_id).await;
+        return Err(format!(
+            "recovered D3D11 generation selected fallback: {fallback}"
+        ));
+    }
+    let recovered_snapshot = match pump.monitor().diagnostics_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            drop(pump);
+            fail_windows_d3d11_recovery(state, session_id).await;
+            return Err(format!("recovered D3D11 diagnostics unavailable: {error}"));
+        }
+    };
+    let primary_source = pump.primary_encoder_source();
+    let auxiliary_source = pump.auxiliary_encoder_source();
+    let recovered_monitor = pump.monitor();
+    // Presenter creation/rebind is part of the successor-generation
+    // transaction. Do not expose the replacement ticket sources or mark the
+    // recovery complete until the active preview target has either proved its
+    // first Present or explicitly entered the hidden-target fallback.
+    let recovered_presenter = match configure_recovered_windows_d3d11_presenter(
+        state,
+        &recovered_monitor,
+        recovered_generation,
+        recovered_snapshot.device.adapter_luid,
+        restore_presenter,
+        stop,
+    )
+    .await
+    {
+        Ok(presenter) => presenter,
+        Err(error) => {
+            drop(pump);
+            fail_windows_d3d11_recovery(state, session_id).await;
+            return Err(format!(
+                "could not restore the recovered D3D11 presenter: {error}"
+            ));
+        }
+    };
+    let recovered_suspension =
+        suspend_preview_compositor_for_d3d11(state, recovered_generation).await;
+
+    let mut pump = Some(pump);
+    let mut recovered_suspension = Some(recovered_suspension);
+    let install_result = {
+        let mut recording = state.recording.lock().await;
+        (|| -> Result<Option<PreviewCompositorSuspension>, String> {
+            let active = recording
+                .as_mut()
+                .filter(|active| active.session_id == session_id)
+                .ok_or_else(|| "recording ended before recovered D3D11 install".to_string())?;
+            if active.stop_requested || stop.load(Ordering::Acquire) {
+                return Err("session stopped before recovered D3D11 install".to_string());
+            }
+            let recording_bridge = active.encoder_bridge.as_ref().ok_or_else(|| {
+                "recovered D3D11 session has no recording/shared bridge".to_string()
+            })?;
+            if !recording_bridge
+                .can_replace_d3d11_input_generation(failed_generation, &primary_source)?
+            {
+                return Err("recording/shared D3D11 ticket source is no longer current".to_string());
+            }
+            if let Some(stream_bridge) = active.encoder_bridge_stream.as_ref() {
+                let auxiliary_source = auxiliary_source.as_ref().ok_or_else(|| {
+                    "recovered split-output D3D11 session has no auxiliary source".to_string()
+                })?;
+                if !stream_bridge
+                    .can_replace_d3d11_input_generation(failed_generation, auxiliary_source)?
+                {
+                    return Err("stream D3D11 ticket source is no longer current".to_string());
+                }
+            }
+            if !recording_bridge
+                .replace_d3d11_input_generation(failed_generation, &primary_source)?
+            {
+                return Err("recording/shared D3D11 ticket source swap lost ownership".to_string());
+            }
+            if let Some(stream_bridge) = active.encoder_bridge_stream.as_ref()
+                && !stream_bridge.replace_d3d11_input_generation(
+                    failed_generation,
+                    auxiliary_source
+                        .as_ref()
+                        .expect("auxiliary replacement was preflighted"),
+                )?
+            {
+                return Err("stream D3D11 ticket source swap lost ownership".to_string());
+            }
+            active
+                .windows_d3d11_recovery
+                .as_mut()
+                .expect("recovery context was validated before restart")
+                .phase
+                .complete(failed_generation, recovered_generation)?;
+            active.windows_d3d11_media = pump.take();
+            Ok(std::mem::replace(
+                &mut active.windows_d3d11_preview_compositor_suspension,
+                recovered_suspension
+                    .take()
+                    .expect("recovered suspension is installed exactly once"),
+            ))
+        })()
+    };
+    let old_suspension = match install_result {
+        Ok(suspension) => suspension,
+        Err(error) => {
+            // Uninstalled pump/suspension values drop here and retire only the
+            // attempted successor generation. The failed generation remains
+            // terminal and cannot consume a second restart.
+            if let Some((placement, _)) = recovered_presenter.as_ref() {
+                let _ = recovered_monitor.destroy_preview();
+                let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                    state,
+                    placement.media_generation,
+                    placement.preview_generation,
+                    "windows-d3d11-recovery-install-failed",
+                )
+                .await;
+                crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                    state,
+                    placement.media_generation,
+                    placement.preview_generation,
+                )
+                .await;
+            }
+            drop(pump);
+            drop(recovered_suspension);
+            fail_windows_d3d11_recovery(state, session_id).await;
+            return Err(error);
+        }
+    };
+    // This token is now superseded by recovered_generation and is inert.
+    drop(old_suspension);
+
+    let public = windows_d3d11_live_diagnostics(
+        recovery.mode,
+        &recovered_snapshot,
+        crate::diagnostics::PREVIEW_POLL_COUNTS.snapshot(),
+    );
+    let emitted = {
+        let mut diagnostics = state.diagnostics.lock().await;
+        if diagnostics.session_id.as_deref() != Some(session_id) {
+            None
+        } else {
+            diagnostics.windows_d3d11_media = public;
+            diagnostics.compositor_backend = Some(CompositorBackend::D3d11);
+            diagnostics.compositor_fallback_reason = None;
+            Some(diagnostics.clone())
+        }
+    };
+    if let Some(emitted) = emitted {
+        state.emit_event(
+            "diagnostics.stats",
+            apply_runtime_diagnostics_snapshot(emitted, state.ffmpeg_work.snapshot()),
+        );
+    }
+    state.emit_log(
+        "warn",
+        format!(
+            "Recovered unified Windows D3D11 media authority from generation {failed_generation} to {recovered_generation}."
+        ),
+    );
+    Ok(RecoveredWindowsD3d11Session {
+        generation: recovered_generation,
+        monitor: recovered_monitor,
+        diagnostics_snapshot: recovered_snapshot,
+        configured_placement: recovered_presenter
+            .as_ref()
+            .map(|(placement, _)| *placement),
+        presenter_diagnostics: recovered_presenter.map(|(_, status)| status.diagnostics),
+    })
 }
 
 #[cfg(target_os = "windows")]
 async fn run_windows_d3d11_session_monitor(
     state: AppState,
     session_id: String,
+    mut generation: u64,
     mode: WindowsD3d11MediaMode,
     monitor: WindowsD3d11SessionMonitor,
     stop: Arc<AtomicBool>,
+    last_snapshot: Arc<StdMutex<Option<WindowsD3d11SessionDiagnosticsSnapshot>>>,
 ) {
+    let mut monitor = Some(monitor);
     let mut configured_placement: Option<
         crate::windows_d3d11_preview::WindowsD3d11PreviewPlacement,
     > = None;
@@ -8857,50 +9746,98 @@ async fn run_windows_d3d11_session_monitor(
     let mut last_placement_error = None;
     let mut consecutive_snapshot_errors = 0_u8;
     'monitor: while !stop.load(Ordering::Acquire) {
-        let snapshot = match monitor.diagnostics_snapshot() {
+        if !windows_d3d11_monitor_identity_is_current(&state, &stop, &session_id, generation).await
+        {
+            break;
+        }
+        let current_monitor = monitor
+            .as_ref()
+            .expect("the D3D11 monitor is owned except during synchronous recovery");
+        let snapshot = match current_monitor.diagnostics_snapshot() {
             Ok(snapshot) => {
                 consecutive_snapshot_errors = 0;
                 snapshot
             }
             Err(error) => {
-                if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
                     break;
                 }
                 consecutive_snapshot_errors = consecutive_snapshot_errors.saturating_add(1);
                 if consecutive_snapshot_errors >= 3 {
                     let reason = format!("windows-d3d11-media-monitor-failed: {error}");
-                    if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                    if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
                         break;
                     }
-                    let mut diagnostics = state.diagnostics.lock().await;
-                    if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
-                        drop(diagnostics);
-                        break;
-                    }
-                    diagnostics.windows_d3d11_media.state =
-                        crate::protocol::WindowsD3d11MediaState::Failed;
-                    diagnostics.windows_d3d11_media.fallback_reason = Some(reason.clone());
-                    drop(diagnostics);
-                    state.emit_log(
-                        "error",
-                        format!(
-                            "D3D11 diagnostics monitor failed for session {session_id}: {error}"
-                        ),
-                    );
-                    let _ = monitor.destroy_preview();
-                    let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
-                        &state, reason,
+                    let failed_monitor = monitor
+                        .take()
+                        .expect("the failed D3D11 monitor is still owned");
+                    match recover_windows_d3d11_session(
+                        &state,
+                        &session_id,
+                        generation,
+                        failed_monitor,
+                        configured_placement.take(),
+                        &stop,
                     )
-                    .await;
-                    break;
+                    .await
+                    {
+                        Ok(recovered) => {
+                            *last_snapshot
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some(recovered.diagnostics_snapshot.clone());
+                            generation = recovered.generation;
+                            configured_placement = recovered.configured_placement;
+                            last_presenter = recovered.presenter_diagnostics;
+                            monitor = Some(recovered.monitor);
+                            last_placement_error = None;
+                            consecutive_snapshot_errors = 0;
+                            continue 'monitor;
+                        }
+                        Err(recovery_error) => {
+                            if windows_d3d11_recording_is_stopping(&state, &stop, &session_id).await
+                            {
+                                break 'monitor;
+                            }
+                            let terminal_reason = format!(
+                                "{reason}; automatic generation recovery failed: {recovery_error}"
+                            );
+                            fail_windows_d3d11_recovery(&state, &session_id).await;
+                            publish_windows_d3d11_monitor_failure(
+                                &state,
+                                &session_id,
+                                terminal_reason.clone(),
+                            )
+                            .await;
+                            state.emit_log(
+                                "error",
+                                format!(
+                                    "D3D11 diagnostics monitor failed for session {session_id}; recovery stopped: {recovery_error}"
+                                ),
+                            );
+                            break 'monitor;
+                        }
+                    }
                 }
                 sleep(Duration::from_millis(250)).await;
                 continue;
             }
         };
-        if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+        let current_monitor = monitor
+            .as_ref()
+            .expect("the D3D11 monitor was restored after recovery");
+        if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
             break;
         }
+        if snapshot.pump.generation != generation
+            || !windows_d3d11_monitor_identity_is_current(&state, &stop, &session_id, generation)
+                .await
+        {
+            break;
+        }
+        *last_snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(snapshot.clone());
 
         let trusted_placement = crate::preview_surface::trusted_windows_d3d11_preview_placement(
             &state,
@@ -8908,7 +9845,7 @@ async fn run_windows_d3d11_session_monitor(
             snapshot.device.adapter_luid,
         )
         .await;
-        if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+        if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
             break;
         }
         match trusted_placement {
@@ -8920,40 +9857,90 @@ async fn run_windows_d3d11_session_monitor(
                     true,
                 ) == WindowsD3d11PreviewMonitorTargetAction::Configure
                 {
-                    match monitor.configure_preview(placement) {
+                    let previous_placement = configured_placement;
+                    let configuration =
+                        crate::preview_surface::begin_windows_d3d11_presenter_configuration(
+                            &state,
+                            placement.media_generation,
+                            placement.preview_generation,
+                        )
+                        .await
+                        .and_then(|()| {
+                            current_monitor
+                                .configure_preview(placement)
+                                .map_err(|error| error.to_string())
+                        });
+                    match configuration {
                         Ok(status) => {
-                            if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                            // Record backend ownership before any stop edge so
+                            // the common monitor cleanup can retire this exact
+                            // pending configuration even if no status update is
+                            // published.
+                            configured_placement = Some(placement);
+                            if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
                                 break 'monitor;
                             }
-                            configured_placement = Some(placement);
                             if last_presenter.as_ref() != Some(&status.diagnostics) {
-                                if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                                if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
                                     break 'monitor;
                                 }
-                                crate::preview_surface::update_windows_d3d11_presenter_status(
-                                    &state,
-                                    status.clone(),
-                                )
-                                .await;
-                                if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                                if let Err(error) =
+                                    crate::preview_surface::update_windows_d3d11_presenter_status(
+                                        &state,
+                                        status.clone(),
+                                    )
+                                    .await
+                                {
+                                    let _ = current_monitor.destroy_preview();
+                                    crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                                        &state,
+                                        placement.media_generation,
+                                        placement.preview_generation,
+                                    )
+                                    .await;
+                                    configured_placement = None;
+                                    last_presenter = None;
+                                    state.emit_log(
+                                        "warn",
+                                        format!(
+                                            "Rejected stale Windows D3D11 presenter configuration: {error}"
+                                        ),
+                                    );
+                                    continue 'monitor;
+                                }
+                                if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
                                     break 'monitor;
                                 }
                                 last_presenter = Some(status.diagnostics);
                             }
                         }
                         Err(error) => {
-                            let _ = monitor.destroy_preview();
+                            let _ = current_monitor.destroy_preview();
                             configured_placement = None;
                             last_presenter = None;
                             let reason = format!("windows-d3d11-preview-configure-failed: {error}");
-                            if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
-                                break 'monitor;
+                            if let Some(previous) = previous_placement {
+                                let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                                    &state,
+                                    previous.media_generation,
+                                    previous.preview_generation,
+                                    reason.clone(),
+                                )
+                                .await;
+                                crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                                    &state,
+                                    previous.media_generation,
+                                    previous.preview_generation,
+                                )
+                                .await;
                             }
-                            crate::preview_surface::teardown_windows_d3d11_presenter_status(
-                                &state, reason,
+                            crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                                &state,
+                                placement.media_generation,
+                                placement.preview_generation,
                             )
                             .await;
-                            if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+                            if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
                                 break 'monitor;
                             }
                         }
@@ -8967,51 +9954,102 @@ async fn run_windows_d3d11_session_monitor(
                     false,
                 );
                 if action == WindowsD3d11PreviewMonitorTargetAction::Destroy {
-                    let _ = monitor.destroy_preview();
+                    let _ = current_monitor.destroy_preview();
                 }
+                let previous_placement = configured_placement.take();
                 configured_placement = None;
                 last_presenter = None;
-                if last_placement_error.as_deref() != Some(error.as_str()) {
-                    if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
-                        break;
-                    }
-                    crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                if let Some(previous) = previous_placement {
+                    let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
                         &state,
+                        previous.media_generation,
+                        previous.preview_generation,
                         format!("windows-d3d11-preview-waiting-for-trusted-bounds: {error}"),
                     )
                     .await;
-                    if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
-                        break;
-                    }
+                    crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                        &state,
+                        previous.media_generation,
+                        previous.preview_generation,
+                    )
+                    .await;
+                }
+                if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                    break;
+                }
+                if last_placement_error.as_deref() != Some(error.as_str()) {
                     last_placement_error = Some(error);
                 }
             }
         }
 
         if configured_placement.is_some() {
-            let status = monitor.preview_status();
-            if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+            let status = current_monitor.preview_status();
+            if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
                 break;
             }
-            if let Ok(status) = status
-                && last_presenter.as_ref() != Some(&status.diagnostics)
-            {
-                if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
-                    break;
+            match status {
+                Ok(status) if last_presenter.as_ref() != Some(&status.diagnostics) => {
+                    if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                        break;
+                    }
+                    let update = crate::preview_surface::update_windows_d3d11_presenter_status(
+                        &state,
+                        status.clone(),
+                    )
+                    .await;
+                    if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
+                        break;
+                    }
+                    match update {
+                        Ok(_) => last_presenter = Some(status.diagnostics),
+                        Err(error) => {
+                            let _ = current_monitor.destroy_preview();
+                            let previous = configured_placement.take();
+                            last_presenter = None;
+                            if let Some(previous) = previous {
+                                let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                                    &state,
+                                    previous.media_generation,
+                                    previous.preview_generation,
+                                    format!("windows-d3d11-preview-update-rejected: {error}"),
+                                )
+                                .await;
+                                crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                                    &state,
+                                    previous.media_generation,
+                                    previous.preview_generation,
+                                )
+                                .await;
+                            }
+                        }
+                    }
                 }
-                crate::preview_surface::update_windows_d3d11_presenter_status(
-                    &state,
-                    status.clone(),
-                )
-                .await;
-                if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
-                    break;
+                Err(error) => {
+                    let _ = current_monitor.destroy_preview();
+                    let previous = configured_placement.take();
+                    last_presenter = None;
+                    if let Some(previous) = previous {
+                        let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                            &state,
+                            previous.media_generation,
+                            previous.preview_generation,
+                            format!("windows-d3d11-preview-present-failed: {error}"),
+                        )
+                        .await;
+                        crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                            &state,
+                            previous.media_generation,
+                            previous.preview_generation,
+                        )
+                        .await;
+                    }
                 }
-                last_presenter = Some(status.diagnostics);
+                Ok(_) => {}
             }
         }
 
-        if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+        if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
             break;
         }
         let public = windows_d3d11_live_diagnostics(
@@ -9022,7 +10060,9 @@ async fn run_windows_d3d11_session_monitor(
         let terminal = public.state == crate::protocol::WindowsD3d11MediaState::Failed;
         let emitted = {
             let mut diagnostics = state.diagnostics.lock().await;
-            if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+            if windows_d3d11_monitor_stop_requested(&stop, current_monitor)
+                || !windows_d3d11_monitor_identity_matches(&diagnostics, &session_id, generation)
+            {
                 drop(diagnostics);
                 break;
             }
@@ -9031,7 +10071,7 @@ async fn run_windows_d3d11_session_monitor(
             diagnostics.compositor_fallback_reason = None;
             diagnostics.clone()
         };
-        if windows_d3d11_monitor_stop_requested(&stop, &monitor) {
+        if windows_d3d11_monitor_stop_requested(&stop, current_monitor) {
             break;
         }
         state.emit_event(
@@ -9039,17 +10079,148 @@ async fn run_windows_d3d11_session_monitor(
             apply_runtime_diagnostics_snapshot(emitted, state.ffmpeg_work.snapshot()),
         );
         if terminal {
-            let _ = monitor.destroy_preview();
-            crate::preview_surface::teardown_windows_d3d11_presenter_status(
-                &state,
-                "windows-d3d11-media-terminal-failure",
-            )
-            .await;
+            if snapshot.pump.device_lost || snapshot.device.device_loss_code.is_some() {
+                let failed_monitor = monitor
+                    .take()
+                    .expect("the terminal D3D11 monitor is still owned");
+                match recover_windows_d3d11_session(
+                    &state,
+                    &session_id,
+                    generation,
+                    failed_monitor,
+                    configured_placement.take(),
+                    &stop,
+                )
+                .await
+                {
+                    Ok(recovered) => {
+                        *last_snapshot
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            Some(recovered.diagnostics_snapshot.clone());
+                        generation = recovered.generation;
+                        configured_placement = recovered.configured_placement;
+                        last_presenter = recovered.presenter_diagnostics;
+                        monitor = Some(recovered.monitor);
+                        last_placement_error = None;
+                        consecutive_snapshot_errors = 0;
+                        continue 'monitor;
+                    }
+                    Err(recovery_error) => {
+                        if windows_d3d11_recording_is_stopping(&state, &stop, &session_id).await {
+                            break 'monitor;
+                        }
+                        let terminal_reason = format!(
+                            "windows-d3d11-media-terminal-failure; automatic generation recovery failed: {recovery_error}"
+                        );
+                        fail_windows_d3d11_recovery(&state, &session_id).await;
+                        publish_windows_d3d11_monitor_failure(&state, &session_id, terminal_reason)
+                            .await;
+                        state.emit_log(
+                            "error",
+                            format!(
+                                "D3D11 generation {generation} device loss could not be recovered: {recovery_error}"
+                            ),
+                        );
+                        break 'monitor;
+                    }
+                }
+            }
+            let _ = current_monitor.destroy_preview();
+            if let Some(previous) = configured_placement.take() {
+                let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+                    &state,
+                    previous.media_generation,
+                    previous.preview_generation,
+                    "windows-d3d11-media-terminal-failure",
+                )
+                .await;
+                crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+                    &state,
+                    previous.media_generation,
+                    previous.preview_generation,
+                )
+                .await;
+            }
             break;
         }
         sleep(Duration::from_millis(250)).await;
     }
-    let _ = monitor.destroy_preview();
+    if let Some(monitor) = monitor.as_ref() {
+        let _ = monitor.destroy_preview();
+    }
+    if let Some(previous) = configured_placement {
+        let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
+            &state,
+            previous.media_generation,
+            previous.preview_generation,
+            "windows-d3d11-media-monitor-stopped",
+        )
+        .await;
+        crate::preview_surface::cancel_windows_d3d11_presenter_configuration(
+            &state,
+            previous.media_generation,
+            previous.preview_generation,
+        )
+        .await;
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn publish_windows_d3d11_monitor_failure(state: &AppState, session_id: &str, reason: String) {
+    let emitted = {
+        let mut diagnostics = state.diagnostics.lock().await;
+        if diagnostics.session_id.as_deref() != Some(session_id) {
+            return;
+        }
+        diagnostics.windows_d3d11_media.state = crate::protocol::WindowsD3d11MediaState::Failed;
+        diagnostics.windows_d3d11_media.fallback_reason = Some(reason);
+        diagnostics.clone()
+    };
+    state.emit_event(
+        "diagnostics.stats",
+        apply_runtime_diagnostics_snapshot(emitted, state.ffmpeg_work.snapshot()),
+    );
+}
+
+#[cfg(target_os = "windows")]
+async fn windows_d3d11_recording_is_stopping(
+    state: &AppState,
+    stop: &AtomicBool,
+    session_id: &str,
+) -> bool {
+    if stop.load(Ordering::Acquire) {
+        return true;
+    }
+    let recording = state.recording.lock().await;
+    recording
+        .as_ref()
+        .filter(|active| active.session_id == session_id)
+        .is_none_or(|active| active.stop_requested)
+}
+
+#[cfg(target_os = "windows")]
+async fn windows_d3d11_monitor_identity_is_current(
+    state: &AppState,
+    stop: &AtomicBool,
+    session_id: &str,
+    generation: u64,
+) -> bool {
+    if stop.load(Ordering::Acquire) {
+        return false;
+    }
+    let diagnostics = state.diagnostics.lock().await;
+    windows_d3d11_monitor_identity_matches(&diagnostics, session_id, generation)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_monitor_identity_matches(
+    diagnostics: &crate::protocol::DiagnosticStats,
+    session_id: &str,
+    generation: u64,
+) -> bool {
+    diagnostics.session_id.as_deref() == Some(session_id)
+        && diagnostics.windows_d3d11_media.generation == Some(generation)
 }
 
 #[cfg(target_os = "windows")]
@@ -14543,11 +15714,13 @@ mod tests {
             encoder_bridge: None,
             encoder_bridge_stream: None,
             #[cfg(target_os = "windows")]
+            windows_d3d11_monitor: None,
+            #[cfg(target_os = "windows")]
             windows_d3d11_media: None,
             #[cfg(target_os = "windows")]
-            windows_d3d11_monitor_stop: None,
+            windows_d3d11_recovery: None,
             #[cfg(target_os = "windows")]
-            windows_d3d11_monitor_task: None,
+            windows_d3d11_preview_compositor_suspension: None,
             stream_targets_snapshot: Arc::new(StdMutex::new(snapshot)),
             captioned_copy_requested: false,
             keep_original_media: false,
@@ -17747,6 +18920,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn windows_d3d11_monitor_updates_only_its_session_and_generation() {
+        let mut diagnostics = crate::diagnostics::idle_diagnostics();
+        diagnostics.session_id = Some("session-a".to_string());
+        diagnostics.windows_d3d11_media.generation = Some(7);
+
+        assert!(windows_d3d11_monitor_identity_matches(
+            &diagnostics,
+            "session-a",
+            7
+        ));
+        assert!(!windows_d3d11_monitor_identity_matches(
+            &diagnostics,
+            "session-b",
+            7
+        ));
+        assert!(!windows_d3d11_monitor_identity_matches(
+            &diagnostics,
+            "session-a",
+            8
+        ));
+    }
+
+    #[test]
+    fn windows_d3d11_recovery_allows_one_immediate_successor_then_fails_closed() {
+        let mut phase = WindowsD3d11RecoveryPhase::Armed { generation: 7 };
+
+        phase.begin(7).unwrap();
+        assert_eq!(
+            phase,
+            WindowsD3d11RecoveryPhase::Recovering {
+                failed_generation: 7
+            }
+        );
+        phase.complete(7, 8).unwrap();
+        assert_eq!(
+            phase,
+            WindowsD3d11RecoveryPhase::Recovered { generation: 8 }
+        );
+
+        let repeat_loss = phase.begin(8).unwrap_err();
+        assert!(repeat_loss.contains("failed again"), "{repeat_loss}");
+        assert_eq!(phase, WindowsD3d11RecoveryPhase::Terminal);
+    }
+
+    #[test]
+    fn windows_d3d11_recovery_rejects_stale_and_skipped_generations() {
+        let mut phase = WindowsD3d11RecoveryPhase::Armed { generation: 12 };
+        let stale = phase.begin(11).unwrap_err();
+        assert!(stale.contains("stale"), "{stale}");
+        assert_eq!(phase, WindowsD3d11RecoveryPhase::Armed { generation: 12 });
+
+        phase.begin(12).unwrap();
+        let skipped = phase.complete(12, 14).unwrap_err();
+        assert!(skipped.contains("expected generation 13"), "{skipped}");
+        assert_eq!(phase, WindowsD3d11RecoveryPhase::Terminal);
+
+        let mut explicitly_failed = WindowsD3d11RecoveryPhase::Armed { generation: 20 };
+        explicitly_failed.fail();
+        assert_eq!(explicitly_failed, WindowsD3d11RecoveryPhase::Terminal);
+    }
+
+    #[test]
+    fn windows_d3d11_final_snapshot_waits_for_writer_and_monitor_join() {
+        let mut phase = WindowsD3d11FinalSnapshotPhase::default();
+        assert!(!phase.permits_final_snapshot());
+        assert!(phase.monitor_joined().is_err());
+        assert_eq!(phase, WindowsD3d11FinalSnapshotPhase::Running);
+
+        phase.writers_joined().unwrap();
+        assert!(!phase.permits_final_snapshot());
+        assert!(phase.writers_joined().is_err());
+
+        phase.monitor_joined().unwrap();
+        assert!(phase.permits_final_snapshot());
+        assert!(phase.monitor_joined().is_err());
+    }
+
     // Rounded camera bubble (2026-07-06): the FFmpeg mask derives from the same
     // constants as the CPU/Metal paths — radius = pct% of min(w,h), SDF on the
     // full box. Pin the generated filter so a refactor cannot silently drift
@@ -18843,11 +20094,13 @@ mod tests {
             encoder_bridge: None,
             encoder_bridge_stream: None,
             #[cfg(target_os = "windows")]
+            windows_d3d11_monitor: None,
+            #[cfg(target_os = "windows")]
             windows_d3d11_media: None,
             #[cfg(target_os = "windows")]
-            windows_d3d11_monitor_stop: None,
+            windows_d3d11_recovery: None,
             #[cfg(target_os = "windows")]
-            windows_d3d11_monitor_task: None,
+            windows_d3d11_preview_compositor_suspension: None,
             stream_targets_snapshot: Arc::new(StdMutex::new(StreamTargetsSnapshot {
                 session_id: "live-audio-lock-test".to_string(),
                 targets: Vec::new(),

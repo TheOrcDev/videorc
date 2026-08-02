@@ -19,6 +19,7 @@ import {
   WINDOWS_STREAM_PERFORMANCE_TIMING,
   WINDOWS_STREAM_ENDURANCE_TIMING,
   WINDOWS_CAPTURE_PROTECTION_MARKERS,
+  assertWindowsStreamSelectionEnvironmentIsRunnerOwned,
   buildWindowsStreamPerformanceMatrix,
   evaluateWindowsStreamResourceBudget,
   evaluateWindowsStreamAggregate,
@@ -51,10 +52,23 @@ import {
   windowsStreamAvDriftFitOptions,
   windowsStreamCalibrationMetrics,
   windowsStreamSecretLeaks,
+  windowsStreamSelectionEnvironmentOverlay,
   windowsStreamCaptureProtectionPlacement
 } from './windows-stream-performance.mjs'
+import { WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS } from './windows-d3d11-media.mjs'
 
 describe('Windows stream performance matrix', () => {
+  it('accepts the package-manager argument separator used by documented pnpm commands', () => {
+    assert.deepEqual(
+      parseWindowsStreamPerformanceArgs(['--', '--list']),
+      parseWindowsStreamPerformanceArgs(['--list'])
+    )
+    assert.throws(
+      () => parseWindowsStreamPerformanceArgs(['--list', '--']),
+      /Unknown Windows stream performance argument/
+    )
+  })
+
   it('lists every release-blocking 1080p topology, cadence, and preview state three times', () => {
     const matrix = buildWindowsStreamPerformanceMatrix()
 
@@ -356,7 +370,14 @@ describe('Windows stream measurement aggregation', () => {
           encoderSystemMemorySamples: 0,
           previewPresents: 5,
           previewBmpRequests: 0,
-          previewBmpBytes: 0
+          previewBmpBytes: 0,
+          messagePumpLagP95Ms: 8,
+          messagePumpLagMaxMs: 12,
+          mediaCommandLagP95Ms: 6,
+          mediaCommandLagMaxMs: 10,
+          maximumConsecutiveMessageBatch: 4,
+          maximumConsecutiveMediaBatch: 3,
+          synchronizationTimeouts: 0
         }
       },
       {
@@ -377,7 +398,14 @@ describe('Windows stream measurement aggregation', () => {
           encoderSystemMemorySamples: 0,
           previewPresents: 65,
           previewBmpRequests: 0,
-          previewBmpBytes: 0
+          previewBmpBytes: 0,
+          messagePumpLagP95Ms: 9,
+          messagePumpLagMaxMs: 14,
+          mediaCommandLagP95Ms: 7,
+          mediaCommandLagMaxMs: 11,
+          maximumConsecutiveMessageBatch: 5,
+          maximumConsecutiveMediaBatch: 4,
+          synchronizationTimeouts: 0
         }
       }
     ])
@@ -393,6 +421,9 @@ describe('Windows stream measurement aggregation', () => {
     assert.equal(summary.d3d11.auxiliaryEncoderAdapterLuid, null)
     assert.equal(summary.d3d11.adapterChanged, false)
     assert.equal(summary.d3d11.stateChanged, false)
+    assert.equal(summary.d3d11.mediaCommandLagMaxMs, 11)
+    assert.equal(summary.d3d11.maximumConsecutiveMessageBatch, 5)
+    assert.equal(summary.d3d11.synchronizationTimeouts, 0)
   })
 
   it('models Desktop Duplication cursor-on and cursor-excluded WGC as distinct contracts', () => {
@@ -821,6 +852,29 @@ describe('Windows stream performance hardware budgets', () => {
 })
 
 describe('Windows stream performance modes and evidence verdicts', () => {
+  it('rejects ambient path selection and clears every selection key before runner-owned flags', () => {
+    const inherited = Object.fromEntries(
+      WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS.map((name) => [name, 'ambient-selection'])
+    )
+    assert.throws(
+      () => assertWindowsStreamSelectionEnvironmentIsRunnerOwned(inherited),
+      new RegExp(`stream runner owns it: ${WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS.join(', ')}`)
+    )
+    const automatic = windowsStreamSelectionEnvironmentOverlay()
+    assert.deepEqual(
+      automatic,
+      Object.fromEntries(WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS.map((name) => [name, undefined]))
+    )
+    const forced = windowsStreamSelectionEnvironmentOverlay({
+      VIDEORC_WINDOWS_D3D11_MEDIA: '1',
+      VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1'
+    })
+    assert.deepEqual(forced, {
+      ...automatic,
+      VIDEORC_WINDOWS_D3D11_MEDIA: '1',
+      VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1'
+    })
+  })
   it('defaults to the complete protected gate and keeps calibration/single-scenario non-release', () => {
     const gate = parseWindowsStreamPerformanceArgs([])
     assert.equal(gate.mode, 'gate')
@@ -1260,6 +1314,19 @@ describe('Windows stream performance modes and evidence verdicts', () => {
     const mismatch = evaluateWindowsStreamRun(automatic)
     assert.equal(mismatch.verdict, 'FAIL')
     assert.match(mismatch.failures.join('\n'), /captureAdapterLuid.*media authority/)
+  })
+
+  it('fails closed on media-thread starvation or synchronization timeouts', () => {
+    const evidence = passingD3d11Evidence('1080p30-stream-preview')
+    evidence.pipeline.d3d11.mediaCommandLagMaxMs = 101
+    evidence.pipeline.d3d11.maximumConsecutiveMediaBatch = 33
+    evidence.pipeline.d3d11.synchronizationTimeouts = 1
+
+    const result = evaluateWindowsStreamRun(evidence)
+    assert.equal(result.verdict, 'FAIL')
+    assert.match(result.failures.join('\n'), /media command maximum/)
+    assert.match(result.failures.join('\n'), /maximumConsecutiveMediaBatch/)
+    assert.match(result.failures.join('\n'), /synchronization timeouts/)
   })
 
   it('requires the auxiliary adapter identity only for split record-plus-stream output', () => {
@@ -2231,6 +2298,11 @@ function passingD3d11Evidence(scenarioId = '1080p30-stream-preview') {
         },
     messageDispatchP95Ms: 50,
     messageDispatchMaxMs: 100,
+    mediaCommandLagP95Ms: 50,
+    mediaCommandLagMaxMs: 100,
+    maximumConsecutiveMessageBatch: 32,
+    maximumConsecutiveMediaBatch: 32,
+    synchronizationTimeouts: 0,
     texturePoolPressureEvents: 0,
     adapterMismatches: 0,
     deviceResets: 0,
@@ -2426,7 +2498,12 @@ function naturalFallbackRunMetrics() {
       cursorCorrect: false,
       inputContinuity: true,
       messageDispatchP95Ms: null,
-      messageDispatchMaxMs: null
+      messageDispatchMaxMs: null,
+      mediaCommandLagP95Ms: null,
+      mediaCommandLagMaxMs: null,
+      maximumConsecutiveMessageBatch: null,
+      maximumConsecutiveMediaBatch: null,
+      synchronizationTimeouts: 0
     }
   }
 }
@@ -2499,7 +2576,12 @@ function draftD3d11Budget(streamCandidate, directory) {
           cursorCorrect: true,
           inputContinuity: true,
           maximumMessageDispatchP95Ms: 50,
-          maximumMessageDispatchMs: 100
+          maximumMessageDispatchMs: 100,
+          maximumMediaCommandLagP95Ms: 50,
+          maximumMediaCommandLagMs: 100,
+          maximumConsecutiveMessageBatch: 32,
+          maximumConsecutiveMediaBatch: 32,
+          synchronizationTimeouts: 0
         },
         thresholds: d3d11TestThresholds()
       }

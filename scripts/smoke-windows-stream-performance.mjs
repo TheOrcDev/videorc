@@ -6,6 +6,16 @@ import { createServer } from 'node:net'
 import { release } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+
+import {
+  revalidateInstalledWindowsCandidate,
+  verifyInstalledWindowsCandidate
+} from './lib/windows-local-gates.mjs'
+import {
+  finalizePreparedJsonArtifact,
+  prepareExclusiveJsonArtifact
+} from './lib/exclusive-json-artifact.mjs'
 
 import {
   WINDOWS_STREAM_PERFORMANCE_THRESHOLDS,
@@ -14,12 +24,21 @@ import {
   WINDOWS_STREAM_NATURAL_FALLBACK_HARDWARE_CLASS,
   WINDOWS_STREAM_NATURAL_FALLBACK_SCENARIOS,
   WINDOWS_CAPTURE_PROTECTION_MARKERS,
+  assertWindowsStreamSelectionEnvironmentIsRunnerOwned,
   attachWindowsStreamNaturalFallbackPolicy,
   buildWindowsD3d11StreamCalibrations,
   evaluateWindowsCaptureProtectionPlacement,
+  evaluateWindowsCaptureProtectionPlacementTimeline,
   evaluateWindowsCaptureProtectionEvidence,
+  evaluateWindowsD3d11PreviewInputContinuity,
+  evaluateWindowsReceiverProgressClock,
   evaluateWindowsStreamAggregate,
+  evaluateWindowsStreamCollectorBoundaries,
+  evaluateWindowsStreamDiagnosticTimeline,
+  evaluateWindowsStreamDxgiDisplayBinding,
+  evaluateWindowsStreamProcessTelemetry,
   evaluateWindowsStreamResourceBudget,
+  evaluateWindowsStreamTargetLifecycle,
   evaluateWindowsStreamRun,
   formatWindowsStreamPerformanceMatrix,
   loadWindowsStreamPerformanceBudget,
@@ -27,6 +46,7 @@ import {
   parseWindowsStreamPerformanceArgs,
   parseWindowsStreamDisplayBounds,
   redactWindowsStreamSecrets,
+  resolveWindowsStreamElectronDisplay,
   receiverBitrateEvidence,
   resolveWindowsStreamPathEvidence,
   summarizeWindowsStreamBmpBudgetMetrics,
@@ -36,9 +56,13 @@ import {
   summarizeWindowsStreamDiagnosticSamples,
   isWindowsD3d11StreamPerformanceBudget,
   normalizeWindowsNaturalFallbackCalibration,
+  windowsStreamAvDriftFitOptions,
   windowsStreamSecretLeaks,
+  windowsStreamSelectionEnvironmentOverlay,
   windowsStreamCaptureProtectionPlacement
 } from './lib/windows-stream-performance.mjs'
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const options = parseWindowsStreamPerformanceArgs(process.argv.slice(2))
 
@@ -105,23 +129,42 @@ if (process.platform !== 'win32' || process.arch !== 'x64') {
 let runtime
 try {
   runtime = await loadRuntime()
+  assertWindowsStreamSelectionEnvironmentIsRunnerOwned(process.env)
+  const candidateExecutable =
+    process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXECUTABLE?.trim() ||
+    process.env.VIDEORC_PERF_APP_EXECUTABLE?.trim()
+  if (!candidateExecutable) {
+    throw new BlockedRunError(
+      'VIDEORC_WINDOWS_ACCEPTANCE_EXECUTABLE must point to the installed NSIS Videorc.exe candidate.'
+    )
+  }
+  const verifiedCandidate = await verifyInstalledWindowsCandidate({
+    executablePath: candidateExecutable,
+    repoRoot,
+    env: process.env
+  })
+  const revalidateCandidate = () =>
+    revalidateInstalledWindowsCandidate({
+      expectedCandidate: verifiedCandidate,
+      repoRoot,
+      env: process.env,
+      platform: process.platform
+    })
   const spawnSpec = runtime.performanceAppSpawnSpec({
     ...process.env,
-    VIDEORC_PERF_APP_EXECUTABLE:
-      process.env.VIDEORC_PERF_APP_EXECUTABLE ?? process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXECUTABLE
+    ...windowsStreamSelectionEnvironmentOverlay(),
+    VIDEORC_PERF_APP_EXECUTABLE: verifiedCandidate.executablePath
   })
   if (!spawnSpec || !existsSync(spawnSpec.command)) {
     throw new BlockedRunError(
       'VIDEORC_WINDOWS_ACCEPTANCE_EXECUTABLE (or VIDEORC_PERF_APP_EXECUTABLE) must point to the installed packaged Videorc.exe.'
     )
   }
-  const candidateSha256 = await runtime.sha256File(spawnSpec.command)
-  const sourceCommit = process.env.VIDEORC_RELEASE_SOURCE_COMMIT?.trim()
-  const installerSha256 = process.env.VIDEORC_RELEASE_EXPECTED_SHA256?.trim()
+  const candidateSha256 = verifiedCandidate.executableSha256
+  const sourceCommit = verifiedCandidate.sourceCommit
+  const installerSha256 = verifiedCandidate.installerSha256
   const expectedCandidateSha256 = process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256?.trim()
-  const candidatePayload = await runtime.packagedAppPayloadIdentity(spawnSpec.command, {
-    osPlatform: 'win32'
-  })
+  const candidatePayload = verifiedCandidate.packagePayload
   const expectedPayloadSha256 =
     process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256?.trim()
   const requiresPremiumProfile =
@@ -276,7 +319,8 @@ try {
           installerSha256,
           ffmpegPath,
           ffprobePath,
-          acceptanceEnvironment
+          acceptanceEnvironment,
+          revalidateCandidate
         })
         aggregate.runs.push(run)
         await writeJson(aggregatePath, aggregate)
@@ -340,6 +384,9 @@ try {
       aggregatePath
     })
   }
+  if (result.verdict === 'PASS') {
+    await revalidateCandidate()
+  }
   await writeJson(aggregatePath, aggregate)
   console.log(`windows-stream-performance: ${result.verdict} (${aggregatePath})`)
   process.exit(result.verdict === 'FAIL' ? 1 : result.verdict === 'BLOCKED' ? 2 : 0)
@@ -369,7 +416,8 @@ async function runScenario({
   installerSha256,
   ffmpegPath,
   ffprobePath,
-  acceptanceEnvironment
+  acceptanceEnvironment,
+  revalidateCandidate
 }) {
   const runDirectory = join(
     outputDirectory,
@@ -487,14 +535,26 @@ async function runScenario({
     exit: null,
     error: null
   }
-  let processTimeline = null
-  let processTimelineError = null
+  let rootProcessIdentity = null
   let selectedScreen = null
+  let displayTopology = null
+  let displayBinding = null
+  let selectedCamera = null
   let selectedMicrophone = null
   let rendererRuntimeInfo = null
   let entitlement = null
   let capturePlacement = null
+  let initialCapturePlacementReadiness = null
+  let capturePlacementTimeline = null
+  let finalCapturePlacementReadiness = null
   let capturePlacementReadiness = null
+  let previewInputContinuity = {
+    verdict: 'BLOCKED',
+    applicable: true,
+    physicalInput: false,
+    blockers: ['physical preview input continuity was not measured']
+  }
+  let nativePreviewSurfaceStatus = null
   let supportBundlePresent = false
   let exportedSupportPath = null
   let localRecordingPath = null
@@ -511,6 +571,13 @@ async function runScenario({
   const writeRunJson = (path, value) =>
     writeJson(path, redactWindowsStreamSecrets(value, rtmpSecrets))
 
+  await assertCandidateIdentity(
+    runtime,
+    spawnSpec.command,
+    candidateSha256,
+    candidatePayload.sha256,
+    `${scenario.id} repetition ${repetition} before launch`
+  )
   try {
     launched = await runtime.launchDevApp({
       spawnSpec,
@@ -519,7 +586,28 @@ async function runScenario({
       packagedSmokeCommandCapability: capability,
       env: appEnvironment
     })
+    smoke = launched.connections['preview-motion-ready']
     ws = await runtime.connectBackend(launched.connections['backend-ready'], timeoutMs())
+    launchProcessCensus = await runtime.collectProcessCensus({
+      ledgerPaths: processLedgerPaths,
+      rootPid: launched.process.pid
+    })
+    pinnedProcessIdentities = mergeProcessIdentities(
+      pinnedProcessIdentities,
+      processIdentitiesFromCensus(launchProcessCensus)
+    )
+    const rootProcess = ownedCensusRows(launchProcessCensus).find(
+      (row) => row.pid === launched.process.pid
+    )
+    if (!rootProcess?.creationDate) {
+      throw new BlockedRunError(
+        'The packaged candidate root process CreationDate/start identity could not be pinned.'
+      )
+    }
+    rootProcessIdentity = {
+      pid: rootProcess.pid,
+      creationDate: rootProcess.creationDate
+    }
     ws.addEventListener('message', (event) => {
       try {
         const payload = JSON.parse(event.data)
@@ -581,11 +669,61 @@ async function runScenario({
         `VIDEORC_WINDOWS_ACCEPTANCE_DISPLAY_BOUNDS ${displayBounds.width}x${displayBounds.height} did not match ${selectedScreen.id} ${selectedScreen.width ?? 'unknown'}x${selectedScreen.height ?? 'unknown'}.`
       )
     }
-    capturePlacement = windowsStreamCaptureProtectionPlacement(displayBounds)
+    let electronDisplay
+    try {
+      const mainWindowState = await runtime.requestSmokeCommand(
+        smoke,
+        'main-window-state',
+        {},
+        { timeoutMs: timeoutMs() }
+      )
+      electronDisplay = resolveWindowsStreamElectronDisplay(
+        displayBounds,
+        mainWindowState?.displays
+      )
+    } catch (error) {
+      throw new BlockedRunError(
+        `The selected DXGI display could not be bound to Electron DIP coordinates: ${message(error)}`
+      )
+    }
+    try {
+      displayTopology = collectWindowsDisplayTopology()
+      displayBinding = evaluateWindowsStreamDxgiDisplayBinding({
+        selectedScreen,
+        displayTopology,
+        expectedPhysicalBounds: displayBounds,
+        expectedElectronBounds: electronDisplay.bounds
+      })
+    } catch (error) {
+      throw new BlockedRunError(
+        `The selected DXGI output could not be bound to the Win32 display topology: ${message(error)}`
+      )
+    }
+    if (displayBinding.verdict !== 'PASS') {
+      throw new BlockedRunError(
+        `The selected DXGI output did not match one exact Win32 monitor: ${displayBinding.blockers.join('; ')}`
+      )
+    }
+    capturePlacement = windowsStreamCaptureProtectionPlacement(displayBounds, {
+      electronDisplay
+    })
     selectedMicrophone = selectMicrophone(
       deviceList?.devices ?? [],
       process.env.VIDEORC_WINDOWS_STREAM_MICROPHONE_ID
     )
+    selectedCamera =
+      scenario.sourceComposition === 'screen-camera'
+        ? selectCamera(
+            deviceList?.devices ?? [],
+            process.env.VIDEORC_WINDOWS_STREAM_CAMERA_ID ??
+              process.env.VIDEORC_WINDOWS_ACCEPTANCE_CAMERA_DEVICE_ID
+          )
+        : null
+    if (scenario.sourceComposition === 'screen-camera' && !selectedCamera) {
+      throw new BlockedRunError(
+        'No available physical Windows DirectShow camera was found for the screen-camera calibration context.'
+      )
+    }
     if (!options.videoOnly && !selectedMicrophone) {
       throw new BlockedRunError(
         'No available physical Windows microphone was found for the audible A/V fixture.'
@@ -602,6 +740,7 @@ async function runScenario({
 
     const sources = {
       screenId: selectedScreen.id,
+      cameraId: selectedCamera?.id ?? null,
       microphoneId: selectedMicrophone?.id ?? null,
       testPattern: false
     }
@@ -614,7 +753,7 @@ async function runScenario({
     }
     const preview = await runtime.request(ws, timeoutMs(), 'preview.screen.start', {
       sources,
-      layout: screenOnlyLayout(),
+      layout: layoutForScenario(scenario),
       video,
       protectedOverlayWindowIds: [],
       ffmpegPath
@@ -626,8 +765,21 @@ async function runScenario({
     }
     previewStarted = true
     await waitForPreviewFrame(runtime, ws, selectedScreen.id)
+    if (selectedCamera) {
+      const cameraPreview = await runtime.request(ws, timeoutMs(), 'preview.camera.start', {
+        sources,
+        layout: layoutForScenario(scenario),
+        video,
+        ffmpegPath
+      })
+      if (cameraPreview?.state !== 'live' && cameraPreview?.state !== 'starting') {
+        throw new BlockedRunError(
+          `DirectShow camera preview did not start: ${cameraPreview?.message ?? cameraPreview?.state ?? 'unknown'}`
+        )
+      }
+      await waitForCameraFrame(runtime, ws, selectedCamera.id)
+    }
 
-    const smoke = launched.connections['preview-motion-ready']
     const runtimeInspection = await runtime.requestSmokeCommand(
       smoke,
       'inspect-native-preview-runtime',
@@ -733,7 +885,7 @@ async function runScenario({
           { timeoutMs: timeoutMs() }
         )
       }
-      capturePlacementReadiness = await waitForCaptureProtectionPlacement({
+      initialCapturePlacementReadiness = await waitForCaptureProtectionPlacement({
         runtime,
         smoke,
         placement: capturePlacement,
@@ -745,13 +897,14 @@ async function runScenario({
       )
     }
 
-    const target = await localRtmpTarget(artifacts.receiverMedia)
+    const target = await localRtmpTarget(artifacts.receiverStaging)
     rtmpSecrets = [target.streamKey, target.listenerUrl]
     listener = spawnReceiver({
       ffmpegPath,
       target,
       warmupSeconds: scenario.warmupMs / 1000,
-      measurementSeconds: scenario.measurementMs / 1000
+      measurementSeconds: scenario.measurementMs / 1000,
+      tailSeconds: Math.max(5, (scenario.sampleIntervalMs * 3) / 1_000)
     })
     await ensureListenerStarted(listener, rtmpSecrets)
 
@@ -774,46 +927,252 @@ async function runScenario({
     }
     sessionActive = true
     localRecordingPath = started.outputPath ?? null
+    const targetId = `local-${scenario.id}`
+    streamTargetPoller = startStreamTargetSnapshotPoller({
+      runtime,
+      ws,
+      snapshots: streamSnapshots,
+      intervalMs: Math.min(500, scenario.sampleIntervalMs / 2)
+    })
+    await waitForStreamTargetLive({
+      snapshots: streamSnapshots,
+      targetId,
+      deadlineMs: timeoutMs()
+    })
+    const receiverMeasurementStart = await listener.waitForMeasurementStart(
+      scenario.warmupMs + timeoutMs()
+    )
 
     const expectedGpuSamples = Math.ceil(scenario.measurementMs / scenario.sampleIntervalMs)
-    const [processResult, diagnosticResult, gpuResult, timelineResult] = await Promise.allSettled([
+    const stimulusMeasurementStartPromise = collectStimulusProcessCensuses(runtime, {
+      motion: {
+        rootPid: motionStimulus?.child?.pid,
+        identities: motionStimulusProcessIdentities
+      },
+      av: options.videoOnly
+        ? null
+        : {
+            rootPid: avStimulus?.child?.pid,
+            identities: avStimulusProcessIdentities
+          }
+    })
+    const collectorsStartedAtMs = Date.now()
+    const observedStartSkewMs = Math.abs(
+      collectorsStartedAtMs - receiverMeasurementStart.startedAtMs
+    )
+    streamMeasurementClock = {
+      receiverMeasurementStartedAtMs: receiverMeasurementStart.startedAtMs,
+      receiverProgressClock: receiverMeasurementStart.clockEvidence,
+      collectorsStartedAtMs,
+      observedStartSkewMs,
+      startSkewMs: observedStartSkewMs + receiverMeasurementStart.clockEvidence.uncertaintyMs,
+      measurementMs: scenario.measurementMs,
+      intervalMs: scenario.sampleIntervalMs,
+      expectedMeasurementEndedAtMs: receiverMeasurementStart.startedAtMs + scenario.measurementMs,
+      collectorsExpectedMeasurementEndedAtMs: collectorsStartedAtMs + scenario.measurementMs
+    }
+    if (streamMeasurementClock.startSkewMs > scenario.sampleIntervalMs) {
+      throw new BlockedRunError(
+        `Receiver and telemetry measurement clocks differed by ${streamMeasurementClock.startSkewMs}ms.`
+      )
+    }
+    const [
+      processResult,
+      diagnosticResult,
+      gpuResult,
+      capturePlacementResult,
+      stimulusStartResult,
+      previewInputResult
+    ] = await Promise.allSettled([
       runtime.collectWindowsProcessTreeTelemetry({
         rootPid: launched.process.pid,
-        warmupMs: scenario.warmupMs,
+        warmupMs: 0,
         measurementMs: scenario.measurementMs,
-        intervalMs: scenario.sampleIntervalMs
+        intervalMs: scenario.sampleIntervalMs,
+        now: Date.now
       }),
       collectDiagnostics({
         runtime,
         ws,
-        warmupMs: scenario.warmupMs,
         measurementMs: scenario.measurementMs,
         intervalMs: scenario.sampleIntervalMs
       }),
       collectGpuSamples({
         runtime,
-        warmupMs: scenario.warmupMs,
+        warmupMs: 0,
         intervalMs: scenario.sampleIntervalMs,
         expectedSamples: expectedGpuSamples
       }),
-      collectOwnedProcessTimeline({
+      collectCaptureProtectionPlacementTimeline({
         runtime,
-        rootPid: launched.process.pid,
-        warmupMs: scenario.warmupMs,
+        smoke,
+        placement: capturePlacement,
+        previewOpen: scenario.previewOpen,
+        warmupMs: 0,
+        measurementMs: scenario.measurementMs,
+        intervalMs: 10_000
+      }),
+      stimulusMeasurementStartPromise,
+      exerciseWindowsPreviewInputContinuity({
+        runtime,
+        smoke,
+        scenario,
+        requireD3d11: options.requireD3d11 || ['forced', 'default'].includes(options.pathEvidence),
+        restoreBounds: capturePlacement.windows.preview
+      })
+    ])
+    if (processResult.status === 'fulfilled') {
+      processTelemetry = processResult.value
+      processTelemetryReadiness = evaluateWindowsStreamProcessTelemetry(processTelemetry, {
         measurementMs: scenario.measurementMs,
         intervalMs: scenario.sampleIntervalMs
       })
-    ])
-    if (processResult.status === 'fulfilled') processTelemetry = processResult.value
+    } else {
+      processTelemetryReadiness = {
+        verdict: 'BLOCKED',
+        blockers: [`process telemetry collection failed: ${message(processResult.reason)}`]
+      }
+    }
     if (diagnosticResult.status === 'fulfilled') {
-      diagnosticSamples = diagnosticResult.value
+      diagnosticTimeline = diagnosticResult.value
+      diagnosticSamples = [
+        ...(diagnosticTimeline.samples ?? []),
+        ...(diagnosticTimeline.terminal ? [diagnosticTimeline.terminal] : [])
+      ]
+      for (const sample of diagnosticSamples) {
+        if (
+          Number.isFinite(sample?.streamTargetsSnapshotObservedAtMs) &&
+          sample?.streamTargetsSnapshot
+        ) {
+          streamSnapshots.push({
+            receivedAtMs: sample.streamTargetsSnapshotObservedAtMs,
+            requestedAtMs: sample.streamTargetsSnapshotRequestedAtMs,
+            source: 'diagnostics-rpc',
+            snapshot: sample.streamTargetsSnapshot
+          })
+        }
+      }
+      diagnosticTimelineReadiness = evaluateWindowsStreamDiagnosticTimeline(diagnosticTimeline, {
+        measurementMs: scenario.measurementMs,
+        intervalMs: scenario.sampleIntervalMs,
+        recordEnabled: scenario.recordEnabled
+      })
+    } else {
+      diagnosticTimelineReadiness = {
+        verdict: 'BLOCKED',
+        blockers: [`diagnostic timeline collection failed: ${message(diagnosticResult.reason)}`]
+      }
     }
     if (gpuResult.status === 'fulfilled') gpuCollection = gpuResult.value
-    if (timelineResult.status === 'fulfilled') {
-      processTimeline = timelineResult.value
+    capturePlacementTimeline =
+      capturePlacementResult.status === 'fulfilled'
+        ? capturePlacementResult.value
+        : {
+            expectedSamples: Math.ceil(scenario.measurementMs / 10_000),
+            intervalMs: 10_000,
+            samples: [],
+            error: message(capturePlacementResult.reason)
+          }
+    if (stimulusStartResult.status === 'fulfilled') {
+      stimulusMeasurementStartCensuses = stimulusStartResult.value
+      motionStimulusProcessIdentities = mergeProcessIdentities(
+        motionStimulusProcessIdentities,
+        stimulusMeasurementStartCensuses.motion?.identities
+      )
+      avStimulusProcessIdentities = mergeProcessIdentities(
+        avStimulusProcessIdentities,
+        stimulusMeasurementStartCensuses.av?.identities
+      )
     } else {
-      processTimelineError = message(timelineResult.reason)
+      stimulusMeasurementStartCensuses = {
+        error: message(stimulusStartResult.reason)
+      }
     }
+    previewInputContinuity =
+      previewInputResult.status === 'fulfilled'
+        ? previewInputResult.value
+        : {
+            verdict: 'BLOCKED',
+            applicable: scenario.previewOpen,
+            physicalInput: false,
+            blockers: [
+              `physical preview input continuity failed: ${message(previewInputResult.reason)}`
+            ]
+          }
+    try {
+      stimulusMeasurementEndCensuses = await collectStimulusProcessCensuses(runtime, {
+        motion: {
+          rootPid: motionStimulus?.child?.pid,
+          identities: motionStimulusProcessIdentities
+        },
+        av: options.videoOnly
+          ? null
+          : {
+              rootPid: avStimulus?.child?.pid,
+              identities: avStimulusProcessIdentities
+            }
+      })
+      motionStimulusProcessIdentities = mergeProcessIdentities(
+        motionStimulusProcessIdentities,
+        stimulusMeasurementEndCensuses.motion?.identities
+      )
+      avStimulusProcessIdentities = mergeProcessIdentities(
+        avStimulusProcessIdentities,
+        stimulusMeasurementEndCensuses.av?.identities
+      )
+    } catch (error) {
+      stimulusMeasurementEndCensuses = { error: message(error) }
+    }
+    stimulusLiveness = evaluateStimulusProcessLiveness({
+      videoOnly: options.videoOnly,
+      measurementStart: stimulusMeasurementStartCensuses,
+      measurementEnd: stimulusMeasurementEndCensuses
+    })
+    await streamTargetPoller.sample().catch(() => undefined)
+    streamTargetPolling = await streamTargetPoller.stop()
+    const collectorBoundaries = evaluateWindowsStreamCollectorBoundaries({
+      collectorsStartedAtMs: streamMeasurementClock.collectorsStartedAtMs,
+      expectedMeasurementEndedAtMs: streamMeasurementClock.collectorsExpectedMeasurementEndedAtMs,
+      intervalMs: scenario.sampleIntervalMs,
+      collectors: {
+        process: {
+          startedAtMs: processTelemetry?.timing?.measurementStartedAtMs,
+          endedAtMs: processTelemetry?.timing?.measurementEndedAtMs
+        },
+        diagnostics: {
+          startedAtMs: diagnosticTimeline?.sampling?.observations?.[0]?.scheduledAtMs,
+          endedAtMs: diagnosticTimeline?.terminalTiming?.measurementEndedAtMs
+        },
+        gpu: {
+          startedAtMs: gpuCollection?.measurementStartedAtMs,
+          endedAtMs: gpuCollection?.measurementEndedAtMs
+        },
+        captureProtection: {
+          startedAtMs: capturePlacementTimeline?.measurementStartedAtMs,
+          endedAtMs: capturePlacementTimeline?.measurementEndedAtMs
+        }
+      }
+    })
+    const measurementFinalCheckedAtMs = Date.now()
+    streamMeasurementClock = {
+      ...streamMeasurementClock,
+      collectorBoundaries,
+      measurementFinalCheckedAtMs,
+      endSkewMs: Math.abs(
+        measurementFinalCheckedAtMs - streamMeasurementClock.expectedMeasurementEndedAtMs
+      )
+    }
+    streamLifecycle = evaluateWindowsStreamTargetLifecycle({
+      snapshots: streamSnapshots,
+      targetId,
+      expectedSessionId: diagnosticTimelineReadiness.sessionId,
+      measurementStartedAtMs: streamMeasurementClock.collectorsStartedAtMs,
+      measurementEndedAtMs: measurementFinalCheckedAtMs,
+      expectedMeasurementEndedAtMs: streamMeasurementClock.expectedMeasurementEndedAtMs,
+      intervalMs: scenario.sampleIntervalMs,
+      receiverAlive: listener.child.exitCode === null && listener.child.signalCode === null,
+      pollingEvidence: streamTargetPolling
+    })
 
     processCensus = await runtime.collectProcessCensus({
       ledgerPaths: processLedgerPaths,
@@ -841,32 +1200,35 @@ async function runScenario({
         ]
       }
     }
-    const finalProcessIds = new Set(
-      (processCensus?.processGroupRows ?? processCensus?.processRows ?? [])
-        .map((row) => row.pid)
-        .filter((pid) => Number.isInteger(pid))
-    )
     const gpuAttribution = runtime.attributeWindowsGpuSamplesToProcessTimeline({
       samples: gpuCollection?.samples ?? [],
-      timeline: processTimeline ?? {
-        expectedSamples: expectedGpuSamples,
-        intervalMs: scenario.sampleIntervalMs,
-        observations: []
-      },
+      candidateRootPid: rootProcessIdentity.pid,
+      candidateRootCreationDate: rootProcessIdentity.creationDate,
+      expectedSamples: expectedGpuSamples,
+      intervalMs: scenario.sampleIntervalMs,
       parseInstance: runtime.parseWindowsGpuCounterInstance
     })
-    const processIds = new Set([...gpuAttribution.processIds, ...finalProcessIds])
     const gpuSummary = runtime.summarizeWindowsGpuSamples({
       samples: gpuAttribution.samples,
       expectedSamples: expectedGpuSamples,
-      processIds,
+      processIds: gpuAttribution.processIds,
       adapterLuid: adapterLuidFromDxgiId(selectedScreen.id)
     })
+    const gpuCollectionBlockers =
+      gpuCollection?.exitCode === 0 && !gpuCollection?.error
+        ? []
+        : [
+            `GPU counter collector did not exit cleanly (exit=${gpuCollection?.exitCode ?? 'missing'}): ${gpuCollection?.error ?? 'no completion evidence'}`
+          ]
     gpuEvidence = {
       ...gpuSummary,
       verdict:
-        gpuAttribution.verdict === 'PASS' && gpuSummary.verdict === 'PASS' ? 'PASS' : 'BLOCKED',
-      blockers: [...gpuAttribution.blockers, ...gpuSummary.blockers]
+        gpuAttribution.verdict === 'PASS' &&
+        gpuSummary.verdict === 'PASS' &&
+        gpuCollectionBlockers.length === 0
+          ? 'PASS'
+          : 'BLOCKED',
+      blockers: [...gpuAttribution.blockers, ...gpuSummary.blockers, ...gpuCollectionBlockers]
     }
     await writeRunJson(artifacts.gpuSamples, {
       commandExitCode: gpuCollection?.exitCode ?? null,
@@ -874,11 +1236,33 @@ async function runScenario({
       attribution: {
         ...gpuAttribution.timeline,
         processIds: gpuAttribution.processIds,
-        collectionError: processTimelineError
+        rootProcess: gpuAttribution.rootProcess
       },
       samples: gpuAttribution.samples,
       ...gpuEvidence
     })
+
+    finalCapturePlacementReadiness = await inspectCaptureProtectionPlacement({
+      runtime,
+      smoke,
+      placement: capturePlacement,
+      previewOpen: scenario.previewOpen
+    }).catch((error) => ({
+      verdict: 'BLOCKED',
+      blockers: [`final placement inspection failed: ${message(error)}`]
+    }))
+    capturePlacementReadiness = evaluateWindowsCaptureProtectionPlacementTimeline({
+      initial: initialCapturePlacementReadiness,
+      timeline: capturePlacementTimeline,
+      final: finalCapturePlacementReadiness
+    })
+
+    if (scenario.previewOpen) {
+      nativePreviewSurfaceStatus = await runtime
+        .requestSmokeCommand(smoke, 'preview-window-state', {}, { timeoutMs: timeoutMs() })
+        .then((value) => value?.surfaceStatus ?? null)
+        .catch(() => null)
+    }
 
     const appExitedDuringMeasurement = launched.process.exitCode !== null
     stoppedSession = await runtime.request(ws, timeoutMs(), 'session.stop')
@@ -886,14 +1270,20 @@ async function runScenario({
     localRecordingPath = stoppedSession?.outputPath ?? localRecordingPath
     listenerExit = await waitForChildExit(listener.child, 15_000)
     listener = null
+    trimReceiverMeasurement({
+      ffmpegPath,
+      inputPath: artifacts.receiverStaging,
+      outputPath: artifacts.receiverMedia,
+      measurementSeconds: scenario.measurementMs / 1_000
+    })
 
-    let exportedSupportPath = null
     try {
       const support = await runtime.request(ws, timeoutMs(), 'diagnostics.supportBundle.export', {
         ffmpegPath,
         appVersion: rendererRuntimeInfo.version,
         rendererDiagnostics: {
           runtimeInfo: rendererRuntimeInfo,
+          nativePreviewSurfaceStatus,
           windowsStreamPerformance: {
             scenarioId: scenario.id,
             repetition,
@@ -921,21 +1311,39 @@ async function runScenario({
         }
         await copyFile(support.path, artifacts.supportBundle)
         supportBundlePresent = true
+        if (resolve(support.path) !== resolve(artifacts.supportBundle)) {
+          await scrubAndDeleteSupportBundle(support.path)
+        }
+        exportedSupportPath = null
       }
-    } catch {
+    } catch (error) {
       if (exportedSupportPath) {
-        await unlink(exportedSupportPath).catch(() => undefined)
+        try {
+          await scrubAndDeleteSupportBundle(exportedSupportPath)
+        } catch (cleanupError) {
+          throw new BlockedRunError(
+            `The invalid Windows acceptance support bundle could not be securely removed after ${message(error)}: ${message(cleanupError)}`
+          )
+        }
       }
       supportBundlePresent = false
     }
 
     await writeRunJson(artifacts.processSamples, {
       telemetry: processTelemetry,
+      readiness: processTelemetryReadiness,
       census: processCensus,
-      timeline: processTimeline,
-      timelineError: processTimelineError
+      rootProcessIdentity,
+      pinnedProcessIdentities
     })
-    await writeRunJson(artifacts.diagnostics, diagnosticSamples)
+    await writeRunJson(artifacts.diagnostics, {
+      timeline: diagnosticTimeline,
+      readiness: diagnosticTimelineReadiness,
+      measurementClock: streamMeasurementClock,
+      streamLifecycle,
+      streamTargetPolling,
+      streamSnapshots
+    })
     await writeRunJson(artifacts.settings, {
       scenario,
       bridge: options.bridge,
@@ -948,12 +1356,14 @@ async function runScenario({
       videoOnly: options.videoOnly,
       source: {
         screen: safeDevice(selectedScreen),
+        camera: safeDevice(selectedCamera),
         microphone: safeDevice(selectedMicrophone),
         displayTopology,
         displayBinding
       },
       captureProtectionPlacement: capturePlacement,
       captureProtectionPlacementReadiness: capturePlacementReadiness,
+      previewInputContinuity,
       previewOpen: scenario.previewOpen,
       rtmp: {
         serverUrl: redactWindowsStreamSecrets(target.serverUrl, rtmpSecrets),
@@ -1125,10 +1535,14 @@ async function runScenario({
       gracefulQuit.error =
         'The packaged app exited before the harness could request a graceful app-quit.'
     }
-    if (pinnedProcessIdentities.length > 0) {
+    if (launched || pinnedProcessIdentities.length > 0) {
       postGracefulProcessCensus = await runtime
         .collectProcessCensus({
           ledgerPaths: processLedgerPaths,
+          rootPid:
+            launched?.process?.exitCode === null && launched?.process?.signalCode === null
+              ? launched.process.pid
+              : undefined,
           extraPids: pinnedProcessIdentities.map((identity) => identity.pid)
         })
         .catch((error) => ({ error: message(error), processRows: [] }))
@@ -1137,6 +1551,8 @@ async function runScenario({
         ownedCensusRows(postGracefulProcessCensus)
       )
       gracefulQuit.descendantsExited =
+        !preQuitProcessCensus?.error &&
+        !quittingProcessCensus?.error &&
         !postGracefulProcessCensus?.error &&
         (postGracefulProcessCensus?.aliveRecords?.length ?? 0) === 0 &&
         survivors.length === 0
@@ -1153,7 +1569,7 @@ async function runScenario({
         teardown = { state: 'leaked', forced: true, error: message(error) }
       }
     }
-    if (pinnedProcessIdentities.length > 0) {
+    if (launched || pinnedProcessIdentities.length > 0) {
       finalProcessCensus = await runtime
         .collectProcessCensus({
           ledgerPaths: processLedgerPaths,
@@ -1161,7 +1577,80 @@ async function runScenario({
         })
         .catch((error) => ({ error: message(error), processRows: [] }))
     }
+    await assertCandidateIdentity(
+      runtime,
+      spawnSpec.command,
+      candidateSha256,
+      candidatePayload.sha256,
+      `${scenario.id} repetition ${repetition} after teardown`
+    )
   }
+
+  const finalProcessSurvivors = matchingProcessIdentities(
+    pinnedProcessIdentities,
+    ownedCensusRows(finalProcessCensus)
+  )
+  const stimulusTeardownClean =
+    stimulusFinalCensuses?.error == null &&
+    stimulusTeardownResultClean(motionStimulusTeardown) &&
+    (options.videoOnly || stimulusTeardownResultClean(avStimulusTeardown)) &&
+    matchingProcessIdentities(
+      motionStimulusProcessIdentities,
+      ownedCensusRows(stimulusFinalCensuses?.motion)
+    ).length === 0 &&
+    (options.videoOnly ||
+      matchingProcessIdentities(
+        avStimulusProcessIdentities,
+        ownedCensusRows(stimulusFinalCensuses?.av)
+      ).length === 0)
+  const teardownClean =
+    gracefulQuit.requested === true &&
+    gracefulQuit.exited === true &&
+    gracefulQuit.descendantsExited === true &&
+    !preQuitProcessCensus?.error &&
+    !quittingProcessCensus?.error &&
+    stimulusTeardownClean &&
+    teardown?.forced !== true &&
+    ['skipped', 'terminated'].includes(teardown?.state) &&
+    !finalProcessCensus?.error &&
+    (finalProcessCensus?.aliveRecords?.length ?? 0) === 0 &&
+    finalProcessSurvivors.length === 0
+  await writeRunJson(artifacts.processSamples, {
+    telemetry: processTelemetry,
+    readiness: processTelemetryReadiness,
+    processLedgerPaths,
+    launchCensus: launchProcessCensus,
+    measurementCensus: processCensus,
+    rootProcessIdentity,
+    pinnedProcessIdentities,
+    preQuitProcessCensus,
+    quittingProcessCensus,
+    gracefulQuit,
+    postGracefulProcessCensus,
+    teardown,
+    finalProcessCensus,
+    finalProcessSurvivors,
+    stimuli: {
+      motion: {
+        processIdentities: motionStimulusProcessIdentities,
+        launchCensus: motionStimulusLaunchCensus,
+        teardown: motionStimulusTeardown,
+        finalCensus: stimulusFinalCensuses?.motion ?? null
+      },
+      av: {
+        required: !options.videoOnly,
+        processIdentities: avStimulusProcessIdentities,
+        launchCensus: avStimulusLaunchCensus,
+        teardown: avStimulusTeardown,
+        finalCensus: stimulusFinalCensuses?.av ?? null
+      },
+      measurementStart: stimulusMeasurementStartCensuses,
+      measurementEnd: stimulusMeasurementEndCensuses,
+      liveness: stimulusLiveness,
+      teardownClean: stimulusTeardownClean
+    },
+    teardownClean
+  })
 
   if (!existsSync(artifacts.receiverMedia) || statSync(artifacts.receiverMedia).size <= 0) {
     throw new Error('The local RTMP receiver artifact was missing or empty.')
@@ -1246,7 +1735,7 @@ async function runScenario({
         artifacts.receiverMedia,
         '-an',
         '-vf',
-        `fps=0.5,crop=${crop.width}:${crop.height}:${crop.x}:${crop.y},scale=320:180:flags=area,format=rgb24`,
+        `crop=${crop.width}:${crop.height}:${crop.x}:${crop.y},scale=32:18:flags=area,format=rgb24`,
         '-f',
         'rawvideo',
         'pipe:1'
@@ -1255,10 +1744,11 @@ async function runScenario({
         role,
         {
           crop,
+          expectedFrames: quality.metrics.observedFrames,
           markerMetrics: measureWindowsCaptureProtectionMarkerPixels(rgb, {
             marker: WINDOWS_CAPTURE_PROTECTION_MARKERS[role],
-            width: 320,
-            height: 180
+            width: 32,
+            height: 18
           }),
           stimulusVisibility: runtime.stimulusTemporalVisibilityFromRgb(rgb, {
             width: 32,
@@ -1274,6 +1764,7 @@ async function runScenario({
   )
   const captureProtection = evaluateWindowsCaptureProtectionEvidence({
     roles: roleEvidence,
+    placementReadiness: capturePlacementReadiness,
     requiredRoles: protectedRoles
   })
   await writeJson(artifacts.captureProtection, captureProtection)
@@ -1294,10 +1785,8 @@ async function runScenario({
       ffmpegPath,
       gates: { targetMs: 60, hardFailMs: 150, requireTarget: true }
     })
-    const drift = runtime.fitOffsetDrift(measurement.pairs, {
-      minPairs: 5,
-      minSpanSec: 30
-    })
+    const driftFit = windowsStreamAvDriftFitOptions(scenario)
+    const drift = runtime.fitOffsetDrift(measurement.pairs, driftFit)
     avSync = {
       required: true,
       measured:
@@ -1308,6 +1797,7 @@ async function runScenario({
       maxAbsoluteOffsetMs: measurement.maxAbsOffsetMs,
       projectedDriftMsPer30Min: runtime.driftMsPer30Min(drift),
       driftBinding: drift !== null,
+      driftFit,
       flashCount: measurement.flashCount,
       clickCount: measurement.clickCount,
       pairs: measurement.pairs
@@ -1334,17 +1824,47 @@ async function runScenario({
       ['reconnecting', 'retrying'].includes(target?.state ?? target?.status)
     )
   ).length
+  const bmpBudgetMetrics = summarizeWindowsStreamBmpBudgetMetrics(
+    diagnosticSamples,
+    scenario.previewOpen
+  )
+  const previewProofSurfaceVerdict = windowsPreviewProofSurfaceVerdict({
+    expectedFallback: options.expectFallback,
+    previewOpen: scenario.previewOpen,
+    placementReadiness: capturePlacementReadiness,
+    pipeline
+  })
+  const calibration = windowsStreamCalibrationMetrics({
+    processTelemetry,
+    gpuEvidence,
+    bmp: bmpBudgetMetrics,
+    pipeline,
+    mediaVerdict: quality?.verdict?.pass === true ? 'PASS' : 'FAIL',
+    lifecycleVerdict: streamLifecycle.verdict,
+    previewProofSurfaceVerdict,
+    inputContinuity: previewInputContinuity.verdict === 'PASS'
+  })
+  if (pipeline.d3d11) {
+    Object.assign(pipeline.d3d11, calibration.d3d11, {
+      inputContinuity: previewInputContinuity.verdict === 'PASS',
+      inputContinuityEvidence: previewInputContinuity
+    })
+  }
 
   const budget = await evaluateBudget({
     options,
     scenario,
     candidateSha256,
     candidatePayloadSha256: candidatePayload.sha256,
+    sourceCommit,
+    installerSha256,
     processTelemetry,
     gpuEvidence,
-    teardown,
     diagnosticSamples,
+    pipeline,
+    calibration,
     processTelemetryReadiness,
+    stimulusLiveness,
     teardownClean
   })
   const evidence = {
@@ -1354,10 +1874,13 @@ async function runScenario({
     scenarioId: scenario.id,
     repetition,
     candidate: {
+      sourceCommit,
+      installerSha256,
       executablePath: spawnSpec.command,
       sha256: candidateSha256,
       packagePayload: candidatePayload
     },
+    context: windowsStreamRunContext({ options, scenario }),
     timing: {
       warmupMs: scenario.warmupMs,
       measurementMs: scenario.measurementMs,
@@ -1367,14 +1890,24 @@ async function runScenario({
       motion: {
         started: Boolean(motionStimulus),
         browserPath: motionStimulus?.browserPath ?? null,
-        browserSource: motionStimulus?.browserSource ?? null
+        browserSource: motionStimulus?.browserSource ?? null,
+        processLivenessVerdict: stimulusLiveness.motion?.verdict ?? 'BLOCKED',
+        processLivenessBlockers: stimulusLiveness.motion?.blockers ?? [],
+        teardown: motionStimulusTeardown
       },
       audio: {
         required: !options.videoOnly,
         started: options.videoOnly ? false : Boolean(avStimulus),
         browserPath: avStimulus?.browserPath ?? null,
-        browserSource: avStimulus?.browserSource ?? null
-      }
+        browserSource: avStimulus?.browserSource ?? null,
+        processLivenessVerdict: options.videoOnly
+          ? 'NOT_REQUIRED'
+          : (stimulusLiveness.av?.verdict ?? 'BLOCKED'),
+        processLivenessBlockers: stimulusLiveness.av?.blockers ?? [],
+        teardown: avStimulusTeardown
+      },
+      processLiveness: stimulusLiveness,
+      teardownClean: stimulusTeardownClean
     },
     artifacts: {
       receiverMedia: artifacts.receiverMedia,
@@ -1413,6 +1946,7 @@ async function runScenario({
       bitrateEvidence: bitrate,
       reconnects,
       lifecycle: streamLifecycle,
+      targetPolling: streamTargetPolling,
       measurementClock: streamMeasurementClock,
       unexpectedExit:
         listenerExit?.code !== 0 ||
@@ -1428,23 +1962,47 @@ async function runScenario({
       gpuVerdict: gpuEvidence.verdict,
       gpu: gpuEvidence,
       teardownClean,
-      leakDetected: finalProcessSurvivors.length > 0 || Boolean(finalProcessCensus?.error),
+      leakDetected:
+        finalProcessSurvivors.length > 0 ||
+        Boolean(finalProcessCensus?.error) ||
+        !stimulusTeardownClean,
       gracefulQuit,
       teardown,
+      stimulusTeardown: {
+        clean: stimulusTeardownClean,
+        motion: motionStimulusTeardown,
+        av: avStimulusTeardown
+      },
       finalProcessSurvivors
     },
     captureProtection,
+    calibration,
     budget
   }
   const result = evaluateWindowsStreamRun(evidence)
-  await writeRunJson(artifacts.verdict, { evidence, result })
+  const preparedReport = await prepareExclusiveJsonArtifact(artifacts.verdict, {
+    evidence,
+    result
+  })
+  const publishedReport = await finalizePreparedJsonArtifact(
+    preparedReport,
+    result.verdict === 'PASS' ? revalidateCandidate : async () => undefined
+  )
   return {
     scenarioId: scenario.id,
     repetition,
     verdict: result.verdict,
     failures: result.failures,
     blockers: result.blockers,
-    evidencePath: artifacts.verdict
+    evidencePath: artifacts.verdict,
+    reportPath: resolve(artifacts.verdict),
+    reportSha256: publishedReport.sha256,
+    candidate: evidence.candidate,
+    context: evidence.context,
+    topology: scenario.topology,
+    previewOpen: scenario.previewOpen,
+    profile: scenario.fps === 60 ? '1080p60' : '1080p30',
+    calibration
   }
 }
 
@@ -1511,10 +2069,18 @@ async function preparePremiumProfile({
   runtime,
   spawnSpec,
   candidateSha256,
+  candidatePayload,
   acceptanceEnvironment,
   outputDirectory
 }) {
   const attestationPath = join(outputDirectory, 'premium-profile-attestation.json')
+  await assertCandidateIdentity(
+    runtime,
+    spawnSpec.command,
+    candidateSha256,
+    candidatePayload.sha256,
+    'before Premium profile preparation launch'
+  )
   const launched = await runtime.launchDevApp({
     spawnSpec,
     timeoutMs: timeoutMs(),
@@ -1549,6 +2115,7 @@ async function preparePremiumProfile({
       ) {
         const fields = {
           candidateSha256,
+          candidatePayloadSha256: candidatePayload.sha256,
           tier: current.tier,
           streamingMaxFps: current.limits.streaming.maxFps,
           verifiedAt: new Date().toISOString()
@@ -1561,6 +2128,7 @@ async function preparePremiumProfile({
         return {
           attestationPath,
           candidateSha256,
+          candidatePayloadSha256: candidatePayload.sha256,
           tier: attestation.tier,
           streamingMaxFps: attestation.streamingMaxFps,
           verifiedAt: attestation.verifiedAt,
@@ -1575,6 +2143,13 @@ async function preparePremiumProfile({
   } finally {
     if (ws) ws.close()
     await launched.stop().catch(() => undefined)
+    await assertCandidateIdentity(
+      runtime,
+      spawnSpec.command,
+      candidateSha256,
+      candidatePayload.sha256,
+      'after Premium profile preparation teardown'
+    )
   }
 }
 
@@ -1611,11 +2186,16 @@ async function evaluateBudget({
   options,
   scenario,
   candidateSha256,
+  candidatePayloadSha256,
+  sourceCommit,
+  installerSha256,
   processTelemetry,
   gpuEvidence,
-  teardown,
   diagnosticSamples,
+  pipeline,
+  calibration,
   processTelemetryReadiness,
+  stimulusLiveness,
   teardownClean
 }) {
   if (options.mode !== 'gate') {
@@ -1627,30 +2207,49 @@ async function evaluateBudget({
     }
   }
   try {
+    if (process.env.VIDEORC_WINDOWS_PERF_BUDGET_PROFILE?.trim()) {
+      throw new BlockedRunError(
+        'VIDEORC_WINDOWS_PERF_BUDGET_PROFILE must be unset; the exact D3D11/fallback context selects its one profile.'
+      )
+    }
+    const context = {
+      ...windowsStreamRunContext({ options, scenario }),
+      sourceCommit,
+      installerSha256,
+      candidateSha256,
+      candidatePayloadSha256,
+      operatingSystem: {
+        platform: process.platform,
+        arch: process.arch,
+        release: release()
+      },
+      timing: {
+        warmupMs: scenario.warmupMs,
+        measurementMs: scenario.measurementMs,
+        intervalMs: scenario.sampleIntervalMs
+      }
+    }
     const loaded = await loadWindowsStreamPerformanceBudget({
       path: process.env.VIDEORC_WINDOWS_PERF_BUDGET_PATH,
-      profileId: process.env.VIDEORC_WINDOWS_PERF_BUDGET_PROFILE,
-      context: {
-        scenario: scenario.id,
-        hardwareClass: windowsHardwareClass(),
-        profileClass: process.env.VIDEORC_PERF_PROFILE_CLASS?.trim() || 'release',
-        buildMode: 'packaged',
-        operatingSystem: {
-          platform: process.platform,
-          arch: process.arch,
-          release: release()
-        },
-        timing: {
-          warmupMs: scenario.warmupMs,
-          measurementMs: scenario.measurementMs,
-          intervalMs: scenario.sampleIntervalMs
-        }
-      }
+      context,
+      candidateRoot: dirname(resolve(process.env.VIDEORC_WINDOWS_ACCEPTANCE_DIR))
     })
+    if (!isWindowsD3d11StreamPerformanceBudget(loaded.document)) {
+      throw new BlockedRunError(
+        'The protected stream gate requires an active videorc.windows-d3d11-performance-budget.'
+      )
+    }
+    const expectedCandidate = {
+      sourceCommit,
+      installerSha256,
+      executableSha256: candidateSha256,
+      packagePayloadSha256: candidatePayloadSha256
+    }
     if (
-      loaded.document.candidateSha256.toLocaleLowerCase('en-US') !== candidateSha256 ||
-      loaded.profile.candidateSha256.toLocaleLowerCase('en-US') !== candidateSha256 ||
+      !candidateIdentityMatches(loaded.document.candidate, expectedCandidate) ||
+      !candidateIdentityMatches(loaded.profile.candidate, expectedCandidate) ||
       processTelemetryReadiness?.verdict !== 'PASS' ||
+      stimulusLiveness?.verdict !== 'PASS' ||
       teardownClean !== true
     ) {
       return {
@@ -1671,6 +2270,14 @@ async function evaluateBudget({
         processTree: summarizeWindowsStreamBudgetProcessTelemetry(processTelemetry),
         gpu: gpuEvidence,
         bmp: summarizeWindowsStreamBmpBudgetMetrics(diagnosticSamples, scenario.previewOpen),
+        d3d11: {
+          ...(pipeline?.d3d11 ?? {}),
+          ...(calibration?.d3d11 ?? {})
+        },
+        encoderSpeedP05: calibration?.encoderSpeedP05,
+        mediaVerdict: calibration?.mediaVerdict,
+        lifecycleVerdict: calibration?.lifecycleVerdict,
+        previewProofSurfaceVerdict: calibration?.previewProofSurfaceVerdict,
         teardownClean
       })
     }
@@ -1993,6 +2600,7 @@ function spawnReceiver({ ffmpegPath, target, warmupSeconds, measurementSeconds, 
   let stderr = ''
   let pending = ''
   let measurementStart = null
+  const measurementProgressSamples = []
   let resolveMeasurementStart
   let rejectMeasurementStart
   const measurementStarted = new Promise((resolveStart, rejectStart) => {
@@ -2017,13 +2625,20 @@ function spawnReceiver({ ffmpegPath, target, warmupSeconds, measurementSeconds, 
         !measurementStart &&
         (Number(progress.frame) > 0 || Number(progress.total_size) > 13)
       ) {
-        measurementStart = {
-          startedAtMs: Date.now(),
+        measurementProgressSamples.push({
+          observedAtMs: Date.now(),
           outTimeUs: Number(progress.out_time_us),
           frame: Number(progress.frame),
           totalSize: Number(progress.total_size)
+        })
+        const clockEvidence = evaluateWindowsReceiverProgressClock(measurementProgressSamples)
+        if (clockEvidence.verdict === 'PASS') {
+          measurementStart = {
+            startedAtMs: clockEvidence.startedAtMs,
+            clockEvidence
+          }
+          resolveMeasurementStart(measurementStart)
         }
-        resolveMeasurementStart(measurementStart)
       }
       if (key === 'progress') {
         for (const progressKey of Object.keys(progress)) delete progress[progressKey]
@@ -2043,6 +2658,7 @@ function spawnReceiver({ ffmpegPath, target, warmupSeconds, measurementSeconds, 
     child,
     stderr: () => stderr,
     measurementStart: () => measurementStart,
+    measurementProgressSamples: () => [...measurementProgressSamples],
     waitForMeasurementStart: (timeout) =>
       promiseWithTimeout(
         measurementStarted,
@@ -2205,40 +2821,14 @@ async function waitForCaptureProtectionPlacement({
   previewOpen,
   deadlineMs = 15_000
 }) {
-  const requiredRoles = [
-    'main',
-    'comments',
-    'notes',
-    'captions',
-    ...(previewOpen ? ['preview', 'proof-surface'] : [])
-  ]
   const deadline = Date.now() + deadlineMs
   let evaluation = null
   do {
-    const [main, comments, notes, captions, preview] = await Promise.all([
-      runtime.requestSmokeCommand(smoke, 'main-window-state', {}, { timeoutMs: timeoutMs() }),
-      runtime.requestSmokeCommand(smoke, 'comments-window-state', {}, { timeoutMs: timeoutMs() }),
-      runtime.requestSmokeCommand(smoke, 'notes-window-state', {}, { timeoutMs: timeoutMs() }),
-      runtime.requestSmokeCommand(smoke, 'captions-window-state', {}, { timeoutMs: timeoutMs() }),
-      previewOpen
-        ? runtime.requestSmokeCommand(smoke, 'preview-window-state', {}, { timeoutMs: timeoutMs() })
-        : Promise.resolve(null)
-    ])
-    evaluation = evaluateWindowsCaptureProtectionPlacement({
+    evaluation = await inspectCaptureProtectionPlacement({
+      runtime,
+      smoke,
       placement,
-      requiredRoles,
-      states: {
-        main,
-        comments,
-        notes,
-        captions,
-        ...(previewOpen
-          ? {
-              preview,
-              'proof-surface': preview?.surface
-            }
-          : {})
-      }
+      previewOpen
     })
     if (evaluation.verdict === 'PASS') return evaluation
     await sleep(100)
@@ -2247,6 +2837,143 @@ async function waitForCaptureProtectionPlacement({
   throw new BlockedRunError(
     `Protected-window placement was not ready: ${evaluation?.blockers?.join('; ') ?? 'no state evidence'}`
   )
+}
+
+async function inspectCaptureProtectionPlacement({ runtime, smoke, placement, previewOpen }) {
+  const requiredRoles = [
+    'main',
+    'comments',
+    'notes',
+    'captions',
+    ...(previewOpen ? ['preview', 'proof-surface'] : [])
+  ]
+  const commandTimeoutMs = Math.min(timeoutMs(), 5_000)
+  const [main, comments, notes, captions, preview] = await Promise.all([
+    runtime.requestSmokeCommand(smoke, 'main-window-state', {}, { timeoutMs: commandTimeoutMs }),
+    runtime.requestSmokeCommand(
+      smoke,
+      'comments-window-state',
+      {},
+      { timeoutMs: commandTimeoutMs }
+    ),
+    runtime.requestSmokeCommand(smoke, 'notes-window-state', {}, { timeoutMs: commandTimeoutMs }),
+    runtime.requestSmokeCommand(
+      smoke,
+      'captions-window-state',
+      {},
+      { timeoutMs: commandTimeoutMs }
+    ),
+    previewOpen
+      ? runtime.requestSmokeCommand(
+          smoke,
+          'preview-window-state',
+          {},
+          {
+            timeoutMs: commandTimeoutMs
+          }
+        )
+      : Promise.resolve(null)
+  ])
+  const states = {
+    main,
+    comments,
+    notes,
+    captions,
+    ...(previewOpen
+      ? {
+          preview,
+          'proof-surface': preview?.surface
+        }
+      : {})
+  }
+  const placementEvaluation = evaluateWindowsCaptureProtectionPlacement({
+    placement,
+    requiredRoles,
+    states
+  })
+  let zOrder
+  try {
+    const snapshot = await runtime.collectWindowsWindowZOrder()
+    const protectedWindows = requiredRoles.map((role) => ({
+      role,
+      hwnd: states[role]?.nativeWindowHandle,
+      pid: states[role]?.processId,
+      cropRect: placement.cropBounds[role],
+      expectedBounds: placement.windows[role]
+    }))
+    zOrder = runtime.evaluateWindowsWindowZOrder({
+      snapshot,
+      protectedWindows,
+      allowedOwnedPids: [
+        ...new Set(protectedWindows.map((window) => window.pid).filter(Number.isInteger))
+      ],
+      boundsTolerancePx: 3
+    })
+  } catch (error) {
+    zOrder = {
+      verdict: 'BLOCKED',
+      blockers: [`Win32 z-order collection failed: ${message(error)}`]
+    }
+  }
+  return {
+    ...placementEvaluation,
+    verdict:
+      placementEvaluation.verdict === 'PASS' && zOrder.verdict === 'PASS' ? 'PASS' : 'BLOCKED',
+    blockers: [
+      ...(placementEvaluation.blockers ?? []),
+      ...(zOrder.blockers ?? []).map((blocker) => `z-order: ${blocker}`)
+    ],
+    zOrder
+  }
+}
+
+async function collectCaptureProtectionPlacementTimeline({
+  runtime,
+  smoke,
+  placement,
+  previewOpen,
+  warmupMs,
+  measurementMs,
+  intervalMs
+}) {
+  await sleep(warmupMs)
+  const expectedSamples = Math.ceil(measurementMs / intervalMs)
+  const maximumSampleLatenessMs = Math.min(2_000, Math.floor(intervalMs / 2))
+  const measurementStartedAtMs = Date.now()
+  const samples = []
+  for (let index = 0; index < expectedSamples; index += 1) {
+    const scheduledAtMs = measurementStartedAtMs + index * intervalMs
+    await sleep(Math.max(0, scheduledAtMs - Date.now()))
+    let evaluation
+    try {
+      evaluation = await inspectCaptureProtectionPlacement({
+        runtime,
+        smoke,
+        placement,
+        previewOpen
+      })
+    } catch (error) {
+      evaluation = {
+        verdict: 'BLOCKED',
+        blockers: [`placement inspection failed: ${message(error)}`]
+      }
+    }
+    samples.push({
+      scheduledAtMs,
+      sampledAtMs: Date.now(),
+      evaluation
+    })
+  }
+  await sleep(Math.max(0, measurementStartedAtMs + measurementMs - Date.now()))
+  return {
+    expectedSamples,
+    intervalMs,
+    measurementMs,
+    maximumSampleLatenessMs,
+    measurementStartedAtMs,
+    measurementEndedAtMs: Date.now(),
+    samples
+  }
 }
 
 async function collectDiagnostics({ runtime, ws, measurementMs, intervalMs }) {
@@ -2268,11 +2995,12 @@ async function collectDiagnostics({ runtime, ws, measurementMs, intervalMs }) {
   const scheduled = await runtime.collectPerformanceSamplesOnSchedule({
     measurementMs,
     intervalMs,
+    nowMs: Date.now,
     collectSample
   })
   const measurementEndedAtMs = scheduled.measurementEndedAtMs
   const terminal = await collectSample()
-  const terminalObservedAtMs = runtime.monotonicNowMs()
+  const terminalObservedAtMs = Date.now()
   return {
     timing: { measurementMs, intervalMs },
     sampling: {
@@ -2348,52 +3076,6 @@ async function collectGpuSamples({ runtime, warmupMs, intervalMs, expectedSample
       })
     })
   })
-}
-
-async function collectOwnedProcessTimeline({
-  runtime,
-  rootPid,
-  warmupMs,
-  measurementMs,
-  intervalMs
-}) {
-  await sleep(warmupMs)
-  const expectedSamples = Math.ceil(measurementMs / intervalMs)
-  const measurementStartedAtMs = Date.now()
-  const observations = []
-  for (let index = 0; index < expectedSamples; index += 1) {
-    const scheduledAtMs = measurementStartedAtMs + index * intervalMs
-    await sleep(Math.max(0, scheduledAtMs - Date.now()))
-    try {
-      const census = await runtime.collectProcessCensus({
-        ledgerPaths: [],
-        rootPid
-      })
-      const sampledAtMs = Date.now()
-      const processIds = [
-        ...new Set(
-          (census?.processGroupRows ?? census?.processRows ?? [])
-            .map((row) => row.pid)
-            .filter((pid) => Number.isInteger(pid) && pid > 0)
-        )
-      ].sort((left, right) => left - right)
-      observations.push({ scheduledAtMs, sampledAtMs, processIds })
-    } catch (error) {
-      observations.push({
-        scheduledAtMs,
-        sampledAtMs: Date.now(),
-        processIds: [],
-        error: message(error)
-      })
-    }
-  }
-  return {
-    expectedSamples,
-    intervalMs,
-    measurementStartedAtMs,
-    measurementEndedAtMs: Date.now(),
-    observations
-  }
 }
 
 function adapterLuidFromDxgiId(sourceId) {
@@ -2472,30 +3154,33 @@ function safeDevice(device) {
 }
 
 function acceptanceAppEnvironment(evidenceDirectory) {
-  return Object.fromEntries(
-    [
+  return {
+    ...windowsStreamSelectionEnvironmentOverlay(),
+    ...Object.fromEntries(
       [
-        'VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR',
-        process.env.VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR
-      ],
-      [
-        'VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED',
-        process.env.VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED
-      ],
-      [
-        'VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256',
-        process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256
-      ],
-      [
-        'VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256',
-        process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256
-      ],
-      [
-        'VIDEORC_WINDOWS_ACCEPTANCE_DIR',
-        process.env.VIDEORC_WINDOWS_ACCEPTANCE_DIR ?? evidenceDirectory
-      ]
-    ].filter(([, value]) => typeof value === 'string' && value.trim())
-  )
+        [
+          'VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR',
+          process.env.VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR
+        ],
+        [
+          'VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED',
+          process.env.VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED
+        ],
+        [
+          'VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256',
+          process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256
+        ],
+        [
+          'VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256',
+          process.env.VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256
+        ],
+        [
+          'VIDEORC_WINDOWS_ACCEPTANCE_DIR',
+          process.env.VIDEORC_WINDOWS_ACCEPTANCE_DIR ?? evidenceDirectory
+        ]
+      ].filter(([, value]) => typeof value === 'string' && value.trim())
+    )
+  }
 }
 
 function requireCommand(command, args, label) {
@@ -2536,6 +3221,171 @@ function runCapturedBuffer(command, args) {
     )
   }
   return result.stdout
+}
+
+function collectWindowsDisplayTopology() {
+  const source = String.raw`
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public static class VideorcDisplayTopology {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT {
+    public int left;
+    public int top;
+    public int right;
+    public int bottom;
+  }
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct MONITORINFOEX {
+    public int cbSize;
+    public RECT rcMonitor;
+    public RECT rcWork;
+    public uint dwFlags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+    public string szDevice;
+  }
+
+  public sealed class DisplayRecord {
+    public string deviceName;
+    public int x;
+    public int y;
+    public int width;
+    public int height;
+    public bool primary;
+  }
+
+  private delegate bool MonitorEnumProc(
+    IntPtr monitor,
+    IntPtr hdc,
+    ref RECT rect,
+    IntPtr data
+  );
+
+  [DllImport("user32.dll")]
+  private static extern bool EnumDisplayMonitors(
+    IntPtr hdc,
+    IntPtr clip,
+    MonitorEnumProc callback,
+    IntPtr data
+  );
+
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFOEX info);
+
+  public static DisplayRecord[] GetDisplays() {
+    var records = new List<DisplayRecord>();
+    MonitorEnumProc callback = delegate(IntPtr monitor, IntPtr hdc, ref RECT rect, IntPtr data) {
+      var info = new MONITORINFOEX();
+      info.cbSize = Marshal.SizeOf(typeof(MONITORINFOEX));
+      if (!GetMonitorInfo(monitor, ref info)) {
+        return true;
+      }
+      records.Add(new DisplayRecord {
+        deviceName = info.szDevice,
+        x = info.rcMonitor.left,
+        y = info.rcMonitor.top,
+        width = info.rcMonitor.right - info.rcMonitor.left,
+        height = info.rcMonitor.bottom - info.rcMonitor.top,
+        primary = (info.dwFlags & 1u) == 1u
+      });
+      return true;
+    };
+    if (!EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero)) {
+      throw new InvalidOperationException("EnumDisplayMonitors failed.");
+    }
+    return records.ToArray();
+  }
+}
+`
+  const script = `$source = @'\n${source}\n'@\nAdd-Type -TypeDefinition $source\nConvertTo-Json -InputObject @([VideorcDisplayTopology]::GetDisplays()) -Compress -Depth 4`
+  const result = spawnSync(
+    process.env.SystemRoot
+      ? join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+      : 'powershell.exe',
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 15_000,
+      maxBuffer: 1024 * 1024
+    }
+  )
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      result.error?.message ?? result.stderr?.trim() ?? `PowerShell exited ${result.status}`
+    )
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(result.stdout)
+  } catch (error) {
+    throw new Error(`Win32 display topology returned invalid JSON: ${message(error)}`)
+  }
+  const displays = Array.isArray(parsed) ? parsed : parsed ? [parsed] : []
+  if (displays.length === 0) {
+    throw new Error('Win32 display topology returned no monitors.')
+  }
+  return displays.map((display) => ({
+    deviceName: display.deviceName,
+    desktopBounds: {
+      x: display.x,
+      y: display.y,
+      width: display.width,
+      height: display.height
+    },
+    primary: display.primary === true
+  }))
+}
+
+async function assertCandidateIdentity(
+  runtime,
+  path,
+  expectedSha256,
+  expectedPayloadSha256,
+  phase
+) {
+  let actualSha256
+  let payload
+  try {
+    ;[actualSha256, payload] = await Promise.all([
+      runtime.sha256File(path),
+      runtime.packagedAppPayloadIdentity(path, { osPlatform: 'win32' })
+    ])
+  } catch (error) {
+    throw new BlockedRunError(
+      `The packaged candidate could not be hashed ${phase}: ${message(error)}`
+    )
+  }
+  if (actualSha256.toLocaleLowerCase('en-US') !== expectedSha256.toLocaleLowerCase('en-US')) {
+    throw new BlockedRunError(
+      `The packaged candidate digest changed ${phase}; refusing mixed-binary evidence.`
+    )
+  }
+  if (
+    !payload.sha256 ||
+    payload.sha256.toLocaleLowerCase('en-US') !== expectedPayloadSha256.toLocaleLowerCase('en-US')
+  ) {
+    throw new BlockedRunError(
+      `The packaged candidate payload changed ${phase}; refusing mixed app.asar/backend/media-tool evidence.`
+    )
+  }
+  return { executableSha256: actualSha256, packagePayload: payload }
+}
+
+async function scrubAndDeleteSupportBundle(path) {
+  try {
+    await writeFile(path, '')
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+  try {
+    await unlink(path)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
 }
 
 function waitForChildExit(child, timeout) {
@@ -2798,52 +3648,11 @@ async function exerciseWindowsPreviewInputContinuity({
       await sleep(100)
     } while (Date.now() < deadline)
 
-    const blockers = []
-    if (!(after?.state?.clicks > 0)) blockers.push('Electron did not receive the physical click')
-    if (!(after?.state?.focusEvents > 0)) {
-      blockers.push('Electron input did not receive focus')
-    }
-    if (!(after?.state?.inputEvents > 0) || after?.state?.value !== 'VIDEORC42') {
-      blockers.push('Electron input did not receive the physical keyboard sequence')
-    }
-    if (after?.state?.activeElementId !== 'videorc-windows-preview-input-target') {
-      blockers.push('Electron input did not remain the active element')
-    }
-    if (!windowsPreviewMovedAtLeast(before.initialBounds, after?.bounds, 12)) {
-      blockers.push('Electron preview window did not move from the physical drag')
-    }
-    if (after?.previewFocused !== true || after?.webContentsFocused !== true) {
-      blockers.push('Electron preview/webContents did not retain focus')
-    }
-    if (after?.presenter?.windowActive !== false || after?.presenter?.windowFocused !== false) {
-      blockers.push('D3D11 presenter activated or took focus')
-    }
-    if (
-      after?.presenter?.firstPresentSucceeded !== true ||
-      after?.presenter?.sourceLive !== true ||
-      !Number.isSafeInteger(before?.presenter?.lastPresentedSequence) ||
-      !Number.isSafeInteger(after?.presenter?.lastPresentedSequence) ||
-      after.presenter.lastPresentedSequence <= before.presenter.lastPresentedSequence
-    ) {
-      blockers.push('D3D11 presenter did not remain live and advance through physical input')
-    }
-
-    return {
-      verdict: blockers.length === 0 ? 'PASS' : 'FAIL',
+    return evaluateWindowsD3d11PreviewInputContinuity({
       applicable: true,
-      physicalInput: true,
-      blockers,
-      clickCount: after?.state?.clicks ?? 0,
-      focusEventCount: after?.state?.focusEvents ?? 0,
-      inputEventCount: after?.state?.inputEvents ?? 0,
-      typedValueMatched: after?.state?.value === 'VIDEORC42',
-      electronWindowMoved: windowsPreviewMovedAtLeast(before.initialBounds, after?.bounds, 12),
-      electronFocused: after?.previewFocused === true && after?.webContentsFocused === true,
-      presenterNeverActivated:
-        after?.presenter?.windowActive === false && after?.presenter?.windowFocused === false,
-      presenterSequenceBefore: before?.presenter?.lastPresentedSequence ?? null,
-      presenterSequenceAfter: after?.presenter?.lastPresentedSequence ?? null
-    }
+      before,
+      after
+    })
   } catch (error) {
     return {
       verdict: 'BLOCKED',
@@ -2928,14 +3737,6 @@ foreach ($step in 1..6) {
       }`
     )
   }
-}
-
-function windowsPreviewMovedAtLeast(before, after, minimum) {
-  return (
-    before &&
-    after &&
-    (Math.abs(after.x - before.x) >= minimum || Math.abs(after.y - before.y) >= minimum)
-  )
 }
 
 function stimulusTeardownResultClean(result) {

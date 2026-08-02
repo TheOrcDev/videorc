@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, join, resolve, win32 } from 'node:path'
 
-import { buildWindowsStreamPerformanceMatrix } from './windows-stream-performance.mjs'
+import {
+  assertWindowsStreamSelectionEnvironmentIsRunnerOwned,
+  buildWindowsStreamPerformanceMatrix,
+  windowsStreamSelectionEnvironmentOverlay
+} from './windows-stream-performance.mjs'
+import { WINDOWS_D3D11_FAIRNESS_LIMITS } from './windows-d3d11-media.mjs'
 
 export const WINDOWS_OBS_SCENARIO = 'youtube-1080p60'
 export const WINDOWS_OBS_TIMING = Object.freeze({
@@ -32,6 +37,14 @@ export const WINDOWS_OBS_D3D11_PROFILES = Object.freeze(['1080p30', '1080p60'])
 export const WINDOWS_OBS_SCHEMA_KIND = 'videorc.windows-obs-side-by-side'
 export const WINDOWS_D3D11_BUDGET_KIND = 'videorc.windows-d3d11-performance-budget'
 
+export function windowsObsSelectionEnvironment({ env = {}, d3d11, requireD3d11 } = {}) {
+  assertWindowsStreamSelectionEnvironmentIsRunnerOwned(env)
+  return windowsStreamSelectionEnvironmentOverlay({
+    ...(d3d11 ? { VIDEORC_WINDOWS_D3D11_MEDIA: '1' } : {}),
+    ...(requireD3d11 ? { VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1' } : {})
+  })
+}
+
 export const WINDOWS_OBS_REQUIRED_ORDER = Object.freeze([
   'obs',
   'videorc',
@@ -42,6 +55,7 @@ export const WINDOWS_OBS_REQUIRED_ORDER = Object.freeze([
 ])
 
 export function parseWindowsObsSideBySideArgs(argv = []) {
+  const args = argv[0] === '--' ? argv.slice(1) : argv
   const result = {
     mode: null,
     list: false,
@@ -56,8 +70,8 @@ export function parseWindowsObsSideBySideArgs(argv = []) {
     streamCalibrations: null,
     output: null
   }
-  for (let index = 0; index < argv.length; index += 1) {
-    const name = argv[index]
+  for (let index = 0; index < args.length; index += 1) {
+    const name = args[index]
     if (name === '--list') {
       setMode(result, 'list', name)
       result.list = true
@@ -68,32 +82,32 @@ export function parseWindowsObsSideBySideArgs(argv = []) {
     } else if (name === '--derive-d3d11-budget') {
       setMode(result, 'derive-d3d11-budget', name)
     } else if (name === '--scenario') {
-      result.scenario = requiredArgumentValue(argv, ++index, name)
+      result.scenario = requiredArgumentValue(args, ++index, name)
     } else if (name === '--runs') {
-      result.runs = parsePositiveInteger(requiredArgumentValue(argv, ++index, name), name)
+      result.runs = parsePositiveInteger(requiredArgumentValue(args, ++index, name), name)
     } else if (name === '--order') {
-      result.order = parseWindowsObsOrder(requiredArgumentValue(argv, ++index, name))
+      result.order = parseWindowsObsOrder(requiredArgumentValue(args, ++index, name))
     } else if (name === '--d3d11') {
       result.d3d11 = true
     } else if (name === '--require-d3d11') {
       result.requireD3d11 = true
     } else if (name === '--profiles') {
-      result.profiles = parseWindowsObsProfiles(requiredArgumentValue(argv, ++index, name))
+      result.profiles = parseWindowsObsProfiles(requiredArgumentValue(args, ++index, name))
     } else if (name === '--comparison') {
-      result.comparison = requiredArgumentValue(argv, ++index, name)
+      result.comparison = requiredArgumentValue(args, ++index, name)
     } else if (name === '--comparisons') {
       result.comparisons = parseExactAbsolutePathList(
-        requiredArgumentValue(argv, ++index, name),
+        requiredArgumentValue(args, ++index, name),
         2,
         name
       )
     } else if (name === '--stream-calibrations') {
       result.streamCalibrations =
         result.mode === 'derive-d3d11-budget'
-          ? parseExactAbsolutePathList(requiredArgumentValue(argv, ++index, name), 2, name)
-          : requiredArgumentValue(argv, ++index, name)
+          ? parseExactAbsolutePathList(requiredArgumentValue(args, ++index, name), 2, name)
+          : requiredArgumentValue(args, ++index, name)
     } else if (name === '--output') {
-      result.output = requiredArgumentValue(argv, ++index, name)
+      result.output = requiredArgumentValue(args, ++index, name)
     } else {
       throw new Error(`Unknown Windows OBS comparison argument: ${name}`)
     }
@@ -604,24 +618,106 @@ export function evaluateWindowsObsComparison(comparison) {
   const failures = []
   const blockers = []
   if (comparison?.schemaVersion !== 1) failures.push('schemaVersion must be 1')
-  if (comparison?.kind !== 'videorc.windows-obs-side-by-side') {
-    failures.push('kind must be videorc.windows-obs-side-by-side')
+  if (comparison?.kind !== WINDOWS_OBS_SCHEMA_KIND) {
+    failures.push(`kind must be ${WINDOWS_OBS_SCHEMA_KIND}`)
+  }
+  if (!['CALIBRATION', 'PASS', 'running'].includes(comparison?.status)) {
+    failures.push('status must be CALIBRATION, PASS, or running')
+  }
+  if (comparison?.scenario !== WINDOWS_OBS_SCENARIO) {
+    failures.push(`scenario must be ${WINDOWS_OBS_SCENARIO}`)
+  }
+  if (stableJson(comparison?.timing) !== stableJson(WINDOWS_OBS_TIMING)) {
+    blockers.push('comparison timing did not match the protected 60s/180s/1s contract')
+  }
+  if (!portableAbsolutePath(comparison?.manifestPath)) {
+    blockers.push('comparison manifestPath was missing or not absolute')
+  }
+  if (!lowercaseSha256(comparison?.manifestSha256)) {
+    blockers.push('comparison manifestSha256 was missing or invalid')
+  }
+  if (!lowercaseSha256(comparison?.stimulus?.manifestSha256)) {
+    blockers.push('comparison stimulus manifest SHA-256 was missing or invalid')
+  }
+  if (
+    comparison?.receiver?.protocol !== 'rtmp-listen-flv-copy' ||
+    !portableAbsolutePath(comparison?.receiver?.ffmpegPath) ||
+    !lowercaseSha256(comparison?.receiver?.ffmpegSha256) ||
+    !portableAbsolutePath(comparison?.receiver?.ffprobePath) ||
+    !lowercaseSha256(comparison?.receiver?.ffprobeSha256)
+  ) {
+    blockers.push('comparison local RTMP receiver/tool identity was incomplete')
+  }
+  if (
+    !/^rtmp:\/\/127\.0\.0\.1:\d+\/live$/.test(comparison?.receiver?.target?.serverUrl ?? '') ||
+    !lowercaseSha256(comparison?.receiver?.target?.streamKeySha256) ||
+    !lowercaseSha256(comparison?.receiver?.target?.bindingSha256) ||
+    comparison.receiver.target.bindingSha256 !==
+      sha256Text(
+        stableJson({
+          serverUrl: comparison.receiver.target.serverUrl,
+          streamKeySha256: comparison.receiver.target.streamKeySha256
+        })
+      )
+  ) {
+    blockers.push('comparison local RTMP target binding was missing or invalid')
   }
   try {
     requireSha(comparison?.candidate?.sha256, 'candidate.sha256')
   } catch (error) {
     failures.push(error.message)
   }
+  if (!portableAbsolutePath(comparison?.candidate?.executablePath)) {
+    blockers.push('candidate.executablePath was missing or not absolute')
+  }
+  const candidatePayloadSha256 = comparison?.candidate?.packagePayload?.sha256
+  try {
+    requireLowercaseSha(candidatePayloadSha256, 'candidate.packagePayload.sha256')
+  } catch (error) {
+    failures.push(error.message)
+  }
   if (comparison?.candidate?.signed !== true) {
     blockers.push('the Videorc candidate was not Authenticode-signed')
+  }
+  if (!/^[0-9a-f]{40}$/.test(comparison?.candidate?.sourceCommit ?? '')) {
+    blockers.push('candidate.sourceCommit was missing or invalid')
+  }
+  try {
+    requireLowercaseSha(comparison?.candidate?.installerSha256, 'candidate.installerSha256')
+  } catch (error) {
+    blockers.push(error.message)
+  }
+  if (!Array.isArray(comparison?.candidate?.packagePayload?.components)) {
+    blockers.push('candidate.packagePayload.components was missing')
+  } else if (
+    comparison.candidate.packagePayload.components.some(
+      (component) =>
+        typeof component?.relativePath !== 'string' ||
+        !component.relativePath.trim() ||
+        !lowercaseSha256(component?.sha256)
+    )
+  ) {
+    blockers.push('candidate.packagePayload.components was incomplete or invalid')
   }
   try {
     requireSha(comparison?.obs?.sha256, 'obs.sha256')
   } catch (error) {
     failures.push(error.message)
   }
+  if (
+    !portableAbsolutePath(comparison?.obs?.executablePath) ||
+    !portableAbsolutePath(comparison?.obs?.portableExecutablePath)
+  ) {
+    blockers.push('OBS input/portable executable paths were missing or not absolute')
+  }
   if (typeof comparison?.obs?.version !== 'string' || !comparison.obs.version.trim()) {
     failures.push('obs.version was missing')
+  }
+  if (comparison?.obs?.signed !== true) {
+    blockers.push('the OBS reference executable was not Authenticode-signed')
+  }
+  if (comparison?.obs?.portableSha256 !== comparison?.obs?.sha256) {
+    blockers.push('the evidence-local OBS portable executable digest did not match the input')
   }
   const runs = Array.isArray(comparison?.runs) ? comparison.runs : []
   let expectedOrder
@@ -643,36 +739,187 @@ export function evaluateWindowsObsComparison(comparison) {
   if (comparison?.audio?.matched !== true) {
     blockers.push('Videorc and OBS did not resolve to the same Core Audio endpoint')
   }
+  if (comparison?.mapping?.verdict !== 'PASS') {
+    blockers.push('the authoritative OBS/Videorc endpoint mapping did not pass')
+  }
+  if (
+    typeof comparison?.hardware?.hardwareClass !== 'string' ||
+    !comparison.hardware.hardwareClass.trim() ||
+    typeof comparison?.hardware?.bootId !== 'string' ||
+    !comparison.hardware.bootId.trim()
+  ) {
+    blockers.push('hardware class/clean-boot identity was missing')
+  }
 
+  const reportPaths = new Set()
+  const reportHashes = new Set()
+  const stimulusHashes = new Set()
   for (const [index, run] of runs.entries()) {
     const label = `run ${index + 1}`
+    if (run?.schemaVersion !== 1 || run?.kind !== 'videorc.windows-obs-side-by-side-run') {
+      failures.push(`${label} schema identity was invalid`)
+    }
     if (run?.index !== index + 1) failures.push(`${label} index did not match its order`)
     if (expectedOrder && run?.app !== expectedOrder[index]) {
       failures.push(`${label} app did not match the protected order`)
     }
     if (run?.clean !== true) blockers.push(`${label} was not a clean run`)
+    if (run?.scenario !== WINDOWS_OBS_SCENARIO) failures.push(`${label} scenario did not match`)
+    if (stableJson(run?.timing) !== stableJson(WINDOWS_OBS_TIMING)) {
+      blockers.push(`${label} timing did not match the protected comparison`)
+    }
+    if (run?.bootId !== comparison?.hardware?.bootId) {
+      blockers.push(`${label} did not use the comparison clean-boot identity`)
+    }
+    if (run?.hardwareClass !== comparison?.hardware?.hardwareClass) {
+      blockers.push(`${label} hardware class changed`)
+    }
     if (run?.settingsSha256 !== settingsHash) {
       blockers.push(`${label} settings did not match the comparison settings`)
     }
     if (run?.app === 'videorc' && run?.candidateSha256 !== comparison?.candidate?.sha256) {
       blockers.push(`${label} used a different Videorc candidate digest`)
     }
+    if (run?.app === 'videorc') {
+      const runPayloadSha256 = run?.candidate?.packagePayload?.sha256
+      if (!lowercaseSha256(runPayloadSha256)) {
+        failures.push(`${label} candidate.packagePayload.sha256 was missing or invalid`)
+      } else if (runPayloadSha256 !== candidatePayloadSha256) {
+        failures.push(`${label} used a different Videorc packaged-payload digest`)
+      }
+      if (run?.candidate?.sha256 !== comparison?.candidate?.sha256) {
+        failures.push(`${label} candidate.sha256 did not match the comparison candidate`)
+      }
+      if (run?.candidate?.sourceCommit !== comparison?.candidate?.sourceCommit) {
+        failures.push(`${label} source commit did not match the comparison candidate`)
+      }
+      if (run?.candidate?.installerSha256 !== comparison?.candidate?.installerSha256) {
+        failures.push(`${label} installer digest did not match the comparison candidate`)
+      }
+      if (
+        comparison?.settings?.normalized?.d3d11?.required === true &&
+        run?.pipeline?.verdict !== 'PASS'
+      ) {
+        failures.push(`${label} did not prove the required D3D11-native pipeline`)
+      }
+      if (
+        comparison?.settings?.normalized?.d3d11?.required === true &&
+        run?.pipeline?.zeroCopyVerdict !== 'PASS'
+      ) {
+        failures.push(`${label} did not prove every D3D11 zero-copy invariant`)
+      }
+      const supportArtifacts = (run?.artifacts ?? []).filter((artifact) =>
+        /(?:^|[\\/])support-bundle\.json$/i.test(artifact?.path ?? '')
+      )
+      if (
+        supportArtifacts.length !== 1 ||
+        run?.supportBundle?.verdict !== 'PASS' ||
+        run.supportBundle.validated !== true ||
+        run.supportBundle.secretFree !== true ||
+        portablePathIdentity(run.supportBundle.path) !==
+          portablePathIdentity(supportArtifacts[0]?.path) ||
+        run.supportBundle.sha256 !== supportArtifacts[0]?.sha256 ||
+        !lowercaseSha256(run.supportBundle.sha256)
+      ) {
+        blockers.push(
+          `${label} must retain exactly one validated, secret-free, hashed support bundle`
+        )
+      }
+    } else if (run?.app === 'obs') {
+      if (
+        run?.obs?.sha256 !== comparison?.obs?.sha256 ||
+        run?.obs?.version !== comparison?.obs?.version ||
+        run?.obs?.portableSha256 !== comparison?.obs?.portableSha256
+      ) {
+        failures.push(`${label} OBS binary/version identity changed`)
+      }
+      if (
+        run?.supportBundle?.verdict !== 'NOT_APPLICABLE' ||
+        (run?.artifacts ?? []).some((artifact) =>
+          /(?:^|[\\/])support-bundle\.json$/i.test(artifact?.path ?? '')
+        )
+      ) {
+        failures.push(`${label} OBS run must not claim a Videorc support bundle`)
+      }
+    }
     if (run?.media?.verdict !== 'PASS') failures.push(`${label} media verdict was not PASS`)
     if (run?.gpu?.verdict !== 'PASS') blockers.push(`${label} GPU evidence was incomplete`)
+    if (run?.process?.telemetryVerdict !== 'PASS') {
+      blockers.push(`${label} process telemetry was incomplete`)
+    }
+    const expectedRootExecutable =
+      run?.app === 'videorc'
+        ? comparison?.candidate?.executablePath
+        : comparison?.obs?.portableExecutablePath
+    if (
+      !Number.isInteger(run?.process?.rootIdentity?.pid) ||
+      run.process.rootIdentity.pid <= 1 ||
+      typeof run?.process?.rootIdentity?.creationDate !== 'string' ||
+      !run.process.rootIdentity.creationDate.trim() ||
+      !portableAbsolutePath(run?.process?.rootIdentity?.executablePath)
+    ) {
+      blockers.push(`${label} publisher root PID/CreationDate/executable identity was incomplete`)
+    } else if (
+      portableAbsolutePath(expectedRootExecutable) &&
+      portablePathIdentity(run.process.rootIdentity.executablePath) !==
+        portablePathIdentity(expectedRootExecutable)
+    ) {
+      failures.push(`${label} publisher root executable did not match its manifest identity`)
+    }
     if (run?.process?.teardownClean !== true)
       failures.push(`${label} process teardown was not clean`)
+    if (run?.process?.forced === true) {
+      failures.push(`${label} required forced application teardown`)
+    }
+    if (run?.receiver?.verdict !== 'PASS') {
+      failures.push(`${label} local RTMP receiver lifecycle/clock did not pass`)
+    }
+    if (
+      run?.receiver?.target?.serverUrl !== comparison?.receiver?.target?.serverUrl ||
+      run?.receiver?.target?.streamKeySha256 !== comparison?.receiver?.target?.streamKeySha256 ||
+      run?.receiver?.target?.bindingSha256 !== comparison?.receiver?.target?.bindingSha256
+    ) {
+      blockers.push(`${label} did not use the manifest-locked local RTMP target`)
+    }
+    if (run?.stimulus?.verdict !== 'PASS' || run?.stimulus?.teardownClean !== true) {
+      blockers.push(`${label} deterministic motion/A/V stimulus evidence was incomplete`)
+    }
+    if (lowercaseSha256(run?.stimulus?.manifestSha256)) {
+      stimulusHashes.add(run.stimulus.manifestSha256)
+      if (run.stimulus.manifestSha256 !== comparison?.stimulus?.manifestSha256) {
+        blockers.push(`${label} stimulus hash did not match the locked manifest`)
+      }
+    } else {
+      blockers.push(`${label} stimulus manifest hash was missing`)
+    }
+    if (!lowercaseSha256(run?.reportSha256)) {
+      blockers.push(`${label} report SHA-256 was missing`)
+    } else {
+      reportHashes.add(run.reportSha256)
+    }
+    if (!portableAbsolutePath(run?.reportPath)) {
+      blockers.push(`${label} report path was missing or not absolute`)
+    } else {
+      reportPaths.add(run.reportPath)
+    }
     if (
       !Array.isArray(run?.artifacts) ||
       run.artifacts.length === 0 ||
       run.artifacts.some(
         (artifact) =>
           typeof artifact?.path !== 'string' ||
-          !artifact.path.trim() ||
-          !/^[0-9a-f]{64}$/i.test(artifact?.sha256 ?? '')
+          !portableAbsolutePath(artifact.path) ||
+          !lowercaseSha256(artifact?.sha256)
       )
     ) {
       blockers.push(`${label} did not retain hashed artifacts`)
     }
+  }
+  if (reportPaths.size !== 6 || reportHashes.size !== 6) {
+    blockers.push('comparison requires six distinct retained report paths and hashes')
+  }
+  if (stimulusHashes.size !== 1) {
+    blockers.push('all six runs must use one identical deterministic stimulus manifest')
   }
 
   const obsRuns = runs.filter((run) => run?.app === 'obs')
@@ -749,6 +996,7 @@ export function deriveWindowsStreamPerformanceBudget({ comparison, calibrations 
   }
   const comparisonPaths = comparison.runs.map((run) => run.reportPath)
   const comparisonHashes = comparison.runs.map((run) => run.reportSha256)
+  const candidatePayloadSha256 = comparison.candidate.packagePayload.sha256
   if (
     comparisonPaths.some((path) => typeof path !== 'string' || !path.trim()) ||
     comparisonHashes.some((hash) => !/^[0-9a-f]{64}$/i.test(hash ?? ''))
@@ -759,6 +1007,19 @@ export function deriveWindowsStreamPerformanceBudget({ comparison, calibrations 
   const obsRuns = comparison.runs.filter((run) => run.app === 'obs')
   const obs = summarizeComparisonRuns(obsRuns)
   const profiles = calibrations.map((calibration) => {
+    const calibrationLabel = `Calibration ${calibration?.id ?? '<unknown>'}`
+    const calibrationPayloadSha256 = calibration?.candidate?.packagePayload?.sha256
+    requireLowercaseSha(
+      calibrationPayloadSha256,
+      `${calibrationLabel} candidate.packagePayload.sha256`
+    )
+    if (calibrationPayloadSha256 !== candidatePayloadSha256) {
+      throw new Error(`${calibrationLabel} used a different Videorc packaged-payload digest.`)
+    }
+    if (typeof calibration?.aggregatePath !== 'string' || !calibration.aggregatePath.trim()) {
+      throw new Error(`${calibrationLabel} aggregatePath was missing.`)
+    }
+    requireSha(calibration?.aggregateSha256, `${calibrationLabel} aggregateSha256`)
     const runs = calibration?.runs
     const expectedRuns =
       calibration?.scope?.scenario === '1080p60-av-endurance' &&
@@ -769,6 +1030,30 @@ export function deriveWindowsStreamPerformanceBudget({ comparison, calibrations 
       throw new Error(
         `Calibration ${calibration?.id ?? '<unknown>'} must contain ${expectedRuns} run${expectedRuns === 1 ? '' : 's'}.`
       )
+    }
+    const reportPaths = runs.map((run) => run?.reportPath)
+    const reportSha256 = runs.map((run) => run?.reportSha256)
+    if (
+      reportPaths.some((path) => typeof path !== 'string' || !path.trim()) ||
+      new Set(reportPaths.map((path) => path.trim())).size !== expectedRuns ||
+      reportSha256.some((hash) => !sha256(hash)) ||
+      new Set(reportSha256.map(normalizeSha256)).size !== expectedRuns
+    ) {
+      throw new Error(
+        `${calibrationLabel} requires ${expectedRuns} distinct retained report paths and hashes.`
+      )
+    }
+    for (const [runIndex, run] of runs.entries()) {
+      const runPayloadSha256 = run?.candidate?.packagePayload?.sha256
+      requireLowercaseSha(
+        runPayloadSha256,
+        `${calibrationLabel} run ${runIndex + 1} candidate.packagePayload.sha256`
+      )
+      if (runPayloadSha256 !== calibrationPayloadSha256) {
+        throw new Error(
+          `${calibrationLabel} run ${runIndex + 1} used a different Videorc packaged-payload digest.`
+        )
+      }
     }
     const roles = Object.keys(runs[0]?.process?.roles ?? {}).sort()
     if (roles.length === 0) {
@@ -787,10 +1072,12 @@ export function deriveWindowsStreamPerformanceBudget({ comparison, calibrations 
       id: calibration.id,
       scope: calibration.scope,
       candidateSha256: comparison.candidate.sha256,
+      candidatePayloadSha256: calibrationPayloadSha256,
       evidence: {
         runCount: expectedRuns,
-        reportPaths: runs.map((run) => run.reportPath),
-        reportSha256: runs.map((run) => run.reportSha256),
+        reportPaths,
+        reportSha256,
+        calibrationPath: calibration.aggregatePath,
         calibrationSha256: calibration.aggregateSha256,
         comparisonPaths,
         comparisonSha256: comparisonHashes
@@ -854,6 +1141,7 @@ export function deriveWindowsStreamPerformanceBudget({ comparison, calibrations 
     kind: 'videorc.windows-performance-budget-set',
     status: 'draft',
     candidateSha256: comparison.candidate.sha256,
+    candidatePayloadSha256,
     comparison: {
       aggregatePath: comparison.aggregatePath,
       aggregateSha256: comparison.aggregateSha256,
@@ -891,6 +1179,7 @@ export function mergeWindowsObsRunEvidence({ manifest, runs }) {
     audio: manifest.mapping?.audio,
     settings: manifest.settings,
     stimulus: manifest.stimulus,
+    receiver: manifest.receiver,
     manifestPath: manifest.manifestPath,
     manifestSha256: manifest.manifestSha256,
     runs: mergedRuns
@@ -1081,6 +1370,29 @@ export function deriveWindowsD3d11PerformanceBudget({ comparisons, calibrations 
           `Calibration ${calibration.id} run ${runIndex + 1} did not prove zero-copy D3D11.`
         )
       }
+      for (const [field, maximum] of [
+        ['messageDispatchP95Ms', WINDOWS_D3D11_FAIRNESS_LIMITS.messagePumpLagP95Ms],
+        ['messageDispatchMaxMs', WINDOWS_D3D11_FAIRNESS_LIMITS.messagePumpLagMaxMs],
+        ['mediaCommandLagP95Ms', WINDOWS_D3D11_FAIRNESS_LIMITS.mediaCommandLagP95Ms],
+        ['mediaCommandLagMaxMs', WINDOWS_D3D11_FAIRNESS_LIMITS.mediaCommandLagMaxMs],
+        [
+          'maximumConsecutiveMessageBatch',
+          WINDOWS_D3D11_FAIRNESS_LIMITS.maximumConsecutiveMessageBatch
+        ],
+        ['maximumConsecutiveMediaBatch', WINDOWS_D3D11_FAIRNESS_LIMITS.maximumConsecutiveMediaBatch]
+      ]) {
+        const value = run?.pipeline?.[field]
+        if (!Number.isFinite(value) || value < 0 || value > maximum) {
+          throw new Error(
+            `Calibration ${calibration.id} run ${runIndex + 1} ${field} exceeded ${maximum}.`
+          )
+        }
+      }
+      if (run?.pipeline?.synchronizationTimeouts !== 0) {
+        throw new Error(
+          `Calibration ${calibration.id} run ${runIndex + 1} synchronizationTimeouts must be zero.`
+        )
+      }
       if (
         Number(run?.bmp?.requests) !== 0 ||
         Number(run?.bmp?.bytes) !== 0 ||
@@ -1156,6 +1468,32 @@ export function deriveWindowsD3d11PerformanceBudget({ comparisons, calibrations 
   }
 }
 
+export function assertWindowsD3d11PerformanceBudgetCanonicalDraft({
+  document,
+  comparisons,
+  calibrations
+}) {
+  const derived = deriveWindowsD3d11PerformanceBudget({ comparisons, calibrations })
+  const generatedFields = [
+    'schemaVersion',
+    'kind',
+    'generatedBy',
+    'candidate',
+    'qualifiedProfiles',
+    'unqualifiedLivestreamProfiles',
+    'comparisonEvidence',
+    'profiles'
+  ]
+  for (const field of generatedFields) {
+    if (stableJson(document?.[field]) !== stableJson(derived[field])) {
+      throw new Error(
+        `Active D3D11 budget ${field} did not byte-for-byte match canonical retained-evidence derivation.`
+      )
+    }
+  }
+  return derived
+}
+
 function deriveWindowsD3d11Profile({ calibration, comparison, obs, candidateIdentity }) {
   const runs = calibration.runs
   const roles = new Set(runs.flatMap((run) => Object.keys(run?.process?.roles ?? {})))
@@ -1195,7 +1533,12 @@ function deriveWindowsD3d11Profile({ calibration, comparison, obs, candidateIden
       cursorCorrect: true,
       inputContinuity: true,
       maximumMessageDispatchP95Ms: 50,
-      maximumMessageDispatchMs: 100
+      maximumMessageDispatchMs: 100,
+      maximumMediaCommandLagP95Ms: 50,
+      maximumMediaCommandLagMs: 100,
+      maximumConsecutiveMessageBatch: 32,
+      maximumConsecutiveMediaBatch: 32,
+      synchronizationTimeouts: 0
     },
     thresholds: {
       maximumTotalCpuP95Percent: Math.ceil(
@@ -1306,6 +1649,11 @@ function portableAbsolutePath(value) {
 
 function portableResolvePath(value) {
   return windowsAbsolutePath(value) ? win32.normalize(value) : resolve(value)
+}
+
+function portablePathIdentity(value) {
+  const resolved = portableResolvePath(value)
+  return windowsAbsolutePath(value) ? resolved.toLocaleLowerCase('en-US') : resolved
 }
 
 function windowsAbsolutePath(value) {

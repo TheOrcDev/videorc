@@ -68,10 +68,9 @@ describe('Windows window z-order evidence', () => {
 
     assert.equal(result.verdict, 'BLOCKED')
     assert.match(result.blockers.join('\n'), /visible unprotected HWND/)
-    assert.deepEqual(
-      result.occluders.map((entry) => entry.hwnd),
-      [normalizeWindowsHwnd(OWNED_OVERLAY_HWND)]
-    )
+    assert.deepEqual(result.occluders.map((entry) => entry.hwnd), [
+      normalizeWindowsHwnd(OWNED_OVERLAY_HWND)
+    ])
   })
 
   it('allows only an exact protected higher-z-order window over another protected crop', () => {

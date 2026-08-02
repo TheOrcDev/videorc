@@ -321,6 +321,37 @@ describe('validateSupportBundle', () => {
     )
   })
 
+  it('requires a named natural fallback when a Windows stream does not use live D3D11', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    bundle.sessions[0].finalDiagnostics = validWindowsStreamDiagnostics()
+    assert.equal(validateSupportBundle(bundle, { windowsAcceptance: true }).ok, true)
+
+    delete bundle.sessions[0].finalDiagnostics.windowsD3d11Media.fallbackReason
+    bundle.sessions[0].finalDiagnostics.windowsD3d11Media.adapterLuid = '00000000000003f1'
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /named fallbackReason/)
+    assert.match(result.failures.join('\n'), /must not claim adapterLuid/)
+  })
+
+  it('requires scheduler fairness and a zero synchronization-timeout counter', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    bundle.diagnostics = {
+      ...validWindowsStreamDiagnostics(),
+      windowsD3d11Media: validWindowsD3d11Diagnostics({
+        mediaCommandLagP95Ms: 51,
+        maximumConsecutiveMediaBatch: 33,
+        synchronizationTimeouts: 1
+      })
+    }
+
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /mediaCommandLagP95Ms within 50 ms/)
+    assert.match(result.failures.join('\n'), /maximumConsecutiveMediaBatch within 32/)
+    assert.match(result.failures.join('\n'), /synchronizationTimeouts=0/)
+  })
+
   it('validates Desktop Duplication cursor-on and cursor-excluded WGC without inverting exclusion', () => {
     const desktop = validWindowsAcceptanceBundle()
     desktop.diagnostics = {
@@ -578,7 +609,31 @@ function validWindowsStreamDiagnostics() {
     streamDuplicatedFrames: 0,
     encoderBridgeRequestedVideoOutput: 'windows-media-foundation-h264-mpegts',
     encoderBridgeEffectiveVideoOutput: 'windows-media-foundation-h264-mpegts',
-    encoderBridgeEncodedOutputBackend: 'windows-media-foundation'
+    encoderBridgeEncodedOutputBackend: 'windows-media-foundation',
+    windowsD3d11Media: validWindowsNaturalD3d11FallbackDiagnostics()
+  }
+}
+
+function validWindowsNaturalD3d11FallbackDiagnostics(overrides = {}) {
+  return {
+    state: 'fallback',
+    requested: false,
+    required: false,
+    adapterLuid: null,
+    captureAdapterLuid: null,
+    compositorAdapterLuid: null,
+    primaryEncoderAdapterLuid: null,
+    auxiliaryEncoderAdapterLuid: null,
+    captureBackend: 'legacy-ffmpeg',
+    fallbackReason: 'd3d11-fence-interface-unavailable',
+    messagePumpLagP95Ms: 0,
+    messagePumpLagMaxMs: 0,
+    mediaCommandLagP95Ms: 0,
+    mediaCommandLagMaxMs: 0,
+    maximumConsecutiveMessageBatch: 0,
+    maximumConsecutiveMediaBatch: 0,
+    synchronizationTimeouts: 0,
+    ...overrides
   }
 }
 
@@ -609,6 +664,11 @@ function validWindowsD3d11Diagnostics(overrides = {}) {
     texturePoolInUse: 2,
     messagePumpLagP95Ms: 10,
     messagePumpLagMaxMs: 20,
+    mediaCommandLagP95Ms: 8,
+    mediaCommandLagMaxMs: 16,
+    maximumConsecutiveMessageBatch: 12,
+    maximumConsecutiveMediaBatch: 10,
+    synchronizationTimeouts: 0,
     cursorRequested: true,
     cursorMode: 'separate',
     cursorPixelsSource: 'duplication-pointer-shape',

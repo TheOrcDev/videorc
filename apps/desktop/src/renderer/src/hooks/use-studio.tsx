@@ -113,7 +113,12 @@ import {
   shouldReloadSceneFromCaptureConfig
 } from '@/lib/layout-transaction-policy'
 import {
+  mergePreviewSurfaceHostStatus,
+  nativePreviewFramePollingRequestKey,
+  nativePreviewFramePollingResponseCanCommit,
   nativePreviewFramePollingShouldSuppress,
+  nativePreviewMainStatusReadGenerationMatches,
+  previewSurfaceStatusWithoutMainAuthority,
   previewSurfaceStatusRequiresMainAuthority,
   nativePreviewSurfaceSyncCanCommit,
   nativePreviewSurfaceSyncNeedsCreate
@@ -1200,7 +1205,15 @@ const idleDiagnosticStats = (): DiagnosticStats => ({
   compositorScreenSourceCvpixelbufferImportFrames: 0,
   compositorScreenSourceByteUploadFrames: 0,
   compositorScreenSourceImportFailures: 0,
-  previewImagePollCounts: { cameraPng: 0, screenPng: 0, liveJpeg: 0, liveMjpeg: 0 },
+  previewImagePollCounts: {
+    cameraPng: 0,
+    screenPng: 0,
+    productionPng: 0,
+    cameraBmp: 0,
+    screenBmp: 0,
+    liveJpeg: 0,
+    liveMjpeg: 0
+  },
   recordingAtRisk: false,
   recordingRiskReasons: [],
   recordingProtected: false,
@@ -4392,6 +4405,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bootstrapGuard.mark('previewSurface')
         const backendStatus = payload as PreviewSurfaceStatus
         const readSerial = ++nativePreviewMainStatusReadSerialRef.current
+        const previewGeneration = previewWindowRef.current.supervisor.generation
+        const mainStatusReadCanCommit = (): boolean =>
+          !disposed &&
+          readSerial === nativePreviewMainStatusReadSerialRef.current &&
+          nativePreviewMainStatusReadGenerationMatches(
+            previewGeneration,
+            previewWindowRef.current.supervisor.generation
+          )
         if (
           previewSurfaceStatusRequiresMainAuthority(backendStatus) &&
           window.videorc?.getNativePreviewSurfaceStatus
@@ -4399,15 +4420,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           void window.videorc
             .getNativePreviewSurfaceStatus()
             .then((mainStatus) => {
-              if (!disposed && readSerial === nativePreviewMainStatusReadSerialRef.current) {
+              if (mainStatusReadCanCommit()) {
                 applyPreviewSurfaceStatusThrottled(mainStatus)
               }
             })
             .catch(() => {
-              if (!disposed && readSerial === nativePreviewMainStatusReadSerialRef.current) {
-                // The raw backend shape cannot claim Windows native authority,
-                // but remains truthful proof/fallback state if main is gone.
-                applyPreviewSurfaceStatusThrottled(backendStatus)
+              if (mainStatusReadCanCommit()) {
+                applyPreviewSurfaceStatusThrottled(
+                  previewSurfaceStatusWithoutMainAuthority(backendStatus)
+                )
               }
             })
           return
@@ -4767,10 +4788,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           previewSurfaceStatusRequiresMainAuthority(nextPreviewSurface) &&
           window.videorc?.getNativePreviewSurfaceStatus
         ) {
+          const previewGeneration = previewWindowRef.current.supervisor.generation
           resolvedPreviewSurface = await window.videorc
             .getNativePreviewSurfaceStatus()
-            .catch(() => nextPreviewSurface)
-          if (!generationIsCurrent()) {
+            .catch(() => previewSurfaceStatusWithoutMainAuthority(nextPreviewSurface))
+          if (
+            !generationIsCurrent() ||
+            !nativePreviewMainStatusReadGenerationMatches(
+              previewGeneration,
+              previewWindowRef.current.supervisor.generation
+            )
+          ) {
             return
           }
         }
@@ -6388,21 +6416,34 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     const recordingActive = isActiveRecordingState(recordingRef.current.state)
+    const generation = previewWindowRef.current.supervisor.generation
     const suppress = nativePreviewFramePollingShouldSuppress({
       recordingActive,
       windowOpen: previewWindowRef.current.open,
       platform: runtimeInfo?.platform ?? 'darwin',
+      generation,
       status: previewSurfaceStatusRef.current
     })
-    const requestKey = `${suppress}:${recordingActive}`
+    const requestKey = nativePreviewFramePollingRequestKey({
+      generation,
+      suppress,
+      recordingActive
+    })
     if (nativePreviewFramePollingRequestKeyRef.current === requestKey) {
       return
     }
     nativePreviewFramePollingRequestKeyRef.current = requestKey
     void window.videorc
-      .setNativePreviewSurfaceFramePollingSuppressed(suppress, recordingActive)
+      .setNativePreviewSurfaceFramePollingSuppressed(suppress, generation, recordingActive)
       .then((status) => {
-        if (nativePreviewFramePollingRequestKeyRef.current === requestKey) {
+        if (
+          nativePreviewFramePollingResponseCanCommit({
+            requestKey,
+            currentRequestKey: nativePreviewFramePollingRequestKeyRef.current,
+            requestGeneration: generation,
+            currentGeneration: previewWindowRef.current.supervisor.generation
+          })
+        ) {
           applyPreviewSurfaceStatus(status)
         }
       })
@@ -6418,24 +6459,38 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   // Closing the preview window must cost nothing: tear the surface session down
   // (helper window, proof window, backend session) instead of merely hiding it.
-  const teardownDetachedPreviewSurface = useCallback(async (generation?: number) => {
-    const generationIsCurrent = (): boolean =>
-      generation === undefined || previewWindowRef.current.supervisor.generation === generation
-    nativePreviewSurfaceCreatedRef.current = false
-    nativePreviewSurfaceLastSyncedBoundsRef.current = null
-    nativePreviewSurfaceBoundsPendingRef.current = null
-    nativePreviewSurfaceBoundsPendingGenerationRef.current = undefined
-    try {
-      if (window.videorc?.applyNativePreviewHostCommands) {
-        await window.videorc.applyNativePreviewHostCommands([{ kind: 'destroy' }], generation)
+  const teardownDetachedPreviewSurface = useCallback(
+    async (generation?: number) => {
+      const generationIsCurrent = (): boolean =>
+        generation === undefined || previewWindowRef.current.supervisor.generation === generation
+      nativePreviewSurfaceCreatedRef.current = false
+      nativePreviewSurfaceLastSyncedBoundsRef.current = null
+      nativePreviewSurfaceBoundsPendingRef.current = null
+      nativePreviewSurfaceBoundsPendingGenerationRef.current = undefined
+      try {
+        const hostStatus = window.videorc?.applyNativePreviewHostCommands
+          ? await window.videorc.applyNativePreviewHostCommands([{ kind: 'destroy' }], generation)
+          : null
+        const backendStatus =
+          generationIsCurrent() && clientRef.current && wsStatusRef.current === 'connected'
+            ? await clientRef.current.request<PreviewSurfaceStatus>('preview.surface.destroy')
+            : null
+        if (!generationIsCurrent()) {
+          return
+        }
+        const status =
+          backendStatus && hostStatus
+            ? mergePreviewSurfaceHostStatus(backendStatus, hostStatus)
+            : (backendStatus ?? hostStatus)
+        if (status) {
+          applyPreviewSurfaceStatus(status)
+        }
+      } catch (error) {
+        console.error('Detached preview surface teardown failed:', error)
       }
-      if (generationIsCurrent() && clientRef.current && wsStatusRef.current === 'connected') {
-        await clientRef.current.request('preview.surface.destroy')
-      }
-    } catch (error) {
-      console.error('Detached preview surface teardown failed:', error)
-    }
-  }, [])
+    },
+    [applyPreviewSurfaceStatus]
+  )
 
   useEffect(() => {
     if (!nativePreviewSurfaceEnabled || runtimeInfo?.disableAutoPreview) {
@@ -10505,81 +10560,6 @@ function isEditableTargetSafe(target: EventTarget | null): boolean {
   return target instanceof HTMLElement
     ? Boolean(target.closest('input, textarea, select, button, [contenteditable="true"]'))
     : false
-}
-
-function mergePreviewSurfaceHostStatus(
-  backendStatus: PreviewSurfaceStatus,
-  hostStatus: PreviewSurfaceStatus
-): PreviewSurfaceStatus {
-  const hostLive = hostStatus.state === 'live'
-  const hostTransport =
-    hostStatus.transport !== 'unavailable' ? hostStatus.transport : backendStatus.transport
-  const hostBacking = hostStatus.backing !== 'none' ? hostStatus.backing : backendStatus.backing
-
-  if (!hostLive) {
-    return {
-      ...backendStatus,
-      framesRendered: Math.max(backendStatus.framesRendered, hostStatus.framesRendered),
-      message: backendStatus.message ?? hostStatus.message
-    }
-  }
-
-  return {
-    ...backendStatus,
-    state: hostStatus.state,
-    source: hostStatus.source,
-    transport: hostTransport,
-    backing: hostBacking,
-    width: hostStatus.width > 0 ? hostStatus.width : backendStatus.width,
-    height: hostStatus.height > 0 ? hostStatus.height : backendStatus.height,
-    targetFps: hostStatus.targetFps > 0 ? hostStatus.targetFps : backendStatus.targetFps,
-    framesRendered: Math.max(backendStatus.framesRendered, hostStatus.framesRendered),
-    presentedFrameId: hostStatus.presentedFrameId ?? backendStatus.presentedFrameId,
-    compositorFrameLag: hostStatus.compositorFrameLag ?? backendStatus.compositorFrameLag,
-    droppedFrames: hostStatus.droppedFrames ?? backendStatus.droppedFrames,
-    inputToPresentLatencyMs:
-      hostStatus.inputToPresentLatencyMs ?? backendStatus.inputToPresentLatencyMs,
-    inputToPresentLatencyP50Ms:
-      hostStatus.inputToPresentLatencyP50Ms ?? backendStatus.inputToPresentLatencyP50Ms,
-    inputToPresentLatencyP95Ms:
-      hostStatus.inputToPresentLatencyP95Ms ?? backendStatus.inputToPresentLatencyP95Ms,
-    inputToPresentLatencyP99Ms:
-      hostStatus.inputToPresentLatencyP99Ms ?? backendStatus.inputToPresentLatencyP99Ms,
-    presentFps: hostStatus.presentFps ?? backendStatus.presentFps,
-    intervalP95Ms: hostStatus.intervalP95Ms ?? backendStatus.intervalP95Ms,
-    intervalP99Ms: hostStatus.intervalP99Ms ?? backendStatus.intervalP99Ms,
-    nativePreviewMutationQueueCapacity:
-      hostStatus.nativePreviewMutationQueueCapacity ??
-      backendStatus.nativePreviewMutationQueueCapacity,
-    nativePreviewMutationQueueDepth:
-      hostStatus.nativePreviewMutationQueueDepth ?? backendStatus.nativePreviewMutationQueueDepth,
-    nativePreviewMutationQueueActiveCount:
-      hostStatus.nativePreviewMutationQueueActiveCount ??
-      backendStatus.nativePreviewMutationQueueActiveCount,
-    nativePreviewMutationQueuePendingCount:
-      hostStatus.nativePreviewMutationQueuePendingCount ??
-      backendStatus.nativePreviewMutationQueuePendingCount,
-    nativePreviewMutationQueueMaxDepth:
-      hostStatus.nativePreviewMutationQueueMaxDepth ??
-      backendStatus.nativePreviewMutationQueueMaxDepth,
-    nativePreviewMutationQueueRejectedCount:
-      hostStatus.nativePreviewMutationQueueRejectedCount ??
-      backendStatus.nativePreviewMutationQueueRejectedCount,
-    framePollingSuppressed:
-      hostStatus.framePollingSuppressed || backendStatus.framePollingSuppressed,
-    sourcePixelsPresent: hostStatus.sourcePixelsPresent || backendStatus.sourcePixelsPresent,
-    nativePreviewHostKind: hostStatus.nativePreviewHostKind ?? backendStatus.nativePreviewHostKind,
-    nativePreviewHostAttached:
-      hostStatus.nativePreviewHostAttached ?? backendStatus.nativePreviewHostAttached,
-    windowsD3d11Presenter: hostStatus.windowsD3d11Presenter ?? backendStatus.windowsD3d11Presenter,
-    firstFrameContract: hostStatus.firstFrameContract ?? backendStatus.firstFrameContract,
-    firstFrameReason: hostStatus.firstFrameReason ?? backendStatus.firstFrameReason,
-    pendingHostCommandCount: backendStatus.pendingHostCommandCount,
-    bounds: hostStatus.bounds ?? backendStatus.bounds,
-    startedAt: hostStatus.startedAt ?? backendStatus.startedAt,
-    updatedAt: hostStatus.updatedAt,
-    message: hostStatus.message ?? backendStatus.message
-  }
 }
 
 function basename(path: string): string {

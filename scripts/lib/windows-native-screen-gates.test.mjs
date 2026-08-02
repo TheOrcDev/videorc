@@ -36,6 +36,10 @@ test('Windows Graphics Capture gate requires a live retained D3D11 texture', () 
 })
 
 test('native Windows screen arguments select D3D11 or natural fallback strictly', () => {
+  assert.deepEqual(
+    parseWindowsNativeScreenArgs(['--', '--d3d11', '--require-d3d11']),
+    parseWindowsNativeScreenArgs(['--d3d11', '--require-d3d11'])
+  )
   assert.deepEqual(parseWindowsNativeScreenArgs(['--d3d11', '--require-d3d11']), {
     d3d11: true,
     requireD3d11: true,

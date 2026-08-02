@@ -45,8 +45,10 @@ const d3dState = () => ({
 
 test('preview lifecycle mode parsing is strict and mutually exclusive', () => {
   assert.equal(parseWindowsPreviewLifecycleMode([], {}), 'default')
+  assert.equal(parseWindowsPreviewLifecycleMode(['--gate'], {}), 'default')
+  assert.equal(parseWindowsPreviewLifecycleMode(['--report-only'], {}), 'default')
   assert.equal(
-    parseWindowsPreviewLifecycleMode([], { VIDEORC_EXPECT_WINDOWS_D3D11: '1' }),
+    parseWindowsPreviewLifecycleMode(['--gate'], { VIDEORC_EXPECT_WINDOWS_D3D11: '1' }),
     'windows-d3d11'
   )
   assert.equal(

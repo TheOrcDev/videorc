@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import { dirname, isAbsolute, relative, resolve } from 'node:path'
+
+import { WINDOWS_D3D11_FAIRNESS_LIMITS } from './windows-d3d11-media.mjs'
 
 export const WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND = 'videorc.windows-d3d11-performance-budget'
 export const WINDOWS_D3D11_PERFORMANCE_HARDWARE_CLASSES = Object.freeze([
@@ -95,7 +97,9 @@ export async function loadWindowsPerformanceBudget({
   context,
   read = readFile,
   requireComparison = false,
-  verifyArtifact = verifyWindowsPerformanceBudgetArtifact
+  verifyArtifact = verifyWindowsPerformanceBudgetArtifact,
+  verifyDerivation = verifyWindowsD3d11PerformanceBudgetDerivation,
+  candidateRoot
 }) {
   if (typeof path !== 'string' || !path.trim()) {
     throw new WindowsPerformanceBudgetError([
@@ -155,8 +159,239 @@ export async function loadWindowsPerformanceBudget({
     if (artifactFailures.length > 0) {
       throw new WindowsPerformanceBudgetError(artifactFailures)
     }
+    if (d3d11Budget) {
+      const derivationFailures = await verifyDerivation({
+        document,
+        budgetPath: path,
+        read,
+        ...(candidateRoot ? { candidateRoot } : {})
+      })
+      if (derivationFailures.length > 0) {
+        throw new WindowsPerformanceBudgetError(derivationFailures)
+      }
+    }
   }
   return { path, profile, document }
+}
+
+export async function verifyWindowsD3d11PerformanceBudgetDerivation({
+  document,
+  budgetPath,
+  candidateRoot = dirname(resolve(budgetPath)),
+  read = readFile,
+  onArtifact = null
+} = {}) {
+  try {
+    const [obsModule, streamModule, supportModule] = await Promise.all([
+      import('./windows-obs-side-by-side.mjs'),
+      import('./windows-stream-performance.mjs'),
+      import('./support-bundle-verifier.mjs')
+    ])
+    const readArtifact = async (path, expectedSha256, label, { json = true } = {}) => {
+      if (typeof path !== 'string' || !path.trim()) throw new Error(`${label} path was missing`)
+      const artifactPath = portableAbsolutePath(path)
+        ? resolve(path)
+        : resolve(dirname(budgetPath), path)
+      assertWindowsD3d11EvidenceAuthorityBoundary({
+        budgetPath,
+        candidateRoot,
+        evidencePath: artifactPath,
+        label
+      })
+      const value = await read(artifactPath)
+      const bytes = Buffer.isBuffer(value) ? value : Buffer.from(String(value), 'utf8')
+      const actualSha256 = createHash('sha256').update(bytes).digest('hex')
+      if (actualSha256 !== normalizeSha256(expectedSha256)) {
+        throw new Error(`${label} SHA-256 did not match retained bytes`)
+      }
+      let parsed = null
+      if (json) {
+        try {
+          parsed = JSON.parse(bytes.toString('utf8'))
+        } catch (error) {
+          throw new Error(`${label} was not valid JSON: ${error.message}`)
+        }
+      }
+      const artifact = {
+        path: artifactPath,
+        sha256: actualSha256,
+        size: bytes.length,
+        bytes,
+        document: parsed
+      }
+      if (typeof onArtifact === 'function') onArtifact(artifact)
+      return artifact
+    }
+
+    const verifyObsComparisonTree = async (evidence) => {
+      const aggregate = await readArtifact(
+        evidence.aggregatePath,
+        evidence.aggregateSha256,
+        `${evidence.hardwareClass} comparison aggregate`
+      )
+      const comparison = {
+        ...aggregate.document,
+        aggregatePath: aggregate.path,
+        aggregateSha256: aggregate.sha256
+      }
+      await readArtifact(
+        comparison.manifestPath,
+        comparison.manifestSha256,
+        `${evidence.hardwareClass} comparison manifest`
+      )
+      for (const [index, run] of (comparison.runs ?? []).entries()) {
+        const report = await readArtifact(
+          run.reportPath,
+          run.reportSha256,
+          `${evidence.hardwareClass} comparison run ${index + 1}`
+        )
+        const embedded = { ...run }
+        delete embedded.reportSha256
+        if (stableJson(report.document) !== stableJson(embedded)) {
+          throw new Error(
+            `${evidence.hardwareClass} comparison run ${index + 1} did not match its retained report bytes`
+          )
+        }
+        for (const [artifactIndex, artifact] of (run.artifacts ?? []).entries()) {
+          const retained = await readArtifact(
+            artifact.path,
+            artifact.sha256,
+            `${evidence.hardwareClass} run ${index + 1} artifact ${artifactIndex + 1}`,
+            { json: /\.json$/i.test(artifact.path) }
+          )
+          if (/(?:^|[\\/])support-bundle\.json$/i.test(artifact.path)) {
+            const validation = supportModule.validateSupportBundle(retained.document, {
+              windowsAcceptance: true
+            })
+            if (!validation.ok) {
+              throw new Error(
+                `${evidence.hardwareClass} run ${index + 1} support bundle was invalid: ${validation.failures.join('; ')}`
+              )
+            }
+          }
+        }
+      }
+      const evaluation = obsModule.evaluateWindowsObsComparison(comparison)
+      if (evaluation.verdict !== 'PASS') {
+        throw new Error(
+          `${evidence.hardwareClass} comparison did not independently re-evaluate to PASS`
+        )
+      }
+      return comparison
+    }
+
+    const comparisons = []
+    for (const evidence of document.comparisonEvidence ?? []) {
+      comparisons.push(await verifyObsComparisonTree(evidence))
+    }
+
+    const calibrations = []
+    const calibrationByPath = new Map()
+    for (const profile of document.profiles ?? []) {
+      const key = canonicalEvidencePath(profile.evidence.calibrationPath)
+      let retained = calibrationByPath.get(key)
+      if (!retained) {
+        retained = await readArtifact(
+          profile.evidence.calibrationPath,
+          profile.evidence.calibrationSha256,
+          `${profile.id} calibration aggregate`
+        )
+        calibrationByPath.set(key, retained)
+        const rebuilt = streamModule.buildWindowsD3d11StreamCalibrations({
+          aggregate: retained.document,
+          aggregatePath: retained.path
+        })
+        if (stableJson(retained.document.d3d11Calibrations ?? []) !== stableJson(rebuilt)) {
+          throw new Error(
+            `${profile.id} calibration declarations did not match their aggregate run summaries`
+          )
+        }
+        for (const [index, run] of (retained.document.runs ?? []).entries()) {
+          if (!run?.reportPath || !run?.reportSha256) {
+            throw new Error(`${profile.id} calibration run ${index + 1} was not report-bound`)
+          }
+          const report = await readArtifact(
+            run.reportPath,
+            run.reportSha256,
+            `${profile.id} calibration run ${index + 1}`
+          )
+          const reevaluated = streamModule.evaluateWindowsStreamRun(report.document?.evidence)
+          if (
+            reevaluated.verdict !== 'PASS' ||
+            stableJson(report.document?.result) !== stableJson(reevaluated) ||
+            stableJson(report.document?.evidence?.calibration) !== stableJson(run.calibration) ||
+            report.document?.evidence?.scenarioId !== run.scenarioId ||
+            report.document?.evidence?.repetition !== run.repetition
+          ) {
+            throw new Error(
+              `${profile.id} calibration run ${index + 1} did not independently match and re-evaluate to PASS`
+            )
+          }
+        }
+        retained.calibrations = rebuilt.map((calibration) => ({
+          ...calibration,
+          aggregateSha256: retained.sha256
+        }))
+      }
+      const calibration = retained.calibrations.find((entry) => entry.id === profile.id)
+      if (!calibration) throw new Error(`${profile.id} was absent from its calibration aggregate`)
+      if (!calibrations.some((entry) => entry.id === calibration.id)) calibrations.push(calibration)
+    }
+
+    const derived = obsModule.assertWindowsD3d11PerformanceBudgetCanonicalDraft({
+      document,
+      comparisons,
+      calibrations
+    })
+    if (document.naturalFallbackPolicy) {
+      const policy = document.naturalFallbackPolicy
+      const aggregate = await readArtifact(
+        policy.evidence.calibrationPath,
+        policy.evidence.calibrationSha256,
+        'natural fallback calibration aggregate'
+      )
+      const reports = []
+      for (let index = 0; index < policy.evidence.reportPaths.length; index += 1) {
+        const report = await readArtifact(
+          policy.evidence.reportPaths[index],
+          policy.evidence.reportSha256[index],
+          `natural fallback report ${index + 1}`
+        )
+        const reevaluated = streamModule.evaluateWindowsStreamRun(report.document?.evidence)
+        if (
+          reevaluated.verdict !== 'PASS' ||
+          stableJson(report.document?.result) !== stableJson(reevaluated)
+        ) {
+          throw new Error(
+            `natural fallback report ${index + 1} did not independently re-evaluate to its exact PASS result`
+          )
+        }
+        reports.push(report)
+      }
+      const fallbackCalibration = streamModule.normalizeWindowsNaturalFallbackCalibration({
+        aggregate: aggregate.document,
+        aggregatePath: aggregate.path,
+        aggregateSha256: aggregate.sha256,
+        reports
+      })
+      const withPolicy = attachWindowsNaturalFallbackPolicy({
+        document: derived,
+        calibration: fallbackCalibration
+      })
+      if (
+        stableJson(withPolicy.naturalFallbackPolicy) !== stableJson(document.naturalFallbackPolicy)
+      ) {
+        throw new Error(
+          'Active D3D11 budget naturalFallbackPolicy did not match canonical retained-evidence derivation'
+        )
+      }
+    }
+    return []
+  } catch (error) {
+    return [
+      `active D3D11 budget could not be deterministically re-derived: ${error?.message ?? String(error)}`
+    ]
+  }
 }
 
 export function validateWindowsPerformanceBudget(document, options = {}) {
@@ -237,6 +472,24 @@ export function validateWindowsPerformanceBudget(document, options = {}) {
 
 export function validateWindowsD3d11PerformanceBudget(document, options = {}) {
   const failures = []
+  const expectedKeys = [
+    'schemaVersion',
+    'kind',
+    'status',
+    'generatedBy',
+    'candidate',
+    'qualifiedProfiles',
+    'unqualifiedLivestreamProfiles',
+    'comparisonEvidence',
+    'profiles',
+    'naturalFallbackPolicy',
+    'activation',
+    ...(document?.status === 'active' ? ['reviewedBy', 'reviewedAt'] : [])
+  ].sort()
+  const actualKeys = isRecord(document) ? Object.keys(document).sort() : []
+  if (!equalArrays(actualKeys, expectedKeys)) {
+    failures.push('D3D11 budget top-level fields contained schema drift')
+  }
   if (document?.schemaVersion !== 1) failures.push('schemaVersion must be 1')
   if (document?.kind !== WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND) {
     failures.push(`kind must be ${WINDOWS_D3D11_PERFORMANCE_BUDGET_KIND}`)
@@ -537,7 +790,12 @@ function validateD3d11Invariants(invariants, label, failures) {
     cursorCorrect: true,
     inputContinuity: true,
     maximumMessageDispatchP95Ms: 50,
-    maximumMessageDispatchMs: 100
+    maximumMessageDispatchMs: 100,
+    maximumMediaCommandLagP95Ms: 50,
+    maximumMediaCommandLagMs: 100,
+    maximumConsecutiveMessageBatch: 32,
+    maximumConsecutiveMediaBatch: 32,
+    synchronizationTimeouts: 0
   }
   for (const [field, expected] of Object.entries(exact)) {
     if (invariants[field] !== expected) {
@@ -1057,6 +1315,32 @@ export function evaluateWindowsPerformanceBudget(profile, metrics) {
       d3d11.messageDispatchMaxMs,
       profile.invariants.maximumMessageDispatchMs
     )
+    requireAtMost(
+      failures,
+      'media command p95',
+      d3d11.mediaCommandLagP95Ms,
+      profile.invariants.maximumMediaCommandLagP95Ms
+    )
+    requireAtMost(
+      failures,
+      'media command maximum',
+      d3d11.mediaCommandLagMaxMs,
+      profile.invariants.maximumMediaCommandLagMs
+    )
+    for (const field of ['maximumConsecutiveMessageBatch', 'maximumConsecutiveMediaBatch']) {
+      const value = d3d11[field]
+      if (
+        !Number.isInteger(value) ||
+        value < 0 ||
+        value > WINDOWS_D3D11_FAIRNESS_LIMITS[field] ||
+        value > profile.invariants[field]
+      ) {
+        failures.push(
+          `${field} ${value ?? 'missing'} exceeded ${profile.invariants[field] ?? 'missing'}`
+        )
+      }
+    }
+    requireEqualMetric(failures, 'synchronization timeouts', d3d11.synchronizationTimeouts, 0)
   }
   if (profile?.invariants?.obsParityQualified === false) {
     requireAtLeast(
@@ -1557,6 +1841,30 @@ function nonEmptyString(value) {
 
 function canonicalEvidencePath(value) {
   return resolve('/', value.trim().replaceAll('\\', '/')).toLocaleLowerCase('en-US')
+}
+
+export function assertWindowsD3d11EvidenceAuthorityBoundary({
+  budgetPath,
+  candidateRoot,
+  evidencePath,
+  label = 'D3D11 retained evidence'
+} = {}) {
+  if (!portableAbsolutePath(budgetPath)) {
+    throw new Error('active D3D11 budget authority path must be absolute')
+  }
+  if (!portableAbsolutePath(candidateRoot) || !portableAbsolutePath(evidencePath)) {
+    throw new Error(`${label} and candidate evidence root must be absolute`)
+  }
+  const resolvedRoot = resolve(candidateRoot)
+  const resolvedCandidate = resolve(evidencePath)
+  const child = relative(resolvedRoot, resolvedCandidate)
+  if (
+    child === '' ||
+    (child !== '..' && !child.startsWith('../') && !child.startsWith('..\\') && !isAbsolute(child))
+  ) {
+    return
+  }
+  throw new Error(`${label} escaped the candidate evidence root`)
 }
 
 function portableAbsolutePath(value) {

@@ -132,8 +132,8 @@ const api: VideorcApi = {
   updateNativePreviewSurfaceScene: (scene) => invoke('preview-surface:update-scene', scene),
   updateNativePreviewSurfaceCompositor: (status) =>
     invoke('preview-surface:update-compositor', status),
-  setNativePreviewSurfaceFramePollingSuppressed: (suppressed, recordingActive) =>
-    invoke('preview-surface:set-frame-polling-suppressed', suppressed, recordingActive),
+  setNativePreviewSurfaceFramePollingSuppressed: (suppressed, generation, recordingActive) =>
+    invoke('preview-surface:set-frame-polling-suppressed', suppressed, generation, recordingActive),
   destroyNativePreviewSurface: (generation) => invoke('preview-surface:destroy', generation),
   getNativePreviewSurfaceStatus: () => invoke('preview-surface:status'),
   openSystemPermissions: (pane) => invoke('system:open-permissions', pane),

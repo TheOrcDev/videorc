@@ -1,5 +1,9 @@
 export function parseWindowsPreviewLifecycleMode(argv = [], env = process.env) {
   const values = [...argv]
+  for (const performanceFlag of ['--gate', '--report-only']) {
+    const index = values.indexOf(performanceFlag)
+    if (index >= 0) values.splice(index, 1)
+  }
   let expectFallback = false
   const fallbackIndex = values.indexOf('--expect-fallback')
   if (fallbackIndex >= 0) {

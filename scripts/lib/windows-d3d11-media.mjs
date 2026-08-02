@@ -30,12 +30,32 @@ export const WINDOWS_D3D11_NATURAL_FALLBACK_SCENARIOS = Object.freeze([
   '1080p30-record-stream-no-preview'
 ])
 
+export const WINDOWS_D3D11_FAIRNESS_LIMITS = Object.freeze({
+  messagePumpLagP95Ms: 50,
+  messagePumpLagMaxMs: 100,
+  mediaCommandLagP95Ms: 50,
+  mediaCommandLagMaxMs: 100,
+  maximumConsecutiveMessageBatch: 32,
+  maximumConsecutiveMediaBatch: 32
+})
+
+export const WINDOWS_D3D11_STAGE_PRODUCER_SCENARIOS = Object.freeze({
+  capture: '1080p30-stream-no-preview',
+  compositor: '1080p30-screen-camera-stream-no-preview',
+  encoder: '1080p30-record-stream-no-preview',
+  preview: '1080p30-stream-preview'
+})
+
 export const WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS = Object.freeze([
   'VIDEORC_WINDOWS_D3D11_MEDIA',
   'VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA',
   'VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT',
   'VIDEORC_WINDOWS_REQUIRE_ENCODED_BRIDGE',
-  'VIDEORC_WINDOWS_EXPECT_D3D11_FALLBACK'
+  'VIDEORC_WINDOWS_EXPECT_D3D11_FALLBACK',
+  'VIDEORC_ENCODER_BRIDGE',
+  'VIDEORC_RECORDING_ENCODER_BRIDGE',
+  'VIDEORC_STREAMING_ENCODER_BRIDGE',
+  'VIDEORC_WINDOWS_GRAPHICS_CAPTURE'
 ])
 
 export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
@@ -193,11 +213,30 @@ const REQUIRED_ZERO_COUNTERS = Object.freeze([
   'adapterMismatches',
   'deviceResets',
   'staleGenerationCallbacks',
+  'synchronizationTimeouts',
   'pathIdentityChanges',
   'unexpectedFallbacks'
 ])
 
+const COMMON_PHYSICAL_STAGE_ASSERTIONS = Object.freeze([
+  'installed-packaged-candidate',
+  'exact-windows-rust-discovery',
+  'focused-windows-rust-tests',
+  'd3d11-live-same-adapter',
+  'zero-copy-counters',
+  'bounded-media-thread-fairness',
+  'no-path-fallback'
+])
+
+const STAGE_SPECIFIC_ASSERTIONS = Object.freeze({
+  capture: 'native-capture-textures',
+  compositor: 'd3d11-screen-camera-composition',
+  encoder: 'media-foundation-gpu-input',
+  preview: 'directcomposition-preview-input-continuity'
+})
+
 export function parseWindowsD3d11MediaArgs(argv = []) {
+  const args = argv[0] === '--' ? argv.slice(1) : argv
   const parsed = {
     operation: null,
     stage: null,
@@ -216,8 +255,8 @@ export function parseWindowsD3d11MediaArgs(argv = []) {
   }
   const seen = new Set()
 
-  for (let index = 0; index < argv.length; index += 1) {
-    const flag = argv[index]
+  for (let index = 0; index < args.length; index += 1) {
+    const flag = args[index]
     if (typeof flag !== 'string' || !flag.startsWith('--')) {
       throw new Error(`Unexpected Windows D3D11 media argument: ${flag}`)
     }
@@ -236,7 +275,7 @@ export function parseWindowsD3d11MediaArgs(argv = []) {
           parsed.operation
         )
       ) {
-        parsed.inputPaths = parseUniqueCsv(requiredValue(argv, ++index, flag), flag)
+        parsed.inputPaths = parseUniqueCsv(requiredValue(args, ++index, flag), flag)
       }
       continue
     }
@@ -249,7 +288,7 @@ export function parseWindowsD3d11MediaArgs(argv = []) {
     if (!VALUE_FLAGS.has(flag)) {
       throw new Error(`Unknown Windows D3D11 media argument: ${flag}`)
     }
-    const value = requiredValue(argv, ++index, flag)
+    const value = requiredValue(args, ++index, flag)
     switch (flag) {
       case '--stage':
         parsed.stage = assertMember(value, WINDOWS_D3D11_MEDIA_STAGES, flag)
@@ -412,6 +451,44 @@ export function windowsD3d11RustDiscoveryCommand() {
   ]
 }
 
+export function windowsD3d11StageProducerSpec({ stage, output } = {}) {
+  const scenario = WINDOWS_D3D11_STAGE_PRODUCER_SCENARIOS[stage]
+  if (!scenario) {
+    throw new Error(`Physical D3D11 stage producer does not support ${stage ?? 'missing'}.`)
+  }
+  if (!portableAbsolutePath(output)) {
+    throw new Error('Physical D3D11 stage producer --output must be absolute.')
+  }
+  return {
+    producer: 'installed-packaged-stream-performance',
+    scenario,
+    args: [
+      '--scenario',
+      scenario,
+      '--runs',
+      '1',
+      '--bridge',
+      'mf',
+      '--require-bridge',
+      '--d3d11',
+      '--require-d3d11',
+      '--path-evidence',
+      'forced',
+      '--video-only',
+      '--output',
+      output
+    ]
+  }
+}
+
+export function requiredWindowsD3d11StageAssertionIds(stage) {
+  const stageAssertion = STAGE_SPECIFIC_ASSERTIONS[stage]
+  if (!stageAssertion) {
+    throw new Error(`Physical D3D11 stage assertions do not support ${stage ?? 'missing'}.`)
+  }
+  return [...COMMON_PHYSICAL_STAGE_ASSERTIONS, stageAssertion]
+}
+
 export function validateWindowsD3d11StageReport(value, { expectedStage } = {}) {
   const failures = []
   if (!isPlainObject(value)) return ['report must be an object']
@@ -451,6 +528,31 @@ export function validateWindowsD3d11StageReport(value, { expectedStage } = {}) {
   }
   if (value.status === 'PASS' && value.assertions?.some((assertion) => !assertion.passed)) {
     failures.push('PASS report contained a failed assertion')
+  }
+  if (STAGE_SPECIFIC_ASSERTIONS[value.stage] && value.status === 'PASS') {
+    const requiredAssertions = requiredWindowsD3d11StageAssertionIds(value.stage)
+    const assertionIds = new Set(value.assertions?.map((assertion) => assertion?.id))
+    for (const id of requiredAssertions) {
+      if (!assertionIds.has(id)) failures.push(`PASS report was missing required assertion ${id}`)
+    }
+    if (value.sourceEvidence?.producer !== 'installed-packaged-stream-performance') {
+      failures.push('PASS report did not identify the installed packaged-app producer')
+    }
+    for (const field of ['producerAggregatePath', 'producerReportPath']) {
+      if (!portableAbsolutePath(value.sourceEvidence?.[field])) {
+        failures.push(`PASS report sourceEvidence.${field} must be absolute`)
+      }
+    }
+    for (const field of [
+      'producerAggregateSha256',
+      'producerReportSha256',
+      'listingSha256',
+      'testOutputSha256'
+    ]) {
+      if (!lowercaseHex(value.sourceEvidence?.[field], 64)) {
+        failures.push(`PASS report sourceEvidence.${field} was invalid`)
+      }
+    }
   }
   return failures
 }
@@ -575,13 +677,8 @@ export function validateWindowsD3d11PathManifest(value) {
   validateAdapterProof(value.adapterProof, value.selection?.mode, failures)
   validatePathInvariants(value.invariants, value.selection?.mode, failures)
   validatePathEvidence(value.evidence, value.workload, value.selection?.mode, failures)
-  if (
-    !Array.isArray(value.runtimeProofLimitations) ||
-    !equalArrays(value.runtimeProofLimitations, [
-      'dedicated-synchronization-timeout-counter-not-emitted'
-    ])
-  ) {
-    failures.push('runtimeProofLimitations must exactly name the current diagnostic gap')
+  if (!Array.isArray(value.runtimeProofLimitations) || value.runtimeProofLimitations.length !== 0) {
+    failures.push('runtimeProofLimitations must be empty for qualified evidence')
   }
   return failures
 }
@@ -1027,12 +1124,21 @@ export function normalizeWindowsD3d11InvariantSummary(runs, { pathEvidence } = {
     }),
     messageDispatchP95Ms: maximumFinite(d3dRuns.map((d3d) => d3d.messageDispatchP95Ms)),
     messageDispatchMaxMs: maximumFinite(d3dRuns.map((d3d) => d3d.messageDispatchMaxMs)),
+    mediaCommandLagP95Ms: maximumFinite(d3dRuns.map((d3d) => d3d.mediaCommandLagP95Ms)),
+    mediaCommandLagMaxMs: maximumFinite(d3dRuns.map((d3d) => d3d.mediaCommandLagMaxMs)),
+    maximumConsecutiveMessageBatch: maximumFinite(
+      d3dRuns.map((d3d) => d3d.maximumConsecutiveMessageBatch)
+    ),
+    maximumConsecutiveMediaBatch: maximumFinite(
+      d3dRuns.map((d3d) => d3d.maximumConsecutiveMediaBatch)
+    ),
     texturePoolCapacityMinimum: minimumFinite(capacityValues),
     texturePoolInUseMaximum: maximumFinite(inUseValues),
     texturePoolPressureEvents: maxCounter(d3dRuns, 'texturePoolPressureEvents'),
     adapterMismatches: maxCounter(d3dRuns, 'adapterMismatches'),
     deviceResets: maxCounter(d3dRuns, 'deviceResets'),
     staleGenerationCallbacks: maxCounter(d3dRuns, 'staleGenerationCallbacks'),
+    synchronizationTimeouts: maxCounter(d3dRuns, 'synchronizationTimeouts'),
     pathIdentityChanges: d3dRuns.filter(
       (d3d) => d3d.stateChanged || d3d.adapterChanged || d3d.fallbackChanged
     ).length,
@@ -1116,6 +1222,13 @@ function validateParsedOptions(parsed) {
   }
   if (parsed.operation === 'stage' && parsed.stage === null) {
     throw new Error('--stage requires a stage name.')
+  }
+  if (
+    parsed.operation === 'stage' &&
+    parsed.stage !== 'contract' &&
+    !portableAbsolutePath(parsed.output)
+  ) {
+    throw new Error('Physical --stage execution requires an absolute --output.')
   }
 }
 
@@ -1467,6 +1580,7 @@ function validatePathInvariants(value, mode, failures) {
         'adapterMismatches',
         'deviceResets',
         'staleGenerationCallbacks',
+        'synchronizationTimeouts',
         'pathIdentityChanges',
         'unexpectedFallbacks'
       ]
@@ -1507,6 +1621,29 @@ function validatePathInvariants(value, mode, failures) {
     }
     if (!Number.isFinite(value.messageDispatchMaxMs) || value.messageDispatchMaxMs > 100) {
       failures.push('invariants.messageDispatchMaxMs exceeded 100ms')
+    }
+    if (
+      !Number.isFinite(value.mediaCommandLagP95Ms) ||
+      value.mediaCommandLagP95Ms < 0 ||
+      value.mediaCommandLagP95Ms > WINDOWS_D3D11_FAIRNESS_LIMITS.mediaCommandLagP95Ms
+    ) {
+      failures.push('invariants.mediaCommandLagP95Ms exceeded 50ms')
+    }
+    if (
+      !Number.isFinite(value.mediaCommandLagMaxMs) ||
+      value.mediaCommandLagMaxMs < 0 ||
+      value.mediaCommandLagMaxMs > WINDOWS_D3D11_FAIRNESS_LIMITS.mediaCommandLagMaxMs
+    ) {
+      failures.push('invariants.mediaCommandLagMaxMs exceeded 100ms')
+    }
+    for (const field of ['maximumConsecutiveMessageBatch', 'maximumConsecutiveMediaBatch']) {
+      if (
+        !Number.isInteger(value[field]) ||
+        value[field] < 0 ||
+        value[field] > WINDOWS_D3D11_FAIRNESS_LIMITS[field]
+      ) {
+        failures.push(`invariants.${field} exceeded its bounded fairness limit`)
+      }
     }
     if (value.namedNaturalFallback !== false) {
       failures.push('supported path must not claim a natural fallback')

@@ -675,8 +675,8 @@ fn validate_layer(layer: WindowsD3d11SceneLayerInput) -> Result<(), WindowsD3d11
             layer.source_id
         )));
     }
-    if let Some(key) = effects.chroma_key {
-        if ![
+    if let Some(key) = effects.chroma_key
+        && (![
             key.angle_threshold_degrees,
             key.softness_degrees,
             key.spill_suppression,
@@ -687,14 +687,13 @@ fn validate_layer(layer: WindowsD3d11SceneLayerInput) -> Result<(), WindowsD3d11
             || !(0.0..=180.0).contains(&key.angle_threshold_degrees)
             || !(0.0..=180.0).contains(&key.softness_degrees)
             || !(0.0..=1.0).contains(&key.spill_suppression)
-            || !(0.0..=1.0).contains(&key.saturation_floor)
-        {
-            return Err(WindowsD3d11CompositorError::invalid(format!(
-                "{} layer {} has invalid chroma-key controls",
-                layer.source_kind.as_str(),
-                layer.source_id
-            )));
-        }
+            || !(0.0..=1.0).contains(&key.saturation_floor))
+    {
+        return Err(WindowsD3d11CompositorError::invalid(format!(
+            "{} layer {} has invalid chroma-key controls",
+            layer.source_kind.as_str(),
+            layer.source_id
+        )));
     }
     if matches!(layer.mask, WindowsD3d11SceneMask::Rounded { radius_pct } if radius_pct > 50) {
         return Err(WindowsD3d11CompositorError::invalid(format!(

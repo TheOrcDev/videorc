@@ -53,6 +53,10 @@ mod protocol {
     #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct WindowsD3d11PresenterDiagnostics {
+        // Mirror of crate::protocol::WindowsD3d11PresenterDiagnostics. The
+        // scalar authority generation is safe to cross the helper boundary.
+        #[serde(default)]
+        pub media_generation: u64,
         pub layered: bool,
         pub transparent: bool,
         pub no_activate: bool,

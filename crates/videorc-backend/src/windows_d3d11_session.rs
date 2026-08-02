@@ -4,6 +4,19 @@ use crate::windows_d3d11_device::{WindowsD3d11MediaRole, WindowsDxgiOutputSelect
 
 pub(crate) const WINDOWS_D3D11_MEDIA_ENV: &str = "VIDEORC_WINDOWS_D3D11_MEDIA";
 pub(crate) const WINDOWS_REQUIRE_D3D11_MEDIA_ENV: &str = "VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA";
+// CFR is deadline-paced by the session pump. A blocking AcquireNextFrame
+// would consume essentially the entire 60-fps budget on a static desktop.
+const WINDOWS_D3D11_CAPTURE_POLL_WAIT_MS: u32 = 0;
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_terminal_source_error(
+    terminal_error: Option<&str>,
+    stopped: bool,
+) -> Option<String> {
+    terminal_error.map(str::to_owned).or_else(|| {
+        stopped.then(|| "D3D11 session pump stopped without a terminal result".to_string())
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowsD3d11MediaMode {
@@ -110,6 +123,11 @@ pub(crate) struct WindowsD3d11SessionPlan {
     pub(crate) primary: WindowsD3d11VideoPlan,
     pub(crate) auxiliary: Option<WindowsD3d11VideoPlan>,
     pub(crate) camera_required: bool,
+    /// The presenter is generation-bound after the media pump starts, so a
+    /// normal session has no preview target at its startup claim gate. Preview
+    /// tickets become required only while a trusted presenter generation is
+    /// configured.
+    pub(crate) preview_required_at_startup: bool,
     pub(crate) primary_role: WindowsD3d11MediaRole,
     pub(crate) roles: BTreeSet<WindowsD3d11MediaRole>,
 }
@@ -284,6 +302,7 @@ pub(crate) fn select_windows_d3d11_session(
             primary: request.primary,
             auxiliary: request.auxiliary,
             camera_required: request.camera_required,
+            preview_required_at_startup: false,
             primary_role,
             roles,
         },
@@ -310,7 +329,7 @@ pub(crate) fn validate_windows_d3d11_startup_evidence(
             "windows-d3d11-media-capture-not-started",
             "capture did not start on the D3D11 media authority",
         ))
-    } else if !evidence.preview_ticket {
+    } else if plan.preview_required_at_startup && !evidence.preview_ticket {
         Some((
             "windows-d3d11-media-preview-ticket-missing",
             "the compositor did not publish a role-bound BGRA preview ticket",
@@ -404,9 +423,9 @@ impl WindowsD3d11CfrSequencer {
 #[cfg(target_os = "windows")]
 mod runtime {
     use std::collections::BTreeSet;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::mpsc;
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -418,7 +437,7 @@ mod runtime {
         CompositorFrameExportHandle, CompositorFrameStore, CompositorPixelFormat,
         caption_overlay_layout_with_inset, caption_overlay_safe_inset,
     };
-    use crate::frame_store::FrameStore;
+    use crate::frame_store::{FrameHandle, FrameStore};
     use crate::preview_camera::{PreviewCameraFrameSource, PreviewCameraPixelFormat};
     use crate::protocol::{LayoutSettings, SceneSourceKind};
     use crate::scene_geometry::{
@@ -447,12 +466,15 @@ mod runtime {
         WindowsD3d11TextureLeaseTicket, WindowsD3d11TexturePoolConfig, WindowsD3d11TicketedTexture,
         WindowsDxgiOutputSelection,
     };
+    use crate::windows_d3d11_preview::{WindowsD3d11PresenterStatus, WindowsD3d11PreviewPlacement};
     use crate::windows_media_foundation_encoder::MediaFoundationEncoderConfig;
 
-    use super::{WindowsD3d11CfrSequencer, WindowsD3d11SessionPlan, WindowsD3d11StartupEvidence};
+    use super::{
+        WindowsD3d11CfrSequencer, WindowsD3d11SessionPlan, WindowsD3d11StartupEvidence,
+        windows_d3d11_terminal_source_error,
+    };
 
     const STARTUP_TIMEOUT: Duration = Duration::from_secs(4);
-    const CAPTURE_WAIT_MS: u32 = 16;
     const CAPTURE_SOURCE_ID: u64 = 1;
     const CAMERA_SOURCE_ID: u64 = 2;
     const CAPTION_PRIMARY_SOURCE_ID: u64 = 10;
@@ -498,12 +520,16 @@ mod runtime {
         pub(crate) adapter_mismatches: u64,
         pub(crate) captured_frames: u64,
         pub(crate) composed_frames: u64,
+        pub(crate) camera_upload_frames: u64,
         pub(crate) latest_capture_sequence: Option<u64>,
         pub(crate) repeated_capture_frames: u64,
         pub(crate) pressure_skips: u64,
+        pub(crate) preview_offered_sequence: Option<u64>,
+        pub(crate) preview_offer_failures: u64,
         pub(crate) preview_sequence: Option<u64>,
         pub(crate) primary_sequence: Option<u64>,
         pub(crate) auxiliary_sequence: Option<u64>,
+        pub(crate) device_lost: bool,
         pub(crate) terminal_error: Option<String>,
         pub(crate) stopped: bool,
     }
@@ -516,16 +542,39 @@ mod runtime {
         primary_store: CompositorFrameStore,
         auxiliary_store: Option<CompositorFrameStore>,
         snapshot: Arc<StdMutex<WindowsD3d11SessionPumpSnapshot>>,
+        preview_generation: Arc<AtomicU64>,
         roles: Vec<WindowsD3d11MediaRoleHandle>,
         primary_role: WindowsD3d11MediaRole,
         startup_evidence: WindowsD3d11StartupEvidence,
     }
 
     #[derive(Debug, Clone)]
+    struct WindowsD3d11EncoderTicketSourceState {
+        client: WindowsD3d11MediaClient,
+        frame_store: CompositorFrameStore,
+        snapshot: Arc<StdMutex<WindowsD3d11SessionPumpSnapshot>>,
+        recovery_count: u8,
+    }
+
+    #[derive(Debug)]
+    struct WindowsD3d11EncoderTicketSourceSlot {
+        current: StdMutex<WindowsD3d11EncoderTicketSourceState>,
+        changed: Condvar,
+    }
+
+    #[derive(Debug, Clone)]
     pub(crate) struct WindowsD3d11EncoderTicketSource {
+        pub(crate) role: WindowsD3d11MediaRole,
+        slot: Arc<WindowsD3d11EncoderTicketSourceSlot>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct WindowsD3d11EncoderTicketSourceSnapshot {
         pub(crate) client: WindowsD3d11MediaClient,
         pub(crate) frame_store: CompositorFrameStore,
         pub(crate) role: WindowsD3d11MediaRole,
+        snapshot: Arc<StdMutex<WindowsD3d11SessionPumpSnapshot>>,
+        recovery_count: u8,
     }
 
     #[derive(Clone)]
@@ -587,6 +636,182 @@ mod runtime {
     }
 
     impl WindowsD3d11EncoderTicketSource {
+        fn new(
+            client: WindowsD3d11MediaClient,
+            frame_store: CompositorFrameStore,
+            role: WindowsD3d11MediaRole,
+            snapshot: Arc<StdMutex<WindowsD3d11SessionPumpSnapshot>>,
+        ) -> Self {
+            Self {
+                role,
+                slot: Arc::new(WindowsD3d11EncoderTicketSourceSlot {
+                    current: StdMutex::new(WindowsD3d11EncoderTicketSourceState {
+                        client,
+                        frame_store,
+                        snapshot,
+                        recovery_count: 0,
+                    }),
+                    changed: Condvar::new(),
+                }),
+            }
+        }
+
+        pub(crate) fn current(&self) -> WindowsD3d11EncoderTicketSourceSnapshot {
+            let current = self
+                .slot
+                .current
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            WindowsD3d11EncoderTicketSourceSnapshot {
+                client: current.client.clone(),
+                frame_store: Arc::clone(&current.frame_store),
+                role: self.role,
+                snapshot: Arc::clone(&current.snapshot),
+                recovery_count: current.recovery_count,
+            }
+        }
+
+        pub(crate) fn generation(&self) -> u64 {
+            self.current().generation()
+        }
+
+        /// Atomically rebinds every clone of this role's source handle. The
+        /// failed generation may be replaced only by its immediate successor;
+        /// delayed callbacks cannot overwrite a newer recovery.
+        pub(crate) fn replace_generation(
+            &self,
+            expected_generation: u64,
+            replacement: &Self,
+        ) -> Result<bool, String> {
+            if !self.can_replace_generation(expected_generation, replacement)? {
+                return Ok(false);
+            }
+            let replacement = replacement.current();
+            let mut current = self
+                .slot
+                .current
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let current_generation = current
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .generation;
+            if current_generation != expected_generation {
+                return Ok(false);
+            }
+            let recovery_count = current.recovery_count.saturating_add(1);
+            *current = WindowsD3d11EncoderTicketSourceState {
+                client: replacement.client,
+                frame_store: replacement.frame_store,
+                snapshot: replacement.snapshot,
+                recovery_count,
+            };
+            drop(current);
+            self.slot.changed.notify_all();
+            Ok(true)
+        }
+
+        pub(crate) fn can_replace_generation(
+            &self,
+            expected_generation: u64,
+            replacement: &Self,
+        ) -> Result<bool, String> {
+            if self.role != replacement.role {
+                return Err(format!(
+                    "cannot replace {:?} D3D11 ticket source with {:?}",
+                    self.role, replacement.role
+                ));
+            }
+            let replacement = replacement.current();
+            let replacement_generation = replacement.generation();
+            if replacement_generation != expected_generation.saturating_add(1) {
+                return Err(format!(
+                    "D3D11 ticket source recovery expected generation {}, received {replacement_generation}",
+                    expected_generation.saturating_add(1)
+                ));
+            }
+            let current = self
+                .slot
+                .current
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let current_generation = current
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .generation;
+            if current_generation != expected_generation {
+                return Ok(false);
+            }
+            if current.recovery_count != 0 {
+                return Err(format!(
+                    "{:?} D3D11 ticket source already consumed its one recovery",
+                    self.role
+                ));
+            }
+            Ok(true)
+        }
+
+        pub(crate) fn wait_for_generation_change(
+            &self,
+            observed_generation: u64,
+            timeout: Duration,
+        ) -> Option<WindowsD3d11EncoderTicketSourceSnapshot> {
+            let current = self
+                .slot
+                .current
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let (current, _) = self
+                .slot
+                .changed
+                .wait_timeout_while(current, timeout, |current| {
+                    current
+                        .snapshot
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .generation
+                        == observed_generation
+                })
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let generation = current
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .generation;
+            (generation != observed_generation).then(|| WindowsD3d11EncoderTicketSourceSnapshot {
+                client: current.client.clone(),
+                frame_store: Arc::clone(&current.frame_store),
+                role: self.role,
+                snapshot: Arc::clone(&current.snapshot),
+                recovery_count: current.recovery_count,
+            })
+        }
+
+        pub(crate) fn latest_ticket(
+            &self,
+        ) -> Option<(u64, Instant, WindowsD3d11TextureLeaseTicket)> {
+            self.current().latest_ticket()
+        }
+
+        pub(crate) fn terminal_error(&self) -> Option<String> {
+            self.current().terminal_error()
+        }
+    }
+
+    impl WindowsD3d11EncoderTicketSourceSnapshot {
+        pub(crate) fn generation(&self) -> u64 {
+            self.snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .generation
+        }
+
+        pub(crate) const fn recovery_count(&self) -> u8 {
+            self.recovery_count
+        }
+
         pub(crate) fn latest_ticket(
             &self,
         ) -> Option<(u64, Instant, WindowsD3d11TextureLeaseTicket)> {
@@ -600,6 +825,21 @@ mod runtime {
             }
             let ticket = frame.metadata.d3d11_texture_for_role(self.role)?;
             Some((frame.sequence, frame.captured_at, ticket))
+        }
+
+        /// The compositor pump is the producer authority for every ticket in
+        /// this store. Once it fails no future sequence can arrive, so bridge
+        /// writers must close their FIFO instead of polling the last frame
+        /// forever and leaving FFmpeg blocked on an open input.
+        pub(crate) fn terminal_error(&self) -> Option<String> {
+            let snapshot = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            windows_d3d11_terminal_source_error(
+                snapshot.terminal_error.as_deref(),
+                snapshot.stopped,
+            )
         }
     }
 
@@ -618,6 +858,7 @@ mod runtime {
             coordinator: &WindowsD3d11MediaCoordinatorSlot,
             plan: WindowsD3d11SessionPlan,
             camera: Option<WindowsD3d11CameraInput>,
+            overlays: WindowsD3d11OverlayInput,
         ) -> Result<Self, String> {
             if plan.camera_required != camera.is_some() {
                 return Err(format!(
@@ -771,28 +1012,46 @@ mod runtime {
                 auxiliary_encoder_adapter_luid,
                 ..Default::default()
             }));
+            let preview_generation = Arc::new(AtomicU64::new(0));
             let (startup_tx, startup_rx) = mpsc::sync_channel(1);
             let worker = {
                 let stop = Arc::clone(&stop);
                 let preview_store = Arc::clone(&preview_store);
                 let primary_store = Arc::clone(&primary_store);
                 let auxiliary_store = auxiliary_store.clone();
-                let snapshot = Arc::clone(&snapshot);
+                let worker_snapshot = Arc::clone(&snapshot);
+                let panic_snapshot = Arc::clone(&snapshot);
+                let panic_client = client.clone();
+                let preview_generation = Arc::clone(&preview_generation);
                 let worker_plan = plan.clone();
                 thread::Builder::new()
                     .name("videorc-windows-d3d11-session".to_string())
                     .spawn(move || {
-                        run_pump(
-                            client,
-                            worker_plan,
-                            stop,
-                            preview_store,
-                            primary_store,
-                            auxiliary_store,
-                            snapshot,
-                            startup_tx,
-                            camera,
-                        );
+                        let result =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                                run_pump(
+                                    client,
+                                    worker_plan,
+                                    stop,
+                                    preview_store,
+                                    primary_store,
+                                    auxiliary_store,
+                                    worker_snapshot,
+                                    startup_tx,
+                                    camera,
+                                    overlays,
+                                    preview_generation,
+                                );
+                            }));
+                        if result.is_err() {
+                            update_snapshot(&panic_snapshot, |current| {
+                                current.terminal_error.get_or_insert_with(|| {
+                                    "D3D11 session pump panicked".to_string()
+                                });
+                                current.stopped = true;
+                            });
+                            let _ = panic_client.stop_capture();
+                        }
                     })
                     .map_err(|error| {
                         format!("could not start D3D11 session pump thread: {error}")
@@ -810,6 +1069,7 @@ mod runtime {
                     primary_store,
                     auxiliary_store,
                     snapshot,
+                    preview_generation,
                     roles,
                     primary_role: plan.primary_role,
                     startup_evidence: evidence,
@@ -843,23 +1103,31 @@ mod runtime {
         }
 
         pub(crate) fn primary_encoder_source(&self) -> WindowsD3d11EncoderTicketSource {
-            WindowsD3d11EncoderTicketSource {
-                client: self.client.clone(),
-                frame_store: self.primary_store(),
-                role: self.primary_role,
-            }
+            WindowsD3d11EncoderTicketSource::new(
+                self.client.clone(),
+                self.primary_store(),
+                self.primary_role,
+                Arc::clone(&self.snapshot),
+            )
         }
 
         pub(crate) fn auxiliary_encoder_source(&self) -> Option<WindowsD3d11EncoderTicketSource> {
-            Some(WindowsD3d11EncoderTicketSource {
-                client: self.client.clone(),
-                frame_store: self.auxiliary_store()?,
-                role: WindowsD3d11MediaRole::Stream,
-            })
+            Some(WindowsD3d11EncoderTicketSource::new(
+                self.client.clone(),
+                self.auxiliary_store()?,
+                WindowsD3d11MediaRole::Stream,
+                Arc::clone(&self.snapshot),
+            ))
         }
 
         pub(crate) const fn startup_evidence(&self) -> WindowsD3d11StartupEvidence {
             self.startup_evidence
+        }
+
+        pub(crate) fn destroy_preview(&self) -> Result<bool, WindowsD3d11Error> {
+            let destroyed = self.client.destroy_preview()?;
+            self.preview_generation.store(0, Ordering::Release);
+            Ok(destroyed)
         }
 
         pub(crate) fn monitor(&self) -> WindowsD3d11SessionMonitor {
@@ -882,6 +1150,7 @@ mod runtime {
             if let Some(worker) = self.worker.take() {
                 let _ = worker.join();
             }
+            let _ = self.destroy_preview();
             let roles = self
                 .roles
                 .iter()
@@ -1047,24 +1316,59 @@ mod runtime {
         auxiliary_store: Option<CompositorFrameStore>,
         snapshot: Arc<StdMutex<WindowsD3d11SessionPumpSnapshot>>,
         startup_tx: mpsc::SyncSender<Result<WindowsD3d11StartupEvidence, String>>,
-        _camera: Option<WindowsD3d11CameraInput>,
+        camera: Option<WindowsD3d11CameraInput>,
+        overlays: WindowsD3d11OverlayInput,
+        preview_generation: Arc<AtomicU64>,
     ) {
         let mut startup_tx = Some(startup_tx);
-        let frame_interval = Duration::from_secs_f64(1.0 / f64::from(plan.primary.fps.max(1)));
+        let render_fps = plan
+            .auxiliary
+            .map(|auxiliary| auxiliary.fps)
+            .unwrap_or_default()
+            .max(plan.primary.fps)
+            .max(1);
+        let frame_interval = Duration::from_secs_f64(1.0 / f64::from(render_fps));
+        let mut last_camera_frame: Option<FrameHandle<PreviewCameraPixelFormat>> = None;
+        let mut last_camera_upload: Option<(u64, Arc<Vec<u8>>)> = None;
+        let mut retained_capture_ticket: Option<WindowsD3d11TextureLeaseTicket> = None;
+        let mut cfr = WindowsD3d11CfrSequencer::default();
         while !stop.load(Ordering::Relaxed) {
             let frame_started_at = Instant::now();
-            let capture = match client
-                .acquire_capture(CAPTURE_WAIT_MS, vec![WindowsD3d11MediaRole::Compositor])
-            {
-                Ok(Some(capture)) => capture,
-                Ok(None) => continue,
+            let mut new_capture_sequence = None;
+            match client.acquire_capture(
+                super::WINDOWS_D3D11_CAPTURE_POLL_WAIT_MS,
+                vec![WindowsD3d11MediaRole::Compositor],
+            ) {
+                Ok(Some(capture)) => {
+                    let sequence = capture.metadata.sequence;
+                    let source_ticket = match ticket_for_role(
+                        capture.texture,
+                        WindowsD3d11MediaRole::Compositor,
+                        WindowsD3d11ComposedTextureKind::CapturedBgra,
+                        WindowsD3d11TextureFormat::Bgra8Unorm,
+                    ) {
+                        Ok(ticket) => ticket,
+                        Err(error) => {
+                            finish_with_error(&snapshot, &mut startup_tx, error);
+                            break;
+                        }
+                    };
+                    retained_capture_ticket = Some(source_ticket);
+                    new_capture_sequence = Some(sequence);
+                    update_snapshot(&snapshot, |current| {
+                        current.captured_frames = current.captured_frames.saturating_add(1);
+                        current.latest_capture_sequence = Some(sequence);
+                    });
+                }
+                Ok(None) => {}
                 Err(error) if is_transient_pressure(&error) => {
                     update_snapshot(&snapshot, |current| {
                         current.pressure_skips = current.pressure_skips.saturating_add(1);
                     });
-                    continue;
                 }
                 Err(error) => {
+                    attribute_adapter_mismatch(&snapshot, &error);
+                    attribute_device_loss(&snapshot, &error);
                     finish_with_error(
                         &snapshot,
                         &mut startup_tx,
@@ -1072,55 +1376,128 @@ mod runtime {
                     );
                     break;
                 }
-            };
-            update_snapshot(&snapshot, |current| {
-                current.captured_frames = current.captured_frames.saturating_add(1);
-            });
-            let sequence = capture.metadata.sequence;
-            let source_ticket = match ticket_for_role(
-                capture.texture,
-                WindowsD3d11MediaRole::Compositor,
-                WindowsD3d11ComposedTextureKind::CapturedBgra,
-                WindowsD3d11TextureFormat::Bgra8Unorm,
-            ) {
-                Ok(ticket) => ticket,
+            }
+            let tick = match cfr.advance(new_capture_sequence) {
+                Ok(Some(tick)) => tick,
+                Ok(None) => {
+                    pace_render_tick(frame_started_at, frame_interval);
+                    continue;
+                }
                 Err(error) => {
                     finish_with_error(&snapshot, &mut startup_tx, error);
                     break;
                 }
             };
-            let scene = match build_scene_plan(&plan, sequence, source_ticket.metadata().generation)
-            {
+            let source_ticket = retained_capture_ticket
+                .as_ref()
+                .expect("CFR tick requires one retained capture ticket")
+                .clone();
+            let camera_frame = latest_camera_frame(camera.as_ref(), &mut last_camera_frame);
+            if plan.camera_required && camera_frame.is_none() {
+                pace_render_tick(frame_started_at, frame_interval);
+                continue;
+            }
+            let overlay_frames = match current_overlay_frames(&plan, &overlays) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    finish_with_error(&snapshot, &mut startup_tx, error);
+                    break;
+                }
+            };
+            let scene = match build_scene_plan(
+                &plan,
+                tick.output_sequence,
+                source_ticket.metadata().generation,
+                camera_frame
+                    .as_ref()
+                    .map(|frame| (frame.width, frame.height)),
+                camera.as_ref().map(|input| &input.layout),
+                &overlay_frames,
+            ) {
                 Ok(scene) => scene,
                 Err(error) => {
                     finish_with_error(&snapshot, &mut startup_tx, error);
                     break;
                 }
             };
+            let mut sources = vec![WindowsD3d11CompositionSource::TextureLease {
+                source_id: CAPTURE_SOURCE_ID,
+                ticket: source_ticket,
+            }];
+            if let Some(frame) = camera_frame.as_ref() {
+                let pixels = match last_camera_upload.as_ref() {
+                    Some((revision, pixels)) if *revision == frame.sequence => Arc::clone(pixels),
+                    _ => {
+                        let pixels = Arc::new(frame.bytes.clone());
+                        last_camera_upload = Some((frame.sequence, Arc::clone(&pixels)));
+                        pixels
+                    }
+                };
+                let Some(row_pitch) = frame.width.checked_mul(4) else {
+                    finish_with_error(
+                        &snapshot,
+                        &mut startup_tx,
+                        format!(
+                            "D3D11 camera frame {} has an overflowing row pitch",
+                            frame.sequence
+                        ),
+                    );
+                    break;
+                };
+                sources.push(WindowsD3d11CompositionSource::BgraUpload {
+                    source_id: CAMERA_SOURCE_ID,
+                    pixels,
+                    dimensions: match WindowsD3d11OutputDimensions::new(frame.width, frame.height) {
+                        Ok(dimensions) => dimensions,
+                        Err(error) => {
+                            finish_with_error(&snapshot, &mut startup_tx, error.to_string());
+                            break;
+                        }
+                    },
+                    row_pitch,
+                    pixel_order: WindowsD3d11UploadPixelOrder::Bgra,
+                    content_revision: frame.sequence,
+                    // FrameHandle bytes are immutable. Repeated CFR ticks at a
+                    // higher render cadence reuse the generation-scoped upload
+                    // until the camera sequence advances.
+                    immutable: true,
+                });
+            }
+            let overlay_sources = overlay_frames
+                .iter()
+                .map(overlay_upload_source)
+                .collect::<Result<Vec<_>, _>>();
+            match overlay_sources {
+                Ok(overlay_sources) => sources.extend(overlay_sources),
+                Err(error) => {
+                    finish_with_error(&snapshot, &mut startup_tx, error);
+                    break;
+                }
+            }
+            let configured_preview_generation = preview_generation.load(Ordering::Acquire);
             let consumers = WindowsD3d11CompositionConsumers {
-                preview: vec![WindowsD3d11MediaRole::Preview],
+                preview: (configured_preview_generation != 0)
+                    .then_some(WindowsD3d11MediaRole::Preview)
+                    .into_iter()
+                    .collect(),
                 primary: vec![plan.primary_role],
                 auxiliary: plan
                     .auxiliary
                     .map(|_| vec![WindowsD3d11MediaRole::Stream])
                     .unwrap_or_default(),
             };
-            let composition = match client.compose_scene(
-                scene,
-                vec![WindowsD3d11CompositionSource::TextureLease {
-                    source_id: CAPTURE_SOURCE_ID,
-                    ticket: source_ticket,
-                }],
-                consumers,
-            ) {
+            let composition = match client.compose_scene(scene, sources, consumers) {
                 Ok(composition) => composition,
                 Err(error) if is_transient_pressure(&error) => {
                     update_snapshot(&snapshot, |current| {
                         current.pressure_skips = current.pressure_skips.saturating_add(1);
                     });
+                    pace_render_tick(frame_started_at, frame_interval);
                     continue;
                 }
                 Err(error) => {
+                    attribute_adapter_mismatch(&snapshot, &error);
+                    attribute_device_loss(&snapshot, &error);
                     finish_with_error(
                         &snapshot,
                         &mut startup_tx,
@@ -1136,6 +1513,38 @@ mod runtime {
                     "D3D11 compositor reported a forbidden production GPU readback".to_string(),
                 );
                 break;
+            }
+            if plan.camera_required && composition.diagnostics.camera_upload_frames == 0 {
+                finish_with_error(
+                    &snapshot,
+                    &mut startup_tx,
+                    "D3D11 screen-camera composition did not report its measured camera upload"
+                        .to_string(),
+                );
+                break;
+            }
+            let camera_upload_frames = composition.diagnostics.camera_upload_frames;
+            if configured_preview_generation != 0 {
+                if let Some(ticket) = clone_ticket_for_role(
+                    &composition.textures,
+                    WindowsD3d11MediaRole::Preview,
+                    WindowsD3d11ComposedTextureKind::PreviewBgra,
+                    WindowsD3d11TextureFormat::Bgra8Unorm,
+                ) {
+                    match client.offer_preview(ticket, configured_preview_generation, true) {
+                        Ok(offer) => {
+                            update_snapshot(&snapshot, |current| {
+                                current.preview_offered_sequence = Some(offer.sequence);
+                            });
+                        }
+                        Err(_) => {
+                            update_snapshot(&snapshot, |current| {
+                                current.preview_offer_failures =
+                                    current.preview_offer_failures.saturating_add(1);
+                            });
+                        }
+                    }
+                }
             }
             let published = publish_composition(
                 composition.textures,
@@ -1153,14 +1562,19 @@ mod runtime {
             };
             update_snapshot(&snapshot, |current| {
                 current.composed_frames = current.composed_frames.saturating_add(1);
-                current.preview_sequence = Some(preview_sequence);
+                if tick.repeated_source {
+                    current.repeated_capture_frames =
+                        current.repeated_capture_frames.saturating_add(1);
+                }
+                current.camera_upload_frames = camera_upload_frames;
+                current.preview_sequence = preview_sequence;
                 current.primary_sequence = Some(primary_sequence);
                 current.auxiliary_sequence = auxiliary_sequence;
             });
             if let Some(sender) = startup_tx.take() {
                 let _ = sender.send(Ok(WindowsD3d11StartupEvidence {
                     capture_started: true,
-                    preview_ticket: true,
+                    preview_ticket: preview_sequence.is_some(),
                     primary_ticket: true,
                     auxiliary_ticket: plan.auxiliary.is_none() || auxiliary_sequence.is_some(),
                     // The media-thread encoder attachment command augments
@@ -1169,9 +1583,7 @@ mod runtime {
                     auxiliary_encoder_attached: true,
                 }));
             }
-            if let Some(remaining) = frame_interval.checked_sub(frame_started_at.elapsed()) {
-                thread::sleep(remaining);
-            }
+            pace_render_tick(frame_started_at, frame_interval);
         }
         let _ = client.stop_capture();
         update_snapshot(&snapshot, |current| current.stopped = true);
@@ -1182,11 +1594,60 @@ mod runtime {
         }
     }
 
+    fn overlay_upload_source(
+        frame: &WindowsD3d11OverlayFrame,
+    ) -> Result<WindowsD3d11CompositionSource, String> {
+        let row_pitch = frame.overlay.width.checked_mul(4).ok_or_else(|| {
+            format!(
+                "D3D11 overlay revision {} has an overflowing row pitch",
+                frame.overlay.revision
+            )
+        })?;
+        let dimensions =
+            WindowsD3d11OutputDimensions::new(frame.overlay.width, frame.overlay.height)
+                .map_err(|error| error.to_string())?;
+        Ok(WindowsD3d11CompositionSource::BgraUpload {
+            source_id: frame.source_id,
+            pixels: Arc::clone(&frame.overlay.bgra),
+            dimensions,
+            row_pitch,
+            pixel_order: WindowsD3d11UploadPixelOrder::Bgra,
+            content_revision: frame.overlay.revision,
+            immutable: true,
+        })
+    }
+
+    fn pace_render_tick(started_at: Instant, frame_interval: Duration) {
+        if let Some(remaining) = frame_interval.checked_sub(started_at.elapsed()) {
+            thread::sleep(remaining);
+        }
+    }
+
     fn is_transient_pressure(error: &WindowsD3d11Error) -> bool {
         matches!(
             error.code,
             WindowsD3d11ErrorCode::TexturePoolExhausted | WindowsD3d11ErrorCode::CommandQueueFull
         )
+    }
+
+    fn attribute_adapter_mismatch(
+        snapshot: &Arc<StdMutex<WindowsD3d11SessionPumpSnapshot>>,
+        error: &WindowsD3d11Error,
+    ) {
+        if error.code == WindowsD3d11ErrorCode::AdapterMismatch {
+            update_snapshot(snapshot, |current| {
+                current.adapter_mismatches = current.adapter_mismatches.saturating_add(1);
+            });
+        }
+    }
+
+    fn attribute_device_loss(
+        snapshot: &Arc<StdMutex<WindowsD3d11SessionPumpSnapshot>>,
+        error: &WindowsD3d11Error,
+    ) {
+        if error.code == WindowsD3d11ErrorCode::DeviceLost {
+            update_snapshot(snapshot, |current| current.device_lost = true);
+        }
     }
 
     fn finish_with_error(
@@ -1523,7 +1984,8 @@ mod runtime {
 
 #[cfg(target_os = "windows")]
 pub(crate) use runtime::{
-    WindowsD3d11CameraInput, WindowsD3d11EncoderTicketSource, WindowsD3d11OverlayInput,
+    WindowsD3d11CameraInput, WindowsD3d11EncoderTicketSource,
+    WindowsD3d11EncoderTicketSourceSnapshot, WindowsD3d11OverlayInput,
     WindowsD3d11SessionDiagnosticsSnapshot, WindowsD3d11SessionMonitor, WindowsD3d11SessionPump,
 };
 
@@ -1555,6 +2017,19 @@ mod tests {
             },
             auxiliary: None,
         }
+    }
+
+    #[test]
+    fn windows_d3d11_ticket_source_treats_every_stopped_pump_as_terminal() {
+        assert_eq!(
+            windows_d3d11_terminal_source_error(Some("device removed"), true).as_deref(),
+            Some("device removed")
+        );
+        assert_eq!(
+            windows_d3d11_terminal_source_error(None, true).as_deref(),
+            Some("D3D11 session pump stopped without a terminal result")
+        );
+        assert_eq!(windows_d3d11_terminal_source_error(None, false), None);
     }
 
     #[test]

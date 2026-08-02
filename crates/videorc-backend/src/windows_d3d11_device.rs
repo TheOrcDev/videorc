@@ -460,6 +460,28 @@ impl WindowsD3d11Error {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsD3d11PreviewStatusAuthority {
+    Error,
+    Presenter,
+    Missing,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_preview_status_authority(
+    has_last_error: bool,
+    has_presenter: bool,
+) -> WindowsD3d11PreviewStatusAuthority {
+    if has_last_error {
+        WindowsD3d11PreviewStatusAuthority::Error
+    } else if has_presenter {
+        WindowsD3d11PreviewStatusAuthority::Presenter
+    } else {
+        WindowsD3d11PreviewStatusAuthority::Missing
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum WindowsD3d11MediaRole {
     Compositor,
@@ -523,10 +545,64 @@ pub(crate) struct WindowsD3d11LeaseRelease {
     pub(crate) role: WindowsD3d11MediaRole,
 }
 
+/// Shared ownership for the media-thread wake event. Client and texture-ticket
+/// clones can outlive the media thread's command loop during cancellation, so
+/// the kernel HANDLE must remain valid until the last possible signaler drops.
+#[cfg(target_os = "windows")]
+struct WindowsD3d11WakeEvent(windows::Win32::Foundation::HANDLE);
+
+#[cfg(target_os = "windows")]
+impl WindowsD3d11WakeEvent {
+    fn create() -> Result<Self, WindowsD3d11Error> {
+        use windows::Win32::System::Threading::CreateEventW;
+        use windows::core::PCWSTR;
+
+        // SAFETY: unnamed auto-reset event with default security.
+        unsafe { CreateEventW(None, false, false, PCWSTR::null()) }
+            .map(Self)
+            .map_err(|error| {
+                WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::DeviceCreationFailed,
+                    format!("creating D3D11 media command event failed: {error}"),
+                )
+            })
+    }
+
+    fn signal(&self) -> Result<(), WindowsD3d11Error> {
+        use windows::Win32::System::Threading::SetEvent;
+
+        // SAFETY: Arc ownership keeps the event alive through this call.
+        unsafe { SetEvent(self.0) }.map_err(|error| {
+            WindowsD3d11Error::new(
+                WindowsD3d11ErrorCode::CommandChannelClosed,
+                format!("signaling D3D11 media command event failed: {error}"),
+            )
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsD3d11WakeEvent {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::CloseHandle;
+
+        // SAFETY: this final Arc owner closes the event exactly once.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+// Win32 event handles may be waited/signaled from any thread. Access is only
+// through SetEvent/MsgWaitForMultipleObjectsEx and final Arc-owned close.
+#[cfg(target_os = "windows")]
+unsafe impl Send for WindowsD3d11WakeEvent {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for WindowsD3d11WakeEvent {}
+
 #[derive(Clone)]
 pub(crate) struct WindowsD3d11TextureLeaseReleaseSender {
     sender: SyncSender<WindowsD3d11LeaseRelease>,
-    wake_event: usize,
+    #[cfg(target_os = "windows")]
+    wake_event: Option<Arc<WindowsD3d11WakeEvent>>,
     failed_releases: Arc<AtomicU64>,
 }
 
@@ -556,15 +632,17 @@ impl WindowsD3d11TextureLeaseReleaseSender {
         Ok((
             Self {
                 sender,
-                wake_event: 0,
+                #[cfg(target_os = "windows")]
+                wake_event: None,
                 failed_releases: Arc::new(AtomicU64::new(0)),
             },
             receiver,
         ))
     }
 
-    fn with_wake_event(mut self, wake_event: usize) -> Self {
-        self.wake_event = wake_event;
+    #[cfg(target_os = "windows")]
+    fn with_wake_event(mut self, wake_event: Arc<WindowsD3d11WakeEvent>) -> Self {
+        self.wake_event = Some(wake_event);
         self
     }
 
@@ -582,15 +660,10 @@ impl WindowsD3d11TextureLeaseReleaseSender {
 
     fn wake(&self) {
         #[cfg(target_os = "windows")]
-        if self.wake_event != 0 {
-            use windows::Win32::Foundation::HANDLE;
-            use windows::Win32::System::Threading::SetEvent;
-
-            // SAFETY: `wake_event` is a non-owning copy of the media thread's
-            // live event handle. A failed signal after shutdown is harmless:
-            // the dropped release remains fail-closed and the texture is never
-            // recycled by another generation.
-            let _ = unsafe { SetEvent(HANDLE(self.wake_event as *mut core::ffi::c_void)) };
+        if let Some(wake_event) = self.wake_event.as_ref() {
+            // A failed signal after shutdown is harmless: the dropped release
+            // remains fail-closed and cannot be recycled by another generation.
+            let _ = wake_event.signal();
         }
     }
 }
@@ -1259,6 +1332,19 @@ impl WindowsD3d11MediaCoordinatorState {
         self.begin_closing(WindowsD3d11CoordinatorRetireReason::DeviceLost)
     }
 
+    /// Retires a failed generation at most once. A delayed callback from an
+    /// already-retired generation is an acknowledgement, not authority to
+    /// retire the replacement generation that may now be running.
+    pub(crate) fn retire_for_device_loss_once(
+        &mut self,
+        generation: u64,
+    ) -> Result<Option<WindowsD3d11CoordinatorReleaseAction>, WindowsD3d11Error> {
+        if generation < self.generation {
+            return Ok(None);
+        }
+        self.retire_for_device_loss(generation).map(Some)
+    }
+
     pub(crate) fn retire_for_shutdown(
         &mut self,
     ) -> Result<Option<WindowsD3d11CoordinatorReleaseAction>, WindowsD3d11Error> {
@@ -1415,10 +1501,38 @@ pub(crate) struct WindowsD3d11MediaRuntimeCounters {
     pub(crate) encoder_gpu_samples: u64,
     pub(crate) encoder_system_memory_samples: u64,
     pub(crate) encoder_backpressure_events: u64,
+    pub(crate) synchronization_timeouts: u64,
     pub(crate) stale_generation_callbacks: u64,
     pub(crate) texture_pool_capacity: u64,
     pub(crate) texture_pool_in_use: u64,
     pub(crate) texture_pool_pressure_events: u64,
+}
+
+impl WindowsD3d11MediaRuntimeCounters {
+    fn include_encoder_totals(
+        &mut self,
+        gpu_samples: u64,
+        system_memory_samples: u64,
+        backpressure_events: u64,
+        drain_timeouts: u64,
+        flush_timeouts: u64,
+        stale_generation_callbacks: u64,
+    ) {
+        self.encoder_gpu_samples = self.encoder_gpu_samples.saturating_add(gpu_samples);
+        self.encoder_system_memory_samples = self
+            .encoder_system_memory_samples
+            .saturating_add(system_memory_samples);
+        self.encoder_backpressure_events = self
+            .encoder_backpressure_events
+            .saturating_add(backpressure_events);
+        self.synchronization_timeouts = self
+            .synchronization_timeouts
+            .saturating_add(drain_timeouts)
+            .saturating_add(flush_timeouts);
+        self.stale_generation_callbacks = self
+            .stale_generation_callbacks
+            .saturating_add(stale_generation_callbacks);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1540,12 +1654,20 @@ mod runtime {
         WindowsD3d11GpuSource, WindowsD3d11GpuSourceContent, WindowsD3d11GpuTargets,
         WindowsD3d11OutputDimensions, WindowsD3d11ScenePlan, WindowsD3d11UploadPixelOrder,
     };
+    use crate::windows_d3d11_encoder_contract::{
+        WindowsD3d11EncoderRole, WindowsD3d11EncoderSubmissionMetadata,
+    };
     use crate::windows_d3d11_preview::{
         WindowsD3d11Presenter, WindowsD3d11PresenterStatus, WindowsD3d11PreviewFrameMetadata,
         WindowsD3d11PreviewPlacement,
     };
     use crate::windows_d3d11_test_pattern::{
         WindowsD3d11TestPatternMetadata, render_bgra_test_pattern,
+    };
+    use crate::windows_media_foundation_encoder::{
+        MediaFoundationD3d11EncoderDiagnostics, MediaFoundationD3d11EncoderProgress,
+        MediaFoundationD3d11H264Encoder, MediaFoundationD3d11SubmissionFailureKind,
+        MediaFoundationEncodedFrame, MediaFoundationEncoderConfig,
     };
     use std::marker::PhantomData;
     use std::mem;
@@ -1555,7 +1677,7 @@ mod runtime {
     use std::sync::mpsc::TrySendError;
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE};
+    use windows::Win32::Foundation::HMODULE;
     use windows::Win32::Graphics::Direct3D::{
         D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
     };
@@ -1574,12 +1696,12 @@ mod runtime {
     };
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
     use windows::Win32::System::SystemInformation::GetTickCount64;
-    use windows::Win32::System::Threading::{CreateEventW, SetEvent};
+    use windows::Win32::System::Threading::SetEvent;
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE,
         PeekMessageW, QS_ALLINPUT, TranslateMessage, WM_QUIT,
     };
-    use windows::core::{Interface, PCWSTR};
+    use windows::core::Interface;
 
     const MEDIA_COMMAND_QUEUE_CAPACITY: usize = 64;
     const MEDIA_RELEASE_QUEUE_CAPACITY: usize = 64;
@@ -1588,6 +1710,7 @@ mod runtime {
     const MEDIA_WAIT_TIMEOUT_MS: u32 = 16;
     const MEDIA_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
     const MAX_CAPTURE_WAIT_MS: u32 = 100;
+    const MAX_ENCODER_WAIT_MS: u32 = 10_000;
     const MAX_COMPOSITION_SOURCES: usize = 64;
     const MAX_COMPOSITION_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 
@@ -1948,34 +2071,6 @@ mod runtime {
         })
     }
 
-    struct OwnedEvent(HANDLE);
-
-    impl OwnedEvent {
-        fn create() -> Result<Self, WindowsD3d11Error> {
-            // SAFETY: unnamed auto-reset event with default security.
-            unsafe { CreateEventW(None, false, false, PCWSTR::null()) }
-                .map(Self)
-                .map_err(|error| {
-                    WindowsD3d11Error::new(
-                        WindowsD3d11ErrorCode::DeviceCreationFailed,
-                        format!("creating D3D11 media command event failed: {error}"),
-                    )
-                })
-        }
-
-        fn value(&self) -> usize {
-            self.0.0 as usize
-        }
-    }
-
-    impl Drop for OwnedEvent {
-        fn drop(&mut self) {
-            // SAFETY: this owner closes its event exactly once on the media
-            // thread after all GPU/COM objects have been dropped.
-            let _ = unsafe { CloseHandle(self.0) };
-        }
-    }
-
     struct ComApartment;
 
     impl ComApartment {
@@ -2007,6 +2102,293 @@ mod runtime {
         command: WindowsD3d11MediaCommand,
     }
 
+    enum WindowsD3d11CaptureRuntime {
+        DesktopDuplication {
+            plan: WindowsD3d11CapturePlan,
+            capture: WindowsD3d11DesktopDuplicationCapture,
+            state: WindowsD3d11DesktopDuplicationState,
+        },
+        WindowsGraphicsCapture {
+            plan: WindowsD3d11CapturePlan,
+            capture: WindowsD3d11WgcMonitorCapture,
+            next_sequence: u64,
+        },
+    }
+
+    impl WindowsD3d11CaptureRuntime {
+        fn kind(&self) -> WindowsD3d11CaptureAuthorityKind {
+            match self {
+                Self::DesktopDuplication { .. } => {
+                    WindowsD3d11CaptureAuthorityKind::DesktopDuplication
+                }
+                Self::WindowsGraphicsCapture { .. } => {
+                    WindowsD3d11CaptureAuthorityKind::WindowsGraphicsCapture
+                }
+            }
+        }
+
+        fn diagnostics(&self) -> WindowsD3d11CaptureDiagnostics {
+            match self {
+                Self::DesktopDuplication { capture, .. } => capture.diagnostics(),
+                Self::WindowsGraphicsCapture { capture, .. } => capture.diagnostics(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct WindowsD3d11EncoderStatus {
+        pub(crate) role: WindowsD3d11MediaRole,
+        pub(crate) identity: String,
+        pub(crate) pending_frame_count: usize,
+        pub(crate) retained_texture_leases: usize,
+        pub(crate) diagnostics: MediaFoundationD3d11EncoderDiagnostics,
+    }
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct WindowsD3d11EncoderProgress {
+        pub(crate) role: WindowsD3d11MediaRole,
+        pub(crate) encoded_frames: Vec<MediaFoundationEncodedFrame>,
+        pub(crate) released_leases: Vec<WindowsD3d11LeaseRelease>,
+        pub(crate) status: WindowsD3d11EncoderStatus,
+    }
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct WindowsD3d11EncoderSubmissionFailure {
+        pub(crate) error: WindowsD3d11Error,
+        /// Output and tracked releases collected before the submitted ticket
+        /// was rejected. Callers must still packetize these frames.
+        pub(crate) progress: Option<WindowsD3d11EncoderProgress>,
+    }
+
+    impl fmt::Display for WindowsD3d11EncoderSubmissionFailure {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            self.error.fmt(formatter)
+        }
+    }
+
+    impl std::error::Error for WindowsD3d11EncoderSubmissionFailure {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.error)
+        }
+    }
+
+    struct WindowsD3d11EncoderRuntime {
+        role: WindowsD3d11MediaRole,
+        encoder: MediaFoundationD3d11H264Encoder,
+        /// A successful ProcessInput moves the ticket here. Only a tracked
+        /// sample release reported by the MFT may remove it.
+        retained_tickets: BTreeMap<u64, WindowsD3d11TextureLeaseTicket>,
+    }
+
+    impl WindowsD3d11EncoderRuntime {
+        fn status(&self) -> WindowsD3d11EncoderStatus {
+            WindowsD3d11EncoderStatus {
+                role: self.role,
+                identity: self.encoder.identity().to_string(),
+                pending_frame_count: self.encoder.pending_frame_count(),
+                retained_texture_leases: self.retained_tickets.len(),
+                diagnostics: self.encoder.diagnostics(),
+            }
+        }
+
+        fn apply_progress(
+            &mut self,
+            generation: u64,
+            progress: MediaFoundationD3d11EncoderProgress,
+        ) -> Result<WindowsD3d11EncoderProgress, WindowsD3d11Error> {
+            let expected_encoder_role = encoder_role(self.role)?;
+            let mut released_leases = Vec::with_capacity(progress.released_leases.len());
+            for release in progress.released_leases {
+                if release.generation != generation || release.role != expected_encoder_role {
+                    return Err(WindowsD3d11Error::new(
+                        WindowsD3d11ErrorCode::StaleGeneration,
+                        "Media Foundation returned a tracked lease for another generation or role",
+                    ));
+                }
+                let ticket = self
+                    .retained_tickets
+                    .remove(&release.lease_id)
+                    .ok_or_else(|| {
+                        WindowsD3d11Error::new(
+                            WindowsD3d11ErrorCode::InvalidLease,
+                            format!(
+                                "Media Foundation released unknown retained lease {} for {:?}",
+                                release.lease_id, self.role
+                            ),
+                        )
+                    })?;
+                let metadata = ticket.metadata();
+                if metadata.generation != release.generation
+                    || metadata.lease_id.as_u64() != release.lease_id
+                    || metadata.role != self.role
+                {
+                    // Keep the mismatched role lease retained rather than
+                    // recycling it into an unrelated generation.
+                    self.retained_tickets.insert(release.lease_id, ticket);
+                    return Err(WindowsD3d11Error::new(
+                        WindowsD3d11ErrorCode::InvalidLease,
+                        "tracked Media Foundation release did not match its retained texture ticket",
+                    ));
+                }
+                drop(ticket);
+                released_leases.push(WindowsD3d11LeaseRelease {
+                    generation: release.generation,
+                    lease_id: metadata.lease_id,
+                    role: self.role,
+                });
+            }
+            Ok(WindowsD3d11EncoderProgress {
+                role: self.role,
+                encoded_frames: progress.encoded_frames,
+                released_leases,
+                status: self.status(),
+            })
+        }
+    }
+
+    struct WindowsD3d11MediaRuntimeState {
+        contract: WindowsD3d11MediaAuthorityState,
+        capture: Option<WindowsD3d11CaptureRuntime>,
+        compositor: Result<WindowsD3d11Compositor, WindowsD3d11CompositorError>,
+        encoders: BTreeMap<WindowsD3d11MediaRole, WindowsD3d11EncoderRuntime>,
+        presenter: Option<WindowsD3d11Presenter>,
+        presenter_last_error: Option<WindowsD3d11Error>,
+        /// Encoder ownership counters survive successful shutdown/removal so
+        /// the final authority snapshot includes drain/flush timeout evidence.
+        retired_encoder_counters: WindowsD3d11MediaRuntimeCounters,
+    }
+
+    impl WindowsD3d11MediaRuntimeState {
+        fn new(
+            generation: u64,
+            compositor: Result<WindowsD3d11Compositor, WindowsD3d11CompositorError>,
+        ) -> Result<Self, WindowsD3d11Error> {
+            Ok(Self {
+                contract: WindowsD3d11MediaAuthorityState::new(generation, compositor.is_ok())?,
+                capture: None,
+                compositor,
+                encoders: BTreeMap::new(),
+                presenter: None,
+                presenter_last_error: None,
+                retired_encoder_counters: WindowsD3d11MediaRuntimeCounters::default(),
+            })
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct WindowsD3d11CaptureSession {
+        pub(crate) plan: WindowsD3d11CapturePlan,
+        pub(crate) diagnostics: WindowsD3d11CaptureDiagnostics,
+    }
+
+    #[derive(Debug, Clone)]
+    pub(crate) enum WindowsD3d11CompositionSource {
+        TextureLease {
+            source_id: u64,
+            ticket: WindowsD3d11TextureLeaseTicket,
+        },
+        BgraUpload {
+            source_id: u64,
+            pixels: Arc<Vec<u8>>,
+            dimensions: WindowsD3d11OutputDimensions,
+            row_pitch: u32,
+            pixel_order: WindowsD3d11UploadPixelOrder,
+            content_revision: u64,
+            immutable: bool,
+        },
+    }
+
+    impl WindowsD3d11CompositionSource {
+        fn source_id(&self) -> u64 {
+            match self {
+                Self::TextureLease { source_id, .. } | Self::BgraUpload { source_id, .. } => {
+                    *source_id
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub(crate) struct WindowsD3d11CompositionConsumers {
+        pub(crate) preview: Vec<WindowsD3d11MediaRole>,
+        pub(crate) primary: Vec<WindowsD3d11MediaRole>,
+        pub(crate) auxiliary: Vec<WindowsD3d11MediaRole>,
+    }
+
+    impl WindowsD3d11CompositionConsumers {
+        fn for_output(&self, role: WindowsD3d11EncodedOutputRole) -> &Vec<WindowsD3d11MediaRole> {
+            match role {
+                WindowsD3d11EncodedOutputRole::Primary => &self.primary,
+                WindowsD3d11EncodedOutputRole::Auxiliary => &self.auxiliary,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum WindowsD3d11ComposedTextureKind {
+        CapturedBgra,
+        PreviewBgra,
+        PrimaryNv12,
+        AuxiliaryNv12,
+    }
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct WindowsD3d11TicketedTexture {
+        pub(crate) kind: WindowsD3d11ComposedTextureKind,
+        pub(crate) lease: WindowsD3d11PublishedTextureLease,
+        pub(crate) width: u32,
+        pub(crate) height: u32,
+        pub(crate) sequence: u64,
+        pub(crate) tickets: Vec<WindowsD3d11TextureLeaseTicket>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct WindowsD3d11CaptureFrameSubmission {
+        pub(crate) metadata: WindowsD3d11CaptureSubmissionMetadata,
+        pub(crate) texture: WindowsD3d11TicketedTexture,
+    }
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct WindowsD3d11CompositionSubmission {
+        pub(crate) frame: WindowsD3d11ComposedFrame,
+        pub(crate) diagnostics: WindowsD3d11CompositorDiagnostics,
+        pub(crate) textures: Vec<WindowsD3d11TicketedTexture>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct WindowsD3d11PreviewOffer {
+        pub(crate) sequence: u64,
+        pub(crate) replaced_sequence: Option<u64>,
+    }
+
+    #[derive(Debug)]
+    struct WindowsD3d11QueuedPreviewFrame {
+        ticket: WindowsD3d11TextureLeaseTicket,
+        preview_generation: u64,
+        source_live: bool,
+    }
+
+    #[derive(Debug)]
+    struct WindowsD3d11RawCaptureSubmission {
+        metadata: WindowsD3d11CaptureSubmissionMetadata,
+        lease: WindowsD3d11PublishedTextureLease,
+        dimensions: WindowsD3d11TextureDimensions,
+    }
+
+    #[derive(Debug)]
+    struct WindowsD3d11RawComposedTexture {
+        kind: WindowsD3d11ComposedTextureKind,
+        lease: WindowsD3d11PublishedTextureLease,
+        dimensions: WindowsD3d11OutputDimensions,
+    }
+
+    #[derive(Debug)]
+    struct WindowsD3d11RawCompositionSubmission {
+        frame: WindowsD3d11ComposedFrame,
+        diagnostics: WindowsD3d11CompositorDiagnostics,
+        textures: Vec<WindowsD3d11RawComposedTexture>,
+    }
+
     #[derive(Debug)]
     enum WindowsD3d11MediaCommand {
         Status {
@@ -2017,7 +2399,72 @@ mod runtime {
             consumers: Vec<WindowsD3d11MediaRole>,
             reply: SyncSender<Result<WindowsD3d11TestPatternSubmission, WindowsD3d11Error>>,
         },
-        Shutdown,
+        StartCapture {
+            plan: WindowsD3d11CapturePlan,
+            reply: SyncSender<Result<WindowsD3d11CaptureSession, WindowsD3d11Error>>,
+        },
+        AcquireCapture {
+            timeout_ms: u32,
+            consumers: Vec<WindowsD3d11MediaRole>,
+            reply: SyncSender<Result<Option<WindowsD3d11RawCaptureSubmission>, WindowsD3d11Error>>,
+        },
+        StopCapture {
+            reply: SyncSender<Result<bool, WindowsD3d11Error>>,
+        },
+        ComposeScene {
+            plan: WindowsD3d11ScenePlan,
+            sources: Vec<WindowsD3d11CompositionSource>,
+            consumers: WindowsD3d11CompositionConsumers,
+            reply: SyncSender<Result<WindowsD3d11RawCompositionSubmission, WindowsD3d11Error>>,
+        },
+        CreateEncoder {
+            role: WindowsD3d11MediaRole,
+            config: MediaFoundationEncoderConfig,
+            in_flight_capacity: usize,
+            reply: SyncSender<Result<WindowsD3d11EncoderStatus, WindowsD3d11Error>>,
+        },
+        EncoderStatus {
+            role: WindowsD3d11MediaRole,
+            reply: SyncSender<Result<WindowsD3d11EncoderStatus, WindowsD3d11Error>>,
+        },
+        SubmitEncoderTexture {
+            ticket: WindowsD3d11TextureLeaseTicket,
+            input_pts_100ns: i64,
+            duration_100ns: i64,
+            submitted_at_micros: u64,
+            reply: SyncSender<
+                Result<WindowsD3d11EncoderProgress, WindowsD3d11EncoderSubmissionFailure>,
+            >,
+        },
+        PollEncoder {
+            role: WindowsD3d11MediaRole,
+            reply: SyncSender<Result<WindowsD3d11EncoderProgress, WindowsD3d11Error>>,
+        },
+        DrainEncoder {
+            role: WindowsD3d11MediaRole,
+            timeout_ms: u32,
+            reply: SyncSender<Result<WindowsD3d11EncoderProgress, WindowsD3d11Error>>,
+        },
+        FlushEncoder {
+            role: WindowsD3d11MediaRole,
+            timeout_ms: u32,
+            reply: SyncSender<Result<WindowsD3d11EncoderProgress, WindowsD3d11Error>>,
+        },
+        ShutdownEncoder {
+            role: WindowsD3d11MediaRole,
+            timeout_ms: u32,
+            reply: SyncSender<Result<WindowsD3d11EncoderProgress, WindowsD3d11Error>>,
+        },
+        ConfigurePreview {
+            placement: WindowsD3d11PreviewPlacement,
+            reply: SyncSender<Result<WindowsD3d11PresenterStatus, WindowsD3d11Error>>,
+        },
+        PreviewStatus {
+            reply: SyncSender<Result<WindowsD3d11PresenterStatus, WindowsD3d11Error>>,
+        },
+        DestroyPreview {
+            reply: SyncSender<Result<bool, WindowsD3d11Error>>,
+        },
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2030,7 +2477,7 @@ mod runtime {
     pub(crate) struct WindowsD3d11MediaClient {
         command_sender: SyncSender<QueuedMediaCommand>,
         release_sender: WindowsD3d11TextureLeaseReleaseSender,
-        event_value: usize,
+        wake_event: Arc<WindowsD3d11WakeEvent>,
         selection: WindowsDxgiOutputSelection,
         generation: u64,
         preview_slot: Arc<Mutex<Option<WindowsD3d11QueuedPreviewFrame>>>,
@@ -2290,17 +2737,9 @@ mod runtime {
             &self,
             placement: WindowsD3d11PreviewPlacement,
         ) -> Result<WindowsD3d11PresenterStatus, WindowsD3d11Error> {
-            if placement.media_generation != self.generation
-                || placement.preview_generation == 0
-                || placement.adapter_luid != self.selection.adapter_luid
-                || placement.target_window_handle == 0
-                || placement.expected_owner_process_id == 0
-            {
-                return Err(WindowsD3d11Error::new(
-                    WindowsD3d11ErrorCode::StaleGeneration,
-                    "preview placement does not match this media authority",
-                ));
-            }
+            // Validation belongs to the media thread so every rejected
+            // reconfiguration can atomically retire a previously healthy
+            // presenter and make PreviewStatus report the new error.
             let (reply, response) = mpsc::sync_channel(1);
             self.enqueue(WindowsD3d11MediaCommand::ConfigurePreview { placement, reply })?;
             receive_response(response)
@@ -2450,10 +2889,6 @@ mod runtime {
             })
         }
 
-        fn shutdown(&self) -> Result<(), WindowsD3d11Error> {
-            self.enqueue(WindowsD3d11MediaCommand::Shutdown)
-        }
-
         fn enqueue(&self, command: WindowsD3d11MediaCommand) -> Result<(), WindowsD3d11Error> {
             self.command_sender
                 .try_send(QueuedMediaCommand {
@@ -2470,16 +2905,11 @@ mod runtime {
                         "D3D11 media command queue is closed",
                     ),
                 })?;
-            // SAFETY: the media thread owns the handle. Failure means shutdown
-            // raced this enqueue and is reported instead of silently blocking.
-            unsafe { SetEvent(HANDLE(self.event_value as *mut core::ffi::c_void)) }.map_err(
-                |error| {
-                    WindowsD3d11Error::new(
-                        WindowsD3d11ErrorCode::CommandChannelClosed,
-                        format!("signaling D3D11 media command event failed: {error}"),
-                    )
-                },
-            )
+            self.wake()
+        }
+
+        fn wake(&self) -> Result<(), WindowsD3d11Error> {
+            self.wake_event.signal()
         }
     }
 
@@ -2702,6 +3132,7 @@ mod runtime {
 
     pub(crate) struct WindowsD3d11MediaThread {
         client: WindowsD3d11MediaClient,
+        shutdown_requested: Arc<AtomicBool>,
         join: Option<JoinHandle<()>>,
     }
 
@@ -2770,17 +3201,18 @@ mod runtime {
                     ));
                 }
             };
-            let release_sender = release_sender.with_wake_event(startup.event_value);
+            let release_sender = release_sender.with_wake_event(Arc::clone(&startup.wake_event));
             Ok(Self {
                 client: WindowsD3d11MediaClient {
                     command_sender,
                     release_sender,
-                    event_value: startup.event_value,
+                    wake_event: startup.wake_event,
                     selection,
                     generation,
                     preview_slot,
                     preview_replaced_frames,
                 },
+                shutdown_requested: cancel_startup,
                 join: Some(join),
             })
         }
@@ -2794,7 +3226,8 @@ mod runtime {
         }
 
         fn shutdown_inner(&mut self) -> Result<(), WindowsD3d11Error> {
-            let send_result = self.client.shutdown();
+            self.shutdown_requested.store(true, AtomicOrdering::Release);
+            let signal_result = self.client.wake();
             if let Some(join) = self.join.take() {
                 join.join().map_err(|_| {
                     WindowsD3d11Error::new(
@@ -2803,7 +3236,7 @@ mod runtime {
                     )
                 })?;
             }
-            send_result
+            signal_result
         }
     }
 
@@ -2813,9 +3246,9 @@ mod runtime {
         }
     }
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Clone)]
     struct MediaThreadStartup {
-        event_value: usize,
+        wake_event: Arc<WindowsD3d11WakeEvent>,
     }
 
     fn run_media_thread(
@@ -2831,7 +3264,7 @@ mod runtime {
     ) {
         let setup = (|| {
             let apartment = ComApartment::initialize()?;
-            let event = OwnedEvent::create()?;
+            let event = Arc::new(WindowsD3d11WakeEvent::create()?);
             let device = WindowsD3d11Device::create(selection)?;
             let texture_pool =
                 WindowsD3d11TexturePoolOwner::create(&device, generation, pool_config)?;
@@ -2846,7 +3279,7 @@ mod runtime {
         let _apartment = apartment;
         if startup_sender
             .send(Ok(MediaThreadStartup {
-                event_value: event.value(),
+                wake_event: Arc::clone(&event),
             }))
             .is_err()
             || cancel_startup.load(AtomicOrdering::Acquire)
@@ -2927,6 +3360,7 @@ mod runtime {
                 let preview_frame = match preview_slot.lock() {
                     Ok(mut slot) => slot.take(),
                     Err(_) => {
+                        media_runtime.presenter = None;
                         media_runtime.presenter_last_error = Some(WindowsD3d11Error::new(
                             WindowsD3d11ErrorCode::CommandChannelClosed,
                             "latest-wins preview slot lock was poisoned",
@@ -2946,6 +3380,11 @@ mod runtime {
                         &texture_pool,
                         &mut media_runtime,
                     ) {
+                        // Any failure before or during Present invalidates the
+                        // last canonical-ready status. Keeping the presenter
+                        // here would make PreviewStatus return stale success
+                        // and prevent the monitor from recreating resources.
+                        media_runtime.presenter = None;
                         media_runtime.presenter_last_error = Some(error);
                     } else {
                         media_runtime.presenter_last_error = None;
@@ -3051,36 +3490,32 @@ mod runtime {
         media_runtime: &WindowsD3d11MediaRuntimeState,
         pump: WindowsD3d11MediaPumpMetrics,
     ) -> WindowsD3d11MediaRuntimeCounters {
-        let mut counters = WindowsD3d11MediaRuntimeCounters {
-            capture: media_runtime
-                .capture
-                .as_ref()
-                .map(WindowsD3d11CaptureRuntime::diagnostics),
-            compositor: media_runtime
-                .compositor
-                .as_ref()
-                .ok()
-                .map(WindowsD3d11Compositor::diagnostics),
-            stale_generation_callbacks: pump.stale_release_callbacks,
-            texture_pool_capacity: texture_pool.state.capacity() as u64,
-            texture_pool_in_use: texture_pool.state.in_use() as u64,
-            texture_pool_pressure_events: texture_pool.state.pressure_events(),
-            ..Default::default()
-        };
+        let mut counters = media_runtime.retired_encoder_counters;
+        counters.capture = media_runtime
+            .capture
+            .as_ref()
+            .map(WindowsD3d11CaptureRuntime::diagnostics);
+        counters.compositor = media_runtime
+            .compositor
+            .as_ref()
+            .ok()
+            .map(WindowsD3d11Compositor::diagnostics);
+        counters.stale_generation_callbacks = counters
+            .stale_generation_callbacks
+            .saturating_add(pump.stale_release_callbacks);
+        counters.texture_pool_capacity = texture_pool.state.capacity() as u64;
+        counters.texture_pool_in_use = texture_pool.state.in_use() as u64;
+        counters.texture_pool_pressure_events = texture_pool.state.pressure_events();
         for encoder in media_runtime.encoders.values() {
             let diagnostics = encoder.encoder.diagnostics();
-            counters.encoder_gpu_samples = counters
-                .encoder_gpu_samples
-                .saturating_add(diagnostics.ownership.gpu_nv12_samples_submitted);
-            counters.encoder_system_memory_samples = counters
-                .encoder_system_memory_samples
-                .saturating_add(diagnostics.ownership.system_memory_i420_samples_submitted);
-            counters.encoder_backpressure_events = counters
-                .encoder_backpressure_events
-                .saturating_add(diagnostics.ownership.backpressure_events);
-            counters.stale_generation_callbacks = counters
-                .stale_generation_callbacks
-                .saturating_add(diagnostics.ownership.stale_release_callbacks);
+            counters.include_encoder_totals(
+                diagnostics.ownership.gpu_nv12_samples_submitted,
+                diagnostics.ownership.system_memory_i420_samples_submitted,
+                diagnostics.ownership.backpressure_events,
+                diagnostics.ownership.drain_timeouts,
+                diagnostics.ownership.flush_timeouts,
+                diagnostics.ownership.stale_release_callbacks,
+            );
         }
         counters
     }
@@ -3262,18 +3697,26 @@ mod runtime {
                 false
             }
             WindowsD3d11MediaCommand::PreviewStatus { reply } => {
-                let response = if let Some(presenter) = media_runtime.presenter.as_ref() {
-                    Ok(presenter.status())
-                } else {
-                    Err(media_runtime
+                // A configure/pre-Present failure is authoritative until the
+                // failed presenter has been retired. Never prefer an older
+                // canonical-ready presenter over its later error.
+                let response = match windows_d3d11_preview_status_authority(
+                    media_runtime.presenter_last_error.is_some(),
+                    media_runtime.presenter.is_some(),
+                ) {
+                    WindowsD3d11PreviewStatusAuthority::Error => Err(media_runtime
                         .presenter_last_error
                         .clone()
-                        .unwrap_or_else(|| {
-                            WindowsD3d11Error::new(
-                                WindowsD3d11ErrorCode::CompositorUnavailable,
-                                "backend D3D11 presenter is not configured",
-                            )
-                        }))
+                        .expect("error authority requires a presenter error")),
+                    WindowsD3d11PreviewStatusAuthority::Presenter => Ok(media_runtime
+                        .presenter
+                        .as_ref()
+                        .expect("presenter authority requires a presenter")
+                        .status()),
+                    WindowsD3d11PreviewStatusAuthority::Missing => Err(WindowsD3d11Error::new(
+                        WindowsD3d11ErrorCode::CompositorUnavailable,
+                        "backend D3D11 presenter is not configured",
+                    )),
                 };
                 let _ = reply.try_send(response);
                 false
@@ -3296,35 +3739,41 @@ mod runtime {
         device: &WindowsD3d11Device,
         media_runtime: &mut WindowsD3d11MediaRuntimeState,
     ) -> Result<WindowsD3d11PresenterStatus, WindowsD3d11Error> {
-        if placement.media_generation != generation
-            || placement.adapter_luid != device.adapter_luid()
-        {
-            return Err(WindowsD3d11Error::new(
-                WindowsD3d11ErrorCode::StaleGeneration,
-                "preview placement does not match the active media authority",
-            ));
-        }
-        let recreate = media_runtime.presenter.as_ref().is_some_and(|presenter| {
-            presenter.target_window_handle() != placement.target_window_handle
-        });
-        if recreate {
-            media_runtime.presenter = None;
-        }
-        let response = if let Some(presenter) = media_runtime.presenter.as_mut() {
-            presenter.configure(device, placement)
-        } else {
-            WindowsD3d11Presenter::create(device, generation, placement).map(|presenter| {
-                let status = presenter.status();
-                media_runtime.presenter = Some(presenter);
-                status
-            })
-        };
+        let response = (|| {
+            if placement.media_generation != generation
+                || placement.adapter_luid != device.adapter_luid()
+            {
+                return Err(WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::StaleGeneration,
+                    "preview placement does not match the active media authority",
+                ));
+            }
+            let recreate = media_runtime.presenter.as_ref().is_some_and(|presenter| {
+                presenter.target_window_handle() != placement.target_window_handle
+            });
+            if recreate {
+                media_runtime.presenter = None;
+            }
+            if let Some(presenter) = media_runtime.presenter.as_mut() {
+                presenter.configure(device, placement)
+            } else {
+                WindowsD3d11Presenter::create(device, generation, placement).map(|presenter| {
+                    let status = presenter.status();
+                    media_runtime.presenter = Some(presenter);
+                    status
+                })
+            }
+        })();
         match response {
             Ok(status) => {
                 media_runtime.presenter_last_error = None;
                 Ok(status)
             }
             Err(error) => {
+                // configure() can fail after mutating Win32/DirectComposition
+                // resources. Retire the whole presenter so PreviewStatus
+                // cannot expose its previous canonical-ready snapshot.
+                media_runtime.presenter = None;
                 media_runtime.presenter_last_error = Some(error.clone());
                 Err(error)
             }
@@ -3573,6 +4022,17 @@ mod runtime {
                 ),
             ));
         }
+        let diagnostics = runtime.encoder.diagnostics();
+        media_runtime
+            .retired_encoder_counters
+            .include_encoder_totals(
+                diagnostics.ownership.gpu_nv12_samples_submitted,
+                diagnostics.ownership.system_memory_i420_samples_submitted,
+                diagnostics.ownership.backpressure_events,
+                diagnostics.ownership.drain_timeouts,
+                diagnostics.ownership.flush_timeouts,
+                diagnostics.ownership.stale_release_callbacks,
+            );
         media_runtime.encoders.remove(&role);
         Ok(progress)
     }
@@ -4079,6 +4539,35 @@ mod tests {
     }
 
     #[test]
+    fn retired_encoder_counters_preserve_final_drain_and_flush_timeouts() {
+        let mut counters = WindowsD3d11MediaRuntimeCounters::default();
+        counters.include_encoder_totals(10, 0, 2, 1, 0, 3);
+        counters.include_encoder_totals(20, 0, 4, 0, 2, 5);
+
+        assert_eq!(counters.encoder_gpu_samples, 30);
+        assert_eq!(counters.encoder_system_memory_samples, 0);
+        assert_eq!(counters.encoder_backpressure_events, 6);
+        assert_eq!(counters.synchronization_timeouts, 3);
+        assert_eq!(counters.stale_generation_callbacks, 8);
+    }
+
+    #[test]
+    fn preview_status_error_invalidates_an_older_presenter_snapshot() {
+        assert_eq!(
+            windows_d3d11_preview_status_authority(true, true),
+            WindowsD3d11PreviewStatusAuthority::Error
+        );
+        assert_eq!(
+            windows_d3d11_preview_status_authority(false, true),
+            WindowsD3d11PreviewStatusAuthority::Presenter
+        );
+        assert_eq!(
+            windows_d3d11_preview_status_authority(false, false),
+            WindowsD3d11PreviewStatusAuthority::Missing
+        );
+    }
+
+    #[test]
     fn windows_d3d11_latency_samples_are_bounded_and_report_p95_and_max() {
         let mut samples = WindowsD3d11LatencySamples::default();
         for value in 1..=100_u64 {
@@ -4477,6 +4966,40 @@ mod tests {
         assert_eq!(
             action,
             WindowsD3d11CoordinatorAcquireAction::StartMediaThread
+        );
+    }
+
+    #[test]
+    fn device_loss_retires_each_generation_once_without_touching_replacement() {
+        let adapter = DxgiAdapterLuid::from_u64(11);
+        let mut coordinator = WindowsD3d11MediaCoordinatorState::new(4).unwrap();
+        coordinator
+            .acquire(adapter, WindowsD3d11MediaRole::Record)
+            .unwrap();
+
+        assert!(matches!(
+            coordinator.retire_for_device_loss_once(4).unwrap(),
+            Some(WindowsD3d11CoordinatorReleaseAction::DrainAndJoin {
+                retired_generation: 4,
+                next_generation: 5,
+            })
+        ));
+        assert_eq!(coordinator.retire_for_device_loss_once(4).unwrap(), None);
+        coordinator.finish_shutdown(4).unwrap();
+        assert_eq!(coordinator.retire_for_device_loss_once(4).unwrap(), None);
+
+        let (replacement, action) = coordinator
+            .acquire(adapter, WindowsD3d11MediaRole::Record)
+            .unwrap();
+        assert_eq!(replacement.generation, 5);
+        assert_eq!(
+            action,
+            WindowsD3d11CoordinatorAcquireAction::StartMediaThread
+        );
+        assert_eq!(coordinator.retire_for_device_loss_once(4).unwrap(), None);
+        assert_eq!(
+            coordinator.active_role_count(WindowsD3d11MediaRole::Record),
+            1
         );
     }
 

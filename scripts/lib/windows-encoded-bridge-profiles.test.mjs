@@ -25,6 +25,14 @@ test('returns selected profiles in canonical order', () => {
   )
 })
 
+test('accepts the package-manager argument separator used by documented pnpm commands', () => {
+  assert.deepEqual(
+    parseWindowsEncodedBridgeArgs(['--', '--profiles', '1080p30']),
+    parseWindowsEncodedBridgeArgs(['--profiles', '1080p30'])
+  )
+  assert.throws(() => parseWindowsEncodedBridgeArgs(['--profiles', '1080p30', '--']), /Unknown/)
+})
+
 test('rejects missing, empty, unknown, duplicate, repeated, and extra arguments', () => {
   assert.throws(
     () => selectWindowsEncodedBridgeProfiles(['--profiles']),

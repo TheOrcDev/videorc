@@ -39,7 +39,7 @@ describe('Electron IPC contract', () => {
   it('keeps the preload invoke and event surface exactly aligned with the maps', () => {
     expectTypeOf<ElectronEventChannelInvariant>().toEqualTypeOf<true>()
     const preload = readFileSync(new URL('../preload/index.ts', import.meta.url), 'utf8')
-    const invoked = [...preload.matchAll(/\binvoke\('([^']+)'/g)].map((match) => match[1]).sort()
+    const invoked = [...preload.matchAll(/\binvoke\(\s*'([^']+)'/g)].map((match) => match[1]).sort()
     const subscribed = [...preload.matchAll(/\bsubscribe\('([^']+)'/g)]
       .map((match) => match[1])
       .sort()
@@ -270,6 +270,12 @@ describe('Electron IPC contract', () => {
     expect(validateElectronInvokeArgs('preview-surface:update-compositor', [compositor])).toEqual([
       compositor
     ])
+    expect(
+      validateElectronInvokeArgs('preview-surface:set-frame-polling-suppressed', [true, 7, true])
+    ).toEqual([true, 7, true])
+    expect(() =>
+      validateElectronInvokeArgs('preview-surface:set-frame-polling-suppressed', [true, true])
+    ).toThrow('set-frame-polling-suppressed.args')
     expect(() =>
       validateElectronInvokeArgs('preview-surface:update-compositor', [
         { ...compositor, state: 'attacker-controlled' }

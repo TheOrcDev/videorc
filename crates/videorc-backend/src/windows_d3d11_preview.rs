@@ -198,12 +198,15 @@ pub(crate) struct WindowsD3d11PreviewContract {
 
 impl WindowsD3d11PreviewContract {
     pub(crate) fn new(media_generation: u64, adapter_luid: DxgiAdapterLuid) -> Self {
-        let mut diagnostics = WindowsD3d11PresenterDiagnostics::default();
-        diagnostics.fallback_reason = Some(
-            WindowsD3d11PreviewFallbackReason::WaitingForTrustedWindow
-                .as_str()
-                .to_string(),
-        );
+        let diagnostics = WindowsD3d11PresenterDiagnostics {
+            media_generation,
+            fallback_reason: Some(
+                WindowsD3d11PreviewFallbackReason::WaitingForTrustedWindow
+                    .as_str()
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
         Self {
             media_generation,
             adapter_luid,
@@ -1159,6 +1162,19 @@ mod tests {
                 height: 450,
             }),
         }
+    }
+
+    #[test]
+    fn windows_d3d11_preview_diagnostics_identify_the_media_authority_generation() {
+        let mut contract = WindowsD3d11PreviewContract::new(41, DxgiAdapterLuid::from_u64(7));
+        assert_eq!(contract.diagnostics().media_generation, 41);
+        assert_eq!(
+            contract.diagnostics().fallback_reason.as_deref(),
+            Some(WindowsD3d11PreviewFallbackReason::WaitingForTrustedWindow.as_str())
+        );
+
+        contract.configure(placement(41, 9), trusted_readback());
+        assert_eq!(contract.diagnostics().media_generation, 41);
     }
 
     #[test]

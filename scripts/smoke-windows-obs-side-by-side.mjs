@@ -5,6 +5,7 @@ import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from '
 import { createServer } from 'node:net'
 import { release, tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, win32 } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   WINDOWS_OBS_D3D11_HARDWARE_CLASSES,
@@ -22,6 +23,7 @@ import {
   normalizedWindowsObsSettings,
   parseWindowsObsSideBySideArgs,
   summarizeWindowsObsProcessTelemetry,
+  windowsObsSelectionEnvironment,
   windowsObsSettingsIdentity
 } from './lib/windows-obs-side-by-side.mjs'
 import {
@@ -35,6 +37,16 @@ import {
   receiverBitrateEvidence,
   summarizeWindowsStreamDiagnosticSamples
 } from './lib/windows-stream-performance.mjs'
+import {
+  revalidateInstalledWindowsCandidate,
+  verifyInstalledWindowsCandidate
+} from './lib/windows-local-gates.mjs'
+import {
+  finalizePreparedJsonArtifact,
+  prepareExclusiveJsonArtifact
+} from './lib/exclusive-json-artifact.mjs'
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const options = parseWindowsObsSideBySideArgs(process.argv.slice(2))
 
@@ -102,6 +114,12 @@ try {
 
 async function executeCalibration() {
   const runtime = await loadRuntime()
+  const selectionEnvironment = windowsObsSelectionEnvironment({
+    env: process.env,
+    d3d11: options.d3d11,
+    requireD3d11: options.requireD3d11
+  })
+  const runnerEnvironment = { ...process.env, ...selectionEnvironment }
   const acceptanceRoot = requiredAbsoluteEnvironmentPath('VIDEORC_WINDOWS_ACCEPTANCE_DIR')
   const candidateExecutable = requiredAbsoluteEnvironmentPath(
     'VIDEORC_WINDOWS_ACCEPTANCE_EXECUTABLE'
@@ -123,7 +141,6 @@ async function executeCalibration() {
     'VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_PAYLOAD_SHA256',
     64
   )
-  const publisherName = requiredEnvironment('VIDEORC_WINDOWS_PUBLISHER_NAME')
   const hardwareClass = requiredEnvironment('VIDEORC_WINDOWS_HARDWARE_CLASS')
   const monitorId = requiredEnvironment('VIDEORC_OBS_MONITOR_ID')
   const videorcDisplayId = requiredEnvironment('VIDEORC_WINDOWS_ACCEPTANCE_DISPLAY_ID')
@@ -151,16 +168,21 @@ async function executeCalibration() {
     throw new BlockedRunError('VIDEORC_OBS_EXECUTABLE did not identify an OBS executable.')
   }
 
-  const gitHead = capturedText('git', ['rev-parse', 'HEAD']).toLocaleLowerCase('en-US')
-  const gitStatus = capturedText('git', ['status', '--porcelain'])
-  if (gitHead !== sourceCommit || gitStatus.trim()) {
-    throw new BlockedRunError(
-      'The OBS comparison checkout must be clean and exactly match VIDEORC_RELEASE_SOURCE_COMMIT.'
-    )
-  }
+  const verifiedCandidate = await verifyInstalledWindowsCandidate({
+    executablePath: candidateExecutable,
+    repoRoot,
+    env: process.env
+  })
+  const revalidateCandidate = () =>
+    revalidateInstalledWindowsCandidate({
+      expectedCandidate: verifiedCandidate,
+      repoRoot,
+      env: process.env,
+      platform: process.platform
+    })
 
   const spawnSpec = runtime.performanceAppSpawnSpec({
-    ...process.env,
+    ...runnerEnvironment,
     VIDEORC_PERF_APP_EXECUTABLE: candidateExecutable
   })
   if (
@@ -179,14 +201,13 @@ async function executeCalibration() {
     platform: 'win32'
   })
 
-  const [candidateSha256, candidatePayload, candidateSignature, obsSha256, obsSignature] =
-    await Promise.all([
-      runtime.sha256File(candidateExecutable),
-      runtime.packagedAppPayloadIdentity(candidateExecutable, { osPlatform: 'win32' }),
-      authenticodeIdentity(candidateExecutable),
-      runtime.sha256File(obsExecutable),
-      authenticodeIdentity(obsExecutable)
-    ])
+  const candidateSha256 = verifiedCandidate.executableSha256
+  const candidatePayload = verifiedCandidate.packagePayload
+  const candidateSignature = verifiedCandidate.signature
+  const [obsSha256, obsSignature] = await Promise.all([
+    runtime.sha256File(obsExecutable),
+    authenticodeIdentity(obsExecutable)
+  ])
   if (candidateSha256 !== expectedCandidateSha256) {
     throw new BlockedRunError('Installed Videorc.exe did not match the expected app digest.')
   }
@@ -195,7 +216,6 @@ async function executeCalibration() {
       'Installed app.asar/backend/FFmpeg payload did not match the expected payload digest.'
     )
   }
-  requireValidSignature(candidateSignature, publisherName, 'Videorc candidate')
   requireValidSignature(obsSignature, null, 'OBS reference')
   const obsCliVersion = parseObsVersion(capturedText(obsExecutable, ['--version']))
 
@@ -230,8 +250,7 @@ async function executeCalibration() {
     const appEnvironment = acceptanceAppEnvironment({
       profileDirectory,
       evidenceDirectory: plan.root,
-      d3d11: options.d3d11,
-      requireD3d11: options.requireD3d11
+      selectionEnvironment
     })
 
     await assertExactExecutablesAbsent([candidateExecutable, obsExecutable, portable.executable])
@@ -359,7 +378,8 @@ async function executeCalibration() {
         ffprobePath,
         d3d11: options.d3d11,
         requireD3d11: options.requireD3d11,
-        rtmpTarget
+        rtmpTarget,
+        revalidateCandidate
       })
       completedRuns.push(report)
       if (report.media.verdict !== 'PASS' || report.process.teardownClean !== true) {
@@ -372,19 +392,22 @@ async function executeCalibration() {
       runs: completedRuns
     })
     aggregate.aggregatePath = plan.aggregatePath
-    await writeJsonNew(plan.aggregatePath, aggregate)
-    const aggregateSha256 = await runtime.sha256File(plan.aggregatePath)
-    const finalized = {
-      ...aggregate,
-      aggregatePath: plan.aggregatePath,
-      aggregateSha256
-    }
-    if (finalized.verdict !== 'PASS') {
-      throw new BlockedRunError(
-        [...finalized.failures, ...finalized.blockers].join('; ') || 'OBS comparison did not pass.'
+    if (aggregate.verdict === 'PASS') {
+      const preparedAggregate = await prepareExclusiveJsonArtifact(plan.aggregatePath, aggregate)
+      const publishedAggregate = await finalizePreparedJsonArtifact(
+        preparedAggregate,
+        revalidateCandidate
       )
+      return {
+        ...aggregate,
+        aggregatePath: plan.aggregatePath,
+        aggregateSha256: publishedAggregate.sha256
+      }
     }
-    return finalized
+    await writeJsonNew(plan.aggregatePath, aggregate)
+    throw new BlockedRunError(
+      [...aggregate.failures, ...aggregate.blockers].join('; ') || 'OBS comparison did not pass.'
+    )
   } catch (error) {
     if (manifest && !existsSync(plan.aggregatePath)) {
       const failedAggregate = {
@@ -437,7 +460,8 @@ async function executeRun({
   ffprobePath,
   d3d11,
   requireD3d11,
-  rtmpTarget
+  rtmpTarget,
+  revalidateCandidate
 }) {
   await mkdir(runPlan.directory, { recursive: false })
   const artifacts = {
@@ -489,6 +513,8 @@ async function executeRun({
   let stimulusStop = null
   let receiverExit = null
   let supportBundlePresent = false
+  let supportBundleValidation = null
+  let supportBundleValidatedSha256 = null
   let caught = null
   try {
     stimuli = await launchStimuli({
@@ -624,24 +650,30 @@ async function executeRun({
       measurementSeconds: WINDOWS_OBS_TIMING.measurementMs / 1000
     })
 
-    if (runPlan.app === 'videorc' && publisher.exportSupportBundle) {
-      const support = await publisher.exportSupportBundle()
-      if (support?.path && existsSync(support.path)) {
-        const supportRaw = await readFile(support.path, 'utf8')
-        assertNoSecrets(supportRaw, [target.streamKey, target.listenerUrl], 'support bundle')
-        const bundle = JSON.parse(supportRaw)
-        const validation = runtime.validateSupportBundle(bundle, { windowsAcceptance: true })
-        if (!validation.ok) {
-          throw new BlockedRunError(
-            `Videorc support bundle failed validation: ${validation.failures.join('; ')}`
-          )
-        }
-        await copyFile(support.path, artifacts.supportBundle)
-        supportBundlePresent = true
-        if (resolve(support.path) !== resolve(artifacts.supportBundle)) {
-          await rm(support.path, { force: true })
-        }
+    if (runPlan.app === 'videorc') {
+      if (typeof publisher.exportSupportBundle !== 'function') {
+        throw new BlockedRunError('Videorc trial did not expose support-bundle export.')
       }
+      const support = await publisher.exportSupportBundle()
+      if (!support?.path || !existsSync(support.path)) {
+        throw new BlockedRunError('Videorc trial did not retain exactly one support bundle.')
+      }
+      if (resolve(support.path) !== resolve(artifacts.supportBundle)) {
+        await copyFile(support.path, artifacts.supportBundle)
+        await rm(support.path, { force: true })
+      }
+      const supportRaw = await readFile(artifacts.supportBundle, 'utf8')
+      assertNoSecrets(supportRaw, [target.streamKey, target.listenerUrl], 'support bundle')
+      const bundle = JSON.parse(supportRaw)
+      const validation = runtime.validateSupportBundle(bundle, { windowsAcceptance: true })
+      if (!validation.ok) {
+        throw new BlockedRunError(
+          `Videorc support bundle failed validation: ${validation.failures.join('; ')}`
+        )
+      }
+      supportBundleValidatedSha256 = createHash('sha256').update(supportRaw).digest('hex')
+      supportBundlePresent = true
+      supportBundleValidation = { verdict: 'PASS', validated: true, secretFree: true }
     }
   } catch (error) {
     caught = redactedRunError(error, [target.streamKey, target.listenerUrl])
@@ -949,6 +981,19 @@ async function executeRun({
       bytes: statSync(path).size
     }))
   )
+  const supportArtifacts = hashedArtifacts.filter(
+    (artifact) => resolve(artifact.path) === resolve(artifacts.supportBundle)
+  )
+  if (
+    (runPlan.app === 'videorc' &&
+      (!supportBundlePresent ||
+        supportArtifacts.length !== 1 ||
+        !supportBundleValidation ||
+        supportArtifacts[0].sha256 !== supportBundleValidatedSha256)) ||
+    (runPlan.app === 'obs' && supportArtifacts.length !== 0)
+  ) {
+    throw new BlockedRunError('OBS comparison support-bundle cardinality was invalid.')
+  }
   const report = {
     schemaVersion: 1,
     kind: 'videorc.windows-obs-side-by-side-run',
@@ -973,6 +1018,10 @@ async function executeRun({
     },
     media,
     pipeline,
+    supportBundle:
+      runPlan.app === 'videorc'
+        ? { ...supportBundleValidation, ...supportArtifacts[0] }
+        : { verdict: 'NOT_APPLICABLE' },
     receiver: receiverEvidence,
     process: {
       ...processSummary,
@@ -989,10 +1038,11 @@ async function executeRun({
     reportPath: runPlan.reportPath
   }
   assertNoSecrets(JSON.stringify(report), [target.streamKey, target.listenerUrl], 'run report')
-  await writeJsonNew(runPlan.reportPath, report)
+  const preparedReport = await prepareExclusiveJsonArtifact(runPlan.reportPath, report)
+  const publishedReport = await finalizePreparedJsonArtifact(preparedReport, revalidateCandidate)
   return {
     ...report,
-    reportSha256: await sha256File(runPlan.reportPath)
+    reportSha256: publishedReport.sha256
   }
 }
 
@@ -1249,8 +1299,9 @@ function resolveObsEncoderId(hardwareClass) {
   )
 }
 
-function acceptanceAppEnvironment({ profileDirectory, evidenceDirectory, d3d11, requireD3d11 }) {
+function acceptanceAppEnvironment({ profileDirectory, evidenceDirectory, selectionEnvironment }) {
   return {
+    ...selectionEnvironment,
     VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR: profileDirectory,
     VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED: '1',
     VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256: requiredEnvironment(
@@ -1262,9 +1313,7 @@ function acceptanceAppEnvironment({ profileDirectory, evidenceDirectory, d3d11, 
     VIDEORC_WINDOWS_ACCEPTANCE_DIR: evidenceDirectory,
     VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
     VIDEORC_DISABLE_AUTO_PREVIEW: '1',
-    VIDEORC_PACKAGED_SMOKE_TEST: '1',
-    ...(d3d11 ? { VIDEORC_WINDOWS_D3D11_MEDIA: '1' } : {}),
-    ...(requireD3d11 ? { VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1' } : {})
+    VIDEORC_PACKAGED_SMOKE_TEST: '1'
   }
 }
 
@@ -1988,13 +2037,13 @@ async function preflightObs({
   }
 }
 
-function buildEndpointMapping({ videorcPreflight, obsPreflight, displayBounds, displayRefreshHz }) {
+function buildEndpointMapping({ videorcPreflight, obsPreflight }) {
   const obsDisplay = {
     deviceName: obsPreflight.display.deviceName,
     adapterLuid: videorcPreflight.display.adapterLuid,
     outputIndex: videorcPreflight.display.outputIndex,
-    desktopBounds: displayBounds,
-    refreshHz: displayRefreshHz
+    desktopBounds: videorcPreflight.display.desktopBounds,
+    refreshHz: videorcPreflight.display.refreshHz
   }
   const result = evaluateWindowsObsEndpointMapping({
     videorc: {
@@ -2849,8 +2898,19 @@ async function pinRootProcessIdentity(rootPid) {
   }
 }
 
-async function startObsPublisher({ portable, profile, runDirectory, expected }) {
+function assertRootExecutable(identity, expectedPath, label) {
+  const actual = win32.normalize(String(identity?.executablePath ?? '')).toLocaleLowerCase('en-US')
+  const expected = win32.normalize(String(expectedPath ?? '')).toLocaleLowerCase('en-US')
+  if (!actual || !expected || actual !== expected) {
+    throw new BlockedRunError(
+      `${label} executable was ${identity?.executablePath ?? 'missing'}, expected ${expectedPath ?? 'missing'}.`
+    )
+  }
+}
+
+async function startObsPublisher({ runtime, portable, profile, runDirectory, expected }) {
   const control = await launchObsControl({
+    runtime,
     portable,
     profile,
     expectedExecutableSha256: expected.portableSha256,
@@ -3430,7 +3490,8 @@ function evaluateVideorcPipeline(statusTimeline, { requireD3d11, expectedAdapter
         previewBmpBytes: d3d11.previewBmpBytes,
         texturePoolPressureEvents: d3d11.texturePoolPressureEvents,
         adapterMismatches: d3d11.adapterMismatches,
-        deviceResets: d3d11.deviceResets
+        deviceResets: d3d11.deviceResets,
+        synchronizationTimeouts: d3d11.synchronizationTimeouts
       })) {
         if (value !== 0) failures.push(`${field}=${value ?? 'missing'} (expected 0)`)
       }
@@ -3452,11 +3513,30 @@ function evaluateVideorcPipeline(statusTimeline, { requireD3d11, expectedAdapter
       }
       if (
         !Number.isFinite(media?.messagePumpLagP95Ms) ||
+        media.messagePumpLagP95Ms < 0 ||
         media.messagePumpLagP95Ms > 50 ||
         !Number.isFinite(media?.messagePumpLagMaxMs) ||
+        media.messagePumpLagMaxMs < 0 ||
         media.messagePumpLagMaxMs > 100
       ) {
         failures.push(`diagnostic sample ${index + 1} exceeded/missed 50/100ms pump limits`)
+      }
+      if (
+        !Number.isFinite(media?.mediaCommandLagP95Ms) ||
+        media.mediaCommandLagP95Ms < 0 ||
+        media.mediaCommandLagP95Ms > 50 ||
+        !Number.isFinite(media?.mediaCommandLagMaxMs) ||
+        media.mediaCommandLagMaxMs < 0 ||
+        media.mediaCommandLagMaxMs > 100
+      ) {
+        failures.push(
+          `diagnostic sample ${index + 1} exceeded/missed 50/100ms media-command limits`
+        )
+      }
+      for (const field of ['maximumConsecutiveMessageBatch', 'maximumConsecutiveMediaBatch']) {
+        if (!Number.isInteger(media?.[field]) || media[field] < 0 || media[field] > 32) {
+          failures.push(`diagnostic sample ${index + 1} ${field} exceeded 32`)
+        }
       }
       if (
         !Number.isFinite(media?.texturePoolCapacity) ||
@@ -3477,7 +3557,8 @@ function evaluateVideorcPipeline(statusTimeline, { requireD3d11, expectedAdapter
         'texturePoolPressureEvents',
         'adapterMismatches',
         'deviceResets',
-        'staleGenerationCallbacks'
+        'staleGenerationCallbacks',
+        'synchronizationTimeouts'
       ]) {
         if (Number(media?.[field]) !== 0) {
           failures.push(

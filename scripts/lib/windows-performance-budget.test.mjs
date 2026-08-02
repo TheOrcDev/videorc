@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
 
 import {
+  assertWindowsD3d11EvidenceAuthorityBoundary,
   attachWindowsNaturalFallbackPolicy,
   evaluateWindowsPerformanceBudget,
   loadWindowsPerformanceBudget,
@@ -314,6 +315,27 @@ describe('Windows performance budgets', () => {
 })
 
 describe('Windows D3D11 performance budgets', () => {
+  it('allows the exact external budget authority but contains every nested evidence path', () => {
+    const authority = {
+      budgetPath: '/repo/docs/acceptance/windows-d3d11-performance-budget.json',
+      candidateRoot: '/evidence'
+    }
+    assert.doesNotThrow(() =>
+      assertWindowsD3d11EvidenceAuthorityBoundary({
+        ...authority,
+        evidencePath: '/evidence/nvidia/obs/aggregate.json'
+      })
+    )
+    assert.throws(
+      () =>
+        assertWindowsD3d11EvidenceAuthorityBoundary({
+          ...authority,
+          evidencePath: '/arbitrary/recomputed/aggregate.json'
+        }),
+      /escaped the candidate evidence root/
+    )
+  })
+
   it('keeps derived evidence draft and rejects activation without natural fallback review', () => {
     const document = d3d11BudgetDocument({ active: false })
     assert.deepEqual(validateWindowsPerformanceBudget(document, { allowDraft: true }), [])
@@ -368,7 +390,8 @@ describe('Windows D3D11 performance budgets', () => {
       path: '/tmp/windows-d3d11-budget.json',
       context: d3dContext,
       read: async () => JSON.stringify(document),
-      verifyArtifact: async ({ expectedSha256 }) => expectedSha256
+      verifyArtifact: async ({ expectedSha256 }) => expectedSha256,
+      verifyDerivation: async () => []
     })
     assert.equal(loaded.profile.id, d3dProfile.id)
 
@@ -376,7 +399,8 @@ describe('Windows D3D11 performance budgets', () => {
       path: '/tmp/windows-d3d11-budget.json',
       context: d3d11RuntimeContext(document.naturalFallbackPolicy.scope, document.candidate),
       read: async () => JSON.stringify(document),
-      verifyArtifact: async ({ expectedSha256 }) => expectedSha256
+      verifyArtifact: async ({ expectedSha256 }) => expectedSha256,
+      verifyDerivation: async () => []
     })
     assert.equal(fallback.profile.id, 'unsupported-natural-fallback-1080p30')
 
@@ -417,10 +441,16 @@ describe('Windows D3D11 performance budgets', () => {
     metrics.d3d11.captureReadbackFrames = 1
     metrics.d3d11.cursorCorrect = false
     metrics.d3d11.messageDispatchMaxMs = 101
+    metrics.d3d11.mediaCommandLagMaxMs = 101
+    metrics.d3d11.maximumConsecutiveMediaBatch = 33
+    metrics.d3d11.synchronizationTimeouts = 1
     assert.deepEqual(evaluateWindowsPerformanceBudget(profile, metrics), [
       'captureReadbackFrames 1 exceeded 0',
       'cursor correctness false did not equal true',
-      'message dispatch maximum 101 exceeded 100'
+      'message dispatch maximum 101 exceeded 100',
+      'media command maximum 101 exceeded 100',
+      'maximumConsecutiveMediaBatch 33 exceeded 32',
+      'synchronization timeouts 1 did not equal 0'
     ])
   })
 
@@ -533,7 +563,12 @@ function d3d11BudgetDocument({ active = true } = {}) {
           cursorCorrect: true,
           inputContinuity: true,
           maximumMessageDispatchP95Ms: 50,
-          maximumMessageDispatchMs: 100
+          maximumMessageDispatchMs: 100,
+          maximumMediaCommandLagP95Ms: 50,
+          maximumMediaCommandLagMs: 100,
+          maximumConsecutiveMessageBatch: 32,
+          maximumConsecutiveMediaBatch: 32,
+          synchronizationTimeouts: 0
         },
         thresholds: d3d11Thresholds()
       }
@@ -710,7 +745,12 @@ function d3d11PassingMetrics() {
     cursorCorrect: true,
     inputContinuity: true,
     messageDispatchP95Ms: 30,
-    messageDispatchMaxMs: 80
+    messageDispatchMaxMs: 80,
+    mediaCommandLagP95Ms: 25,
+    mediaCommandLagMaxMs: 70,
+    maximumConsecutiveMessageBatch: 12,
+    maximumConsecutiveMediaBatch: 10,
+    synchronizationTimeouts: 0
   }
   return metrics
 }

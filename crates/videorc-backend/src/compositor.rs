@@ -950,7 +950,29 @@ pub async fn start_synthetic_compositor(
     params: CompositorStartParams,
 ) -> CompositorStatus {
     let _lifecycle = state.compositor_lifecycle.lock().await;
-    if !stop_current_compositor(&state).await {
+    start_synthetic_compositor_with_lifecycle(&state, params).await
+}
+
+/// Starts a compositor only when no newer owner has installed a run. This is
+/// used when restoring a preview compositor after a native D3D11 recording:
+/// restoration must never stop or replace a compositor created meanwhile.
+#[cfg(any(target_os = "windows", test))]
+pub async fn start_synthetic_compositor_if_idle(
+    state: AppState,
+    params: CompositorStartParams,
+) -> Option<CompositorStatus> {
+    let _lifecycle = state.compositor_lifecycle.lock().await;
+    if state.compositor.lock().await.run_id.is_some() {
+        return None;
+    }
+    Some(start_synthetic_compositor_with_lifecycle(&state, params).await)
+}
+
+async fn start_synthetic_compositor_with_lifecycle(
+    state: &AppState,
+    params: CompositorStartParams,
+) -> CompositorStatus {
+    if !stop_current_compositor(state).await {
         return state.compositor.lock().await.status.clone();
     }
 

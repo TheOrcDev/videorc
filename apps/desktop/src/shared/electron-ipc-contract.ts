@@ -875,7 +875,7 @@ const specificRuntimeInvokeContracts = {
     previewSurfaceStatusSchema
   ),
   'preview-surface:set-frame-polling-suppressed': invokeContract(
-    tupleSchema([booleanSchema, optionalSchema(booleanSchema)]),
+    tupleSchema([booleanSchema, nonNegativeSafeIntegerSchema, optionalSchema(booleanSchema)]),
     previewSurfaceStatusSchema
   ),
   'preview-surface:destroy': invokeContract(optionalGenerationOnlyArgs, previewSurfaceStatusSchema),

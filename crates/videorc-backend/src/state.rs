@@ -78,14 +78,24 @@ impl WindowsD3d11MediaCoordinator {
                 retired_generation, ..
             } => {
                 #[cfg(target_os = "windows")]
-                {
+                let shutdown_result = {
                     self.client.take();
                     if let Some(media_thread) = self.media_thread.take() {
-                        media_thread.shutdown()?;
+                        media_thread.shutdown()
+                    } else {
+                        Ok(())
                     }
-                }
+                };
                 self.active_adapter_luid = None;
-                self.state.finish_shutdown(retired_generation)
+                let finish_result = self.state.finish_shutdown(retired_generation);
+                #[cfg(target_os = "windows")]
+                {
+                    shutdown_result.and(finish_result)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    finish_result
+                }
             }
         }
     }
@@ -101,6 +111,15 @@ impl WindowsD3d11MediaCoordinator {
             return Ok(());
         };
         self.finish_release_action(action)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn retire_device_loss_once(&mut self, generation: u64) -> Result<bool, WindowsD3d11Error> {
+        let Some(action) = self.state.retire_for_device_loss_once(generation)? else {
+            return Ok(false);
+        };
+        self.finish_release_action(action)?;
+        Ok(true)
     }
 }
 
@@ -204,6 +223,17 @@ pub(crate) fn acquire_windows_d3d11_media(
         client,
         coordinator: Arc::downgrade(coordinator),
     })
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn retire_windows_d3d11_media_for_device_loss(
+    coordinator: &WindowsD3d11MediaCoordinatorSlot,
+    generation: u64,
+) -> Result<bool, WindowsD3d11Error> {
+    coordinator
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retire_device_loss_once(generation)
 }
 
 #[derive(Clone)]

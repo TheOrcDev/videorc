@@ -607,6 +607,7 @@ describe('backend RPC contract', () => {
         windowActive: false,
         windowFocused: false,
         previewGeneration: 7,
+        mediaGeneration: 11,
         generationMatches: true,
         ownerProcessMatches: true,
         sameAdapter: true,
@@ -624,6 +625,23 @@ describe('backend RPC contract', () => {
     expect(validateBackendRpcResult('preview.surface.status', d3d11SurfaceStatus)).toEqual(
       d3d11SurfaceStatus
     )
+    const { mediaGeneration: _mediaGeneration, ...generationlessPresenter } =
+      d3d11SurfaceStatus.windowsD3d11Presenter
+    expect(() =>
+      validateBackendEventPayload('preview.surface.status', {
+        ...d3d11SurfaceStatus,
+        windowsD3d11Presenter: generationlessPresenter
+      })
+    ).toThrow('mediaGeneration')
+    expect(() =>
+      validateBackendRpcResult('preview.surface.status', {
+        ...d3d11SurfaceStatus,
+        windowsD3d11Presenter: {
+          ...d3d11SurfaceStatus.windowsD3d11Presenter,
+          mediaGeneration: -1
+        }
+      })
+    ).toThrow('mediaGeneration')
     for (const leaked of [
       { ...d3d11SurfaceStatus, nativeWindowHandle: '0x0000000000000001' },
       { ...d3d11SurfaceStatus, processId: 42 },
@@ -672,12 +690,33 @@ describe('backend RPC contract', () => {
   })
 
   it('accepts real diagnostic wire payloads without renderer-only timestamps', () => {
-    const diagnostics = { skippedFrames: 0, droppedFrames: 2 }
+    const diagnostics = {
+      skippedFrames: 0,
+      droppedFrames: 2,
+      previewImagePollCounts: {
+        cameraPng: 0,
+        screenPng: 0,
+        productionPng: 0,
+        cameraBmp: 3,
+        screenBmp: 4,
+        liveJpeg: 0,
+        liveMjpeg: 0
+      }
+    }
     expect(validateBackendRpcResult('diagnostics.stats', diagnostics)).toEqual(diagnostics)
     expect(validateBackendEventPayload('diagnostics.stats', diagnostics)).toEqual(diagnostics)
     expect(() => validateBackendRpcResult('diagnostics.stats', { skippedFrames: -1 })).toThrow(
       'diagnostics.stats'
     )
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...diagnostics,
+        previewImagePollCounts: {
+          ...diagnostics.previewImagePollCounts,
+          productionPng: -1
+        }
+      })
+    ).toThrow('productionPng')
   })
 
   it('validates scalar-only Windows D3D11 media diagnostics', () => {
@@ -720,6 +759,7 @@ describe('backend RPC contract', () => {
       texturePoolPressureEvents: 0,
       adapterMismatches: 0,
       deviceResets: 0,
+      synchronizationTimeouts: 0,
       staleGenerationCallbacks: 0
     }
     const diagnostics = {
@@ -739,6 +779,15 @@ describe('backend RPC contract', () => {
         }
       })
     ).toThrow('sharedTextureHandle')
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...diagnostics,
+        windowsD3d11Media: {
+          ...windowsD3d11Media,
+          synchronizationTimeouts: -1
+        }
+      })
+    ).toThrow('synchronizationTimeouts')
   })
 
   it('parses response and event envelopes before dispatch', () => {

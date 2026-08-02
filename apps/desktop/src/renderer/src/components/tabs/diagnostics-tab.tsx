@@ -1337,10 +1337,17 @@ function formatImagePolls(counts?: DiagnosticStats['previewImagePollCounts']): s
   if (!counts) {
     return '--'
   }
-  const total = counts.cameraPng + counts.screenPng + counts.liveJpeg + counts.liveMjpeg
+  const total =
+    counts.cameraPng +
+    counts.screenPng +
+    counts.productionPng +
+    counts.cameraBmp +
+    counts.screenBmp +
+    counts.liveJpeg +
+    counts.liveMjpeg
   return total === 0
     ? 'None'
-    : `${total} (cam ${counts.cameraPng}, scr ${counts.screenPng}, jpg ${counts.liveJpeg}, mjpeg ${counts.liveMjpeg})`
+    : `${total} (PNG cam ${counts.cameraPng}, scr ${counts.screenPng}, prod ${counts.productionPng}; BMP cam ${counts.cameraBmp}, scr ${counts.screenBmp}; jpg ${counts.liveJpeg}, mjpeg ${counts.liveMjpeg})`
 }
 
 // The plan's "OBS-native preview" vs "Fallback preview" badge. Only the
