@@ -1314,16 +1314,13 @@ mod runtime {
                     WindowsD3d11GpuSourceContent::Texture(texture) => {
                         create_shader_resource(raw_device, texture, "captured source")?
                     }
-                    WindowsD3d11GpuSourceContent::Upload(upload) => {
-                        let shader_resource = self.resolve_upload(
-                            device,
-                            plan.sequence,
-                            layer.source_id,
-                            layer.source_kind,
-                            upload,
-                        )?;
-                        shader_resource
-                    }
+                    WindowsD3d11GpuSourceContent::Upload(upload) => self.resolve_upload(
+                        device,
+                        plan.sequence,
+                        layer.source_id,
+                        layer.source_kind,
+                        upload,
+                    )?,
                 };
                 resolved_sources.push(Some(shader_resource));
             }
@@ -1538,7 +1535,7 @@ mod runtime {
             update_constants(context, constant_buffer, &constants);
             // Procedural layers deliberately bind a null SRV.
             unsafe {
-                context.PSSetShaderResources(0, Some(&[shader_resource.clone()]));
+                context.PSSetShaderResources(0, Some(std::slice::from_ref(shader_resource)));
                 context.Draw(6, 0);
             }
         }
@@ -1916,6 +1913,7 @@ mod runtime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_nv12_output(
         device: &WindowsD3d11Device,
         shaders: &CompiledShaders,
@@ -2066,7 +2064,7 @@ mod runtime {
             D3DCompile(
                 WINDOWS_D3D11_SHADER_SOURCE.as_ptr().cast::<c_void>(),
                 WINDOWS_D3D11_SHADER_SOURCE.len(),
-                PCSTR(b"windows_d3d11_shaders.hlsl\0".as_ptr()),
+                PCSTR(c"windows_d3d11_shaders.hlsl".as_ptr().cast()),
                 None,
                 None::<&ID3DInclude>,
                 PCSTR(entry.as_ptr()),

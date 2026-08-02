@@ -597,10 +597,12 @@ mod runtime {
             placement: WindowsD3d11PreviewPlacement,
         ) -> Result<WindowsD3d11PresenterStatus, WindowsD3d11Error> {
             let preview_generation = placement.preview_generation;
-            let status = self.client.configure_preview(placement).map_err(|error| {
-                attribute_adapter_mismatch(&self.snapshot, &error);
-                error
-            })?;
+            let status = self
+                .client
+                .configure_preview(placement)
+                .inspect_err(|error| {
+                    attribute_adapter_mismatch(&self.snapshot, error);
+                })?;
             self.preview_generation
                 .store(preview_generation, Ordering::Release);
             Ok(status)
@@ -1524,25 +1526,25 @@ mod runtime {
                 break;
             }
             let camera_upload_frames = composition.diagnostics.camera_upload_frames;
-            if configured_preview_generation != 0 {
-                if let Some(ticket) = clone_ticket_for_role(
+            if configured_preview_generation != 0
+                && let Some(ticket) = clone_ticket_for_role(
                     &composition.textures,
                     WindowsD3d11MediaRole::Preview,
                     WindowsD3d11ComposedTextureKind::PreviewBgra,
                     WindowsD3d11TextureFormat::Bgra8Unorm,
-                ) {
-                    match client.offer_preview(ticket, configured_preview_generation, true) {
-                        Ok(offer) => {
-                            update_snapshot(&snapshot, |current| {
-                                current.preview_offered_sequence = Some(offer.sequence);
-                            });
-                        }
-                        Err(_) => {
-                            update_snapshot(&snapshot, |current| {
-                                current.preview_offer_failures =
-                                    current.preview_offer_failures.saturating_add(1);
-                            });
-                        }
+                )
+            {
+                match client.offer_preview(ticket, configured_preview_generation, true) {
+                    Ok(offer) => {
+                        update_snapshot(&snapshot, |current| {
+                            current.preview_offered_sequence = Some(offer.sequence);
+                        });
+                    }
+                    Err(_) => {
+                        update_snapshot(&snapshot, |current| {
+                            current.preview_offer_failures =
+                                current.preview_offer_failures.saturating_add(1);
+                        });
                     }
                 }
             }

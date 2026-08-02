@@ -4039,7 +4039,7 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                 Err(failure) => {
                     if let Some(progress) = failure.progress
                         && let Err(error) = write_windows_d3d11_encoder_progress(
-                            progress,
+                            *progress,
                             &mut fifo,
                             &mut ts_writer,
                             &stop,

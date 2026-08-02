@@ -8,7 +8,6 @@ import { Button } from '@/components/ui/button'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
 
 import type { StatusDotTone } from '@/components/status-dot'
-import { StudioTab } from '@/components/tabs/studio-tab'
 import {
   WORKSPACE_SHORTCUTS,
   WorkspaceNavContext,
@@ -32,9 +31,12 @@ import {
 } from '@/lib/system-access'
 import { cn } from '@/lib/utils'
 
-// Studio is the launch surface and stays eager. Every other workspace is loaded
-// only on first navigation, then retained by the browser module cache. This keeps
-// AI, Library, Diagnostics, and their heavier dependencies out of first paint.
+// Workspace views are loaded only on first navigation, then retained by the
+// browser module cache. Studio remains the launch surface, but its dashboard and
+// heavier dependencies stay out of the shell's eager entry chunk.
+const StudioTab = lazy(async () => ({
+  default: (await import('@/components/tabs/studio-tab')).StudioTab
+}))
 const AiTab = lazy(async () => ({ default: (await import('@/components/tabs/ai-tab')).AiTab }))
 const AssetsTab = lazy(async () => ({
   default: (await import('@/components/tabs/assets-tab')).AssetsTab

@@ -2157,7 +2157,7 @@ mod runtime {
         pub(crate) error: WindowsD3d11Error,
         /// Output and tracked releases collected before the submitted ticket
         /// was rejected. Callers must still packetize these frames.
-        pub(crate) progress: Option<WindowsD3d11EncoderProgress>,
+        pub(crate) progress: Option<Box<WindowsD3d11EncoderProgress>>,
     }
 
     impl fmt::Display for WindowsD3d11EncoderSubmissionFailure {
@@ -3251,6 +3251,7 @@ mod runtime {
         wake_event: Arc<WindowsD3d11WakeEvent>,
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_media_thread(
         selection: WindowsDxgiOutputSelection,
         generation: u64,
@@ -3586,9 +3587,8 @@ mod runtime {
                 let response = media_runtime
                     .contract
                     .stop_capture(generation)
-                    .map(|stopped| {
+                    .inspect(|_| {
                         media_runtime.capture = None;
-                        stopped
                     });
                 let _ = reply.try_send(response);
                 false
@@ -3919,14 +3919,14 @@ mod runtime {
                             WindowsD3d11ErrorCode::InvalidLease,
                             "Media Foundation rejected a ticket with a mismatched explicit release",
                         ),
-                        progress: Some(progress),
+                        progress: Some(Box::new(progress)),
                     });
                 }
                 // `ticket` was never inserted after a rejected ProcessInput.
                 // Its Drop sends the explicit unsubmitted role release.
                 Err(WindowsD3d11EncoderSubmissionFailure {
                     error: WindowsD3d11Error::new(error_code, detail),
-                    progress: Some(progress),
+                    progress: Some(Box::new(progress)),
                 })
             }
         }

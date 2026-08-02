@@ -1818,20 +1818,12 @@ pub async fn start_session(
     let windows_d3d11_media_mode =
         WindowsD3d11MediaMode::from_process_env().map_err(anyhow::Error::msg)?;
     #[cfg(target_os = "windows")]
-    let mut windows_d3d11_initial_diagnostics =
-        crate::protocol::WindowsD3d11MediaDiagnostics::default();
+    let windows_d3d11_initial_diagnostics;
     #[cfg(target_os = "windows")]
     let mut windows_d3d11_recovery = None;
     #[cfg(target_os = "windows")]
     let mut windows_d3d11_media = {
         let media_mode = windows_d3d11_media_mode;
-        windows_d3d11_initial_diagnostics.requested = media_mode != WindowsD3d11MediaMode::Disabled;
-        windows_d3d11_initial_diagnostics.required = media_mode.is_required();
-        windows_d3d11_initial_diagnostics.state = if media_mode == WindowsD3d11MediaMode::Disabled {
-            crate::protocol::WindowsD3d11MediaState::Unavailable
-        } else {
-            crate::protocol::WindowsD3d11MediaState::Probing
-        };
         let layout_capability = windows_d3d11_display_camera_layout(&params.layout.layout_preset);
         let camera_required = layout_capability.unwrap_or(false);
         let camera_input = if camera_required {
