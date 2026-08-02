@@ -9713,11 +9713,25 @@ mod tests {
     #[tokio::test]
     async fn stream_output_topology_probe_rpc_returns_a_secret_free_typed_verdict() {
         let state = test_state();
+        let missing_ffmpeg_marker = format!("videorc-missing-ffmpeg-{}", Uuid::new_v4());
+        let missing_ffmpeg_path = std::env::temp_dir().join(&missing_ffmpeg_marker).join(
+            if cfg!(target_os = "windows") {
+                "ffmpeg.exe"
+            } else {
+                "ffmpeg"
+            },
+        );
+        assert!(
+            !missing_ffmpeg_path.exists(),
+            "the topology test requires a guaranteed-missing FFmpeg path"
+        );
+        let missing_ffmpeg_path = missing_ffmpeg_path.to_string_lossy().into_owned();
         let response = request_for_test(
             &state,
             "topology-probe",
             "stream.output.topology.probe",
             json!({
+                "ffmpegPath": missing_ffmpeg_path,
                 "streamProfile": {
                     "preset": "stream-safe-1080p30",
                     "width": 1920,
@@ -9734,11 +9748,31 @@ mod tests {
         let payload = response.payload.expect("topology probe payload");
         assert_eq!(payload["streamProfile"]["width"], 1920);
         assert_eq!(payload["outputRoles"], json!(["shared"]));
-        assert_eq!(
-            payload["requestedBridgeOutput"], payload["effectiveBridgeOutput"],
-            "the source default must not fabricate a probed fallback"
-        );
-        assert_eq!(payload["probeState"], "not-required");
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(
+                payload["requestedBridgeOutput"],
+                "windows-media-foundation-h264-mpegts"
+            );
+            assert_eq!(payload["effectiveBridgeOutput"], "raw-yuv420p");
+            assert_eq!(payload["probeState"], "rejected");
+            let fallback_reason = payload["fallbackReason"]
+                .as_str()
+                .expect("a rejected Media Foundation topology has a fallback reason");
+            assert!(!fallback_reason.trim().is_empty());
+            assert!(
+                fallback_reason.len() <= 480,
+                "topology fallback reason must remain protocol-bounded"
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(
+                payload["requestedBridgeOutput"], payload["effectiveBridgeOutput"],
+                "the source default must not fabricate a probed fallback"
+            );
+            assert_eq!(payload["probeState"], "not-required");
+        }
         let capability_key = payload["capabilityKey"]
             .as_str()
             .expect("hashed capability key");
@@ -9748,6 +9782,10 @@ mod tests {
             "stream-output-topology-v1:".len() + 64
         );
         let serialized = payload.to_string().to_ascii_lowercase();
+        assert!(
+            !serialized.contains(&missing_ffmpeg_marker.to_ascii_lowercase()),
+            "the local FFmpeg probe path must not leave the backend"
+        );
         assert!(!serialized.contains("streamkey"));
         assert!(!serialized.contains("serverurl"));
         assert!(!serialized.contains("accesstoken"));

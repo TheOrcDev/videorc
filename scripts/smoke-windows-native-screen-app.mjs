@@ -31,7 +31,8 @@ import {
   nativeWindowsScreenRecordingActive,
   parseWindowsNativeScreenArgs,
   requiredBmpPreviewAdvances,
-  windowsNativeScreenPerformanceBudgetContext
+  windowsNativeScreenPerformanceBudgetContext,
+  windowsNativeScreenRequiresFinalDiagnostics
 } from './lib/windows-native-screen-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -66,6 +67,11 @@ const performanceReportRequested = Boolean(process.env.VIDEORC_PERF_REPORT_PATH)
 const measureOccludedAuxWindows = process.env.VIDEORC_PERF_OCCLUDED_AUX_WINDOWS === '1'
 const requireEncodedBridge =
   process.env.VIDEORC_WINDOWS_REQUIRE_ENCODED_BRIDGE === '1' || options.requireD3d11
+const requireFinalDiagnostics = windowsNativeScreenRequiresFinalDiagnostics({
+  requireEncodedBridge,
+  d3d11: options.d3d11,
+  expectFallback: options.expectFallback
+})
 const requireGraphicsCapture = process.env.VIDEORC_WINDOWS_REQUIRE_GRAPHICS_CAPTURE === '1'
 const requireDirectD3D11Recording =
   process.env.VIDEORC_WINDOWS_REQUIRE_DIRECT_D3D11_RECORDING === '1'
@@ -260,14 +266,16 @@ try {
     )
   }
   if (collectorFailed && !performanceEvaluationRequested) throw collectorFailure
-  const stopRequestedAt = Date.now()
-  const finalDiagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
-  if (requireEncodedBridge) {
-    assertEncodedBridgeDiagnostics(finalDiagnostics, {
-      requireOutput: true,
-      requireDirectD3D11Recording,
-      requireNoCpuCompositor: includeCamera
-    })
+  let finalDiagnostics = null
+  if (requireFinalDiagnostics) {
+    finalDiagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
+    if (requireEncodedBridge) {
+      assertEncodedBridgeDiagnostics(finalDiagnostics, {
+        requireOutput: true,
+        requireDirectD3D11Recording,
+        requireNoCpuCompositor: includeCamera
+      })
+    }
   }
   if (camera) {
     cameraEvidence = await waitForNativeCameraFrame(ws, camera.id)
@@ -291,6 +299,7 @@ try {
   if (options.d3d11 || options.expectFallback) {
     assertD3d11Diagnostics(finalDiagnostics, { requireOutput: options.d3d11 })
   }
+  const stopRequestedAt = Date.now()
   const stopped = await request(ws, timeoutMs, 'session.stop')
   const outputPath = stopped?.outputPath ?? started?.outputPath
   if (!outputPath || !existsSync(outputPath) || statSync(outputPath).size <= 0) {

@@ -78,7 +78,8 @@ describe('native preview host policy', () => {
           sourcePixelsPresent: true
         }),
         driverKind: 'in-process',
-        recentPresent: false
+        recentPresent: false,
+        platform: 'darwin'
       })
     ).toBe(true)
   })
@@ -168,7 +169,8 @@ describe('native preview host policy', () => {
           nativePreviewHostAttached: true,
           sourcePixelsPresent: true
         }),
-        true
+        true,
+        'darwin'
       )
     ).toMatchObject({
       framePollingSuppressed: true,

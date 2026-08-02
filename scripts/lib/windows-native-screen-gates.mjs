@@ -33,6 +33,14 @@ export function parseWindowsNativeScreenArgs(argv = []) {
   }
 }
 
+export function windowsNativeScreenRequiresFinalDiagnostics({
+  requireEncodedBridge = false,
+  d3d11 = false,
+  expectFallback = null
+} = {}) {
+  return requireEncodedBridge || d3d11 || Boolean(expectFallback)
+}
+
 export function evaluateWindowsNativeScreenD3d11Diagnostics(
   diagnostics,
   { requireOutput = false, expectFallback = null } = {}

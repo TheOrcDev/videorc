@@ -18141,14 +18141,19 @@ mod tests {
             video_output,
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            video_output,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(video_output, EncoderBridgeVideoOutput::RawYuv420p);
         assert!(!args.contains(&"tee".to_string()));
         assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(args.contains(&"rtmp://a.rtmp.youtube.com/live2/abc123".to_string()));
         assert!(args.iter().any(|arg| arg == "-shortest"));
         assert!(!args.iter().any(|arg| arg == "[preview]"));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
             // FLV's H264 tag, forced: wrappers clone the mpegts tag verbatim.
@@ -18181,7 +18186,7 @@ mod tests {
             );
             assert_eq!(arg_value(&args, "-filter_complex"), None);
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             assert_eq!(
                 arg_value(&args, "-c:v"),
@@ -18323,9 +18328,14 @@ mod tests {
             video_output,
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            video_output,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(video_output, EncoderBridgeVideoOutput::RawYuv420p);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             // File output + one fifo-muxer FLV output per target — no tee
             // (mpegts→flv slaves reject the forwarded codec tag) and a
@@ -18341,7 +18351,7 @@ mod tests {
                 2
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             assert!(args.contains(&"tee".to_string()));
             let tee = args.iter().find(|arg| arg.contains("[f=matroska")).unwrap();
@@ -18351,7 +18361,7 @@ mod tests {
         assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(args.iter().any(|arg| arg == "-shortest"));
         assert!(!args.iter().any(|arg| arg == "[preview]"));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
             assert_eq!(arg_value(&args, "-filter_complex"), None);
@@ -18374,7 +18384,7 @@ mod tests {
                 None
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             assert_eq!(
                 arg_value(&args, "-c:v"),
@@ -22457,14 +22467,13 @@ mod tests {
             crate::captions::CaptionBurnTarget::Off,
             "an ineligible mixed captions-off session does not reserve an impossible live leg"
         );
-        // Platform truth: record+stream split output is VideoToolbox-only, so
-        // the captions-off session validates on macOS and is correctly
-        // rejected (for the split-output reason, not a captions reason) on
-        // Windows.
-        #[cfg(target_os = "macos")]
+        // Platform truth: record+stream split output has a native encoded
+        // bridge on macOS and Windows. Other platforms still reject it for the
+        // split-output reason, independently of captions.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         validate_outputs(&captions_off)
             .expect("captions-off preserves the existing mixed-profile capture behavior");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let error = validate_outputs(&captions_off).unwrap_err().to_string();
             assert!(

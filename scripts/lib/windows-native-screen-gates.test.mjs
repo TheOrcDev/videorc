@@ -12,7 +12,8 @@ import {
   parseWindowsNativeScreenArgs,
   requiredBmpPreviewAdvances,
   selectNativeWindowsScreen,
-  windowsNativeScreenPerformanceBudgetContext
+  windowsNativeScreenPerformanceBudgetContext,
+  windowsNativeScreenRequiresFinalDiagnostics
 } from './windows-native-screen-gates.mjs'
 
 test('Windows Graphics Capture gate requires a live retained D3D11 texture', () => {
@@ -98,6 +99,21 @@ test('native Windows D3D11 diagnostics prove zero-copy output and named fallback
     ),
     []
   )
+})
+
+test('native Windows screen requests final diagnostics only for diagnostics-gated lanes', () => {
+  assert.equal(windowsNativeScreenRequiresFinalDiagnostics(), false)
+  assert.equal(
+    windowsNativeScreenRequiresFinalDiagnostics({
+      requireEncodedBridge: false,
+      d3d11: false,
+      expectFallback: null
+    }),
+    false
+  )
+  assert.equal(windowsNativeScreenRequiresFinalDiagnostics({ requireEncodedBridge: true }), true)
+  assert.equal(windowsNativeScreenRequiresFinalDiagnostics({ d3d11: true }), true)
+  assert.equal(windowsNativeScreenRequiresFinalDiagnostics({ expectFallback: 'natural' }), true)
 })
 
 test('native Windows screen selection prefers DXGI and falls back to gdigrab', () => {

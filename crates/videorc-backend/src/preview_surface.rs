@@ -236,7 +236,21 @@ pub async fn apply_main_owned_preview_surface_bounds(
     let _lifecycle = state.preview_surface_lifecycle.lock().await;
     validate_main_owned_preview_window(&params.bounds)?;
 
-    let mut slot = state.preview_surface.lock().await;
+    let status = {
+        let mut slot = state.preview_surface.lock().await;
+        apply_validated_main_owned_preview_surface_bounds(&mut slot, params)?
+    };
+
+    // The stored status is renderer-safe by construction: the trusted HWND
+    // lives only in `main_owned_bounds`.
+    state.emit_event("preview.surface.status", status.clone());
+    Ok(status)
+}
+
+fn apply_validated_main_owned_preview_surface_bounds(
+    slot: &mut PreviewSurfaceRuntime,
+    params: MainOwnedPreviewSurfaceBoundsParams,
+) -> Result<PreviewSurfaceStatus, String> {
     if !matches!(
         slot.status.state,
         PreviewSurfaceState::Starting | PreviewSurfaceState::Live
@@ -282,13 +296,7 @@ pub async fn apply_main_owned_preview_surface_bounds(
     slot.status.height = surface_dimension(safe_bounds.height);
     slot.status.bounds = Some(safe_bounds);
     slot.status.updated_at = Utc::now().to_rfc3339();
-    let status = slot.status.clone();
-    drop(slot);
-
-    // The stored status is renderer-safe by construction: the trusted HWND
-    // lives only in `main_owned_bounds`.
-    state.emit_event("preview.surface.status", status.clone());
-    Ok(status)
+    Ok(slot.status.clone())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1656,18 +1664,23 @@ mod tests {
                 });
         }
 
-        let status = apply_main_owned_preview_surface_bounds(
-            &state,
-            MainOwnedPreviewSurfaceBoundsParams {
-                bounds: MainOwnedPreviewSurfaceBounds {
-                    bounds: bounds(1280.0, 720.0),
-                    order_above_window_handle: None,
-                },
-                generation: 42,
+        let params = MainOwnedPreviewSurfaceBoundsParams {
+            bounds: MainOwnedPreviewSurfaceBounds {
+                bounds: bounds(1280.0, 720.0),
+                order_above_window_handle: None,
             },
-        )
-        .await
-        .expect("a newer trusted preview generation replaces the old one");
+            generation: 42,
+        };
+        #[cfg(target_os = "windows")]
+        let status = {
+            let mut surface = state.preview_surface.lock().await;
+            apply_validated_main_owned_preview_surface_bounds(&mut surface, params)
+        }
+        .expect("a newer validated preview generation replaces the old one");
+        #[cfg(not(target_os = "windows"))]
+        let status = apply_main_owned_preview_surface_bounds(&state, params)
+            .await
+            .expect("a newer trusted preview generation replaces the old one");
 
         let presenter = status
             .windows_d3d11_presenter
