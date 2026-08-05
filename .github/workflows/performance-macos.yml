@@ -42,7 +42,7 @@ concurrency:
 jobs:
   performance-contract:
     name: Validate synthetic performance contracts
-    runs-on: macos-15
+    runs-on: tenki-macos-latest-mini
     timeout-minutes: 20
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -81,7 +81,7 @@ jobs:
           scripts/lib/process-memory-gate.test.mjs
   runner-availability:
     name: Require online performance runner
-    runs-on: ubuntu-latest
+    runs-on: tenki-standard-medium-4c-8g
     timeout-minutes: 5
     steps:
       - name: Fail when the authorized macOS runner is unavailable
@@ -134,7 +134,9 @@ jobs:
     needs: runner-availability
     # This runner must be a logged-in macOS session with Screen Recording,
     # Camera, and Microphone permission already granted to the harness/app.
-    runs-on: [self-hosted, macOS, videorc-performance]
+    runs-on:
+             - self-hosted
+             - tenki-macos-latest-mini
     timeout-minutes: 360
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
