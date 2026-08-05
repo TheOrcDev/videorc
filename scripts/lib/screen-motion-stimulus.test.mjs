@@ -39,8 +39,8 @@ describe('resolveWindowsStimulusBrowser', () => {
           'ProgramFiles(x86)': 'C:/Program Files (x86)',
           LOCALAPPDATA: 'C:/Users/test/AppData/Local'
         },
-        exists: (path) => path === edge
-      }).executablePath,
+        exists: (path) => path.replaceAll('\\', '/') === edge
+      }).executablePath.replaceAll('\\', '/'),
       edge
     )
 
@@ -52,8 +52,8 @@ describe('resolveWindowsStimulusBrowser', () => {
           'ProgramFiles(x86)': 'C:/Program Files (x86)',
           LOCALAPPDATA: 'C:/Users/test/AppData/Local'
         },
-        exists: (path) => path === localChrome
-      }).executablePath,
+        exists: (path) => path.replaceAll('\\', '/') === localChrome
+      }).executablePath.replaceAll('\\', '/'),
       localChrome
     )
   })
