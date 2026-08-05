@@ -21,9 +21,23 @@ export function previewWindowSurfaceReady(
     : windowState?.surface?.visible === true &&
       surfaceStatus?.nativePreviewHostKind === 'proof-surface' &&
       surfaceStatus?.framePollingSuppressed === false
-  const supervisorReady =
+  const nativeSupervisorReady =
     windowState?.supervisor?.lifecycleState === 'surface-live' &&
     windowState?.supervisor?.surfaceActive === true
+  // Windows' supported proof presenter is intentionally reported as a
+  // lifecycle fallback (it is not a native D3D11/CAMetal surface). Once the
+  // proof surface is live, visible, and its first source frame is verified,
+  // that fallback is healthy and should satisfy the smoke's readiness gate.
+  const proofFallbackReady =
+    expectedTransport === 'electron-proof-surface' &&
+    expectedBacking === 'electron-browser-window' &&
+    windowState?.supervisor?.lifecycleState === 'surface-fallback' &&
+    windowState?.supervisor?.surfaceActive === false &&
+    surfaceStatus?.state === 'live' &&
+    surfaceStatus?.nativePreviewHostKind === 'proof-surface' &&
+    surfaceStatus?.sourcePixelsPresent === true &&
+    surfaceStatus?.firstFrameContract === 'met'
+  const supervisorReady = nativeSupervisorReady || proofFallbackReady
   const firstFrameReady = expectNativeMetalPreview || surfaceStatus?.firstFrameContract === 'met'
 
   return (

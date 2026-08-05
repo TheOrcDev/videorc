@@ -28,6 +28,7 @@ const windowsEvidence = () => ({
     targetFps: 60,
     nativePreviewHostKind: 'proof-surface',
     framePollingSuppressed: false,
+    sourcePixelsPresent: true,
     firstFrameContract: 'met',
     pendingHostCommandCount: 0,
     bounds: { width: 960, height: 540 }
@@ -52,12 +53,23 @@ test('Windows proof readiness accepts a visible unsuppressed proof host', () => 
   assert.equal(previewWindowSurfaceReady(windowsEvidence(), windowsOptions), true)
 })
 
-test('Windows proof readiness rejects a supervisor that still calls the supported host fallback', () => {
+test('Windows proof readiness accepts a fully-proven supported host fallback', () => {
   const evidence = windowsEvidence()
   evidence.windowState.supervisor = {
     lifecycleState: 'surface-fallback',
     surfaceActive: false
   }
+
+  assert.equal(previewWindowSurfaceReady(evidence, windowsOptions), true)
+})
+
+test('Windows proof readiness rejects a fallback before source first-frame proof', () => {
+  const evidence = windowsEvidence()
+  evidence.windowState.supervisor = {
+    lifecycleState: 'surface-fallback',
+    surfaceActive: false
+  }
+  evidence.surfaceStatus.firstFrameContract = 'pending'
 
   assert.equal(previewWindowSurfaceReady(evidence, windowsOptions), false)
 })
