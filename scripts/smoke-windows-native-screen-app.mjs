@@ -33,6 +33,7 @@ import {
   parseWindowsNativeScreenArgs,
   requiredBmpPreviewAdvances,
   windowsNativeScreenPerformanceBudgetContext,
+  windowsNativeScreenRecordingArtifactGates,
   windowsNativeScreenRequiresFinalDiagnostics
 } from './lib/windows-native-screen-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -314,7 +315,7 @@ try {
     ffprobePath,
     intendedFps: video.fps,
     expectAudio: false,
-    gates: { requireMotion: false }
+    gates: windowsNativeScreenRecordingArtifactGates(screen)
   })
   recordingEvidence = {
     outputPath,

@@ -301,3 +301,20 @@ export function requiredBmpPreviewAdvances(screen) {
   // five-frame expectation to this explicitly identified software renderer.
   return /microsoft basic render driver/i.test(screen?.detail ?? '') ? 3 : 5
 }
+
+export function windowsNativeScreenRecordingArtifactGates(screen) {
+  const hostedSoftwareRenderer = /microsoft basic render driver/i.test(screen?.detail ?? '')
+  return {
+    requireMotion: false,
+    ...(hostedSoftwareRenderer
+      ? {
+          // The hosted Basic Render Driver consistently records around
+          // 29.25fps for a requested 30fps session. Keep artifact proof
+          // strict on real GPUs while allowing that documented software-host
+          // floor (5% still catches material drops or cadence regressions).
+          frameCountTolerance: 0.05,
+          cadenceMismatchTolerancePct: 5
+        }
+      : {})
+  }
+}

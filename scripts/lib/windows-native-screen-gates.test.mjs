@@ -13,6 +13,7 @@ import {
   requiredBmpPreviewAdvances,
   selectNativeWindowsScreen,
   windowsNativeScreenPerformanceBudgetContext,
+  windowsNativeScreenRecordingArtifactGates,
   windowsNativeScreenRequiresFinalDiagnostics
 } from './windows-native-screen-gates.mjs'
 
@@ -141,6 +142,21 @@ test('BMP preview liveness threshold is relaxed only for the hosted software ren
   assert.equal(requiredBmpPreviewAdvances({ detail: 'Microsoft Basic Render Driver' }), 3)
   assert.equal(requiredBmpPreviewAdvances({ detail: 'NVIDIA GeForce GTX 1650 SUPER' }), 5)
   assert.equal(requiredBmpPreviewAdvances({}), 5)
+})
+
+test('native screen artifact cadence tolerance is relaxed only for the hosted software renderer', () => {
+  assert.deepEqual(
+    windowsNativeScreenRecordingArtifactGates({ detail: 'Microsoft Basic Render Driver' }),
+    {
+      requireMotion: false,
+      frameCountTolerance: 0.05,
+      cadenceMismatchTolerancePct: 5
+    }
+  )
+  assert.deepEqual(
+    windowsNativeScreenRecordingArtifactGates({ detail: 'NVIDIA GeForce GTX 1650 SUPER' }),
+    { requireMotion: false }
+  )
 })
 
 test('native Windows budget context binds the actual packaged payload digest', () => {
