@@ -25,7 +25,8 @@ import {
   evaluateWindowsNativeScreenD3d11Diagnostics,
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive,
-  parseWindowsNativeScreenArgs
+  parseWindowsNativeScreenArgs,
+  windowsNativeScreenRecordingArtifactGates
 } from './lib/windows-native-screen-gates.mjs'
 import {
   analyzeStartupResolution,
@@ -480,6 +481,9 @@ async function runNativePreviewRecordingScenario(
     throw new Error(`[${scenario.label}] Recording output is empty: ${outputPath}`)
   }
 
+  const recordingArtifactGates = packagedWindowsScreen
+    ? windowsNativeScreenRecordingArtifactGates(packagedWindowsScreen)
+    : { requireMotion: !usePackagedWindowsScreen }
   const [startupReport, recordingReport] = await Promise.all([
     analyzeStartupResolution(outputPath, {
       ffmpegPath,
@@ -487,14 +491,14 @@ async function runNativePreviewRecordingScenario(
       expectedWidth: scenario.width,
       expectedHeight: scenario.height,
       intendedFps: scenario.fps,
-      gates: { requireMotion: !usePackagedWindowsScreen }
+      gates: recordingArtifactGates
     }),
     analyzeRecording(outputPath, {
       ffmpegPath,
       ffprobePath,
       intendedFps: scenario.fps,
       expectAudio: !usePackagedWindowsScreen,
-      gates: { requireMotion: !usePackagedWindowsScreen }
+      gates: recordingArtifactGates
     })
   ])
   const [startupReportPaths, recordingReportPaths] = await Promise.all([
