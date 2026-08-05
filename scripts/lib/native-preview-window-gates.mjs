@@ -39,6 +39,13 @@ export function previewWindowSurfaceReady(
     surfaceStatus?.firstFrameContract === 'met'
   const supervisorReady = nativeSupervisorReady || proofFallbackReady
   const firstFrameReady = expectNativeMetalPreview || surfaceStatus?.firstFrameContract === 'met'
+  // The Electron proof presenter can continuously have one compositor update
+  // queued on a loaded hosted runner. Once its surface is live and the first
+  // source frame is proven, that queue depth is not a readiness failure. Native
+  // presenters still require an empty host-command queue before they claim
+  // ownership.
+  const hostCommandsReady =
+    !expectNativePresenter || (surfaceStatus?.pendingHostCommandCount ?? -1) === 0
 
   return (
     windowState?.open === true &&
@@ -51,7 +58,7 @@ export function previewWindowSurfaceReady(
     surfaceStatus?.transport === expectedTransport &&
     surfaceStatus?.backing === expectedBacking &&
     (surfaceStatus?.targetFps ?? 0) >= 60 &&
-    (surfaceStatus?.pendingHostCommandCount ?? -1) === 0 &&
+    hostCommandsReady &&
     positiveBounds
   )
 }

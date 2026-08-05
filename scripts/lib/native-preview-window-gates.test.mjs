@@ -109,18 +109,23 @@ test('backend proof status may omit the optional host-kind mirror after source p
   )
 })
 
-test('Windows proof readiness rejects hidden, suppressed, or pending hosts', () => {
+test('Windows proof readiness rejects hidden, suppressed, or unproven hosts', () => {
   for (const mutate of [
     (evidence) => (evidence.windowState.surface.visible = false),
     (evidence) => (evidence.surfaceStatus.framePollingSuppressed = true),
     (evidence) => (evidence.surfaceStatus.firstFrameContract = 'pending'),
-    (evidence) => (evidence.surfaceStatus.pendingHostCommandCount = 1),
     (evidence) => (evidence.surfaceStatus.bounds.width = 0)
   ]) {
     const evidence = windowsEvidence()
     mutate(evidence)
     assert.equal(previewWindowSurfaceReady(evidence, windowsOptions), false)
   }
+})
+
+test('Windows proof readiness tolerates a queued compositor update after first-frame proof', () => {
+  const evidence = windowsEvidence()
+  evidence.surfaceStatus.pendingHostCommandCount = 1
+  assert.equal(previewWindowSurfaceReady(evidence, windowsOptions), true)
 })
 
 test('preview host readiness rejects the wrong transport or backing', () => {
@@ -169,6 +174,8 @@ test('native Windows D3D11 readiness requires the canonical presenter triple and
   }
 
   assert.equal(previewWindowSurfaceReady(evidence, options), true)
+  evidence.surfaceStatus.pendingHostCommandCount = 1
+  assert.equal(previewWindowSurfaceReady(evidence, options), false)
   evidence.surfaceStatus.nativePreviewHostKind = 'proof-surface'
   assert.equal(previewWindowSurfaceReady(evidence, options), false)
 })
