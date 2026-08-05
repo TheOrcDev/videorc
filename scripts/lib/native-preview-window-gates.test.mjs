@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { previewWindowSurfaceReady } from './native-preview-window-gates.mjs'
+import {
+  nativePreviewSurfaceStatusReady,
+  previewWindowSurfaceReady
+} from './native-preview-window-gates.mjs'
 
 const windowsOptions = {
   expectedTransport: 'electron-proof-surface',
@@ -72,6 +75,38 @@ test('Windows proof readiness rejects a fallback before source first-frame proof
   evidence.surfaceStatus.firstFrameContract = 'pending'
 
   assert.equal(previewWindowSurfaceReady(evidence, windowsOptions), false)
+})
+
+test('backend proof status may omit the optional host-kind mirror after source proof', () => {
+  const status = {
+    state: 'live',
+    transport: 'electron-proof-surface',
+    backing: 'electron-browser-window',
+    sourcePixelsPresent: true,
+    targetFps: 60,
+    framesRendered: 12
+  }
+  assert.equal(
+    nativePreviewSurfaceStatusReady(status, {
+      expectedTransport: 'electron-proof-surface',
+      expectedBacking: 'electron-browser-window',
+      expectedHostKind: 'proof-surface',
+      previousFrames: 11
+    }),
+    true
+  )
+  assert.equal(
+    nativePreviewSurfaceStatusReady(
+      { ...status, sourcePixelsPresent: false },
+      {
+        expectedTransport: 'electron-proof-surface',
+        expectedBacking: 'electron-browser-window',
+        expectedHostKind: 'proof-surface',
+        previousFrames: 11
+      }
+    ),
+    false
+  )
 })
 
 test('Windows proof readiness rejects hidden, suppressed, or pending hosts', () => {

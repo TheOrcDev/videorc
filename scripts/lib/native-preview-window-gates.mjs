@@ -55,3 +55,30 @@ export function previewWindowSurfaceReady(
     positiveBounds
   )
 }
+
+export function nativePreviewSurfaceStatusReady(
+  status,
+  { expectedTransport, expectedBacking, expectedHostKind, previousFrames = 0 } = {}
+) {
+  const isProofSurface =
+    expectedTransport === 'electron-proof-surface' &&
+    expectedBacking === 'electron-browser-window'
+  const hostKindReady =
+    expectedHostKind === undefined ||
+    status?.nativePreviewHostKind === expectedHostKind ||
+    (isProofSurface && status?.nativePreviewHostKind === undefined)
+  const proofStatusReady =
+    !isProofSurface ||
+    (status?.sourcePixelsPresent === true &&
+      (status?.nativePreviewHostKind === undefined ||
+        status?.nativePreviewHostKind === 'proof-surface'))
+  return (
+    status?.state === 'live' &&
+    status?.transport === expectedTransport &&
+    status?.backing === expectedBacking &&
+    hostKindReady &&
+    proofStatusReady &&
+    (status?.targetFps ?? 0) >= 60 &&
+    (status?.framesRendered ?? 0) > previousFrames
+  )
+}

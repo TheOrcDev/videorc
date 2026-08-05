@@ -16,7 +16,10 @@ import {
   summarizeNativePreviewRecordingDiagnostics
 } from './lib/native-preview-diagnostics.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
-import { previewWindowSurfaceReady } from './lib/native-preview-window-gates.mjs'
+import {
+  nativePreviewSurfaceStatusReady,
+  previewWindowSurfaceReady
+} from './lib/native-preview-window-gates.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 import {
   evaluateWindowsNativeScreenD3d11Diagnostics,
@@ -840,15 +843,14 @@ async function waitForNativeSurface(ws, previousFrames = 0) {
   while (Date.now() < deadline) {
     lastStatus = await request(ws, timeoutMs, 'preview.surface.status')
     if (
-      lastStatus.state === 'live' &&
-      lastStatus.transport === expectedSurfaceTransport &&
-      lastStatus.backing === expectedSurfaceBacking &&
-      (expectedNativePreviewHostKind === undefined ||
-        lastStatus.nativePreviewHostKind === expectedNativePreviewHostKind) &&
+      nativePreviewSurfaceStatusReady(lastStatus, {
+        expectedTransport: expectedSurfaceTransport,
+        expectedBacking: expectedSurfaceBacking,
+        expectedHostKind: expectedNativePreviewHostKind,
+        previousFrames
+      }) &&
       (!expectWindowsD3d11Preview ||
-        (lastStatus.firstFrameContract === 'met' && lastStatus.framePollingSuppressed === true)) &&
-      (lastStatus.targetFps ?? 0) >= 60 &&
-      lastStatus.framesRendered > previousFrames
+        (lastStatus.firstFrameContract === 'met' && lastStatus.framePollingSuppressed === true))
     ) {
       return lastStatus
     }
