@@ -66,6 +66,7 @@ import {
 import { runBackendInterruptingAction } from './interruption-actions'
 import { AccountSignInTransactions } from './account-sign-in-transactions'
 import { ProviderOAuthCallbacks } from './provider-oauth-callbacks'
+import { unregisterGlobalShortcutsWhenReady } from './global-shortcut-lifecycle'
 import {
   createSafeStoragePersistenceCodec,
   type SecurePersistenceCodec
@@ -420,7 +421,7 @@ function setGlobalShortcuts(shortcuts: {
 }
 
 app.on('will-quit', () => {
-  globalShortcut.unregisterAll()
+  unregisterGlobalShortcutsWhenReady(globalShortcut, () => app.isReady())
 })
 let nativePreviewSurfaceWindow: BrowserWindow | null = null
 let notesWindow: BrowserWindow | null = null
