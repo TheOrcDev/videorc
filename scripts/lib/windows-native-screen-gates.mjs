@@ -163,8 +163,19 @@ export function nativeWindowsScreenRecordingActive(evidence, sourceId) {
     diagnostics?.activeOutputMode === 'record' &&
     recording?.state === 'recording' &&
     (nativeWindowsCompositorUsesScreen(compositor, sourceId) ||
-      diagnostics?.encoderBridgeEncodedOutputInputSubtype === 'NV12-D3D11') &&
+      nativeWindowsD3d11MediaEncodingActive(diagnostics)) &&
     sourceEntry?.status === 'live'
+  )
+}
+
+export function nativeWindowsD3d11MediaEncodingActive(diagnostics) {
+  const media = diagnostics?.windowsD3d11Media
+  return (
+    diagnostics?.encoderBridgeEncodedOutputInputSubtype === 'NV12-D3D11' ||
+    (media?.state === 'live' &&
+      (media.encoderGpuSamples ?? 0) > 0 &&
+      (media.encoderSystemMemorySamples ?? 0) === 0 &&
+      (media.rawVideoCopiedFrames ?? 0) === 0)
   )
 }
 

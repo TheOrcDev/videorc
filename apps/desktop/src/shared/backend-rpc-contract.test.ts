@@ -736,6 +736,7 @@ describe('backend RPC contract', () => {
       cursorPixelsSource: 'desktop-duplication-shape',
       cursorExclusionGuaranteed: false,
       captureReadbackFrames: 0,
+      protectedContentMaskedFrames: 3,
       textureImportFrames: 120,
       cameraUploadFrames: 0,
       cursorShapeUploads: 2,
@@ -770,6 +771,28 @@ describe('backend RPC contract', () => {
     }
 
     expect(validateBackendRpcResult('diagnostics.stats', diagnostics)).toEqual(diagnostics)
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...diagnostics,
+        windowsD3d11Media: {
+          ...windowsD3d11Media,
+          protectedContentMaskedFrames: -1
+        }
+      })
+    ).toThrow('protectedContentMaskedFrames')
+    expect(
+      validateBackendRpcResult('diagnostics.stats', {
+        skippedFrames: 0,
+        droppedFrames: 0
+      })
+    ).toEqual({ skippedFrames: 0, droppedFrames: 0 })
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        skippedFrames: 0,
+        droppedFrames: 0,
+        compositorBackend: null
+      })
+    ).toThrow('compositorBackend')
     expect(() =>
       validateBackendRpcResult('diagnostics.stats', {
         ...diagnostics,

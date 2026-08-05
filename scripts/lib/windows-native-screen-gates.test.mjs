@@ -212,7 +212,12 @@ test('native ScreenOnly recording proof joins recording, compositor, and source 
         ...evidence,
         diagnostics: {
           ...evidence.diagnostics,
-          encoderBridgeEncodedOutputInputSubtype: 'NV12-D3D11'
+          windowsD3d11Media: {
+            state: 'live',
+            encoderGpuSamples: 1,
+            encoderSystemMemorySamples: 0,
+            rawVideoCopiedFrames: 0
+          }
         },
         compositor: { state: 'idle' }
       },

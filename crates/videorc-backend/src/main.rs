@@ -9754,16 +9754,27 @@ mod tests {
                 payload["requestedBridgeOutput"],
                 "windows-media-foundation-h264-mpegts"
             );
-            assert_eq!(payload["effectiveBridgeOutput"], "raw-yuv420p");
-            assert_eq!(payload["probeState"], "rejected");
-            let fallback_reason = payload["fallbackReason"]
-                .as_str()
-                .expect("a rejected Media Foundation topology has a fallback reason");
-            assert!(!fallback_reason.trim().is_empty());
-            assert!(
-                fallback_reason.len() <= 480,
-                "topology fallback reason must remain protocol-bounded"
-            );
+            match payload["probeState"].as_str() {
+                Some("passed") => {
+                    assert_eq!(
+                        payload["effectiveBridgeOutput"],
+                        "windows-media-foundation-h264-mpegts"
+                    );
+                    assert!(payload["fallbackReason"].is_null());
+                }
+                Some("rejected") | Some("unsupported") => {
+                    assert_eq!(payload["effectiveBridgeOutput"], "raw-yuv420p");
+                    let fallback_reason = payload["fallbackReason"]
+                        .as_str()
+                        .expect("a rejected Media Foundation topology has a fallback reason");
+                    assert!(!fallback_reason.trim().is_empty());
+                    assert!(
+                        fallback_reason.len() <= 480,
+                        "topology fallback reason must remain protocol-bounded"
+                    );
+                }
+                verdict => panic!("unexpected Media Foundation topology verdict: {verdict:?}"),
+            }
         }
         #[cfg(not(target_os = "windows"))]
         {

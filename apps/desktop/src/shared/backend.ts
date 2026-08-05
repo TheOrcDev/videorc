@@ -1310,6 +1310,8 @@ export interface WindowsD3d11MediaDiagnostics {
   cursorPixelsSource?: string
   cursorExclusionGuaranteed: boolean
   captureReadbackFrames: number
+  /** Frames where Windows masked protected pixels while capture continued. */
+  protectedContentMaskedFrames: number
   textureImportFrames: number
   cameraUploadFrames: number
   cursorShapeUploads: number

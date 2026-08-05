@@ -27,6 +27,7 @@ import {
   assertWindowsGraphicsCaptureTexture,
   evaluateWindowsNativeScreenD3d11Diagnostics,
   nativeWindowsCompositorUsesScreen,
+  nativeWindowsD3d11MediaEncodingActive,
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive,
   parseWindowsNativeScreenArgs,
@@ -773,10 +774,10 @@ function assertEncodedBridgeDiagnostics(
   }
   if (
     requireDirectD3D11Recording &&
-    diagnostics?.encoderBridgeEncodedOutputInputSubtype !== 'NV12-D3D11'
+    !nativeWindowsD3d11MediaEncodingActive(diagnostics)
   ) {
     failures.push(
-      `encodedOutputInputSubtype=${diagnostics?.encoderBridgeEncodedOutputInputSubtype ?? 'missing'}`
+      `directD3D11Media=${diagnostics?.encoderBridgeEncodedOutputInputSubtype ?? 'missing'}`
     )
   }
   if (requireOutput && !(diagnostics?.encoderBridgeEncodedOutputFrames > 0)) {

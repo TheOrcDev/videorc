@@ -251,6 +251,8 @@ pub(crate) struct WindowsD3d11CaptureDiagnostics {
     pub(crate) pool_pressure_drops: u64,
     pub(crate) acquisition_timeouts: u64,
     pub(crate) capture_readback_frames: u64,
+    /// Frames for which Desktop Duplication masked OS-protected pixels.
+    pub(crate) protected_content_masked_frames: u64,
     pub(crate) pointer_shape_uploads: u64,
     pub(crate) pointer_composited_frames: u64,
     pub(crate) wgc_frame_callbacks: u64,
@@ -304,6 +306,10 @@ impl WindowsD3d11CaptureDiagnostics {
         }
         if decision.timestamp_corrected {
             self.timestamp_corrections = self.timestamp_corrections.saturating_add(1);
+        }
+        if decision.protected_content_masked {
+            self.protected_content_masked_frames =
+                self.protected_content_masked_frames.saturating_add(1);
         }
     }
 }
@@ -508,6 +514,7 @@ pub(crate) struct WindowsD3d11CaptureDecision {
     pub(crate) clear_previous_pointer: bool,
     pub(crate) use_cached_uncomposited_desktop: bool,
     pub(crate) timestamp_corrected: bool,
+    pub(crate) protected_content_masked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -646,12 +653,10 @@ impl WindowsD3d11DesktopDuplicationState {
         &mut self,
         observation: WindowsD3d11DuplicationObservation,
     ) -> Result<WindowsD3d11CaptureDecision, WindowsD3d11CaptureError> {
-        if observation.protected_content_masked_out {
-            return Err(WindowsD3d11CaptureError::new(
-                WindowsD3d11CaptureFallbackReason::ProtectedContent,
-                "Desktop Duplication reported protected content masking",
-            ));
-        }
+        // Desktop Duplication already masks protected pixels in the returned
+        // texture. The remaining desktop pixels are still valid to record, so
+        // retain the hardware capture path and surface the condition through
+        // diagnostics instead of failing the whole session into CPU fallback.
         let desktop_changed = observation.last_present_qpc > 0;
         if desktop_changed && !observation.desktop_surface_acquired {
             return Err(WindowsD3d11CaptureError::new(
@@ -737,6 +742,7 @@ impl WindowsD3d11DesktopDuplicationState {
             clear_previous_pointer,
             use_cached_uncomposited_desktop,
             timestamp_corrected,
+            protected_content_masked: observation.protected_content_masked_out,
         })
     }
 }
@@ -2143,6 +2149,23 @@ mod tests {
             WindowsD3d11CursorPixelsSource::DesktopSurface
         );
         assert!(!embedded_frame.composite_pointer);
+    }
+
+    #[test]
+    fn windows_d3d11_capture_keeps_recording_when_windows_masks_protected_content() {
+        let mut state = WindowsD3d11DesktopDuplicationState::new(1, true).expect("valid state");
+        let mut observation = duplication_observation(100, 90, pointer(false, 0, 0, 0));
+        observation.protected_content_masked_out = true;
+
+        let decision = state
+            .observe(observation)
+            .expect("the unprotected desktop pixels remain recordable");
+
+        assert!(decision.publish);
+        assert!(decision.protected_content_masked);
+        let mut diagnostics = WindowsD3d11CaptureDiagnostics::default();
+        diagnostics.record_decision(decision);
+        assert_eq!(diagnostics.protected_content_masked_frames, 1);
     }
 
     #[test]
