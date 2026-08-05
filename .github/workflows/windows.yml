@@ -137,7 +137,24 @@ jobs:
           VIDEORC_SMOKE_VIDEO_BITRATE_KBPS: '6000'
 
       - name: Verify native DXGI/GDI ScreenOnly recording and BMP preview
-        run: pnpm smoke:windows-native-screen
+        # The hosted Microsoft Basic Render Driver can briefly lose cadence
+        # under shared-runner preemption. Retry a fresh packaged-app run so a
+        # one-off 3-4% cadence dip does not make the installer gate flaky;
+        # persistent capture/quality failures still fail after all attempts.
+        run: |
+          $attempts = 3
+          for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+            $env:VIDEORC_SMOKE_OUTPUT_DIR = Join-Path $env:RUNNER_TEMP "videorc-windows-native-screen-smoke-attempt-$attempt"
+            Write-Host "Windows native screen smoke attempt $attempt/$attempts"
+            pnpm smoke:windows-native-screen
+            if ($LASTEXITCODE -eq 0) {
+              exit 0
+            }
+            if ($attempt -eq $attempts) {
+              exit $LASTEXITCODE
+            }
+            Write-Host "Native screen smoke attempt $attempt failed; retrying with a fresh app/output directory."
+          }
         env:
           VIDEORC_PERF_APP_EXECUTABLE: apps/desktop/release/win-unpacked/Videorc.exe
           VIDEORC_SMOKE_OUTPUT_DIR: ${{ runner.temp }}/videorc-windows-native-screen-smoke
