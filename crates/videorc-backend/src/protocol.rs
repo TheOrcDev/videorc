@@ -1408,13 +1408,13 @@ pub struct WindowsD3d11MediaDiagnostics {
     pub preview_bmp_requests: u64,
     #[serde(default)]
     pub preview_bmp_bytes: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_pump_lag_p95_ms: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_pump_lag_max_ms: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_command_lag_p95_ms: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_command_lag_max_ms: Option<f64>,
     #[serde(default)]
     pub maximum_consecutive_message_batch: u64,
@@ -4378,6 +4378,17 @@ mod tests {
         };
         let wire = serde_json::to_value(&diagnostics).unwrap();
         assert_eq!(wire["synchronizationTimeouts"], 3);
+        for field in [
+            "messagePumpLagP95Ms",
+            "messagePumpLagMaxMs",
+            "mediaCommandLagP95Ms",
+            "mediaCommandLagMaxMs",
+        ] {
+            assert!(
+                wire.get(field).is_none(),
+                "unset optional timing field {field} must be omitted rather than serialized as null"
+            );
+        }
 
         let legacy: WindowsD3d11MediaDiagnostics = serde_json::from_value(serde_json::json!({
             "state": "unavailable"
