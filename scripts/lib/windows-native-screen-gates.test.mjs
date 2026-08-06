@@ -13,6 +13,7 @@ import {
   requiredBmpPreviewAdvances,
   selectNativeWindowsScreen,
   windowsNativeScreenPerformanceBudgetContext,
+  windowsNativeScreenRecordingArtifactGates,
   windowsNativeScreenRequiresFinalDiagnostics
 } from './windows-native-screen-gates.mjs'
 
@@ -143,6 +144,21 @@ test('BMP preview liveness threshold is relaxed only for the hosted software ren
   assert.equal(requiredBmpPreviewAdvances({}), 5)
 })
 
+test('native screen artifact cadence tolerance is relaxed only for the hosted software renderer', () => {
+  assert.deepEqual(
+    windowsNativeScreenRecordingArtifactGates({ detail: 'Microsoft Basic Render Driver' }),
+    {
+      requireMotion: false,
+      frameCountTolerance: 0.05,
+      cadenceMismatchTolerancePct: 5
+    }
+  )
+  assert.deepEqual(
+    windowsNativeScreenRecordingArtifactGates({ detail: 'NVIDIA GeForce GTX 1650 SUPER' }),
+    { requireMotion: false }
+  )
+})
+
 test('native Windows budget context binds the actual packaged payload digest', () => {
   const timing = { warmupMs: 60_000, measurementMs: 600_000, intervalMs: 1_000 }
   assert.deepEqual(
@@ -212,7 +228,12 @@ test('native ScreenOnly recording proof joins recording, compositor, and source 
         ...evidence,
         diagnostics: {
           ...evidence.diagnostics,
-          encoderBridgeEncodedOutputInputSubtype: 'NV12-D3D11'
+          windowsD3d11Media: {
+            state: 'live',
+            encoderGpuSamples: 1,
+            encoderSystemMemorySamples: 0,
+            rawVideoCopiedFrames: 0
+          }
         },
         compositor: { state: 'idle' }
       },

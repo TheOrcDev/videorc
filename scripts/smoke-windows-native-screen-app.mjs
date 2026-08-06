@@ -27,11 +27,13 @@ import {
   assertWindowsGraphicsCaptureTexture,
   evaluateWindowsNativeScreenD3d11Diagnostics,
   nativeWindowsCompositorUsesScreen,
+  nativeWindowsD3d11MediaEncodingActive,
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive,
   parseWindowsNativeScreenArgs,
   requiredBmpPreviewAdvances,
   windowsNativeScreenPerformanceBudgetContext,
+  windowsNativeScreenRecordingArtifactGates,
   windowsNativeScreenRequiresFinalDiagnostics
 } from './lib/windows-native-screen-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -313,7 +315,7 @@ try {
     ffprobePath,
     intendedFps: video.fps,
     expectAudio: false,
-    gates: { requireMotion: false }
+    gates: windowsNativeScreenRecordingArtifactGates(screen)
   })
   recordingEvidence = {
     outputPath,
@@ -773,10 +775,10 @@ function assertEncodedBridgeDiagnostics(
   }
   if (
     requireDirectD3D11Recording &&
-    diagnostics?.encoderBridgeEncodedOutputInputSubtype !== 'NV12-D3D11'
+    !nativeWindowsD3d11MediaEncodingActive(diagnostics)
   ) {
     failures.push(
-      `encodedOutputInputSubtype=${diagnostics?.encoderBridgeEncodedOutputInputSubtype ?? 'missing'}`
+      `directD3D11Media=${diagnostics?.encoderBridgeEncodedOutputInputSubtype ?? 'missing'}`
     )
   }
   if (requireOutput && !(diagnostics?.encoderBridgeEncodedOutputFrames > 0)) {

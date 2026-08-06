@@ -28,6 +28,10 @@ import {
 import { WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS } from './windows-d3d11-media.mjs'
 import { buildWindowsStreamPerformanceMatrix } from './windows-stream-performance.mjs'
 
+function posixPath(value) {
+  return value.replaceAll('\\', '/')
+}
+
 const SHA = Object.freeze({
   candidate: 'a'.repeat(64),
   payload: 'b'.repeat(64),
@@ -178,13 +182,16 @@ describe('Windows OBS side-by-side protected arguments', () => {
       evidenceDirectory: '/evidence/nvidia',
       candidateSha256: SHA.candidate
     })
-    assert.equal(plan.root, `/evidence/nvidia/windows-stream-obs/${SHA.candidate}`)
+    assert.equal(
+      posixPath(plan.root),
+      posixPath(resolve('/evidence/nvidia/windows-stream-obs', SHA.candidate))
+    )
     assert.deepEqual(
       plan.runs.map(({ app }) => app),
       WINDOWS_OBS_REQUIRED_ORDER
     )
-    assert.match(plan.runs[0].reportPath, /runs\/1-obs\/report\.json$/)
-    assert.match(plan.runs[5].reportPath, /runs\/6-videorc\/report\.json$/)
+    assert.match(posixPath(plan.runs[0].reportPath), /runs\/1-obs\/report\.json$/)
+    assert.match(posixPath(plan.runs[5].reportPath), /runs\/6-videorc\/report\.json$/)
     assert.throws(
       () =>
         buildWindowsObsRunPlan({

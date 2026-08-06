@@ -9162,6 +9162,8 @@ fn windows_d3d11_live_diagnostics(
             .is_some_and(|diagnostics| diagnostics.cursor_exclusion_guaranteed),
         capture_readback_frames: capture
             .map_or(0, |diagnostics| diagnostics.capture_readback_frames),
+        protected_content_masked_frames: capture
+            .map_or(0, |diagnostics| diagnostics.protected_content_masked_frames),
         texture_import_frames: snapshot.pump.composed_frames,
         camera_upload_frames: compositor
             .map_or(snapshot.pump.camera_upload_frames, |diagnostics| {

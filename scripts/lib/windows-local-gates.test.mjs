@@ -248,15 +248,18 @@ describe('Windows candidate payload binding', () => {
     assert.equal(inspected.installerSha256, installerSha256)
     assert.equal(inspected.stagedExecutableSha256, executableSha256)
     assert.equal(inspected.stagedPackagePayload.sha256, packagePayload.sha256)
-    assert.deepEqual(inspectedPaths, [
-      '/repo/apps/desktop/release/release.json',
-      '/repo/apps/desktop/release/Videorc-0.9.45-win-x64.exe',
-      '/repo/apps/desktop/release/win-unpacked/Videorc.exe',
-      '/repo/apps/desktop/release/win-unpacked/resources/app.asar',
-      '/repo/apps/desktop/release/win-unpacked/resources/videorc-backend.exe',
-      '/repo/apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffmpeg.exe',
-      '/repo/apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffprobe.exe'
-    ])
+    assert.deepEqual(
+      inspectedPaths,
+      [
+        'apps/desktop/release/release.json',
+        'apps/desktop/release/Videorc-0.9.45-win-x64.exe',
+        'apps/desktop/release/win-unpacked/Videorc.exe',
+        'apps/desktop/release/win-unpacked/resources/app.asar',
+        'apps/desktop/release/win-unpacked/resources/videorc-backend.exe',
+        'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffmpeg.exe',
+        'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffprobe.exe'
+      ].map((path) => posixPath(resolve('/repo', path)))
+    )
 
     await assert.rejects(
       inspectCanonicalWindowsReleaseCandidate({

@@ -16,13 +16,17 @@ import {
   summarizeNativePreviewRecordingDiagnostics
 } from './lib/native-preview-diagnostics.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
-import { previewWindowSurfaceReady } from './lib/native-preview-window-gates.mjs'
+import {
+  nativePreviewSurfaceStatusReady,
+  previewWindowSurfaceReady
+} from './lib/native-preview-window-gates.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 import {
   evaluateWindowsNativeScreenD3d11Diagnostics,
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive,
-  parseWindowsNativeScreenArgs
+  parseWindowsNativeScreenArgs,
+  windowsNativeScreenRecordingArtifactGates
 } from './lib/windows-native-screen-gates.mjs'
 import {
   analyzeStartupResolution,
@@ -477,6 +481,9 @@ async function runNativePreviewRecordingScenario(
     throw new Error(`[${scenario.label}] Recording output is empty: ${outputPath}`)
   }
 
+  const recordingArtifactGates = packagedWindowsScreen
+    ? windowsNativeScreenRecordingArtifactGates(packagedWindowsScreen)
+    : { requireMotion: !usePackagedWindowsScreen }
   const [startupReport, recordingReport] = await Promise.all([
     analyzeStartupResolution(outputPath, {
       ffmpegPath,
@@ -484,14 +491,14 @@ async function runNativePreviewRecordingScenario(
       expectedWidth: scenario.width,
       expectedHeight: scenario.height,
       intendedFps: scenario.fps,
-      gates: { requireMotion: !usePackagedWindowsScreen }
+      gates: recordingArtifactGates
     }),
     analyzeRecording(outputPath, {
       ffmpegPath,
       ffprobePath,
       intendedFps: scenario.fps,
       expectAudio: !usePackagedWindowsScreen,
-      gates: { requireMotion: !usePackagedWindowsScreen }
+      gates: recordingArtifactGates
     })
   ])
   const [startupReportPaths, recordingReportPaths] = await Promise.all([
@@ -840,15 +847,14 @@ async function waitForNativeSurface(ws, previousFrames = 0) {
   while (Date.now() < deadline) {
     lastStatus = await request(ws, timeoutMs, 'preview.surface.status')
     if (
-      lastStatus.state === 'live' &&
-      lastStatus.transport === expectedSurfaceTransport &&
-      lastStatus.backing === expectedSurfaceBacking &&
-      (expectedNativePreviewHostKind === undefined ||
-        lastStatus.nativePreviewHostKind === expectedNativePreviewHostKind) &&
+      nativePreviewSurfaceStatusReady(lastStatus, {
+        expectedTransport: expectedSurfaceTransport,
+        expectedBacking: expectedSurfaceBacking,
+        expectedHostKind: expectedNativePreviewHostKind,
+        previousFrames
+      }) &&
       (!expectWindowsD3d11Preview ||
-        (lastStatus.firstFrameContract === 'met' && lastStatus.framePollingSuppressed === true)) &&
-      (lastStatus.targetFps ?? 0) >= 60 &&
-      lastStatus.framesRendered > previousFrames
+        (lastStatus.firstFrameContract === 'met' && lastStatus.framePollingSuppressed === true))
     ) {
       return lastStatus
     }

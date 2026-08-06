@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { previewWindowSurfaceReady } from './native-preview-window-gates.mjs'
+import {
+  nativePreviewSurfaceStatusReady,
+  previewWindowSurfaceReady
+} from './native-preview-window-gates.mjs'
 
 const windowsOptions = {
   expectedTransport: 'electron-proof-surface',
@@ -28,6 +31,7 @@ const windowsEvidence = () => ({
     targetFps: 60,
     nativePreviewHostKind: 'proof-surface',
     framePollingSuppressed: false,
+    sourcePixelsPresent: true,
     firstFrameContract: 'met',
     pendingHostCommandCount: 0,
     bounds: { width: 960, height: 540 }
@@ -52,28 +56,76 @@ test('Windows proof readiness accepts a visible unsuppressed proof host', () => 
   assert.equal(previewWindowSurfaceReady(windowsEvidence(), windowsOptions), true)
 })
 
-test('Windows proof readiness rejects a supervisor that still calls the supported host fallback', () => {
+test('Windows proof readiness accepts a fully-proven supported host fallback', () => {
   const evidence = windowsEvidence()
   evidence.windowState.supervisor = {
     lifecycleState: 'surface-fallback',
     surfaceActive: false
   }
 
+  assert.equal(previewWindowSurfaceReady(evidence, windowsOptions), true)
+})
+
+test('Windows proof readiness rejects a fallback before source first-frame proof', () => {
+  const evidence = windowsEvidence()
+  evidence.windowState.supervisor = {
+    lifecycleState: 'surface-fallback',
+    surfaceActive: false
+  }
+  evidence.surfaceStatus.firstFrameContract = 'pending'
+
   assert.equal(previewWindowSurfaceReady(evidence, windowsOptions), false)
 })
 
-test('Windows proof readiness rejects hidden, suppressed, or pending hosts', () => {
+test('backend proof status may omit the optional host-kind mirror after source proof', () => {
+  const status = {
+    state: 'live',
+    transport: 'electron-proof-surface',
+    backing: 'electron-browser-window',
+    sourcePixelsPresent: true,
+    targetFps: 60,
+    framesRendered: 12
+  }
+  assert.equal(
+    nativePreviewSurfaceStatusReady(status, {
+      expectedTransport: 'electron-proof-surface',
+      expectedBacking: 'electron-browser-window',
+      expectedHostKind: 'proof-surface',
+      previousFrames: 11
+    }),
+    true
+  )
+  assert.equal(
+    nativePreviewSurfaceStatusReady(
+      { ...status, sourcePixelsPresent: false },
+      {
+        expectedTransport: 'electron-proof-surface',
+        expectedBacking: 'electron-browser-window',
+        expectedHostKind: 'proof-surface',
+        previousFrames: 11
+      }
+    ),
+    false
+  )
+})
+
+test('Windows proof readiness rejects hidden, suppressed, or unproven hosts', () => {
   for (const mutate of [
     (evidence) => (evidence.windowState.surface.visible = false),
     (evidence) => (evidence.surfaceStatus.framePollingSuppressed = true),
     (evidence) => (evidence.surfaceStatus.firstFrameContract = 'pending'),
-    (evidence) => (evidence.surfaceStatus.pendingHostCommandCount = 1),
     (evidence) => (evidence.surfaceStatus.bounds.width = 0)
   ]) {
     const evidence = windowsEvidence()
     mutate(evidence)
     assert.equal(previewWindowSurfaceReady(evidence, windowsOptions), false)
   }
+})
+
+test('Windows proof readiness tolerates a queued compositor update after first-frame proof', () => {
+  const evidence = windowsEvidence()
+  evidence.surfaceStatus.pendingHostCommandCount = 1
+  assert.equal(previewWindowSurfaceReady(evidence, windowsOptions), true)
 })
 
 test('preview host readiness rejects the wrong transport or backing', () => {
@@ -122,6 +174,8 @@ test('native Windows D3D11 readiness requires the canonical presenter triple and
   }
 
   assert.equal(previewWindowSurfaceReady(evidence, options), true)
+  evidence.surfaceStatus.pendingHostCommandCount = 1
+  assert.equal(previewWindowSurfaceReady(evidence, options), false)
   evidence.surfaceStatus.nativePreviewHostKind = 'proof-surface'
   assert.equal(previewWindowSurfaceReady(evidence, options), false)
 })

@@ -1386,6 +1386,10 @@ pub struct WindowsD3d11MediaDiagnostics {
     pub cursor_exclusion_guaranteed: bool,
     #[serde(default)]
     pub capture_readback_frames: u64,
+    /// Frames where Windows masked protected pixels while the remaining
+    /// desktop pixels continued through the D3D11 media path.
+    #[serde(default)]
+    pub protected_content_masked_frames: u64,
     #[serde(default)]
     pub texture_import_frames: u64,
     #[serde(default)]
@@ -1404,13 +1408,13 @@ pub struct WindowsD3d11MediaDiagnostics {
     pub preview_bmp_requests: u64,
     #[serde(default)]
     pub preview_bmp_bytes: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_pump_lag_p95_ms: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_pump_lag_max_ms: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_command_lag_p95_ms: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_command_lag_max_ms: Option<f64>,
     #[serde(default)]
     pub maximum_consecutive_message_batch: u64,
@@ -1774,7 +1778,7 @@ pub struct DiagnosticStats {
     #[serde(default)]
     pub encode_backend: Option<EncodeBackend>,
     /// Which compositor backend produced the most recent diagnostic window.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compositor_backend: Option<CompositorBackend>,
     /// Reason the shared compositor had to use CPU fallback.
     #[serde(default)]
@@ -4374,12 +4378,34 @@ mod tests {
         };
         let wire = serde_json::to_value(&diagnostics).unwrap();
         assert_eq!(wire["synchronizationTimeouts"], 3);
+        for field in [
+            "messagePumpLagP95Ms",
+            "messagePumpLagMaxMs",
+            "mediaCommandLagP95Ms",
+            "mediaCommandLagMaxMs",
+        ] {
+            assert!(
+                wire.get(field).is_none(),
+                "unset optional timing field {field} must be omitted rather than serialized as null"
+            );
+        }
 
         let legacy: WindowsD3d11MediaDiagnostics = serde_json::from_value(serde_json::json!({
             "state": "unavailable"
         }))
         .unwrap();
         assert_eq!(legacy.synchronization_timeouts, 0);
+    }
+
+    #[test]
+    fn diagnostic_stats_omit_an_unavailable_compositor_backend_on_the_wire() {
+        let diagnostics = crate::diagnostics::idle_diagnostics();
+        let wire = serde_json::to_value(diagnostics).unwrap();
+
+        assert!(
+            wire.get("compositorBackend").is_none(),
+            "optional compositor backend must be omitted rather than serialized as null"
+        );
     }
 
     #[test]

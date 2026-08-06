@@ -929,6 +929,7 @@ const windowsD3d11MediaDiagnosticsSchema = objectSchema(
     cursorPixelsSource: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
     cursorExclusionGuaranteed: booleanSchema,
     captureReadbackFrames: nonNegativeInteger,
+    protectedContentMaskedFrames: nonNegativeInteger,
     textureImportFrames: nonNegativeInteger,
     cameraUploadFrames: nonNegativeInteger,
     cursorShapeUploads: nonNegativeInteger,

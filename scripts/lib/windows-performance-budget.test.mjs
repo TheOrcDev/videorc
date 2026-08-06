@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { describe, it } from 'node:test'
 
 import {
@@ -221,7 +221,7 @@ describe('Windows performance budgets', () => {
         '/tmp/acceptance/one.json',
         '/tmp/acceptance/two.json',
         '/tmp/acceptance/three.json'
-      ]
+      ].map((path) => resolve(path))
     )
   })
 

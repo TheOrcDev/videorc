@@ -163,8 +163,19 @@ export function nativeWindowsScreenRecordingActive(evidence, sourceId) {
     diagnostics?.activeOutputMode === 'record' &&
     recording?.state === 'recording' &&
     (nativeWindowsCompositorUsesScreen(compositor, sourceId) ||
-      diagnostics?.encoderBridgeEncodedOutputInputSubtype === 'NV12-D3D11') &&
+      nativeWindowsD3d11MediaEncodingActive(diagnostics)) &&
     sourceEntry?.status === 'live'
+  )
+}
+
+export function nativeWindowsD3d11MediaEncodingActive(diagnostics) {
+  const media = diagnostics?.windowsD3d11Media
+  return (
+    diagnostics?.encoderBridgeEncodedOutputInputSubtype === 'NV12-D3D11' ||
+    (media?.state === 'live' &&
+      (media.encoderGpuSamples ?? 0) > 0 &&
+      (media.encoderSystemMemorySamples ?? 0) === 0 &&
+      (media.rawVideoCopiedFrames ?? 0) === 0)
   )
 }
 
@@ -289,4 +300,21 @@ export function requiredBmpPreviewAdvances(screen) {
   // surface advances through recording, but do not apply the physical-GPU
   // five-frame expectation to this explicitly identified software renderer.
   return /microsoft basic render driver/i.test(screen?.detail ?? '') ? 3 : 5
+}
+
+export function windowsNativeScreenRecordingArtifactGates(screen) {
+  const hostedSoftwareRenderer = /microsoft basic render driver/i.test(screen?.detail ?? '')
+  return {
+    requireMotion: false,
+    ...(hostedSoftwareRenderer
+      ? {
+          // The hosted Basic Render Driver consistently records around
+          // 29.25fps for a requested 30fps session. Keep artifact proof
+          // strict on real GPUs while allowing that documented software-host
+          // floor (5% still catches material drops or cadence regressions).
+          frameCountTolerance: 0.05,
+          cadenceMismatchTolerancePct: 5
+        }
+      : {})
+  }
 }
