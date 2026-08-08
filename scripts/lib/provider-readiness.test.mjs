@@ -12,7 +12,10 @@ import {
 function completeEnv(overrides = {}) {
   return {
     VIDEORC_ENABLE_YOUTUBE_OAUTH: '1',
-    VIDEORC_YOUTUBE_CLIENT_ID: 'youtube-client-secret-value',
+    VIDEORC_YOUTUBE_CLIENT_ID: 'youtube-client-id-value',
+    // Google's Desktop client rejects a secretless token exchange, so a
+    // complete YouTube setup now carries the secret too.
+    VIDEORC_YOUTUBE_CLIENT_SECRET: 'youtube-client-secret-value',
     VIDEORC_SMOKE_YOUTUBE_CHANNEL_READY: '1',
     VIDEORC_BUNDLED_TWITCH_CLIENT_ID: 'twitch-bundled-client-value',
     VIDEORC_TWITCH_CLIENT_SECRET: 'twitch-secret-value',
