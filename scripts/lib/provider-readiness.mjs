@@ -296,6 +296,9 @@ function readinessForProvider(provider, env, callbackCoverage) {
   if (clientId.source === 'missing') {
     missing.push(`one of ${provider.clientIdVars.join(', ')}`)
   }
+  if (clientId.source === 'placeholder') {
+    missing.push(`${clientId.envVar} still holds template text, not a real client ID`)
+  }
   if (clientSecret.required && clientSecret.source === 'missing') {
     missing.push(provider.secretVars.join(' or '))
   }
@@ -330,12 +333,41 @@ function evaluateCallbackCoverage(env) {
   }
 }
 
+// A credential file can be filled with template text and still look
+// "configured": Videorc shipped every build with
+// VIDEORC_BUNDLED_TWITCH_CLIENT_ID=paste-your-client-id-here, so Twitch OAuth
+// answered "invalid client" for every user while readiness reported ready.
+// Non-empty is not the same as real.
+const PLACEHOLDER_CREDENTIAL_PATTERNS = [
+  /paste/i,
+  /your[-_ ]?(client|api|app)/i,
+  /(client|api|app)[-_ ]?id[-_ ]?here/i,
+  /^(changeme|change[-_ ]me|todo|tbd|xxx+|placeholder|example|dummy|fake|test)$/i,
+  /<[^>]+>/,
+  /\.\.\./
+]
+
+export function isPlaceholderCredential(value) {
+  const trimmed = stringValue(value)
+  if (!trimmed) {
+    return false
+  }
+  return PLACEHOLDER_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(trimmed))
+}
+
 function credentialPresence(names, env) {
   const present = names.find((name) => stringValue(env[name]))
   if (!present) {
     return {
       source: 'missing',
       envVar: null,
+      envVars: names
+    }
+  }
+  if (isPlaceholderCredential(env[present])) {
+    return {
+      source: 'placeholder',
+      envVar: present,
       envVars: names
     }
   }
@@ -370,6 +402,9 @@ function credentialSourceLabel(credential) {
   }
   if (credential.source === 'missing') {
     return `missing (expected ${credential.envVars.join(' or ')})`
+  }
+  if (credential.source === 'placeholder') {
+    return `PLACEHOLDER in ${credential.envVar} — replace with the real client ID`
   }
   return `${credential.source} (${credential.envVar})`
 }

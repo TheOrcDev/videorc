@@ -102,4 +102,37 @@ describe('provider readiness evidence', () => {
     assert.match(markdown, /VIDEORC_SMOKE_X_LIVESTREAM_OAUTH1_READY=1/)
     assert.match(markdown, /VIDEORC_SMOKE_X_NATIVE_LIVE_ACCESS=1/)
   })
+
+  it('rejects template text in a credential instead of reading it as configured', () => {
+    // Videorc shipped every build with
+    // VIDEORC_BUNDLED_TWITCH_CLIENT_ID=paste-your-client-id-here; Twitch
+    // answered "invalid client" for every user while readiness said ready.
+    const result = evaluateProviderReadiness({
+      env: completeEnv({ VIDEORC_BUNDLED_TWITCH_CLIENT_ID: 'paste-your-client-id-here' }),
+      generatedAt: '2026-06-13T00:00:00Z',
+      commit: 'abc123'
+    })
+
+    const twitch = result.providers.find((provider) => provider.label === 'Twitch')
+    assert.equal(twitch.ready, false)
+    assert.equal(twitch.clientId.source, 'placeholder')
+    assert.match(twitch.missing.join(' '), /template text/)
+    assert.equal(result.ready, false)
+
+    const consoleReport = formatProviderReadinessConsole(result)
+    assert.match(consoleReport, /PLACEHOLDER/)
+    // Never echo the value itself, only the variable name.
+    assert.doesNotMatch(consoleReport, /paste-your-client-id-here/)
+  })
+
+  it('accepts a real-looking client ID', () => {
+    const result = evaluateProviderReadiness({
+      env: completeEnv({ VIDEORC_BUNDLED_TWITCH_CLIENT_ID: 'h0bkly86iw8hc6zrljio6ay86ccv3d' }),
+      generatedAt: '2026-06-13T00:00:00Z',
+      commit: 'abc123'
+    })
+    const twitch = result.providers.find((provider) => provider.label === 'Twitch')
+    assert.equal(twitch.clientId.source, 'bundled')
+    assert.equal(twitch.ready, true)
+  })
 })
