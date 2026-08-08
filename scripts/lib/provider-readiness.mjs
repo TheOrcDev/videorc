@@ -21,8 +21,12 @@ export const PROVIDERS = [
     pauseReason: YOUTUBE_OAUTH_PAUSED_REASON,
     enableVars: ['VIDEORC_ENABLE_YOUTUBE_OAUTH', 'VIDEORC_BUNDLED_YOUTUBE_OAUTH_ENABLED'],
     clientIdVars: ['VIDEORC_YOUTUBE_CLIENT_ID', 'VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID'],
-    secretVars: ['VIDEORC_YOUTUBE_CLIENT_SECRET'],
-    secretRequired: false,
+    // Google's Desktop client type REQUIRES client_secret in the token
+    // exchange even with PKCE: omitting it fails AFTER consent with
+    // `invalid_request: client_secret is missing.` The bundled build-time
+    // value is the shipping source, so it counts toward readiness.
+    secretVars: ['VIDEORC_YOUTUBE_CLIENT_SECRET', 'VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET'],
+    secretRequired: true,
     accountChecks: [
       {
         label: 'verified Live-enabled channel available',

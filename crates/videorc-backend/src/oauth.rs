@@ -22,6 +22,13 @@ const OAUTH_PROVIDER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration:
 const OAUTH_PROVIDER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const BUNDLED_TWITCH_CLIENT_ID: Option<&str> = option_env!("VIDEORC_BUNDLED_TWITCH_CLIENT_ID");
 const BUNDLED_YOUTUBE_CLIENT_ID: Option<&str> = option_env!("VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID");
+// Google's "Desktop app" client type REQUIRES client_secret in the token
+// exchange even with PKCE — omitting it fails the exchange with
+// `invalid_request: client_secret is missing.` AFTER the user has already
+// granted consent. For an installed app this value is not a true secret
+// (it ships in the binary); PKCE is what actually protects the exchange.
+const BUNDLED_YOUTUBE_CLIENT_SECRET: Option<&str> =
+    option_env!("VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET");
 // The Videorc X OAuth app (public Native App client, PKCE — no secret involved).
 // Client IDs are public identifiers; build-time/runtime env still override.
 const BUNDLED_X_CLIENT_ID: Option<&str> = match option_env!("VIDEORC_BUNDLED_X_CLIENT_ID") {
@@ -2324,10 +2331,13 @@ fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
             if let Some(message) = provider_oauth_unavailable_message(platform) {
                 anyhow::bail!("{message}");
             }
-            Ok(youtube_provider_config(required_credential(
-                "VIDEORC_YOUTUBE_CLIENT_ID",
-                BUNDLED_YOUTUBE_CLIENT_ID,
-            )?))
+            Ok(youtube_provider_config(
+                required_credential("VIDEORC_YOUTUBE_CLIENT_ID", BUNDLED_YOUTUBE_CLIENT_ID)?,
+                required_credential(
+                    "VIDEORC_YOUTUBE_CLIENT_SECRET",
+                    BUNDLED_YOUTUBE_CLIENT_SECRET,
+                )?,
+            ))
         }
         StreamPlatform::Twitch => Ok(OAuthProviderConfig {
             authorization_url: "https://id.twitch.tv/oauth2/authorize".to_string(),
@@ -2365,14 +2375,14 @@ fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
     }
 }
 
-fn youtube_provider_config(client_id: String) -> OAuthProviderConfig {
+fn youtube_provider_config(client_id: String, client_secret: String) -> OAuthProviderConfig {
     OAuthProviderConfig {
         authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
         token_url: "https://oauth2.googleapis.com/token".to_string(),
         profile_url: "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true"
             .to_string(),
         client_id,
-        client_secret: None,
+        client_secret: Some(client_secret),
         scopes: vec!["https://www.googleapis.com/auth/youtube.force-ssl".to_string()],
         extra_params: HashMap::from([
             ("access_type".to_string(), "offline".to_string()),
@@ -4681,10 +4691,15 @@ mod tests {
 
     #[test]
     fn youtube_verification_config_uses_pkce_and_the_minimum_scope() {
-        let config = youtube_provider_config("public-client-id".to_string());
+        let config =
+            youtube_provider_config("public-client-id".to_string(), "client-secret".to_string());
 
         assert!(config.pkce);
-        assert_eq!(config.client_secret, None);
+        // Google's Desktop client type rejects a PKCE-only token exchange with
+        // `client_secret is missing` AFTER consent, so the secret rides along
+        // WITH PKCE. Asserting None here previously enshrined a flow that
+        // could never complete against Google.
+        assert_eq!(config.client_secret.as_deref(), Some("client-secret"));
         assert_eq!(
             config.scopes,
             vec!["https://www.googleapis.com/auth/youtube.force-ssl"]
