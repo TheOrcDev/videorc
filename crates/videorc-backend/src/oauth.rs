@@ -2307,6 +2307,164 @@ struct OAuthTokenResponse {
     scope: Option<OAuthScopeResponse>,
 }
 
+// ── Twitch device code flow ─────────────────────────────────────────────
+//
+// Twitch registers Videorc as a PUBLIC client (desktop apps cannot keep a
+// secret), and a public client has NO client secret at all. Twitch's
+// authorization-code grant rejects such a client outright — with or without
+// PKCE — returning `Invalid client credentials` AFTER the user has already
+// approved. The device code flow is Twitch's supported path for exactly this
+// case: it authenticates by client id alone and still issues a refresh token
+// (verified: the refresh grant accepts client_id with no secret).
+//
+// UX is unchanged for the user: Twitch's verification_uri already embeds the
+// user code, so the app opens that URL and the user just approves.
+
+pub const TWITCH_DEVICE_URL: &str = "https://id.twitch.tv/oauth2/device";
+pub const TWITCH_DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
+/// Twitch answers `slow_down` when polled too fast; back off by this much.
+const DEVICE_SLOW_DOWN_STEP: i64 = 5;
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TwitchDeviceAuthorization {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: i64,
+    #[serde(default = "default_device_interval")]
+    pub interval: i64,
+}
+
+fn default_device_interval() -> i64 {
+    5
+}
+
+/// One poll of the device token endpoint, classified so the caller can decide
+/// whether to keep waiting, back off, or surface a terminal failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DevicePollOutcome {
+    /// The user has not approved yet — keep polling at the current interval.
+    Pending,
+    /// Polled too fast — raise the interval before the next attempt.
+    SlowDown { next_interval: i64 },
+    /// The user declined, or the device code aged out. Terminal.
+    Failed { reason: String },
+    /// Approved. Contains the tokens.
+    Approved(Box<ExchangedOAuthToken>),
+}
+
+/// Classify a device-token poll from its HTTP status and body, without any
+/// network access, so the state machine is unit-testable.
+pub fn classify_device_poll(
+    platform: StreamPlatform,
+    status: u16,
+    body: &str,
+    requested_scopes: &[String],
+    interval: i64,
+) -> Result<DevicePollOutcome> {
+    if status == 200 {
+        let token: OAuthTokenResponse = serde_json::from_str(body)
+            .context("Could not parse the Twitch device token response")?;
+        if token.access_token.trim().is_empty() {
+            anyhow::bail!("Twitch device authorization returned an empty access token.");
+        }
+        let scopes = token
+            .scopes()
+            .filter(|scopes| !scopes.is_empty())
+            .unwrap_or_else(|| requested_scopes.to_vec());
+        let expires_at = token
+            .expires_in
+            .and_then(|seconds| Utc::now().checked_add_signed(Duration::seconds(seconds)))
+            .map(|expires_at| expires_at.to_rfc3339());
+        return Ok(DevicePollOutcome::Approved(Box::new(ExchangedOAuthToken {
+            platform,
+            access_token: token.access_token,
+            refresh_token: token.refresh_token,
+            scopes,
+            expires_at,
+        })));
+    }
+
+    // Twitch reports the pending/slow-down/denied states as 400s whose message
+    // carries the meaning. Match on the message, not the status.
+    let lowered = body.to_ascii_lowercase();
+    if lowered.contains("authorization_pending") || lowered.contains("authorization pending") {
+        return Ok(DevicePollOutcome::Pending);
+    }
+    if lowered.contains("slow_down") || lowered.contains("slow down") {
+        return Ok(DevicePollOutcome::SlowDown {
+            next_interval: interval.saturating_add(DEVICE_SLOW_DOWN_STEP),
+        });
+    }
+    if lowered.contains("expired_token") || lowered.contains("expired") {
+        return Ok(DevicePollOutcome::Failed {
+            reason: "The Twitch authorization code expired before it was approved.".to_string(),
+        });
+    }
+    if lowered.contains("access_denied") || lowered.contains("denied") {
+        return Ok(DevicePollOutcome::Failed {
+            reason: "Twitch authorization was declined.".to_string(),
+        });
+    }
+    Ok(DevicePollOutcome::Failed {
+        reason: format!("Twitch device authorization failed with HTTP {status}."),
+    })
+}
+
+/// Ask Twitch to start a device authorization for these scopes.
+pub async fn start_twitch_device_authorization(
+    client_id: &str,
+    scopes: &[String],
+    client: &reqwest::Client,
+) -> Result<TwitchDeviceAuthorization> {
+    let response = client
+        .post(TWITCH_DEVICE_URL)
+        .form(&[("client_id", client_id), ("scopes", &scopes.join(" "))])
+        .send()
+        .await
+        .context("Could not reach Twitch to start device authorization")?;
+    if !response.status().is_success() {
+        let status = response.status();
+        anyhow::bail!("Twitch device authorization request failed with HTTP {status}");
+    }
+    let authorization = response
+        .json::<TwitchDeviceAuthorization>()
+        .await
+        .context("Could not parse the Twitch device authorization response")?;
+    if authorization.device_code.trim().is_empty()
+        || authorization.verification_uri.trim().is_empty()
+    {
+        anyhow::bail!("Twitch device authorization response was incomplete.");
+    }
+    Ok(authorization)
+}
+
+/// Poll once for the device token. Callers own the wait between polls.
+pub async fn poll_twitch_device_token(
+    platform: StreamPlatform,
+    token_url: &str,
+    client_id: &str,
+    device_code: &str,
+    scopes: &[String],
+    interval: i64,
+    client: &reqwest::Client,
+) -> Result<DevicePollOutcome> {
+    let response = client
+        .post(token_url)
+        .form(&[
+            ("client_id", client_id),
+            ("device_code", device_code),
+            ("grant_type", TWITCH_DEVICE_GRANT_TYPE),
+            ("scopes", &scopes.join(" ")),
+        ])
+        .send()
+        .await
+        .context("Could not reach Twitch while waiting for device authorization")?;
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    classify_device_poll(platform, status, &body, scopes, interval)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum OAuthScopeResponse {
@@ -4686,6 +4844,99 @@ mod tests {
             statuses
                 .iter()
                 .all(|status| !status.message.contains("CLIENT_SECRET"))
+        );
+    }
+
+    fn twitch_device_scopes() -> Vec<String> {
+        vec![
+            "channel:manage:broadcast".to_string(),
+            "user:write:chat".to_string(),
+        ]
+    }
+
+    #[test]
+    fn device_poll_treats_pending_as_keep_waiting_not_failure() {
+        let outcome = classify_device_poll(
+            StreamPlatform::Twitch,
+            400,
+            r#"{"status":400,"message":"authorization_pending"}"#,
+            &twitch_device_scopes(),
+            5,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, DevicePollOutcome::Pending);
+    }
+
+    #[test]
+    fn device_poll_backs_off_when_twitch_says_slow_down() {
+        let outcome = classify_device_poll(
+            StreamPlatform::Twitch,
+            400,
+            r#"{"status":400,"message":"slow_down"}"#,
+            &twitch_device_scopes(),
+            5,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, DevicePollOutcome::SlowDown { next_interval: 10 });
+    }
+
+    #[test]
+    fn device_poll_reports_decline_and_expiry_as_terminal() {
+        let denied = classify_device_poll(
+            StreamPlatform::Twitch,
+            400,
+            r#"{"status":400,"message":"access_denied"}"#,
+            &twitch_device_scopes(),
+            5,
+        )
+        .unwrap();
+        assert!(matches!(denied, DevicePollOutcome::Failed { .. }));
+
+        let expired = classify_device_poll(
+            StreamPlatform::Twitch,
+            400,
+            r#"{"status":400,"message":"expired_token"}"#,
+            &twitch_device_scopes(),
+            5,
+        )
+        .unwrap();
+        assert!(matches!(expired, DevicePollOutcome::Failed { .. }));
+    }
+
+    #[test]
+    fn device_poll_returns_tokens_and_falls_back_to_requested_scopes() {
+        let DevicePollOutcome::Approved(token) = classify_device_poll(
+            StreamPlatform::Twitch,
+            200,
+            r#"{"access_token":"at","refresh_token":"rt","expires_in":14400}"#,
+            &twitch_device_scopes(),
+            5,
+        )
+        .unwrap() else {
+            panic!("an approved device poll must return tokens");
+        };
+
+        assert_eq!(token.access_token, "at");
+        // Twitch omits `scope` on the device grant; the requested set stands in
+        // so a connection is never stored claiming zero permissions.
+        assert_eq!(token.scopes, twitch_device_scopes());
+        assert_eq!(token.refresh_token.as_deref(), Some("rt"));
+        assert!(token.expires_at.is_some());
+    }
+
+    #[test]
+    fn device_poll_rejects_an_empty_access_token() {
+        assert!(
+            classify_device_poll(
+                StreamPlatform::Twitch,
+                200,
+                r#"{"access_token":"   "}"#,
+                &twitch_device_scopes(),
+                5,
+            )
+            .is_err()
         );
     }
 
