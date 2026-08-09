@@ -4515,6 +4515,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setActiveScreen(payload as StreamScreen | null)
       }),
       nextClient.on('platformAccounts.changed', (payload) => {
+        // The authorization link toast is persistent; retire it as soon
+        // as the connection resolves.
+        toast.dismiss('oauth-authorization-link')
         bootstrapGuard.mark('platformAccounts')
         setPlatformAccounts(payload as PlatformAccount[])
       }),
@@ -7757,10 +7760,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           params
         )
         await window.videorc.openOAuthUrl(result.authUrl)
+        // Auto-open uses the DEFAULT browser, which is often NOT the browser
+        // the user is signed into the platform with. Keep the link copyable so
+        // it can be pasted into the right one. Stays until dismissed: device
+        // authorizations (Twitch) can take a while, and a 4-second toast is
+        // gone long before the user has switched browsers and signed in.
         // Callback-URL registration hints live in docs/distribution.md — they
         // are developer-portal instructions, not something an end user can act
         // on, so the toast stays quiet.
-        toast.success('OAuth browser opened.')
+        toast.success('Approve the connection in your browser', {
+          id: 'oauth-authorization-link',
+          description: 'Signed in on a different browser? Copy the link and open it there instead.',
+          duration: Number.POSITIVE_INFINITY,
+          action: {
+            label: 'Copy link',
+            onClick: () => {
+              void navigator.clipboard
+                .writeText(result.authUrl)
+                .then(() => toast.success('Authorization link copied.'))
+                .catch(() => toast.error('Could not copy the link.'))
+            }
+          }
+        })
       } catch (error) {
         reportError(error)
       }

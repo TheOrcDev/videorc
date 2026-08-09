@@ -217,10 +217,18 @@ enum PendingOAuthWork {
 
 impl PendingOAuthWork {
     fn is_code_less_resumable(&self) -> bool {
-        matches!(
-            self,
-            Self::ProviderExchangeStarted(_) | Self::ProviderToken(_) | Self::AccountStorage { .. }
-        )
+        match self {
+            Self::ProviderExchangeStarted(_)
+            | Self::ProviderToken(_)
+            | Self::AccountStorage { .. } => true,
+            // A device grant (Twitch) NEVER has an authorization code: the
+            // poller trades the device code for tokens instead. Without this,
+            // completion is rejected as "no code" before it ever polls — which
+            // is exactly how the flow silently did nothing after the user
+            // approved in the browser.
+            Self::ProviderExchange(exchange) => exchange.is_device_grant(),
+            Self::Generic => false,
+        }
     }
 
     fn is_unadvanced(&self) -> bool {
@@ -5011,6 +5019,25 @@ mod tests {
             device_code: device_code.map(str::to_string),
             device_interval_seconds: Some(5),
         }
+    }
+
+    #[test]
+    fn a_device_grant_completes_without_an_authorization_code() {
+        // The bug this pins: completion computed
+        //   failed = !code_less_resume && (error || !code_present)
+        // and a device grant has NO code by design, so the flow was rejected
+        // before it ever polled — the user approved in the browser and the app
+        // did nothing. A device grant must be code-less resumable.
+        let device = PendingOAuthWork::ProviderExchange(device_exchange_fixture(Some("dc")));
+        assert!(
+            device.is_code_less_resumable(),
+            "a device grant has no authorization code and must still complete"
+        );
+
+        // Redirect providers must keep requiring their code.
+        let redirect = PendingOAuthWork::ProviderExchange(device_exchange_fixture(None));
+        assert!(!redirect.is_code_less_resumable());
+        assert!(!PendingOAuthWork::Generic.is_code_less_resumable());
     }
 
     #[test]
