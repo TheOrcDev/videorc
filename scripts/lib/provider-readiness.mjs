@@ -38,8 +38,10 @@ export const PROVIDERS = [
     label: 'Twitch',
     clientIdVars: ['VIDEORC_TWITCH_CLIENT_ID', 'VIDEORC_BUNDLED_TWITCH_CLIENT_ID'],
     secretVars: ['VIDEORC_TWITCH_CLIENT_SECRET'],
-    // Public client type: the id alone connects; a secret only upgrades
-    // confidential setups.
+    // Public client type, so no secret exists — but the id alone does NOT
+    // complete an authorization-code exchange (Twitch answers "Invalid client
+    // credentials"). Connect uses the device code flow, which authenticates by
+    // client id; a secret only matters for confidential forks.
     secretRequired: false,
     accountChecks: [
       {
