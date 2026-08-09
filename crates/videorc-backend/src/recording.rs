@@ -3885,7 +3885,7 @@ fn mp4_export_args(input: &Path, output: &Path, trim_seconds: Option<f64>) -> Ve
         "-loglevel".to_string(),
         "warning".to_string(),
         "-i".to_string(),
-        input.display().to_string(),
+        ffmpeg_file_path(input),
         "-map".to_string(),
         "0".to_string(),
         "-c:v".to_string(),
@@ -3904,7 +3904,7 @@ fn mp4_export_args(input: &Path, output: &Path, trim_seconds: Option<f64>) -> Ve
         // Bound the stop tail: end the delivered file at the shorter stream.
         args.extend(["-t".to_string(), format!("{trim_seconds:.3}")]);
     }
-    args.push(output.display().to_string());
+    args.push(ffmpeg_file_path(output));
     args
 }
 
@@ -6613,12 +6613,15 @@ fn should_finalize_recording_session(
     // before the user asks to stop is still an early termination (for example,
     // a source/pipe that silently ended) and must never publish a shortened
     // artifact as successful.
-    // Stop intent must win the monitor's exit-ready race, but that alone is not
-    // proof that muxer flush completed. A forced
-    // TERM/KILL or any non-zero FFmpeg exit keeps the artifact as recovery
-    // media and marks the session failed unless a future explicit verifier can
-    // prove the container is complete.
-    if recording_bridge_terminal_failure.is_some() || !ffmpeg_exit_success {
+    // Stop intent must win the monitor's exit-ready race. Windows FFmpeg can
+    // report a non-zero status while closing a stopped graph even though the
+    // local MKV is still exportable; let the MP4 exporter validate that output
+    // instead of unconditionally marooning it as recovery media. A recording
+    // bridge failure remains terminal because it means the video producer did
+    // not finish its contract.
+    if recording_bridge_terminal_failure.is_some()
+        || (!ffmpeg_exit_success && !stop_intent_preceded_exit)
+    {
         return false;
     }
     // A dead STREAM output ends FFmpeg without a user stop, but the RECORDING
@@ -20504,8 +20507,8 @@ mod tests {
     fn only_an_explicit_graceful_stop_can_finalize_an_unbounded_capture() {
         assert!(!should_finalize_recording_session(true, false, None, None));
         assert!(
-            !should_finalize_recording_session(false, true, None, None),
-            "a non-zero/forced FFmpeg exit after stop must remain failed"
+            should_finalize_recording_session(false, true, None, None),
+            "a stopped Windows graph may have a non-zero exit while its MKV remains exportable"
         );
         assert!(should_finalize_recording_session(true, true, None, None));
 
@@ -21329,6 +21332,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mp4_export_normalizes_windows_verbatim_paths() {
+        #[cfg(target_os = "windows")]
+        {
+            let args = mp4_export_args(
+                Path::new(r"\\?\C:\recordings\capture.mkv"),
+                Path::new(r"\\?\C:\recordings\.videorc-export.partial\export.mp4"),
+                None,
+            );
+            assert_eq!(arg_value(&args, "-i"), Some(r"C:\recordings\capture.mkv"));
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some(r"C:\recordings\.videorc-export.partial\export.mp4")
+            );
+        }
+    }
     #[test]
     fn mp4_export_uses_no_overwrite_with_an_absent_child_in_an_owned_directory() {
         let directory = std::env::temp_dir().join(format!(
