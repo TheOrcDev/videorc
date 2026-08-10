@@ -265,18 +265,14 @@ jobs:
           VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          pnpm --filter @videorc/desktop exec electron-builder --win nsis --publish never --prepackaged release/win-unpacked --config electron-builder.windows-unsigned.cjs
+          # Same script the unsigned job runs before writing the manifest, so
+          # this second pass adds nothing: NSIS packaging copies
+          # resources/elevate.exe into win-unpacked, and the manifest already
+          # covers it. One implementation, so the two passes cannot drift.
+          pnpm package:windows:nsis-prewarm
           if ($LASTEXITCODE -ne 0) {
             throw 'Unable to prewarm the pinned NSIS packaging path.'
           }
-          $releaseRoot = 'apps/desktop/release'
-          $generatedInstaller = Get-ChildItem -LiteralPath $releaseRoot -File -Filter 'Videorc-*-win-x64.exe'
-          if ($generatedInstaller.Count -ne 1) {
-            throw 'The NSIS prewarm did not produce exactly one unsigned installer.'
-          }
-          Get-ChildItem -LiteralPath $releaseRoot -File |
-            Where-Object { $_.Name -ne 'windows-unsigned-staging.json' } |
-            Remove-Item -Force
           pnpm release:staging:verify:windows
           if ($LASTEXITCODE -ne 0) {
             throw 'NSIS prewarm changed the hash-bound unsigned staging payload.'
@@ -504,13 +500,25 @@ jobs:
         shell: pwsh
         run: |
           $cleanupFailures = [System.Collections.Generic.List[string]]::new()
-          try {
-            az logout
-            if ($LASTEXITCODE -ne 0) {
-              $cleanupFailures.Add("az logout exited $LASTEXITCODE")
+          # This step is `if: always()`, so it also runs when the job failed
+          # before Azure login. `az logout` exits non-zero with no active
+          # session, which used to throw here and bury the real failure under a
+          # spurious cleanup error. Only log out when a session actually exists;
+          # a failing logout WITH a session is still fatal, and `az account
+          # clear` runs unconditionally either way.
+          az account show 2>$null | Out-Null
+          $hasSession = $LASTEXITCODE -eq 0
+          if ($hasSession) {
+            try {
+              az logout
+              if ($LASTEXITCODE -ne 0) {
+                $cleanupFailures.Add("az logout exited $LASTEXITCODE")
+              }
+            } catch {
+              $cleanupFailures.Add("az logout failed: $($_.Exception.Message)")
             }
-          } catch {
-            $cleanupFailures.Add("az logout failed: $($_.Exception.Message)")
+          } else {
+            Write-Host 'No Azure CLI session to clear.'
           }
           try {
             az account clear
