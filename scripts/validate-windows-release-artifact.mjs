@@ -56,24 +56,56 @@ async function main() {
   console.log(formatWindowsReleaseValidationReport(result))
 }
 
-function readAuthenticodeSignature(installerPath) {
+// Prefer pwsh: it is what the signing job itself uses to verify publisher and
+// timestamp, so it is the interpreter this repo has actually proven against
+// Azure Trusted Signing signatures. powershell.exe stays as a fallback for
+// hosts without PowerShell 7.
+const SIGNATURE_SHELLS = ['pwsh', 'powershell.exe']
+
+function readAuthenticodeSignature(target) {
+  // ErrorActionPreference=Stop matters: without it a failing
+  // Get-AuthenticodeSignature is non-terminating, $sig stays null, the script
+  // still exits 0, and the caller sees an empty status with no reason — which
+  // is exactly how this validator once reported `status must be Valid, got .`
+  // after a successful sign.
   const script = [
+    "$ErrorActionPreference = 'Stop'",
     '$sig = Get-AuthenticodeSignature -LiteralPath $env:VIDEORC_SIGNATURE_TARGET',
+    'if ($null -eq $sig) { throw "Get-AuthenticodeSignature returned nothing for $env:VIDEORC_SIGNATURE_TARGET" }',
     '$publisher = if ($sig.SignerCertificate) { $sig.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } else { $null }',
     '[pscustomobject]@{ status = [string]$sig.Status; publisher = $publisher; timestampPresent = ($null -ne $sig.TimeStamperCertificate) } | ConvertTo-Json -Compress'
   ].join('; ')
-  const result = spawnSync(
-    'powershell.exe',
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-    {
-      encoding: 'utf8',
-      env: { ...process.env, VIDEORC_SIGNATURE_TARGET: installerPath }
+
+  const failures = []
+  for (const shell of SIGNATURE_SHELLS) {
+    const result = spawnSync(
+      shell,
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, VIDEORC_SIGNATURE_TARGET: target }
+      }
+    )
+    if (result.error?.code === 'ENOENT') {
+      failures.push(`${shell}: not installed`)
+      continue
     }
-  )
-  if (result.status !== 0 || !result.stdout?.trim()) {
-    throw new Error('Get-AuthenticodeSignature failed for the Windows installer.')
+    const stdout = result.stdout?.trim() ?? ''
+    if (result.status === 0 && stdout) {
+      const parsed = JSON.parse(stdout)
+      if (parsed.status) {
+        return parsed
+      }
+      failures.push(`${shell}: empty signature status`)
+      continue
+    }
+    // Surface the real reason instead of swallowing it.
+    const stderr = result.stderr?.trim() ?? ''
+    failures.push(`${shell}: exit ${result.status}${stderr ? ` — ${stderr}` : ''}`)
   }
-  return JSON.parse(result.stdout.trim())
+  throw new Error(
+    `Unable to read the Authenticode signature of ${target}:\n  ${failures.join('\n  ')}`
+  )
 }
 
 function currentCommit() {
