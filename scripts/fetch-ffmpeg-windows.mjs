@@ -21,6 +21,8 @@ import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 
+import { assessFfmpegWindowsPin, autobuildDurability } from './lib/ffmpeg-windows-pin.mjs'
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const pinPath = join(repoRoot, 'vendor', 'ffmpeg', 'windows-pin.json')
 const downloadPath = join(repoRoot, 'vendor', 'ffmpeg', '_build', 'windows-download.zip')
@@ -49,11 +51,9 @@ async function sha256Of(path) {
 }
 
 const pin = JSON.parse(await readFile(pinPath, 'utf8'))
-if (!pin.url || !pin.sha256) {
-  fail(`${pinPath} must contain { url, sha256 }`)
-}
-if (!/lgpl/.test(pin.url)) {
-  fail(`pinned URL is not an LGPL build: ${pin.url} (LGPL-only is the repo's ffmpeg policy)`)
+const assessment = assessFfmpegWindowsPin(pin)
+if (!assessment.ok) {
+  fail(`${pinPath} is unusable:\n  - ${assessment.problems.join('\n  - ')}`)
 }
 
 const ffmpegExe = join(outputDir, 'bin', 'ffmpeg.exe')
@@ -84,7 +84,13 @@ if (!haveZip) {
   await mkdir(dirname(downloadPath), { recursive: true })
   const response = await fetch(pin.url, { redirect: 'follow' })
   if (!response.ok || !response.body) {
-    fail(`download failed: HTTP ${response.status} for ${pin.url}`)
+    // A 404 on a BtbN autobuild almost always means upstream pruned the
+    // release. Say so, rather than leaving the next reader to rediscover it.
+    const pruned =
+      response.status === 404 && autobuildDurability(pin.url)
+        ? '\nThis release looks pruned upstream. Re-pin the last autobuild of a recent month and update the sha256.'
+        : ''
+    fail(`download failed: HTTP ${response.status} for ${pin.url}${pruned}`)
   }
   await pipeline(Readable.fromWeb(response.body), createWriteStream(downloadPath))
 }
