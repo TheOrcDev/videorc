@@ -31,7 +31,7 @@ export function getReleaseUploadS3Config(env = process.env) {
   )
 
   return {
-    accessKeyId: requireEnv(env, [
+    accessKeyId: requireCredentialEnv(env, [
       'VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID',
       'VIDEORC_DOWNLOAD_S3_ACCESS_KEY_ID'
     ]),
@@ -42,7 +42,7 @@ export function getReleaseUploadS3Config(env = process.env) {
       envFlag(env.VIDEORC_DOWNLOAD_S3_FORCE_PATH_STYLE) ||
       Boolean(endpointUrl),
     region: requireEnv(env, ['VIDEORC_RELEASE_UPLOAD_S3_REGION', 'VIDEORC_DOWNLOAD_S3_REGION']),
-    secretAccessKey: requireEnv(env, [
+    secretAccessKey: requireCredentialEnv(env, [
       'VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY',
       'VIDEORC_DOWNLOAD_S3_SECRET_ACCESS_KEY'
     ]),
@@ -343,6 +343,31 @@ function parseS3EndpointUrl(value) {
       'Release upload S3 endpoint URL must be a credential-free HTTPS URL.'
     )
   }
+}
+
+/**
+ * Credentials go into the Authorization header (and the signing key), so they
+ * must be single-token printable ASCII.
+ *
+ * A credential copied out of a .env file with its trailing `# comment` attached
+ * passes every earlier check and then fails deep inside fetch with
+ * "Cannot convert argument to a ByteString because the character at index N has
+ * a value of 8212" — an em dash in the comment, with nothing pointing at the
+ * real cause. Reject it here, naming the variable and the reason.
+ *
+ * The value itself is never echoed.
+ */
+function requireCredentialEnv(env, names) {
+  const value = requireEnv(env, names)
+  const name = names.find((candidate) => nonEmpty(env[candidate])) ?? names[0]
+  if (!/^[\x21-\x7e]+$/.test(value)) {
+    throw new ReleaseUploadConfigError(
+      'invalid-credential',
+      `${name} must be a single printable ASCII token. It contains whitespace or ` +
+        'non-ASCII characters — a trailing "# comment" copied from a .env file is the usual cause.'
+    )
+  }
+  return value
 }
 
 function requireEnv(env, names) {
