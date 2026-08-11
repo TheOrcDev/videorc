@@ -354,3 +354,58 @@ describe('release S3 request signing', () => {
     }
   })
 })
+
+describe('S3 credential validation', () => {
+  const base = {
+    VIDEORC_RELEASE_UPLOAD_S3_BUCKET: 'videorc-releases',
+    VIDEORC_RELEASE_UPLOAD_S3_REGION: 'auto',
+    VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL: 'https://example.r2.cloudflarestorage.com'
+  }
+
+  it('accepts a clean credential pair', () => {
+    const config = getReleaseUploadS3Config({
+      ...base,
+      VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID: 'a'.repeat(32),
+      VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY: 'b'.repeat(64)
+    })
+    assert.equal(config.accessKeyId, 'a'.repeat(32))
+  })
+
+  it('rejects a credential carrying a trailing .env comment, naming the variable', () => {
+    // The exact shape that reached production: value + " # rotated — <date>".
+    assert.throws(
+      () =>
+        getReleaseUploadS3Config({
+          ...base,
+          VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID: `${'a'.repeat(32)} # rotated — 2026-08-01`,
+          VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY: 'b'.repeat(64)
+        }),
+      /VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID must be a single printable ASCII token/
+    )
+  })
+
+  it('rejects a secret with an embedded em dash', () => {
+    assert.throws(
+      () =>
+        getReleaseUploadS3Config({
+          ...base,
+          VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID: 'a'.repeat(32),
+          VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY: `${'b'.repeat(64)}—`
+        }),
+      /SECRET_ACCESS_KEY must be a single printable ASCII token/
+    )
+  })
+
+  it('never echoes the credential value in the error', () => {
+    try {
+      getReleaseUploadS3Config({
+        ...base,
+        VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID: 'SUPERSECRETVALUE — leak',
+        VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY: 'b'.repeat(64)
+      })
+      assert.fail('expected a config error')
+    } catch (error) {
+      assert.doesNotMatch(error.message, /SUPERSECRETVALUE/)
+    }
+  })
+})
