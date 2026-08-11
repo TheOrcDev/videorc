@@ -546,4 +546,13 @@ jobs:
           VIDEORC_RELEASE_UPLOAD_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_REGION }}
           VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL }}
           VIDEORC_RELEASE_UPLOAD_S3_FORCE_PATH_STYLE: 'true'
+          # Publish the LGPL files FROM THE PACKAGED PAYLOAD, not vendor/. The
+          # script's default points at vendor/ffmpeg/windows-x64, which only
+          # exists where fetch-ffmpeg-windows.mjs has run — that is the
+          # unprivileged job, not this one, which has just the downloaded
+          # win-unpacked artifact. These copies are also the ones that actually
+          # ship, and they are covered by the staging hash, so the published
+          # source offer provably matches the shipped binaries.
+          VIDEORC_WINDOWS_FFMPEG_LICENSE_PATH: apps/desktop/release/win-unpacked/resources/ffmpeg/LICENSE.txt
+          VIDEORC_WINDOWS_FFMPEG_SOURCE_PATH: apps/desktop/release/win-unpacked/resources/ffmpeg/SOURCE.txt
         run: pnpm release:candidate:upload:windows
