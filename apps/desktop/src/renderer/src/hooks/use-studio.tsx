@@ -5919,14 +5919,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           protectedOverlayWindowIds
         })
         let proofError: unknown = null
+        let proofFailed = false
         try {
           await rememberLiveLayoutCommit(status)
         } catch (error) {
+          proofFailed = true
           proofError = error
         }
         applyScene(status.scene)
         setCaptureConfig((current) => ({ ...current, sources }))
-        if (proofError) {
+        if (proofFailed) {
           const detail = proofError instanceof Error ? proofError.message : String(proofError)
           console.warn(
             `Source switch committed at revision ${status.sceneRevision}; output proof was not observed. ${detail}`

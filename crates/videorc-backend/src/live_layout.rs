@@ -61,6 +61,33 @@ const UNUSED_CAMERA_STOP_GRACE: Duration = Duration::from_secs(1);
 /// capturer must not be swapped onto program output.
 const SOURCE_FRESH_FRAME_MAX_AGE_MS: u64 = 1_500;
 
+#[derive(Debug, Clone, Copy)]
+struct SourceReadinessDeadlines {
+    camera: Option<Instant>,
+    screen: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct SourceReadinessGuard {
+    source_label: &'static str,
+    deadline: Instant,
+    target_sources: SourceSelection,
+}
+
+impl SourceReadinessDeadlines {
+    fn starting_now(needs: SceneSourceNeeds) -> Self {
+        let now = Instant::now();
+        Self {
+            camera: needs
+                .camera
+                .then(|| now + warm_source_start_timeout("camera")),
+            screen: needs
+                .screen
+                .then(|| now + warm_source_start_timeout("screen")),
+        }
+    }
+}
+
 fn warm_source_start_timeout(source_label: &str) -> Duration {
     match source_label {
         "screen" => WARM_SCREEN_START_TIMEOUT,
@@ -447,13 +474,14 @@ async fn apply_scene_transaction(
         }
         ApplyMode::Warm => {
             let missing = missing_sources(needs, live);
-            let deadline =
-                start_missing_sources(state, intent_id, &params, &missing, action_label).await?;
+            let deadlines =
+                start_missing_sources(state, intent_id, &params, needs, &missing, action_label)
+                    .await?;
             ensure_layout_intent_current(state, intent_id).await?;
             wait_for_sources_ready(
                 state,
                 intent_id,
-                deadline,
+                deadlines,
                 needs,
                 target_sources,
                 action_label,
@@ -538,6 +566,7 @@ async fn await_layout_source_start<T: Send + 'static>(
     timeout: Duration,
     source_label: &'static str,
     restart_ready: Option<oneshot::Receiver<()>>,
+    readiness_guard: Option<SourceReadinessGuard>,
     mut source_task: tokio::task::JoinHandle<T>,
 ) -> Result<(T, Instant)> {
     if let Some(mut restart_ready) = restart_ready {
@@ -556,6 +585,14 @@ async fn await_layout_source_start<T: Send + 'static>(
         }
     }
     let deadline = Instant::now() + timeout;
+    let guarded_source_label = readiness_guard.as_ref().map(|guard| guard.source_label);
+    let guarded_readiness_failure = async {
+        match readiness_guard.as_ref() {
+            Some(guard) => wait_for_guarded_source_readiness_failure(state, guard).await,
+            None => std::future::pending::<String>().await,
+        }
+    };
+    tokio::pin!(guarded_readiness_failure);
     tokio::select! {
         result = &mut source_task => result
             .map(|value| (value, deadline))
@@ -573,7 +610,46 @@ async fn await_layout_source_start<T: Send + 'static>(
                 timeout.as_secs(),
             );
         }
+        failure = &mut guarded_readiness_failure => {
+            source_task.abort();
+            cancel_pending_source_start_for_intent(state, intent_id, source_label).await;
+            if let Some(guarded_source_label) = guarded_source_label
+                && guarded_source_label != source_label
+            {
+                cancel_pending_source_start_for_intent(state, intent_id, guarded_source_label).await;
+            }
+            bail!(failure)
+        }
     }
+}
+
+async fn wait_for_guarded_source_readiness_failure(
+    state: &AppState,
+    guard: &SourceReadinessGuard,
+) -> String {
+    tokio::time::sleep_until(guard.deadline).await;
+    let readiness = source_readiness(state, &guard.target_sources).await;
+    let needs = match guard.source_label {
+        "camera" => SceneSourceNeeds {
+            camera: true,
+            screen: false,
+        },
+        "screen" => SceneSourceNeeds {
+            camera: false,
+            screen: true,
+        },
+        _ => SceneSourceNeeds::default(),
+    };
+    if missing_sources(needs, readiness.live).is_empty() {
+        return std::future::pending::<String>().await;
+    }
+    let detail =
+        missing_readiness_messages(needs, &readiness, Some(&guard.target_sources)).join("; ");
+    format!(
+        "Live source device switch blocked after {} ({}s) exceeded its source-start/readiness budget: {detail}. The previous layout is still live.",
+        guard.source_label,
+        warm_source_start_timeout(guard.source_label).as_secs()
+    )
 }
 
 async fn source_start_failure_detail(state: &AppState, source_label: &str) -> String {
@@ -719,16 +795,12 @@ async fn start_missing_sources(
     state: &AppState,
     intent_id: u64,
     params: &SceneConfigParams,
+    needs: SceneSourceNeeds,
     missing: &[&'static str],
     action_label: &'static str,
-) -> Result<Instant> {
+) -> Result<SourceReadinessDeadlines> {
     let ffmpeg_path = active_recording_ffmpeg_path(state).await;
-    let mut readiness_deadline = Instant::now()
-        + missing
-            .iter()
-            .map(|source| warm_source_start_timeout(source))
-            .max()
-            .unwrap_or(WARM_CAMERA_START_TIMEOUT);
+    let mut readiness_deadlines = SourceReadinessDeadlines::starting_now(needs);
     for source in missing {
         ensure_layout_intent_current(state, intent_id).await?;
         match *source {
@@ -754,10 +826,17 @@ async fn start_missing_sources(
                     warm_source_start_timeout("camera"),
                     "camera",
                     None,
+                    missing.contains(&"screen").then(|| SourceReadinessGuard {
+                        source_label: "screen",
+                        deadline: readiness_deadlines
+                            .screen
+                            .expect("needed screen source must have a readiness deadline"),
+                        target_sources: params.sources.clone(),
+                    }),
                     start,
                 )
                 .await?;
-                readiness_deadline = readiness_deadline.max(deadline);
+                readiness_deadlines.camera = Some(deadline);
                 if matches!(
                     status.state,
                     PreviewCameraState::Failed
@@ -795,10 +874,11 @@ async fn start_missing_sources(
                     warm_source_start_timeout("screen"),
                     "screen",
                     Some(restart_ready_rx),
+                    None,
                     start,
                 )
                 .await?;
-                readiness_deadline = readiness_deadline.max(deadline);
+                readiness_deadlines.screen = Some(deadline);
                 if matches!(
                     status.state,
                     PreviewScreenState::Failed
@@ -815,7 +895,7 @@ async fn start_missing_sources(
             other => bail!("Unknown source kind {other} for live layout switch."),
         }
     }
-    Ok(readiness_deadline)
+    Ok(readiness_deadlines)
 }
 
 async fn active_recording_ffmpeg_path(state: &AppState) -> Option<String> {
@@ -830,7 +910,7 @@ async fn active_recording_ffmpeg_path(state: &AppState) -> Option<String> {
 async fn wait_for_sources_ready(
     state: &AppState,
     intent_id: u64,
-    deadline: Instant,
+    deadlines: SourceReadinessDeadlines,
     needs: SceneSourceNeeds,
     target_sources: &SourceSelection,
     action_label: &'static str,
@@ -841,7 +921,27 @@ async fn wait_for_sources_ready(
         if missing_sources(needs, readiness.live).is_empty() {
             return Ok(());
         }
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        if needs.camera
+            && !readiness.live.camera
+            && deadlines.camera.is_some_and(|deadline| now >= deadline)
+        {
+            expired.push(format!(
+                "camera ({}s)",
+                warm_source_start_timeout("camera").as_secs()
+            ));
+        }
+        if needs.screen
+            && !readiness.live.screen
+            && deadlines.screen.is_some_and(|deadline| now >= deadline)
+        {
+            expired.push(format!(
+                "screen ({}s)",
+                warm_source_start_timeout("screen").as_secs()
+            ));
+        }
+        if !expired.is_empty() {
             let still_missing =
                 missing_readiness_messages(needs, &readiness, Some(target_sources)).join("; ");
             if needs.camera && !readiness.live.camera {
@@ -851,8 +951,8 @@ async fn wait_for_sources_ready(
                 cancel_pending_source_start_for_intent(state, intent_id, "screen").await;
             }
             bail!(
-                "Live {action_label} blocked: {still_missing} within {}s total source-start/readiness time. The previous layout is still live.",
-                warm_source_start_timeout(if needs.screen { "screen" } else { "camera" }).as_secs()
+                "Live {action_label} blocked after {} exceeded its source-start/readiness budget: {still_missing}. The previous layout is still live.",
+                expired.join(" + ")
             );
         }
         sleep(WARM_SOURCE_POLL).await;
@@ -1747,6 +1847,7 @@ mod tests {
                 Duration::from_secs(5),
                 "screen",
                 None,
+                None,
                 source_task,
             )
             .await
@@ -1817,6 +1918,7 @@ mod tests {
                 Duration::from_secs(5),
                 "screen",
                 None,
+                None,
                 source_task,
             )
             .await
@@ -1878,6 +1980,7 @@ mod tests {
                 Duration::from_millis(50),
                 "screen",
                 None,
+                None,
                 source_task,
             ),
         )
@@ -1923,6 +2026,7 @@ mod tests {
             warm_source_start_timeout("screen"),
             "screen",
             None,
+            None,
             source_task,
         )
         .await;
@@ -1962,6 +2066,7 @@ mod tests {
             warm_source_start_timeout("screen"),
             "screen",
             Some(restart_ready_rx),
+            None,
             source_task,
         )
         .await;
@@ -2001,6 +2106,7 @@ mod tests {
             intent_id,
             Duration::from_millis(1),
             "screen",
+            None,
             None,
             source_task,
         )
@@ -2045,7 +2151,10 @@ mod tests {
         let error = wait_for_sources_ready(
             &state,
             intent_id,
-            Instant::now(),
+            SourceReadinessDeadlines {
+                camera: None,
+                screen: Some(Instant::now()),
+            },
             SceneSourceNeeds {
                 camera: false,
                 screen: true,
@@ -2061,6 +2170,44 @@ mod tests {
                 .to_string()
                 .contains("ScreenCaptureKit stream failed to start: display was disconnected")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn screen_readiness_budget_is_not_extended_by_a_later_camera_deadline() {
+        let state = test_state();
+        let target = sources(true, true);
+        let needs = SceneSourceNeeds {
+            camera: true,
+            screen: true,
+        };
+        let intent_id = begin_layout_intent(&state, Some(25), needs)
+            .await
+            .expect("dual-source intent should register");
+        let started = Instant::now();
+        let camera_start = tokio::spawn(async {
+            sleep(Duration::from_secs(20)).await;
+            42_u64
+        });
+
+        let error = await_layout_source_start(
+            &state,
+            intent_id,
+            Duration::from_secs(20),
+            "camera",
+            None,
+            Some(SourceReadinessGuard {
+                source_label: "screen",
+                deadline: started + WARM_SCREEN_START_TIMEOUT,
+                target_sources: target,
+            }),
+            camera_start,
+        )
+        .await
+        .expect_err("the screen must fail at its own deadline");
+
+        assert_eq!(Instant::now() - started, WARM_SCREEN_START_TIMEOUT);
+        assert!(error.to_string().contains("screen (15s)"));
+        assert!(!error.to_string().contains("camera (5s)"));
     }
 
     #[test]
