@@ -117,7 +117,14 @@ async function signedGet({ config, descriptor }) {
     method: 'GET',
     objectKey: descriptor.objectKey
   })
-  return fetch(signed.url, { headers: signed.headers, method: 'GET', redirect: 'error' })
+  // identity, or Cloudflare gzips text/plain objects and strips
+  // content-length, which fails the size checks and hands us decompressed
+  // bytes whose length cannot match any transported content-length anyway.
+  return fetch(signed.url, {
+    headers: { ...signed.headers, 'accept-encoding': 'identity' },
+    method: 'GET',
+    redirect: 'error'
+  })
 }
 
 function assertDownloadedSha({ bytes, descriptor, expectedSha256 }) {

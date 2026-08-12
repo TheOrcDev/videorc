@@ -91,7 +91,15 @@ async function putArtifact({ artifact, config }) {
 
 function signedFetch({ config, method, objectKey }) {
   const signed = buildSignedS3Request({ config, method, objectKey })
-  return fetch(signed.url, { headers: signed.headers, method, redirect: 'error' })
+  // identity, or Cloudflare gzips text/plain responses on the fly and STRIPS
+  // content-length — which made the post-upload verify read size 0 for the
+  // .sha256 sidecar it had just written and report a false immutability
+  // collision. Unsigned header, so it does not enter the SigV4 signature.
+  return fetch(signed.url, {
+    headers: { ...signed.headers, 'accept-encoding': 'identity' },
+    method,
+    redirect: 'error'
+  })
 }
 
 main().catch((error) => {

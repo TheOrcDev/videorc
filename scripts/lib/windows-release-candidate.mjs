@@ -105,12 +105,20 @@ export function classifyCandidateObjectHead({ artifact, response }) {
       `Candidate storage HEAD failed for ${artifact.objectKey}: HTTP ${response.status}.`
     )
   }
-  const remoteSize = Number(response.headers.get('content-length'))
+  // The SHA-256 metadata is the authoritative identity check. Content-length
+  // is corroboration only: callers request identity encoding, but if an edge
+  // ever compresses the response anyway the header disappears — treating that
+  // as size 0 is how a run once reported a collision against its own
+  // just-written sidecar. Compare size only when the header is present.
+  const contentLength = response.headers.get('content-length')
   const remoteSha256 = response.headers.get('x-amz-meta-sha256')?.trim().toLowerCase()
-  if (remoteSize !== artifact.sizeBytes || remoteSha256 !== artifact.sha256) {
+  const sizeMismatch = contentLength !== null && Number(contentLength) !== artifact.sizeBytes
+  if (sizeMismatch || remoteSha256 !== artifact.sha256) {
     throw new WindowsReleaseCandidateError(
       'candidate-storage-collision',
-      `Immutable candidate object already exists with different bytes: ${artifact.objectKey}.`
+      `Immutable candidate object already exists with different bytes: ${artifact.objectKey} ` +
+        `(remote sha256=${remoteSha256 ?? 'missing'}, size=${contentLength ?? 'missing'}; ` +
+        `expected sha256=${artifact.sha256}, size=${artifact.sizeBytes}).`
     )
   }
   return 'identical'
