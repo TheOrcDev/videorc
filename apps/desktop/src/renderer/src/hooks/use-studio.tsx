@@ -5918,9 +5918,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           background: activeSceneBackground,
           protectedOverlayWindowIds
         })
-        await rememberLiveLayoutCommit(status)
+        let proofError: unknown = null
+        try {
+          await rememberLiveLayoutCommit(status)
+        } catch (error) {
+          proofError = error
+        }
         applyScene(status.scene)
         setCaptureConfig((current) => ({ ...current, sources }))
+        if (proofError) {
+          const detail = proofError instanceof Error ? proofError.message : String(proofError)
+          console.warn(
+            `Source switch committed at revision ${status.sceneRevision}; output proof was not observed. ${detail}`
+          )
+          toast.warning('Switch committed — output catching up.', {
+            id: 'live-source-switch-output-catching-up',
+            description:
+              'The source selection was applied. Videorc will reconcile the output status as it catches up.'
+          })
+        }
         // Success is visible in the preview itself — no confirmation popup
         // for a routine source switch (errors still report below).
       } catch (error) {

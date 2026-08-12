@@ -24,6 +24,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep};
 
 use crate::compositor::update_compositor_scene;
@@ -35,7 +36,7 @@ use crate::preview_camera::{
 use crate::preview_screen::{PreviewScreenFrameInfo, preview_screen_latest_frame_info};
 use crate::preview_screen::{
     begin_preview_screen_stop, finish_preview_screen_stop, preview_screen_status,
-    start_preview_screen,
+    start_preview_screen_for_live_switch,
 };
 use crate::protocol::default_layout_settings;
 use crate::protocol::{
@@ -51,13 +52,21 @@ use crate::screen_capture::{
 };
 use crate::state::AppState;
 
-const WARM_SOURCE_START_TIMEOUT: Duration = Duration::from_secs(5);
+const WARM_CAMERA_START_TIMEOUT: Duration = Duration::from_secs(5);
+const WARM_SCREEN_START_TIMEOUT: Duration = Duration::from_secs(15);
 const WARM_SOURCE_POLL: Duration = Duration::from_millis(100);
 const LAYOUT_INTENT_CANCEL_POLL: Duration = Duration::from_millis(25);
 const UNUSED_CAMERA_STOP_GRACE: Duration = Duration::from_secs(1);
 /// A source counts as live only when its newest frame is at most this old — a stalled
 /// capturer must not be swapped onto program output.
 const SOURCE_FRESH_FRAME_MAX_AGE_MS: u64 = 1_500;
+
+fn warm_source_start_timeout(source_label: &str) -> Duration {
+    match source_label {
+        "screen" => WARM_SCREEN_START_TIMEOUT,
+        _ => WARM_CAMERA_START_TIMEOUT,
+    }
+}
 
 fn fallback_video_settings() -> crate::protocol::VideoSettings {
     crate::protocol::VideoSettings {
@@ -438,9 +447,8 @@ async fn apply_scene_transaction(
         }
         ApplyMode::Warm => {
             let missing = missing_sources(needs, live);
-            let deadline = Instant::now() + WARM_SOURCE_START_TIMEOUT;
-            start_missing_sources(state, intent_id, deadline, &params, &missing, action_label)
-                .await?;
+            let deadline =
+                start_missing_sources(state, intent_id, &params, &missing, action_label).await?;
             ensure_layout_intent_current(state, intent_id).await?;
             wait_for_sources_ready(
                 state,
@@ -527,53 +535,98 @@ async fn wait_for_layout_intent_superseded(state: &AppState, intent_id: u64) -> 
 async fn await_layout_source_start<T: Send + 'static>(
     state: &AppState,
     intent_id: u64,
-    deadline: Instant,
+    timeout: Duration,
     source_label: &'static str,
+    restart_ready: Option<oneshot::Receiver<()>>,
     mut source_task: tokio::task::JoinHandle<T>,
-) -> Result<T> {
+) -> Result<(T, Instant)> {
+    if let Some(mut restart_ready) = restart_ready {
+        tokio::select! {
+            result = &mut source_task => {
+                let deadline = Instant::now() + timeout;
+                return result
+                    .map(|value| (value, deadline))
+                    .map_err(|error| anyhow::anyhow!("{source_label} source startup task failed: {error}"));
+            },
+            _ = wait_for_layout_intent_superseded(state, intent_id) => {
+                let latest = reconcile_superseded_source_start(state, source_label, &mut source_task).await;
+                bail!("Layout intent {intent_id} was superseded by newer intent {latest}.")
+            },
+            _ = &mut restart_ready => {}
+        }
+    }
+    let deadline = Instant::now() + timeout;
     tokio::select! {
-        result = &mut source_task => result.map_err(|error| {
-            anyhow::anyhow!("{source_label} source startup task failed: {error}")
-        }),
+        result = &mut source_task => result
+            .map(|value| (value, deadline))
+            .map_err(|error| anyhow::anyhow!("{source_label} source startup task failed: {error}")),
         _ = wait_for_layout_intent_superseded(state, intent_id) => {
-            let intents = state.layout_intents.lock().await;
-            let latest = intents.latest_intent_id;
-            let latest_needs_source = match source_label {
-                "camera" => intents.latest_needs_camera,
-                "screen" => intents.latest_needs_screen,
-                _ => false,
-            };
-            if !latest_needs_source {
-                // Do not detach a startup that can register after the winner's
-                // retirement edge has already run. Abort it while intent
-                // registration is blocked, then invalidate any lease it created
-                // before observing cancellation. A winner that still needs this
-                // source keeps the detached task and can join its lease instead.
-                source_task.abort();
-                let _ = (&mut source_task).await;
-                match source_label {
-                    "camera" if preview_camera_status(state).await.state == PreviewCameraState::Starting => {
-                        let stop = begin_preview_camera_stop(state).await;
-                        let _ = finish_preview_camera_stop(stop).await;
-                    }
-                    "screen" if preview_screen_status(state).await.state == PreviewScreenState::Starting => {
-                        let stop = begin_preview_screen_stop(state).await;
-                        let _ = finish_preview_screen_stop(stop).await;
-                    }
-                    _ => {}
-                }
-            }
+            let latest = reconcile_superseded_source_start(state, source_label, &mut source_task).await;
             bail!("Layout intent {intent_id} was superseded by newer intent {latest}.")
         }
         _ = tokio::time::sleep_until(deadline) => {
+            let failure_detail = source_start_failure_detail(state, source_label).await;
             source_task.abort();
             cancel_pending_source_start_for_intent(state, intent_id, source_label).await;
             bail!(
-                "Layout intent {intent_id} timed out while starting {source_label} within {}s.",
-                WARM_SOURCE_START_TIMEOUT.as_secs()
+                "Layout intent {intent_id} timed out while starting {source_label} within {}s.{failure_detail}",
+                timeout.as_secs(),
             );
         }
     }
+}
+
+async fn source_start_failure_detail(state: &AppState, source_label: &str) -> String {
+    if source_label != "screen" {
+        return String::new();
+    }
+    let status = preview_screen_status(state).await;
+    if status.state != PreviewScreenState::Failed {
+        return String::new();
+    }
+    status
+        .message
+        .as_deref()
+        .map(|message| format!(" Screen error: {message}"))
+        .unwrap_or_default()
+}
+
+async fn reconcile_superseded_source_start<T: Send + 'static>(
+    state: &AppState,
+    source_label: &'static str,
+    source_task: &mut tokio::task::JoinHandle<T>,
+) -> u64 {
+    let intents = state.layout_intents.lock().await;
+    let latest = intents.latest_intent_id;
+    let latest_needs_source = match source_label {
+        "camera" => intents.latest_needs_camera,
+        "screen" => intents.latest_needs_screen,
+        _ => false,
+    };
+    if !latest_needs_source {
+        // Do not detach a startup that can register after the winner's retirement
+        // edge has already run. Abort it while intent registration is blocked, then
+        // invalidate any lease it created before observing cancellation. A winner
+        // that still needs this source keeps the detached task and can join its lease.
+        source_task.abort();
+        let _ = source_task.await;
+        match source_label {
+            "camera"
+                if preview_camera_status(state).await.state == PreviewCameraState::Starting =>
+            {
+                let stop = begin_preview_camera_stop(state).await;
+                let _ = finish_preview_camera_stop(stop).await;
+            }
+            "screen"
+                if preview_screen_status(state).await.state == PreviewScreenState::Starting =>
+            {
+                let stop = begin_preview_screen_stop(state).await;
+                let _ = finish_preview_screen_stop(stop).await;
+            }
+            _ => {}
+        }
+    }
+    latest
 }
 
 async fn cancel_pending_source_start_for_intent(
@@ -665,12 +718,17 @@ fn layout_apply_status(
 async fn start_missing_sources(
     state: &AppState,
     intent_id: u64,
-    deadline: Instant,
     params: &SceneConfigParams,
     missing: &[&'static str],
     action_label: &'static str,
-) -> Result<()> {
+) -> Result<Instant> {
     let ffmpeg_path = active_recording_ffmpeg_path(state).await;
+    let mut readiness_deadline = Instant::now()
+        + missing
+            .iter()
+            .map(|source| warm_source_start_timeout(source))
+            .max()
+            .unwrap_or(WARM_CAMERA_START_TIMEOUT);
     for source in missing {
         ensure_layout_intent_current(state, intent_id).await?;
         match *source {
@@ -690,8 +748,16 @@ async fn start_missing_sources(
                         ffmpeg_path: ffmpeg_path.clone(),
                     },
                 ));
-                let status =
-                    await_layout_source_start(state, intent_id, deadline, "camera", start).await?;
+                let (status, deadline) = await_layout_source_start(
+                    state,
+                    intent_id,
+                    warm_source_start_timeout("camera"),
+                    "camera",
+                    None,
+                    start,
+                )
+                .await?;
+                readiness_deadline = readiness_deadline.max(deadline);
                 if matches!(
                     status.state,
                     PreviewCameraState::Failed
@@ -712,7 +778,8 @@ async fn start_missing_sources(
                 {
                     continue;
                 }
-                let start = tokio::spawn(start_preview_screen(
+                let (restart_ready_tx, restart_ready_rx) = oneshot::channel();
+                let start = tokio::spawn(start_preview_screen_for_live_switch(
                     state.clone(),
                     PreviewScreenStartParams {
                         sources: params.sources.clone(),
@@ -720,9 +787,18 @@ async fn start_missing_sources(
                         protected_overlay_window_ids: params.protected_overlay_window_ids.clone(),
                         ffmpeg_path: ffmpeg_path.clone(),
                     },
+                    restart_ready_tx,
                 ));
-                let status =
-                    await_layout_source_start(state, intent_id, deadline, "screen", start).await?;
+                let (status, deadline) = await_layout_source_start(
+                    state,
+                    intent_id,
+                    warm_source_start_timeout("screen"),
+                    "screen",
+                    Some(restart_ready_rx),
+                    start,
+                )
+                .await?;
+                readiness_deadline = readiness_deadline.max(deadline);
                 if matches!(
                     status.state,
                     PreviewScreenState::Failed
@@ -739,7 +815,7 @@ async fn start_missing_sources(
             other => bail!("Unknown source kind {other} for live layout switch."),
         }
     }
-    Ok(())
+    Ok(readiness_deadline)
 }
 
 async fn active_recording_ffmpeg_path(state: &AppState) -> Option<String> {
@@ -776,7 +852,7 @@ async fn wait_for_sources_ready(
             }
             bail!(
                 "Live {action_label} blocked: {still_missing} within {}s total source-start/readiness time. The previous layout is still live.",
-                WARM_SOURCE_START_TIMEOUT.as_secs()
+                warm_source_start_timeout(if needs.screen { "screen" } else { "camera" }).as_secs()
             );
         }
         sleep(WARM_SOURCE_POLL).await;
@@ -882,8 +958,17 @@ fn screen_readiness_detail(
         .screen_frame
         .map(|frame| frame.frame_age_ms)
         .or(status.frame_age_ms);
+    let failure = if status.state == PreviewScreenState::Failed {
+        status
+            .message
+            .as_deref()
+            .map(|message| format!(", error: {message}"))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     format!(
-        "state: {}, target: {}, current: {}, frames captured: {}, latest sequence: {}, latest frame age: {}",
+        "state: {}, target: {}, current: {}, frames captured: {}, latest sequence: {}, latest frame age: {}{}",
         screen_state_label(&status.state),
         target_sources
             .and_then(selected_screen_source_id)
@@ -896,7 +981,8 @@ fn screen_readiness_detail(
                 .map(|frame| frame.sequence)
                 .or(status.sequence)
         ),
-        format_age_ms(frame_age_ms)
+        format_age_ms(frame_age_ms),
+        failure
     )
 }
 
@@ -1658,8 +1744,9 @@ mod tests {
             await_layout_source_start(
                 &waiter_state,
                 stale_intent,
-                Instant::now() + Duration::from_secs(5),
+                Duration::from_secs(5),
                 "screen",
+                None,
                 source_task,
             )
             .await
@@ -1727,8 +1814,9 @@ mod tests {
             await_layout_source_start(
                 &waiter_state,
                 stale_intent,
-                Instant::now() + Duration::from_secs(5),
+                Duration::from_secs(5),
                 "screen",
+                None,
                 source_task,
             )
             .await
@@ -1787,8 +1875,9 @@ mod tests {
             await_layout_source_start(
                 &state,
                 intent_id,
-                Instant::now() + Duration::from_millis(50),
+                Duration::from_millis(50),
                 "screen",
+                None,
                 source_task,
             ),
         )
@@ -1801,6 +1890,176 @@ mod tests {
             preview_screen_status(&state).await.state,
             PreviewScreenState::Starting,
             "timeout must invalidate the pending lease so it cannot install later"
+        );
+    }
+
+    #[test]
+    fn live_source_start_budgets_are_source_specific() {
+        assert_eq!(warm_source_start_timeout("camera"), Duration::from_secs(5));
+        assert_eq!(warm_source_start_timeout("screen"), Duration::from_secs(15));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn screen_source_start_budget_accepts_an_eight_second_start() {
+        let state = test_state();
+        let intent_id = begin_layout_intent(
+            &state,
+            Some(21),
+            SceneSourceNeeds {
+                camera: false,
+                screen: true,
+            },
+        )
+        .await
+        .expect("screen intent should register");
+        let source_task = tokio::spawn(async {
+            sleep(Duration::from_secs(8)).await;
+            42_u64
+        });
+
+        let result = await_layout_source_start(
+            &state,
+            intent_id,
+            warm_source_start_timeout("screen"),
+            "screen",
+            None,
+            source_task,
+        )
+        .await;
+
+        assert_eq!(
+            result
+                .expect("an eight-second screen start should fit its budget")
+                .0,
+            42
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn screen_source_start_budget_begins_after_old_stream_teardown() {
+        let state = test_state();
+        let intent_id = begin_layout_intent(
+            &state,
+            Some(22),
+            SceneSourceNeeds {
+                camera: false,
+                screen: true,
+            },
+        )
+        .await
+        .expect("screen intent should register");
+        let (restart_ready_tx, restart_ready_rx) = oneshot::channel();
+        let source_task = tokio::spawn(async move {
+            sleep(Duration::from_secs(8)).await;
+            let _ = restart_ready_tx.send(());
+            sleep(Duration::from_secs(8)).await;
+            42_u64
+        });
+
+        let result = await_layout_source_start(
+            &state,
+            intent_id,
+            warm_source_start_timeout("screen"),
+            "screen",
+            Some(restart_ready_rx),
+            source_task,
+        )
+        .await;
+
+        assert_eq!(
+            result
+                .expect("teardown time must not consume the screen startup budget")
+                .0,
+            42
+        );
+    }
+
+    #[tokio::test]
+    async fn screen_source_start_timeout_surfaces_the_native_start_error() {
+        let state = test_state();
+        let intent_id = begin_layout_intent(
+            &state,
+            Some(23),
+            SceneSourceNeeds {
+                camera: false,
+                screen: true,
+            },
+        )
+        .await
+        .expect("screen intent should register");
+        {
+            let mut screen = state.preview_screen.lock().await;
+            screen.status.state = PreviewScreenState::Failed;
+            screen.status.message = Some(
+                "ScreenCaptureKit stream failed to start: display was disconnected".to_string(),
+            );
+        }
+        let source_task = tokio::spawn(async { std::future::pending::<u64>().await });
+
+        let error = await_layout_source_start(
+            &state,
+            intent_id,
+            Duration::from_millis(1),
+            "screen",
+            None,
+            source_task,
+        )
+        .await
+        .expect_err("pending native startup must time out");
+
+        assert!(
+            error
+                .to_string()
+                .contains("ScreenCaptureKit stream failed to start: display was disconnected")
+        );
+    }
+
+    #[tokio::test]
+    async fn screen_readiness_timeout_surfaces_the_native_start_error() {
+        let state = test_state();
+        let target = sources(false, true);
+        let intent_id = begin_layout_intent(
+            &state,
+            Some(24),
+            SceneSourceNeeds {
+                camera: false,
+                screen: true,
+            },
+        )
+        .await
+        .expect("screen intent should register");
+        {
+            let mut screen = state.preview_screen.lock().await;
+            screen.status = live_screen_status(
+                target.screen_id.as_deref().expect("selected screen"),
+                None,
+                0,
+                None,
+            );
+            screen.status.state = PreviewScreenState::Failed;
+            screen.status.message = Some(
+                "ScreenCaptureKit stream failed to start: display was disconnected".to_string(),
+            );
+        }
+
+        let error = wait_for_sources_ready(
+            &state,
+            intent_id,
+            Instant::now(),
+            SceneSourceNeeds {
+                camera: false,
+                screen: true,
+            },
+            &target,
+            "source device switch",
+        )
+        .await
+        .expect_err("a failed screen start must block the switch");
+
+        assert!(
+            error
+                .to_string()
+                .contains("ScreenCaptureKit stream failed to start: display was disconnected")
         );
     }
 
