@@ -71,6 +71,12 @@ jobs:
         # ffmpeg binary and no capture devices.
         run: cargo test -p videorc-backend
 
+      - name: Build backend for process/memory sentinel
+        # The sentinel launches the dev app through `cargo run`. Build the
+        # exact binary first so its 120-second readiness budget measures app
+        # startup rather than a cold Rust binary link on the macOS runner.
+        run: cargo build -p videorc-backend --bin videorc-backend
+
       - name: Install dependencies for process/memory sentinel
         run: pnpm install --frozen-lockfile
 
