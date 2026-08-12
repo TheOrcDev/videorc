@@ -350,3 +350,41 @@ describe('Windows candidate storage transport guardrails', () => {
     })
   })
 })
+
+describe('classifyCandidateObjectHead under response compression', () => {
+  const artifact = {
+    objectKey: 'candidates/windows/x/y/Videorc.exe.sha256',
+    sha256: 'a'.repeat(64),
+    sizeBytes: 93
+  }
+  // Adapt a plain object to the Headers#get contract (null on miss).
+  const asHeaders = (entries) => ({ get: (name) => entries[name] ?? null })
+
+  it('treats a matching hash with a stripped content-length as identical', () => {
+    // Cloudflare gzips text/plain and removes content-length; the hash still
+    // proves identity. This exact shape failed attempt nine.
+    const response = { ok: true, status: 200, headers: asHeaders({ 'x-amz-meta-sha256': artifact.sha256 }) }
+    assert.equal(classifyCandidateObjectHead({ artifact, response }), 'identical')
+  })
+
+  it('still refuses a hash mismatch even without content-length', () => {
+    const response = { ok: true, status: 200, headers: asHeaders({ 'x-amz-meta-sha256': 'b'.repeat(64) }) }
+    assert.throws(
+      () => classifyCandidateObjectHead({ artifact, response }),
+      /already exists with different bytes/
+    )
+  })
+
+  it('still refuses a size mismatch when content-length is present', () => {
+    const response = {
+      ok: true,
+      status: 200,
+      headers: asHeaders({ 'x-amz-meta-sha256': artifact.sha256, 'content-length': '17' })
+    }
+    assert.throws(
+      () => classifyCandidateObjectHead({ artifact, response }),
+      /already exists with different bytes/
+    )
+  })
+
+})
