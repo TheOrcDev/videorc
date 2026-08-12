@@ -29,6 +29,14 @@ export function layoutTransactionProofDisposition(input: {
   return input.proofSucceeded ? 'apply-proven' : 'apply-unproven'
 }
 
+// Idle scene commits are authoritative immediately. Only wait for the compositor
+// presentation proof when the detached preview can actually receive a frame;
+// with no preview window open, the compositor intentionally has no presentation
+// consumer and a proof would be impossible.
+export function idlePreviewLayoutProofRequired(input: { surfaceCanPresent: boolean }): boolean {
+  return input.surfaceCanPresent
+}
+
 // Instant background apply while live: commit only when a session is active,
 // only after the session's own start armed the watcher (start params already
 // carry the background), and only when the resolved background VALUE changed —

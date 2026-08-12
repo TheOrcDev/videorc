@@ -181,6 +181,28 @@ describe('validateSupportBundle', () => {
     assert.match(result.failures.join('\n'), /sessions\.0\.outputFile/)
   })
 
+  it('rejects an unredacted Windows quality-status path', () => {
+    const session = validBundle().sessions[0]
+    const bundle = validBundle({
+      sessions: [
+        {
+          ...session,
+          qualityStatus: {
+            status: 'not-hundred-percent',
+            path: 'C:\\Users\\orcdev\\Videos\\Videorc\\Recordings\\session.mp4',
+            reasons: ['missing audio stream'],
+            needsAttention: true
+          }
+        }
+      ]
+    })
+
+    const result = validateSupportBundle(bundle)
+
+    assert.equal(result.ok, false)
+    assert.match(result.failures.join('\n'), /sessions\.0\.qualityStatus\.path/)
+  })
+
   it('rejects raw RTMP URLs and URL credentials', () => {
     const bundle = validBundle({
       recording: {

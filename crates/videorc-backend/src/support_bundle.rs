@@ -342,7 +342,9 @@ fn redact_sessions(
                 stream_preset: session.stream_preset,
                 container: session.container,
                 duration_ms: session.duration_ms,
-                quality_status: session.quality_status,
+                quality_status: session
+                    .quality_status
+                    .map(|status| redact_quality_status(status, &mut summary)),
                 final_diagnostics: session.final_diagnostics,
                 health_events: session
                     .health_events
@@ -359,6 +361,39 @@ fn redact_sessions(
         })
         .collect();
     (sessions, summary)
+}
+
+fn redact_quality_status(
+    status: GateStatus,
+    summary: &mut SupportBundleRedactionSummary,
+) -> GateStatus {
+    let mut redact_path = |path: String| {
+        summary.media_paths += 1;
+        redact_to_basename(&path)
+    };
+
+    match status {
+        GateStatus::Ready { path } => GateStatus::Ready {
+            path: redact_path(path),
+        },
+        GateStatus::Repaired { path, interpolated } => GateStatus::Repaired {
+            path: redact_path(path),
+            interpolated,
+        },
+        GateStatus::NotHundredPercent {
+            path,
+            reasons,
+            needs_attention,
+        } => GateStatus::NotHundredPercent {
+            path: redact_path(path),
+            reasons,
+            needs_attention,
+        },
+        GateStatus::Failed { path, reason } => GateStatus::Failed {
+            path: redact_path(path),
+            reason,
+        },
+    }
 }
 
 fn redact_health_event(
@@ -610,7 +645,11 @@ mod tests {
             stream_preset: None,
             container: Some("mp4".to_string()),
             duration_ms: Some(1000),
-            quality_status: None,
+            quality_status: Some(GateStatus::NotHundredPercent {
+                path: r"C:\Users\orcdev\Videos\Videorc\Recordings\final.mp4".to_string(),
+                reasons: vec!["missing audio stream".to_string()],
+                needs_attention: true,
+            }),
             final_diagnostics: None,
             layout: crate::protocol::default_layout_settings(),
             sources: crate::protocol::SourceSelection {
@@ -653,10 +692,21 @@ mod tests {
             sessions[0].ai_artifacts[0].file.as_deref(),
             Some("<redacted:path:transcript.json>")
         );
+        assert_eq!(
+            sessions[0]
+                .quality_status
+                .as_ref()
+                .and_then(|status| match status {
+                    GateStatus::NotHundredPercent { path, .. } => Some(path.as_str()),
+                    _ => None,
+                }),
+            Some("<redacted:path:final.mp4>")
+        );
         let json = serde_json::to_string(&sessions).unwrap();
         assert!(!json.contains("private transcript body"));
+        assert!(!json.contains(r"C:\Users\orcdev"));
         assert_eq!(summary.ai_artifact_bodies, 1);
-        assert_eq!(summary.media_paths, 3);
+        assert_eq!(summary.media_paths, 4);
     }
 
     #[test]
