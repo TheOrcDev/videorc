@@ -104,6 +104,7 @@ import {
 } from '@/lib/single-flight-generation'
 import {
   latestLayoutTransactionCommit,
+  idlePreviewLayoutProofRequired,
   layoutTransactionBackendSnapshotIsStable,
   layoutTransactionFailureReconciliation,
   layoutTransactionProofDisposition,
@@ -5501,21 +5502,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return false
       }
 
-      const compositorStatus = sessionActive
-        ? await waitForLiveLayoutProof(client, status)
-        : await waitForPreviewLayoutProof(client, status)
-      if (layoutIntentIdRef.current !== intentId || status.intentId !== intentId) {
-        return false
-      }
       const previewWindowState = await window.videorc?.getPreviewWindowState?.()
       // While the preview is hidden (dialog overlay, minimized, fullscreen,
-      // scrolled away) the host benign-skips presents, so a presented-revision
-      // proof can never arrive. The compositor proof above already covered the
-      // commit; do not demand a proof the surface is not allowed to produce.
+      // scrolled away) the host benign-skips presents. With no detached preview
+      // open, the idle compositor also intentionally has no presentation
+      // consumer. In either case, do not wait for a proof that cannot arrive.
       const surfaceCanPresent =
         previewWindowState?.open === true &&
         previewWindowState.visible &&
         previewWindowState.dockHiddenReason == null
+      const compositorStatus = sessionActive
+        ? await waitForLiveLayoutProof(client, status)
+        : idlePreviewLayoutProofRequired({ surfaceCanPresent })
+          ? await waitForPreviewLayoutProof(client, status)
+          : status.compositorStatus
+      if (layoutIntentIdRef.current !== intentId || status.intentId !== intentId) {
+        return false
+      }
       if (nativePreviewSurfaceEnabled && surfaceCanPresent) {
         const proofOwner = nativePreviewSceneProofPresentationOwner({
           mainPumpActive: mainPumpActiveRef.current,

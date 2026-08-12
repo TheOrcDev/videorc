@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   latestLayoutTransactionCommit,
+  idlePreviewLayoutProofRequired,
   layoutTransactionBackendSnapshotIsStable,
   layoutTransactionFailureReconciliation,
   layoutTransactionProofDisposition,
@@ -12,6 +13,11 @@ import {
 } from './layout-transaction-policy'
 
 describe('layout transaction policy', () => {
+  it('requires idle preview proof only when a detached preview can present', () => {
+    expect(idlePreviewLayoutProofRequired({ surfaceCanPresent: false })).toBe(false)
+    expect(idlePreviewLayoutProofRequired({ surfaceCanPresent: true })).toBe(true)
+  })
+
   it('reconciles the UI to a current backend commit when presentation proof times out', () => {
     expect(
       layoutTransactionProofDisposition({
