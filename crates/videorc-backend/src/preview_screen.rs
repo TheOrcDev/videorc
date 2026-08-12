@@ -6,6 +6,7 @@ use chrono::Utc;
 use image::ImageEncoder;
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
@@ -345,6 +346,25 @@ pub async fn start_preview_screen(
     state: AppState,
     params: PreviewScreenStartParams,
 ) -> PreviewScreenStatus {
+    start_preview_screen_with_restart_signal(state, params, None).await
+}
+
+/// The live-layout deadline starts only after the old capture thread is fully
+/// retired. Discovery and first-frame readiness get their whole source budget;
+/// the bounded ScreenCaptureKit stop is accounted for separately.
+pub(crate) async fn start_preview_screen_for_live_switch(
+    state: AppState,
+    params: PreviewScreenStartParams,
+    restart_ready: oneshot::Sender<()>,
+) -> PreviewScreenStatus {
+    start_preview_screen_with_restart_signal(state, params, Some(restart_ready)).await
+}
+
+async fn start_preview_screen_with_restart_signal(
+    state: AppState,
+    params: PreviewScreenStartParams,
+    mut restart_ready: Option<oneshot::Sender<()>>,
+) -> PreviewScreenStatus {
     let Some(source) = selected_screen_source(&params) else {
         stop_preview_screen(&state).await;
         let status =
@@ -447,12 +467,14 @@ pub async fn start_preview_screen(
     };
     let start_lease = match begin_screen_start(&state, start_key.clone(), starting).await {
         PreviewScreenStartRegistration::JoinExisting => {
+            signal_screen_restart_ready(&mut restart_ready);
             return wait_for_screen_start(&state, &start_key).await;
         }
         PreviewScreenStartRegistration::Started(lease) => lease,
     };
 
     stop_current_screen_for_restart(&state).await;
+    signal_screen_restart_ready(&mut restart_ready);
 
     let run_id = Uuid::new_v4().to_string();
     let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
@@ -725,6 +747,12 @@ pub async fn start_preview_screen(
                 preview_screen_status(&state).await
             }
         }
+    }
+}
+
+fn signal_screen_restart_ready(restart_ready: &mut Option<oneshot::Sender<()>>) {
+    if let Some(restart_ready) = restart_ready.take() {
+        let _ = restart_ready.send(());
     }
 }
 

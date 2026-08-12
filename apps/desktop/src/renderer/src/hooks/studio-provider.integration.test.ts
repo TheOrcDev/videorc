@@ -515,6 +515,18 @@ class StudioBackend {
           compositorStatus: compositorFor(this.currentScene, this.currentLayout, this.revision)
         }
       }
+      case 'scene.source.device.switch': {
+        this.revision += 1
+        return {
+          applied: true,
+          mode: 'warm',
+          intentId: this.revision,
+          sceneRevision: this.revision,
+          presentationProven: true,
+          scene: this.currentScene,
+          compositorStatus: compositorFor(this.currentScene, this.currentLayout, this.revision)
+        }
+      }
       case 'screens.list':
         return []
       case 'screens.active':
@@ -815,6 +827,65 @@ describe('real StudioProvider lifecycle', () => {
     vi.clearAllMocks()
     vi.useRealTimers()
   })
+
+  it('keeps a committed live source selection when output proof catches up late', async () => {
+    const backend = new StudioBackend()
+    backend.recordingState = 'recording'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.recording.recording.state === 'recording'
+    )
+    vi.clearAllMocks()
+
+    const sources = {
+      ...latest()!.core.captureConfig.sources,
+      screenId: 'screen:screencapturekit:2',
+      windowId: undefined
+    }
+    await act(async () => {
+      await latest()!.core.switchSourceDeviceLive('capture', sources)
+    })
+
+    expect(latest()?.core.captureConfig.sources).toEqual(sources)
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Switch committed — output catching up.',
+      expect.objectContaining({ id: 'live-source-switch-output-catching-up' })
+    )
+  }, 10_000)
 
   it('builds the exact secret-free shared and split output topology shapes', () => {
     const streamVideo = {
