@@ -7,6 +7,12 @@ pub(crate) const WINDOWS_REQUIRE_D3D11_MEDIA_ENV: &str = "VIDEORC_WINDOWS_REQUIR
 // CFR is deadline-paced by the session pump. A blocking AcquireNextFrame
 // would consume essentially the entire 60-fps budget on a static desktop.
 const WINDOWS_D3D11_CAPTURE_POLL_WAIT_MS: u32 = 0;
+// The direct D3D11 capture/compositor/Media Foundation path has production
+// coverage through 1080p. Larger canvases must stay on the legacy bridge until
+// they have equivalent device-level qualification; admitting them here can let
+// a driver-specific hardware encoder failure take down the backend.
+const WINDOWS_D3D11_QUALIFIED_MAX_LONG_SIDE: u32 = 1920;
+const WINDOWS_D3D11_QUALIFIED_MAX_SHORT_SIDE: u32 = 1080;
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_d3d11_terminal_source_error(
@@ -78,6 +84,11 @@ pub(crate) struct WindowsD3d11VideoPlan {
     pub(crate) height: u32,
     pub(crate) fps: u32,
     pub(crate) bitrate_kbps: u32,
+}
+
+fn windows_d3d11_output_fits_qualified_envelope(video: WindowsD3d11VideoPlan) -> bool {
+    video.width.max(video.height) <= WINDOWS_D3D11_QUALIFIED_MAX_LONG_SIDE
+        && video.width.min(video.height) <= WINDOWS_D3D11_QUALIFIED_MAX_SHORT_SIDE
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,6 +268,28 @@ pub(crate) fn select_windows_d3d11_session(
             mode,
             "windows-d3d11-media-screen-dimensions-invalid",
             format!("selected monitor {screen_id} reported {source_width}x{source_height}"),
+        );
+    }
+    if !windows_d3d11_output_fits_qualified_envelope(request.primary) {
+        return fallback_or_required(
+            mode,
+            "windows-d3d11-media-primary-output-unqualified",
+            format!(
+                "the production D3D11/Media Foundation path is qualified through 1920x1080; primary output is {}x{}",
+                request.primary.width, request.primary.height
+            ),
+        );
+    }
+    if let Some(auxiliary) = request.auxiliary
+        && !windows_d3d11_output_fits_qualified_envelope(auxiliary)
+    {
+        return fallback_or_required(
+            mode,
+            "windows-d3d11-media-auxiliary-output-unqualified",
+            format!(
+                "the production D3D11/Media Foundation path is qualified through 1920x1080; auxiliary output is {}x{}",
+                auxiliary.width, auxiliary.height
+            ),
         );
     }
     if !request.primary.width.is_multiple_of(2)
@@ -2173,6 +2206,31 @@ mod tests {
             select_windows_d3d11_session(WindowsD3d11MediaMode::Required, unsupported).unwrap_err();
         assert!(error.contains(WINDOWS_REQUIRE_D3D11_MEDIA_ENV));
         assert!(error.contains("primary-profile-invalid"));
+    }
+
+    #[test]
+    fn windows_d3d11_auto_falls_back_for_unqualified_2k_output() {
+        let mut output_2k = request();
+        output_2k.primary.width = 2560;
+        output_2k.primary.height = 1440;
+        let WindowsD3d11SessionSelection::NaturalFallback(fallback) =
+            select_windows_d3d11_session(WindowsD3d11MediaMode::Automatic, output_2k).unwrap()
+        else {
+            panic!("2K output must use the legacy bridge until D3D11 is qualified for it");
+        };
+        assert_eq!(
+            fallback.code,
+            "windows-d3d11-media-primary-output-unqualified"
+        );
+        assert!(fallback.detail.contains("2560x1440"));
+
+        let mut required_output_2k = request();
+        required_output_2k.primary.width = 2560;
+        required_output_2k.primary.height = 1440;
+        let error =
+            select_windows_d3d11_session(WindowsD3d11MediaMode::Required, required_output_2k)
+                .unwrap_err();
+        assert!(error.contains("primary-output-unqualified"));
     }
 
     #[test]
