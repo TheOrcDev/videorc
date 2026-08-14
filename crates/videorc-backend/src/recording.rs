@@ -1458,6 +1458,11 @@ pub async fn start_session(
         bail!("A capture session is already running");
     }
 
+    // Linux L1 is a compile/test target only. Fail before creating session
+    // state or touching capture devices until the VAAPI + OpenH264 encoder
+    // decision is implemented in a later port phase.
+    ensure_platform_encoder_supported()?;
+
     hydrate_stream_key_secret_refs(&state, &mut params)?;
     normalize_stream_only_output_video(&mut params)?;
     validate_session_entitlements(&params, &entitlements::current_entitlements())?;
@@ -7259,7 +7264,36 @@ enum FfmpegH264Platform {
     Macos,
     WindowsHardware,
     WindowsSoftware,
+    #[cfg(test)]
+    PortableTestOpenH264,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum RuntimePlatform {
+    Macos,
+    Windows,
+    Linux,
     Other,
+}
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[error("H.264 encoding is unsupported on {platform} at Linux port level L1")]
+struct PlatformEncoderUnsupported {
+    platform: &'static str,
+}
+
+fn ffmpeg_h264_platform_for_target(
+    target: RuntimePlatform,
+) -> std::result::Result<FfmpegH264Platform, PlatformEncoderUnsupported> {
+    match target {
+        RuntimePlatform::Macos => Ok(FfmpegH264Platform::Macos),
+        RuntimePlatform::Windows => Ok(FfmpegH264Platform::WindowsSoftware),
+        RuntimePlatform::Linux => Err(PlatformEncoderUnsupported { platform: "Linux" }),
+        RuntimePlatform::Other => Err(PlatformEncoderUnsupported {
+            platform: "this platform",
+        }),
+    }
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -7401,22 +7435,48 @@ struct FfmpegH264Encoder {
     backend: EncodeBackend,
 }
 
-fn current_ffmpeg_h264_platform() -> FfmpegH264Platform {
+fn current_ffmpeg_h264_platform()
+-> std::result::Result<FfmpegH264Platform, PlatformEncoderUnsupported> {
     #[cfg(target_os = "macos")]
     {
-        FfmpegH264Platform::Macos
+        ffmpeg_h264_platform_for_target(RuntimePlatform::Macos)
     }
     #[cfg(target_os = "windows")]
     {
         // Native Media Foundation bridge selection is per-session. The raw
         // developer/fallback path remains truthfully OpenH264 and never reads a
         // process-global hardware verdict from another session.
-        FfmpegH264Platform::WindowsSoftware
+        ffmpeg_h264_platform_for_target(RuntimePlatform::Windows)
     }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    #[cfg(all(test, not(target_os = "macos"), not(target_os = "windows")))]
     {
-        FfmpegH264Platform::Other
+        // Cross-platform unit tests still exercise the complete argument
+        // topology without claiming a production Linux encoder. The runtime
+        // selector itself is covered separately and remains unsupported.
+        Ok(FfmpegH264Platform::PortableTestOpenH264)
     }
+    #[cfg(all(
+        not(test),
+        target_os = "linux",
+        not(target_os = "macos"),
+        not(target_os = "windows")
+    ))]
+    {
+        ffmpeg_h264_platform_for_target(RuntimePlatform::Linux)
+    }
+    #[cfg(all(
+        not(test),
+        not(target_os = "linux"),
+        not(target_os = "macos"),
+        not(target_os = "windows")
+    ))]
+    {
+        ffmpeg_h264_platform_for_target(RuntimePlatform::Other)
+    }
+}
+
+fn ensure_platform_encoder_supported() -> std::result::Result<(), PlatformEncoderUnsupported> {
+    current_ffmpeg_h264_platform().map(|_| ())
 }
 
 fn ffmpeg_h264_encoder(platform: FfmpegH264Platform) -> FfmpegH264Encoder {
@@ -7443,10 +7503,13 @@ fn ffmpeg_h264_encoder(platform: FfmpegH264Platform) -> FfmpegH264Encoder {
             pix_fmt: "yuv420p",
             backend: EncodeBackend::SoftwareOpenH264,
         },
-        FfmpegH264Platform::Other => FfmpegH264Encoder {
-            codec: "libx264",
+        #[cfg(test)]
+        FfmpegH264Platform::PortableTestOpenH264 => FfmpegH264Encoder {
+            // Test-only portable fixture. Production Linux selection returns
+            // PlatformEncoderUnsupported and never reaches an encoder.
+            codec: "libopenh264",
             pix_fmt: "yuv420p",
-            backend: EncodeBackend::SoftwareX264,
+            backend: EncodeBackend::SoftwareOpenH264,
         },
     }
 }
@@ -7498,31 +7561,41 @@ fn windows_media_foundation_hardware_probe_args(video: &VideoSettings) -> Vec<St
 const WINDOWS_MEDIA_FOUNDATION_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn default_h264_encode_backend() -> EncodeBackend {
-    ffmpeg_h264_encoder(current_ffmpeg_h264_platform()).backend
+    ffmpeg_h264_encoder(
+        current_ffmpeg_h264_platform()
+            .expect("macOS and Windows always have a configured H.264 encoder"),
+    )
+    .backend
 }
 
-fn append_h264_encoding_args(args: &mut Vec<String>, video: &VideoSettings, low_latency: bool) {
+fn append_h264_encoding_args(
+    args: &mut Vec<String>,
+    video: &VideoSettings,
+    low_latency: bool,
+) -> std::result::Result<(), PlatformEncoderUnsupported> {
     append_h264_encoding_args_for_platform(
         args,
         video,
-        current_ffmpeg_h264_platform(),
+        current_ffmpeg_h264_platform()?,
         low_latency,
     );
+    Ok(())
 }
 
 fn append_h264_encoding_args_preserving_input_timestamps(
     args: &mut Vec<String>,
     video: &VideoSettings,
     low_latency: bool,
-) {
+) -> std::result::Result<(), PlatformEncoderUnsupported> {
     append_h264_encoding_args_for_platform_with_timing(
         args,
         video,
-        current_ffmpeg_h264_platform(),
+        current_ffmpeg_h264_platform()?,
         false,
         low_latency,
     );
     args.extend(["-fps_mode".to_string(), "vfr".to_string()]);
+    Ok(())
 }
 
 fn append_h264_encoding_args_for_platform(
@@ -7588,22 +7661,21 @@ fn append_h264_encoding_args_for_platform_with_timing(
                 "1".to_string(),
             ]);
         }
-        FfmpegH264Platform::Other => {
+        #[cfg(test)]
+        FfmpegH264Platform::PortableTestOpenH264 => {
             args.extend([
-                "-preset".to_string(),
-                "ultrafast".to_string(),
-                "-tune".to_string(),
-                "zerolatency".to_string(),
+                "-rc_mode".to_string(),
+                "bitrate".to_string(),
+                "-allow_skip_frames".to_string(),
+                "1".to_string(),
             ]);
         }
     }
     // Spec-valid High profile/level (the recording-quality audit caught the
     // encoders' auto picks under-leveling 60fps streams). Media Foundation
     // exposes neither option, so the Windows arms keep the encoder default.
-    if matches!(
-        platform,
-        FfmpegH264Platform::Macos | FfmpegH264Platform::Other
-    ) && let Some(level) = h264_high_level_label(video.width, video.height, video.fps)
+    if matches!(platform, FfmpegH264Platform::Macos)
+        && let Some(level) = h264_high_level_label(video.width, video.height, video.fps)
     {
         args.extend([
             "-profile:v".to_string(),
@@ -10432,7 +10504,7 @@ fn bridge_compositor_ffmpeg_args(
                     &mut args,
                     &params.output.video,
                     !stream_targets.is_empty(),
-                );
+                )?;
             }
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
@@ -11017,7 +11089,7 @@ fn ffmpeg_args(
         "[v_main]".to_string(),
     ]);
     append_audio_output_args(&mut args, &input_layout);
-    append_h264_encoding_args(&mut args, &params.output.video, !stream_targets.is_empty());
+    append_h264_encoding_args(&mut args, &params.output.video, !stream_targets.is_empty())?;
     append_audio_encoding_args(
         &mut args,
         &input_layout,
@@ -14944,13 +15016,13 @@ mod tests {
         append_h264_encoding_args_for_platform(
             &mut fallback_args,
             &video,
-            FfmpegH264Platform::Other,
+            FfmpegH264Platform::PortableTestOpenH264,
             true,
         );
-        assert_eq!(arg_value(&fallback_args, "-c:v"), Some("libx264"));
+        assert_eq!(arg_value(&fallback_args, "-c:v"), Some("libopenh264"));
         assert_eq!(arg_value(&fallback_args, "-pix_fmt"), Some("yuv420p"));
-        assert_eq!(arg_value(&fallback_args, "-preset"), Some("ultrafast"));
-        assert_eq!(arg_value(&fallback_args, "-tune"), Some("zerolatency"));
+        assert_eq!(arg_value(&fallback_args, "-rc_mode"), Some("bitrate"));
+        assert_eq!(arg_value(&fallback_args, "-allow_skip_frames"), Some("1"));
 
         for args in [
             &macos_args,
@@ -14985,8 +15057,19 @@ mod tests {
             EncodeBackend::SoftwareOpenH264
         );
         assert_eq!(
-            ffmpeg_h264_encoder(FfmpegH264Platform::Other).backend,
-            EncodeBackend::SoftwareX264
+            ffmpeg_h264_encoder(FfmpegH264Platform::PortableTestOpenH264).backend,
+            EncodeBackend::SoftwareOpenH264
+        );
+    }
+
+    #[test]
+    fn linux_h264_encoder_is_a_typed_unsupported_result() {
+        let error = ffmpeg_h264_platform_for_target(RuntimePlatform::Linux)
+            .expect_err("Linux L1 must not select an encoder");
+        assert_eq!(error.platform, "Linux");
+        assert_eq!(
+            error.to_string(),
+            "H.264 encoding is unsupported on Linux at Linux port level L1"
         );
     }
 
@@ -17824,7 +17907,7 @@ mod tests {
     }
 
     fn assert_current_h264_encoder_args(args: &[String], low_latency: bool) {
-        let platform = current_ffmpeg_h264_platform();
+        let platform = current_ffmpeg_h264_platform().expect("test encoder platform");
         let encoder = ffmpeg_h264_encoder(platform);
         assert_eq!(arg_value(args, "-c:v"), Some(encoder.codec));
         match platform {
@@ -17852,12 +17935,12 @@ mod tests {
                 assert_eq!(arg_value(args, "-hw_encoding"), None);
                 assert_eq!(encoder.backend, EncodeBackend::SoftwareOpenH264);
             }
-            FfmpegH264Platform::Other => {
+            FfmpegH264Platform::PortableTestOpenH264 => {
                 assert_eq!(arg_value(args, "-allow_sw"), None);
                 assert_eq!(arg_value(args, "-realtime"), None);
                 assert_eq!(arg_value(args, "-prio_speed"), None);
-                assert_eq!(arg_value(args, "-preset"), Some("ultrafast"));
-                assert_eq!(arg_value(args, "-tune"), Some("zerolatency"));
+                assert_eq!(arg_value(args, "-rc_mode"), Some("bitrate"));
+                assert_eq!(arg_value(args, "-allow_skip_frames"), Some("1"));
             }
         }
     }
@@ -18231,7 +18314,12 @@ mod tests {
         {
             assert_eq!(
                 arg_value(&args, "-c:v"),
-                Some(ffmpeg_h264_encoder(current_ffmpeg_h264_platform()).codec)
+                Some(
+                    ffmpeg_h264_encoder(
+                        current_ffmpeg_h264_platform().expect("test encoder platform")
+                    )
+                    .codec
+                )
             );
             assert_eq!(arg_value(&args, "-allow_sw"), None);
             assert_eq!(arg_value(&args, "-realtime"), None);
@@ -18317,7 +18405,12 @@ mod tests {
         {
             assert_eq!(
                 arg_value(&args, "-c:v"),
-                Some(ffmpeg_h264_encoder(current_ffmpeg_h264_platform()).codec)
+                Some(
+                    ffmpeg_h264_encoder(
+                        current_ffmpeg_h264_platform().expect("test encoder platform")
+                    )
+                    .codec
+                )
             );
             assert_eq!(arg_value(&args, "-allow_sw"), None);
             assert_eq!(arg_value(&args, "-realtime"), None);
@@ -18429,7 +18522,12 @@ mod tests {
         {
             assert_eq!(
                 arg_value(&args, "-c:v"),
-                Some(ffmpeg_h264_encoder(current_ffmpeg_h264_platform()).codec)
+                Some(
+                    ffmpeg_h264_encoder(
+                        current_ffmpeg_h264_platform().expect("test encoder platform")
+                    )
+                    .codec
+                )
             );
             assert_eq!(arg_value(&args, "-allow_sw"), None);
             assert_eq!(arg_value(&args, "-realtime"), None);

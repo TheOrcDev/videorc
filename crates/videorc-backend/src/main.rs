@@ -51,6 +51,7 @@ mod scene_geometry;
 mod screen_capture;
 mod secrets;
 mod session_ops;
+mod source_mask;
 mod source_registry;
 mod source_status;
 mod state;

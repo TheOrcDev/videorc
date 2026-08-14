@@ -45,6 +45,7 @@ use crate::scene_geometry::{
     scene_crop_from_transform, scene_mask_allows, scene_source_fit, scene_source_rect_pixels,
     scene_source_render_transform,
 };
+pub use crate::source_mask::SourceMask;
 use crate::state::AppState;
 use crate::windows_d3d11_device::{
     DxgiAdapterLuid, WindowsD3d11MediaRole, WindowsD3d11TextureFormat,
@@ -2278,13 +2279,11 @@ struct PreparedGpuSource<'a> {
 }
 
 #[cfg(target_os = "macos")]
-fn scene_mask_into_metal(mask: SceneMask) -> crate::metal_compositor::SourceMask {
+fn scene_mask_into_metal(mask: SceneMask) -> SourceMask {
     match mask {
-        SceneMask::None => crate::metal_compositor::SourceMask::None,
-        SceneMask::Circle => crate::metal_compositor::SourceMask::Circle,
-        SceneMask::Rounded { radius_pct } => {
-            crate::metal_compositor::SourceMask::Rounded { radius_pct }
-        }
+        SceneMask::None => SourceMask::None,
+        SceneMask::Circle => SourceMask::Circle,
+        SceneMask::Rounded { radius_pct } => SourceMask::Rounded { radius_pct },
     }
 }
 
