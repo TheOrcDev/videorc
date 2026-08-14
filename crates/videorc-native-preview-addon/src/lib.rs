@@ -4,6 +4,10 @@ mod color;
 #[cfg(target_os = "macos")]
 #[path = "../../videorc-backend/src/metal_compositor.rs"]
 mod metal_compositor;
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+#[path = "../../videorc-backend/src/source_mask.rs"]
+mod source_mask;
 
 #[cfg(target_os = "macos")]
 mod macos {
