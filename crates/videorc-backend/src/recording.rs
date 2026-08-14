@@ -22569,7 +22569,7 @@ mod tests {
     }
 
     #[test]
-    fn captioned_record_and_stream_rejects_multiple_target_profiles() {
+    fn captioned_record_and_stream_respects_platform_output_capability() {
         let mut params = base_params(true, true);
         params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
         params.captions = Some(crate::protocol::CaptionsSessionParams {
@@ -22594,8 +22594,22 @@ mod tests {
         twitch.output_bitrate_kbps = Some(6000);
         params.streaming = Some(streaming);
 
-        let error = validate_outputs(&params).unwrap_err().to_string();
-        assert!(error.contains("one captioned stream profile"), "{error}");
+        if separate_encoded_provider_output_role_available(&params) {
+            let error = validate_outputs(&params).unwrap_err().to_string();
+            assert!(error.contains("one captioned stream profile"), "{error}");
+        } else {
+            validate_outputs(&params)
+                .expect("a shared encoder collapses targets to one caption-safe profile");
+            let profiles = resolved_enabled_stream_output_videos(&params)
+                .expect("shared provider output profiles");
+            assert_eq!(profiles.len(), 2);
+            assert!(
+                profiles
+                    .iter()
+                    .all(|profile| same_video_profile(profile, &params.output.video)),
+                "an unproven split role must resolve every target to the shared recording profile"
+            );
+        }
 
         let mut captions_off = base_params(true, true);
         captions_off.output.video = VideoSettings {
