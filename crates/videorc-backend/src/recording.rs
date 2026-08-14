@@ -1722,7 +1722,7 @@ pub async fn start_session(
         &encoder_output_topology,
         requested_encoder_bridge_video_output,
     )
-    .await;
+    .await?;
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
     if params.output.stream_enabled {
         let provider_plan = resolve_provider_stream_output_plan(&params)?;
@@ -7264,8 +7264,6 @@ enum FfmpegH264Platform {
     Macos,
     WindowsHardware,
     WindowsSoftware,
-    #[cfg(test)]
-    PortableTestOpenH264,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7450,10 +7448,12 @@ fn current_ffmpeg_h264_platform()
     }
     #[cfg(all(test, not(target_os = "macos"), not(target_os = "windows")))]
     {
-        // Cross-platform unit tests still exercise the complete argument
-        // topology without claiming a production Linux encoder. The runtime
-        // selector itself is covered separately and remains unsupported.
-        Ok(FfmpegH264Platform::PortableTestOpenH264)
+        // Cross-platform unit tests exercise the REAL Windows software
+        // encoder table (OpenH264) rather than a test-only twin: a private
+        // variant duplicating those args would silently go stale the next
+        // time the #149-tuned OpenH264 args change. The runtime selector's
+        // Linux refusal is covered separately via RuntimePlatform::Linux.
+        Ok(FfmpegH264Platform::WindowsSoftware)
     }
     #[cfg(all(
         not(test),
@@ -7499,14 +7499,6 @@ fn ffmpeg_h264_encoder(platform: FfmpegH264Platform) -> FfmpegH264Encoder {
             // libopenh264 measured ~2.5x realtime on the same box. OpenH264 is
             // the reliable software fallback; hardware Media Foundation stays
             // the probed fast path.
-            codec: "libopenh264",
-            pix_fmt: "yuv420p",
-            backend: EncodeBackend::SoftwareOpenH264,
-        },
-        #[cfg(test)]
-        FfmpegH264Platform::PortableTestOpenH264 => FfmpegH264Encoder {
-            // Test-only portable fixture. Production Linux selection returns
-            // PlatformEncoderUnsupported and never reaches an encoder.
             codec: "libopenh264",
             pix_fmt: "yuv420p",
             backend: EncodeBackend::SoftwareOpenH264,
@@ -7560,12 +7552,8 @@ fn windows_media_foundation_hardware_probe_args(video: &VideoSettings) -> Vec<St
 #[cfg(target_os = "windows")]
 const WINDOWS_MEDIA_FOUNDATION_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn default_h264_encode_backend() -> EncodeBackend {
-    ffmpeg_h264_encoder(
-        current_ffmpeg_h264_platform()
-            .expect("macOS and Windows always have a configured H.264 encoder"),
-    )
-    .backend
+fn default_h264_encode_backend() -> std::result::Result<EncodeBackend, PlatformEncoderUnsupported> {
+    Ok(ffmpeg_h264_encoder(current_ffmpeg_h264_platform()?).backend)
 }
 
 fn append_h264_encoding_args(
@@ -7654,15 +7642,6 @@ fn append_h264_encoding_args_for_platform_with_timing(
             // libopenh264 tuned per the #149 real-device benchmark (~2.5x
             // realtime at 1080p30/8Mbps on the bundled build): bitrate rate
             // control with frame-skip permitted only under overshoot.
-            args.extend([
-                "-rc_mode".to_string(),
-                "bitrate".to_string(),
-                "-allow_skip_frames".to_string(),
-                "1".to_string(),
-            ]);
-        }
-        #[cfg(test)]
-        FfmpegH264Platform::PortableTestOpenH264 => {
             args.extend([
                 "-rc_mode".to_string(),
                 "bitrate".to_string(),
@@ -8783,7 +8762,12 @@ async fn resolve_windows_encoded_bridge_decision(
     ffmpeg_path: &str,
     plan: &EncoderOutputTopologyPlan,
     requested: EncoderBridgeVideoOutput,
-) -> WindowsEncodedBridgeDecision {
+) -> std::result::Result<WindowsEncodedBridgeDecision, PlatformEncoderUnsupported> {
+    // Resolve the fallback backend FIRST and as a value: this function is
+    // reachable on every platform (the topology-probe RPC calls it, and the
+    // renderer fires that probe automatically), so an unsupported platform
+    // must surface as the typed error, never as a panic mid-argument.
+    let fallback_encode_backend = default_h264_encode_backend()?;
     let graphics_adapter_driver_identity = graphics_adapter_driver_identity();
     let capability_key = output_topology_capability_key(
         ffmpeg_path,
@@ -8806,12 +8790,12 @@ async fn resolve_windows_encoded_bridge_decision(
     } else {
         None
     };
-    select_windows_encoded_bridge_decision(
+    Ok(select_windows_encoded_bridge_decision(
         requested,
         capability_key,
         probe,
-        default_h264_encode_backend(),
-    )
+        fallback_encode_backend,
+    ))
 }
 
 #[cfg(target_os = "windows")]
@@ -8865,7 +8849,7 @@ pub async fn probe_stream_output_topology(
     let plan = encoder_output_topology_plan_from_probe(&params);
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path.clone());
     let requested = recording_encoder_bridge_video_output(params.recording_profile.is_some(), true);
-    let decision = resolve_windows_encoded_bridge_decision(&ffmpeg_path, &plan, requested).await;
+    let decision = resolve_windows_encoded_bridge_decision(&ffmpeg_path, &plan, requested).await?;
 
     Ok(StreamOutputTopologyProbeResult {
         capability_key: decision.capability_key,
@@ -15012,24 +14996,7 @@ mod tests {
             Some("1")
         );
 
-        let mut fallback_args = Vec::new();
-        append_h264_encoding_args_for_platform(
-            &mut fallback_args,
-            &video,
-            FfmpegH264Platform::PortableTestOpenH264,
-            true,
-        );
-        assert_eq!(arg_value(&fallback_args, "-c:v"), Some("libopenh264"));
-        assert_eq!(arg_value(&fallback_args, "-pix_fmt"), Some("yuv420p"));
-        assert_eq!(arg_value(&fallback_args, "-rc_mode"), Some("bitrate"));
-        assert_eq!(arg_value(&fallback_args, "-allow_skip_frames"), Some("1"));
-
-        for args in [
-            &macos_args,
-            &windows_args,
-            &windows_software_args,
-            &fallback_args,
-        ] {
+        for args in [&macos_args, &windows_args, &windows_software_args] {
             assert_eq!(arg_value(args, "-b:v"), Some("6000k"));
             assert_eq!(arg_value(args, "-maxrate"), Some("6000k"));
             assert_eq!(arg_value(args, "-bufsize"), Some("12000k"));
@@ -15054,10 +15021,6 @@ mod tests {
         );
         assert_eq!(
             ffmpeg_h264_encoder(FfmpegH264Platform::WindowsSoftware).backend,
-            EncodeBackend::SoftwareOpenH264
-        );
-        assert_eq!(
-            ffmpeg_h264_encoder(FfmpegH264Platform::PortableTestOpenH264).backend,
             EncodeBackend::SoftwareOpenH264
         );
     }
@@ -17934,13 +17897,6 @@ mod tests {
                 assert_eq!(arg_value(args, "-prio_speed"), None);
                 assert_eq!(arg_value(args, "-hw_encoding"), None);
                 assert_eq!(encoder.backend, EncodeBackend::SoftwareOpenH264);
-            }
-            FfmpegH264Platform::PortableTestOpenH264 => {
-                assert_eq!(arg_value(args, "-allow_sw"), None);
-                assert_eq!(arg_value(args, "-realtime"), None);
-                assert_eq!(arg_value(args, "-prio_speed"), None);
-                assert_eq!(arg_value(args, "-rc_mode"), Some("bitrate"));
-                assert_eq!(arg_value(args, "-allow_skip_frames"), Some("1"));
             }
         }
     }
@@ -22594,6 +22550,20 @@ mod tests {
         twitch.output_bitrate_kbps = Some(6000);
         params.streaming = Some(streaming);
 
+        // Pin the branch each shipping platform MUST take: without this, a
+        // regression that flips the availability helper silently reroutes the
+        // test into the other arm and the mixed-profile rejection coverage
+        // evaporates while staying green.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert!(
+            separate_encoded_provider_output_role_available(&params),
+            "macOS/Windows must offer the split encoded provider role"
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert!(
+            !separate_encoded_provider_output_role_available(&params),
+            "platforms without an encoded bridge must not offer the split role"
+        );
         if separate_encoded_provider_output_role_available(&params) {
             let error = validate_outputs(&params).unwrap_err().to_string();
             assert!(error.contains("one captioned stream profile"), "{error}");

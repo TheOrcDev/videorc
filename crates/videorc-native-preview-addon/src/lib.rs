@@ -4,6 +4,10 @@ mod color;
 #[cfg(target_os = "macos")]
 #[path = "../../videorc-backend/src/metal_compositor.rs"]
 mod metal_compositor;
+// metal_compositor re-exports crate::source_mask::SourceMask, so every crate
+// that #[path]-includes it must also mount source_mask at its own root (the
+// backend and the helper binary both do). allow(dead_code): the addon uses
+// the type only through the re-export.
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 #[path = "../../videorc-backend/src/source_mask.rs"]

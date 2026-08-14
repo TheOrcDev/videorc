@@ -25,33 +25,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 11.0.9
-          run_install: false
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24.6.0'
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Check
-        run: cargo check -p videorc-backend
-
-      - name: Format check
-        run: cargo fmt --check --all
-
       - name: Clippy
+        # clippy -D warnings is the compile gate (compile errors fail it
+        # regardless of the lint allows), matching ci.yml and windows.yml —
+        # no separate cargo check, no pnpm (nothing in this job runs JS), and
+        # no fmt (rustfmt output is platform-independent; ci.yml owns it).
         # cfg(linux) makes macOS/Windows-only helpers dead or their imports
         # unused. Keep this allow list identical to windows.yml while the
         # cross-platform warning wall is burned down; drop both lists together.
