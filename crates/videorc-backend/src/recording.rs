@@ -22635,19 +22635,20 @@ mod tests {
             burn_target: crate::captions::CaptionBurnTarget::Stream,
             ..Default::default()
         });
-        assert_eq!(
-            caption_burn_target(&captions_off),
-            crate::captions::CaptionBurnTarget::Off,
-            "an ineligible mixed captions-off session does not reserve an impossible live leg"
-        );
-        // Platform truth: record+stream split output has a native encoded
-        // bridge on macOS and Windows. Other platforms still reject it for the
-        // split-output reason, independently of captions.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        validate_outputs(&captions_off)
-            .expect("captions-off preserves the existing mixed-profile capture behavior");
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
+        if separate_encoded_provider_output_role_available(&captions_off) {
+            assert_eq!(
+                caption_burn_target(&captions_off),
+                crate::captions::CaptionBurnTarget::Off,
+                "an ineligible split profile does not reserve an impossible live leg"
+            );
+            validate_outputs(&captions_off)
+                .expect("captions-off preserves the proven mixed-profile capture behavior");
+        } else {
+            assert_eq!(
+                caption_burn_target(&captions_off),
+                crate::captions::CaptionBurnTarget::Stream,
+                "the shared provider plan normalizes the targets to one eligible live leg"
+            );
             let error = validate_outputs(&captions_off).unwrap_err().to_string();
             assert!(
                 error.contains("share one encoder"),
