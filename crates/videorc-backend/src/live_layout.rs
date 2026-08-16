@@ -1008,8 +1008,20 @@ fn missing_readiness_messages(
 ) -> Vec<String> {
     let mut messages = Vec::new();
     if needs.camera && !readiness.live.camera {
+        // "Never delivered" and "went stale" are different failures: the first
+        // is a dead session or claimed device (Cam Link class), the second a
+        // stalled-but-once-working stream. Say which one it was.
+        let status = &readiness.camera_status;
+        let never_delivered = status.frames_captured == 0
+            && status.sequence.is_none()
+            && readiness.camera_frame.is_none();
+        let label = if never_delivered {
+            "camera session never delivered a frame"
+        } else {
+            "camera frames stopped or went stale"
+        };
         messages.push(format!(
-            "camera produced no fresh frames ({})",
+            "{label} ({})",
             camera_readiness_detail(readiness, target_sources)
         ));
     }
@@ -1032,13 +1044,14 @@ fn camera_readiness_detail(
         .map(|frame| frame.frame_age_ms)
         .or(status.frame_age_ms);
     format!(
-        "state: {}, target: {}, current: {}, frames captured: {}, latest sequence: {}, latest frame age: {}",
+        "state: {}, target: {}, current: {}, frames captured: {}, dropped: {}, latest sequence: {}, latest frame age: {}",
         camera_state_label(&status.state),
         target_sources
             .and_then(|sources| sources.camera_id.as_deref())
             .unwrap_or("none"),
         status.camera_id.as_deref().unwrap_or("none"),
         status.frames_captured,
+        status.dropped_frames,
         format_optional_u64(
             readiness
                 .camera_frame
@@ -2378,9 +2391,48 @@ mod tests {
         );
 
         assert_eq!(messages.len(), 2);
-        assert!(messages[0].contains("camera produced no fresh frames"));
+        // 42 frames were captured and went stale — this is the stale wording,
+        // not the never-delivered wording.
+        assert!(messages[0].contains("camera frames stopped or went stale"));
         assert!(messages[0].contains("latest frame age: 1501ms"));
         assert!(messages[1].contains("screen/window produced no initial frame"));
         assert!(messages[1].contains("frames captured: 0"));
+    }
+
+    #[test]
+    fn missing_readiness_messages_distinguish_a_camera_that_never_delivered() {
+        // The Cam Link zombie shape: Live status, zero frames ever, no frame
+        // store entry. The message must say "never delivered", not "stale",
+        // and must carry the dropped counter so a silent-device failure can be
+        // told apart from an unusable-format failure in field reports.
+        let mut camera = live_camera_status("camera:a", None, 0, None);
+        camera.dropped_frames = 7;
+        let mut target = sources(true, false);
+        target.camera_id = Some("camera:a".to_string());
+        let readiness = SourceReadiness {
+            live: SourceLiveness {
+                camera: false,
+                screen: false,
+            },
+            camera_status: camera,
+            screen_status: live_screen_status("screen:unused", None, 0, None),
+            camera_frame: None,
+            screen_frame: None,
+        };
+
+        let messages = missing_readiness_messages(
+            SceneSourceNeeds {
+                camera: true,
+                screen: false,
+            },
+            &readiness,
+            Some(&target),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("camera session never delivered a frame"));
+        assert!(messages[0].contains("frames captured: 0"));
+        assert!(messages[0].contains("dropped: 7"));
+        assert!(messages[0].contains("latest frame age: none"));
     }
 }
