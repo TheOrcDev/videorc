@@ -75,6 +75,7 @@ async fn list_macos_devices(ffmpeg_path: &str) -> DeviceList {
         .devices
         .iter()
         .any(|device| device.status == DeviceStatus::PermissionRequired);
+    let native_camera_rows_present = !native_cameras.devices.is_empty();
     warnings.extend(native_cameras.warnings);
     devices.extend(native_cameras.devices);
 
@@ -96,7 +97,12 @@ async fn list_macos_devices(ffmpeg_path: &str) -> DeviceList {
             for device in av_devices {
                 match device.kind {
                     AvFoundationDeviceKind::Video => {
-                        if !device.name.to_lowercase().contains("capture screen") {
+                        // Mirror the microphone rule: the FFmpeg fallback rows are
+                        // a safety net for when native discovery returns nothing,
+                        // not duplicate picker entries beside every native camera.
+                        if !native_camera_rows_present
+                            && !device.name.to_lowercase().contains("capture screen")
+                        {
                             devices.push(Device {
                                 id: format!("camera:avfoundation:{}", device.index),
                                 name: format!("FFmpeg fallback - {}", device.name),

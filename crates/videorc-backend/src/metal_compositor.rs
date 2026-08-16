@@ -728,11 +728,25 @@ unsafe impl Sync for MetalSourceTextureCache {}
 impl MetalSceneCompositor {
     /// Build the compositor, or `None` when no Metal device / shader compile is available.
     pub fn new() -> Option<Self> {
+        Self::new_with_smooth_scaling(false)
+    }
+
+    /// `smooth_scaling` selects a linear min/mag sampler for scene draws.
+    /// Recording compositors keep the nearest sampler: their sources land at
+    /// ~1:1 scale and nearest preserves exact crop edges. Preview-owned
+    /// compositors render the scene into a small canvas — point-sampling that
+    /// minification re-picks a different subset of source pixels every frame,
+    /// which reads as crawling grain ("snow") on any noisy source.
+    pub fn new_with_smooth_scaling(smooth_scaling: bool) -> Option<Self> {
         let device = MTLCreateSystemDefaultDevice()?;
         let queue = device.newCommandQueue()?;
         let pipeline = build_pipeline(&device, false)?;
         let blend_pipeline = build_pipeline(&device, true)?;
-        let sampler = build_sampler(&device)?;
+        let sampler = if smooth_scaling {
+            build_preview_sampler(&device)?
+        } else {
+            build_sampler(&device)?
+        };
         let source_texture_cache = make_texture_cache(&device).map(MetalSourceTextureCache::new);
         Some(Self {
             device,
@@ -1298,6 +1312,10 @@ impl MetalPreviewPresenter {
         height: usize,
     ) -> Option<MetalImportedIosurfaceTexture> {
         let texture = import_iosurface_texture(&self.device, iosurface_id, width, height)?;
+        // The import trusts the IOSurface's own geometry over the caller's
+        // frame metadata; record what was actually imported.
+        let width = texture.width();
+        let height = texture.height();
         Some(MetalImportedIosurfaceTexture {
             iosurface_id,
             width,
@@ -1470,11 +1488,29 @@ pub fn import_iosurface_texture(
     height: usize,
 ) -> Option<Retained<MetalTexture>> {
     let surface = IOSurfaceRef::lookup(iosurface_id)?;
+    // Metal's validation layer aborts the whole process (assert -> SIGABRT,
+    // not a catchable error) when the descriptor disagrees with the
+    // IOSurface's real geometry. The caller's dimensions ride frame metadata
+    // and can be stale across a canvas resize — the preview -> recording
+    // handoff recreates surfaces at new sizes while old metadata is still in
+    // flight. The surface's own geometry is the only safe source of truth: a
+    // mismatched frame presents scaled for one beat instead of killing the
+    // app (observed as a recording-start crash in 0.9.52).
+    let surface_width = surface.width();
+    let surface_height = surface.height();
+    if surface_width == 0 || surface_height == 0 {
+        return None;
+    }
+    if surface_width != width || surface_height != height {
+        eprintln!(
+            "[videorc-native-preview] IOSurface {iosurface_id} is {surface_width}x{surface_height} but frame metadata says {width}x{height}; importing at surface geometry"
+        );
+    }
     let descriptor = unsafe {
         MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
             MTLPixelFormat::BGRA8Unorm,
-            width,
-            height,
+            surface_width,
+            surface_height,
             false,
         )
     };

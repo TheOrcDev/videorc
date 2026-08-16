@@ -292,8 +292,8 @@ fn apply_validated_main_owned_preview_surface_bounds(
     slot.main_owned_generation = Some(params.generation);
     slot.main_owned_bounds = Some(params.bounds);
     slot.main_owned_host_bounds = Some(host_bounds);
-    slot.status.width = surface_dimension(safe_bounds.width);
-    slot.status.height = surface_dimension(safe_bounds.height);
+    slot.status.width = surface_render_dimension(safe_bounds.width, safe_bounds.scale_factor);
+    slot.status.height = surface_render_dimension(safe_bounds.height, safe_bounds.scale_factor);
     slot.status.bounds = Some(safe_bounds);
     slot.status.updated_at = Utc::now().to_rfc3339();
     Ok(slot.status.clone())
@@ -378,8 +378,8 @@ pub async fn create_preview_surface(
         transport: PreviewTransport::ElectronProofSurface,
         backing: PreviewSurfaceBacking::ElectronBrowserWindow,
         target_fps,
-        width: surface_dimension(bounds.width),
-        height: surface_dimension(bounds.height),
+        width: surface_render_dimension(bounds.width, bounds.scale_factor),
+        height: surface_render_dimension(bounds.height, bounds.scale_factor),
         frames_rendered: 0,
         presented_frame_id: None,
         compositor_frame_lag: None,
@@ -475,8 +475,8 @@ async fn try_reuse_live_surface(
         let mut next = slot.status.clone();
         next.source = params.source.clone();
         next.target_fps = target_fps;
-        next.width = surface_dimension(params.bounds.width);
-        next.height = surface_dimension(params.bounds.height);
+        next.width = surface_render_dimension(params.bounds.width, params.bounds.scale_factor);
+        next.height = surface_render_dimension(params.bounds.height, params.bounds.scale_factor);
         next.bounds = Some(params.bounds.clone());
         next.updated_at = Utc::now().to_rfc3339();
         let host_update = slot.native_host.update_bounds(&params.bounds);
@@ -513,8 +513,8 @@ pub async fn update_preview_surface_bounds(
     let (status, preview_run_id) = {
         let mut slot = state.preview_surface.lock().await;
         let mut next = slot.status.clone();
-        next.width = surface_dimension(params.bounds.width);
-        next.height = surface_dimension(params.bounds.height);
+        next.width = surface_render_dimension(params.bounds.width, params.bounds.scale_factor);
+        next.height = surface_render_dimension(params.bounds.height, params.bounds.scale_factor);
         next.bounds = Some(params.bounds.clone());
         next.updated_at = Utc::now().to_rfc3339();
         if next.state == PreviewSurfaceState::Unavailable
@@ -1093,6 +1093,20 @@ fn surface_dimension(value: f64) -> u32 {
     value.round().clamp(1.0, f64::from(u32::MAX)) as u32
 }
 
+/// Preview canvas dimensions in device pixels. The dock-slot bounds arrive in
+/// CSS points; compositing the scene at point size and upscaling to a Retina
+/// drawable throws away half the resolution before the present blit can do
+/// anything about it. The scale is clamped so a corrupt renderer value cannot
+/// balloon the canvas.
+fn surface_render_dimension(value: f64, scale_factor: f64) -> u32 {
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor.clamp(1.0, 3.0)
+    } else {
+        1.0
+    };
+    surface_dimension(value * scale)
+}
+
 fn unavailable_status(message: Option<String>) -> PreviewSurfaceStatus {
     PreviewSurfaceStatus {
         state: PreviewSurfaceState::Unavailable,
@@ -1150,6 +1164,18 @@ mod tests {
         )
     }
 
+    #[test]
+    fn surface_render_dimension_scales_to_device_pixels() {
+        // Bounds arrive in CSS points; the canvas must render at device pixels.
+        assert_eq!(surface_render_dimension(700.0, 2.0), 1400);
+        assert_eq!(surface_render_dimension(700.0, 1.0), 700);
+        // Corrupt or missing scale factors fall back to 1x, and runaway
+        // values clamp so the canvas cannot balloon.
+        assert_eq!(surface_render_dimension(700.0, f64::NAN), 700);
+        assert_eq!(surface_render_dimension(700.0, 0.0), 700);
+        assert_eq!(surface_render_dimension(700.0, 10.0), 2100);
+    }
+
     fn bounds(width: f64, height: f64) -> PreviewSurfaceBounds {
         PreviewSurfaceBounds {
             screen_x: 100.0,
@@ -1188,8 +1214,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(first.width, 1280);
-        assert_eq!(first.height, 720);
+        assert_eq!(first.width, 2560);
+        assert_eq!(first.height, 1440);
         assert!(
             serde_json::to_value(&first)
                 .unwrap()
@@ -1245,8 +1271,8 @@ mod tests {
         assert_eq!(status.transport, PreviewTransport::ElectronProofSurface);
         assert_eq!(status.backing, PreviewSurfaceBacking::ElectronBrowserWindow);
         assert_eq!(status.target_fps, 60);
-        assert_eq!(status.width, 800);
-        assert_eq!(status.height, 450);
+        assert_eq!(status.width, 1600);
+        assert_eq!(status.height, 900);
         assert_eq!(status.pending_host_command_count, 1);
         assert_eq!(
             compositor.frame_pipeline.consumer.as_deref(),
@@ -1316,12 +1342,12 @@ mod tests {
         destroy_preview_surface(&state).await;
 
         assert_eq!(second_compositor.run_id, first_compositor.run_id);
-        assert_eq!(second_compositor.width, 640);
-        assert_eq!(second_compositor.height, 360);
+        assert_eq!(second_compositor.width, 1280);
+        assert_eq!(second_compositor.height, 720);
         assert_eq!(duplicate.started_at, first.started_at);
         assert_eq!(duplicate.source, PreviewSurfaceSource::Screen);
-        assert_eq!(duplicate.width, 640);
-        assert_eq!(duplicate.height, 360);
+        assert_eq!(duplicate.width, 1280);
+        assert_eq!(duplicate.height, 720);
         assert_eq!(duplicate.transport, PreviewTransport::NativeSurface);
         assert_eq!(duplicate.backing, PreviewSurfaceBacking::CaMetalLayer);
         assert_eq!(duplicate.presented_frame_id, Some(42));
@@ -1468,8 +1494,8 @@ mod tests {
         destroy_preview_surface(&state).await;
 
         assert_eq!(status.state, PreviewSurfaceState::Live);
-        assert_eq!(status.width, 640);
-        assert_eq!(status.height, 360);
+        assert_eq!(status.width, 1280);
+        assert_eq!(status.height, 720);
         assert_eq!(resize_count, 1);
         assert_eq!(
             last_command_kind,
@@ -1899,7 +1925,7 @@ mod tests {
         )
         .await;
         let verification = async {
-            let initial = wait_for_frame_dimensions_after(&state, 160, 90, None).await?;
+            let initial = wait_for_frame_dimensions_after(&state, 320, 180, None).await?;
             let initial_status = compositor_status(&state).await;
 
             update_preview_surface_bounds(
@@ -1910,7 +1936,7 @@ mod tests {
             )
             .await;
             let portrait =
-                wait_for_frame_dimensions_after(&state, 90, 160, Some(initial.sequence)).await?;
+                wait_for_frame_dimensions_after(&state, 180, 320, Some(initial.sequence)).await?;
 
             // The owner's 2026-07-14 regression was this reverse direction:
             // horizontal mode returned while the compositor kept publishing
@@ -1923,7 +1949,7 @@ mod tests {
             )
             .await;
             let landscape =
-                wait_for_frame_dimensions_after(&state, 160, 90, Some(portrait.sequence)).await?;
+                wait_for_frame_dimensions_after(&state, 320, 180, Some(portrait.sequence)).await?;
             let final_status = compositor_status(&state).await;
             Ok::<_, String>((initial_status, portrait, landscape, final_status))
         }
@@ -1932,13 +1958,13 @@ mod tests {
 
         let (initial_status, portrait, landscape, final_status) =
             verification.expect("preview compositor should follow both orientation changes");
-        assert_eq!(portrait.width, 90);
-        assert_eq!(portrait.height, 160);
-        assert_eq!(landscape.width, 160);
-        assert_eq!(landscape.height, 90);
+        assert_eq!(portrait.width, 180);
+        assert_eq!(portrait.height, 320);
+        assert_eq!(landscape.width, 320);
+        assert_eq!(landscape.height, 180);
         assert_eq!(final_status.run_id, initial_status.run_id);
-        assert_eq!(final_status.width, 160);
-        assert_eq!(final_status.height, 90);
+        assert_eq!(final_status.width, 320);
+        assert_eq!(final_status.height, 180);
     }
 
     #[tokio::test]
@@ -1953,7 +1979,7 @@ mod tests {
             },
         )
         .await;
-        wait_for_frame_dimensions_after(&state, 160, 90, None)
+        wait_for_frame_dimensions_after(&state, 320, 180, None)
             .await
             .expect("preview compositor should publish before ownership changes");
         let preview_run_id = compositor_status(&state)
