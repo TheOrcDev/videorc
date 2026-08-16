@@ -52,7 +52,13 @@ use crate::screen_capture::{
 };
 use crate::state::AppState;
 
-const WARM_CAMERA_START_TIMEOUT: Duration = Duration::from_secs(5);
+/// Camera warm-start budget covers teardown + AVCaptureSession config +
+/// startRunning() + the FIRST FRESH FRAME. External capture devices (Cam Link,
+/// Continuity Camera, virtual cams) can take well over 5s to deliver a first
+/// frame after HDMI renegotiation, so the camera gets the same budget as the
+/// screen. A retry within `preview_camera::CAMERA_FIRST_FRAME_REUSE_GRACE`
+/// joins the in-flight warm-up instead of restarting the device.
+const WARM_CAMERA_START_TIMEOUT: Duration = Duration::from_secs(15);
 const WARM_SCREEN_START_TIMEOUT: Duration = Duration::from_secs(15);
 const WARM_SOURCE_POLL: Duration = Duration::from_millis(100);
 const LAYOUT_INTENT_CANCEL_POLL: Duration = Duration::from_millis(25);
@@ -2011,8 +2017,21 @@ mod tests {
 
     #[test]
     fn live_source_start_budgets_are_source_specific() {
-        assert_eq!(warm_source_start_timeout("camera"), Duration::from_secs(5));
+        assert_eq!(warm_source_start_timeout("camera"), Duration::from_secs(15));
         assert_eq!(warm_source_start_timeout("screen"), Duration::from_secs(15));
+    }
+
+    #[test]
+    fn camera_zombie_grace_exceeds_the_camera_warm_start_budget() {
+        // If the grace were inside the budget, a switch retry would tear down a
+        // session that is still legitimately warming up and restart its clock —
+        // a camera slower than the grace could then never come back (the 0.9.51
+        // Cam Link retry storm). Retries must join the warm-up, not kill it.
+        assert!(
+            crate::preview_camera::CAMERA_FIRST_FRAME_REUSE_GRACE
+                > warm_source_start_timeout("camera"),
+            "CAMERA_FIRST_FRAME_REUSE_GRACE must stay above WARM_CAMERA_START_TIMEOUT"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2220,7 +2239,7 @@ mod tests {
 
         assert_eq!(Instant::now() - started, WARM_SCREEN_START_TIMEOUT);
         assert!(error.to_string().contains("screen (15s)"));
-        assert!(!error.to_string().contains("camera (5s)"));
+        assert!(!error.to_string().contains("camera (15s)"));
     }
 
     #[test]

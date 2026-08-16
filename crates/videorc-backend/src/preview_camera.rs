@@ -1076,10 +1076,14 @@ async fn release_current_preview_camera_source(state: &AppState) -> bool {
 }
 
 /// How long a Live-acked session may stay frameless before reuse treats it as
-/// dead. First frames normally land well under a second after startRunning();
-/// the layout-readiness budget (5s) sits above this, so a genuinely slow first
-/// frame still has time to arrive after the forced restart.
-const CAMERA_FIRST_FRAME_REUSE_GRACE: Duration = Duration::from_secs(4);
+/// dead. This MUST exceed the camera's layout warm-start budget
+/// (`live_layout::WARM_CAMERA_START_TIMEOUT`): a readiness bail deliberately
+/// leaves the still-warming session in place, and the next switch attempt has
+/// to JOIN that warm-up — tearing it down restarts the device clock from zero,
+/// so a camera whose first frame is slower than the grace could never come
+/// back (0.9.51 Cam Link retry-storm regression). Only a session frameless
+/// longer than any legitimate warm-up is treated as dead.
+pub(crate) const CAMERA_FIRST_FRAME_REUSE_GRACE: Duration = Duration::from_secs(20);
 
 /// True when the current camera session acked Live, has never produced any
 /// frame evidence (no captured-frame count, nothing in the frame store), and
@@ -3410,6 +3414,24 @@ mod tests {
             slot.status.frames_captured = 0;
             slot.status.sequence = None;
             slot.live_acked_at = Some(Instant::now());
+        }
+        assert!(!camera_live_session_is_frameless_zombie(&state).await);
+    }
+
+    #[tokio::test]
+    async fn frameless_live_slot_inside_the_warm_start_budget_is_not_a_zombie() {
+        // The 0.9.51 Cam Link retry storm: a slow external device 10s into its
+        // warm-up (past the old 4s grace) was torn down by every retry, so its
+        // first frame could never arrive. A retry must JOIN this warm-up.
+        let state = test_state();
+        {
+            let mut slot = state.preview_camera.lock().await;
+            slot.status.state = PreviewCameraState::Live;
+            slot.status.camera_id = Some("camera:test".to_string());
+            slot.status.frames_captured = 0;
+            slot.status.sequence = None;
+            slot.source_key = Some(SourceKey::camera("camera:test".to_string()));
+            slot.live_acked_at = Some(Instant::now() - Duration::from_secs(10));
         }
         assert!(!camera_live_session_is_frameless_zombie(&state).await);
     }
