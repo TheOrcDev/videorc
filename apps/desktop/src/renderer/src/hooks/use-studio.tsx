@@ -3518,10 +3518,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     async (accountId?: string, options: { background?: boolean } = {}) => {
       const unavailable = oauthUnavailableReason('youtube')
       if (unavailable) {
+        // No toast: the streaming tab's destination card already states the
+        // unavailable reason inline, and this fires on routine refreshes —
+        // repeating it as a toast was pure nag (owner request 2026-08-14).
         setYoutubeChannels([])
-        if (!options.background) {
-          toast.warning(unavailable)
-        }
         return
       }
       if (!client) {
@@ -3556,9 +3556,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const selectYouTubeChannel = useCallback(
     async (channelId: string, accountId?: string) => {
-      const unavailable = oauthUnavailableReason('youtube')
-      if (unavailable) {
-        toast.warning(unavailable)
+      if (oauthUnavailableReason('youtube')) {
+        // Silent: the channel picker is not rendered while OAuth is
+        // unavailable, so this is unreachable through the UI; if reached
+        // programmatically the inline destination status already explains it.
         return
       }
       if (!client || wsStatus !== 'connected') {
@@ -7758,9 +7759,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const connectPlatformAccount = useCallback(
     async (platform: PlatformAccount['platform']) => {
-      const unavailable = oauthUnavailableReason(platform)
-      if (unavailable) {
-        toast.warning(unavailable)
+      if (oauthUnavailableReason(platform)) {
+        // Silent: the destination card renders the unavailable reason inline
+        // right next to the control that triggers this, so the toast only
+        // duplicated visible copy (owner request 2026-08-14).
         return
       }
       if (!client || wsStatus !== 'connected') {
