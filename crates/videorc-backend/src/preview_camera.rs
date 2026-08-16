@@ -125,6 +125,10 @@ struct PreviewCameraStartKey {
     ffmpeg_path: String,
     video: VideoSettings,
     target_fps: u32,
+    /// Derived capture box (inset overlay vs full canvas). Two starts that
+    /// agree on everything else but need different capture geometry must not
+    /// join each other's in-flight session.
+    capture_target: (u32, u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +151,11 @@ struct NativeCameraPreviewThread {
     ffmpeg_path: String,
     layout: LayoutSettings,
     video: VideoSettings,
+    /// The capture target box this session's AVFoundation output geometry was
+    /// derived from at start. `layout` above is refreshed on reuse as
+    /// bookkeeping, so it cannot answer "what geometry is this session
+    /// actually delivering" — this field can.
+    capture_target: (u32, u32),
 }
 
 /// Fast half of a camera stop. Runtime ownership has already been detached and
@@ -422,6 +431,7 @@ pub async fn start_preview_camera(
         ffmpeg_path: ffmpeg_path.clone(),
         video: params.video.clone(),
         target_fps,
+        capture_target: camera_capture_target_dimensions(&params.layout, &params.video),
     };
     let start_lease = match begin_camera_start(&state, start_key.clone(), starting).await {
         PreviewCameraStartRegistration::JoinExisting => {
@@ -519,6 +529,7 @@ pub async fn start_preview_camera(
                 updated_at: Utc::now().to_rfc3339(),
                 message,
             };
+            let capture_target = camera_capture_target_dimensions(&params.layout, &params.video);
             let mut started_thread = Some(NativeCameraPreviewThread {
                 stop_tx,
                 join_handle: Some(join_handle),
@@ -526,6 +537,7 @@ pub async fn start_preview_camera(
                 ffmpeg_path,
                 layout: params.layout,
                 video: params.video,
+                capture_target,
             });
             let installed = {
                 let mut slot = state.preview_camera.lock().await;
@@ -1113,6 +1125,24 @@ async fn camera_live_session_is_frameless_zombie(state: &AppState) -> bool {
         .is_none_or(|acked| acked.elapsed() >= CAMERA_FIRST_FRAME_REUSE_GRACE)
 }
 
+/// True when the live camera session's configured capture box no longer
+/// matches what `layout`/`video` require. A hot preset switch (inset overlay
+/// <-> full canvas) keeps the session alive while its AVFoundation output
+/// stays sized for the old scene; only a restart re-derives the geometry.
+pub(crate) async fn camera_capture_geometry_is_stale(
+    state: &AppState,
+    layout: &LayoutSettings,
+    video: &VideoSettings,
+) -> bool {
+    let slot = state.preview_camera.lock().await;
+    if slot.status.state != PreviewCameraState::Live {
+        return false;
+    }
+    slot.active.as_ref().is_some_and(|active| {
+        active.capture_target != camera_capture_target_dimensions(layout, video)
+    })
+}
+
 async fn reuse_current_camera_source(
     state: &AppState,
     source_key: &SourceKey,
@@ -1129,6 +1159,10 @@ async fn reuse_current_camera_source(
         active.ffmpeg_path == ffmpeg_path
             && active.video == *video
             && slot.status.target_fps == target_fps
+            // AVFoundation output geometry is fixed at session start; a layout
+            // whose capture box differs (inset overlay vs full canvas) must
+            // restart the session, not adopt frames sized for the old scene.
+            && active.capture_target == camera_capture_target_dimensions(layout, video)
     });
     if !can_reuse {
         return None;
@@ -3257,6 +3291,7 @@ mod tests {
             ffmpeg_path: "ffmpeg".to_string(),
             video: video.clone(),
             target_fps: video.fps,
+            capture_target: camera_capture_target_dimensions(&test_layout(false), &video),
         };
         let starting = PreviewCameraStatus {
             state: PreviewCameraState::Starting,
@@ -3343,6 +3378,7 @@ mod tests {
                 ffmpeg_path: "ffmpeg".to_string(),
                 layout: test_layout(false),
                 video: video.clone(),
+                capture_target: camera_capture_target_dimensions(&test_layout(false), &video),
             });
         }
 
@@ -3385,6 +3421,63 @@ mod tests {
             Some("Native camera preview source reused.")
         );
     }
+    #[tokio::test]
+    async fn reuse_refuses_a_session_with_stale_capture_geometry() {
+        // A hot preset switch (inset overlay <-> full canvas) changes the
+        // derived capture box. The running session keeps delivering frames
+        // sized for the old scene, so reuse must force a restart instead of
+        // adopting them.
+        let state = test_state();
+        let video = test_video();
+        let source_key = SourceKey::camera("camera:avfoundation-native:test");
+        let full_canvas_layout = test_layout(false);
+        let mut inset_layout = test_layout(false);
+        inset_layout.layout_preset = LayoutPreset::ScreenCamera;
+        assert_ne!(
+            camera_capture_target_dimensions(&full_canvas_layout, &video),
+            camera_capture_target_dimensions(&inset_layout, &video),
+            "the two presets must derive different capture boxes for this test"
+        );
+        let (stop_tx, _stop_rx) = std_mpsc::channel();
+        {
+            let mut slot = state.preview_camera.lock().await;
+            slot.source_key = Some(source_key.clone());
+            slot.status.state = PreviewCameraState::Live;
+            slot.status.target_fps = video.fps;
+            slot.active = Some(NativeCameraPreviewThread {
+                stop_tx,
+                join_handle: None,
+                shared: Arc::new(StdMutex::new(PreviewCameraShared::default())),
+                ffmpeg_path: "ffmpeg".to_string(),
+                layout: inset_layout.clone(),
+                video: video.clone(),
+                capture_target: camera_capture_target_dimensions(&inset_layout, &video),
+            });
+        }
+
+        assert!(
+            reuse_current_camera_source(
+                &state,
+                &source_key,
+                "ffmpeg",
+                &full_canvas_layout,
+                &video,
+                video.fps
+            )
+            .await
+            .is_none(),
+            "a capture-geometry mismatch must not be reused"
+        );
+        assert!(
+            camera_capture_geometry_is_stale(&state, &full_canvas_layout, &video).await,
+            "the staleness probe must agree with reuse"
+        );
+        assert!(
+            !camera_capture_geometry_is_stale(&state, &inset_layout, &video).await,
+            "matching geometry must not report stale"
+        );
+    }
+
     #[tokio::test]
     async fn frameless_live_slot_past_grace_is_a_zombie() {
         // The Cam Link failure shape: Live acked, zero frames ever, grace long

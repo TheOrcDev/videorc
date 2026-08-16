@@ -30,8 +30,9 @@ use tokio::time::{Instant, sleep};
 use crate::compositor::update_compositor_scene;
 use crate::live_scene::{ApplyMode, MutationContext, MutationKind, classify_mutation};
 use crate::preview_camera::{
-    PreviewCameraFrameInfo, begin_preview_camera_stop, finish_preview_camera_stop,
-    preview_camera_latest_frame_info, preview_camera_status, start_preview_camera,
+    PreviewCameraFrameInfo, begin_preview_camera_stop, camera_capture_geometry_is_stale,
+    finish_preview_camera_stop, preview_camera_latest_frame_info, preview_camera_status,
+    start_preview_camera,
 };
 use crate::preview_screen::{PreviewScreenFrameInfo, preview_screen_latest_frame_info};
 use crate::preview_screen::{
@@ -470,6 +471,7 @@ async fn apply_scene_transaction(
                 commit_scene_for_intent(state, intent_id, &scene, params.layout.clone(), None)
                     .await?;
             retire_unused_sources_after_commit(state, intent_id, needs).await;
+            resync_camera_capture_geometry_after_commit(state, intent_id, &params, needs).await;
             Ok(layout_apply_status(
                 intent_id,
                 if session_active { "hot" } else { "idle" },
@@ -512,6 +514,7 @@ async fn apply_scene_transaction(
             )
             .await?;
             retire_unused_sources_after_commit(state, intent_id, needs).await;
+            resync_camera_capture_geometry_after_commit(state, intent_id, &params, needs).await;
             Ok(layout_apply_status(
                 intent_id,
                 "warm",
@@ -963,6 +966,45 @@ async fn wait_for_sources_ready(
         }
         sleep(WARM_SOURCE_POLL).await;
     }
+}
+
+/// A hot preset switch keeps the live camera session, but AVFoundation output
+/// geometry is fixed at session start — a session capturing the inset overlay
+/// box keeps delivering 720p-class frames after the scene goes full-canvas
+/// (and vice versa). Re-derive the capture box after the commit and restart
+/// the camera in the background when it no longer matches; reuse refuses
+/// mismatched geometry, so the start lands as a real restart. The compositor
+/// holds the last frame across the restart, so the swap is a brief hold, not
+/// a blank slot.
+async fn resync_camera_capture_geometry_after_commit(
+    state: &AppState,
+    intent_id: u64,
+    params: &SceneConfigParams,
+    needs: SceneSourceNeeds,
+) {
+    if !needs.camera {
+        return;
+    }
+    let video = params.video.clone().unwrap_or_else(fallback_video_settings);
+    if !camera_capture_geometry_is_stale(state, &params.layout, &video).await {
+        return;
+    }
+    let start_params = PreviewCameraStartParams {
+        sources: params.sources.clone(),
+        layout: params.layout.clone(),
+        video,
+        ffmpeg_path: active_recording_ffmpeg_path(state).await,
+    };
+    let resync_state = state.clone();
+    tokio::spawn(async move {
+        let still_current = {
+            let intents = resync_state.layout_intents.lock().await;
+            intents.latest_intent_id == intent_id && intents.latest_needs_camera
+        };
+        if still_current {
+            let _ = start_preview_camera(resync_state, start_params).await;
+        }
+    });
 }
 
 async fn retire_unused_sources_after_commit(

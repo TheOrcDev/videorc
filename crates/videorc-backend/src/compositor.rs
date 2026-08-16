@@ -1741,8 +1741,13 @@ async fn run_synthetic_compositor_loop(
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     // Persisted GPU compositor (Some only on macOS when not disabled and a GPU exists);
     // built once and reused per frame. Held across the loop's awaits (it is Send).
-    let mut gpu_compositor = new_gpu_compositor();
-    let mut stream_gpu_compositor = stream_output.and_then(|_| new_gpu_compositor());
+    // Preview-owned compositors minify the scene into a small canvas; smooth
+    // (linear) sampling there kills the crawling-grain aliasing of a nearest
+    // minification. Recording/stream compositors keep nearest for exact crops.
+    let smooth_preview_scaling =
+        matches!(frame_consumer, CompositorFrameConsumer::NativePreview) && stream_output.is_none();
+    let mut gpu_compositor = new_gpu_compositor(smooth_preview_scaling);
+    let mut stream_gpu_compositor = stream_output.and_then(|_| new_gpu_compositor(false));
     let mut live_sources = CompositorLiveSources::refresh(&state).await;
     let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
     let mut next_live_source_refresh_at = Instant::now() + COMPOSITOR_LIVE_SOURCE_REFRESH_INTERVAL;
@@ -2328,11 +2333,11 @@ impl<'a> PreparedGpuSource<'a> {
 }
 
 #[cfg(target_os = "macos")]
-fn new_gpu_compositor() -> Option<GpuCompositor> {
+fn new_gpu_compositor(smooth_scaling: bool) -> Option<GpuCompositor> {
     if !metal_compositor_enabled() {
         return None;
     }
-    match GpuCompositor::new() {
+    match GpuCompositor::new_with_smooth_scaling(smooth_scaling) {
         Some(compositor) => {
             tracing::info!("Metal GPU compositor enabled");
             Some(compositor)
@@ -2346,7 +2351,7 @@ fn new_gpu_compositor() -> Option<GpuCompositor> {
     }
 }
 #[cfg(not(target_os = "macos"))]
-fn new_gpu_compositor() -> Option<GpuCompositor> {
+fn new_gpu_compositor(_smooth_scaling: bool) -> Option<GpuCompositor> {
     None
 }
 
@@ -5860,7 +5865,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn metal_compose_supports_test_pattern_source() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
@@ -5949,7 +5954,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn metal_compose_supports_test_pattern_overlay_without_camera_frame() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
@@ -6058,7 +6063,7 @@ mod tests {
 
     #[test]
     fn metal_compose_supports_side_by_side_screen_camera_layout() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
@@ -6144,7 +6149,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn metal_compose_background_under_inset_screen_target_or_skips() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
@@ -6238,7 +6243,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn publish_compositor_frame_retains_metal_target_export_handle_or_skips() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
@@ -6326,7 +6331,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn publish_compositor_frame_can_publish_metal_target_without_yuv_payload_or_skips() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
@@ -6465,7 +6470,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn metal_compose_missing_camera_frame_renders_placeholder_or_skips() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
@@ -6536,7 +6541,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn metal_compose_missing_active_screen_image_renders_placeholder_or_skips() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
@@ -6997,11 +7002,11 @@ mod tests {
             eprintln!("skipping: Metal compositor disabled");
             return;
         }
-        let Some(mut recording_gpu) = new_gpu_compositor() else {
+        let Some(mut recording_gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: recording Metal compositor unavailable");
             return;
         };
-        let Some(mut stream_gpu) = new_gpu_compositor() else {
+        let Some(mut stream_gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: stream Metal compositor unavailable");
             return;
         };

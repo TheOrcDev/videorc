@@ -4335,12 +4335,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         } else if (event.code === 'camera-cadence-mismatch') {
           // The camera is healthy but delivering a different rate than the session
-          // (e.g. a 24p HDMI feed into a 30fps session): the recording will stutter.
-          // Actionable at record start — the user can stop and fix the camera output.
-          toast.warning('Camera frame rate mismatch', {
-            description: event.message,
-            duration: 15000
-          })
+          // (e.g. a 24p HDMI feed into a 30fps session). The health event stays in
+          // the session record and diagnostics; a toast on every record start was
+          // noise for setups that live with a fixed-rate HDMI source.
         } else if (event.code === 'mic-silent') {
           // Plan 021 F3: the user must hear about a silent mic from the app,
           // not from playing the file back. Warn = mid-session (stopping and
@@ -8657,11 +8654,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           let unhealthy: StreamTargetSettings | null = null
           let unhealthyMessage: string | null = null
           for (const target of enabledOauthTargets) {
-            const unavailable = oauthUnavailableReason(target.platform)
-            if (unavailable) {
-              unhealthy = target
-              unhealthyMessage = unavailable
-              break
+            if (oauthUnavailableReason(target.platform)) {
+              // Feature-flagged-off OAuth (YouTube pending Google review) is a
+              // known product state: the go-live setup skips the target with an
+              // inline status, so it must not block or toast here either.
+              continue
             }
             if (target.platform === 'x') {
               const capability = await client.request<XNativeLiveCapability>(
@@ -8802,7 +8799,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (target.platform === 'youtube') {
           const unavailable = oauthUnavailableReason(target.platform)
           if (unavailable) {
-            throw new Error(unavailable)
+            // Known product state (feature-flagged off while Google review is
+            // pending), not a setup failure: keep it off the go-live failure
+            // toast and mark the destination inline instead.
+            nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+              status: { state: 'warning', message: unavailable }
+            })
+            continue
           }
           const prepared = await client.request<PreparedYouTubeBroadcast>(
             'streamTargets.youtube.prepare',
