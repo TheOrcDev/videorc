@@ -117,20 +117,10 @@ export function AccountMenu({
         <DropdownMenuSeparator />
 
         {signedIn ? (
-          <>
-            <DropdownMenuItem onSelect={openAccount}>
-              <UserCircle />
-              Account
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={isSignOutDisabled(account, live)}
-              variant="destructive"
-              onSelect={signOut}
-            >
-              <SignOut />
-              Sign out
-            </DropdownMenuItem>
-          </>
+          <DropdownMenuItem onSelect={openAccount}>
+            <UserCircle />
+            Account
+          </DropdownMenuItem>
         ) : (
           <DropdownMenuItem onSelect={signIn}>
             <SignIn />
@@ -155,6 +145,20 @@ export function AccountMenu({
           <GearSix />
           Settings
         </DropdownMenuItem>
+
+        {signedIn ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={isSignOutDisabled(account, live)}
+              variant="destructive"
+              onSelect={signOut}
+            >
+              <SignOut />
+              Sign out
+            </DropdownMenuItem>
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   )
