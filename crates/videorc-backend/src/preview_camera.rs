@@ -111,6 +111,12 @@ pub struct PreviewCameraRuntime {
     start_generation: u64,
     active: Option<NativeCameraPreviewThread>,
     poll_task: Option<JoinHandle<()>>,
+    /// When the current session acked Live. macOS acks Live as soon as
+    /// startRunning() returns — before any frame exists — so a session can be
+    /// "live" and frameless. This timestamp bounds how long that is treated
+    /// as normal startup rather than a dead session (see
+    /// camera_live_session_is_frameless_zombie).
+    live_acked_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +330,7 @@ pub fn initial_preview_camera_state() -> PreviewCameraRuntime {
         start_generation: 0,
         active: None,
         poll_task: None,
+        live_acked_at: None,
     }
 }
 
@@ -360,6 +367,15 @@ pub async fn start_preview_camera(
         if !keep_alive {
             stop_current_camera(&state).await;
         }
+    } else if camera_live_session_is_frameless_zombie(&state).await {
+        // Same source key, status Live — but the session never delivered a
+        // single frame and its first-frame grace has elapsed. Exclusive
+        // devices (Elgato Cam Link) get here when startRunning() succeeds
+        // while the device is mid-renegotiation or still held by a closing
+        // session: AVFoundation reports running, no sample buffer ever
+        // arrives, and the reuse path below would hand that dead status back
+        // forever. Tear the session down so this start is a real restart.
+        stop_current_camera(&state).await;
     }
     acquire_preview_camera_source(&state, source_key.clone(), SourceLifecycleStatus::Starting)
         .await;
@@ -520,6 +536,7 @@ pub async fn start_preview_camera(
                     slot.run_id = Some(run_id.clone());
                     slot.source_key = Some(source_key.clone());
                     slot.active = started_thread.take();
+                    slot.live_acked_at = Some(Instant::now());
                     true
                 }
             };
@@ -672,6 +689,7 @@ pub(crate) async fn begin_preview_camera_stop(state: &AppState) -> PreviewCamera
         slot.run_id = None;
         slot.source_key = None;
         slot.starting = None;
+        slot.live_acked_at = None;
         (slot.active.take(), slot.poll_task.take())
     };
     if let Some(task) = poll_task {
@@ -925,6 +943,7 @@ async fn stop_current_camera_inner(state: &AppState, clear_starting: bool) {
     let (previous, poll_task) = {
         let mut slot = state.preview_camera.lock().await;
         slot.run_id = None;
+        slot.live_acked_at = None;
         if clear_starting {
             slot.source_key = None;
             slot.starting = None;
@@ -1054,6 +1073,40 @@ async fn release_current_preview_camera_source(state: &AppState) -> bool {
         .iter()
         .find(|entry| entry.key == source_key)
         .is_some_and(|entry| !entry.consumers.is_empty())
+}
+
+/// How long a Live-acked session may stay frameless before reuse treats it as
+/// dead. First frames normally land well under a second after startRunning();
+/// the layout-readiness budget (5s) sits above this, so a genuinely slow first
+/// frame still has time to arrive after the forced restart.
+const CAMERA_FIRST_FRAME_REUSE_GRACE: Duration = Duration::from_secs(4);
+
+/// True when the current camera session acked Live, has never produced any
+/// frame evidence (no captured-frame count, nothing in the frame store), and
+/// has been in that state longer than the first-frame grace.
+async fn camera_live_session_is_frameless_zombie(state: &AppState) -> bool {
+    let slot = state.preview_camera.lock().await;
+    if slot.status.state != PreviewCameraState::Live {
+        return false;
+    }
+    let has_frame_evidence = slot.status.frames_captured > 0
+        || slot.status.sequence.is_some()
+        || slot.active.as_ref().is_some_and(|active| {
+            // WouldBlock means the capture thread holds the frame lock right
+            // now — that is evidence of life, not a zombie.
+            match active.shared.try_lock() {
+                Ok(shared) => shared.frame_store.latest().is_some(),
+                Err(TryLockError::WouldBlock) => true,
+                Err(TryLockError::Poisoned(poisoned)) => {
+                    poisoned.into_inner().frame_store.latest().is_some()
+                }
+            }
+        });
+    if has_frame_evidence {
+        return false;
+    }
+    slot.live_acked_at
+        .is_none_or(|acked| acked.elapsed() >= CAMERA_FIRST_FRAME_REUSE_GRACE)
 }
 
 async fn reuse_current_camera_source(
@@ -3327,5 +3380,78 @@ mod tests {
             status.message.as_deref(),
             Some("Native camera preview source reused.")
         );
+    }
+    #[tokio::test]
+    async fn frameless_live_slot_past_grace_is_a_zombie() {
+        // The Cam Link failure shape: Live acked, zero frames ever, grace long
+        // gone. The next same-key start must tear down and truly restart.
+        let state = test_state();
+        {
+            let mut slot = state.preview_camera.lock().await;
+            slot.status.state = PreviewCameraState::Live;
+            slot.status.camera_id = Some("camera:test".to_string());
+            slot.status.frames_captured = 0;
+            slot.status.sequence = None;
+            slot.source_key = Some(SourceKey::camera("camera:test".to_string()));
+            slot.live_acked_at =
+                Some(Instant::now() - CAMERA_FIRST_FRAME_REUSE_GRACE - Duration::from_millis(1));
+        }
+        assert!(camera_live_session_is_frameless_zombie(&state).await);
+    }
+
+    #[tokio::test]
+    async fn frameless_live_slot_within_grace_is_not_a_zombie() {
+        // A camera that acked Live a moment ago is still warming up; the
+        // readiness wait owns that window, not a forced restart.
+        let state = test_state();
+        {
+            let mut slot = state.preview_camera.lock().await;
+            slot.status.state = PreviewCameraState::Live;
+            slot.status.frames_captured = 0;
+            slot.status.sequence = None;
+            slot.live_acked_at = Some(Instant::now());
+        }
+        assert!(!camera_live_session_is_frameless_zombie(&state).await);
+    }
+
+    #[tokio::test]
+    async fn live_slot_with_frame_evidence_is_never_a_zombie() {
+        let state = test_state();
+        {
+            let mut slot = state.preview_camera.lock().await;
+            slot.status.state = PreviewCameraState::Live;
+            slot.status.frames_captured = 42;
+            slot.live_acked_at =
+                Some(Instant::now() - CAMERA_FIRST_FRAME_REUSE_GRACE - Duration::from_secs(60));
+        }
+        assert!(!camera_live_session_is_frameless_zombie(&state).await);
+    }
+
+    #[tokio::test]
+    async fn non_live_slot_is_not_a_zombie() {
+        // Starting/Failed/DeviceMissing states have their own handling; the
+        // zombie teardown must never fire for them.
+        let state = test_state();
+        {
+            let mut slot = state.preview_camera.lock().await;
+            slot.status.state = PreviewCameraState::Starting;
+            slot.live_acked_at =
+                Some(Instant::now() - CAMERA_FIRST_FRAME_REUSE_GRACE - Duration::from_secs(60));
+        }
+        assert!(!camera_live_session_is_frameless_zombie(&state).await);
+    }
+
+    #[tokio::test]
+    async fn frameless_live_slot_with_no_ack_timestamp_is_a_zombie() {
+        // A Live status with no recorded ack time (state restored oddly, or a
+        // pre-fix session) has no claim to the warmup grace.
+        let state = test_state();
+        {
+            let mut slot = state.preview_camera.lock().await;
+            slot.status.state = PreviewCameraState::Live;
+            slot.status.frames_captured = 0;
+            slot.live_acked_at = None;
+        }
+        assert!(camera_live_session_is_frameless_zombie(&state).await);
     }
 }
