@@ -2385,6 +2385,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Stable handle for callbacks that only need to READ the config (labels,
   // lookups) without re-creating themselves on every config change.
   const lastRecordingStateRef = useRef<string | null>(null)
+  // The idle status tick that ends a session does not reliably carry the
+  // finished session's id; remember the last one seen so the saved-toast
+  // actions can target the right recording.
+  const lastRecordingSessionIdRef = useRef<string | null>(null)
   // Quality-gate toast dedupe: the gate can re-emit an updated not-100 verdict for
   // the same session (fast assessment, then post-repair); one toast is enough.
   const qualityToastSessionsRef = useRef<Set<string>>(new Set())
@@ -4244,6 +4248,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const status = payload as RecordingStatus
         const previousState = lastRecordingStateRef.current
         lastRecordingStateRef.current = status.state
+        if (status.sessionId) {
+          lastRecordingSessionIdRef.current = status.sessionId
+        }
         applyRecordingStatus(status)
         if (['idle', 'failed'].includes(status.state)) {
           setStreamTargets([])
@@ -4260,16 +4267,37 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ) {
           void refreshSessions(nextClient)
         }
-        // D6: the moment a recording lands is the moment to publish it.
+        // A finished recording gets its two natural next steps: watch it, or
+        // find it in the Library. (The publish pitch lives in the Publish tab,
+        // not in this toast — owner call, 2026-08-16.)
         if (
           status.state === 'idle' &&
           ['recording', 'streaming', 'stopping'].includes(previousState ?? '')
         ) {
+          const finishedSessionId = status.sessionId ?? lastRecordingSessionIdRef.current
+          const openInLibrary = (): void =>
+            openLibraryFromQualityToast(finishedSessionId ?? undefined)
           toast.success('Recording saved', {
-            description: 'Turn it into a publishable upload?',
             action: {
-              label: 'Make it publishable',
-              onClick: () => window.dispatchEvent(new CustomEvent('videorc:open-publish'))
+              label: 'Play',
+              onClick: () => {
+                if (!finishedSessionId || !window.videorc?.openSession) {
+                  openInLibrary()
+                  return
+                }
+                void window.videorc.openSession(finishedSessionId).then((problem) => {
+                  // The export can still be finalizing right after the toast
+                  // fires; the Library row shows the honest state, so land
+                  // there instead of erroring on an eager click.
+                  if (problem) {
+                    openInLibrary()
+                  }
+                })
+              }
+            },
+            cancel: {
+              label: 'Open in Library',
+              onClick: openInLibrary
             },
             duration: 12000
           })

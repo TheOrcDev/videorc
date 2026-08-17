@@ -191,11 +191,15 @@ function TakeoverControls({ onOpenAssets }: { onOpenAssets: () => void }): React
               )
             })}
           </div>
-          <span className="text-xs text-muted-foreground">
+          {/* Reserve two lines of text-xs so swapping between the three hint
+              strings can never reflow the content below (the active-takeover
+              copy is longer than the idle hint and used to push everything
+              down when it wrapped). */}
+          <span className="block min-h-8 text-xs text-muted-foreground">
             {disconnected
               ? `Backend socket is ${wsStatus} — takeovers need the backend.`
               : activeScreen
-                ? `${activeScreen.name} is covering the output. Click it to go back to the scene.`
+                ? `${activeScreen.name} is covering the output — click it to return.`
                 : 'Click a takeover to cover the output — works while live.'}
           </span>
         </>
