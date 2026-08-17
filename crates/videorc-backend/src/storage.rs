@@ -2576,7 +2576,9 @@ impl Database {
              SELECT ?3, ?4, ?6, ?6, 'completed', mode,
                     CASE WHEN ?9 = 0 THEN ?7 ELSE NULL END,
                     CASE WHEN ?9 = 1 THEN ?7 ELSE NULL END,
-                    stream_preset, ?8, COALESCE(?10, duration_ms), sources_json, layout_json,
+                    stream_preset,
+                    CASE WHEN ?9 = 1 THEN NULL ELSE ?8 END,
+                    COALESCE(?10, duration_ms), sources_json, layout_json,
                     output_json, NULL, ?11, ?2, ?5, 'noise-cleanup'
              FROM sessions WHERE id = ?2",
             params![
@@ -5224,6 +5226,19 @@ impl Database {
             ",
         )?;
         ensure_column(&conn, "sessions", "container", "container TEXT")?;
+        // Noise-cleanup derivatives used to store their literal mp4-family
+        // extension as the container, which the session protocol enum rejects —
+        // one such row broke sessions.list (and with it recording) for every
+        // client (2026-08-17). mp4-family files follow the import convention:
+        // the file lives in mp4_path, container stays empty.
+        conn.execute(
+            "UPDATE sessions
+             SET mp4_path = COALESCE(mp4_path, output_path),
+                 output_path = NULL,
+                 container = NULL
+             WHERE container IN ('mp4', 'mov', 'm4v')",
+            [],
+        )?;
         ensure_column(&conn, "sessions", "duration_ms", "duration_ms INTEGER")?;
         ensure_column(
             &conn,

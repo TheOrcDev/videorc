@@ -2337,6 +2337,75 @@ mod tests {
     }
 
     #[test]
+    fn mp4_derivative_stores_no_container_and_routes_to_mp4_path() {
+        // The literal "mp4" once landed in the container column, which the
+        // session protocol enum rejects — one such row broke sessions.list
+        // (and recording) for every client. mp4-family derivatives follow the
+        // import convention: file in mp4_path, container empty.
+        let base = std::env::temp_dir().join(format!(
+            "videorc-cleanup-mp4-container-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let source_path = base.join("source.mp4");
+        let output_path = base.join("source — Noise Cleaned.mp4");
+        std::fs::write(&source_path, b"source bytes").unwrap();
+        std::fs::write(&output_path, b"cleaned bytes").unwrap();
+        let database = Database::open_in_memory_for_tests();
+        let now = Utc::now().to_rfc3339();
+        database
+            .create_completed_session(
+                &completed_recording(
+                    "source",
+                    &source_path,
+                    "record",
+                    Some("microphone:1".to_string()),
+                ),
+                &now,
+                Some(source_path.to_str().unwrap()),
+                Some(1000),
+                Some(12),
+            )
+            .unwrap();
+        let identity = capture_session_file_bound_identity(&source_path)
+            .unwrap()
+            .unwrap();
+        let full_sha256 = full_file_sha256(&source_path).unwrap();
+        let job = database
+            .create_or_get_noise_cleanup_job("source", &identity, NOISE_CLEANUP_PRESET)
+            .unwrap();
+        database
+            .bind_noise_cleanup_source_fingerprint(&job.job.id, &full_sha256)
+            .unwrap();
+        database
+            .complete_noise_cleanup_derivative(
+                &job.job.id,
+                "source",
+                "derivative",
+                "Source title — Noise Cleaned",
+                "Source title",
+                output_path.to_str().unwrap(),
+                "mp4",
+                Some(1000),
+                19,
+            )
+            .unwrap();
+
+        let derivative = database
+            .list_sessions(20)
+            .unwrap()
+            .into_iter()
+            .find(|session| session.id == "derivative")
+            .expect("derivative session must list");
+        assert_eq!(
+            derivative.container, None,
+            "mp4 must not leak into container"
+        );
+        assert_eq!(derivative.mp4_path.as_deref(), output_path.to_str());
+        assert_eq!(derivative.output_path, None);
+    }
+
+    #[test]
     fn externally_missing_output_keeps_derivative_metadata_and_reserves_its_path() {
         let base = std::env::temp_dir().join(format!(
             "videorc-cleanup-external-output-delete-{}",
