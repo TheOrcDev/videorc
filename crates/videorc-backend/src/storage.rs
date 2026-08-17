@@ -3249,7 +3249,7 @@ impl Database {
                 output_path,
                 mp4_path,
                 stream_preset,
-                container,
+                container: normalized_session_container(container),
                 duration_ms,
                 final_diagnostics: diagnostics_json
                     .as_deref()
@@ -3462,7 +3462,7 @@ impl Database {
                     output_path: row.get(6)?,
                     mp4_path: row.get(7)?,
                     stream_preset: stream_preset.clone(),
-                    container: row.get(9)?,
+                    container: normalized_session_container(row.get(9)?),
                     duration_ms: row.get(10)?,
                     file_size_bytes: row.get(12)?,
                     scene_label: session_scene_label(&layout, stream_preset.as_deref(), &mode),
@@ -5896,6 +5896,28 @@ pub fn session_scene_label(
     )
 }
 
+/// A stored container the session protocol does not recognise must degrade to
+/// "no container" for that one row — never fail the whole list. One malformed
+/// row once took recording down for every client (2026-08-17): the renderer's
+/// protocol validation rejects the full sessions.list response on any single
+/// bad value. Validated against the real protocol enum so the accepted set can
+/// never drift from what clients enforce.
+fn normalized_session_container(value: Option<String>) -> Option<String> {
+    value.filter(|container| {
+        let recognised = serde_json::from_value::<crate::protocol::RecordingContainer>(
+            serde_json::Value::String(container.clone()),
+        )
+        .is_ok();
+        if !recognised {
+            tracing::warn!(
+                container,
+                "session row carries a container the protocol does not know; listing it without one"
+            );
+        }
+        recognised
+    })
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -6072,6 +6094,70 @@ fn title_case_word(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::session_scene_label;
+
+    #[test]
+    fn unknown_container_degrades_to_one_row_not_a_dead_list() {
+        // The class of the 2026-08-17 outage: any single stored container the
+        // protocol enum rejects used to fail sessions.list validation in every
+        // client, which blocked recording entirely. A bad row must list as
+        // container-less; the rest of the library must be untouched.
+        use super::*;
+        let database = Database {
+            conn: Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+            path: PathBuf::from(":memory:"),
+        };
+        database.migrate().unwrap();
+        {
+            let conn = database.lock().unwrap();
+            for (id, container) in [
+                ("healthy", Some("mkv")),
+                ("poisoned", Some("mp42-from-the-future")),
+                ("importish", None),
+            ] {
+                conn.execute(
+                    "INSERT INTO sessions
+                        (id, title, started_at, status, mode, container,
+                         sources_json, layout_json, output_json)
+                     VALUES (?1, ?1, '2026-08-17T00:00:00Z', 'completed', 'record', ?2,
+                             '{}', ?3, '{}')",
+                    params![
+                        id,
+                        container,
+                        serde_json::to_string(&crate::protocol::default_layout_settings()).unwrap(),
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let sessions = database.list_sessions(10).unwrap();
+        assert_eq!(sessions.len(), 3, "no row may be dropped");
+        let by_id = |id: &str| {
+            sessions
+                .iter()
+                .find(|session| session.id == id)
+                .unwrap_or_else(|| panic!("{id} must list"))
+        };
+        assert_eq!(by_id("healthy").container.as_deref(), Some("mkv"));
+        assert_eq!(
+            by_id("poisoned").container,
+            None,
+            "an unrecognised container must degrade to none, not poison the list"
+        );
+        assert_eq!(by_id("importish").container, None);
+        // Every listed container must round-trip through the protocol enum —
+        // the exact invariant the renderer's validator enforces on clients.
+        for session in &sessions {
+            if let Some(container) = &session.container {
+                serde_json::from_value::<crate::protocol::RecordingContainer>(
+                    serde_json::Value::String(container.clone()),
+                )
+                .unwrap_or_else(|_| {
+                    panic!("listed container {container:?} must satisfy the protocol enum")
+                });
+            }
+        }
+    }
 
     #[test]
     fn scene_labels_map_presets_and_stream_presets() {
