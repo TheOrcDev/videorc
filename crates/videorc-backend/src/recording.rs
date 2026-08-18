@@ -2335,6 +2335,12 @@ pub async fn start_session(
                 &session_id,
                 params.output.video.fps,
                 startup_source_requirements,
+                Some(crate::protocol::PreviewCameraStartParams {
+                    sources: params.sources.clone(),
+                    layout: params.layout.clone(),
+                    video: params.output.video.clone(),
+                    ffmpeg_path: Some(ffmpeg_path.clone()),
+                }),
             )
             .await
             {
@@ -6890,6 +6896,14 @@ const RECORDING_STARTUP_CADENCE_FRAME_INTERVAL_FACTOR: f64 = 6.0;
 #[cfg(not(target_os = "macos"))]
 const RECORDING_STARTUP_CADENCE_MIN_FRAME_GAP: Duration = Duration::from_millis(200);
 const RECORDING_CAMERA_CADENCE_READY_TIMEOUT: Duration = Duration::from_millis(3000);
+/// When the cadence has not settled by this point, the session is presumed to
+/// have drifted into degraded delivery (long-uptime capture cards do this) and
+/// gets one forced in-place restart instead of running out the clock.
+const RECORDING_CAMERA_CADENCE_RESTART_AFTER: Duration = Duration::from_millis(1200);
+/// The post-restart budget covers a real device warm-up (Cam Link first frame
+/// is 2-5s) plus the ~1-2s of frames the cadence sampler needs. Only applies
+/// when a restart was actually performed; the undisturbed path keeps the 3s.
+const RECORDING_CAMERA_CADENCE_RESTARTED_TIMEOUT: Duration = Duration::from_millis(10_000);
 const RECORDING_CAMERA_CADENCE_READY_POLL: Duration = Duration::from_millis(25);
 const RECORDING_CAMERA_CADENCE_FRAME_INTERVAL_FACTOR: f64 = 2.1;
 const RECORDING_CAMERA_CADENCE_MAX_FRAME_AGE_MS: u64 = 250;
@@ -7006,14 +7020,15 @@ async fn await_recording_camera_cadence_ready(
     session_id: &str,
     target_fps: u32,
     requirements: CompositorStartupSourceRequirements,
+    camera_restart: Option<crate::protocol::PreviewCameraStartParams>,
 ) -> Result<()> {
     if !requirements.require_camera_source {
         return Ok(());
     }
 
     reset_preview_camera_capture_timings(state).await;
-    let started_at = Instant::now();
-    let threshold_ms = camera_cadence_ready_threshold_ms(target_fps);
+    let mut started_at = Instant::now();
+    let mut restarted = false;
 
     loop {
         let (sample_pts_gap_p95_ms, callback_gap_p95_ms, frame_age_ms, camera_source_fps) = {
@@ -7025,6 +7040,8 @@ async fn await_recording_camera_cadence_ready(
                 diagnostics.preview_camera_source_fps,
             )
         };
+        let threshold_ms =
+            camera_cadence_ready_threshold_with_source_ms(target_fps, camera_source_fps);
 
         if camera_cadence_ready(
             sample_pts_gap_p95_ms,
@@ -7064,7 +7081,68 @@ async fn await_recording_camera_cadence_ready(
             return Ok(());
         }
 
-        if started_at.elapsed() >= RECORDING_CAMERA_CADENCE_READY_TIMEOUT {
+        // Remediate before refusing: a long-lived capture session can drift
+        // into bursty delivery (classic Cam Link behavior after hours of
+        // uptime) while still previewing fine — nothing else in the app ever
+        // restarts a degraded-but-alive camera, so the record button was the
+        // first and only place the rot surfaced, as a dead click. One forced
+        // stop+start clears the drift in practice; plain start_preview_camera
+        // would REUSE the degraded session (it has frame evidence), so the
+        // stop must be explicit.
+        if !restarted
+            && started_at.elapsed() >= RECORDING_CAMERA_CADENCE_RESTART_AFTER
+            && let Some(restart_params) = camera_restart.clone()
+        {
+            restarted = true;
+            let _ = emit_health_event(
+                state,
+                Some(session_id),
+                HealthLevel::Info,
+                "recording-camera-cadence-restart",
+                &format!(
+                    "Camera cadence did not settle (sample PTS p95 {}, threshold {:.0}ms); restarting the camera session before recording starts.",
+                    optional_ms(sample_pts_gap_p95_ms),
+                    threshold_ms,
+                ),
+            );
+            let stop = crate::preview_camera::begin_preview_camera_stop(state).await;
+            let _ = crate::preview_camera::finish_preview_camera_stop(stop).await;
+            let _ =
+                crate::preview_camera::start_preview_camera(state.clone(), restart_params).await;
+            reset_preview_camera_capture_timings(state).await;
+            // The fresh session earns a fresh clock with a warm-up-sized budget.
+            started_at = Instant::now();
+        }
+
+        let budget = if restarted {
+            RECORDING_CAMERA_CADENCE_RESTARTED_TIMEOUT
+        } else {
+            RECORDING_CAMERA_CADENCE_READY_TIMEOUT
+        };
+        if started_at.elapsed() >= budget {
+            // Degrade before blocking: fresh frames prove the camera is alive,
+            // just jittery — that records as visible stutter, not garbage. The
+            // hard refusal is reserved for a source that is not delivering at
+            // all. Mirrors the cadence-mismatch policy above: warn, never
+            // block a usable take.
+            let frames_fresh =
+                frame_age_ms.is_some_and(|age| age <= RECORDING_CAMERA_CADENCE_MAX_FRAME_AGE_MS);
+            if frames_fresh {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Warn,
+                    "recording-camera-cadence-degraded",
+                    &format!(
+                        "Camera frame delivery is unstable (sample PTS p95 {}, threshold {:.0}ms, callback p95 {}, frame age {}) — recording anyway; motion may stutter. A camera or HDMI re-plug usually clears this.",
+                        optional_ms(sample_pts_gap_p95_ms),
+                        threshold_ms,
+                        optional_ms(callback_gap_p95_ms),
+                        optional_u64_ms(frame_age_ms)
+                    ),
+                );
+                return Ok(());
+            }
             let message = format!(
                 "Recording startup blocked before encoding: camera sample PTS cadence did not settle (sample PTS p95 {}, threshold {:.0}ms, callback p95 {}, frame age {}).",
                 optional_ms(sample_pts_gap_p95_ms),
@@ -7117,6 +7195,25 @@ fn camera_cadence_ready(
 
 fn camera_cadence_ready_threshold_ms(target_fps: u32) -> f64 {
     1000.0 / f64::from(target_fps.max(1)) * RECORDING_CAMERA_CADENCE_FRAME_INTERVAL_FACTOR
+}
+
+/// The budget must be honest about the SOURCE's frame interval, not just the
+/// session's: a 23.976p HDMI feed into a 30fps session has a nominal gap of
+/// 41.7ms, so the session-derived 70ms budget leaves a healthy 24p camera one
+/// jitter spike from a refused recording. Scale to the slower of the two when
+/// the measured source rate is credible.
+fn camera_cadence_ready_threshold_with_source_ms(
+    target_fps: u32,
+    camera_source_fps: Option<f64>,
+) -> f64 {
+    let target_threshold = camera_cadence_ready_threshold_ms(target_fps);
+    let source_threshold = camera_source_fps
+        .filter(|fps| fps.is_finite() && (5.0..=120.0).contains(fps))
+        .map(|fps| 1000.0 / fps * RECORDING_CAMERA_CADENCE_FRAME_INTERVAL_FACTOR);
+    match source_threshold {
+        Some(source) => target_threshold.max(source),
+        None => target_threshold,
+    }
 }
 
 /// The camera can be healthy (steady cadence, fresh frames) yet deliver a DIFFERENT
@@ -19239,6 +19336,171 @@ mod tests {
         assert!(
             native_window_recording_path_message(false).contains("FFmpeg AVFoundation fallback")
         );
+    }
+
+    #[test]
+    fn camera_cadence_threshold_honors_a_slower_source() {
+        // A 23.976p HDMI feed into a 30fps session has a 41.7ms nominal gap;
+        // the session-derived 70ms budget left healthy 24p cameras one jitter
+        // spike from a refused recording.
+        let with_24p = camera_cadence_ready_threshold_with_source_ms(30, Some(23.976));
+        assert!(
+            with_24p > 87.0 && with_24p < 88.5,
+            "24p source must widen the budget to its own interval: {with_24p}"
+        );
+        // A source faster than the session never TIGHTENS the budget.
+        let with_60 = camera_cadence_ready_threshold_with_source_ms(30, Some(60.0));
+        assert!((with_60 - camera_cadence_ready_threshold_ms(30)).abs() < 0.01);
+        // Garbage measurements fall back to the session-derived budget.
+        for garbage in [None, Some(f64::NAN), Some(0.0), Some(2.0), Some(500.0)] {
+            let fallback = camera_cadence_ready_threshold_with_source_ms(30, garbage);
+            assert!((fallback - camera_cadence_ready_threshold_ms(30)).abs() < 0.01);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cadence_barrier_restarts_then_records_degraded_when_frames_stay_fresh() {
+        // The 2026-08-19 report: p95 ~192ms with 123ms frame age — camera
+        // alive but bursty. The barrier must try one restart, then start the
+        // recording with a warning instead of refusing (dead record button).
+        let state = test_state();
+        // Background samplers in the test state recompute camera diagnostics
+        // from the (absent) session; pin the degraded-but-fresh snapshot for
+        // the whole run so the barrier sees a stable picture.
+        let pin_state = state.clone();
+        let pin = tokio::spawn(async move {
+            loop {
+                {
+                    let mut diagnostics = pin_state.diagnostics.lock().await;
+                    diagnostics.preview_camera_sample_pts_gap_p95_ms = Some(192.4);
+                    diagnostics.preview_camera_capture_gap_p95_ms = Some(193.8);
+                    diagnostics.preview_camera_frame_age_ms = Some(123);
+                    diagnostics.preview_camera_source_fps = Some(23.96);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+        let requirements = CompositorStartupSourceRequirements {
+            require_real_source: true,
+            require_camera_source: true,
+            require_screen_source: false,
+        };
+        let restart = crate::protocol::PreviewCameraStartParams {
+            sources: crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: Some("camera:avfoundation-native:test".to_string()),
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: crate::protocol::default_layout_settings(),
+            video: crate::protocol::VideoSettings {
+                preset: crate::protocol::VideoPreset::Tutorial1440p30,
+                width: 2560,
+                height: 1440,
+                fps: 30,
+                bitrate_kbps: 8000,
+            },
+            ffmpeg_path: None,
+        };
+
+        state
+            .database
+            .create_completed_session(
+                &crate::storage::NewSession {
+                    id: "session-degraded".to_string(),
+                    title: "session-degraded".to_string(),
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                    mode: "record".to_string(),
+                    output_path: None,
+                    container: None,
+                    stream_preset: None,
+                    sources: crate::protocol::SourceSelection {
+                        screen_id: None,
+                        window_id: None,
+                        camera_id: Some("camera:avfoundation-native:test".to_string()),
+                        microphone_id: None,
+                        test_pattern: false,
+                    },
+                    layout: crate::protocol::default_layout_settings(),
+                    output: OutputSettings {
+                        keep_original_mkv: false,
+                        record_enabled: true,
+                        stream_enabled: false,
+                        output_directory: None,
+                        ffmpeg_path: None,
+                        video: default_video_settings(),
+                        rtmp: RtmpSettings {
+                            preset: RtmpPreset::YouTube,
+                            server_url: "rtmp://a.rtmp.youtube.com/live2".to_string(),
+                            stream_key: "abc123".to_string(),
+                        },
+                    },
+                },
+                &chrono::Utc::now().to_rfc3339(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let result = await_recording_camera_cadence_ready(
+            &state,
+            "session-degraded",
+            30,
+            requirements,
+            Some(restart),
+        )
+        .await;
+
+        pin.abort();
+        assert!(
+            result.is_ok(),
+            "fresh-but-jittery frames must record with a warning, not refuse: {result:?}"
+        );
+        let events = state
+            .database
+            .list_health_events("session-degraded")
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.code == "recording-camera-cadence-restart"),
+            "the barrier must attempt one in-place camera restart first"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.code == "recording-camera-cadence-degraded"),
+            "proceeding on a jittery camera must leave a warning in the session record"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cadence_barrier_still_refuses_a_camera_with_no_fresh_frames() {
+        let state = test_state();
+        {
+            let mut diagnostics = state.diagnostics.lock().await;
+            diagnostics.preview_camera_sample_pts_gap_p95_ms = Some(400.0);
+            diagnostics.preview_camera_capture_gap_p95_ms = Some(400.0);
+            diagnostics.preview_camera_frame_age_ms = Some(5_000);
+            diagnostics.preview_camera_source_fps = None;
+        }
+        let requirements = CompositorStartupSourceRequirements {
+            require_real_source: true,
+            require_camera_source: true,
+            require_screen_source: false,
+        };
+
+        let result =
+            await_recording_camera_cadence_ready(&state, "session-dead", 30, requirements, None)
+                .await;
+
+        assert!(
+            result.is_err(),
+            "a camera with no fresh frames must still refuse to record"
+        );
+        assert!(result.unwrap_err().to_string().contains("did not settle"));
     }
 
     #[test]
