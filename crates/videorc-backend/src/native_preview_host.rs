@@ -26,6 +26,9 @@ pub struct NativePreviewHostBounds {
     // False = hide the surface entirely (slot scrolled away / document hidden).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible: Option<bool>,
+    // Corner radius in points; see PreviewSurfaceBounds::corner_radius.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_radius: Option<f64>,
     // Cross-process stacking target (detached preview window) + always-on-top.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_above_window_id: Option<u32>,
@@ -52,6 +55,7 @@ impl NativePreviewHostBounds {
             clip_width: bounds.clip_width.map(|width| width.max(0.0)),
             clip_height: bounds.clip_height.map(|height| height.max(0.0)),
             visible: bounds.visible,
+            corner_radius: bounds.corner_radius,
             order_above_window_id: bounds.order_above_window_id,
             order_above_window_handle: None,
             preview_generation: None,
@@ -71,6 +75,14 @@ impl NativePreviewHostBounds {
             self.width * self.scale_factor,
             self.height * self.scale_factor,
         )
+    }
+
+    /// Sanitized corner radius in points: finite, non-negative, zero when absent.
+    pub fn corner_radius_points(&self) -> f64 {
+        self.corner_radius
+            .filter(|radius| radius.is_finite())
+            .map(|radius| radius.max(0.0))
+            .unwrap_or(0.0)
     }
 
     /// The layer's contentsScale for this bounds' target display (plan 025 S2).
@@ -386,6 +398,7 @@ mod macos {
             let ca_layer: &CALayer = layer.as_super();
             view.setLayer(Some(ca_layer));
             view.setWantsLayer(true);
+            apply_corner_radius(&layer, bounds.corner_radius_points());
             Self {
                 view,
                 layer,
@@ -427,6 +440,9 @@ mod macos {
                 let ca_layer: &CALayer = self.layer.as_super();
                 ca_layer.setContentsScale(bounds.contents_scale());
             }
+            if self.bounds.corner_radius_points() != bounds.corner_radius_points() {
+                apply_corner_radius(&self.layer, bounds.corner_radius_points());
+            }
             if self.bounds.view_frame_in_clip() != bounds.view_frame_in_clip() {
                 self.view.setFrame(view_frame(&bounds));
             }
@@ -452,6 +468,16 @@ mod macos {
             "[videorc-native-preview-sizing] non-finite window frame requested=({},{} {}x{}) — macOS will clamp",
             requested.origin.x, requested.origin.y, requested.size.width, requested.size.height,
         );
+    }
+
+    /// Clip the Metal surface to the docked slot's rounded panel. CALayer
+    /// radii are in POINTS (contentsScale owns the pixel mapping), so the
+    /// value plumbs straight from the renderer's CSS radius. Square corners
+    /// used to poke past the rounded container (owner report, 2026-08-19).
+    fn apply_corner_radius(layer: &CAMetalLayer, radius_points: f64) {
+        let ca_layer: &CALayer = layer.as_super();
+        ca_layer.setCornerRadius(radius_points);
+        ca_layer.setMasksToBounds(radius_points > 0.0);
     }
 
     fn sizing_inputs(bounds: &NativePreviewHostBounds) -> (u64, u64, u64) {
@@ -1024,6 +1050,7 @@ mod tests {
     #[test]
     fn host_bounds_clamp_to_visible_drawable_size() {
         let bounds = PreviewSurfaceBounds {
+            corner_radius: None,
             screen_x: 10.0,
             screen_y: 20.0,
             width: 0.0,
@@ -1073,6 +1100,7 @@ mod tests {
     fn clip_frame_and_view_offset_crop_the_scrolled_slot() {
         // Slot spans screen rows 20..380; the scroll container only shows rows 120..320.
         let bounds = NativePreviewHostBounds {
+            corner_radius: None,
             screen_x: 10.0,
             screen_y: 20.0,
             width: 640.0,
@@ -1152,6 +1180,7 @@ mod tests {
     #[test]
     fn host_bounds_carry_clip_and_visibility() {
         let bounds = PreviewSurfaceBounds {
+            corner_radius: None,
             screen_x: 10.0,
             screen_y: 20.0,
             width: 640.0,

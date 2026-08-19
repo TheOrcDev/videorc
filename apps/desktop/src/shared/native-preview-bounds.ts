@@ -57,6 +57,11 @@ export function normalizePreviewSurfaceBounds(bounds: PreviewSurfaceBounds): Pre
   } else {
     delete normalized.elevated
   }
+  if (typeof bounds.cornerRadius === 'number' && Number.isFinite(bounds.cornerRadius)) {
+    normalized.cornerRadius = Math.max(0, bounds.cornerRadius)
+  } else {
+    delete normalized.cornerRadius
+  }
   // Renderer-supplied bounds are never an HWND authority. The object spread
   // above intentionally preserves unknown future geometry, so privileged
   // fields must be deleted explicitly rather than relying on TypeScript.
@@ -164,7 +169,9 @@ export function previewSurfaceDrawableBoundsChanged(
     Math.abs(previous.width - next.width) >= 1 ||
     Math.abs(previous.height - next.height) >= 1 ||
     Math.abs(previous.scaleFactor - next.scaleFactor) >= 0.01 ||
-    (previous.visible ?? true) !== (next.visible ?? true)
+    (previous.visible ?? true) !== (next.visible ?? true) ||
+    // A radius change must reach the layer even when nothing else moved.
+    Math.abs((previous.cornerRadius ?? 0) - (next.cornerRadius ?? 0)) >= 0.5
   )
 }
 

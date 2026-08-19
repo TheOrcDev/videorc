@@ -1385,6 +1385,9 @@ export interface PreviewSurfaceBounds {
   // whether the pair floats above other apps (always-on-top).
   orderAboveWindowId?: number
   elevated?: boolean
+  /** Corner radius in points; docked previews pass the panel radius so the
+   * native surface clips to the rounded slot. Absent/0 = square. */
+  cornerRadius?: number
 }
 
 /** Canonical lowercase, fixed-width pointer value. It is never renderer-facing. */

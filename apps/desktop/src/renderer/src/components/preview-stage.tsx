@@ -211,7 +211,10 @@ function DockedPreviewFrame({
       >
         <div
           ref={slotRef}
-          className="relative h-full"
+          /* rounded-panel (18pt) matches the cornerRadius main sends with the
+             docked surface bounds — the native CAMetalLayer now clips itself
+             to the same radius, so the CSS ground and the video agree. */
+          className="relative h-full overflow-hidden rounded-panel"
           data-videorc-dock-slot
           style={{ aspectRatio: slotRatio }}
         >

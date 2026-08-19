@@ -2216,6 +2216,12 @@ pub struct PreviewSurfaceBounds {
     pub order_above_window_id: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elevated: Option<bool>,
+    // Corner radius in POINTS for the native surface (CALayer works in points;
+    // contentsScale handles pixels). Docked previews pass the panel radius so
+    // the surface clips to the rounded slot instead of poking square corners
+    // past it; absent/0 = square (floating window, legacy callers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_radius: Option<f64>,
 }
 
 /// Validated opaque HWND identity used only by Electron main and the backend

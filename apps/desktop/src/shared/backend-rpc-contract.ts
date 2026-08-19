@@ -81,6 +81,7 @@ export interface BackendRpcMethodMap {
   'entitlements.get': BackendRpcDefinition<undefined, EntitlementsSnapshot>
   'entitlements.refresh': BackendRpcDefinition<undefined, EntitlementsSnapshot>
   'account.get': BackendRpcDefinition<undefined, VideorcAccountSnapshot>
+  'account.refresh': BackendRpcDefinition<undefined, VideorcAccountSnapshot>
   'account.complete_sign_in': BackendRpcDefinition<
     { code: string; state: string; verifier: string; intentGeneration: number },
     VideorcAccountSnapshot
@@ -696,7 +697,8 @@ const rendererSafePreviewBoundsSchema = objectSchema(
     clipHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
-    elevated: optionalSchema(booleanSchema)
+    elevated: optionalSchema(booleanSchema),
+    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 }))
   },
   { allowUnknown: false }
 )
@@ -727,7 +729,8 @@ const mainOwnedPreviewBoundsSchema = objectSchema(
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
     orderAboveWindowHandle: optionalSchema(opaqueNativeWindowHandleSchema),
-    elevated: optionalSchema(booleanSchema)
+    elevated: optionalSchema(booleanSchema),
+    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 }))
   },
   { allowUnknown: false }
 )
@@ -1302,6 +1305,7 @@ const runtimeContracts = {
   'entitlements.get': { params: undefinedSchema, result: entitlementsSchema },
   'entitlements.refresh': { params: undefinedSchema, result: entitlementsSchema },
   'account.get': { params: undefinedSchema, result: accountSchema },
+  'account.refresh': { params: undefinedSchema, result: accountSchema },
   'account.complete_sign_in': {
     params: objectSchema(
       {

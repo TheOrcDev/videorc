@@ -39,6 +39,8 @@ mod protocol {
         pub order_above_window_id: Option<u32>,
         #[serde(default)]
         pub elevated: Option<bool>,
+        #[serde(default)]
+        pub corner_radius: Option<f64>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
