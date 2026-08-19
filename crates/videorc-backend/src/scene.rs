@@ -131,8 +131,7 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
             if let Some(camera_id) = params.sources.camera_id.clone() {
                 let mut camera =
                     camera_source(camera_id, &params.layout, output_width, output_height);
-                camera.transform = full_frame_transform();
-                camera.default_transform = full_frame_transform();
+                place_camera_keeping_crop(&mut camera, full_frame_transform());
                 scene.sources.push(camera);
             } else {
                 scene.sources.push(base_source(&params.sources));
@@ -166,8 +165,7 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
             if let Some(camera_id) = params.sources.camera_id.clone() {
                 let mut camera =
                     camera_source(camera_id, &params.layout, output_width, output_height);
-                camera.transform = region_transform(camera_x, camera_fraction);
-                camera.default_transform = camera.transform.clone();
+                place_camera_keeping_crop(&mut camera, region_transform(camera_x, camera_fraction));
                 scene.sources.push(camera);
             }
         }
@@ -212,8 +210,7 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
             {
                 let mut camera =
                     camera_source(camera_id, &params.layout, output_width, output_height);
-                camera.transform = full_frame_transform();
-                camera.default_transform = full_frame_transform();
+                place_camera_keeping_crop(&mut camera, full_frame_transform());
                 scene.sources.push(camera);
             } else {
                 scene.sources.push(base_source(&params.sources));
@@ -375,6 +372,22 @@ fn camera_source(
     }
 }
 
+/// Place a camera into a preset frame while keeping the zoom/pan crop that
+/// `camera_source` derived from the layout. Placement transforms only say
+/// WHERE the camera sits; overwriting the whole transform silently discarded
+/// the crop, which made Zoom / Pan X / Pan Y no-ops in every preset except
+/// ScreenCamera (owner report, 2026-08-19). All three render paths (Metal,
+/// CPU, FFmpeg) consume the same crop fields, so parity holds.
+fn place_camera_keeping_crop(camera: &mut SceneSource, placement: SceneTransform) {
+    let mut placed = placement;
+    placed.crop_left = camera.transform.crop_left;
+    placed.crop_top = camera.transform.crop_top;
+    placed.crop_right = camera.transform.crop_right;
+    placed.crop_bottom = camera.transform.crop_bottom;
+    camera.transform = placed.clone();
+    camera.default_transform = placed;
+}
+
 fn full_frame_transform() -> SceneTransform {
     SceneTransform {
         x: 0.0,
@@ -446,8 +459,10 @@ fn push_vertical_stack(
 
     if let Some(camera_id) = params.sources.camera_id.clone() {
         let mut camera = camera_source(camera_id, &params.layout, output_width, output_height);
-        camera.transform = vertical_band_transform(bands.camera_y, bands.camera_height);
-        camera.default_transform = camera.transform.clone();
+        place_camera_keeping_crop(
+            &mut camera,
+            vertical_band_transform(bands.camera_y, bands.camera_height),
+        );
         scene.sources.push(camera);
     }
 }
@@ -473,8 +488,7 @@ fn collapsed_vertical_single_source(
         (true, Some(_)) => None,
         (false, Some(camera_id)) => {
             let mut camera = camera_source(camera_id, &params.layout, output_width, output_height);
-            camera.transform = full_frame_transform();
-            camera.default_transform = full_frame_transform();
+            place_camera_keeping_crop(&mut camera, full_frame_transform());
             Some(camera)
         }
         (_, None) => Some(base_source(&params.sources)),
@@ -1001,6 +1015,35 @@ mod tests {
         assert_eq!(scene.sources[0].transform.width, 1.0);
         assert!(scene.sources[1].transform.x > 0.6);
         assert!(scene.sources[1].transform.y > 0.6);
+    }
+
+    #[test]
+    fn camera_zoom_crop_survives_every_preset_placement() {
+        // Zoom/pan derive a crop in camera_source; the placement arms used to
+        // overwrite the whole transform and silently discard it, making
+        // Zoom / Pan X / Pan Y no-ops outside ScreenCamera.
+        for preset in [
+            LayoutPreset::CameraOnly,
+            LayoutPreset::SideBySide,
+            LayoutPreset::VerticalCameraOnly,
+            LayoutPreset::VerticalSplit,
+        ] {
+            let mut params = base_params();
+            params.layout.layout_preset = preset.clone();
+            params.layout.camera_zoom = 150;
+            params.layout.camera_offset_x = 20;
+            let scene = scene_from_capture_config(params);
+            let camera = scene
+                .sources
+                .iter()
+                .find(|source| matches!(source.kind, SceneSourceKind::Camera))
+                .unwrap_or_else(|| panic!("{preset:?} must place the camera"));
+            assert!(
+                camera.transform.crop_left > 0.0 || camera.transform.crop_right > 0.0,
+                "{preset:?} must keep the zoom crop, got {:?}",
+                camera.transform
+            );
+        }
     }
 
     #[test]

@@ -1125,6 +1125,37 @@ async fn camera_live_session_is_frameless_zombie(state: &AppState) -> bool {
         .is_none_or(|acked| acked.elapsed() >= CAMERA_FIRST_FRAME_REUSE_GRACE)
 }
 
+/// Test-only: install a healthy Live camera slot whose capture target was
+/// derived from `layout`, so cross-module tests (live_layout's geometry
+/// resync) can arm a staleness scenario without reaching into private slot
+/// fields.
+#[cfg(test)]
+pub(crate) async fn test_install_live_camera_for_layout(
+    state: &AppState,
+    camera_id: &str,
+    layout: &LayoutSettings,
+    video: &VideoSettings,
+) {
+    let (stop_tx, _stop_rx) = std_mpsc::channel();
+    let mut slot = state.preview_camera.lock().await;
+    slot.source_key = Some(SourceKey::camera(camera_id.to_string()));
+    slot.status.state = PreviewCameraState::Live;
+    slot.status.camera_id = Some(camera_id.to_string());
+    slot.status.target_fps = video.fps;
+    slot.status.frames_captured = 42;
+    slot.status.sequence = Some(42);
+    slot.live_acked_at = Some(Instant::now());
+    slot.active = Some(NativeCameraPreviewThread {
+        stop_tx,
+        join_handle: None,
+        shared: Arc::new(StdMutex::new(PreviewCameraShared::default())),
+        ffmpeg_path: "ffmpeg".to_string(),
+        layout: layout.clone(),
+        video: video.clone(),
+        capture_target: camera_capture_target_dimensions(layout, video),
+    });
+}
+
 /// True when the live camera session's configured capture box no longer
 /// matches what `layout`/`video` require. A hot preset switch (inset overlay
 /// <-> full canvas) keeps the session alive while its AVFoundation output

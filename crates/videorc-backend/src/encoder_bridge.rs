@@ -3325,7 +3325,7 @@ impl RawVideoFifoWriter {
     fn close_and_join(&mut self) {
         self.frame_mailbox.close();
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            bounded_writer_join(join);
         }
     }
 }
@@ -3616,9 +3616,27 @@ impl VideoToolboxFifoWriter {
     fn close_and_join(&mut self) {
         self.frame_tx.take();
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            bounded_writer_join(join);
         }
     }
+}
+
+/// Join a writer thread with a bounded grace, then DETACH it. A writer blocked
+/// on a stalled sink (dead RTMP ingest, wedged fifo consumer) must not wedge
+/// session teardown — the unbounded join here was one of the two places a
+/// stop against an unresponsive Twitch endpoint hung until Force stop
+/// (owner report, 2026-08-19). A detached thread is reaped when the fifo/pipe
+/// closes or at process teardown.
+fn bounded_writer_join<T>(join: std::thread::JoinHandle<T>) {
+    const WRITER_CLOSE_JOIN_GRACE: Duration = Duration::from_secs(3);
+    let deadline = Instant::now() + WRITER_CLOSE_JOIN_GRACE;
+    while !join.is_finished() {
+        if Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = join.join();
 }
 
 enum PreservingOutputFrameOffer<T> {
