@@ -296,6 +296,9 @@ describe('Electron IPC contract', () => {
     expect(
       validateElectronInvokeResult('preview-surface:set-frame-polling-suppressed', surfaceStatus)
     ).toEqual(surfaceStatus)
+    expect(
+      validateElectronInvokeResult('preview-surface:drain-host-commands', surfaceStatus)
+    ).toEqual(surfaceStatus)
     const d3d11SurfaceStatus = {
       ...surfaceStatus,
       transport: 'd3d11-shared-texture',
@@ -305,6 +308,15 @@ describe('Electron IPC contract', () => {
     expect(validateElectronInvokeResult('preview-surface:status', d3d11SurfaceStatus)).toEqual(
       d3d11SurfaceStatus
     )
+    for (const invalid of [
+      { ...surfaceStatus, bounds: { ...bounds, cornerRadius: -1 } },
+      { ...surfaceStatus, bounds: { ...bounds, cornerRadius: 257 } }
+    ]) {
+      expect(() => validateElectronInvokeResult('preview-surface:status', invalid)).toThrow()
+      expect(() =>
+        validateElectronInvokeResult('preview-surface:drain-host-commands', invalid)
+      ).toThrow()
+    }
     for (const leaked of [
       { ...d3d11SurfaceStatus, nativeWindowHandle: '0x0000000000000001' },
       { ...d3d11SurfaceStatus, processId: 42 },
