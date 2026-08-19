@@ -17,30 +17,25 @@ describe('window capture protection policy', () => {
     'proof-surface'
   ]
 
-  it('protects every app-owned control and proof window on Windows', () => {
-    for (const role of everyRole) {
-      expect(videorcWindowRequiresCaptureProtection(role, 'win32')).toBe(true)
+  it('protects ONLY the notes teleprompter, on every platform', () => {
+    // Owner call, 2026-08-19: comments and captions are part of the show and
+    // must stay visible in recordings; notes is the one private window.
+    for (const platform of ['darwin', 'win32', 'linux'] as const) {
+      for (const role of everyRole) {
+        expect(videorcWindowRequiresCaptureProtection(role, platform)).toBe(role === 'notes')
+      }
     }
-  })
-
-  it('preserves cross-platform protection for presentation-side control windows', () => {
-    expect(videorcWindowRequiresCaptureProtection('notes', 'darwin')).toBe(true)
-    expect(videorcWindowRequiresCaptureProtection('comments', 'linux')).toBe(true)
-    expect(videorcWindowRequiresCaptureProtection('captions', 'darwin')).toBe(true)
-    expect(videorcWindowRequiresCaptureProtection('main', 'darwin')).toBe(false)
-    expect(videorcWindowRequiresCaptureProtection('preview', 'linux')).toBe(false)
-    expect(videorcWindowRequiresCaptureProtection('proof-surface', 'darwin')).toBe(false)
   })
 
   it('is idempotent for one window instance', () => {
     const setContentProtection = vi.fn()
     const window = { setContentProtection }
 
-    expect(applyVideorcWindowCaptureProtection(window, 'main', { platform: 'win32' })).toEqual({
+    expect(applyVideorcWindowCaptureProtection(window, 'notes', { platform: 'win32' })).toEqual({
       state: 'protected',
       protected: true
     })
-    expect(applyVideorcWindowCaptureProtection(window, 'main', { platform: 'win32' })).toEqual({
+    expect(applyVideorcWindowCaptureProtection(window, 'notes', { platform: 'win32' })).toEqual({
       state: 'already-protected',
       protected: true
     })
@@ -52,8 +47,8 @@ describe('window capture protection policy', () => {
     const first = { setContentProtection: vi.fn() }
     const recreated = { setContentProtection: vi.fn() }
 
-    applyVideorcWindowCaptureProtection(first, 'preview', { platform: 'win32' })
-    applyVideorcWindowCaptureProtection(recreated, 'preview', { platform: 'win32' })
+    applyVideorcWindowCaptureProtection(first, 'notes', { platform: 'win32' })
+    applyVideorcWindowCaptureProtection(recreated, 'notes', { platform: 'win32' })
 
     expect(first.setContentProtection).toHaveBeenCalledTimes(1)
     expect(recreated.setContentProtection).toHaveBeenCalledTimes(1)
@@ -71,14 +66,14 @@ describe('window capture protection policy', () => {
     }
 
     expect(
-      applyVideorcWindowCaptureProtection(window, 'proof-surface', {
+      applyVideorcWindowCaptureProtection(window, 'notes', {
         platform: 'win32',
         onFailure
       })
     ).toMatchObject({ state: 'failed', protected: false })
     expect(onFailure).toHaveBeenCalledWith('x'.repeat(512))
     expect(
-      applyVideorcWindowCaptureProtection(window, 'proof-surface', {
+      applyVideorcWindowCaptureProtection(window, 'notes', {
         platform: 'win32'
       })
     ).toEqual({ state: 'protected', protected: true })

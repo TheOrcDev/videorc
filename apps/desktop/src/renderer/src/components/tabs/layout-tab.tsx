@@ -417,7 +417,7 @@ export function LayoutTab(): ReactElement {
                   <PowerSlider
                     label="Margin"
                     max={96}
-                    min={8}
+                    min={0}
                     numericInput
                     suffix="px"
                     value={layout.cameraMargin}
@@ -446,9 +446,11 @@ export function LayoutTab(): ReactElement {
                     type="single"
                     value={layout.cameraFit}
                     variant="outline"
-                    onValueChange={(value) =>
-                      value && patchLayout({ cameraFit: value as CameraFit })
-                    }
+                    onValueChange={(value) => {
+                      if (!value) return
+                      patchLayout({ cameraFit: value as CameraFit })
+                      applyLayoutPatch({ cameraFit: value as CameraFit })
+                    }}
                   >
                     <ToggleGroupItem value="fill">Fill crop</ToggleGroupItem>
                     <ToggleGroupItem value="fit">Fit frame</ToggleGroupItem>
@@ -463,7 +465,10 @@ export function LayoutTab(): ReactElement {
                 <Switch
                   checked={layout.cameraMirror}
                   id="camera-mirror"
-                  onCheckedChange={(checked) => patchLayout({ cameraMirror: checked })}
+                  onCheckedChange={(checked) => {
+                    patchLayout({ cameraMirror: checked })
+                    applyLayoutPatch({ cameraMirror: checked })
+                  }}
                 />
               </Field>
 
@@ -476,6 +481,7 @@ export function LayoutTab(): ReactElement {
                 suffix="%"
                 value={layout.cameraZoom}
                 onChange={(cameraZoom) => patchLayout({ cameraZoom })}
+                onCommit={(cameraZoom) => applyLayoutPatch({ cameraZoom })}
               />
               <PowerSlider
                 bipolar
@@ -486,6 +492,7 @@ export function LayoutTab(): ReactElement {
                 step={5}
                 value={layout.cameraOffsetX}
                 onChange={(cameraOffsetX) => patchLayout({ cameraOffsetX })}
+                onCommit={(cameraOffsetX) => applyLayoutPatch({ cameraOffsetX })}
               />
               <PowerSlider
                 bipolar
@@ -496,6 +503,7 @@ export function LayoutTab(): ReactElement {
                 step={5}
                 value={layout.cameraOffsetY}
                 onChange={(cameraOffsetY) => patchLayout({ cameraOffsetY })}
+                onCommit={(cameraOffsetY) => applyLayoutPatch({ cameraOffsetY })}
               />
 
               <span className="pt-2 text-[12.5px] leading-none font-medium text-subtle">

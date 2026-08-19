@@ -1353,7 +1353,7 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
     cameraMargin: clampNumber(
       candidate.cameraMargin,
       defaultCaptureConfig.layout.cameraMargin,
-      8,
+      0,
       96
     ),
     cameraZoom: clampNumber(candidate.cameraZoom, defaultCaptureConfig.layout.cameraZoom, 100, 200),

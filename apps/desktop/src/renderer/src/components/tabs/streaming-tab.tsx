@@ -24,6 +24,7 @@ import { useEffect, useMemo, useState, type ReactElement } from 'react'
 import { ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
+import { AvatarCircle } from '@/lib/chat-avatar'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -1070,11 +1071,16 @@ function OAuthAccountPanel({
   return (
     <div className="flex flex-col gap-2 rounded-row border bg-muted/30 p-3">
       <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-col gap-1">
-          <span className="truncate text-sm font-medium">{account.accountLabel}</span>
-          <span className="truncate text-xs text-muted-foreground">
-            {account.accountHandle ?? account.accountId}
-          </span>
+        <div className="flex min-w-0 items-center gap-2.5">
+          {/* The platform account's own avatar (stored at connect time and
+              resolved through main's allowlisted cache); initials fallback. */}
+          <AvatarCircle avatarUrl={account.avatarUrl} name={account.accountLabel} />
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="truncate text-sm font-medium">{account.accountLabel}</span>
+            <span className="truncate text-xs text-muted-foreground">
+              {account.accountHandle ?? account.accountId}
+            </span>
+          </div>
         </div>
         <Badge variant={account.status === 'connected' ? 'success' : 'warning'}>
           {account.status === 'connected' ? 'Connected' : 'Reconnect'}

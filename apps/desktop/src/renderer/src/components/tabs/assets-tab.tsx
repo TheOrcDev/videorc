@@ -185,6 +185,13 @@ export function AssetsTab(): ReactElement {
                   void importInto(slot.id)
                   return
                 }
+                // Clicking the ACTIVE background removes it — the tile is a
+                // toggle, matching its aria-pressed semantics (owner request,
+                // 2026-08-19).
+                if (status === 'active') {
+                  setRegistry(clearActiveSlot)
+                  return
+                }
                 setRegistry((current) => applySlot(current, slot.id))
               }}
               onMissing={() => markMissing(slot.id)}

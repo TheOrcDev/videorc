@@ -78,20 +78,17 @@ export function AccountMenu({
           aria-label={`Open account menu (backend ${statusLabel})`}
           className="flex min-w-0 items-center gap-1.5 rounded-row px-1.5 py-1 text-sm transition-colors hover:bg-sidebar-accent/60"
         >
-          {/* The web account's avatar when one exists (uploaded on videorc.com
-              or the Google photo), served through main's allowlisted cache —
-              the icon otherwise. */}
-          {account.status === 'signed-in' && account.avatarUrl ? (
+          {/* The web account's avatar (uploaded on videorc.com or the Google
+              photo) through main's allowlisted cache; a signed-in account
+              without one gets initials — a face beats a generic glyph. */}
+          {account.status === 'signed-in' ? (
             <AvatarCircle
               avatarUrl={account.avatarUrl}
               className="size-4 text-[7px]"
               name={displayName}
             />
           ) : (
-            <UserCircle
-              className="size-4 shrink-0 text-muted-foreground"
-              weight={signedIn ? 'fill' : 'regular'}
-            />
+            <UserCircle className="size-4 shrink-0 text-muted-foreground" weight="regular" />
           )}
           <span className="truncate text-xs font-medium">{displayName}</span>
           {/* Secondary backend status: a small dot only — the label lives in the
@@ -102,7 +99,7 @@ export function AccountMenu({
       <DropdownMenuContent align="start" side="top" className="w-56">
         <DropdownMenuLabel className="flex items-center justify-between gap-2 py-1.5">
           <span className="flex min-w-0 items-center gap-2">
-            {account.status === 'signed-in' && account.avatarUrl ? (
+            {account.status === 'signed-in' ? (
               <AvatarCircle avatarUrl={account.avatarUrl} name={displayName} />
             ) : null}
             <span className="truncate text-sm font-medium text-foreground">

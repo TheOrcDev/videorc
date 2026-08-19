@@ -294,27 +294,26 @@ describe('studio context invalidation boundaries', () => {
     expect(optionalPlatformLoad).toBeGreaterThan(criticalPreviewCommit)
   })
 
-  it('keeps diagnostics and chat consumers below the Studio tab root', () => {
+  it('keeps diagnostics consumers below the Studio tab root', () => {
+    // The in-studio chat rail was removed 2026-08-19 (comments live only in
+    // the separate window), so the partition to protect is root vs preview:
+    // the Studio root must not subscribe to diagnostics or chat contexts.
     const source = readFileSync(
       new URL('../components/tabs/studio-tab.tsx', import.meta.url),
       'utf8'
     )
     const rootStart = source.indexOf('export function StudioTab')
     const previewStart = source.indexOf('function StudioPreviewPanel', rootStart)
-    const chatStart = source.indexOf('function StudioLiveChatRail', previewStart)
     const rootComponent = source.slice(rootStart, previewStart)
-    const previewComponent = source.slice(previewStart, chatStart)
-    const chatComponent = source.slice(chatStart)
+    const previewComponent = source.slice(previewStart)
 
     expect(rootStart).toBeGreaterThan(-1)
     expect(previewStart).toBeGreaterThan(rootStart)
-    expect(chatStart).toBeGreaterThan(previewStart)
+    expect(source).not.toMatch(/useStudioChat\s*\(/)
     expect(rootComponent).not.toMatch(/useStudioDiagnostics\s*\(/)
-    expect(rootComponent).not.toMatch(/useStudioChat\s*\(/)
     expect(rootComponent).not.toMatch(/\bdiagnosticStats\b/)
     expect(rootComponent).not.toMatch(/\bliveChatSnapshot\b/)
     expect(previewComponent).toMatch(/useStudioDiagnostics\s*\(/)
-    expect(chatComponent).toMatch(/useStudioChat\s*\(/)
   })
 
   it('coalesces websocket chat messages before updating React state', () => {

@@ -394,13 +394,13 @@ export function CaptionsControls(): ReactElement {
                 }
               }}
             >
-              <ToggleGroupItem className="flex-1" value="s">
+              <ToggleGroupItem className="min-w-fit flex-1 px-1.5" value="s">
                 Small
               </ToggleGroupItem>
-              <ToggleGroupItem className="flex-1" value="m">
+              <ToggleGroupItem className="min-w-fit flex-1 px-1.5" value="m">
                 Medium
               </ToggleGroupItem>
-              <ToggleGroupItem className="flex-1" value="l">
+              <ToggleGroupItem className="min-w-fit flex-1 px-1.5" value="l">
                 Large
               </ToggleGroupItem>
             </ToggleGroup>

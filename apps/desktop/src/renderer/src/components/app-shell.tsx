@@ -232,10 +232,12 @@ export function AppShell(): ReactElement {
           void openNotesWindow()
         }
       }
+      // Comments live ONLY in the separate window now (owner call,
+      // 2026-08-19) — plain (cmd)J, which used to toggle the in-studio rail,
+      // keeps working by toggling the window, same as (cmd)shift-J.
       if (
         runtimeInfo?.commentsWindowEnabled &&
         event.key.toLowerCase() === 'j' &&
-        event.shiftKey &&
         (event.metaKey || event.ctrlKey)
       ) {
         event.preventDefault()
