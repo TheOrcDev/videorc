@@ -111,14 +111,9 @@ export function commentsDestinationSummary({
       continue
     }
     if (provider.write === 'read-only' || provider.state === 'connected') {
-      // X has no documented send API — say it is the platform's limit, not a
-      // Videorc breakage (owner report, 2026-08-19: "cannot send comments
-      // inside of X").
-      parts.push(
-        provider.platform === 'x'
-          ? 'X receive-only (X provides no send API)'
-          : `${CHAT_PLATFORM_LABELS[provider.platform]} receive-only`
-      )
+      // X sends now (closed-beta chat API, 2026-08-19) — read-only here only
+      // means THIS stream lacks send context (e.g. a manual-RTMP X target).
+      parts.push(`${CHAT_PLATFORM_LABELS[provider.platform]} receive-only`)
       continue
     }
     if (provider.state === 'failed') {
