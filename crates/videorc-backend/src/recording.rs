@@ -281,7 +281,11 @@ const IDLE_PREVIEW_WIDTH: u32 = 1280;
 const IDLE_PREVIEW_HEIGHT: u32 = 720;
 const IDLE_PREVIEW_FPS: u32 = 10;
 const IDLE_PREVIEW_JPEG_QUALITY: u32 = 4;
-const STOP_FINALIZE_TIMEOUT: Duration = Duration::from_secs(20);
+// Must comfortably contain the streaming escalation ladder (quit grace 8s +
+// kill grace 5s) plus process reaping and finalization, so the FIRST stop
+// click completes even against a dead RTMP ingest instead of stranding the
+// UI on "Stopping…" until a Force stop (owner report, 2026-08-19).
+const STOP_FINALIZE_TIMEOUT: Duration = Duration::from_secs(25);
 const FINAL_DURATION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 // A just-exited FFmpeg can leave its MP4 briefly unavailable to a Windows
 // filter driver (Defender/indexing are common examples). Do not demote an
@@ -942,6 +946,50 @@ pub struct ActiveRecording {
     /// Renderer/status hint only. Successful finalization uses the ordered
     /// monitor result above rather than sampling this flag after process exit.
     pub stop_requested: bool,
+}
+
+/// Test-only stub of an active capture session, crate-visible so guards in
+/// other modules (e.g. live_layout's mid-recording camera-resync guard) can
+/// arm `state.recording` without rebuilding this large literal.
+#[cfg(test)]
+pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
+    ActiveRecording {
+        session_id: session_id.to_string(),
+        pid: 0,
+        stdin: None,
+        output_path: None,
+        stream_url: None,
+        ffmpeg_path: "test-ffmpeg".to_string(),
+        started_at: Utc::now().to_rfc3339(),
+        capture_epoch: Arc::new(std::sync::OnceLock::new()),
+        capture_started_fallback: Instant::now(),
+        mode: "record".to_string(),
+        audio_tracks: Vec::new(),
+        pipeline: RecordingPipeline::new(false, true, &[]),
+        native_audio: None,
+        ffmpeg_live_audio_session: None,
+        screen_overlay: None,
+        encoder_bridge: None,
+        encoder_bridge_stream: None,
+        #[cfg(target_os = "windows")]
+        windows_d3d11_monitor: None,
+        #[cfg(target_os = "windows")]
+        windows_d3d11_media: None,
+        #[cfg(target_os = "windows")]
+        windows_d3d11_recovery: None,
+        #[cfg(target_os = "windows")]
+        windows_d3d11_preview_compositor_suspension: None,
+        stream_targets_snapshot: Arc::new(StdMutex::new(crate::streaming::StreamTargetsSnapshot {
+            session_id: session_id.to_string(),
+            targets: Vec::new(),
+        })),
+        captioned_copy_requested: false,
+        keep_original_media: false,
+        comment_highlight_available: false,
+        _capture_permit: None,
+        stop_intent_sender: None,
+        stop_requested: false,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -3415,11 +3463,28 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
         tokio::spawn(stop_fallback(state.clone(), pid, session_id, output_path));
     }
 
-    Ok(
-        wait_for_final_recording_status(&mut final_status_events, &wait_session_id)
-            .await
-            .unwrap_or(status),
-    )
+    match wait_for_final_recording_status(&mut final_status_events, &wait_session_id).await {
+        Some(final_status) => Ok(final_status),
+        None => {
+            // The escalation ladder (quit -> TERM -> KILL) overran the finalize
+            // window — almost always a stream endpoint that stopped responding.
+            // Say so instead of returning a bare "Stopping" that strands the UI
+            // with no explanation until the user finds Force stop.
+            let _ = emit_health_event(
+                &state,
+                Some(&wait_session_id),
+                HealthLevel::Warn,
+                "recording-stop-finalize-overrun",
+                "Stopping is taking longer than expected — a stream endpoint is not responding. The session is being shut down in the background; Force stop ends it immediately.",
+            );
+            let mut status = status;
+            status.message = Some(
+                "A stream endpoint is not responding; finishing the stop in the background."
+                    .to_string(),
+            );
+            Ok(status)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10554,12 +10619,7 @@ fn bridge_compositor_ffmpeg_args(
 
     let stream_legs = stream_targets
         .iter()
-        .map(|target| {
-            format!(
-                "[f=flv:onfail=ignore:flvflags=no_duration_filesize]{}",
-                escape_tee_target(&target.url)
-            )
-        })
+        .map(|target| rtmp_tee_leg(&target.url))
         .collect::<Vec<_>>();
 
     match (output_path, stream_targets) {
@@ -11074,6 +11134,21 @@ fn append_bridge_audio_input_args(
     }
 }
 
+/// One tee slave spec for an RTMP(S) leg. `onfail=ignore` keeps a dying
+/// platform from killing the recording or the other streams; `rw_timeout`
+/// (microseconds) bounds every socket operation so a stalled ingest ERRORS OUT
+/// instead of blocking the tee muxer's teardown forever — an unresponsive
+/// Twitch endpoint used to wedge the whole stop path until Force stop
+/// (owner report, 2026-08-19). Steady-state overflow is already handled by
+/// the fifo wrapper's drop_pkts_on_overflow; this bounds the CLOSE.
+fn rtmp_tee_leg(url: &str) -> String {
+    format!(
+        "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}]{}",
+        escape_tee_target(url)
+    )
+}
+const RTMP_LEG_RW_TIMEOUT_US: u64 = 8_000_000;
+
 fn bridge_recording_video_filter(video_input_index: usize, video: &VideoSettings) -> String {
     let fps = video.fps.max(1);
     format!("[{video_input_index}:v]setpts=PTS-STARTPTS,fps={fps}[v_main]")
@@ -11124,12 +11199,7 @@ fn ffmpeg_args(
 
     let stream_legs = stream_targets
         .iter()
-        .map(|target| {
-            format!(
-                "[f=flv:onfail=ignore:flvflags=no_duration_filesize]{}",
-                escape_tee_target(&target.url)
-            )
-        })
+        .map(|target| rtmp_tee_leg(&target.url))
         .collect::<Vec<_>>();
 
     match (output_path, stream_targets) {
@@ -19336,6 +19406,16 @@ mod tests {
         assert!(
             native_window_recording_path_message(false).contains("FFmpeg AVFoundation fallback")
         );
+    }
+
+    #[test]
+    fn rtmp_tee_legs_carry_a_socket_deadline() {
+        // Without rw_timeout a stalled ingest blocks the tee muxer teardown
+        // forever and the stop path hangs until Force stop.
+        let leg = rtmp_tee_leg("rtmp://live.twitch.tv/app/streamkey");
+        assert!(leg.starts_with("[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout="));
+        assert!(leg.contains(":rw_timeout=8000000]"));
+        assert!(leg.ends_with("rtmp://live.twitch.tv/app/streamkey"));
     }
 
     #[test]

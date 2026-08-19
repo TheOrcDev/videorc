@@ -985,6 +985,15 @@ async fn resync_camera_capture_geometry_after_commit(
     if !needs.camera {
         return;
     }
+    // NEVER restart the camera while a capture session owns the pipeline: the
+    // encoder assumes fixed camera frame geometry, and a mid-stream restart
+    // that re-derives it misreads buffers as color garbage and can kill the
+    // take (0.9.53–0.9.57 regression, owner-reported on a live scene switch).
+    // Stale geometry mid-session is the long-standing correct behavior — the
+    // scene math absorbs the scale — and the next idle commit re-syncs it.
+    if state.recording.lock().await.is_some() {
+        return;
+    }
     let video = params.video.clone().unwrap_or_else(fallback_video_settings);
     if !camera_capture_geometry_is_stale(state, &params.layout, &video).await {
         return;
@@ -1323,6 +1332,70 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::Release);
         }
+    }
+
+    #[tokio::test]
+    async fn geometry_resync_is_inert_while_a_session_is_recording() {
+        // The 0.9.53–0.9.57 regression: a hot preset switch mid-recording
+        // (inset -> full canvas changes the capture box) force-restarted the
+        // camera under the encoder — geometry changed mid-stream, buffers were
+        // misread as color garbage, and the take could die. The resync must be
+        // a no-op while any capture session owns the pipeline.
+        let state = test_state();
+        let video = crate::protocol::VideoSettings {
+            preset: crate::protocol::VideoPreset::Tutorial1440p30,
+            width: 2560,
+            height: 1440,
+            fps: 30,
+            bitrate_kbps: 8000,
+        };
+        // Installed under the inset preset; the committed scene goes
+        // full-canvas, so the capture box is genuinely stale.
+        let inset_layout = default_layout_settings();
+        let mut full_layout = default_layout_settings();
+        full_layout.layout_preset = crate::protocol::LayoutPreset::CameraOnly;
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:avfoundation-native:0",
+            &inset_layout,
+            &video,
+        )
+        .await;
+        assert!(
+            camera_capture_geometry_is_stale(&state, &full_layout, &video).await,
+            "the scenario must be a real staleness case for this test to mean anything"
+        );
+        *state.recording.lock().await =
+            Some(crate::recording::test_active_recording_stub("mid-session"));
+
+        let needs = SceneSourceNeeds {
+            camera: true,
+            screen: false,
+        };
+        let intent_id = begin_layout_intent(&state, Some(7), needs)
+            .await
+            .expect("intent must register");
+        let params = crate::protocol::SceneConfigParams {
+            sources: sources(true, false),
+            layout: full_layout,
+            video: Some(video),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        };
+        resync_camera_capture_geometry_after_commit(&state, intent_id, &params, needs).await;
+        // Give a wrongly-spawned restart time to touch the slot.
+        sleep(Duration::from_millis(80)).await;
+
+        let status = preview_camera_status(&state).await;
+        assert_eq!(
+            status.state,
+            crate::protocol::PreviewCameraState::Live,
+            "mid-recording resync must never restart the camera"
+        );
+        assert_eq!(
+            status.frames_captured, 42,
+            "the live session must be untouched"
+        );
     }
 
     fn sources(camera: bool, screen: bool) -> SourceSelection {
