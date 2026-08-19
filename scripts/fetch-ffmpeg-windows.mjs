@@ -98,32 +98,40 @@ if (!haveZip) {
   let lastUpdate = 0
   const startTime = Date.now()
 
+  function renderProgress() {
+    const now = Date.now()
+    lastUpdate = now
+    const elapsedSec = (now - startTime) / 1000 || 0.001
+    const speedMB = (downloadedBytes / (1024 * 1024) / elapsedSec).toFixed(1)
+    const currentMB = (downloadedBytes / (1024 * 1024)).toFixed(1)
+    if (totalBytes > 0) {
+      const totalMB = (totalBytes / (1024 * 1024)).toFixed(1)
+      const pct = Math.min(100, Math.floor((downloadedBytes / totalBytes) * 100))
+      const barWidth = 25
+      const filled = Math.min(barWidth, Math.floor((barWidth * downloadedBytes) / totalBytes))
+      const bar =
+        '='.repeat(filled) +
+        (filled < barWidth ? '>' : '') +
+        ' '.repeat(Math.max(0, barWidth - filled - 1))
+      process.stdout.write(
+        `\r  [${bar}] ${pct}% (${currentMB} / ${totalMB} MB) @ ${speedMB} MB/s `
+      )
+    } else {
+      process.stdout.write(`\r  ${currentMB} MB downloaded @ ${speedMB} MB/s `)
+    }
+  }
+
   const progressStream = new Transform({
     transform(chunk, _encoding, callback) {
       downloadedBytes += chunk.length
-      const now = Date.now()
-      if (now - lastUpdate > 100 || (totalBytes > 0 && downloadedBytes >= totalBytes)) {
-        lastUpdate = now
-        const elapsedSec = (now - startTime) / 1000 || 0.001
-        const speedMB = (downloadedBytes / (1024 * 1024) / elapsedSec).toFixed(1)
-        const currentMB = (downloadedBytes / (1024 * 1024)).toFixed(1)
-        if (totalBytes > 0) {
-          const totalMB = (totalBytes / (1024 * 1024)).toFixed(1)
-          const pct = Math.min(100, Math.floor((downloadedBytes / totalBytes) * 100))
-          const barWidth = 25
-          const filled = Math.min(barWidth, Math.floor((barWidth * downloadedBytes) / totalBytes))
-          const bar =
-            '='.repeat(filled) +
-            (filled < barWidth ? '>' : '') +
-            ' '.repeat(Math.max(0, barWidth - filled - 1))
-          process.stdout.write(
-            `\r  [${bar}] ${pct}% (${currentMB} / ${totalMB} MB) @ ${speedMB} MB/s `
-          )
-        } else {
-          process.stdout.write(`\r  ${currentMB} MB downloaded @ ${speedMB} MB/s `)
-        }
+      if (Date.now() - lastUpdate > 100) {
+        renderProgress()
       }
       callback(null, chunk)
+    },
+    flush(callback) {
+      renderProgress()
+      callback()
     }
   })
 
