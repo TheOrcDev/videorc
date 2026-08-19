@@ -1425,14 +1425,12 @@ const idlePreviewSupervisorState = (): PreviewSupervisorState => ({
 })
 
 async function currentProtectedOverlayWindowIds(): Promise<number[]> {
+  // Only Notes is capture-protected: it is a private teleprompter. Comments
+  // and Captions are part of the show and stay visible in recordings (owner
+  // call, 2026-08-19), so they are neither excluded from capture nor hidden
+  // from the source picker.
   const latestNotesWindow = await window.videorc?.getNotesWindowState?.().catch(() => null)
-  const latestCommentsWindow = await window.videorc?.getCommentsWindowState?.().catch(() => null)
-  const latestCaptionsWindow = await window.videorc?.getCaptionsWindowState?.().catch(() => null)
-  return protectedOverlayWindowIdsFromOverlayWindows(
-    latestNotesWindow ?? idleNotesWindowState(),
-    latestCommentsWindow ?? idleCommentsWindowState(),
-    latestCaptionsWindow ?? idleCaptionsWindowState()
-  )
+  return protectedOverlayWindowIdsFromOverlayWindows(latestNotesWindow ?? idleNotesWindowState())
 }
 
 export function useStudioCore(): StudioCoreContextValue {
@@ -7712,6 +7710,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [client, isSessionActive, reportError, screens]
   )
 
+  // A takeover covers the output, so the microphone auto-mutes with it and
+  // comes back when the takeover clears (owner request, 2026-08-19). The stash
+  // remembers the pre-takeover mute so clearing restores intent: the mic only
+  // un-mutes if the takeover muted it AND the user did not unmute manually in
+  // between. null = no takeover-owned stash. Both the session-panel button and
+  // remote control route through these two callbacks, so this covers every
+  // entry point; the live-audio sync loop propagates the config change to the
+  // running mic session.
+  const takeoverMuteStashRef = useRef<boolean | null>(null)
+
   const activateScreen = useCallback(
     async (screenId: string) => {
       if (!client) {
@@ -7723,11 +7731,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setLastError(null)
         const screen = await client.request<StreamScreen>('screens.activate', { screenId })
         setActiveScreen(screen)
+        if (takeoverMuteStashRef.current === null) {
+          takeoverMuteStashRef.current = captureConfigRef.current.audio.microphoneMuted
+        }
+        setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, microphoneMuted: true }
+        }))
       } catch (error) {
         reportError(error)
       }
     },
-    [client, reportError]
+    [client, reportError, setCaptureConfig]
   )
 
   const clearActiveScreen = useCallback(async () => {
@@ -7740,10 +7755,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setLastError(null)
       await client.request<StreamScreen | null>('screens.clear')
       setActiveScreen(null)
+      const stashed = takeoverMuteStashRef.current
+      takeoverMuteStashRef.current = null
+      if (stashed === false) {
+        // Un-mute only what the takeover muted; a manual unmute mid-takeover
+        // (current already false) is a no-op, and a pre-takeover mute stays.
+        setCaptureConfig((current) =>
+          current.audio.microphoneMuted
+            ? { ...current, audio: { ...current.audio, microphoneMuted: false } }
+            : current
+        )
+      }
     } catch (error) {
       reportError(error)
     }
-  }, [client, reportError])
+  }, [client, reportError, setCaptureConfig])
 
   const disconnectPlatformAccount = useCallback(
     async (platform: PlatformAccount['platform']) => {
@@ -9870,14 +9896,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ? startBlockedReason
       : null
   const visibleDeviceList = useMemo(
-    () =>
-      deviceListWithoutProtectedOverlayWindows(
-        deviceList,
-        notesWindow,
-        commentsWindow,
-        captionsWindow
-      ),
-    [deviceList, notesWindow, commentsWindow, captionsWindow]
+    () => deviceListWithoutProtectedOverlayWindows(deviceList, notesWindow),
+    [deviceList, notesWindow]
   )
   const selectedCaptureDevice = findDevice(
     visibleDeviceList.devices,

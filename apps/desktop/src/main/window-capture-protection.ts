@@ -34,15 +34,16 @@ export const WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS: Readonly<Record<VideorcWin
   })
 
 /**
- * Notes, Comments, and Captions are presentation-side control windows that
- * must never enter a captured display on any platform. Windows additionally
- * protects every Videorc-owned control/presenter window.
+ * Only Notes is a private teleprompter that must never enter a captured
+ * display; Comments and Captions are part of the show and stay VISIBLE in
+ * recordings (owner call, 2026-08-19 — "only notes should be invisible").
+ * The rule is deliberately identical on every platform.
  */
 export function videorcWindowRequiresCaptureProtection(
   role: VideorcWindowRole,
-  platform: NodeJS.Platform
+  _platform: NodeJS.Platform
 ): boolean {
-  return platform === 'win32' || role === 'notes' || role === 'comments' || role === 'captions'
+  return role === 'notes'
 }
 
 /**

@@ -1,8 +1,7 @@
 import { ArrowSquareOut, PushPinSimple, WarningCircle } from '@phosphor-icons/react'
-import { lazy, Suspense, useEffect, useRef, useState, type ReactElement } from 'react'
+import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
-import { LiveChatRail } from '@/components/live-chat-rail'
 import { ObsImportNudge } from '@/components/obs-import-nudge'
 import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
@@ -14,7 +13,6 @@ import { SessionPanel } from '@/components/studio/session-panel'
 import { Button } from '@/components/ui/button'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
 import {
-  useStudioChat,
   useStudioCore,
   useStudioDiagnostics,
   useStudioPreview,
@@ -23,7 +21,6 @@ import {
 import { videoProfileCompatibility } from '@/lib/capture'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
-import { liveChatRailAvailable, shouldAutoOpenLiveChatRail } from '@/lib/live-chat-surface'
 import { studioHealth } from '@/lib/studio-health'
 import {
   isSessionTransportActive,
@@ -191,8 +188,6 @@ export function StudioTab(): ReactElement {
           </Suspense>
         </PageStack>
       </div>
-
-      <StudioLiveChatRail />
     </div>
   )
 }
@@ -334,69 +329,6 @@ function StudioPreviewPanel(): ReactElement {
       {previewStage}
       {healthErrorRow}
     </PanelSection>
-  )
-}
-
-function StudioLiveChatRail(): ReactElement | null {
-  const studio = useStudioCore()
-  const { recording } = useStudioRecordingState()
-  const { liveChatSnapshot } = useStudioChat()
-  const chatProvidersAttached = liveChatSnapshot.providers.length > 0
-  const chatRailAvailable = liveChatRailAvailable(recording.state, liveChatSnapshot)
-  const [chatRailOpen, setChatRailOpen] = useState(false)
-  const chatAutoOpened = useRef(false)
-
-  // Live while streaming, retained after stop while the in-memory transcript
-  // still has comments. It clears once the local chat view is cleared.
-  useEffect(() => {
-    if (!chatRailAvailable) {
-      chatAutoOpened.current = false
-      setChatRailOpen(false)
-      return
-    }
-    if (
-      shouldAutoOpenLiveChatRail({
-        alreadyAutoOpened: chatAutoOpened.current,
-        providersAttached: chatProvidersAttached,
-        recordingState: recording.state,
-        snapshot: liveChatSnapshot
-      })
-    ) {
-      chatAutoOpened.current = true
-      setChatRailOpen(true)
-    }
-  }, [chatRailAvailable, chatProvidersAttached, liveChatSnapshot, recording.state])
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key.toLowerCase() === 'j' && !event.shiftKey && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault()
-        if (chatRailAvailable) {
-          setChatRailOpen((value) => !value)
-        }
-      }
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [chatRailAvailable])
-
-  if (!chatRailOpen || !chatRailAvailable) {
-    return null
-  }
-
-  return (
-    <LiveChatRail
-      highlightedId={studio.highlightedCommentId}
-      highlightApplyingId={studio.commentHighlightApplyingId}
-      highlightFailure={studio.commentHighlightFailure}
-      highlightState={studio.commentHighlightState}
-      snapshot={liveChatSnapshot}
-      windowOpen={studio.commentsWindow.open}
-      onClearLocal={studio.clearLiveChat}
-      onClose={() => setChatRailOpen(false)}
-      onHighlight={studio.toggleCommentHighlight}
-      onPopOut={studio.toggleCommentsWindow}
-      platform={studio.runtimeInfo?.platform}
-    />
   )
 }
 
