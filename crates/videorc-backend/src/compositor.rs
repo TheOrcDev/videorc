@@ -2446,6 +2446,7 @@ fn push_caption_overlay_gpu_source<'a>(
         },
         false,
         SceneCrop::none(),
+        (0.0, 0.0),
         canvas_width,
         canvas_height,
     ) else {
@@ -2521,6 +2522,7 @@ fn try_gpu_compose(
                     },
                     matches!(background.fit, BackgroundFit::Fit),
                     background_zoom_crop(Some(background)),
+                    (0.0, 0.0),
                     inputs.width,
                     inputs.height,
                 )
@@ -2580,6 +2582,7 @@ fn try_gpu_compose(
                 CompositorSceneSourceFit::Contain
             ),
             SceneCrop::none(),
+            (0.0, 0.0),
             inputs.width,
             inputs.height,
         )
@@ -2655,6 +2658,7 @@ fn try_gpu_compose(
                 CompositorSceneSourceFit::Contain
             ),
             SceneCrop::none(),
+            (0.0, 0.0),
             inputs.width,
             inputs.height,
         )
@@ -2737,6 +2741,7 @@ fn try_gpu_compose(
                             SceneFit::Contain
                         ),
                         source_crop,
+                        source_cover_pan(&SceneSourceKind::Camera, layout),
                         inputs.width,
                         inputs.height,
                     )
@@ -2776,6 +2781,7 @@ fn try_gpu_compose(
                             SceneFit::Contain
                         ),
                         source_crop,
+                        source_cover_pan(&SceneSourceKind::Camera, layout),
                         inputs.width,
                         inputs.height,
                     )
@@ -2825,6 +2831,7 @@ fn try_gpu_compose(
                         rect,
                         screen_contain,
                         source_crop,
+                        source_cover_pan(&source.kind, layout),
                         inputs.width,
                         inputs.height,
                     )
@@ -2853,6 +2860,7 @@ fn try_gpu_compose(
                         rect,
                         screen_contain,
                         source_crop,
+                        source_cover_pan(&source.kind, layout),
                         inputs.width,
                         inputs.height,
                     )
@@ -2883,6 +2891,7 @@ fn try_gpu_compose(
                     rect,
                     false,
                     SceneCrop::none(),
+                    (0.0, 0.0),
                     inputs.width,
                     inputs.height,
                 )
@@ -3253,16 +3262,21 @@ fn gpu_compositor_frame(
 }
 
 #[cfg(target_os = "macos")]
+// Placement is a flat description of one draw: geometry in, shader vec4s out.
+// Bundling the eight scalars into structs would add indirection at ~10 call
+// sites for no reuse.
+#[allow(clippy::too_many_arguments)]
 fn gpu_source_placement(
     source_width: u32,
     source_height: u32,
     rect: PixelRect,
     contain: bool,
     crop: SceneCrop,
+    pan: (f64, f64),
     output_width: u32,
     output_height: u32,
 ) -> Option<([f32; 4], [f32; 4])> {
-    let fit = source_fit(source_width, source_height, rect, contain, crop)?;
+    let fit = source_fit(source_width, source_height, rect, contain, crop, pan)?;
     let output_width = f64::from(output_width.max(1));
     let output_height = f64::from(output_height.max(1));
     let source_width = f64::from(source_width.max(1));
@@ -3704,6 +3718,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
             scene_content_rect_pixels(stage_margin, width, height),
             SourceRenderOptions {
                 crop: SceneCrop::none(),
+                pan: (0.0, 0.0),
                 // Screen-image stand-ins are screen-like: contain, never crop.
                 contain: matches!(
                     compositor_scene_source_fit(&SceneSourceKind::Screen, &snapshot.layout),
@@ -3753,6 +3768,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                         rect,
                         SourceRenderOptions {
                             crop: scene_crop_from_transform(&transform),
+                            pan: (0.0, 0.0),
                             contain: screen_contain,
                             mirror_x: false,
                             mask: SceneMask::None,
@@ -3773,6 +3789,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                         rect,
                         SourceRenderOptions {
                             crop: scene_crop_from_transform(&transform),
+                            pan: (0.0, 0.0),
                             contain: screen_contain,
                             mirror_x: false,
                             mask: SceneMask::None,
@@ -3797,6 +3814,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                     rect,
                     SourceRenderOptions {
                         crop: scene_crop_from_transform(&transform),
+                        pan: source_cover_pan(&SceneSourceKind::Camera, &snapshot.layout),
                         contain: matches!(
                             scene_source_fit(&SceneSourceKind::Camera, &snapshot.layout),
                             SceneFit::Contain
@@ -4010,6 +4028,8 @@ enum SourcePixelFormat {
 #[derive(Debug, Clone, Copy)]
 struct SourceRenderOptions {
     crop: SceneCrop,
+    /// Fill-mode cover pan (normalized -1..=1); see `source_cover_pan`.
+    pan: (f64, f64),
     contain: bool,
     mirror_x: bool,
     mask: SceneMask,
@@ -4147,6 +4167,7 @@ fn render_scene_background(
         },
         SourceRenderOptions {
             crop: background_zoom_crop(Some(background)),
+            pan: (0.0, 0.0),
             contain: matches!(background.fit, BackgroundFit::Fit),
             mirror_x: false,
             mask: SceneMask::None,
@@ -4258,6 +4279,7 @@ fn render_synthetic_source_rect(
         rect,
         SourceRenderOptions {
             crop: SceneCrop::none(),
+            pan: (0.0, 0.0),
             contain: false,
             mirror_x: false,
             mask: SceneMask::None,
@@ -4446,6 +4468,7 @@ fn blit_rgba_to_yuv420p(
         rect,
         options.contain,
         options.crop,
+        options.pan,
     ) else {
         return false;
     };
@@ -4659,12 +4682,28 @@ struct SourceFit {
     source_height: f64,
 }
 
+/// Fill-mode pan for a scene source: which part of the cover-crop aspect
+/// slack stays visible (normalized -1..=1). Only the camera has pan controls;
+/// every other source keeps the centered default. The mapping mirrors the
+/// legacy FFmpeg `crop_offset_expr`, keeping the three render paths in
+/// parity.
+fn source_cover_pan(kind: &SceneSourceKind, layout: &LayoutSettings) -> (f64, f64) {
+    match kind {
+        SceneSourceKind::Camera => (
+            f64::from(layout.camera_offset_x.clamp(-100, 100)) / 100.0,
+            f64::from(layout.camera_offset_y.clamp(-100, 100)) / 100.0,
+        ),
+        _ => (0.0, 0.0),
+    }
+}
+
 fn source_fit(
     source_width: u32,
     source_height: u32,
     rect: PixelRect,
     contain: bool,
     crop: SceneCrop,
+    pan: (f64, f64),
 ) -> Option<SourceFit> {
     if rect.width == 0 || rect.height == 0 || source_width == 0 || source_height == 0 {
         return None;
@@ -4696,11 +4735,18 @@ fn source_fit(
             source_height: source_h,
         })
     } else {
+        // Fill/cover: pan chooses WHICH part of the aspect slack stays
+        // visible instead of hard-centering it. fraction = (1 + pan) / 2
+        // mirrors the legacy FFmpeg crop_offset_expr ((in-out)/2 +
+        // offset*(in-out)/200), so all render paths agree — pan was silently
+        // ignored here, which made Pan X/Y no-ops at zoom 100 (owner report,
+        // 2026-08-19).
+        let pan_fraction = |pan: f64| (1.0 + pan.clamp(-1.0, 1.0)) / 2.0;
         let (source_x, source_y, fitted_source_width, fitted_source_height) =
             if source_aspect > rect_aspect {
                 let fitted_source_width = source_h * rect_aspect;
                 (
-                    source_x + (source_w - fitted_source_width) / 2.0,
+                    source_x + (source_w - fitted_source_width) * pan_fraction(pan.0),
                     source_y,
                     fitted_source_width,
                     source_h,
@@ -4709,7 +4755,7 @@ fn source_fit(
                 let fitted_source_height = source_w / rect_aspect;
                 (
                     source_x,
-                    source_y + (source_h - fitted_source_height) / 2.0,
+                    source_y + (source_h - fitted_source_height) * pan_fraction(pan.1),
                     source_w,
                     fitted_source_height,
                 )
@@ -5516,6 +5562,7 @@ mod tests {
                     right: 0.0,
                     bottom: 0.0,
                 },
+                pan: (0.0, 0.0),
                 contain: false,
                 mirror_x: false,
                 mask: SceneMask::None,
@@ -5555,6 +5602,7 @@ mod tests {
             },
             SourceRenderOptions {
                 crop: SceneCrop::none(),
+                pan: (0.0, 0.0),
                 contain: false,
                 mirror_x: false,
                 mask: SceneMask::None,
@@ -5616,6 +5664,7 @@ mod tests {
             },
             SourceRenderOptions {
                 crop: SceneCrop::none(),
+                pan: (0.0, 0.0),
                 contain: false,
                 mirror_x: false,
                 mask: SceneMask::None,
@@ -5674,6 +5723,7 @@ mod tests {
             },
             SourceRenderOptions {
                 crop: SceneCrop::none(),
+                pan: (0.0, 0.0),
                 contain: false,
                 mirror_x: false,
                 mask: SceneMask::None,
@@ -5735,6 +5785,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cover_pan_chooses_the_visible_window_of_the_aspect_slack() {
+        // A 16:9 source into a square box in Fill mode has horizontal slack;
+        // pan must pick which part survives — it was hard-centered before
+        // (owner report, 2026-08-19: Pan X/Y did nothing at default zoom).
+        // Matches the legacy FFmpeg crop_offset_expr mapping.
+        let rect = PixelRect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let fit_for = |pan_x: f64| {
+            source_fit(1920, 1080, rect, false, SceneCrop::none(), (pan_x, 0.0)).expect("cover fit")
+        };
+        let centered = fit_for(0.0);
+        assert!((centered.source_x - (1920.0 - 1080.0) / 2.0).abs() < 0.001);
+        let left = fit_for(-1.0);
+        assert!(left.source_x.abs() < 0.001, "full left pan starts at 0");
+        let right = fit_for(1.0);
+        assert!(
+            (right.source_x - (1920.0 - 1080.0)).abs() < 0.001,
+            "full right pan ends at the source edge"
+        );
+        // Out-of-range pan clamps instead of sampling outside the source.
+        let overshoot = fit_for(5.0);
+        assert!((overshoot.source_x - (1920.0 - 1080.0)).abs() < 0.001);
+        // Contain mode never pans — there is no crop to move.
+        let contained =
+            source_fit(1920, 1080, rect, true, SceneCrop::none(), (1.0, 1.0)).expect("contain fit");
+        assert!(contained.source_x.abs() < 0.001);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn gpu_source_placement_reports_transform_crop_to_shader() {
@@ -5754,6 +5837,7 @@ mod tests {
                 right: 0.0,
                 bottom: 0.0,
             },
+            (0.0, 0.0),
             4,
             2,
         )
@@ -5777,6 +5861,7 @@ mod tests {
             },
             true,
             SceneCrop::none(),
+            (0.0, 0.0),
             4,
             4,
         )
