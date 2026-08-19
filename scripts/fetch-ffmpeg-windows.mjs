@@ -97,6 +97,11 @@ if (!haveZip) {
   let downloadedBytes = 0
   let lastUpdate = 0
   const startTime = Date.now()
+  // Carriage-return progress is for humans at a terminal. In CI (non-TTY)
+  // the \r updates pile onto one endless log line, so render sparse plain
+  // lines instead (this fetcher runs in the Windows CI and release lanes).
+  const interactive = process.stdout.isTTY === true
+  const updateIntervalMs = interactive ? 100 : 10_000
 
   function renderProgress() {
     const now = Date.now()
@@ -107,6 +112,10 @@ if (!haveZip) {
     if (totalBytes > 0) {
       const totalMB = (totalBytes / (1024 * 1024)).toFixed(1)
       const pct = Math.min(100, Math.floor((downloadedBytes / totalBytes) * 100))
+      if (!interactive) {
+        console.log(`  ${pct}% (${currentMB} / ${totalMB} MB) @ ${speedMB} MB/s`)
+        return
+      }
       const barWidth = 25
       const filled = Math.min(barWidth, Math.floor((barWidth * downloadedBytes) / totalBytes))
       const bar =
@@ -116,6 +125,8 @@ if (!haveZip) {
       process.stdout.write(
         `\r  [${bar}] ${pct}% (${currentMB} / ${totalMB} MB) @ ${speedMB} MB/s `
       )
+    } else if (!interactive) {
+      console.log(`  ${currentMB} MB downloaded @ ${speedMB} MB/s`)
     } else {
       process.stdout.write(`\r  ${currentMB} MB downloaded @ ${speedMB} MB/s `)
     }
@@ -124,7 +135,7 @@ if (!haveZip) {
   const progressStream = new Transform({
     transform(chunk, _encoding, callback) {
       downloadedBytes += chunk.length
-      if (Date.now() - lastUpdate > 100) {
+      if (Date.now() - lastUpdate > updateIntervalMs) {
         renderProgress()
       }
       callback(null, chunk)
@@ -136,7 +147,9 @@ if (!haveZip) {
   })
 
   await pipeline(Readable.fromWeb(response.body), progressStream, createWriteStream(downloadPath))
-  process.stdout.write('\n')
+  if (interactive) {
+    process.stdout.write('\n')
+  }
 }
 
 const actualSha = await sha256Of(downloadPath)
