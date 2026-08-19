@@ -1,4 +1,5 @@
 import {
+  ArrowCounterClockwise,
   ArrowDown,
   ArrowLeft,
   ArrowRight,
@@ -595,6 +596,43 @@ export function LayoutTab(): ReactElement {
                   />
                 </>
               ) : null}
+
+              {/* One committed patch back to the shipped camera defaults —
+                  placement, frame, lens, and chroma key. Never touches the
+                  layout preset or the selected sources (owner request,
+                  2026-08-19). */}
+              <Button
+                className="mt-2 w-fit"
+                size="xs"
+                variant="ghost"
+                onClick={() => {
+                  const defaults = {
+                    cameraTransformMode: 'preset',
+                    cameraTransform: null,
+                    cameraCorner: 'bottom-right',
+                    cameraSize: 'medium',
+                    cameraShape: 'rectangle',
+                    cameraCornerRadiusPct: 12,
+                    cameraAspect: 'source',
+                    cameraMargin: 32,
+                    cameraFit: 'fill',
+                    cameraMirror: false,
+                    cameraZoom: 100,
+                    cameraOffsetX: 0,
+                    cameraOffsetY: 0,
+                    cameraChromaKeyEnabled: false,
+                    cameraChromaKeyColor: '#00FF00',
+                    cameraChromaKeySimilarityPct: 40,
+                    cameraChromaKeySmoothnessPct: 8,
+                    cameraChromaKeySpillPct: 10
+                  } as const
+                  patchLayout(defaults)
+                  applyLayoutPatch(defaults)
+                }}
+              >
+                <ArrowCounterClockwise data-icon="inline-start" />
+                Reset camera settings
+              </Button>
 
               <SourceVisibilityField
                 disabled={isSessionActive}

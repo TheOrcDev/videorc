@@ -3326,6 +3326,9 @@ function previewWindowSurfaceBounds(visibleOverride?: boolean): PreviewSurfaceBo
     scaleFactor: state.scaleFactor,
     screenHeight: state.screenHeight,
     visible,
+    // Docked previews clip to the studio slot's rounded panel (--radius-panel
+    // = 18pt); the floating window stays square. CALayer radii are in points.
+    cornerRadius: state.mode === 'docked' ? 18 : 0,
     ...(orderAboveWindowId === undefined
       ? {}
       : {

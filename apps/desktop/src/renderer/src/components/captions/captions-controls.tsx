@@ -380,7 +380,10 @@ export function CaptionsControls(): ReactElement {
               </ToggleGroupItem>
             </ToggleGroup>
           </Field>
-          <Field>
+          {/* Three labelled items need a full row: sharing a half-column let
+              the labels escape the buttons at narrow widths (owner report,
+              twice). min-w-fit keeps each item's intrinsic floor. */}
+          <Field className="sm:col-span-2">
             <FieldLabel>Text size</FieldLabel>
             <ToggleGroup
               aria-label="Caption text size"

@@ -34,7 +34,7 @@ describe('comments destination status', () => {
         providers,
         sendTargets: ['youtube', 'twitch']
       })
-    ).toBe('Sends to YouTube + Twitch · X receive-only')
+    ).toBe('Sends to YouTube + Twitch · X receive-only (X provides no send API)')
   })
 
   it('surfaces per-destination failures without hiding receive-only destinations', () => {
@@ -44,7 +44,7 @@ describe('comments destination status', () => {
         sendTargets: ['youtube', 'twitch'],
         failures: [{ destinationId: 'twitch-target', platform: 'twitch', reason: 'Token expired' }]
       })
-    ).toBe('Sends to YouTube + Twitch · Twitch failed · X receive-only')
+    ).toBe('Sends to YouTube + Twitch · Twitch failed · X receive-only (X provides no send API)')
   })
 
   it('distinguishes a missing write scope from a receive-only provider', () => {
@@ -56,7 +56,9 @@ describe('comments destination status', () => {
         ],
         sendTargets: []
       })
-    ).toBe('No writable destinations · Twitch reconnect to send · X receive-only')
+    ).toBe(
+      'No writable destinations · Twitch reconnect to send · X receive-only (X provides no send API)'
+    )
   })
 
   it('names the bound account so a wrong-channel manual stream is visible', () => {
@@ -90,7 +92,9 @@ describe('comments destination status', () => {
     expect(providerMarkup).toContain('YouTube')
     expect(providerMarkup).toContain('Connected')
     expect(providerMarkup).toContain('Receive-only')
-    expect(composerMarkup).toContain('Sends to YouTube + Twitch · Twitch failed · X receive-only')
+    expect(composerMarkup).toContain(
+      'Sends to YouTube + Twitch · Twitch failed · X receive-only (X provides no send API)'
+    )
     expect(composerMarkup).toContain('Twitch: Token expired')
   })
 })

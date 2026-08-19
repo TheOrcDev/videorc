@@ -5279,6 +5279,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void refreshEntitlementsForClient(client).catch(() => {
         // Preserve the current fail-closed snapshot on transport failure.
       })
+      // The identity snapshot was otherwise frozen at the last interactive
+      // sign-in — account.refresh existed backend-side but was never wired,
+      // so a web-side avatar/name change never reached the app (owner
+      // report, 2026-08-19). Failures keep the current snapshot.
+      if (account?.status === 'signed-in') {
+        void client
+          .requestTyped('account.refresh', undefined)
+          .then((snapshot) => setAccount(snapshot))
+          .catch(() => {})
+      }
     }
     window.addEventListener('focus', refreshOnFocus)
     const timer =
@@ -5291,7 +5301,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         window.clearInterval(timer)
       }
     }
-  }, [account?.status, client, refreshEntitlementsForClient, wsStatus])
+  }, [account, client, refreshEntitlementsForClient, setAccount, wsStatus])
 
   // Real OS camera/mic access status (Electron getMediaAccessStatus, over IPC —
   // independent of the backend socket). Refresh on mount and whenever the window
