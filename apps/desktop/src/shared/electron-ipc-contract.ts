@@ -506,6 +506,7 @@ const previewBoundsSchema = objectSchema(
     clipY: optionalSchema(numberSchema()),
     clipWidth: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
     clipHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(nonNegativeSafeIntegerSchema),
     elevated: optionalSchema(booleanSchema)
