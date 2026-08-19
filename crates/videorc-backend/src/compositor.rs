@@ -4080,7 +4080,7 @@ pub(crate) fn render_camera_overlay_bgra(
         width: overlay_width,
         height: overlay_height,
     };
-    let Some(fit) = source_fit(source_width, source_height, rect, contain, crop) else {
+    let Some(fit) = source_fit(source_width, source_height, rect, contain, crop, (0.0, 0.0)) else {
         return false;
     };
     let Some(byte_len) = usize::try_from(overlay_width)

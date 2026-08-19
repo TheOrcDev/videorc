@@ -607,7 +607,7 @@ function exactProbeExecOptions(): {
   maxBuffer: number
   windowsHide: true
 } {
-  return { encoding: 'utf8', timeout: 1000, maxBuffer: 16 * 1024, windowsHide: true }
+  return { encoding: 'utf8', timeout: 5000, maxBuffer: 16 * 1024, windowsHide: true }
 }
 
 function sleepSync(delayMs: number): void {
