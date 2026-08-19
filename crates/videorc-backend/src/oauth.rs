@@ -2053,6 +2053,28 @@ pub async fn exchange_authorization_code(
 /// device grant instead WAITS here, polling until the user approves in the
 /// browser, so every caller downstream — checkpointing, profile fetch,
 /// account storage, events — stays identical for both grant types.
+/// Which provider exchange, if any, a completion outcome should run.
+///
+/// A redirect grant needs the provider's single-use authorization code. A
+/// device grant (Twitch) NEVER has one — the poller trades the stored device
+/// code instead — so requiring `Some(code)` at the driver was exactly the bug
+/// that made the whole device flow authorize into the void: the background
+/// completion task matched no arm, the session was retired at spawn time, and
+/// nobody was listening by the time the user approved in the browser
+/// (0.9.50–0.9.56). The placeholder code is ignored by
+/// `obtain_provider_token` for device grants.
+pub fn provider_exchange_to_run(
+    exchange: Option<PendingOAuthExchange>,
+    authorization_code: Option<String>,
+) -> Option<(PendingOAuthExchange, String)> {
+    let exchange = exchange?;
+    match authorization_code {
+        Some(code) => Some((exchange, code)),
+        None if exchange.is_device_grant() => Some((exchange, String::new())),
+        None => None,
+    }
+}
+
 pub async fn obtain_provider_token(
     exchange: &PendingOAuthExchange,
     authorization_code: &str,
@@ -5038,6 +5060,38 @@ mod tests {
         let redirect = PendingOAuthWork::ProviderExchange(device_exchange_fixture(None));
         assert!(!redirect.is_code_less_resumable());
         assert!(!PendingOAuthWork::Generic.is_code_less_resumable());
+    }
+
+    #[test]
+    fn completion_driver_runs_a_device_exchange_without_a_code() {
+        // The 0.9.50–0.9.56 outage: the driver destructured
+        // `(Some(exchange), Some(code))`, which a device grant can never
+        // satisfy — the background completion matched no arm, the session was
+        // retired at spawn time, and the user's browser approval landed on
+        // nothing. All three shapes are pinned here so "who supplies the
+        // code" can never quietly kill the device flow again (#187 fixed the
+        // same disease one layer lower).
+        let device = provider_exchange_to_run(Some(device_exchange_fixture(Some("dc"))), None);
+        let (exchange, code) = device.expect("a device grant must run without a code");
+        assert!(exchange.is_device_grant());
+        assert!(
+            code.is_empty(),
+            "the placeholder code must be inert — obtain_provider_token ignores it"
+        );
+
+        // A redirect exchange with its code runs with that exact code.
+        let redirect = provider_exchange_to_run(
+            Some(device_exchange_fixture(None)),
+            Some("auth-code".to_string()),
+        );
+        let (_, code) = redirect.expect("a redirect grant with a code must run");
+        assert_eq!(code, "auth-code");
+
+        // A redirect exchange with NO code must never run — that code is the
+        // single-use provider credential, there is nothing to trade without it.
+        assert!(provider_exchange_to_run(Some(device_exchange_fixture(None)), None).is_none());
+        // No exchange, nothing to run.
+        assert!(provider_exchange_to_run(None, Some("auth-code".to_string())).is_none());
     }
 
     #[test]
