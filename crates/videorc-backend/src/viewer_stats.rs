@@ -41,6 +41,14 @@ pub struct TwitchViewerConfig {
     pub api_base_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XViewerConfig {
+    pub broadcast_id: String,
+    #[serde(default)]
+    pub api_base_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewerPlatformCount {
@@ -150,14 +158,27 @@ async fn fetch_twitch_count(client: &reqwest::Client, config: &TwitchViewerConfi
     parse_twitch_viewer_count(&body)
 }
 
+async fn fetch_x_count(client: &reqwest::Client, config: &XViewerConfig) -> Option<u64> {
+    // Credentials are resolved per poll so a rotated token is picked up
+    // without restarting the sampler.
+    let credentials = crate::x_live::x_livestream_credentials().ok().flatten()?;
+    let base = config
+        .api_base_url
+        .as_deref()
+        .unwrap_or(crate::x_live::DEFAULT_API_BASE_URL);
+    crate::x_live::fetch_broadcast_viewer_count(client, &credentials, base, &config.broadcast_id)
+        .await
+}
+
 /// Session-scoped sampler task; aborted with the live-chat connectors on stop.
 pub async fn run_viewer_sampler(
     state: AppState,
     session_id: String,
     youtube: Option<YouTubeViewerConfig>,
     twitch: Option<TwitchViewerConfig>,
+    x: Option<XViewerConfig>,
 ) {
-    if youtube.is_none() && twitch.is_none() {
+    if youtube.is_none() && twitch.is_none() && x.is_none() {
         return;
     }
     let client = reqwest::Client::new();
@@ -179,6 +200,9 @@ pub async fn run_viewer_sampler(
                 StreamPlatform::Twitch,
                 fetch_twitch_count(&client, config).await,
             ));
+        }
+        if let Some(config) = x.as_ref() {
+            counts.push((StreamPlatform::X, fetch_x_count(&client, config).await));
         }
 
         let at = chrono::Utc::now().to_rfc3339();

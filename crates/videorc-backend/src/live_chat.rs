@@ -1341,6 +1341,7 @@ pub async fn start_live_chat(state: &AppState, params: LiveChatStartParams) -> L
                 params.session_id.clone(),
                 youtube_viewers,
                 twitch_viewers,
+                None,
             ));
             let mut coordinator = state.live_chat.lock().await;
             coordinator.attach_task(handle);
@@ -1427,6 +1428,19 @@ pub async fn start_x_live_chat(
         status_base_url: params.status_base_url,
         access_url: params.access_url,
     };
+    // X viewer counts ride the same session lifecycle as the chat connector
+    // (plan 028 specified them; they were never implemented — owner report,
+    // 2026-08-19: "cannot see how many watchers there are from X").
+    let viewer_handle = tokio::spawn(crate::viewer_stats::run_viewer_sampler(
+        state.clone(),
+        params.session_id.clone(),
+        None,
+        None,
+        Some(crate::viewer_stats::XViewerConfig {
+            broadcast_id: config.broadcast_id.clone(),
+            api_base_url: None,
+        }),
+    ));
     let handle = tokio::spawn(crate::x_chat::run_x_chat_connector(
         state.clone(),
         params.session_id,
@@ -1434,6 +1448,7 @@ pub async fn start_x_live_chat(
     ));
     {
         let mut coordinator = state.live_chat.lock().await;
+        coordinator.attach_task(viewer_handle);
         coordinator.attach_task(handle);
     }
 

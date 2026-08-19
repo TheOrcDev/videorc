@@ -193,14 +193,26 @@ pub async fn run_x_chat_connector(state: AppState, session_id: String, config: X
         }
         reconnect_attempts += 1;
         if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
+            let message = format!(
+                "X live chat stopped after {MAX_RECONNECT_ATTEMPTS} consecutive connection attempts: {error}"
+            );
+            // Owner report 2026-08-19: an empty X comment feed with no trace
+            // anywhere burned a livestream's worth of debugging. The terminal
+            // failure lands in the session health record so the cause is on
+            // file even if nobody watched the provider row live.
+            let _ = crate::recording::emit_health_event(
+                &state,
+                Some(&session_id),
+                crate::protocol::HealthLevel::Warn,
+                "x-live-chat-failed",
+                &message,
+            );
             set_provider_and_emit(
                 &state,
                 StreamPlatform::X,
                 config.target_id.as_deref(),
                 LiveChatProviderConnectionState::Failed,
-                &format!(
-                    "X live chat stopped after {MAX_RECONNECT_ATTEMPTS} consecutive connection attempts: {error}"
-                ),
+                &message,
             )
             .await;
             return;

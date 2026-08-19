@@ -1438,14 +1438,33 @@ async fn reuse_current_screen_source(
         active.ffmpeg_path == ffmpeg_path
             && active.video == *video
             && slot.status.target_fps == target_fps
-            && active.protected_overlay_window_ids == protected_overlay_window_ids
     });
     if !can_reuse {
         return None;
     }
+    // A changed exclusion set must NEVER force a restart: opening/closing the
+    // Notes window flips the id set, and the resulting SCK teardown mid-
+    // recording froze the screen and corrupted colors (owner report,
+    // 2026-08-19 — the same disease as the mid-recording camera restart).
+    // Privacy is not at stake: Electron content protection excludes those
+    // windows from EVERY capture at the OS level independently of this
+    // filter, which is best-effort hygiene. The stored set updates so status
+    // stays truthful, and the SCK filter picks it up at the next real start.
+    let ids_changed = slot
+        .active
+        .as_ref()
+        .is_some_and(|active| active.protected_overlay_window_ids != protected_overlay_window_ids);
+    if ids_changed && let Some(active) = slot.active.as_mut() {
+        active.protected_overlay_window_ids = protected_overlay_window_ids.to_vec();
+    }
     let mut status = slot.status.clone();
     status.updated_at = Utc::now().to_rfc3339();
-    status.message = Some("Native screen preview source reused.".to_string());
+    status.message = Some(if ids_changed {
+        "Native screen preview source reused; the capture exclusion set updates at the next capture start (content protection already hides those windows)."
+            .to_string()
+    } else {
+        "Native screen preview source reused.".to_string()
+    });
     slot.status = status.clone();
     Some(status)
 }
@@ -4019,7 +4038,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_protected_overlay_windows_prevent_screen_source_reuse() {
+    async fn changed_protected_overlay_windows_reuse_without_restart() {
         let state = test_state();
         let source_key = SourceKey::screen("screen:screencapturekit:5");
         let (stop_tx, _stop_rx) = std_mpsc::channel();
@@ -4068,10 +4087,33 @@ mod tests {
                 .await
                 .is_some()
         );
-        assert!(
+        // A changed exclusion set must reuse, not restart: the SCK teardown it
+        // used to force froze the screen mid-recording when the Notes window
+        // opened/closed (2026-08-19). Content protection is the privacy layer;
+        // the stored set updates so status stays truthful.
+        let status =
             reuse_current_screen_source(&state, &source_key, "ffmpeg", &video, video.fps, &[7])
                 .await
-                .is_none()
+                .expect("an exclusion-set change alone must never force a restart");
+        assert!(
+            status
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("exclusion set updates")),
+            "the reuse must say the filter change is deferred"
+        );
+        let slot = state.preview_screen.lock().await;
+        assert_eq!(
+            slot.run_id.as_deref(),
+            Some("run-1"),
+            "the running session must be untouched"
+        );
+        assert_eq!(
+            slot.active
+                .as_ref()
+                .map(|active| active.protected_overlay_window_ids.clone()),
+            Some(vec![7]),
+            "the stored exclusion set must reflect the new truth"
         );
     }
 }

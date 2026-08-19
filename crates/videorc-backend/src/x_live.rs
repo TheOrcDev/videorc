@@ -18,7 +18,7 @@ type HmacSha1 = Hmac<Sha1>;
 
 const X_LIVESTREAM_DOCS_URL: &str = "https://github.com/xdevplatform/x-livestream-sample";
 const X_API_OVERVIEW_URL: &str = "https://docs.x.com/x-api/overview";
-const DEFAULT_API_BASE_URL: &str = "https://api.x.com";
+pub const DEFAULT_API_BASE_URL: &str = "https://api.x.com";
 const DEFAULT_SOURCE_NAME: &str = "Videorc Primary Encoder";
 const DEFAULT_LOCALE: &str = "en";
 const DEFAULT_CHAT_OPTION: u8 = 2;
@@ -1138,6 +1138,54 @@ async fn publish_broadcast(
     send_x_request(client, credentials, Method::PUT, url, Some(body)).await
 }
 
+/// Best-effort concurrent-viewer count for a live X broadcast (plan 028:
+/// `GET /2/users/{uid}/broadcasts/{bid}` surfaces state + viewer counts). The
+/// producer API's field name varies across its Periscope lineage, so parse
+/// defensively; a missing count is a skipped sample, never an error — the
+/// sampler's failure discipline (viewer_stats.rs) forbids degrading the
+/// stream over telemetry.
+pub async fn fetch_broadcast_viewer_count(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+    broadcast_id: &str,
+) -> Option<u64> {
+    let url = endpoint(
+        base_url,
+        &format!(
+            "/2/users/{}/broadcasts/{}",
+            credentials.user_id, broadcast_id
+        ),
+    )
+    .ok()?;
+    let value: serde_json::Value = send_x_request(client, credentials, Method::GET, url, None)
+        .await
+        .ok()?;
+    parse_x_broadcast_viewer_count(&value)
+}
+
+pub fn parse_x_broadcast_viewer_count(body: &serde_json::Value) -> Option<u64> {
+    let broadcast = body.get("broadcast").unwrap_or(body);
+    for key in [
+        "viewer_count",
+        "total_watching",
+        "concurrent_viewers",
+        "num_watching",
+        "watching_count",
+    ] {
+        let Some(count) = broadcast.get(key) else {
+            continue;
+        };
+        if let Some(count) = count.as_u64() {
+            return Some(count);
+        }
+        if let Some(count) = count.as_str().and_then(|value| value.parse().ok()) {
+            return Some(count);
+        }
+    }
+    None
+}
+
 async fn end_broadcast(
     client: &reqwest::Client,
     credentials: &XLivestreamCredentials,
@@ -1429,6 +1477,26 @@ fn x_should_not_tweet(metadata: &StreamMetadataDraft) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn broadcast_viewer_count_parses_defensively_across_field_lineages() {
+        use serde_json::json;
+        // Enveloped, numeric.
+        assert_eq!(
+            parse_x_broadcast_viewer_count(&json!({"broadcast": {"total_watching": 42}})),
+            Some(42)
+        );
+        // Bare object, string-typed count (Periscope lineage).
+        assert_eq!(
+            parse_x_broadcast_viewer_count(&json!({"viewer_count": "7"})),
+            Some(7)
+        );
+        // No recognized field = skipped sample, never a panic.
+        assert_eq!(
+            parse_x_broadcast_viewer_count(&json!({"broadcast": {"state": "RUNNING"}})),
+            None
+        );
+    }
     use super::*;
     use crate::streaming::PlatformAccountStatus;
 
