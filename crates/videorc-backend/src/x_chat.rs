@@ -112,9 +112,9 @@ struct XChatFrame {
 
 pub fn x_chat_message(has_x_account: bool) -> &'static str {
     if has_x_account {
-        "X live chat can be read for native X broadcasts."
+        "X live chat can be read and sent for native X broadcasts."
     } else {
-        "Connect or configure X native live before reading X chat."
+        "Connect or configure X native live before using X chat."
     }
 }
 

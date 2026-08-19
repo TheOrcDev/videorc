@@ -1150,14 +1150,9 @@ pub async fn fetch_broadcast_viewer_count(
     base_url: &str,
     broadcast_id: &str,
 ) -> Option<u64> {
-    let url = endpoint(
-        base_url,
-        &format!(
-            "/2/users/{}/broadcasts/{}",
-            credentials.user_id, broadcast_id
-        ),
-    )
-    .ok()?;
+    // GET /2/broadcasts/:id — the user-prefixed route is deprecated (docs
+    // verified 2026-08-19); ownership is still enforced by the auth context.
+    let url = endpoint(base_url, &format!("/2/broadcasts/{broadcast_id}")).ok()?;
     let value: serde_json::Value = send_x_request(client, credentials, Method::GET, url, None)
         .await
         .ok()?;
@@ -1184,6 +1179,67 @@ pub fn parse_x_broadcast_viewer_count(body: &serde_json::Value) -> Option<u64> {
         }
     }
     None
+}
+
+/// Maximum chat message length X accepts (`POST /2/broadcasts/:id/chat`).
+pub const X_CHAT_MESSAGE_MAX_CHARS: usize = 140;
+
+/// Send a plain-text chat message to a LIVE broadcast as the authorized user.
+/// Closed-beta Livestream API (docs verified 2026-08-19): OAuth 1.0a user
+/// context is an accepted auth for this route, so the existing "Authorize X
+/// Live" credentials qualify. Returns the server timestamp (nanoseconds,
+/// decimal string) — which is also the message id. Errors are user-facing
+/// strings for the comments send surface.
+pub async fn send_broadcast_chat_message(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+    broadcast_id: &str,
+    text: &str,
+) -> Result<String, String> {
+    let url = endpoint(base_url, &format!("/2/broadcasts/{broadcast_id}/chat"))
+        .map_err(|error| format!("X chat endpoint could not be built: {error}"))?;
+    let authorization = oauth1_authorization_header(
+        "POST",
+        url.as_str(),
+        credentials,
+        &oauth_nonce(),
+        oauth_timestamp(),
+    )
+    .map_err(|error| format!("X chat request could not be signed: {error}"))?;
+    let response = client
+        .post(url)
+        .header("Authorization", authorization)
+        .json(&json!({ "text": text }))
+        .send()
+        .await
+        .map_err(|error| format!("Could not reach X to send the chat message: {error}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    if status.as_u16() == 403 {
+        return Err(
+            "X did not permit this account to chat in the broadcast (chat settings may limit who can post)."
+                .to_string(),
+        );
+    }
+    if status.as_u16() == 400 {
+        return Err(
+            "X rejected the chat message — the broadcast may not be live yet or has ended."
+                .to_string(),
+        );
+    }
+    if !status.is_success() {
+        return Err(format!("X chat send failed with HTTP {}.", status.as_u16()));
+    }
+    let data = body.get("data").cloned().unwrap_or_default();
+    if data.get("success").and_then(|value| value.as_bool()) != Some(true) {
+        return Err("X reported the chat message was not sent.".to_string());
+    }
+    Ok(data
+        .get("timestamp")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string())
 }
 
 async fn end_broadcast(

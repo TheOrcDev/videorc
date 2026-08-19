@@ -325,7 +325,13 @@ pub fn chat_capability(
                 } else {
                     CommentsReadState::Unavailable
                 },
-                write: CommentsWriteState::ReadOnly,
+                write: if x_live_ready {
+                    // POST /2/broadcasts/:id/chat accepts the OAuth 1.0a user
+                    // context we already hold (closed-beta Livestream API).
+                    CommentsWriteState::Ready
+                } else {
+                    CommentsWriteState::ReadOnly
+                },
                 required_scope: None,
                 account_id: account.map(|account| account.account_id.clone()),
                 account_label: account.map(|account| account.account_label.clone()),
@@ -487,6 +493,12 @@ pub enum ChatSenderConfig {
         live_chat_id: Option<String>,
     },
     Twitch(crate::twitch_chat::TwitchChatSenderConfig),
+    /// X live-broadcast chat (closed-beta Livestream API). Credentials are
+    /// resolved per send so a rotated token is picked up without restarting
+    /// the session.
+    X {
+        broadcast_id: String,
+    },
     Fake(FakeChatSendBehavior),
     #[cfg(test)]
     FakeProbe {
@@ -1396,7 +1408,7 @@ pub async fn start_x_live_chat(
             account_id: None,
             account_label: None,
             read: CommentsReadState::WaitingForBroadcastContext,
-            write: CommentsWriteState::ReadOnly,
+            write: CommentsWriteState::Ready,
             state: LiveChatProviderConnectionState::Disabled,
             message: crate::x_chat::x_chat_message(false).to_string(),
             last_connected_at: None,
@@ -1441,6 +1453,9 @@ pub async fn start_x_live_chat(
             api_base_url: None,
         }),
     ));
+    let sender_destination_id =
+        comments_destination_id(StreamPlatform::X, config.target_id.as_deref());
+    let sender_broadcast_id = config.broadcast_id.clone();
     let handle = tokio::spawn(crate::x_chat::run_x_chat_connector(
         state.clone(),
         params.session_id,
@@ -1450,6 +1465,12 @@ pub async fn start_x_live_chat(
         let mut coordinator = state.live_chat.lock().await;
         coordinator.attach_task(viewer_handle);
         coordinator.attach_task(handle);
+        coordinator.register_sender(
+            sender_destination_id,
+            ChatSenderConfig::X {
+                broadcast_id: sender_broadcast_id,
+            },
+        );
     }
 
     let snapshot = current_status(state).await;
@@ -1811,6 +1832,34 @@ async fn send_to_destination(
         } => Err("YouTube live chat is not resolved yet — try again in a moment.".to_string()),
         ChatSenderConfig::Twitch(config) => {
             crate::twitch_chat::send_twitch_chat_message(client, &config, text).await
+        }
+        ChatSenderConfig::X { broadcast_id } => {
+            // X caps messages at 140 chars while the shared composer allows
+            // more; fail the X leg honestly instead of truncating — the
+            // partial-send phase already renders per-destination failures.
+            if text.chars().count() > crate::x_live::X_CHAT_MESSAGE_MAX_CHARS {
+                return Err(format!(
+                    "X limits chat messages to {} characters — shorten the message to reach X.",
+                    crate::x_live::X_CHAT_MESSAGE_MAX_CHARS
+                ));
+            }
+            let credentials = crate::x_live::x_livestream_credentials()
+                .ok()
+                .flatten()
+                .ok_or_else(|| {
+                    "X Live authorization is missing — authorize X Live to send chat.".to_string()
+                })?;
+            crate::x_live::send_broadcast_chat_message(
+                client,
+                &credentials,
+                crate::x_live::DEFAULT_API_BASE_URL,
+                &broadcast_id,
+                text,
+            )
+            .await
+            .map(|timestamp| ProviderSendReceipt {
+                provider_message_id: (!timestamp.is_empty()).then_some(timestamp),
+            })
         }
         ChatSenderConfig::Fake(behavior) => match behavior {
             FakeChatSendBehavior::Sent => Ok(ProviderSendReceipt {
@@ -3154,6 +3203,43 @@ mod tests {
         assert_eq!(capability.account_id.as_deref(), Some("connected-channel"));
         assert_eq!(capability.read, CommentsReadState::Ready);
         assert_eq!(capability.write, CommentsWriteState::Ready);
+    }
+
+    #[tokio::test]
+    async fn x_send_enforces_the_140_char_platform_cap_before_any_network() {
+        // The shared composer allows 200 chars; X caps at 140. The X leg must
+        // fail honestly (Partial phase renders it) instead of truncating.
+        let client = reqwest::Client::new();
+        let long_message = "x".repeat(141);
+        let error = send_to_destination(
+            &client,
+            ChatSenderConfig::X {
+                broadcast_id: "1AbCdEfGhIjKl".to_string(),
+            },
+            &long_message,
+        )
+        .await
+        .expect_err("141 chars must fail the X leg");
+        assert!(
+            error.contains("140"),
+            "the error must name the limit: {error}"
+        );
+
+        // Within the cap but with no stored X Live credentials, the arm must
+        // fail on authorization — proving credentials resolve per send.
+        let error = send_to_destination(
+            &client,
+            ChatSenderConfig::X {
+                broadcast_id: "1AbCdEfGhIjKl".to_string(),
+            },
+            "hello",
+        )
+        .await
+        .expect_err("missing credentials must fail the X leg");
+        assert!(
+            error.contains("authoriz") || error.contains("Authoriz"),
+            "the error must point at authorization: {error}"
+        );
     }
 
     #[test]
