@@ -163,7 +163,8 @@ describe('Electron IPC contract', () => {
       screenY: 0,
       width: 1280,
       height: 720,
-      scaleFactor: 2
+      scaleFactor: 2,
+      cornerRadius: 18
     }
     const layout = {
       layoutPreset: 'screen-camera',
