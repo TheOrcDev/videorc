@@ -1408,16 +1408,23 @@ mod tests {
             fps: 30,
             bitrate_kbps: 8000,
         };
-        // Installed under the inset preset; the committed scene goes
-        // full-canvas, so the capture box is genuinely stale.
-        let inset_layout = default_layout_settings();
-        let mut full_layout = default_layout_settings();
-        full_layout.layout_preset = crate::protocol::LayoutPreset::CameraOnly;
+        // Installed under a smaller output canvas; the committed scene uses a
+        // larger one, so the capture box is genuinely stale. (Capture geometry
+        // is layout-invariant — only a canvas change can arm staleness.)
+        let mut installed_video = video.clone();
+        installed_video.preset = crate::protocol::VideoPreset::Stream1080p60;
+        installed_video.width = 1920;
+        installed_video.height = 1080;
+        let full_layout = {
+            let mut layout = default_layout_settings();
+            layout.layout_preset = crate::protocol::LayoutPreset::CameraOnly;
+            layout
+        };
         crate::preview_camera::test_install_live_camera_for_layout(
             &state,
             "camera:avfoundation-native:0",
-            &inset_layout,
-            &video,
+            &default_layout_settings(),
+            &installed_video,
         )
         .await;
         assert!(
@@ -1473,14 +1480,20 @@ mod tests {
             fps: 30,
             bitrate_kbps: 8000,
         };
-        let inset_layout = default_layout_settings();
-        let mut full_layout = default_layout_settings();
-        full_layout.layout_preset = crate::protocol::LayoutPreset::CameraOnly;
+        let mut installed_video = video.clone();
+        installed_video.preset = crate::protocol::VideoPreset::Stream1080p60;
+        installed_video.width = 1920;
+        installed_video.height = 1080;
+        let full_layout = {
+            let mut layout = default_layout_settings();
+            layout.layout_preset = crate::protocol::LayoutPreset::CameraOnly;
+            layout
+        };
         crate::preview_camera::test_install_live_camera_for_layout(
             &state,
             "camera:avfoundation-native:0",
-            &inset_layout,
-            &video,
+            &default_layout_settings(),
+            &installed_video,
         )
         .await;
         assert!(
