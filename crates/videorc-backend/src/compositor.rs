@@ -823,6 +823,38 @@ fn scene_with_transition(scene: Scene, transition: &SceneTransition, now: Instan
     scene
 }
 
+/// Decide what transition a scene commit installs. A commit that asks for
+/// motion glides from the current effective transforms over the requested
+/// duration. A commit that DOESN'T mention motion (config reloads, camera
+/// installs, source rebinds routinely re-commit in the background) must not
+/// snap a running glide — it carries the glide forward from the current
+/// effective transforms across the remaining time. An explicit 0 means
+/// "instant, now" and cancels any glide.
+fn next_scene_transition(
+    transition_ms: Option<u32>,
+    previous_effective: Option<Scene>,
+    has_target_scene: bool,
+    active_remaining: Option<Duration>,
+    now: Instant,
+) -> Option<SceneTransition> {
+    if !has_target_scene {
+        return None;
+    }
+    match (transition_ms, previous_effective) {
+        (Some(duration_ms), Some(from)) if duration_ms > 0 => Some(SceneTransition {
+            from,
+            started_at: now,
+            duration: Duration::from_millis(u64::from(duration_ms.min(1_000))),
+        }),
+        (None, Some(from)) => active_remaining.map(|remaining| SceneTransition {
+            from,
+            started_at: now,
+            duration: remaining,
+        }),
+        _ => None,
+    }
+}
+
 fn snapshot_with_transition(
     snapshot: Option<CompositorSceneSnapshot>,
     transition: Option<&SceneTransition>,
@@ -1529,6 +1561,10 @@ pub async fn update_compositor_scene(
         // the new scene glides from wherever things currently are (including
         // mid-flight re-anchoring when commits interrupt a running glide).
         let now = Instant::now();
+        let active_remaining = compositor.scene_transition.as_ref().and_then(|active| {
+            let remaining = active.duration.saturating_sub(now - active.started_at);
+            (!remaining.is_zero()).then_some(remaining)
+        });
         let previous_effective = compositor.scene.as_ref().and_then(|previous| {
             previous.scene.clone().map(|previous_scene| {
                 match compositor.scene_transition.as_ref() {
@@ -1537,14 +1573,13 @@ pub async fn update_compositor_scene(
                 }
             })
         });
-        compositor.scene_transition = match (transition_ms, previous_effective, scene.as_ref()) {
-            (Some(duration_ms), Some(from), Some(_)) if duration_ms > 0 => Some(SceneTransition {
-                from,
-                started_at: now,
-                duration: Duration::from_millis(u64::from(duration_ms.min(1_000))),
-            }),
-            _ => None,
-        };
+        compositor.scene_transition = next_scene_transition(
+            transition_ms,
+            previous_effective,
+            scene.is_some(),
+            active_remaining,
+            now,
+        );
         let snapshot = CompositorSceneSnapshot {
             revision,
             scene,
@@ -3488,6 +3523,48 @@ mod scene_motion_tests {
             outputs: Vec::new(),
             background: None,
         }
+    }
+
+    #[test]
+    fn background_commit_mid_glide_carries_the_glide_forward() {
+        // Config reloads and camera installs re-commit the scene WITHOUT a
+        // transition while a glide is running. That commit must not snap —
+        // it continues from the current effective transforms across the
+        // remaining time (owner-reported 0.9.63 glitch: the glide aborted
+        // with a visible jump when the camera pipeline re-committed).
+        let now = Instant::now();
+        let from = scene_with(vec![source(
+            SceneSourceKind::Camera,
+            transform(0.4, 0.2, 0.4, 0.6),
+        )]);
+        let carried = next_scene_transition(
+            None,
+            Some(from.clone()),
+            true,
+            Some(Duration::from_millis(180)),
+            now,
+        )
+        .expect("an active glide must survive a background commit");
+        assert_eq!(carried.duration, Duration::from_millis(180));
+        assert_eq!(carried.started_at, now);
+        assert_eq!(carried.from, from);
+        // No active glide -> a background commit stays instant.
+        assert!(next_scene_transition(None, Some(from.clone()), true, None, now).is_none());
+        // An explicit 0 is a REQUEST for instant and cancels a running glide.
+        assert!(
+            next_scene_transition(
+                Some(0),
+                Some(from.clone()),
+                true,
+                Some(Duration::from_millis(180)),
+                now
+            )
+            .is_none()
+        );
+        // A motion request installs the requested duration (clamped).
+        let requested =
+            next_scene_transition(Some(5_000), Some(from), true, None, now).expect("installs");
+        assert_eq!(requested.duration, Duration::from_millis(1_000));
     }
 
     #[test]
