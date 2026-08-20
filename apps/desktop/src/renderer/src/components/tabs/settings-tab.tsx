@@ -11,9 +11,11 @@ import {
   FolderOpen,
   GearSix,
   LockKey,
+  MinusCircle,
   PaintBrush,
   Sparkle,
-  Warning
+  Warning,
+  XCircle
 } from '@phosphor-icons/react'
 import { useTheme } from 'next-themes'
 import { useEffect, useState, type ReactElement } from 'react'
@@ -229,7 +231,7 @@ export function SettingsTab({
                   </p>
                 </div>
                 <Switch
-                  checked={settings.animateSceneChanges !== false}
+                  checked={settings.animateSceneChanges === true}
                   id="animate-scene-changes"
                   onCheckedChange={(checked) =>
                     setSettings((current) => ({ ...current, animateSceneChanges: checked }))
@@ -322,24 +324,6 @@ export function SettingsTab({
                   className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-row px-2.5 py-2 text-sm"
                 >
                   <span className="w-32 shrink-0 font-medium">{row.label}</span>
-                  <StatusBadge
-                    tone={
-                      row.state === 'granted'
-                        ? 'good'
-                        : row.state === 'not-granted' || row.state === 'device-issue'
-                          ? 'warn'
-                          : 'neutral'
-                    }
-                    value={
-                      row.state === 'granted'
-                        ? 'Granted'
-                        : row.state === 'not-granted'
-                          ? 'Not granted'
-                          : row.state === 'device-issue'
-                            ? 'Device issue'
-                            : 'Checked on first use'
-                    }
-                  />
                   {/* Q4 (plan 022): the permission TARGET is the actionable part —
                       truncation clipped it to "Captur…"/"Voice a…". The row
                       flex-wraps, so let the detail take a full line when tight
@@ -364,9 +348,32 @@ export function SettingsTab({
                       variant="outline"
                       onClick={() => void openSystemPermissionSettings(row.id)}
                     >
-                      Manage settings
+                      Manage
                     </Button>
                   ) : null}
+                  {row.state === 'granted' ? (
+                    <CheckCircle
+                      aria-label={`${row.label} granted`}
+                      className="size-4 shrink-0 text-success"
+                      weight="fill"
+                    />
+                  ) : row.state === 'not-granted' || row.state === 'device-issue' ? (
+                    <XCircle
+                      aria-label={
+                        row.state === 'device-issue'
+                          ? `${row.label} device issue`
+                          : `${row.label} not granted`
+                      }
+                      className="size-4 shrink-0 text-destructive"
+                      weight="fill"
+                    />
+                  ) : (
+                    <MinusCircle
+                      aria-label={`${row.label} checked on first use`}
+                      className="size-4 shrink-0 text-muted-foreground"
+                      weight="fill"
+                    />
+                  )}
                 </div>
               )
             })}

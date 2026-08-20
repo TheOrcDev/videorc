@@ -44,7 +44,8 @@ export type SettingsState = {
   }
   /**
    * Scene motion: layout changes glide (320ms ease) in the live output —
-   * preview, stream, AND recording — instead of cutting. Default on.
+   * preview, stream, AND recording — instead of cutting. Default OFF while
+   * the glide's interplay with idle camera restarts settles in the field.
    */
   animateSceneChanges?: boolean
 }
@@ -325,7 +326,7 @@ export const defaultSettings: SettingsState = {
   outputDirectory: '',
   outputDirectoryHandle: undefined,
   keepOriginalRecording: false,
-  animateSceneChanges: true
+  animateSceneChanges: false
 }
 
 export const rtmpDefaults: Record<RtmpPreset, string> = {

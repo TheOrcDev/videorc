@@ -2379,18 +2379,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [screenImportPending, setScreenImportPending] = useState(false)
   const [streamMetadataSavePending, setStreamMetadataSavePending] = useState(false)
   const [supportBundleExportPending, setSupportBundleExportPending] = useState(false)
-  const [settings, setSettings] = useState<SettingsState>(() => {
-    const loaded = loadJson(STORAGE_KEYS.settings, defaultSettings)
-    // Scene motion defaults on, but an OS-level reduced-motion preference
-    // flips the DEFAULT off until the user chooses explicitly in Settings.
-    if (
-      loaded.animateSceneChanges === undefined &&
-      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-    ) {
-      return { ...loaded, animateSceneChanges: false }
-    }
-    return loaded
-  })
+  const [settings, setSettings] = useState<SettingsState>(() =>
+    loadJson(STORAGE_KEYS.settings, defaultSettings)
+  )
   const settingsRef = useRef(settings)
   settingsRef.current = settings
   // Stable handle for callbacks that only need to READ the config (labels,
@@ -5752,9 +5743,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             video: options?.videoOverride ?? requestedConfig.video,
             background: activeSceneBackground,
             protectedOverlayWindowIds,
-            // Scene motion: the committed layout glides into place (320ms
-            // ease) in preview, stream, and recording alike. Absent = instant.
-            ...(settingsRef.current.animateSceneChanges !== false
+            // Scene motion (opt-in): the committed layout glides into place
+            // (320ms ease) in preview, stream, and recording alike. Absent =
+            // instant cut.
+            ...(settingsRef.current.animateSceneChanges === true
               ? { transitionMs: SCENE_TRANSITION_MS }
               : {})
           })

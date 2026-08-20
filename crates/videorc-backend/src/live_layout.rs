@@ -60,6 +60,11 @@ use crate::state::AppState;
 /// screen. A retry within `preview_camera::CAMERA_FIRST_FRAME_REUSE_GRACE`
 /// joins the in-flight warm-up instead of restarting the device.
 const WARM_CAMERA_START_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long the scene must sit still before an idle geometry resync may
+/// restart the camera. Long enough that scene browsing (and any 320ms scene
+/// glide) never cycles the device; short enough that the capture box catches
+/// up soon after the user settles on a layout.
+const CAMERA_GEOMETRY_RESYNC_SETTLE: Duration = Duration::from_secs(2);
 const WARM_SCREEN_START_TIMEOUT: Duration = Duration::from_secs(15);
 const WARM_SOURCE_POLL: Duration = Duration::from_millis(100);
 const LAYOUT_INTENT_CANCEL_POLL: Duration = Duration::from_millis(25);
@@ -1008,21 +1013,40 @@ async fn resync_camera_capture_geometry_after_commit(
     if !camera_capture_geometry_is_stale(state, &params.layout, &video).await {
         return;
     }
+    let layout = params.layout.clone();
     let start_params = PreviewCameraStartParams {
         sources: params.sources.clone(),
         layout: params.layout.clone(),
-        video,
+        video: video.clone(),
         ffmpeg_path: active_recording_ffmpeg_path(state).await,
     };
     let resync_state = state.clone();
     tokio::spawn(async move {
+        // Settle first: browsing scenes fires a commit per click, and an
+        // immediate restart per click stacks camera restarts on top of each
+        // other — overlapping warm-ups misread renegotiation buffers as color
+        // garbage and cycle the device off/on in plain view (owner-reported on
+        // 0.9.63 scene motion, same family as the 0.9.51 retry storm). Waiting
+        // out the settle window means only the LAST switch restarts the
+        // camera, well after any 320ms scene glide has landed.
+        sleep(CAMERA_GEOMETRY_RESYNC_SETTLE).await;
         let still_current = {
             let intents = resync_state.layout_intents.lock().await;
             intents.latest_intent_id == intent_id && intents.latest_needs_camera
         };
-        if still_current {
-            let _ = start_preview_camera(resync_state, start_params).await;
+        if !still_current {
+            return;
         }
+        // Re-check the world after the settle window: a session may have
+        // started (resync must stay inert mid-recording), or a newer commit
+        // may have restarted the camera into matching geometry already.
+        if resync_state.recording.lock().await.is_some() {
+            return;
+        }
+        if !camera_capture_geometry_is_stale(&resync_state, &layout, &video).await {
+            return;
+        }
+        let _ = start_preview_camera(resync_state, start_params).await;
     });
 }
 
@@ -1427,6 +1451,71 @@ mod tests {
             status.state,
             crate::protocol::PreviewCameraState::Live,
             "mid-recording resync must never restart the camera"
+        );
+        assert_eq!(
+            status.frames_captured, 42,
+            "the live session must be untouched"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn geometry_resync_settles_and_yields_to_a_newer_scene_switch() {
+        // Browsing scenes fires one commit per click. An immediate restart per
+        // click stacks camera restarts (renegotiation garbage on screen, the
+        // device cycling off/on — owner-reported on 0.9.63 scene motion). The
+        // resync must wait out the settle window and stand down when a newer
+        // intent supersedes it, so only the LAST switch can restart the camera.
+        let state = test_state();
+        let video = crate::protocol::VideoSettings {
+            preset: crate::protocol::VideoPreset::Tutorial1440p30,
+            width: 2560,
+            height: 1440,
+            fps: 30,
+            bitrate_kbps: 8000,
+        };
+        let inset_layout = default_layout_settings();
+        let mut full_layout = default_layout_settings();
+        full_layout.layout_preset = crate::protocol::LayoutPreset::CameraOnly;
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:avfoundation-native:0",
+            &inset_layout,
+            &video,
+        )
+        .await;
+        assert!(
+            camera_capture_geometry_is_stale(&state, &full_layout, &video).await,
+            "the scenario must be a real staleness case for this test to mean anything"
+        );
+
+        let needs = SceneSourceNeeds {
+            camera: true,
+            screen: false,
+        };
+        let intent_id = begin_layout_intent(&state, Some(7), needs)
+            .await
+            .expect("intent must register");
+        let params = crate::protocol::SceneConfigParams {
+            transition_ms: Some(320),
+            sources: sources(true, false),
+            layout: full_layout,
+            video: Some(video),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        };
+        resync_camera_capture_geometry_after_commit(&state, intent_id, &params, needs).await;
+        // The user clicks another scene before the settle window elapses.
+        begin_layout_intent(&state, Some(8), needs)
+            .await
+            .expect("newer intent must register");
+        // Run well past the settle window (paused clock auto-advances).
+        sleep(CAMERA_GEOMETRY_RESYNC_SETTLE + Duration::from_secs(1)).await;
+
+        let status = preview_camera_status(&state).await;
+        assert_eq!(
+            status.state,
+            crate::protocol::PreviewCameraState::Live,
+            "a superseded resync must never restart the camera"
         );
         assert_eq!(
             status.frames_captured, 42,
