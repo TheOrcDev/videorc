@@ -45,6 +45,7 @@ use crate::scene_geometry::{
     scene_crop_from_transform, scene_mask_allows, scene_source_fit, scene_source_rect_pixels,
     scene_source_render_transform,
 };
+use crate::source_registry::SourceKey;
 use crate::state::AppState;
 use crate::windows_d3d11_device::{
     DxgiAdapterLuid, WindowsD3d11MediaRole, WindowsD3d11TextureFormat,
@@ -446,6 +447,15 @@ struct CompositorLiveSources {
     screen: Option<PreviewScreenFrameSource>,
     last_camera_frame: Option<(FrameHandle<PreviewCameraPixelFormat>, LayoutSettings)>,
     last_screen_frame: Option<FrameHandle<PreviewScreenPixelFormat>>,
+    /// Key of the source that produced the held last frame. A slot that goes
+    /// EMPTY (stop/restart interval, retire) keeps the frame — only a source
+    /// with a genuinely DIFFERENT key may drop it. Clearing on the empty
+    /// interval was the root cause of the on-air "colors": the very frames a
+    /// restart needs bridged were thrown away, so the render fell through to
+    /// the animated missing-source placeholder (magenta accent for camera,
+    /// orange for screen) in the live output.
+    last_camera_source_key: Option<SourceKey>,
+    last_screen_source_key: Option<SourceKey>,
     camera_fetch: LiveSourceFetchState,
     screen_fetch: LiveSourceFetchState,
 }
@@ -534,35 +544,55 @@ impl CompositorLiveSources {
             preview_camera_frame_source(state),
             preview_screen_frame_source(state)
         );
-        if !same_camera_source(self.camera.as_ref(), camera.as_ref()) {
-            self.last_camera_frame = None;
-            self.camera_fetch = LiveSourceFetchState::default();
-        }
-        if !same_screen_source(self.screen.as_ref(), screen.as_ref()) {
-            self.last_screen_frame = None;
-            self.screen_fetch = LiveSourceFetchState::default();
-        }
-        self.camera = camera;
-        self.screen = screen;
+        self.adopt_camera_source(camera);
+        self.adopt_screen_source(screen);
         self
     }
 
     fn refresh_sources_nonblocking(mut self, state: &AppState) -> Self {
         if let Ok(camera) = try_preview_camera_frame_source(state) {
-            if !same_camera_source(self.camera.as_ref(), camera.as_ref()) {
-                self.last_camera_frame = None;
-                self.camera_fetch = LiveSourceFetchState::default();
-            }
-            self.camera = camera;
+            self.adopt_camera_source(camera);
         }
         if let Ok(screen) = try_preview_screen_frame_source(state) {
-            if !same_screen_source(self.screen.as_ref(), screen.as_ref()) {
-                self.last_screen_frame = None;
-                self.screen_fetch = LiveSourceFetchState::default();
-            }
-            self.screen = screen;
+            self.adopt_screen_source(screen);
         }
         self
+    }
+
+    /// Adopt the current camera slot. An EMPTY slot (stop/restart interval,
+    /// retire) HOLDS the last frame so the render bridges the gap with the
+    /// last real picture instead of the missing-source placeholder; only a
+    /// source with a genuinely different key drops it.
+    fn adopt_camera_source(&mut self, camera: Option<PreviewCameraFrameSource>) {
+        let Some(next) = camera else {
+            self.camera = None;
+            return;
+        };
+        let next_key = next.source_key().cloned();
+        if self.last_camera_source_key.is_some() && self.last_camera_source_key != next_key {
+            self.last_camera_frame = None;
+            self.camera_fetch = LiveSourceFetchState::default();
+        }
+        self.last_camera_source_key = next_key;
+        self.camera = Some(next);
+    }
+
+    /// Screen twin of [`Self::adopt_camera_source`]: a retired screen source
+    /// (camera-only interlude) keeps its last frame as the standby picture, so
+    /// switching back composes a real desktop while the fresh session's first
+    /// frame propagates.
+    fn adopt_screen_source(&mut self, screen: Option<PreviewScreenFrameSource>) {
+        let Some(next) = screen else {
+            self.screen = None;
+            return;
+        };
+        let next_key = next.source_key().cloned();
+        if self.last_screen_source_key.is_some() && self.last_screen_source_key != next_key {
+            self.last_screen_frame = None;
+            self.screen_fetch = LiveSourceFetchState::default();
+        }
+        self.last_screen_source_key = next_key;
+        self.screen = Some(next);
     }
 
     fn fetch_stats(&self) -> CompositorLiveSourceFetchStats {
@@ -698,22 +728,6 @@ fn scene_needs_live_screen_frame(
 
 fn active_image_source_is_cached(active_image_source: Option<&CompositorImageSource>) -> bool {
     active_image_source.is_some_and(|source| source.rgba.is_some() || source.bgra.is_some())
-}
-
-fn same_camera_source(
-    previous: Option<&PreviewCameraFrameSource>,
-    next: Option<&PreviewCameraFrameSource>,
-) -> bool {
-    previous.and_then(PreviewCameraFrameSource::source_key)
-        == next.and_then(PreviewCameraFrameSource::source_key)
-}
-
-fn same_screen_source(
-    previous: Option<&PreviewScreenFrameSource>,
-    next: Option<&PreviewScreenFrameSource>,
-) -> bool {
-    previous.and_then(PreviewScreenFrameSource::source_key)
-        == next.and_then(PreviewScreenFrameSource::source_key)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3482,6 +3496,104 @@ fn gpu_source_placement(
         (1.0 - ((fit.source_y + fit.source_height) / source_height)).clamp(0.0, 1.0) as f32,
     ];
     Some((dest, crop))
+}
+
+#[cfg(test)]
+mod live_source_hold_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn camera_frame() -> (FrameHandle<PreviewCameraPixelFormat>, LayoutSettings) {
+        (
+            Arc::new(crate::frame_store::StoredFrame {
+                sequence: 7,
+                width: 4,
+                height: 4,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [0, 0, 255, 255].repeat(16),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            }),
+            crate::protocol::default_layout_settings(),
+        )
+    }
+
+    fn screen_frame() -> FrameHandle<PreviewScreenPixelFormat> {
+        Arc::new(crate::frame_store::StoredFrame {
+            sequence: 9,
+            width: 4,
+            height: 4,
+            pixel_format: PreviewScreenPixelFormat::Bgra8,
+            metadata: (),
+            bytes: [255, 0, 0, 255].repeat(16),
+            source_iosurface: None,
+            source_pixel_buffer: None,
+            source_d3d11_texture: None,
+            recycle_pool: None,
+            captured_at: Instant::now(),
+        })
+    }
+
+    #[test]
+    fn an_empty_slot_holds_the_last_frame_across_the_restart_interval() {
+        // The on-air "colors" root cause: a restarting/retired source empties
+        // its slot for a moment, and dropping the held frame there made the
+        // render fall through to the animated missing-source placeholder
+        // (magenta camera / orange screen) in the LIVE output. An empty slot
+        // must HOLD; the placeholder is only for sources that never delivered.
+        let key = SourceKey::camera("camera:avfoundation-native:0");
+        let mut sources = CompositorLiveSources::default();
+        sources.adopt_camera_source(Some(PreviewCameraFrameSource::test_with_key(Some(
+            key.clone(),
+        ))));
+        sources.last_camera_frame = Some(camera_frame());
+
+        sources.adopt_camera_source(None);
+        assert!(
+            sources.latest_camera_frame().is_some(),
+            "the held frame must bridge the empty interval"
+        );
+
+        // The restarted session comes back under the SAME key: still held.
+        sources.adopt_camera_source(Some(PreviewCameraFrameSource::test_with_key(Some(key))));
+        assert!(
+            sources.last_camera_frame.is_some(),
+            "a same-key restart must not drop the bridge frame"
+        );
+    }
+
+    #[test]
+    fn a_retired_screen_holds_its_frame_and_a_different_display_drops_it() {
+        let display_one = SourceKey::screen("screen:screencapturekit:1");
+        let display_two = SourceKey::screen("screen:screencapturekit:2");
+        let mut sources = CompositorLiveSources::default();
+        sources.adopt_screen_source(Some(PreviewScreenFrameSource::test_with_key(Some(
+            display_one.clone(),
+        ))));
+        sources.last_screen_frame = Some(screen_frame());
+
+        // Camera-only interlude retires the screen: the frame stays as the
+        // standby picture for the switch back.
+        sources.adopt_screen_source(None);
+        assert!(sources.latest_screen_frame().is_some());
+        sources.adopt_screen_source(Some(PreviewScreenFrameSource::test_with_key(Some(
+            display_one,
+        ))));
+        assert!(sources.last_screen_frame.is_some());
+
+        // A genuinely different display must not show the old one's picture.
+        sources.adopt_screen_source(Some(PreviewScreenFrameSource::test_with_key(Some(
+            display_two,
+        ))));
+        assert!(
+            sources.last_screen_frame.is_none(),
+            "a different source key must drop the held frame"
+        );
+    }
 }
 
 #[cfg(test)]

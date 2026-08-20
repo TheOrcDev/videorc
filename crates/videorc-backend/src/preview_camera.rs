@@ -189,6 +189,17 @@ pub struct PreviewCameraFrameSource {
 }
 
 impl PreviewCameraFrameSource {
+    /// Test-only constructor: compositor tests exercise source adoption
+    /// (hold-last-frame across restart intervals) without a live slot.
+    #[cfg(test)]
+    pub(crate) fn test_with_key(source_key: Option<SourceKey>) -> Self {
+        Self {
+            shared: Arc::new(StdMutex::new(PreviewCameraShared::default())),
+            layout: crate::protocol::default_layout_settings(),
+            source_key,
+        }
+    }
+
     pub fn source_key(&self) -> Option<&SourceKey> {
         self.source_key.as_ref()
     }
