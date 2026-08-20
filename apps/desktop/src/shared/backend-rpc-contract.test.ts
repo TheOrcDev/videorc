@@ -555,6 +555,50 @@ describe('backend RPC contract', () => {
     ).toMatchObject({ artifacts: [{ id: 'artifact-1' }] })
   })
 
+  it('accepts transitionMs on layout transactions and rejects out-of-range values', () => {
+    // transitionMs crosses exactly one wire validator (this allowUnknown:false
+    // schema) — issue #232 class: a field added to N−1 of N layers throws
+    // RuntimeSchemaError in production. Pin the one layer here.
+    const layoutParams = {
+      intentId: 7,
+      sources: { cameraId: 'cam-1', screenId: 'screen-1' },
+      layout: {
+        layoutPreset: 'screen-camera',
+        cameraTransformMode: 'preset',
+        cameraTransform: null,
+        cameraCorner: 'bottom-right',
+        cameraSize: 'medium',
+        cameraShape: 'rounded',
+        cameraCornerRadiusPct: 12,
+        cameraAspect: 'source',
+        cameraChromaKeyEnabled: false,
+        cameraChromaKeyColor: '#00ff00',
+        cameraChromaKeySimilarityPct: 40,
+        cameraChromaKeySmoothnessPct: 10,
+        cameraChromaKeySpillPct: 10,
+        cameraMargin: 16,
+        cameraFit: 'fill',
+        cameraMirror: false,
+        cameraZoom: 100,
+        cameraOffsetX: 0,
+        cameraOffsetY: 0,
+        sideBySideSplit: '50-50',
+        sideBySideCameraSide: 'left'
+      },
+      transitionMs: 320
+    }
+    expect(validateBackendRpcParams('scene.layout.apply_live', layoutParams)).toEqual(layoutParams)
+    expect(validateBackendRpcParams('scene.layout.apply_preview', layoutParams)).toEqual(
+      layoutParams
+    )
+    expect(() =>
+      validateBackendRpcParams('scene.layout.apply_live', { ...layoutParams, transitionMs: 2000 })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('scene.layout.apply_live', { ...layoutParams, transitionMs: 0.5 })
+    ).toThrow()
+  })
+
   it('validates every destructive contract named in the runtime registry', () => {
     expect(runtimeValidatedBackendRpcMethods).toEqual(
       expect.arrayContaining([

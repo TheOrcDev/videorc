@@ -695,6 +695,10 @@ pub struct SceneConfigParams {
     pub background: Option<EffectiveSceneBackground>,
     #[serde(default)]
     pub protected_overlay_window_ids: Vec<u32>,
+    /// Scene-motion duration in ms for THIS commit (renderer sends it when
+    /// "Animate scene changes" is on). Absent/0 = instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_ms: Option<u32>,
 }
 
 /// Backend-owned scene layout transaction. Renderer-generated intent ids are
@@ -2636,6 +2640,10 @@ pub struct CompositorSceneUpdateParams {
     pub layout: LayoutSettings,
     #[serde(default)]
     pub active_screen: Option<StreamScreen>,
+    /// Scene-motion duration in ms (clamped to 1000): the previous scene's
+    /// transforms glide to this one. Absent/0 = instant switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -3796,6 +3804,7 @@ mod tests {
     #[test]
     fn scene_config_round_trips_background_and_defaults_absent_background() {
         let plain = SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -3814,6 +3823,7 @@ mod tests {
         assert_eq!(legacy.background, None);
 
         let params = SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: None,
                 window_id: None,

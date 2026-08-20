@@ -467,9 +467,15 @@ async fn apply_scene_transaction(
     let live = source_liveness(state, target_sources).await;
     match plan_live_swap(mutation_kind, needs, live) {
         ApplyMode::Hot => {
-            let status =
-                commit_scene_for_intent(state, intent_id, &scene, params.layout.clone(), None)
-                    .await?;
+            let status = commit_scene_for_intent(
+                state,
+                intent_id,
+                &scene,
+                params.layout.clone(),
+                None,
+                params.transition_ms,
+            )
+            .await?;
             retire_unused_sources_after_commit(state, intent_id, needs).await;
             resync_camera_capture_geometry_after_commit(state, intent_id, &params, needs).await;
             Ok(layout_apply_status(
@@ -511,6 +517,7 @@ async fn apply_scene_transaction(
                 &scene,
                 params.layout.clone(),
                 Some(message.clone()),
+                params.transition_ms,
             )
             .await?;
             retire_unused_sources_after_commit(state, intent_id, needs).await;
@@ -760,6 +767,7 @@ async fn commit_scene_for_intent(
     scene: &Scene,
     layout: crate::protocol::LayoutSettings,
     message: Option<String>,
+    transition_ms: Option<u32>,
 ) -> Result<SceneCommitStatus> {
     // Keep registration and the commit edge mutually exclusive. Warm-up never holds
     // this guard, so a new request can supersede an older waiter immediately.
@@ -770,7 +778,9 @@ async fn commit_scene_for_intent(
             intents.latest_intent_id
         );
     }
-    let status = commit_scene_with_layout(state, scene, layout, message).await?;
+    let status =
+        commit_scene_with_layout_with_transition(state, scene, layout, message, transition_ms)
+            .await?;
     drop(intents);
     Ok(status)
 }
@@ -1209,9 +1219,27 @@ pub async fn commit_scene_with_layout(
     layout: crate::protocol::LayoutSettings,
     message: Option<String>,
 ) -> Result<SceneCommitStatus> {
+    commit_scene_with_layout_with_transition(state, scene, layout, message, None).await
+}
+
+pub async fn commit_scene_with_layout_with_transition(
+    state: &AppState,
+    scene: &Scene,
+    layout: crate::protocol::LayoutSettings,
+    message: Option<String>,
+    transition_ms: Option<u32>,
+) -> Result<SceneCommitStatus> {
     let now_millis = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
-    commit_scene_with_layout_at_time_with_policy(state, scene, layout, message, now_millis, false)
-        .await
+    commit_scene_with_layout_at_time_with_policy(
+        state,
+        scene,
+        layout,
+        message,
+        now_millis,
+        false,
+        transition_ms,
+    )
+    .await
 }
 
 pub async fn commit_idle_scene_with_layout(
@@ -1221,8 +1249,10 @@ pub async fn commit_idle_scene_with_layout(
     message: Option<String>,
 ) -> Result<SceneCommitStatus> {
     let now_millis = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
-    commit_scene_with_layout_at_time_with_policy(state, scene, layout, message, now_millis, true)
-        .await
+    commit_scene_with_layout_at_time_with_policy(
+        state, scene, layout, message, now_millis, true, None,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1233,10 +1263,13 @@ async fn commit_scene_with_layout_at_time(
     message: Option<String>,
     now_millis: u64,
 ) -> Result<SceneCommitStatus> {
-    commit_scene_with_layout_at_time_with_policy(state, scene, layout, message, now_millis, false)
-        .await
+    commit_scene_with_layout_at_time_with_policy(
+        state, scene, layout, message, now_millis, false, None,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn commit_scene_with_layout_at_time_with_policy(
     state: &AppState,
     scene: &Scene,
@@ -1244,6 +1277,7 @@ async fn commit_scene_with_layout_at_time_with_policy(
     message: Option<String>,
     now_millis: u64,
     idle_only: bool,
+    transition_ms: Option<u32>,
 ) -> Result<SceneCommitStatus> {
     // An unreadable background must DEGRADE, never kill the commit: failing here
     // took the whole preview down with it (every builtin .webp background before
@@ -1288,6 +1322,7 @@ async fn commit_scene_with_layout_at_time_with_policy(
             scene: Some(scene.clone()),
             layout,
             active_screen,
+            transition_ms,
         },
     )
     .await;
@@ -1376,6 +1411,7 @@ mod tests {
             .await
             .expect("intent must register");
         let params = crate::protocol::SceneConfigParams {
+            transition_ms: None,
             sources: sources(true, false),
             layout: full_layout,
             video: Some(video),
@@ -1440,6 +1476,7 @@ mod tests {
 
     fn config(preset: LayoutPreset, camera: bool, screen: bool) -> SceneConfigParams {
         SceneConfigParams {
+            transition_ms: None,
             sources: sources(camera, screen),
             layout: layout(preset),
             video: Some(fallback_video_settings()),

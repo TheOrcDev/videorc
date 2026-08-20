@@ -219,6 +219,24 @@ export function SettingsTab({
                 />
               </div>
             </Field>
+            <Field>
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <FieldLabel htmlFor="animate-scene-changes">Animate scene changes</FieldLabel>
+                  <p className="text-xs text-muted-foreground">
+                    Layout switches glide into place instead of cutting — visible live on stream and
+                    in recordings.
+                  </p>
+                </div>
+                <Switch
+                  checked={settings.animateSceneChanges !== false}
+                  id="animate-scene-changes"
+                  onCheckedChange={(checked) =>
+                    setSettings((current) => ({ ...current, animateSceneChanges: checked }))
+                  }
+                />
+              </div>
+            </Field>
           </FieldGroup>
 
           <div className="flex flex-col gap-0.5">

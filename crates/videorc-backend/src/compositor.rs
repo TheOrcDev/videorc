@@ -288,6 +288,12 @@ impl CompositorPixelFormat {
 pub struct CompositorRuntime {
     pub status: CompositorStatus,
     scene: Option<CompositorSceneSnapshot>,
+    /// Active scene-motion transition: the previous scene's EFFECTIVE
+    /// transforms glide toward the committed scene over `duration`. Applied
+    /// once per tick at the snapshot choke point in publish_compositor_frame,
+    /// so every render path (Metal, CPU, preview, stream, recording) sees
+    /// identical geometry by construction.
+    scene_transition: Option<SceneTransition>,
     image_sources: CompositorImageCache,
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
@@ -472,6 +478,7 @@ struct CompositorRenderCache {
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
     snapshot: Option<CompositorSceneSnapshot>,
+    transition: Option<SceneTransition>,
     active_image_source: Option<CompositorImageSource>,
     background_image_source: Option<CompositorImageSource>,
 }
@@ -510,6 +517,7 @@ impl CompositorRenderCache {
             frame_store: compositor.frame_store.clone(),
             stream_frame_store: compositor.stream_frame_store.clone(),
             snapshot: compositor.scene.clone(),
+            transition: compositor.scene_transition.clone(),
             active_image_source,
             background_image_source,
         }
@@ -706,6 +714,128 @@ fn same_screen_source(
 ) -> bool {
     previous.and_then(PreviewScreenFrameSource::source_key)
         == next.and_then(PreviewScreenFrameSource::source_key)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SceneTransition {
+    /// The scene being left, with EFFECTIVE transforms captured at commit
+    /// time (a commit landing mid-transition re-anchors from wherever the
+    /// glide currently is, so rapid preset clicks stay smooth).
+    from: Scene,
+    started_at: Instant,
+    duration: Duration,
+}
+
+/// Soft start, soft landing, no overshoot — the design language's
+/// nothing-bounces rule for on-air motion.
+fn ease_in_out_cubic(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
+
+fn scene_transition_progress(transition: &SceneTransition, now: Instant) -> f64 {
+    let duration = transition.duration.as_secs_f64();
+    if duration <= 0.0 {
+        return 1.0;
+    }
+    (now.saturating_duration_since(transition.started_at)
+        .as_secs_f64()
+        / duration)
+        .clamp(0.0, 1.0)
+}
+
+fn lerp_f64(from: f64, to: f64, p: f64) -> f64 {
+    from + (to - from) * p
+}
+
+/// Full-geometry interpolation: position, size, AND crops, so zoom/pan
+/// framing glides with the layout instead of popping.
+fn lerp_scene_transform(from: &SceneTransform, to: &SceneTransform, p: f64) -> SceneTransform {
+    SceneTransform {
+        x: lerp_f64(from.x, to.x, p),
+        y: lerp_f64(from.y, to.y, p),
+        width: lerp_f64(from.width, to.width, p),
+        height: lerp_f64(from.height, to.height, p),
+        crop_left: lerp_f64(from.crop_left, to.crop_left, p),
+        crop_top: lerp_f64(from.crop_top, to.crop_top, p),
+        crop_right: lerp_f64(from.crop_right, to.crop_right, p),
+        crop_bottom: lerp_f64(from.crop_bottom, to.crop_bottom, p),
+    }
+}
+
+/// A source with no predecessor grows in from 92% about its own center —
+/// pure geometry, no shader/opacity work (that is the V2 fade).
+fn synthetic_enter_from(to: &SceneTransform) -> SceneTransform {
+    const ENTER_SCALE: f64 = 0.92;
+    let width = to.width * ENTER_SCALE;
+    let height = to.height * ENTER_SCALE;
+    SceneTransform {
+        x: to.x + (to.width - width) / 2.0,
+        y: to.y + (to.height - height) / 2.0,
+        width,
+        height,
+        crop_left: to.crop_left,
+        crop_top: to.crop_top,
+        crop_right: to.crop_right,
+        crop_bottom: to.crop_bottom,
+    }
+}
+
+/// Camera glides to camera; the base capture (screen/window/test pattern)
+/// glides to the base, even when the preset swaps which kind fills it.
+fn scene_motion_family(kind: &SceneSourceKind) -> u8 {
+    match kind {
+        SceneSourceKind::Camera => 0,
+        SceneSourceKind::Screen | SceneSourceKind::Window | SceneSourceKind::TestPattern => 1,
+    }
+}
+
+/// The per-tick effective scene: every visible target source's transform is
+/// eased from its predecessor (matched by motion family) or from a grow-in
+/// origin when it just entered. Exited sources vanish on the first frame by
+/// construction (only target sources render).
+fn scene_with_transition(scene: Scene, transition: &SceneTransition, now: Instant) -> Scene {
+    let progress = ease_in_out_cubic(scene_transition_progress(transition, now));
+    if progress >= 1.0 {
+        return scene;
+    }
+    let mut scene = scene;
+    for source in scene.sources.iter_mut() {
+        if !source.visible {
+            continue;
+        }
+        let from = transition
+            .from
+            .sources
+            .iter()
+            .find(|previous| {
+                previous.visible
+                    && scene_motion_family(&previous.kind) == scene_motion_family(&source.kind)
+            })
+            .map(|previous| previous.transform.clone())
+            .unwrap_or_else(|| synthetic_enter_from(&source.transform));
+        source.transform = lerp_scene_transform(&from, &source.transform, progress);
+    }
+    scene
+}
+
+fn snapshot_with_transition(
+    snapshot: Option<CompositorSceneSnapshot>,
+    transition: Option<&SceneTransition>,
+    now: Instant,
+) -> Option<CompositorSceneSnapshot> {
+    let Some(transition) = transition else {
+        return snapshot;
+    };
+    let mut snapshot = snapshot?;
+    if let Some(scene) = snapshot.scene.take() {
+        snapshot.scene = Some(scene_with_transition(scene, transition, now));
+    }
+    Some(snapshot)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -930,6 +1060,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
     CompositorRuntime {
         status: stopped_status(Some("Compositor is not running.".to_string())),
         scene: None,
+        scene_transition: None,
         image_sources: CompositorImageCache::new(
             COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES,
             COMPOSITOR_IMAGE_CACHE_ENTRY_BUDGET,
@@ -1377,6 +1508,7 @@ pub async fn update_compositor_scene(
         scene,
         layout,
         active_screen,
+        transition_ms,
     } = params;
     let active_screen = active_screen.map(|screen| {
         state
@@ -1393,6 +1525,26 @@ pub async fn update_compositor_scene(
             return compositor.status.clone();
         }
 
+        // Scene motion: capture the OUTGOING scene's effective transforms so
+        // the new scene glides from wherever things currently are (including
+        // mid-flight re-anchoring when commits interrupt a running glide).
+        let now = Instant::now();
+        let previous_effective = compositor.scene.as_ref().and_then(|previous| {
+            previous.scene.clone().map(|previous_scene| {
+                match compositor.scene_transition.as_ref() {
+                    Some(active) => scene_with_transition(previous_scene, active, now),
+                    None => previous_scene,
+                }
+            })
+        });
+        compositor.scene_transition = match (transition_ms, previous_effective, scene.as_ref()) {
+            (Some(duration_ms), Some(from), Some(_)) if duration_ms > 0 => Some(SceneTransition {
+                from,
+                started_at: now,
+                duration: Duration::from_millis(u64::from(duration_ms.min(1_000))),
+            }),
+            _ => None,
+        };
         let snapshot = CompositorSceneSnapshot {
             revision,
             scene,
@@ -1459,6 +1611,7 @@ pub async fn update_compositor_active_screen(
             scene,
             layout,
             active_screen,
+            transition_ms: None,
         },
     )
     .await
@@ -3297,6 +3450,160 @@ fn gpu_source_placement(
 }
 
 #[cfg(test)]
+mod scene_motion_tests {
+    use super::*;
+    use crate::protocol::{Scene, SceneSource, SceneSourceKind, SceneTransform};
+
+    fn transform(x: f64, y: f64, width: f64, height: f64) -> SceneTransform {
+        SceneTransform {
+            x,
+            y,
+            width,
+            height,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        }
+    }
+
+    fn source(kind: SceneSourceKind, t: SceneTransform) -> SceneSource {
+        SceneSource {
+            id: format!("{kind:?}"),
+            kind,
+            name: String::new(),
+            device_id: None,
+            visible: true,
+            locked: false,
+            transform: t.clone(),
+            default_transform: t,
+        }
+    }
+
+    fn scene_with(sources: Vec<SceneSource>) -> Scene {
+        Scene {
+            id: "scene".to_string(),
+            name: "scene".to_string(),
+            sources,
+            outputs: Vec::new(),
+            background: None,
+        }
+    }
+
+    #[test]
+    fn easing_is_soft_bounded_and_monotonic() {
+        assert_eq!(ease_in_out_cubic(0.0), 0.0);
+        assert_eq!(ease_in_out_cubic(1.0), 1.0);
+        assert!((ease_in_out_cubic(0.5) - 0.5).abs() < 1e-9);
+        // No overshoot, ever — the nothing-bounces rule.
+        let mut previous = 0.0;
+        for step in 0..=100 {
+            let value = ease_in_out_cubic(f64::from(step) / 100.0);
+            assert!((0.0..=1.0).contains(&value));
+            assert!(value >= previous);
+            previous = value;
+        }
+        // Out-of-range inputs clamp instead of extrapolating.
+        assert_eq!(ease_in_out_cubic(-1.0), 0.0);
+        assert_eq!(ease_in_out_cubic(2.0), 1.0);
+    }
+
+    #[test]
+    fn mid_transition_geometry_sits_between_the_two_layouts() {
+        // The owner's example: side-by-side camera gliding to the corner.
+        let from_camera = transform(0.7, 0.0, 0.3, 1.0);
+        let to_camera = transform(0.75, 0.05, 0.2, 0.2);
+        let transition = SceneTransition {
+            from: scene_with(vec![source(SceneSourceKind::Camera, from_camera.clone())]),
+            started_at: Instant::now() - Duration::from_millis(160),
+            duration: Duration::from_millis(320),
+        };
+        let animated = scene_with_transition(
+            scene_with(vec![source(SceneSourceKind::Camera, to_camera.clone())]),
+            &transition,
+            Instant::now(),
+        );
+        let camera = &animated.sources[0].transform;
+        // Strictly between the endpoints on every animated axis.
+        assert!(camera.x > from_camera.x && camera.x < to_camera.x);
+        assert!(camera.width < from_camera.width && camera.width > to_camera.width);
+        assert!(camera.height < from_camera.height && camera.height > to_camera.height);
+    }
+
+    #[test]
+    fn finished_transition_returns_the_target_scene_untouched() {
+        let to = scene_with(vec![source(
+            SceneSourceKind::Camera,
+            transform(0.1, 0.1, 0.2, 0.2),
+        )]);
+        let transition = SceneTransition {
+            from: scene_with(vec![source(
+                SceneSourceKind::Camera,
+                transform(0.0, 0.0, 1.0, 1.0),
+            )]),
+            started_at: Instant::now() - Duration::from_secs(5),
+            duration: Duration::from_millis(320),
+        };
+        let animated = scene_with_transition(to.clone(), &transition, Instant::now());
+        assert_eq!(
+            animated, to,
+            "an expired glide must cost and change nothing"
+        );
+    }
+
+    #[test]
+    fn base_family_glides_across_capture_kinds_and_entrants_grow_in() {
+        // Screen in the old scene, Window in the new: same slot, must glide.
+        let transition = SceneTransition {
+            from: scene_with(vec![source(
+                SceneSourceKind::Screen,
+                transform(0.0, 0.0, 0.7, 1.0),
+            )]),
+            started_at: Instant::now() - Duration::from_millis(160),
+            duration: Duration::from_millis(320),
+        };
+        let animated = scene_with_transition(
+            scene_with(vec![
+                source(SceneSourceKind::Window, transform(0.0, 0.0, 1.0, 1.0)),
+                source(SceneSourceKind::Camera, transform(0.75, 0.05, 0.2, 0.2)),
+            ]),
+            &transition,
+            Instant::now(),
+        );
+        let window = &animated.sources[0].transform;
+        assert!(
+            window.width > 0.7 && window.width < 1.0,
+            "base glides across kinds"
+        );
+        // The camera has no predecessor: grows in from 92% about its center.
+        let camera = &animated.sources[1].transform;
+        assert!(camera.width > 0.2 * 0.92 && camera.width < 0.2);
+        assert!(camera.x > 0.75 && camera.x < 0.75 + 0.2 * 0.04 + 1e-9);
+    }
+
+    #[test]
+    fn zero_or_absent_duration_never_installs_motion() {
+        let transition = SceneTransition {
+            from: scene_with(vec![source(
+                SceneSourceKind::Camera,
+                transform(0.0, 0.0, 1.0, 1.0),
+            )]),
+            started_at: Instant::now(),
+            duration: Duration::from_millis(0),
+        };
+        let to = scene_with(vec![source(
+            SceneSourceKind::Camera,
+            transform(0.1, 0.1, 0.2, 0.2),
+        )]);
+        assert_eq!(
+            scene_with_transition(to.clone(), &transition, Instant::now()),
+            to,
+            "zero duration is an instant switch"
+        );
+    }
+}
+
+#[cfg(test)]
 fn rgba_to_bgra_bytes(rgba: &[u8]) -> Vec<u8> {
     let mut bgra = Vec::with_capacity(rgba.len());
     for pixel in rgba.chunks_exact(4) {
@@ -3357,7 +3664,11 @@ async fn publish_compositor_frame(
     render_cache.refresh_nonblocking(state);
     let frame_store = render_cache.frame_store.clone();
     let stream_frame_store = render_cache.stream_frame_store.clone();
-    let snapshot = render_cache.snapshot.clone();
+    let snapshot = snapshot_with_transition(
+        render_cache.snapshot.clone(),
+        render_cache.transition.as_ref(),
+        Instant::now(),
+    );
     let active_image_source = render_cache.active_image_source.clone();
     let background_image_source = render_cache.background_image_source.clone();
     let scene_snapshot_ms = scene_snapshot_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -5252,6 +5563,7 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = layout_preset;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: screen_id.map(ToString::to_string),
                 window_id: None,
@@ -5956,6 +6268,7 @@ mod tests {
         };
         let layout = crate::protocol::default_layout_settings();
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -6045,6 +6358,7 @@ mod tests {
         };
         let layout = crate::protocol::default_layout_settings();
         let mut scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -6157,6 +6471,7 @@ mod tests {
         layout.side_by_side_split = crate::protocol::SideBySideSplit::SixtyForty;
         layout.side_by_side_camera_side = crate::protocol::SideBySideCameraSide::Left;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: Some("screen-1".to_string()),
                 window_id: None,
@@ -6241,6 +6556,7 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = LayoutPreset::ScreenOnly;
         let mut scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: Some("screen-1".to_string()),
                 window_id: None,
@@ -6335,6 +6651,7 @@ mod tests {
         let state = test_state();
         let layout = crate::protocol::default_layout_settings();
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -6423,6 +6740,7 @@ mod tests {
         let state = test_state();
         let layout = crate::protocol::default_layout_settings();
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -6561,6 +6879,7 @@ mod tests {
         };
         let layout = crate::protocol::default_layout_settings();
         let mut scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -7020,6 +7339,7 @@ mod tests {
         .await;
         let layout = crate::protocol::default_layout_settings();
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -7041,6 +7361,7 @@ mod tests {
         update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 1,
                 scene: Some(scene),
                 layout,
@@ -7098,6 +7419,7 @@ mod tests {
         let state = test_state();
         let layout = crate::protocol::default_layout_settings();
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -7688,6 +8010,7 @@ mod tests {
         let status = update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 10,
                 scene: Some(scene.clone()),
                 layout: layout.clone(),
@@ -7703,6 +8026,7 @@ mod tests {
         let stale = update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 9,
                 scene: None,
                 layout: layout.clone(),
@@ -7718,6 +8042,7 @@ mod tests {
         let newest = update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 11,
                 scene: None,
                 layout,
@@ -7749,6 +8074,7 @@ mod tests {
         let first = update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 1,
                 scene: None,
                 layout: layout.clone(),
@@ -7773,6 +8099,7 @@ mod tests {
         let second = update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 2,
                 scene: None,
                 layout: layout.clone(),
@@ -7789,6 +8116,7 @@ mod tests {
         let missing = update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 3,
                 scene: None,
                 layout,
@@ -7970,6 +8298,7 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = LayoutPreset::ScreenOnly;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -8369,6 +8698,7 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = LayoutPreset::ScreenOnly;
         let mut scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: Some("screen:screencapturekit:1".to_string()),
                 window_id: None,
@@ -8468,6 +8798,7 @@ mod tests {
         layout.layout_preset = LayoutPreset::VerticalCameraTop;
         layout.camera_fit = crate::protocol::CameraFit::Fit;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: Some("screen:screencapturekit:1".to_string()),
                 window_id: None,
@@ -8682,6 +9013,7 @@ mod tests {
         layout.layout_preset = LayoutPreset::CameraOnly;
         layout.camera_shape = CameraShape::Circle;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -8858,6 +9190,7 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = LayoutPreset::CameraOnly;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -8942,6 +9275,7 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = LayoutPreset::ScreenOnly;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -8959,6 +9293,7 @@ mod tests {
         update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 20,
                 scene: Some(scene),
                 layout,

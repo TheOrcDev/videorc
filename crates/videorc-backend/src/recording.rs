@@ -1480,6 +1480,7 @@ async fn commit_recording_startup_scene_at_time(
             scene: Some(scene.clone()),
             layout,
             active_screen,
+            transition_ms: None,
         },
     )
     .await;
@@ -2370,6 +2371,7 @@ pub async fn start_session(
             .await;
             let scene = params.scene.clone().unwrap_or_else(|| {
                 scene_from_capture_config(SceneConfigParams {
+                    transition_ms: None,
                     sources: params.sources.clone(),
                     layout: params.layout.clone(),
                     video: Some(params.output.video.clone()),
@@ -8148,6 +8150,7 @@ async fn should_use_compositor_encoder_bridge(
     }
     let scene = params.scene.clone().unwrap_or_else(|| {
         scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: params.sources.clone(),
             layout: params.layout.clone(),
             video: Some(params.output.video.clone()),

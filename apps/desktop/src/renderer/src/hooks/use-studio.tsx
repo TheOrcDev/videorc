@@ -391,6 +391,10 @@ function openLibraryFromQualityToast(sessionId?: string): void {
 const TELEMETRY_UI_COMMIT_INTERVAL_MS = 1000
 const SIGNED_IN_ENTITLEMENT_REFRESH_INTERVAL_MS = 5 * 60_000
 const LIVE_CHAT_RECOVERY_RETRY_DELAY_MS = 250
+/// Scene-motion duration: content motion on-air sits just above the UI's
+/// 100-150ms tier; >=500ms reads as a broadcast wipe.
+const SCENE_TRANSITION_MS = 320
+
 const SESSION_LIST_PAGE_LIMIT = 50
 export const SESSION_DETAIL_BUFFER_LIMIT = 120
 const SESSION_DETAIL_CACHE_LIMIT = 8
@@ -2375,9 +2379,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [screenImportPending, setScreenImportPending] = useState(false)
   const [streamMetadataSavePending, setStreamMetadataSavePending] = useState(false)
   const [supportBundleExportPending, setSupportBundleExportPending] = useState(false)
-  const [settings, setSettings] = useState<SettingsState>(() =>
-    loadJson(STORAGE_KEYS.settings, defaultSettings)
-  )
+  const [settings, setSettings] = useState<SettingsState>(() => {
+    const loaded = loadJson(STORAGE_KEYS.settings, defaultSettings)
+    // Scene motion defaults on, but an OS-level reduced-motion preference
+    // flips the DEFAULT off until the user chooses explicitly in Settings.
+    if (
+      loaded.animateSceneChanges === undefined &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    ) {
+      return { ...loaded, animateSceneChanges: false }
+    }
+    return loaded
+  })
   const settingsRef = useRef(settings)
   settingsRef.current = settings
   // Stable handle for callbacks that only need to READ the config (labels,
@@ -5738,7 +5751,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             // state, so the transaction carries its target canvas explicitly.
             video: options?.videoOverride ?? requestedConfig.video,
             background: activeSceneBackground,
-            protectedOverlayWindowIds
+            protectedOverlayWindowIds,
+            // Scene motion: the committed layout glides into place (320ms
+            // ease) in preview, stream, and recording alike. Absent = instant.
+            ...(settingsRef.current.animateSceneChanges !== false
+              ? { transitionMs: SCENE_TRANSITION_MS }
+              : {})
           })
           const committedSnapshot: LayoutTransactionSnapshot = {
             sceneRevision: status.sceneRevision,
