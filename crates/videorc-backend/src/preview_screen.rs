@@ -174,6 +174,16 @@ pub struct PreviewScreenFrameSource {
 }
 
 impl PreviewScreenFrameSource {
+    /// Test-only constructor: compositor tests exercise source adoption
+    /// (hold-last-frame across retire/restart intervals) without a live slot.
+    #[cfg(test)]
+    pub(crate) fn test_with_key(source_key: Option<SourceKey>) -> Self {
+        Self {
+            shared: Arc::new(StdMutex::new(PreviewScreenShared::default())),
+            source_key,
+        }
+    }
+
     pub fn source_key(&self) -> Option<&SourceKey> {
         self.source_key.as_ref()
     }
