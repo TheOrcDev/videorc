@@ -42,6 +42,11 @@ export type SettingsState = {
     streamToggle?: string
     micToggle?: string
   }
+  /**
+   * Scene motion: layout changes glide (320ms ease) in the live output —
+   * preview, stream, AND recording — instead of cutting. Default on.
+   */
+  animateSceneChanges?: boolean
 }
 
 export type CaptionBurnTarget = 'off' | 'stream' | 'recording' | 'both'
@@ -319,7 +324,8 @@ export const MICROPHONE_SYNC_OFFSET_MAX_MS = 1000
 export const defaultSettings: SettingsState = {
   outputDirectory: '',
   outputDirectoryHandle: undefined,
-  keepOriginalRecording: false
+  keepOriginalRecording: false,
+  animateSceneChanges: true
 }
 
 export const rtmpDefaults: Record<RtmpPreset, string> = {

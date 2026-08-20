@@ -831,6 +831,7 @@ mod tests {
 
     fn base_params() -> SceneConfigParams {
         SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: Some("screen:screencapturekit:1".to_string()),
                 window_id: None,

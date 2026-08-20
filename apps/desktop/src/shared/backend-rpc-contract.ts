@@ -581,7 +581,8 @@ const sceneConfigSchema = objectSchema(
     background: optionalSchema(boundedBackendParamValueSchema),
     protectedOverlayWindowIds: optionalSchema(
       arraySchema(numberSchema({ integer: true, min: 0 }), { maxLength: 16 })
-    )
+    ),
+    transitionMs: optionalSchema(numberSchema({ integer: true, min: 0, max: 1000 }))
   },
   { allowUnknown: false }
 )

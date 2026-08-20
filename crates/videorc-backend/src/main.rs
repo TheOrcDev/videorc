@@ -9726,6 +9726,7 @@ mod tests {
         let mut layout = protocol::default_layout_settings();
         layout.layout_preset = preset;
         let config = protocol::SceneConfigParams {
+            transition_ms: None,
             sources: protocol::SourceSelection {
                 screen_id: Some("screen:screencapturekit:1".to_string()),
                 window_id: None,

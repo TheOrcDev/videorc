@@ -510,6 +510,8 @@ export interface SceneConfigParams {
   video?: VideoSettings
   background?: EffectiveSceneBackground
   protectedOverlayWindowIds?: number[]
+  /** Scene-motion duration (ms) for this commit; absent/0 = instant switch. */
+  transitionMs?: number
 }
 
 export interface SceneTransformUpdateParams {
