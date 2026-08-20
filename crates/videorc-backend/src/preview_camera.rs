@@ -22,9 +22,10 @@ use crate::diagnostics::{
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats};
 use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
+#[cfg(any(target_os = "windows", test))]
+use crate::protocol::{CameraAspect, CameraShape, CameraSize, CameraTransformMode, LayoutPreset};
 use crate::protocol::{
-    CameraAspect, CameraCapabilityFormat, CameraShape, CameraSize, CameraTransformMode,
-    LayoutPreset, LayoutSettings, PreviewCameraStartParams, PreviewCameraState,
+    CameraCapabilityFormat, LayoutSettings, PreviewCameraStartParams, PreviewCameraState,
     PreviewCameraStatus, VideoSettings,
 };
 use crate::source_registry::{SourceConsumerReason, SourceKey};
@@ -33,10 +34,10 @@ use crate::state::AppState;
 
 const PREVIEW_CAMERA_DEFAULT_PNG_WIDTH: u32 = 1280;
 const PREVIEW_CAMERA_MAX_PNG_WIDTH: u32 = 1920;
+#[cfg(any(target_os = "windows", test))]
 const CAMERA_REFERENCE_WIDTH: u32 = 1280;
+#[cfg(any(target_os = "windows", test))]
 const CAMERA_REFERENCE_HEIGHT: u32 = 720;
-const CAMERA_OVERLAY_CAPTURE_MIN_WIDTH: u32 = 1280;
-const CAMERA_OVERLAY_CAPTURE_MIN_HEIGHT: u32 = 720;
 const CAMERA_CAPTURE_CPU_COPY_ENV: &str = "VIDEORC_CAMERA_CAPTURE_CPU_COPY";
 const WINDOWS_CAMERA_PREVIEW_STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
 #[cfg(any(target_os = "windows", test))]
@@ -1601,29 +1602,23 @@ fn windows_camera_mjpeg_capture_modes(width: u32, height: u32) -> Vec<(u32, u32)
     modes
 }
 
-fn camera_capture_target_dimensions(layout: &LayoutSettings, video: &VideoSettings) -> (u32, u32) {
-    // Only the inset scenes (ScreenCamera + its vertical twin) render the
-    // camera as a small overlay box; everywhere else the camera can span the
-    // canvas, so capture at full output size.
-    if !matches!(
-        layout.layout_preset,
-        LayoutPreset::ScreenCamera | LayoutPreset::VerticalScreenCamera
-    ) {
-        return (video.width, video.height);
-    }
-
-    let (overlay_width, overlay_height) = camera_overlay_target_dimensions(layout, video);
-
-    (
-        overlay_width
-            .max(CAMERA_OVERLAY_CAPTURE_MIN_WIDTH)
-            .min(video.width.max(1)),
-        overlay_height
-            .max(CAMERA_OVERLAY_CAPTURE_MIN_HEIGHT)
-            .min(video.height.max(1)),
-    )
+fn camera_capture_target_dimensions(_layout: &LayoutSettings, video: &VideoSettings) -> (u32, u32) {
+    // Capture geometry is LAYOUT-INVARIANT on purpose: always the full output
+    // canvas, for every preset. The inset scenes used to capture a small
+    // overlay box as an optimization, which made camera-only <-> screen+camera
+    // the one preset pair whose capture boxes differed — so exactly those
+    // switches force-restarted the camera (device power-cycles, renegotiation
+    // garbage on screen; owner-reported through 0.9.64). The compositor's
+    // scene math scales the full-size frame into any inset, capturing big and
+    // scaling down only improves inset quality, and a preset switch can now
+    // NEVER invalidate a running camera session. Only genuine output-canvas
+    // changes (video preset/orientation) re-derive capture geometry.
+    // The Windows D3D11 overlay path does its own overlay sizing in
+    // windows_camera_preview_output_dimensions.
+    (video.width, video.height)
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn camera_overlay_target_dimensions(layout: &LayoutSettings, video: &VideoSettings) -> (u32, u32) {
     if let (CameraTransformMode::Custom, Some(transform)) =
         (layout.camera_transform_mode, layout.camera_transform)
@@ -1646,6 +1641,7 @@ fn camera_overlay_target_dimensions(layout: &LayoutSettings, video: &VideoSettin
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn scaled_camera_box_size(
     size: &CameraSize,
     shape: &CameraShape,
@@ -1675,11 +1671,13 @@ fn scaled_camera_box_size(
     )
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn camera_output_scale(video: &VideoSettings) -> f64 {
     (f64::from(video.width) / f64::from(CAMERA_REFERENCE_WIDTH))
         .min(f64::from(video.height) / f64::from(CAMERA_REFERENCE_HEIGHT))
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn scale_camera_dimension(value: f64) -> u32 {
     value.round().max(1.0).min(f64::from(u32::MAX)) as u32
 }
@@ -3211,15 +3209,20 @@ mod tests {
     }
 
     #[test]
-    fn screen_camera_overlay_capture_target_uses_overlay_quality_floor() {
+    fn screen_camera_capture_target_keeps_output_resolution() {
+        // Capture geometry is layout-invariant: the inset preset captures the
+        // SAME full canvas as every other preset, so a camera-only <->
+        // screen+camera switch can never invalidate a running camera session
+        // (owner-reported restarts with renegotiation garbage through 0.9.64).
         let mut layout = test_layout(false);
         layout.layout_preset = LayoutPreset::ScreenCamera;
         layout.camera_size = CameraSize::Medium;
         layout.camera_shape = CameraShape::Rectangle;
+        let video = test_video();
 
         assert_eq!(
-            camera_capture_target_dimensions(&layout, &test_video()),
-            (1280, 720)
+            camera_capture_target_dimensions(&layout, &video),
+            (video.width, video.height)
         );
     }
 
@@ -3454,20 +3457,32 @@ mod tests {
     }
     #[tokio::test]
     async fn reuse_refuses_a_session_with_stale_capture_geometry() {
-        // A hot preset switch (inset overlay <-> full canvas) changes the
-        // derived capture box. The running session keeps delivering frames
-        // sized for the old scene, so reuse must force a restart instead of
-        // adopting them.
+        // Capture geometry is layout-invariant, so only a genuine output
+        // canvas change (video preset/orientation) can make it stale. A
+        // session capturing the old canvas keeps delivering frames sized for
+        // it, so reuse must force a restart instead of adopting them.
         let state = test_state();
         let video = test_video();
+        let mut larger_canvas = test_video();
+        larger_canvas.preset = VideoPreset::Tutorial1440p30;
+        larger_canvas.width = 2560;
+        larger_canvas.height = 1440;
         let source_key = SourceKey::camera("camera:avfoundation-native:test");
         let full_canvas_layout = test_layout(false);
-        let mut inset_layout = test_layout(false);
-        inset_layout.layout_preset = LayoutPreset::ScreenCamera;
-        assert_ne!(
+        let inset_layout = {
+            let mut layout = test_layout(false);
+            layout.layout_preset = LayoutPreset::ScreenCamera;
+            layout
+        };
+        assert_eq!(
             camera_capture_target_dimensions(&full_canvas_layout, &video),
             camera_capture_target_dimensions(&inset_layout, &video),
-            "the two presets must derive different capture boxes for this test"
+            "presets must share ONE capture box — a preset switch never restarts the camera"
+        );
+        assert_ne!(
+            camera_capture_target_dimensions(&full_canvas_layout, &video),
+            camera_capture_target_dimensions(&full_canvas_layout, &larger_canvas),
+            "an output canvas change must derive a different capture box for this test"
         );
         let (stop_tx, _stop_rx) = std_mpsc::channel();
         {
@@ -3492,20 +3507,24 @@ mod tests {
                 &source_key,
                 "ffmpeg",
                 &full_canvas_layout,
-                &video,
-                video.fps
+                &larger_canvas,
+                larger_canvas.fps
             )
             .await
             .is_none(),
             "a capture-geometry mismatch must not be reused"
         );
         assert!(
-            camera_capture_geometry_is_stale(&state, &full_canvas_layout, &video).await,
+            camera_capture_geometry_is_stale(&state, &full_canvas_layout, &larger_canvas).await,
             "the staleness probe must agree with reuse"
         );
         assert!(
+            !camera_capture_geometry_is_stale(&state, &full_canvas_layout, &video).await,
+            "the same canvas must not report stale — regardless of preset"
+        );
+        assert!(
             !camera_capture_geometry_is_stale(&state, &inset_layout, &video).await,
-            "matching geometry must not report stale"
+            "a preset switch alone must NEVER report stale"
         );
     }
 

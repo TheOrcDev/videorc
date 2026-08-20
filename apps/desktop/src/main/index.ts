@@ -7252,6 +7252,16 @@ function setDockIcon(): void {
   if (process.platform !== 'darwin') {
     return
   }
+  // Packaged builds must NOT override the Dock icon: the bundle's icon.icns
+  // is drawn on Apple's icon grid (art at ~80% with transparent margins),
+  // while this override replaced it at runtime with the full-bleed
+  // videorc-logo.png — which is why the Dock icon rendered visibly larger
+  // than every neighbor no matter how the .icns was fixed. The override only
+  // earns its keep in dev, where Electron would otherwise show its default
+  // icon.
+  if (app.isPackaged) {
+    return
+  }
 
   const icon = resolveAppIcon()
   if (icon) {
