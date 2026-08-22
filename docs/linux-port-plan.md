@@ -78,6 +78,23 @@ The code and CI contract are implemented. A real Ubuntu machine must still
 prove both the VAAPI path and the software fallback before the release can
 advance.
 
+Run the hardware-only acceptance command on the named Ubuntu 24.04 x64 tester
+box. It requires a webcam, a VAAPI render node, and explicit tester/machine
+labels; it fetches the pinned FFmpeg bundle, records 1080p30 through the real
+dev app once per forced backend, checks the final artifacts and diagnostics,
+and writes `linux-encoder-acceptance.json` beside the recordings:
+
+```bash
+VIDEORC_LINUX_TESTER_NAME="<person>" \
+VIDEORC_LINUX_TESTER_MACHINE="<specific box>" \
+VIDEORC_LINUX_PHYSICAL_HARDWARE=1 \
+pnpm smoke:linux-encoder-acceptance
+```
+
+`--backend=openh264` or `--backend=vaapi` may be used to diagnose one path,
+but only the default two-backend run emits `complete: true` evidence and clears
+the L1.5 hardware gate. CI runners and virtual machines are not substitutes.
+
 ### Hardware stop before L2
 
 Do not start L2 until a named Linux tester and a specific Ubuntu 24.04 x64
