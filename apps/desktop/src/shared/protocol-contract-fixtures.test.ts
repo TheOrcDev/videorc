@@ -5,6 +5,12 @@ import { describe, expect, it } from 'vitest'
 import { normalizeLayoutSettings } from '../renderer/src/lib/capture'
 import type {
   AccountCallbackEnvelope,
+  CohostFlagParams,
+  CohostQuestionParams,
+  CohostSettings,
+  CohostSettingsPatch,
+  CohostStartParams,
+  CohostState,
   CompositorStatus,
   LayoutSettings,
   PreviewSurfaceBounds,
@@ -16,6 +22,7 @@ import type {
 } from './backend'
 import { normalizeSessionCommentsListParams } from './backend'
 import {
+  validateBackendEventPayload,
   validateBackendRpcParams,
   validateBackendRpcResult,
   type BackendRpcParams
@@ -53,6 +60,15 @@ interface HighRiskContractFixtures {
     terminalPage: SessionCommentsPage
     deleteParams: BackendRpcParams<'sessions.delete'>
     deletionOperation: SessionDeletionOperation
+  }
+  cohost: {
+    startParams: CohostStartParams
+    questionParams: CohostQuestionParams
+    flagParams: CohostFlagParams
+    settingsPatch: CohostSettingsPatch
+    settings: CohostSettings
+    state: CohostState
+    offState: CohostState
   }
 }
 
@@ -127,6 +143,48 @@ describe('shared high-risk protocol fixture', () => {
     expect(
       validateBackendRpcParams('account.complete_sign_in', fixtures.account.completeSignInParams)
     ).toStrictEqual(fixtures.account.completeSignInParams)
+  })
+
+  it('keeps the Live Co-host RPC params, settings, and state identical across languages', () => {
+    expect(validateBackendRpcParams('cohost.start', fixtures.cohost.startParams)).toStrictEqual(
+      fixtures.cohost.startParams
+    )
+    for (const method of ['cohost.question.answered', 'cohost.question.dismiss'] as const) {
+      expect(validateBackendRpcParams(method, fixtures.cohost.questionParams)).toStrictEqual(
+        fixtures.cohost.questionParams
+      )
+    }
+    expect(
+      validateBackendRpcParams('cohost.flag.dismiss', fixtures.cohost.flagParams)
+    ).toStrictEqual(fixtures.cohost.flagParams)
+    expect(
+      validateBackendRpcParams('cohost.settings.set', fixtures.cohost.settingsPatch)
+    ).toStrictEqual(fixtures.cohost.settingsPatch)
+    expect(validateBackendRpcResult('cohost.settings.get', fixtures.cohost.settings)).toStrictEqual(
+      fixtures.cohost.settings
+    )
+    for (const method of [
+      'cohost.status',
+      'cohost.start',
+      'cohost.stop',
+      'cohost.question.answered',
+      'cohost.question.dismiss',
+      'cohost.flag.dismiss'
+    ] as const) {
+      expect(validateBackendRpcResult(method, fixtures.cohost.state)).toStrictEqual(
+        fixtures.cohost.state
+      )
+      expect(validateBackendRpcResult(method, fixtures.cohost.offState)).toStrictEqual(
+        fixtures.cohost.offState
+      )
+    }
+    expect(validateBackendEventPayload('cohost.state', fixtures.cohost.state)).toStrictEqual(
+      fixtures.cohost.state
+    )
+    expect(validateBackendEventPayload('cohost.state', fixtures.cohost.offState)).toStrictEqual(
+      fixtures.cohost.offState
+    )
+    expect(fixtures.cohost.offState).toMatchObject({ sessionId: null, reason: null, mood: null })
   })
 
   it('keeps comment pagination defaults and deletion DTOs identical', () => {

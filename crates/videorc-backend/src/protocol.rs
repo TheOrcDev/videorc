@@ -97,6 +97,7 @@ pub enum FeatureId {
     Multistreaming,
     CloudAi,
     NoiseCleanup,
+    LiveCohost,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -3226,6 +3227,51 @@ pub enum HealthLevel {
     Error,
 }
 
+// --- Live Co-host RPC params (wire contract v1; mirrored in shared/backend.ts) ---
+
+/// `cohost.start`. Consent is renderer-owned state (the cloud-AI consent
+/// toggle), so the renderer passes it explicitly on every start; the backend
+/// never assumes it. `streamTitle` is optional context for the model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostStartParams {
+    pub session_id: String,
+    #[serde(default)]
+    pub consent_to_process_chat: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_title: Option<String>,
+}
+
+/// `cohost.question.answered` / `cohost.question.dismiss`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostQuestionParams {
+    pub session_id: String,
+    pub question_id: String,
+}
+
+/// `cohost.flag.dismiss`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostFlagParams {
+    pub session_id: String,
+    pub message_id: String,
+}
+
+/// `cohost.settings.set`: every field optional; absent fields are unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSettingsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<crate::cohost::CohostTone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_highlight: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunAiWorkflowParams {
@@ -4305,6 +4351,48 @@ mod tests {
         let operation: SessionDeletionHandle =
             serde_json::from_value(operation_wire.clone()).unwrap();
         assert_eq!(serde_json::to_value(operation).unwrap(), operation_wire);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_cohost_dtos() {
+        let start_wire = shared_high_risk_contract_fixture_value("/cohost/startParams");
+        let start: CohostStartParams = serde_json::from_value(start_wire.clone()).unwrap();
+        assert!(start.consent_to_process_chat);
+        assert_eq!(serde_json::to_value(start).unwrap(), start_wire);
+
+        let minimal_start: CohostStartParams =
+            serde_json::from_value(serde_json::json!({ "sessionId": "session-fixture" })).unwrap();
+        assert!(!minimal_start.consent_to_process_chat);
+        assert_eq!(minimal_start.stream_title, None);
+
+        let question_wire = shared_high_risk_contract_fixture_value("/cohost/questionParams");
+        let question: CohostQuestionParams = serde_json::from_value(question_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(question).unwrap(), question_wire);
+
+        let flag_wire = shared_high_risk_contract_fixture_value("/cohost/flagParams");
+        let flag: CohostFlagParams = serde_json::from_value(flag_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(flag).unwrap(), flag_wire);
+
+        let patch_wire = shared_high_risk_contract_fixture_value("/cohost/settingsPatch");
+        let patch: CohostSettingsPatch = serde_json::from_value(patch_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(patch).unwrap(), patch_wire);
+        let empty_patch: CohostSettingsPatch =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty_patch, CohostSettingsPatch::default());
+
+        let settings_wire = shared_high_risk_contract_fixture_value("/cohost/settings");
+        let settings: crate::cohost::CohostSettings =
+            serde_json::from_value(settings_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(settings).unwrap(), settings_wire);
+
+        let state_wire = shared_high_risk_contract_fixture_value("/cohost/state");
+        let state: crate::cohost::CohostState = serde_json::from_value(state_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(state).unwrap(), state_wire);
+
+        let off_wire = shared_high_risk_contract_fixture_value("/cohost/offState");
+        let off: crate::cohost::CohostState = serde_json::from_value(off_wire.clone()).unwrap();
+        assert_eq!(off, crate::cohost::CohostState::off());
+        assert_eq!(serde_json::to_value(off).unwrap(), off_wire);
     }
 
     #[test]

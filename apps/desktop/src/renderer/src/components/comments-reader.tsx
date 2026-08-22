@@ -1,6 +1,7 @@
 import { ChatCircle, Eye, PaperPlaneRight, PushPin } from '@phosphor-icons/react'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
+import { CohostPane } from '@/components/cohost-pane'
 import { CommentRow, commentHighlightPresentationForMessage } from '@/components/comment-row'
 import { CommentsDestinationStatus } from '@/components/comments-destination-status'
 import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -17,6 +18,9 @@ import { Kbd } from '@/components/ui/kbd'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import type {
+  CohostFlag,
+  CohostQuestion,
+  CohostState,
   CommentHighlightState,
   CommentsSendOperation,
   CommentsViewMode,
@@ -26,7 +30,9 @@ import type {
   StreamPlatform,
   ViewerSample
 } from '@/lib/backend'
-import { CHAT_SEND_MAX_CHARS, validateChatDraft, type ChatSendFailure } from '@/lib/chat-send'
+import { chatDraftMaxChars, validateChatDraft, type ChatSendFailure } from '@/lib/chat-send'
+import { draftForQuestion } from '@/lib/cohost-view'
+import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { liveChatEmptyMessage, sortMessagesChronological } from '@/lib/live-chat-view'
 import { cn } from '@/lib/utils'
 import { viewerChipDetail, viewerChipLabel, viewerSampleStale } from '@/lib/viewer-count-view'
@@ -57,7 +63,18 @@ export function CommentsReader({
   sendOperation = null,
   sendFailures = [],
   onSend,
-  viewerSample = null
+  viewerSample = null,
+  cohostState = null,
+  cohostGate,
+  cohostConsented = false,
+  cohostEnabled = false,
+  cohostActionPending = false,
+  onCohostShowOnStream,
+  onCohostAnswered,
+  onCohostDismissQuestion,
+  onCohostDismissFlag,
+  onCohostEnableConsent,
+  onCohostUpgrade
 }: {
   snapshot: LiveChatSnapshot
   onClear?: () => void
@@ -80,7 +97,19 @@ export function CommentsReader({
   sendPending?: boolean
   sendOperation?: CommentsSendOperation | null
   sendFailures?: ChatSendFailure[]
-  onSend?: (text: string) => void
+  onSend?: (text: string, options?: { inReplyToQuestionId?: string }) => void
+  /** Latest `cohost.state`; null hides the Co-host segment entirely. */
+  cohostState?: CohostState | null
+  cohostGate?: EntitlementUiGate
+  cohostConsented?: boolean
+  cohostEnabled?: boolean
+  cohostActionPending?: boolean
+  onCohostShowOnStream?: (question: CohostQuestion) => void
+  onCohostAnswered?: (question: CohostQuestion) => void
+  onCohostDismissQuestion?: (question: CohostQuestion) => void
+  onCohostDismissFlag?: (flag: CohostFlag) => void
+  onCohostEnableConsent?: () => void
+  onCohostUpgrade?: (url: string) => void
 }): ReactElement {
   const messages = sortMessagesChronological(snapshot.messages)
   const live = Boolean(snapshot.sessionId)
@@ -98,6 +127,19 @@ export function CommentsReader({
   const [pinned, setPinned] = useState(true)
   const [unread, setUnread] = useState(0)
   const previousCount = useRef(messages.length)
+  // Reply is a PREFILL, never a send: the co-host draft lands in the shared
+  // composer, editable, and carries the question id so a real send marks it
+  // answered. `seq` re-applies the same draft after an edit + another Reply.
+  const [replyPrefill, setReplyPrefill] = useState<{
+    seq: number
+    text: string
+    questionId: string
+  } | null>(null)
+  const cohostVisible =
+    cohostState !== null &&
+    cohostGate !== undefined &&
+    mode === 'Live' &&
+    viewMode?.kind !== 'history'
 
   useEffect(() => {
     if (!viewerSample) return
@@ -131,6 +173,14 @@ export function CommentsReader({
       setUnread((value) => value + added)
     }
   }, [messages.length, pinned])
+
+  const scrollToMessage = (messageId: string): void => {
+    const viewport = viewportRef.current
+    const row = viewport?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(messageId)}"]`)
+    if (!row) return
+    setPinned(false)
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }
 
   const jumpToLatest = (): void => {
     const viewport = viewportRef.current
@@ -200,6 +250,33 @@ export function CommentsReader({
       </header>
       <Separator />
 
+      {cohostVisible ? (
+        <div className="shrink-0 px-3 pt-2">
+          <CohostPane
+            actionPending={cohostActionPending}
+            consented={cohostConsented}
+            enabled={cohostEnabled}
+            gate={cohostGate!}
+            highlightedMessageId={highlightedId}
+            state={cohostState}
+            onAnswered={(question) => onCohostAnswered?.(question)}
+            onDismissFlag={(flag) => onCohostDismissFlag?.(flag)}
+            onDismissQuestion={(question) => onCohostDismissQuestion?.(question)}
+            onEnableConsent={onCohostEnableConsent}
+            onJumpToMessage={scrollToMessage}
+            onReply={(question) =>
+              setReplyPrefill((current) => ({
+                seq: (current?.seq ?? 0) + 1,
+                text: draftForQuestion(question, sendTargets),
+                questionId: question.id
+              }))
+            }
+            onShowOnStream={onCohostShowOnStream}
+            onUpgrade={onCohostUpgrade}
+          />
+        </div>
+      ) : null}
+
       <ScrollArea ref={scrollRootRef} className="min-h-0 flex-1 px-3 py-2">
         {messages.length === 0 ? (
           <OffAir providers={snapshot.providers} />
@@ -243,9 +320,11 @@ export function CommentsReader({
 
       {onSend && mode === 'Live' && viewMode?.kind !== 'history' ? (
         <SendRow
+          cohostState={cohostState}
           failures={sendFailures}
           operation={sendOperation}
           pending={sendPending}
+          prefill={replyPrefill}
           providers={snapshot.providers}
           targets={sendTargets}
           onSend={onSend}
@@ -261,6 +340,8 @@ function SendRow({
   pending,
   failures,
   operation,
+  prefill,
+  cohostState,
   onSend
 }: {
   targets: StreamPlatform[]
@@ -268,15 +349,35 @@ function SendRow({
   pending: boolean
   failures: ChatSendFailure[]
   operation: CommentsSendOperation | null
-  onSend: (text: string) => void
+  prefill: { seq: number; text: string; questionId: string } | null
+  cohostState: CohostState | null
+  onSend: (text: string, options?: { inReplyToQuestionId?: string }) => void
 }): ReactElement {
   const [draft, setDraft] = useState('')
+  // The question a draft is answering. Cleared as soon as the streamer clears
+  // the box — a reply must never be attributed to a question it no longer
+  // answers.
+  const [replyToQuestionId, setReplyToQuestionId] = useState<string | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const appliedPrefillRef = useRef(0)
+  // Per-platform caps: the draft must fit the STRICTEST destination it reaches.
+  const maxChars = chatDraftMaxChars(targets)
   const canSend = targets.length > 0 && !pending
+
+  useEffect(() => {
+    if (!prefill || prefill.seq === appliedPrefillRef.current) return
+    appliedPrefillRef.current = prefill.seq
+    setDraft(prefill.text)
+    setReplyToQuestionId(prefill.questionId)
+    inputRef.current?.focus()
+  }, [prefill])
+
   const submit = (): void => {
-    const text = validateChatDraft(draft)
+    const text = validateChatDraft(draft, maxChars)
     if (!text || !canSend) return
-    onSend(text)
+    onSend(text, replyToQuestionId ? { inReplyToQuestionId: replyToQuestionId } : undefined)
     setDraft('')
+    setReplyToQuestionId(null)
   }
 
   return (
@@ -284,14 +385,18 @@ function SendRow({
       <Separator className="mb-2" />
       <InputGroup>
         <InputGroupInput
+          ref={inputRef}
           aria-label="Send a comment to all writable destinations"
           disabled={targets.length === 0}
-          maxLength={CHAT_SEND_MAX_CHARS}
+          maxLength={maxChars}
           placeholder={
             targets.length > 0 ? 'Message writable destinations…' : 'No writable destinations'
           }
           value={draft}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => {
+            setDraft(event.target.value)
+            if (event.target.value.trim().length === 0) setReplyToQuestionId(null)
+          }}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               event.preventDefault()
@@ -300,10 +405,20 @@ function SendRow({
           }}
         />
         <InputGroupAddon align="inline-end">
+          {draft.length > 0 ? (
+            <span
+              className={cn(
+                'text-[11px] tabular-nums',
+                draft.trim().length > maxChars ? 'text-destructive' : 'text-subtle'
+              )}
+            >
+              {draft.trim().length}/{maxChars}
+            </span>
+          ) : null}
           <Kbd aria-label="Enter">↵</Kbd>
           <InputGroupButton
             aria-label={pending ? 'Sending comment' : 'Send comment to all writable destinations'}
-            disabled={!canSend || !validateChatDraft(draft)}
+            disabled={!canSend || !validateChatDraft(draft, maxChars)}
             size="icon-xs"
             onClick={submit}
           >
@@ -311,8 +426,14 @@ function SendRow({
           </InputGroupButton>
         </InputGroupAddon>
       </InputGroup>
+      {replyToQuestionId ? (
+        <p className="mt-1 text-[11px] text-subtle">
+          Replying to a co-host question — edit freely, nothing sends until you do.
+        </p>
+      ) : null}
       <div className="mt-1.5">
         <CommentsDestinationStatus
+          cohostState={cohostState}
           failures={failures}
           mode="composer"
           providers={providers}

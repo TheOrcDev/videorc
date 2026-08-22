@@ -65,6 +65,7 @@ export type FeatureId =
   | 'multistreaming'
   | 'cloud-ai'
   | 'noise-cleanup'
+  | 'live-cohost'
 export type EntitlementState = 'enabled' | 'disabled' | 'developer-override'
 export type EntitlementTier = 'basic' | 'premium' | 'developer'
 export type EntitlementSource =
@@ -2886,6 +2887,8 @@ export interface CommentsSendCommand {
   operationId: string
   sessionId: string
   text: string
+  /** Co-host reply: the open question this send answers (cleared on sent/partial). */
+  inReplyToQuestionId?: string
 }
 
 export interface CommentsClearCommand {
@@ -3129,6 +3132,14 @@ export interface VideorcApi {
   pushCommentsClearResult: (
     resolution: CommentsCommandResolution<LiveChatSnapshot>
   ) => Promise<boolean>
+  /** Co-host relay: the main renderer pushes state, the window seeds + follows
+   * it, and window actions come back through the same correlated broker. */
+  pushCohostWindowState: (state: CohostWindowState) => Promise<void>
+  getCohostWindowState: () => Promise<CohostWindowState | null>
+  onCohostWindowState: (callback: (state: CohostWindowState) => void) => () => void
+  sendCohostAction: (command: CohostActionCommand) => Promise<CohostState>
+  onCohostActionRequest: (callback: (command: CohostActionCommand) => void) => () => void
+  pushCohostActionResult: (resolution: CommentsCommandResolution<CohostState>) => Promise<boolean>
   getBundledBackgroundAssets: () => Promise<BackgroundImportResult[]>
   beginAccountSignIn: (authorizeUrl: string) => Promise<void>
   signOutAccount: () => Promise<VideorcAccountSnapshot>
@@ -3443,6 +3454,146 @@ export function createEmptyLiveChatSnapshot(updatedAt: string): LiveChatSnapshot
     unreadCount: 0,
     updatedAt
   }
+}
+
+/** `liveChat.send` params (wire mirror of live_chat.rs `CommentsSendParams`). */
+export interface CommentsSendParams {
+  operationId: string
+  sessionId: string
+  text: string
+  /** Co-host reply: on a terminal `sent`/`partial` phase the engine marks this question answered. */
+  inReplyToQuestionId?: string
+}
+
+// --- Live Chat Co-host (Premium cloud AI) ---
+// Wire mirror of crates/videorc-backend/src/cohost.rs. Plan:
+// "2026-08-22 - Videorc Live Chat Co-host Plan". The backend owns the tick
+// scheduler, the open-question set, flags, mood, and readiness; the renderer
+// only renders `cohost.state` and calls `cohost.*` RPCs. Reply sends reuse
+// `liveChat.send` with `inReplyToQuestionId`.
+
+export type CohostTone = 'friendly' | 'short' | 'professional'
+export type CohostStatus = 'off' | 'listening' | 'paused' | 'error'
+export type CohostReason =
+  | 'premium-required'
+  | 'consent-required'
+  | 'session-expired'
+  | 'signed-out'
+  | 'quota-exhausted'
+  | 'server-unconfigured'
+  | 'network'
+  | 'gateway-error'
+export type CohostPriority = 'high' | 'normal' | 'low'
+export type CohostMood = 'hype' | 'calm' | 'tense' | 'mixed'
+export type CohostFlagKind = 'toxicity' | 'spam' | 'self-promo' | 'personal-info'
+export type CohostFlagSeverity = 'high' | 'medium' | 'low'
+
+/** Persisted per-profile co-host settings (`cohost.settings.get/set`). */
+export interface CohostSettings {
+  enabled: boolean
+  tone: CohostTone
+  /** Streamer notes the model answers from; at most 4000 characters. */
+  notes: string
+  /** "Show questions on stream automatically" (default off). */
+  autoHighlight: boolean
+}
+
+/** `cohost.settings.set`: absent fields are unchanged. */
+export interface CohostSettingsPatch {
+  enabled?: boolean
+  tone?: CohostTone
+  notes?: string
+  autoHighlight?: boolean
+}
+
+/** One open viewer question grouped across platforms and askers. */
+export interface CohostQuestion {
+  id: string
+  text: string
+  messageIds: string[]
+  askers: string[]
+  platforms: StreamPlatform[]
+  priority: CohostPriority
+  /** Draft reply in the chat's language (≤ 200 chars); editable before send. */
+  suggestedReply: string
+  fromNotes: boolean
+  firstSeenAt: string
+  updatedAt: string
+}
+
+export interface CohostFlag {
+  messageId: string
+  kind: CohostFlagKind
+  severity: CohostFlagSeverity
+  reason: string
+  at: string
+}
+
+/** The `cohost.state` event payload and every `cohost.*` RPC result. */
+export interface CohostState {
+  sessionId: string | null
+  status: CohostStatus
+  reason: CohostReason | null
+  questions: CohostQuestion[]
+  flags: CohostFlag[]
+  mood: CohostMood | null
+  lastTickAt: string | null
+  tickSeq: number
+  /** True when the last tick dropped messages under the 60-message delta cap. */
+  partial: boolean
+}
+
+/**
+ * `cohost.start`. Cloud-AI consent is renderer-owned, so the renderer passes
+ * it on every start; without it the engine pauses with `consent-required` and
+ * never sends chat to the server.
+ */
+export interface CohostStartParams {
+  sessionId: string
+  consentToProcessChat?: boolean
+  streamTitle?: string | null
+}
+
+/** `cohost.question.answered` / `cohost.question.dismiss`. */
+export interface CohostQuestionParams {
+  sessionId: string
+  questionId: string
+}
+
+/** `cohost.flag.dismiss`. */
+export interface CohostFlagParams {
+  sessionId: string
+  messageId: string
+}
+
+/**
+ * What the detached Comments window needs to render the Co-host segment. The
+ * MAIN renderer owns the backend socket, the entitlement snapshot and the
+ * renderer-local cloud-AI consent, so it resolves all three and relays one
+ * value; the window never re-derives gating.
+ */
+export interface CohostWindowState {
+  state: CohostState | null
+  /** Premium gate result. Fail-closed: false until the main renderer says otherwise. */
+  entitled: boolean
+  entitlementReason: string | null
+  upgradeUrl: string | null
+  /** Renderer-local cloud-AI consent (`videorc.aiConsent`). */
+  consented: boolean
+  /** Persisted `cohost.settings.enabled`. */
+  enabled: boolean
+}
+
+export type CohostActionKind = 'answered' | 'dismiss-question' | 'dismiss-flag'
+
+/** Correlated co-host action from the Comments window, brokered through main
+ * to the main renderer (which makes the actual `cohost.*` RPC). */
+export interface CohostActionCommand {
+  requestId: string
+  sessionId: string
+  kind: CohostActionKind
+  /** Question id for question actions; the flagged message id for flags. */
+  targetId: string
 }
 
 // Live captions (captions.* RPCs + events; premium cloud-AI feature).

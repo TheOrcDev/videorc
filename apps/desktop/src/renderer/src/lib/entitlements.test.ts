@@ -38,6 +38,11 @@ const developerEntitlements: EntitlementsSnapshot = {
       featureId: 'noise-cleanup',
       state: 'developer-override',
       reason: 'Enabled by Videorc debug/dev backend build.'
+    },
+    {
+      featureId: 'live-cohost',
+      state: 'developer-override',
+      reason: 'Enabled by Videorc debug/dev backend build.'
     }
   ],
   limits: {
@@ -69,6 +74,8 @@ describe('entitlements', () => {
     expect(entitlementDisabledReason(null, 'multistreaming')).toContain('Premium')
     expect(isFeatureEntitled(null, 'cloud-ai')).toBe(false)
     expect(entitlementDisabledReason(null, 'cloud-ai')).toContain('Premium')
+    expect(isFeatureEntitled(null, 'live-cohost')).toBe(false)
+    expect(entitlementDisabledReason(null, 'live-cohost')).toContain('Premium')
     expect(isFeatureEntitled(null, 'noise-cleanup')).toBe(false)
     expect(entitlementDisabledReason(null, 'noise-cleanup')).toBe(
       'Noise Cleanup requires Videorc Premium.'

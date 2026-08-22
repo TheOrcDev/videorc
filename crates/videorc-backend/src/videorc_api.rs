@@ -20,6 +20,15 @@ pub(crate) const CAPTION_CHUNK_UPLOAD_TIMEOUT: std::time::Duration =
 pub(crate) const AI_CAPABILITIES_REQUEST_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(8);
 const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Co-host ticks are synchronous and small; a hung tick must become a
+/// retryable failure before the next cadence window, never a stalled engine.
+pub(crate) const COHOST_TICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+const COHOST_TICK_PATH: &str = "/api/ai/cohost/tick";
+
+use crate::cohost::{
+    CohostFlagKind, CohostFlagSeverity, CohostMood, CohostPriority, CohostReason, CohostTone,
+};
+use crate::streaming::StreamPlatform;
 
 use crate::protocol::{
     AiCapabilities, AiJobCreateResponse, AiJobEnvelope, AiJobSnapshot, AiObjectUploadResponse,
@@ -108,6 +117,219 @@ pub struct AiObjectUploadRequest<'a> {
     pub session_client_id: &'a str,
     pub size_bytes: u64,
     pub workflow_kind: &'a str,
+}
+
+// --- Live Co-host tick wire types (contract v1; field names are load-bearing) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickRequest {
+    pub client_version: String,
+    pub session_client_id: String,
+    pub tick_seq: u64,
+    pub prompt_version: u32,
+    pub consent_to_process_chat: bool,
+    pub tone: CohostTone,
+    pub notes: String,
+    pub stream_title: Option<String>,
+    pub open_questions: Vec<CohostTickOpenQuestion>,
+    pub messages: Vec<CohostTickMessage>,
+    pub dropped_messages: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickOpenQuestion {
+    pub id: String,
+    pub text: String,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickMessage {
+    pub id: String,
+    pub platform: StreamPlatform,
+    pub author: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
+    pub text: String,
+    pub at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickResponse {
+    #[serde(default)]
+    pub prompt_version: u32,
+    #[serde(default)]
+    pub questions: Vec<CohostTickQuestion>,
+    #[serde(default)]
+    pub resolved: Vec<String>,
+    #[serde(default)]
+    pub flags: Vec<CohostTickFlag>,
+    #[serde(default)]
+    pub mood: Option<CohostMood>,
+    #[serde(default)]
+    pub usage: Option<CohostTickUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickQuestion {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub message_ids: Vec<String>,
+    #[serde(default)]
+    pub askers: Vec<String>,
+    #[serde(default)]
+    pub platforms: Vec<StreamPlatform>,
+    #[serde(default)]
+    pub priority: CohostPriority,
+    #[serde(default)]
+    pub suggested_reply: String,
+    #[serde(default)]
+    pub from_notes: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickFlag {
+    pub message_id: String,
+    pub kind: CohostFlagKind,
+    pub severity: CohostFlagSeverity,
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub model: String,
+}
+
+/// Every non-200 tick outcome, classified from the error envelope code first
+/// and the HTTP status second. `reason()` is the renderer-facing mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CohostApiError {
+    /// 401: the stored bearer no longer works (session expired/rotated).
+    Unauthorized { message: String },
+    /// 403 `premium-required`.
+    PremiumRequired { message: String },
+    /// 400 `consent-required`.
+    ConsentRequired { message: String },
+    /// 400 `prompt-version-unsupported`: this build is behind the server.
+    PromptVersionUnsupported { message: String },
+    /// 400 `invalid-request`: a desktop-side request bug (zod rejection).
+    InvalidRequest { message: String },
+    /// 429 `quota-exhausted` (+ Retry-After seconds when the server sent one).
+    QuotaExhausted {
+        retry_after: Option<std::time::Duration>,
+        message: String,
+    },
+    /// 503 `ai-gateway-not-configured` | `cohost-disabled`.
+    ServerUnconfigured { code: String, message: String },
+    /// 502 `ai-gateway-error` and any other server failure.
+    GatewayError { code: String, message: String },
+    /// Transport failure or the 8 s timeout.
+    Network { message: String },
+    /// 200 with a body that does not match the contract.
+    MalformedResponse { message: String },
+}
+
+impl CohostApiError {
+    pub fn reason(&self) -> CohostReason {
+        match self {
+            Self::Unauthorized { .. } => CohostReason::SessionExpired,
+            Self::PremiumRequired { .. } => CohostReason::PremiumRequired,
+            Self::ConsentRequired { .. } => CohostReason::ConsentRequired,
+            Self::PromptVersionUnsupported { .. } | Self::ServerUnconfigured { .. } => {
+                CohostReason::ServerUnconfigured
+            }
+            Self::QuotaExhausted { .. } => CohostReason::QuotaExhausted,
+            Self::InvalidRequest { .. }
+            | Self::GatewayError { .. }
+            | Self::MalformedResponse { .. } => CohostReason::GatewayError,
+            Self::Network { .. } => CohostReason::Network,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Unauthorized { message }
+            | Self::PremiumRequired { message }
+            | Self::ConsentRequired { message }
+            | Self::PromptVersionUnsupported { message }
+            | Self::InvalidRequest { message }
+            | Self::QuotaExhausted { message, .. }
+            | Self::ServerUnconfigured { message, .. }
+            | Self::GatewayError { message, .. }
+            | Self::Network { message }
+            | Self::MalformedResponse { message } => message,
+        }
+    }
+}
+
+/// `Retry-After` as delay-seconds. HTTP-date forms are not parsed; the engine
+/// falls back to its default quota pause.
+pub(crate) fn parse_retry_after_seconds(value: Option<&str>) -> Option<std::time::Duration> {
+    value
+        .map(str::trim)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+}
+
+pub(crate) fn classify_cohost_failure(
+    status: u16,
+    code: &str,
+    message: String,
+    retry_after: Option<&str>,
+) -> CohostApiError {
+    match code {
+        "unauthorized" => return CohostApiError::Unauthorized { message },
+        "premium-required" => return CohostApiError::PremiumRequired { message },
+        "consent-required" => return CohostApiError::ConsentRequired { message },
+        "prompt-version-unsupported" => {
+            return CohostApiError::PromptVersionUnsupported { message };
+        }
+        "invalid-request" => return CohostApiError::InvalidRequest { message },
+        "quota-exhausted" => {
+            return CohostApiError::QuotaExhausted {
+                retry_after: parse_retry_after_seconds(retry_after),
+                message,
+            };
+        }
+        "ai-gateway-not-configured" | "cohost-disabled" => {
+            return CohostApiError::ServerUnconfigured {
+                code: code.to_string(),
+                message,
+            };
+        }
+        _ => {}
+    }
+    match status {
+        401 => CohostApiError::Unauthorized { message },
+        403 => CohostApiError::PremiumRequired { message },
+        400 => CohostApiError::InvalidRequest { message },
+        429 => CohostApiError::QuotaExhausted {
+            retry_after: parse_retry_after_seconds(retry_after),
+            message,
+        },
+        503 => CohostApiError::ServerUnconfigured {
+            code: code.to_string(),
+            message,
+        },
+        _ => CohostApiError::GatewayError {
+            code: code.to_string(),
+            message: format!("cohost tick failed ({status}): {message}"),
+        },
+    }
 }
 
 /// A thin client over the Videorc web API.
@@ -305,6 +527,48 @@ impl VideorcApiClient {
             .json()
             .await
             .with_context(|| format!("Could not read Videorc API response for {path}."))
+    }
+
+    /// One synchronous Live Co-host tick. Every failure class is mapped to a
+    /// `CohostApiError` so the engine can pause/back off with an honest reason.
+    pub async fn post_cohost_tick(
+        &self,
+        bearer_token: &str,
+        request: &CohostTickRequest,
+    ) -> std::result::Result<CohostTickResponse, CohostApiError> {
+        let response = self
+            .http
+            .post(self.endpoint(COHOST_TICK_PATH))
+            .bearer_auth(bearer_token)
+            .json(request)
+            .timeout(COHOST_TICK_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| CohostApiError::Network {
+                message: format!("Could not reach the co-host service: {error}"),
+            })?;
+
+        let status = response.status();
+        if status.is_success() {
+            return response
+                .json()
+                .await
+                .map_err(|error| CohostApiError::MalformedResponse {
+                    message: format!("Could not read the co-host response: {error}"),
+                });
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            &code,
+            message,
+            retry_after.as_deref(),
+        ))
     }
 
     /// Fetch safe client-facing AI quota metadata for the signed-in user.
@@ -706,6 +970,7 @@ mod tests {
     #[test]
     fn entitlement_capability_request_finishes_before_the_rpc_deadline() {
         assert!(!AI_CAPABILITIES_REQUEST_TIMEOUT.is_zero());
+        assert_eq!(COHOST_TICK_TIMEOUT.as_secs(), 8);
         assert!(AI_CAPABILITIES_REQUEST_TIMEOUT < std::time::Duration::from_secs(10));
     }
 
@@ -913,5 +1178,171 @@ mod tests {
             CaptionChunkFailure::Transient { code: Some(code), .. }
                 if code == "captions-realtime-disabled"
         ));
+    }
+
+    #[test]
+    fn cohost_failures_classify_by_envelope_code_then_status() {
+        let cases: Vec<(u16, &str, Option<&str>, CohostApiError, CohostReason)> = vec![
+            (
+                401,
+                "unauthorized",
+                None,
+                CohostApiError::Unauthorized {
+                    message: "m".into(),
+                },
+                CohostReason::SessionExpired,
+            ),
+            (
+                403,
+                "premium-required",
+                None,
+                CohostApiError::PremiumRequired {
+                    message: "m".into(),
+                },
+                CohostReason::PremiumRequired,
+            ),
+            (
+                400,
+                "consent-required",
+                None,
+                CohostApiError::ConsentRequired {
+                    message: "m".into(),
+                },
+                CohostReason::ConsentRequired,
+            ),
+            (
+                400,
+                "prompt-version-unsupported",
+                None,
+                CohostApiError::PromptVersionUnsupported {
+                    message: "m".into(),
+                },
+                CohostReason::ServerUnconfigured,
+            ),
+            (
+                400,
+                "invalid-request",
+                None,
+                CohostApiError::InvalidRequest {
+                    message: "m".into(),
+                },
+                CohostReason::GatewayError,
+            ),
+            (
+                429,
+                "quota-exhausted",
+                Some("120"),
+                CohostApiError::QuotaExhausted {
+                    retry_after: Some(std::time::Duration::from_secs(120)),
+                    message: "m".into(),
+                },
+                CohostReason::QuotaExhausted,
+            ),
+            (
+                429,
+                "unknown",
+                Some("Wed, 21 Oct 2026 07:28:00 GMT"),
+                CohostApiError::QuotaExhausted {
+                    retry_after: None,
+                    message: "m".into(),
+                },
+                CohostReason::QuotaExhausted,
+            ),
+            (
+                503,
+                "ai-gateway-not-configured",
+                None,
+                CohostApiError::ServerUnconfigured {
+                    code: "ai-gateway-not-configured".into(),
+                    message: "m".into(),
+                },
+                CohostReason::ServerUnconfigured,
+            ),
+            (
+                503,
+                "cohost-disabled",
+                None,
+                CohostApiError::ServerUnconfigured {
+                    code: "cohost-disabled".into(),
+                    message: "m".into(),
+                },
+                CohostReason::ServerUnconfigured,
+            ),
+            (
+                502,
+                "ai-gateway-error",
+                None,
+                CohostApiError::GatewayError {
+                    code: "ai-gateway-error".into(),
+                    message: "cohost tick failed (502): m".into(),
+                },
+                CohostReason::GatewayError,
+            ),
+            (
+                500,
+                "unknown",
+                None,
+                CohostApiError::GatewayError {
+                    code: "unknown".into(),
+                    message: "cohost tick failed (500): m".into(),
+                },
+                CohostReason::GatewayError,
+            ),
+            // Ops blocklist: any unknown 403 code is the premium-required class.
+            (
+                403,
+                "ai-user-disabled",
+                None,
+                CohostApiError::PremiumRequired {
+                    message: "m".into(),
+                },
+                CohostReason::PremiumRequired,
+            ),
+            // Status-only fallbacks when the envelope carries no known code.
+            (
+                401,
+                "unknown",
+                None,
+                CohostApiError::Unauthorized {
+                    message: "m".into(),
+                },
+                CohostReason::SessionExpired,
+            ),
+            (
+                403,
+                "unknown",
+                None,
+                CohostApiError::PremiumRequired {
+                    message: "m".into(),
+                },
+                CohostReason::PremiumRequired,
+            ),
+        ];
+        for (status, code, retry_after, expected, reason) in cases {
+            let actual = classify_cohost_failure(status, code, "m".to_string(), retry_after);
+            assert_eq!(actual, expected, "{status} {code}");
+            assert_eq!(actual.reason(), reason, "{status} {code}");
+        }
+        assert_eq!(
+            parse_retry_after_seconds(Some(" 42 ")),
+            Some(std::time::Duration::from_secs(42))
+        );
+        assert_eq!(parse_retry_after_seconds(Some("soon")), None);
+        assert_eq!(parse_retry_after_seconds(None), None);
+    }
+
+    #[test]
+    fn cohost_tick_response_tolerates_missing_optional_fields() {
+        let response: CohostTickResponse = serde_json::from_str(
+            r#"{"promptVersion":1,"questions":[{"id":"q_1","text":"What keyboard?"}],"mood":"calm"}"#,
+        )
+        .unwrap();
+        assert_eq!(response.questions.len(), 1);
+        assert_eq!(response.questions[0].priority, CohostPriority::Normal);
+        assert!(response.questions[0].message_ids.is_empty());
+        assert_eq!(response.mood, Some(CohostMood::Calm));
+        assert!(response.resolved.is_empty());
+        assert!(response.flags.is_empty());
+        assert!(response.usage.is_none());
     }
 }

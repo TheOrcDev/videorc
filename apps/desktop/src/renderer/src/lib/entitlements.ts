@@ -49,6 +49,11 @@ export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
       featureId: 'noise-cleanup',
       state: 'disabled',
       reason: 'Noise Cleanup requires Videorc Premium.'
+    },
+    {
+      featureId: 'live-cohost',
+      state: 'disabled',
+      reason: 'Live Co-host requires Videorc Premium.'
     }
   ],
   limits: {

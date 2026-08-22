@@ -1,5 +1,11 @@
 import type {
   BackendHealth,
+  CohostFlagParams,
+  CohostQuestionParams,
+  CohostSettings,
+  CohostSettingsPatch,
+  CohostStartParams,
+  CohostState,
   CompositorFrameReady,
   CompositorStatus,
   DeviceList,
@@ -133,6 +139,14 @@ export interface BackendRpcMethodMap {
     GateStatus
   >
   'repair.restore_file': BackendRpcDefinition<{ sessionId: string }, { restored: boolean }>
+  'cohost.status': BackendRpcDefinition<undefined, CohostState>
+  'cohost.start': BackendRpcDefinition<CohostStartParams, CohostState>
+  'cohost.stop': BackendRpcDefinition<undefined, CohostState>
+  'cohost.question.answered': BackendRpcDefinition<CohostQuestionParams, CohostState>
+  'cohost.question.dismiss': BackendRpcDefinition<CohostQuestionParams, CohostState>
+  'cohost.flag.dismiss': BackendRpcDefinition<CohostFlagParams, CohostState>
+  'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
+  'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
 }
 
 export type BackendRpcMethod = keyof BackendRpcMethodMap
@@ -155,6 +169,7 @@ export interface BackendEventMap {
   'preview.camera.status': PreviewCameraStatus
   'preview.screen.status': PreviewScreenStatus
   'diagnostics.stats': DiagnosticStats
+  'cohost.state': CohostState
 }
 
 export type BackendEvent = keyof BackendEventMap
@@ -231,7 +246,8 @@ const entitlementCapabilitySchema = objectSchema(
       'livestreaming',
       'multistreaming',
       'cloud-ai',
-      'noise-cleanup'
+      'noise-cleanup',
+      'live-cohost'
     ]),
     state: enumSchema(['enabled', 'disabled', 'developer-override']),
     reason: optionalText
@@ -1301,6 +1317,93 @@ const oauthCallbackResultSchema = runtimeSchema<OAuthCallbackResult>(
   }
 )
 
+const cohostToneSchema = enumSchema(['friendly', 'short', 'professional'])
+const cohostNotesSchema = stringSchema({ maxLength: 4000 })
+const cohostSettingsSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    tone: cohostToneSchema,
+    notes: cohostNotesSchema,
+    autoHighlight: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostSettings>
+const cohostSettingsPatchSchema = objectSchema(
+  {
+    enabled: optionalSchema(booleanSchema),
+    tone: optionalSchema(cohostToneSchema),
+    notes: optionalSchema(cohostNotesSchema),
+    autoHighlight: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostSettingsPatch>
+const cohostQuestionSchema = objectSchema(
+  {
+    id: boundedString,
+    text: stringSchema({ maxLength: 2000 }),
+    messageIds: arraySchema(boundedString, { maxLength: 500 }),
+    askers: arraySchema(stringSchema({ maxLength: 512 }), { maxLength: 500 }),
+    platforms: arraySchema(enumSchema(['youtube', 'twitch', 'x', 'custom']), { maxLength: 4 }),
+    priority: enumSchema(['high', 'normal', 'low']),
+    suggestedReply: stringSchema({ maxLength: 2000 }),
+    fromNotes: booleanSchema,
+    firstSeenAt: timestamp,
+    updatedAt: timestamp
+  },
+  { allowUnknown: false }
+)
+const cohostFlagSchema = objectSchema(
+  {
+    messageId: boundedString,
+    kind: enumSchema(['toxicity', 'spam', 'self-promo', 'personal-info']),
+    severity: enumSchema(['high', 'medium', 'low']),
+    reason: stringSchema({ maxLength: 2000 }),
+    at: timestamp
+  },
+  { allowUnknown: false }
+)
+const cohostStateSchema = objectSchema(
+  {
+    sessionId: nullableSchema(boundedString),
+    status: enumSchema(['off', 'listening', 'paused', 'error']),
+    reason: nullableSchema(
+      enumSchema([
+        'premium-required',
+        'consent-required',
+        'session-expired',
+        'signed-out',
+        'quota-exhausted',
+        'server-unconfigured',
+        'network',
+        'gateway-error'
+      ])
+    ),
+    questions: arraySchema(cohostQuestionSchema, { maxLength: 40 }),
+    flags: arraySchema(cohostFlagSchema, { maxLength: 50 }),
+    mood: nullableSchema(enumSchema(['hype', 'calm', 'tense', 'mixed'])),
+    lastTickAt: nullableSchema(timestamp),
+    tickSeq: nonNegativeInteger,
+    partial: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostState>
+const cohostStartParamsSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    consentToProcessChat: optionalSchema(booleanSchema),
+    streamTitle: optionalSchema(nullableSchema(stringSchema({ maxLength: 1000 })))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostStartParams>
+const cohostQuestionParamsSchema = objectSchema(
+  { sessionId: boundedString, questionId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostQuestionParams>
+const cohostFlagParamsSchema = objectSchema(
+  { sessionId: boundedString, messageId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostFlagParams>
+
 const runtimeContracts = {
   'health.ping': { params: undefinedOrFfmpegPathSchema, result: backendHealthSchema },
   'entitlements.get': { params: undefinedSchema, result: entitlementsSchema },
@@ -1465,7 +1568,15 @@ const runtimeContracts = {
   'repair.restore_file': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: objectSchema({ restored: booleanSchema }, { allowUnknown: false })
-  }
+  },
+  'cohost.status': { params: undefinedSchema, result: cohostStateSchema },
+  'cohost.start': { params: cohostStartParamsSchema, result: cohostStateSchema },
+  'cohost.stop': { params: undefinedSchema, result: cohostStateSchema },
+  'cohost.question.answered': { params: cohostQuestionParamsSchema, result: cohostStateSchema },
+  'cohost.question.dismiss': { params: cohostQuestionParamsSchema, result: cohostStateSchema },
+  'cohost.flag.dismiss': { params: cohostFlagParamsSchema, result: cohostStateSchema },
+  'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
+  'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema }
 } satisfies Record<BackendRpcMethod, RuntimeBackendRpcContract>
 
 export function isTypedBackendRpcMethod(method: string): method is BackendRpcMethod {
@@ -1504,7 +1615,8 @@ const runtimeEventSchemas = {
   'preview.surface.status': previewSurfaceStatusSchema,
   'preview.camera.status': previewCameraStatusSchema,
   'preview.screen.status': previewScreenStatusSchema,
-  'diagnostics.stats': diagnosticStatsSchema
+  'diagnostics.stats': diagnosticStatsSchema,
+  'cohost.state': cohostStateSchema
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {

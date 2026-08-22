@@ -8,6 +8,8 @@ import type {
   StreamPlatform
 } from '@/lib/backend'
 import type { ChatSendFailure } from '@/lib/chat-send'
+import type { CohostState } from '@/lib/backend'
+import { cohostChipView } from '@/lib/cohost-view'
 
 function joinLabels(labels: string[]): string {
   if (labels.length < 2) return labels[0] ?? ''
@@ -130,18 +132,35 @@ export function commentsDestinationSummary({
   return parts.join(' · ')
 }
 
+/** Co-host status, in the destination strip's own vocabulary. Monochrome by
+ * rule — only `listening` earns the live accent, exactly like a connected
+ * destination. */
+export function CohostStatusChip({ state }: { state: CohostState | null }): ReactElement | null {
+  const chip = cohostChipView(state)
+  if (!chip) return null
+  return (
+    <Badge data-slot="cohost-status-chip" variant={chip.tone === 'live' ? 'success' : 'outline'}>
+      <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-current" />
+      {chip.label}
+    </Badge>
+  )
+}
+
 export function CommentsDestinationStatus({
   providers,
   mode = 'providers',
   sendTargets = [],
-  failures = []
+  failures = [],
+  cohostState = null
 }: {
   providers: LiveChatProviderState[]
   mode?: 'providers' | 'composer'
   sendTargets?: StreamPlatform[]
   failures?: ChatSendFailure[]
+  /** Latest `cohost.state`; null hides the chip entirely. */
+  cohostState?: CohostState | null
 }): ReactElement | null {
-  if (providers.length === 0 && mode === 'providers') {
+  if (providers.length === 0 && mode === 'providers' && !cohostState) {
     return null
   }
 
@@ -149,9 +168,15 @@ export function CommentsDestinationStatus({
     const summary = commentsDestinationSummary({ providers, sendTargets, failures })
     return (
       <div className="flex min-w-0 flex-col gap-1.5" data-slot="comments-destination-status">
-        <p className="text-[11px] leading-tight text-muted-foreground" title={summary}>
-          {summary}
-        </p>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <p
+            className="min-w-0 flex-1 truncate text-[11px] leading-tight text-muted-foreground"
+            title={summary}
+          >
+            {summary}
+          </p>
+          <CohostStatusChip state={cohostState} />
+        </div>
         {failures.length > 0 ? (
           <div className="flex flex-wrap gap-1">
             {failures.map((failure) => (
@@ -190,6 +215,7 @@ export function CommentsDestinationStatus({
           {providerStatusLabel(provider)}
         </Badge>
       ))}
+      <CohostStatusChip state={cohostState} />
     </div>
   )
 }

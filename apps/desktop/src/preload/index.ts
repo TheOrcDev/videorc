@@ -52,6 +52,13 @@ const api: VideorcApi = {
   sendChatFromCommentsWindow: (command) => invoke('comments-window:send', command),
   onChatSendRequest: (callback) => subscribe('comments-window:send-request', callback),
   pushChatSendResult: (resolution) => invoke('comments-window:send-result-push', resolution),
+  pushCohostWindowState: (state) => invoke('comments-window:cohost-push', state),
+  getCohostWindowState: () => invoke('comments-window:cohost-get'),
+  onCohostWindowState: (callback) => subscribe('comments-window:cohost', callback),
+  sendCohostAction: (command) => invoke('comments-window:cohost-action', command),
+  onCohostActionRequest: (callback) => subscribe('comments-window:cohost-action-request', callback),
+  pushCohostActionResult: (resolution) =>
+    invoke('comments-window:cohost-action-result-push', resolution),
   clearComments: (command) => invoke('comments-window:clear', command),
   onCommentsClearRequest: (callback) => subscribe('comments-window:clear-request', callback),
   pushCommentsClearResult: (resolution) => invoke('comments-window:clear-result-push', resolution),

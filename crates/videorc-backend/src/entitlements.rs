@@ -34,6 +34,7 @@ const MULTISTREAMING_DISABLED_REASON: &str =
 const CLOUD_AI_DISABLED_REASON: &str =
     "Cloud AI is a Videorc Premium feature. Sign in with a Premium account to enable it.";
 const NOISE_CLEANUP_DISABLED_REASON: &str = "Noise Cleanup requires Videorc Premium.";
+const LIVE_COHOST_DISABLED_REASON: &str = "Live Co-host requires Videorc Premium.";
 const DEV_BUILD_OVERRIDE_REASON: &str = "Enabled by Videorc debug/dev backend build.";
 
 // --- Account-hydrated entitlement (multistream premium gate) ------------------
@@ -212,6 +213,11 @@ pub fn basic_entitlements() -> EntitlementsSnapshot {
                 state: EntitlementState::Disabled,
                 reason: Some(NOISE_CLEANUP_DISABLED_REASON.to_string()),
             },
+            EntitlementCapability {
+                feature_id: FeatureId::LiveCohost,
+                state: EntitlementState::Disabled,
+                reason: Some(LIVE_COHOST_DISABLED_REASON.to_string()),
+            },
         ],
         limits: basic_limits(),
         checked_at: None,
@@ -252,6 +258,7 @@ fn enabled_capabilities(
         FeatureId::Multistreaming,
         FeatureId::CloudAi,
         FeatureId::NoiseCleanup,
+        FeatureId::LiveCohost,
     ]
     .into_iter()
     .map(|feature_id| EntitlementCapability {
@@ -771,6 +778,14 @@ mod tests {
             Some(NOISE_CLEANUP_DISABLED_REASON)
         );
         assert!(require_feature(&basic, FeatureId::NoiseCleanup).is_err());
+        assert!(require_feature(&basic, FeatureId::LiveCohost).is_err());
+        assert!(
+            require_feature(
+                &premium_entitlements(EntitlementSource::Creem),
+                FeatureId::LiveCohost
+            )
+            .is_ok()
+        );
 
         for snapshot in [
             premium_entitlements(EntitlementSource::Creem),

@@ -514,6 +514,11 @@ pub struct CommentsSendParams {
     pub operation_id: String,
     pub session_id: String,
     pub text: String,
+    /// Co-host reply: the open question this send answers. On a terminal
+    /// `sent`/`partial` phase the engine clears it. Not persisted with the
+    /// operation.
+    #[serde(default)]
+    pub in_reply_to_question_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -762,6 +767,11 @@ impl LiveChatCoordinator {
 
     /// True once a session has been started (or left a transcript) — drives whether
     /// `current_status` returns the live view versus the setup-time capability snapshot.
+    /// The active chat session id, if a session is running.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
     pub fn has_session_view(&self) -> bool {
         self.session_id.is_some() || !self.messages.is_empty() || !self.providers.is_empty()
     }
@@ -1250,6 +1260,9 @@ pub async fn start_live_chat(state: &AppState, params: LiveChatStartParams) -> L
             provider.message = "Waiting for X broadcast context.".to_string();
         }
     }
+    // A new chat session replaces any co-host session; a late tick for the
+    // old one must not publish into this stream.
+    crate::cohost::stop_cohost_for_session_end(state).await;
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     {
         let mut coordinator = state.live_chat.lock().await;
@@ -1656,6 +1669,10 @@ async fn execute_send_live_chat_message(
     };
 
     let now = chrono::Utc::now().to_rfc3339();
+    let in_reply_to_question_id = params
+        .in_reply_to_question_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
     let mut operation = CommentsSendOperation {
         id: params.operation_id,
         session_id: params.session_id,
@@ -1741,6 +1758,19 @@ async fn execute_send_live_chat_message(
         .save_chat_send_operation(&operation)
         .map_err(|error| format!("Could not persist send result: {error}"))?;
     state.emit_event("liveChat.sendOperation", operation.clone());
+    if let Some(question_id) = in_reply_to_question_id
+        && matches!(
+            operation.phase,
+            CommentsSendOperationPhase::Sent | CommentsSendOperationPhase::Partial
+        )
+    {
+        crate::cohost::mark_question_answered_after_send(
+            state,
+            &operation.session_id,
+            &question_id,
+        )
+        .await;
+    }
     Ok(operation)
 }
 
@@ -1907,6 +1937,7 @@ pub async fn stop_live_chat(state: &AppState) -> LiveChatSnapshot {
         coordinator.stop_session();
     }
     drop(lifecycle_delivery);
+    crate::cohost::stop_cohost_for_session_end(state).await;
     let snapshot = current_status(state).await;
     state.emit_event("liveChat.snapshot", snapshot.clone());
     snapshot
@@ -2044,7 +2075,7 @@ pub(crate) async fn try_deliver_messages(
             "Live-chat delivery completed after its session was replaced.",
         ));
     }
-    for message in authoritative_messages {
+    for message in &authoritative_messages {
         if message.is_deleted {
             crate::comment_highlight::clear_comment_highlight_for_message(
                 state,
@@ -2055,6 +2086,7 @@ pub(crate) async fn try_deliver_messages(
         }
         state.emit_event("liveChat.message", message);
     }
+    crate::cohost::note_messages(state, &authoritative_messages).await;
     Ok(())
 }
 
@@ -2271,6 +2303,7 @@ mod tests {
             operation_id: operation_id.to_string(),
             session_id: session_id.to_string(),
             text: text.to_string(),
+            in_reply_to_question_id: None,
         }
     }
 

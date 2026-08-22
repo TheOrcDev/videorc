@@ -225,15 +225,83 @@
       "messages": []
     },
     "deleteParams": {
-      "sessionIds": [
-        "session-fixture"
-      ]
+      "sessionIds": ["session-fixture"]
     },
     "deletionOperation": {
       "operationId": "delete-fixture-0123456789abcdef",
       "sessionId": "session-fixture",
       "pathCount": 2,
       "blockedPathCount": 0
+    }
+  },
+  "cohost": {
+    "startParams": {
+      "sessionId": "session-fixture",
+      "consentToProcessChat": true,
+      "streamTitle": "Rust night"
+    },
+    "questionParams": {
+      "sessionId": "session-fixture",
+      "questionId": "q_fixture"
+    },
+    "flagParams": {
+      "sessionId": "session-fixture",
+      "messageId": "session-fixture:twitch:default:message-fixture"
+    },
+    "settingsPatch": {
+      "enabled": true,
+      "tone": "short",
+      "notes": "Keyboard: Keychron Q1",
+      "autoHighlight": false
+    },
+    "settings": {
+      "enabled": true,
+      "tone": "friendly",
+      "notes": "",
+      "autoHighlight": false
+    },
+    "state": {
+      "sessionId": "session-fixture",
+      "status": "listening",
+      "reason": null,
+      "questions": [
+        {
+          "id": "q_fixture",
+          "text": "What keyboard is that?",
+          "messageIds": ["session-fixture:twitch:default:message-fixture"],
+          "askers": ["Viewer"],
+          "platforms": ["twitch"],
+          "priority": "high",
+          "suggestedReply": "Keychron Q1!",
+          "fromNotes": true,
+          "firstSeenAt": "2026-08-22T10:00:00Z",
+          "updatedAt": "2026-08-22T10:00:20Z"
+        }
+      ],
+      "flags": [
+        {
+          "messageId": "session-fixture:twitch:default:message-fixture",
+          "kind": "self-promo",
+          "severity": "low",
+          "reason": "Promotes a channel.",
+          "at": "2026-08-22T10:00:20Z"
+        }
+      ],
+      "mood": "hype",
+      "lastTickAt": "2026-08-22T10:00:20Z",
+      "tickSeq": 2,
+      "partial": false
+    },
+    "offState": {
+      "sessionId": null,
+      "status": "off",
+      "reason": null,
+      "questions": [],
+      "flags": [],
+      "mood": null,
+      "lastTickAt": null,
+      "tickSeq": 0,
+      "partial": false
     }
   }
 }
