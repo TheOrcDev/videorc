@@ -1,0 +1,46 @@
+name: Linux
+
+# Linux L1 is a compile-and-test gate, not a shipping application claim.
+# Capture, preview, encoding, packaging, and device acceptance land in later
+# phases tracked by docs/linux-port-plan.md.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: Linux gates (Rust compile + test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        # clippy -D warnings is the compile gate (compile errors fail it
+        # regardless of the lint allows), matching ci.yml and windows.yml —
+        # no separate cargo check, no pnpm (nothing in this job runs JS), and
+        # no fmt (rustfmt output is platform-independent; ci.yml owns it).
+        # cfg(linux) makes macOS/Windows-only helpers dead or their imports
+        # unused. Keep this allow list identical to windows.yml while the
+        # cross-platform warning wall is burned down; drop both lists together.
+        run: cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut
+
+      - name: Test
+        # Platform-neutral tests run normally. Tests that require Apple or
+        # Windows frameworks remain gated at their implementation boundary.
+        run: cargo test -p videorc-backend

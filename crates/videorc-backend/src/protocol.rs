@@ -1225,7 +1225,11 @@ pub struct StreamHealth {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum EncodeBackend {
-    /// libx264 (software), used on non-macOS/non-Windows fallback builds.
+    /// libx264 (software). LEGACY: no code path selects this since the Linux
+    /// L1 port removed the non-macOS/non-Windows fallback — Linux returns a
+    /// typed PlatformEncoderUnsupported instead, and the LGPL-only ffmpeg
+    /// policy forbids reintroducing GPL x264. Kept only so historical
+    /// diagnostics payloads still deserialize.
     SoftwareX264,
     /// h264_videotoolbox (hardware, sw fallback allowed).
     HardwareVideotoolbox,

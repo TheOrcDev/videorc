@@ -21,6 +21,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
+pub use crate::source_mask::SourceMask;
+
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFType, CGSize};
@@ -260,15 +262,6 @@ pub struct GpuSourceContentKey {
     pub namespace: u64,
     pub revision: u64,
     pub variant: u64,
-}
-
-/// Camera-bubble mask shared by both software compositors (the FFmpeg leg mirrors
-/// the same constants in its filter graph).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceMask {
-    None,
-    Circle,
-    Rounded { radius_pct: u32 },
 }
 
 impl SourceMask {

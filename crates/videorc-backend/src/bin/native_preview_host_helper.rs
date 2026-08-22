@@ -8,6 +8,10 @@ mod metal_compositor;
 #[allow(dead_code)]
 #[path = "../native_preview_host.rs"]
 mod native_preview_host;
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+#[path = "../source_mask.rs"]
+mod source_mask;
 
 #[cfg(target_os = "macos")]
 mod protocol {

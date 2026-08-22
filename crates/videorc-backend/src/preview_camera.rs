@@ -6,6 +6,7 @@ use chrono::Utc;
 use image::ImageEncoder;
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
+use rayon::prelude::*;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
@@ -14,6 +15,7 @@ use crate::camera_capture::{
     CameraFormatSummary, camera_capability_matrix_for_id, parse_native_camera_id,
     parse_windows_dshow_camera_id,
 };
+use crate::color::{ycbcr_bt709_full_to_bgr, ycbcr_bt709_video_to_bgr};
 use crate::diagnostics::{
     PreviewCameraCaptureTimingStats, apply_preview_camera_capability_stats,
     apply_preview_camera_capture_timing_stats, apply_preview_camera_source_stats,
@@ -2029,10 +2031,95 @@ mod windows {
     }
 }
 
+/// NV12 (4:2:0 bi-planar Y'CbCr) -> BGRA, parallelized across output rows.
+///
+/// The conversion is platform-neutral even though AVFoundation is currently
+/// its only production caller. Keeping it outside the macOS module makes the
+/// pixel seam available to future Linux PipeWire capture without importing an
+/// Apple framework module.
+#[allow(clippy::too_many_arguments)]
+fn nv12_to_bgra(
+    y: &[u8],
+    y_stride: usize,
+    cbcr: &[u8],
+    cbcr_stride: usize,
+    width: usize,
+    height: usize,
+    full_range: bool,
+    out: &mut [u8],
+) {
+    let row_bytes = width * 4;
+    out.par_chunks_mut(row_bytes)
+        .enumerate()
+        .for_each(|(row, out_row)| {
+            if row >= height {
+                return;
+            }
+            let y_row = &y[row * y_stride..];
+            let cbcr_row = &cbcr[(row / 2) * cbcr_stride..];
+            for (x, pixel) in out_row.chunks_exact_mut(4).enumerate() {
+                let chroma = (x / 2) * 2;
+                let (b, g, r) = if full_range {
+                    ycbcr_bt709_full_to_bgr(y_row[x], cbcr_row[chroma], cbcr_row[chroma + 1])
+                } else {
+                    ycbcr_bt709_video_to_bgr(y_row[x], cbcr_row[chroma], cbcr_row[chroma + 1])
+                };
+                pixel[0] = b;
+                pixel[1] = g;
+                pixel[2] = r;
+                pixel[3] = 255;
+            }
+        });
+}
+
+/// Packed 4:2:2 Y'CbCr -> BGRA, parallelized by row. `uyvy` selects the byte
+/// order: UYVY (`2vuy`, Cb Y0 Cr Y1) when true, YUY2 (`yuvs`, Y0 Cb Y1 Cr)
+/// when false.
+fn yuv422_to_bgra(
+    plane: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    uyvy: bool,
+    out: &mut [u8],
+) {
+    let row_bytes = width * 4;
+    out.par_chunks_mut(row_bytes)
+        .enumerate()
+        .for_each(|(row, out_row)| {
+            if row >= height {
+                return;
+            }
+            let src = &plane[row * stride..];
+            for (pair, out8) in out_row.chunks_exact_mut(8).enumerate() {
+                let i = pair * 4;
+                let (cb, y0, cr, y1) = if uyvy {
+                    (src[i], src[i + 1], src[i + 2], src[i + 3])
+                } else {
+                    (src[i + 1], src[i], src[i + 3], src[i + 2])
+                };
+                let (b0, g0, r0) = ycbcr_bt709_video_to_bgr(y0, cb, cr);
+                let (b1, g1, r1) = ycbcr_bt709_video_to_bgr(y1, cb, cr);
+                out8[0] = b0;
+                out8[1] = g0;
+                out8[2] = r0;
+                out8[3] = 255;
+                out8[4] = b1;
+                out8[5] = g1;
+                out8[6] = r1;
+                out8[7] = 255;
+            }
+        });
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::slice;
 
+    use super::*;
+    use crate::camera_capture::{
+        CameraFormatSummary, NativeCameraPermission, choose_camera_format,
+    };
     use dispatch2::DispatchQueue;
     use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::{AnyObject, ProtocolObject};
@@ -2056,13 +2143,6 @@ mod macos {
         kCVPixelFormatType_422YpCbCr8_yuvs,
     };
     use objc2_foundation::{NSDictionary, NSNumber, NSObject, NSObjectProtocol, NSString};
-    use rayon::prelude::*;
-
-    use super::*;
-    use crate::camera_capture::{
-        CameraFormatSummary, NativeCameraPermission, choose_camera_format,
-    };
-    use crate::color::{ycbcr_bt709_full_to_bgr, ycbcr_bt709_video_to_bgr};
 
     struct CameraDelegateIvars {
         shared: Arc<StdMutex<PreviewCameraShared>>,
@@ -2731,81 +2811,6 @@ mod macos {
         true
     }
 
-    /// NV12 (4:2:0 bi-planar Y'CbCr) -> BGRA, parallelized across output rows.
-    #[allow(clippy::too_many_arguments)]
-    fn nv12_to_bgra(
-        y: &[u8],
-        y_stride: usize,
-        cbcr: &[u8],
-        cbcr_stride: usize,
-        width: usize,
-        height: usize,
-        full_range: bool,
-        out: &mut [u8],
-    ) {
-        let row_bytes = width * 4;
-        out.par_chunks_mut(row_bytes)
-            .enumerate()
-            .for_each(|(row, out_row)| {
-                if row >= height {
-                    return;
-                }
-                let y_row = &y[row * y_stride..];
-                let cbcr_row = &cbcr[(row / 2) * cbcr_stride..];
-                for (x, pixel) in out_row.chunks_exact_mut(4).enumerate() {
-                    let chroma = (x / 2) * 2;
-                    let (b, g, r) = if full_range {
-                        ycbcr_bt709_full_to_bgr(y_row[x], cbcr_row[chroma], cbcr_row[chroma + 1])
-                    } else {
-                        ycbcr_bt709_video_to_bgr(y_row[x], cbcr_row[chroma], cbcr_row[chroma + 1])
-                    };
-                    pixel[0] = b;
-                    pixel[1] = g;
-                    pixel[2] = r;
-                    pixel[3] = 255;
-                }
-            });
-    }
-
-    /// Packed 4:2:2 Y'CbCr -> BGRA, parallelized by row. `uyvy` selects the byte
-    /// order: UYVY (`2vuy`, Cb Y0 Cr Y1) when true, YUY2 (`yuvs`, Y0 Cb Y1 Cr) when false.
-    fn yuv422_to_bgra(
-        plane: &[u8],
-        stride: usize,
-        width: usize,
-        height: usize,
-        uyvy: bool,
-        out: &mut [u8],
-    ) {
-        let row_bytes = width * 4;
-        out.par_chunks_mut(row_bytes)
-            .enumerate()
-            .for_each(|(row, out_row)| {
-                if row >= height {
-                    return;
-                }
-                let src = &plane[row * stride..];
-                for (pair, out8) in out_row.chunks_exact_mut(8).enumerate() {
-                    let i = pair * 4;
-                    let (cb, y0, cr, y1) = if uyvy {
-                        (src[i], src[i + 1], src[i + 2], src[i + 3])
-                    } else {
-                        (src[i + 1], src[i], src[i + 3], src[i + 2])
-                    };
-                    let (b0, g0, r0) = ycbcr_bt709_video_to_bgr(y0, cb, cr);
-                    let (b1, g1, r1) = ycbcr_bt709_video_to_bgr(y1, cb, cr);
-                    out8[0] = b0;
-                    out8[1] = g0;
-                    out8[2] = r0;
-                    out8[3] = 255;
-                    out8[4] = b1;
-                    out8[5] = g1;
-                    out8[6] = r1;
-                    out8[7] = 255;
-                }
-            });
-    }
-
     fn cm_time_seconds(time: CMTime) -> Option<f64> {
         let seconds = unsafe { time.seconds() };
         seconds.is_finite().then_some(seconds)
@@ -2904,6 +2909,33 @@ mod tests {
             fps: 60,
             bitrate_kbps: 9000,
         }
+    }
+
+    #[test]
+    fn shared_nv12_conversion_preserves_bt709_video_range_pixels() {
+        let y = [16, 235, 81, 145];
+        let cbcr = [128, 128];
+        let mut out = [0; 16];
+
+        nv12_to_bgra(&y, 2, &cbcr, 2, 2, 2, false, &mut out);
+
+        for (index, luma) in y.into_iter().enumerate() {
+            let (b, g, r) = ycbcr_bt709_video_to_bgr(luma, 128, 128);
+            assert_eq!(&out[index * 4..index * 4 + 4], &[b, g, r, 255]);
+        }
+    }
+
+    #[test]
+    fn shared_yuv422_conversion_accepts_uyvy_and_yuy2_ordering() {
+        let mut uyvy_out = [0; 8];
+        let mut yuy2_out = [0; 8];
+
+        yuv422_to_bgra(&[128, 16, 128, 235], 4, 2, 1, true, &mut uyvy_out);
+        yuv422_to_bgra(&[16, 128, 235, 128], 4, 2, 1, false, &mut yuy2_out);
+
+        assert_eq!(uyvy_out, yuy2_out);
+        assert_eq!(uyvy_out[3], 255);
+        assert_eq!(uyvy_out[7], 255);
     }
 
     #[test]
