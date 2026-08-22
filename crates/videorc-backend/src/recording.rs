@@ -7938,7 +7938,7 @@ async fn default_h264_encode_backend(ffmpeg_path: &str) -> Result<ResolvedFfmpeg
         let devices = linux_render_device_candidates_in(Path::new("/dev/dri"));
         let (accepted_device, rejection_reason) =
             probe_linux_vaapi_encoder(ffmpeg_path, &devices).await;
-        return select_linux_h264_encoder(preference, accepted_device, rejection_reason);
+        select_linux_h264_encoder(preference, accepted_device, rejection_reason)
     }
     #[cfg(not(target_os = "linux"))]
     {

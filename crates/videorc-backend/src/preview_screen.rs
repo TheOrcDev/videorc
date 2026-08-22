@@ -976,7 +976,7 @@ fn encode_preview_screen_png(
         return None;
     }
     let mut rgba = Vec::with_capacity(frame.bytes.len());
-    for pixel in frame.bytes.chunks_exact(4) {
+    for pixel in frame.bytes.as_chunks::<4>().0 {
         rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
     }
     let (rgba, width, height) =

@@ -232,7 +232,9 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
 
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| {
             let high = hex_value(chunk[0])?;
             let low = hex_value(chunk[1])?;

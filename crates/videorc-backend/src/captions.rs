@@ -252,7 +252,9 @@ pub fn downmix_resample_to_16k_mono(samples: &[f32], channels: u16, sample_rate:
         .chunks_exact(channels)
         .map(|frame| frame.iter().sum::<f32>() / channels as f32)
         .collect();
-    mono.chunks_exact(3)
+    mono.as_chunks::<3>()
+        .0
+        .iter()
         .map(|window| {
             let value = (window[0] + window[1] + window[2]) / 3.0;
             (value.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
@@ -1496,7 +1498,9 @@ fn decode_caption_overlay(png_base64: &str) -> Result<DecodedCaptionOverlay> {
 
     let rgba = Arc::new(image.into_raw());
     let bgra = Arc::new(
-        rgba.chunks_exact(4)
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|pixel| [pixel[2], pixel[1], pixel[0], pixel[3]])
             .collect(),
     );
