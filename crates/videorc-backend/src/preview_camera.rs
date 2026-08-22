@@ -879,7 +879,7 @@ fn encode_preview_camera_png(
         return None;
     }
     let mut rgba = Vec::with_capacity(frame.bytes.len());
-    for pixel in frame.bytes.chunks_exact(4) {
+    for pixel in frame.bytes.as_chunks::<4>().0 {
         rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
     }
     if layout.camera_mirror {
@@ -2057,7 +2057,7 @@ fn nv12_to_bgra(
             }
             let y_row = &y[row * y_stride..];
             let cbcr_row = &cbcr[(row / 2) * cbcr_stride..];
-            for (x, pixel) in out_row.chunks_exact_mut(4).enumerate() {
+            for (x, pixel) in out_row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let chroma = (x / 2) * 2;
                 let (b, g, r) = if full_range {
                     ycbcr_bt709_full_to_bgr(y_row[x], cbcr_row[chroma], cbcr_row[chroma + 1])
@@ -2091,7 +2091,7 @@ fn yuv422_to_bgra(
                 return;
             }
             let src = &plane[row * stride..];
-            for (pair, out8) in out_row.chunks_exact_mut(8).enumerate() {
+            for (pair, out8) in out_row.as_chunks_mut::<8>().0.iter_mut().enumerate() {
                 let i = pair * 4;
                 let (cb, y0, cr, y1) = if uyvy {
                     (src[i], src[i + 1], src[i + 2], src[i + 3])

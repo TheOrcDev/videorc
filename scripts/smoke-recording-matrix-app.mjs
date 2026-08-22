@@ -166,6 +166,7 @@ async function recordCombo({ ws, smoke, combo, assertPreviewLiveness = false, st
   const diagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
   const bridgeDiagnostics = Object.fromEntries(
     [
+      'encodeBackend',
       'encoderBridgeInputFps',
       'encoderBridgeQueueDepth',
       'encoderBridgeOutputQueueOldestFrameAgeMs',

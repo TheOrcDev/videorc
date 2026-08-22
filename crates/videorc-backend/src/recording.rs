@@ -1789,7 +1789,10 @@ pub async fn start_session(
         state.emit_log(
             "warn",
             format!(
-                "Using the OpenH264 software H.264 fallback after the requested Media Foundation encoded bridge was rejected: {reason}"
+                "Using the {} FFmpeg H.264 fallback after the requested Media Foundation encoded bridge was rejected: {reason}",
+                encode_backend_label(Some(
+                    windows_encoded_bridge_decision.effective_encode_backend
+                ))
             ),
         );
     } else if matches!(
@@ -1808,6 +1811,26 @@ pub async fn start_session(
                     .input_subtype
                     .as_deref()
                     .unwrap_or("<unknown>")
+            ),
+        );
+    } else if let Some(reason) = windows_encoded_bridge_decision
+        .encoder_selection_fallback_reason
+        .as_deref()
+    {
+        // Software fallback is an expected, fully supported Linux posture.
+        // Keep it visible in logs and diagnostics without raising a health
+        // warning or user-facing toast.
+        state.emit_log("info", reason);
+    } else if let Some(device) = windows_encoded_bridge_decision
+        .fallback_ffmpeg_encoder
+        .vaapi_device
+        .as_deref()
+    {
+        state.emit_log(
+            "info",
+            format!(
+                "VAAPI H.264 encoder selected after probing {}.",
+                device.display()
             ),
         );
     }
@@ -2167,7 +2190,14 @@ pub async fn start_session(
     initial_diagnostics.encoder_bridge_encoded_output_input_subtype =
         windows_encoded_bridge_decision.input_subtype.clone();
     initial_diagnostics.encoder_bridge_encoded_output_fallback_reason =
-        windows_encoded_bridge_decision.fallback_reason.clone();
+        windows_encoded_bridge_decision
+            .fallback_reason
+            .clone()
+            .or_else(|| {
+                windows_encoded_bridge_decision
+                    .encoder_selection_fallback_reason
+                    .clone()
+            });
     initial_diagnostics.recording_protected = use_encoder_bridge;
     #[cfg(target_os = "windows")]
     {
@@ -2241,6 +2271,7 @@ pub async fn start_session(
     {
         let camera_overlay = if matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera) {
             let scene = scene_from_capture_config(SceneConfigParams {
+                transition_ms: None,
                 sources: params.sources.clone(),
                 layout: params.layout.clone(),
                 video: Some(params.output.video.clone()),
@@ -2482,12 +2513,13 @@ pub async fn start_session(
             .as_deref()
             .context("Encoder bridge FIFO path was not prepared")?;
         if params.output.record_enabled && !params.output.stream_enabled {
-            bridge_recording_ffmpeg_args(
+            bridge_recording_ffmpeg_args_with_encoder(
                 &capture,
                 &params,
                 output_path.as_deref(),
                 fifo_path,
                 encoder_bridge_video_output,
+                &windows_encoded_bridge_decision.fallback_ffmpeg_encoder,
             )?
         } else if let (Some(stream_output), Some(stream_fifo_path)) = (
             encoder_bridge_stream_output,
@@ -2504,22 +2536,24 @@ pub async fn start_session(
                 stream_output,
             )?
         } else {
-            bridge_compositor_ffmpeg_args(
+            bridge_compositor_ffmpeg_args_with_encoder(
                 &capture,
                 &params,
                 output_path.as_deref(),
                 &stream_targets,
                 fifo_path,
                 encoder_bridge_video_output,
+                &windows_encoded_bridge_decision.fallback_ffmpeg_encoder,
             )?
         }
     } else {
-        ffmpeg_args(
+        ffmpeg_args_with_encoder(
             &capture,
             &params,
             output_path.as_deref(),
             &stream_targets,
             screen_overlay.as_ref(),
+            &windows_encoded_bridge_decision.fallback_ffmpeg_encoder,
         )?
     };
     let ffmpeg_live_audio_filter_count = ffmpeg_live_microphone_filter_count(&args);
@@ -7426,6 +7460,8 @@ fn bool_label(value: bool) -> &'static str {
 #[allow(dead_code)]
 enum FfmpegH264Platform {
     Macos,
+    LinuxVaapi,
+    LinuxSoftware,
     WindowsHardware,
     WindowsSoftware,
 }
@@ -7440,9 +7476,52 @@ enum RuntimePlatform {
 }
 
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
-#[error("H.264 encoding is unsupported on {platform} at Linux port level L1")]
+#[error("H.264 encoding is unsupported on {platform}")]
 struct PlatformEncoderUnsupported {
     platform: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedFfmpegH264Encoder {
+    platform: FfmpegH264Platform,
+    vaapi_device: Option<PathBuf>,
+    fallback_reason: Option<String>,
+}
+
+impl ResolvedFfmpegH264Encoder {
+    fn for_platform(platform: FfmpegH264Platform) -> Self {
+        Self {
+            platform,
+            vaapi_device: None,
+            fallback_reason: None,
+        }
+    }
+
+    fn backend(&self) -> EncodeBackend {
+        ffmpeg_h264_encoder(self.platform).backend
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinuxH264EncoderPreference {
+    Auto,
+    Vaapi,
+    OpenH264,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+impl LinuxH264EncoderPreference {
+    fn parse(value: Option<&str>) -> std::result::Result<Self, String> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("auto") => Ok(Self::Auto),
+            Some("vaapi") => Ok(Self::Vaapi),
+            Some("openh264") => Ok(Self::OpenH264),
+            Some(value) => Err(format!(
+                "VIDEORC_LINUX_H264_ENCODER must be auto, vaapi, or openh264; got {value}"
+            )),
+        }
+    }
 }
 
 fn ffmpeg_h264_platform_for_target(
@@ -7451,7 +7530,10 @@ fn ffmpeg_h264_platform_for_target(
     match target {
         RuntimePlatform::Macos => Ok(FfmpegH264Platform::Macos),
         RuntimePlatform::Windows => Ok(FfmpegH264Platform::WindowsSoftware),
-        RuntimePlatform::Linux => Err(PlatformEncoderUnsupported { platform: "Linux" }),
+        // The synchronous default is the portable LGPL fallback. Session
+        // startup replaces it with LinuxVaapi only after a real render-node
+        // encode probe succeeds for the exact bundled FFmpeg binary.
+        RuntimePlatform::Linux => Ok(FfmpegH264Platform::LinuxSoftware),
         RuntimePlatform::Other => Err(PlatformEncoderUnsupported {
             platform: "this platform",
         }),
@@ -7615,8 +7697,8 @@ fn current_ffmpeg_h264_platform()
         // Cross-platform unit tests exercise the REAL Windows software
         // encoder table (OpenH264) rather than a test-only twin: a private
         // variant duplicating those args would silently go stale the next
-        // time the #149-tuned OpenH264 args change. The runtime selector's
-        // Linux refusal is covered separately via RuntimePlatform::Linux.
+        // time the #149-tuned OpenH264 args change. Linux's portable default
+        // and runtime selector are covered explicitly below.
         Ok(FfmpegH264Platform::WindowsSoftware)
     }
     #[cfg(all(
@@ -7649,6 +7731,16 @@ fn ffmpeg_h264_encoder(platform: FfmpegH264Platform) -> FfmpegH264Encoder {
             codec: "h264_videotoolbox",
             pix_fmt: "yuv420p",
             backend: EncodeBackend::HardwareVideotoolbox,
+        },
+        FfmpegH264Platform::LinuxVaapi => FfmpegH264Encoder {
+            codec: "h264_vaapi",
+            pix_fmt: "vaapi",
+            backend: EncodeBackend::HardwareVaapi,
+        },
+        FfmpegH264Platform::LinuxSoftware => FfmpegH264Encoder {
+            codec: "libopenh264",
+            pix_fmt: "yuv420p",
+            backend: EncodeBackend::SoftwareOpenH264,
         },
         FfmpegH264Platform::WindowsHardware => FfmpegH264Encoder {
             codec: "h264_mf",
@@ -7716,37 +7808,170 @@ fn windows_media_foundation_hardware_probe_args(video: &VideoSettings) -> Vec<St
 #[cfg(target_os = "windows")]
 const WINDOWS_MEDIA_FOUNDATION_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn default_h264_encode_backend() -> std::result::Result<EncodeBackend, PlatformEncoderUnsupported> {
-    Ok(ffmpeg_h264_encoder(current_ffmpeg_h264_platform()?).backend)
+#[cfg(any(test, target_os = "linux"))]
+fn linux_render_device_candidates_in(dri_directory: &Path) -> Vec<PathBuf> {
+    let mut devices = std::fs::read_dir(dri_directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let suffix = name.strip_prefix("renderD")?;
+            suffix
+                .chars()
+                .all(|character| character.is_ascii_digit())
+                .then(|| entry.path())
+        })
+        .collect::<Vec<_>>();
+    devices.sort();
+    devices
 }
 
-fn append_h264_encoding_args(
-    args: &mut Vec<String>,
-    video: &VideoSettings,
-    low_latency: bool,
-) -> std::result::Result<(), PlatformEncoderUnsupported> {
-    append_h264_encoding_args_for_platform(
-        args,
-        video,
-        current_ffmpeg_h264_platform()?,
-        low_latency,
-    );
-    Ok(())
+#[cfg(any(test, target_os = "linux"))]
+fn linux_vaapi_probe_args(device: &Path) -> Vec<String> {
+    vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-vaapi_device".to_string(),
+        device.display().to_string(),
+        "-f".to_string(),
+        "lavfi".to_string(),
+        "-i".to_string(),
+        "color=c=black:s=128x72:r=30".to_string(),
+        "-vf".to_string(),
+        "format=nv12,hwupload".to_string(),
+        "-frames:v".to_string(),
+        "3".to_string(),
+        "-an".to_string(),
+        "-c:v".to_string(),
+        "h264_vaapi".to_string(),
+        "-profile:v".to_string(),
+        "high".to_string(),
+        "-b:v".to_string(),
+        "1000k".to_string(),
+        "-f".to_string(),
+        "null".to_string(),
+        "-".to_string(),
+    ]
 }
 
-fn append_h264_encoding_args_preserving_input_timestamps(
+#[cfg(any(test, target_os = "linux"))]
+fn select_linux_h264_encoder(
+    preference: LinuxH264EncoderPreference,
+    accepted_device: Option<PathBuf>,
+    rejection_reason: Option<String>,
+) -> Result<ResolvedFfmpegH264Encoder> {
+    if preference == LinuxH264EncoderPreference::OpenH264 {
+        return Ok(ResolvedFfmpegH264Encoder {
+            platform: FfmpegH264Platform::LinuxSoftware,
+            vaapi_device: None,
+            fallback_reason: Some(
+                "OpenH264 software encoding was selected explicitly for this session.".to_string(),
+            ),
+        });
+    }
+    if let Some(device) = accepted_device {
+        return Ok(ResolvedFfmpegH264Encoder {
+            platform: FfmpegH264Platform::LinuxVaapi,
+            vaapi_device: Some(device),
+            fallback_reason: None,
+        });
+    }
+    let reason = rejection_reason.unwrap_or_else(|| {
+        "no /dev/dri/renderD* device was available for the VAAPI probe".to_string()
+    });
+    if preference == LinuxH264EncoderPreference::Vaapi {
+        bail!("VAAPI encoding was required but its render-node probe failed: {reason}");
+    }
+    Ok(ResolvedFfmpegH264Encoder {
+        platform: FfmpegH264Platform::LinuxSoftware,
+        vaapi_device: None,
+        fallback_reason: Some(format!(
+            "VAAPI was unavailable ({reason}); using the LGPL OpenH264 software fallback."
+        )),
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn probe_linux_vaapi_encoder(
+    ffmpeg_path: &str,
+    devices: &[PathBuf],
+) -> (Option<PathBuf>, Option<String>) {
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+    let mut rejections = Vec::new();
+    for device in devices {
+        let mut command = Command::new(ffmpeg_path);
+        command
+            .args(linux_vaapi_probe_args(device))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        match timeout(PROBE_TIMEOUT, command.output()).await {
+            Ok(Ok(output)) if output.status.success() => return (Some(device.clone()), None),
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                rejections.push(format!(
+                    "{}: {}",
+                    device.display(),
+                    bounded_stream_output_topology_fallback_reason(&stderr)
+                ));
+            }
+            Ok(Err(error)) => rejections.push(format!("{}: {error}", device.display())),
+            Err(_) => rejections.push(format!("{}: probe timed out", device.display())),
+        }
+    }
+    let reason = (!rejections.is_empty()).then(|| rejections.join("; "));
+    (None, reason)
+}
+
+async fn default_h264_encode_backend(ffmpeg_path: &str) -> Result<ResolvedFfmpegH264Encoder> {
+    #[cfg(target_os = "linux")]
+    {
+        let preference = LinuxH264EncoderPreference::parse(
+            std::env::var("VIDEORC_LINUX_H264_ENCODER").ok().as_deref(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        if preference == LinuxH264EncoderPreference::OpenH264 {
+            return select_linux_h264_encoder(preference, None, None);
+        }
+        let devices = linux_render_device_candidates_in(Path::new("/dev/dri"));
+        let (accepted_device, rejection_reason) =
+            probe_linux_vaapi_encoder(ffmpeg_path, &devices).await;
+        select_linux_h264_encoder(preference, accepted_device, rejection_reason)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = ffmpeg_path;
+        Ok(ResolvedFfmpegH264Encoder::for_platform(
+            current_ffmpeg_h264_platform()?,
+        ))
+    }
+}
+
+fn append_h264_encoding_args_for_platform_preserving_input_timestamps(
     args: &mut Vec<String>,
     video: &VideoSettings,
+    platform: FfmpegH264Platform,
     low_latency: bool,
-) -> std::result::Result<(), PlatformEncoderUnsupported> {
-    append_h264_encoding_args_for_platform_with_timing(
-        args,
-        video,
-        current_ffmpeg_h264_platform()?,
-        false,
-        low_latency,
-    );
+) {
+    append_h264_encoding_args_for_platform_with_timing(args, video, platform, false, low_latency);
     args.extend(["-fps_mode".to_string(), "vfr".to_string()]);
+}
+
+fn append_h264_device_args(
+    args: &mut Vec<String>,
+    encoder: &ResolvedFfmpegH264Encoder,
+) -> Result<()> {
+    if encoder.platform != FfmpegH264Platform::LinuxVaapi {
+        return Ok(());
+    }
+    let device = encoder
+        .vaapi_device
+        .as_deref()
+        .context("The selected VAAPI encoder has no probed render device")?;
+    args.extend(["-vaapi_device".to_string(), device.display().to_string()]);
     Ok(())
 }
 
@@ -7793,6 +8018,20 @@ fn append_h264_encoding_args_for_platform_with_timing(
                 args.extend(["-prio_speed".to_string(), "1".to_string()]);
             }
         }
+        FfmpegH264Platform::LinuxVaapi => {
+            args.extend(["-rc_mode".to_string(), "VBR".to_string()]);
+            if low_latency {
+                args.extend(["-bf".to_string(), "0".to_string()]);
+            }
+        }
+        FfmpegH264Platform::LinuxSoftware => {
+            args.extend([
+                "-rc_mode".to_string(),
+                "bitrate".to_string(),
+                "-allow_skip_frames".to_string(),
+                "1".to_string(),
+            ]);
+        }
         FfmpegH264Platform::WindowsHardware => {
             args.extend(["-hw_encoding".to_string(), "1".to_string()]);
             args.extend([
@@ -7817,8 +8056,12 @@ fn append_h264_encoding_args_for_platform_with_timing(
     // Spec-valid High profile/level (the recording-quality audit caught the
     // encoders' auto picks under-leveling 60fps streams). Media Foundation
     // exposes neither option, so the Windows arms keep the encoder default.
-    if matches!(platform, FfmpegH264Platform::Macos)
-        && let Some(level) = h264_high_level_label(video.width, video.height, video.fps)
+    if matches!(
+        platform,
+        FfmpegH264Platform::Macos
+            | FfmpegH264Platform::LinuxVaapi
+            | FfmpegH264Platform::LinuxSoftware
+    ) && let Some(level) = h264_high_level_label(video.width, video.height, video.fps)
     {
         args.extend([
             "-profile:v".to_string(),
@@ -7877,6 +8120,7 @@ fn compositor_backend_label(backend: Option<CompositorBackend>) -> &'static str 
 fn encode_backend_label(backend: Option<EncodeBackend>) -> &'static str {
     match backend {
         Some(EncodeBackend::HardwareVideotoolbox) => "hardware-videotoolbox",
+        Some(EncodeBackend::HardwareVaapi) => "hardware-vaapi",
         Some(EncodeBackend::HardwareMediaFoundation) => "hardware-media-foundation",
         Some(EncodeBackend::SoftwareMediaFoundation) => "software-media-foundation",
         Some(EncodeBackend::SoftwareOpenH264) => "software-open-h264",
@@ -8377,6 +8621,8 @@ struct WindowsEncodedBridgeDecision {
     encoder_identity: Option<String>,
     input_subtype: Option<String>,
     fallback_reason: Option<String>,
+    fallback_ffmpeg_encoder: ResolvedFfmpegH264Encoder,
+    encoder_selection_fallback_reason: Option<String>,
 }
 
 impl WindowsEncodedBridgeDecision {
@@ -8397,6 +8643,10 @@ impl WindowsEncodedBridgeDecision {
             encoder_identity: None,
             input_subtype: None,
             fallback_reason: None,
+            fallback_ffmpeg_encoder: ResolvedFfmpegH264Encoder::for_platform(
+                FfmpegH264Platform::WindowsSoftware,
+            ),
+            encoder_selection_fallback_reason: None,
         }
     }
 }
@@ -8883,6 +9133,10 @@ fn select_windows_encoded_bridge_decision(
             encoder_identity: Some(encoder_identity),
             input_subtype: Some(input_subtype),
             fallback_reason: None,
+            fallback_ffmpeg_encoder: ResolvedFfmpegH264Encoder::for_platform(
+                FfmpegH264Platform::WindowsSoftware,
+            ),
+            encoder_selection_fallback_reason: None,
         },
         #[cfg(any(test, target_os = "windows"))]
         Some(MediaFoundationTopologyProbe::Rejected { reason }) => WindowsEncodedBridgeDecision {
@@ -8894,6 +9148,10 @@ fn select_windows_encoded_bridge_decision(
             encoder_identity: None,
             input_subtype: None,
             fallback_reason: Some(bounded_stream_output_topology_fallback_reason(&reason)),
+            fallback_ffmpeg_encoder: ResolvedFfmpegH264Encoder::for_platform(
+                FfmpegH264Platform::WindowsSoftware,
+            ),
+            encoder_selection_fallback_reason: None,
         },
         #[cfg(any(test, not(target_os = "windows")))]
         Some(MediaFoundationTopologyProbe::Unsupported { reason }) => {
@@ -8906,6 +9164,10 @@ fn select_windows_encoded_bridge_decision(
                 encoder_identity: None,
                 input_subtype: None,
                 fallback_reason: Some(bounded_stream_output_topology_fallback_reason(&reason)),
+                fallback_ffmpeg_encoder: ResolvedFfmpegH264Encoder::for_platform(
+                    FfmpegH264Platform::WindowsSoftware,
+                ),
+                encoder_selection_fallback_reason: None,
             }
         }
         None => WindowsEncodedBridgeDecision {
@@ -8919,6 +9181,10 @@ fn select_windows_encoded_bridge_decision(
             fallback_reason: Some(bounded_stream_output_topology_fallback_reason(
                 "Media Foundation output topology probe did not produce a verdict",
             )),
+            fallback_ffmpeg_encoder: ResolvedFfmpegH264Encoder::for_platform(
+                FfmpegH264Platform::WindowsSoftware,
+            ),
+            encoder_selection_fallback_reason: None,
         },
     }
 }
@@ -8927,12 +9193,13 @@ async fn resolve_windows_encoded_bridge_decision(
     ffmpeg_path: &str,
     plan: &EncoderOutputTopologyPlan,
     requested: EncoderBridgeVideoOutput,
-) -> std::result::Result<WindowsEncodedBridgeDecision, PlatformEncoderUnsupported> {
+) -> Result<WindowsEncodedBridgeDecision> {
     // Resolve the fallback backend FIRST and as a value: this function is
     // reachable on every platform (the topology-probe RPC calls it, and the
     // renderer fires that probe automatically), so an unsupported platform
     // must surface as the typed error, never as a panic mid-argument.
-    let fallback_encode_backend = default_h264_encode_backend()?;
+    let resolved_encoder = default_h264_encode_backend(ffmpeg_path).await?;
+    let fallback_encode_backend = resolved_encoder.backend();
     let graphics_adapter_driver_identity = graphics_adapter_driver_identity();
     let capability_key = output_topology_capability_key(
         ffmpeg_path,
@@ -8955,12 +9222,15 @@ async fn resolve_windows_encoded_bridge_decision(
     } else {
         None
     };
-    Ok(select_windows_encoded_bridge_decision(
+    let mut decision = select_windows_encoded_bridge_decision(
         requested,
         capability_key,
         probe,
         fallback_encode_backend,
-    ))
+    );
+    decision.encoder_selection_fallback_reason = resolved_encoder.fallback_reason.clone();
+    decision.fallback_ffmpeg_encoder = resolved_encoder;
+    Ok(decision)
 }
 
 #[cfg(target_os = "windows")]
@@ -9025,7 +9295,9 @@ pub async fn probe_stream_output_topology(
         effective_bridge_output: stream_output_bridge(decision.effective),
         effective_encode_backend: decision.effective_encode_backend,
         probe_state: decision.probe_state,
-        fallback_reason: decision.fallback_reason,
+        fallback_reason: decision
+            .fallback_reason
+            .or(decision.encoder_selection_fallback_reason),
     })
 }
 
@@ -10572,6 +10844,7 @@ fn recording_encoder_bridge_sources_ready(
         })
 }
 
+#[cfg(test)]
 fn bridge_recording_ffmpeg_args(
     capture: &CaptureInputs,
     params: &StartSessionParams,
@@ -10579,18 +10852,39 @@ fn bridge_recording_ffmpeg_args(
     fifo_path: &Path,
     video_output: EncoderBridgeVideoOutput,
 ) -> Result<Vec<String>> {
+    let encoder = ResolvedFfmpegH264Encoder::for_platform(current_ffmpeg_h264_platform()?);
+    bridge_recording_ffmpeg_args_with_encoder(
+        capture,
+        params,
+        output_path,
+        fifo_path,
+        video_output,
+        &encoder,
+    )
+}
+
+fn bridge_recording_ffmpeg_args_with_encoder(
+    capture: &CaptureInputs,
+    params: &StartSessionParams,
+    output_path: Option<&Path>,
+    fifo_path: &Path,
+    video_output: EncoderBridgeVideoOutput,
+    encoder: &ResolvedFfmpegH264Encoder,
+) -> Result<Vec<String>> {
     let output_path =
         output_path.context("Encoder bridge recording requires a local output path")?;
-    bridge_compositor_ffmpeg_args(
+    bridge_compositor_ffmpeg_args_with_encoder(
         capture,
         params,
         Some(output_path),
         &[],
         fifo_path,
         video_output,
+        encoder,
     )
 }
 
+#[cfg(test)]
 fn bridge_compositor_ffmpeg_args(
     capture: &CaptureInputs,
     params: &StartSessionParams,
@@ -10598,6 +10892,27 @@ fn bridge_compositor_ffmpeg_args(
     stream_targets: &[StreamTarget],
     fifo_path: &Path,
     video_output: EncoderBridgeVideoOutput,
+) -> Result<Vec<String>> {
+    let encoder = ResolvedFfmpegH264Encoder::for_platform(current_ffmpeg_h264_platform()?);
+    bridge_compositor_ffmpeg_args_with_encoder(
+        capture,
+        params,
+        output_path,
+        stream_targets,
+        fifo_path,
+        video_output,
+        &encoder,
+    )
+}
+
+fn bridge_compositor_ffmpeg_args_with_encoder(
+    capture: &CaptureInputs,
+    params: &StartSessionParams,
+    output_path: Option<&Path>,
+    stream_targets: &[StreamTarget],
+    fifo_path: &Path,
+    video_output: EncoderBridgeVideoOutput,
+    encoder: &ResolvedFfmpegH264Encoder,
 ) -> Result<Vec<String>> {
     validate_stream_targets_for_ffmpeg(stream_targets)?;
     let mut args = vec![
@@ -10611,6 +10926,7 @@ fn bridge_compositor_ffmpeg_args(
         "-progress".to_string(),
         "pipe:2".to_string(),
     ];
+    append_h264_device_args(&mut args, encoder)?;
     let input_layout =
         append_bridge_recording_input_args(&mut args, capture, params, fifo_path, video_output);
     // Copy-kind outputs (AnnexB/MpegTs) with stream targets fan out as one
@@ -10629,9 +10945,10 @@ fn bridge_compositor_ffmpeg_args(
             EncoderBridgeVideoOutput::RawYuv420p => {
                 args.extend([
                     "-filter_complex".to_string(),
-                    bridge_recording_video_filter(
+                    bridge_recording_video_filter_for_encoder(
                         input_layout.video_input_index,
                         &params.output.video,
+                        encoder,
                     ),
                     "-map".to_string(),
                     "[v_main]".to_string(),
@@ -10649,11 +10966,12 @@ fn bridge_compositor_ffmpeg_args(
         append_audio_output_args(&mut args, &input_layout);
         match video_output {
             EncoderBridgeVideoOutput::RawYuv420p => {
-                append_h264_encoding_args_preserving_input_timestamps(
+                append_h264_encoding_args_for_platform_preserving_input_timestamps(
                     &mut args,
                     &params.output.video,
+                    encoder.platform,
                     !stream_targets.is_empty(),
-                )?;
+                );
             }
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
@@ -11208,17 +11526,46 @@ fn rtmp_tee_leg(url: &str) -> String {
 }
 const RTMP_LEG_RW_TIMEOUT_US: u64 = 8_000_000;
 
-fn bridge_recording_video_filter(video_input_index: usize, video: &VideoSettings) -> String {
+fn bridge_recording_video_filter_for_encoder(
+    video_input_index: usize,
+    video: &VideoSettings,
+    encoder: &ResolvedFfmpegH264Encoder,
+) -> String {
     let fps = video.fps.max(1);
-    format!("[{video_input_index}:v]setpts=PTS-STARTPTS,fps={fps}[v_main]")
+    let upload = if encoder.platform == FfmpegH264Platform::LinuxVaapi {
+        ",format=nv12,hwupload"
+    } else {
+        ""
+    };
+    format!("[{video_input_index}:v]setpts=PTS-STARTPTS,fps={fps}{upload}[v_main]")
 }
 
+#[cfg(test)]
 fn ffmpeg_args(
     capture: &CaptureInputs,
     params: &StartSessionParams,
     output_path: Option<&Path>,
     stream_targets: &[StreamTarget],
     screen_overlay: Option<&ScreenOverlayInput>,
+) -> Result<Vec<String>> {
+    let encoder = ResolvedFfmpegH264Encoder::for_platform(current_ffmpeg_h264_platform()?);
+    ffmpeg_args_with_encoder(
+        capture,
+        params,
+        output_path,
+        stream_targets,
+        screen_overlay,
+        &encoder,
+    )
+}
+
+fn ffmpeg_args_with_encoder(
+    capture: &CaptureInputs,
+    params: &StartSessionParams,
+    output_path: Option<&Path>,
+    stream_targets: &[StreamTarget],
+    screen_overlay: Option<&ScreenOverlayInput>,
+    encoder: &ResolvedFfmpegH264Encoder,
 ) -> Result<Vec<String>> {
     validate_stream_targets_for_ffmpeg(stream_targets)?;
     let mut args = vec![
@@ -11232,6 +11579,7 @@ fn ffmpeg_args(
         "-progress".to_string(),
         "pipe:2".to_string(),
     ];
+    append_h264_device_args(&mut args, encoder)?;
     let input_layout = append_input_args(
         &mut args,
         capture,
@@ -11239,7 +11587,7 @@ fn ffmpeg_args(
         &params.output.video,
         screen_overlay,
     );
-    let filter = recording_video_filter(capture, &input_layout, params, true);
+    let filter = recording_video_filter_for_encoder(capture, &input_layout, params, true, encoder);
 
     args.extend([
         "-filter_complex".to_string(),
@@ -11248,7 +11596,12 @@ fn ffmpeg_args(
         "[v_main]".to_string(),
     ]);
     append_audio_output_args(&mut args, &input_layout);
-    append_h264_encoding_args(&mut args, &params.output.video, !stream_targets.is_empty())?;
+    append_h264_encoding_args_for_platform(
+        &mut args,
+        &params.output.video,
+        encoder.platform,
+        !stream_targets.is_empty(),
+    );
     append_audio_encoding_args(
         &mut args,
         &input_layout,
@@ -11984,11 +12337,31 @@ fn test_tone_audio_track() -> AudioTrack {
     }
 }
 
+#[cfg(test)]
 fn recording_video_filter(
     capture: &CaptureInputs,
     input_layout: &InputLayout,
     params: &StartSessionParams,
     include_live_preview: bool,
+) -> String {
+    let encoder = ResolvedFfmpegH264Encoder::for_platform(
+        current_ffmpeg_h264_platform().unwrap_or(FfmpegH264Platform::WindowsSoftware),
+    );
+    recording_video_filter_for_encoder(
+        capture,
+        input_layout,
+        params,
+        include_live_preview,
+        &encoder,
+    )
+}
+
+fn recording_video_filter_for_encoder(
+    capture: &CaptureInputs,
+    input_layout: &InputLayout,
+    params: &StartSessionParams,
+    include_live_preview: bool,
+    encoder: &ResolvedFfmpegH264Encoder,
 ) -> String {
     let scene = params
         .scene
@@ -12012,7 +12385,14 @@ fn recording_video_filter(
     // primaries/transfer on the frames: hardware encoders (h264_videotoolbox)
     // build the VUI from frame properties and `scale` only sets matrix+range.
     // The preview leg stays unconverted.
-    let to_bt709 = "scale=out_color_matrix=bt709:out_range=tv,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,format=yuv420p";
+    let encode_format = if encoder.platform == FfmpegH264Platform::LinuxVaapi {
+        "format=nv12,hwupload"
+    } else {
+        "format=yuv420p"
+    };
+    let to_bt709 = format!(
+        "scale=out_color_matrix=bt709:out_range=tv,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,{encode_format}"
+    );
     if include_live_preview {
         format!(
             "{video};[{video_label}]split=2[v_main_rgb][v_preview];[v_main_rgb]{to_bt709}[v_main];[v_preview]{}[preview]",
@@ -15013,6 +15393,10 @@ mod tests {
             "hardware-videotoolbox"
         );
         assert_eq!(
+            encode_backend_label(Some(EncodeBackend::HardwareVaapi)),
+            "hardware-vaapi"
+        );
+        assert_eq!(
             encode_backend_label(Some(EncodeBackend::HardwareMediaFoundation)),
             "hardware-media-foundation"
         );
@@ -15166,7 +15550,36 @@ mod tests {
             Some("1")
         );
 
-        for args in [&macos_args, &windows_args, &windows_software_args] {
+        let mut linux_vaapi_args = Vec::new();
+        append_h264_encoding_args_for_platform(
+            &mut linux_vaapi_args,
+            &video,
+            FfmpegH264Platform::LinuxVaapi,
+            true,
+        );
+        assert_eq!(arg_value(&linux_vaapi_args, "-c:v"), Some("h264_vaapi"));
+        assert_eq!(arg_value(&linux_vaapi_args, "-pix_fmt"), Some("vaapi"));
+        assert_eq!(arg_value(&linux_vaapi_args, "-rc_mode"), Some("VBR"));
+        assert_eq!(arg_value(&linux_vaapi_args, "-bf"), Some("0"));
+
+        let mut linux_software_args = Vec::new();
+        append_h264_encoding_args_for_platform(
+            &mut linux_software_args,
+            &video,
+            FfmpegH264Platform::LinuxSoftware,
+            true,
+        );
+        assert_eq!(arg_value(&linux_software_args, "-c:v"), Some("libopenh264"));
+        assert_eq!(arg_value(&linux_software_args, "-pix_fmt"), Some("yuv420p"));
+        assert_eq!(arg_value(&linux_software_args, "-rc_mode"), Some("bitrate"));
+
+        for args in [
+            &macos_args,
+            &linux_vaapi_args,
+            &linux_software_args,
+            &windows_args,
+            &windows_software_args,
+        ] {
             assert_eq!(arg_value(args, "-b:v"), Some("6000k"));
             assert_eq!(arg_value(args, "-maxrate"), Some("6000k"));
             assert_eq!(arg_value(args, "-bufsize"), Some("12000k"));
@@ -15186,6 +15599,14 @@ mod tests {
             EncodeBackend::HardwareVideotoolbox
         );
         assert_eq!(
+            ffmpeg_h264_encoder(FfmpegH264Platform::LinuxVaapi).backend,
+            EncodeBackend::HardwareVaapi
+        );
+        assert_eq!(
+            ffmpeg_h264_encoder(FfmpegH264Platform::LinuxSoftware).backend,
+            EncodeBackend::SoftwareOpenH264
+        );
+        assert_eq!(
             ffmpeg_h264_encoder(FfmpegH264Platform::WindowsHardware).backend,
             EncodeBackend::HardwareMediaFoundation
         );
@@ -15196,13 +15617,97 @@ mod tests {
     }
 
     #[test]
-    fn linux_h264_encoder_is_a_typed_unsupported_result() {
-        let error = ffmpeg_h264_platform_for_target(RuntimePlatform::Linux)
-            .expect_err("Linux L1 must not select an encoder");
-        assert_eq!(error.platform, "Linux");
+    fn linux_h264_encoder_has_a_portable_lgpl_default() {
         assert_eq!(
-            error.to_string(),
-            "H.264 encoding is unsupported on Linux at Linux port level L1"
+            ffmpeg_h264_platform_for_target(RuntimePlatform::Linux),
+            Ok(FfmpegH264Platform::LinuxSoftware)
+        );
+    }
+
+    #[test]
+    fn linux_h264_encoder_preference_is_explicit_and_bounded() {
+        assert_eq!(
+            LinuxH264EncoderPreference::parse(None),
+            Ok(LinuxH264EncoderPreference::Auto)
+        );
+        assert_eq!(
+            LinuxH264EncoderPreference::parse(Some("auto")),
+            Ok(LinuxH264EncoderPreference::Auto)
+        );
+        assert_eq!(
+            LinuxH264EncoderPreference::parse(Some("vaapi")),
+            Ok(LinuxH264EncoderPreference::Vaapi)
+        );
+        assert_eq!(
+            LinuxH264EncoderPreference::parse(Some("openh264")),
+            Ok(LinuxH264EncoderPreference::OpenH264)
+        );
+        assert!(LinuxH264EncoderPreference::parse(Some("x264")).is_err());
+    }
+
+    #[test]
+    fn linux_render_device_candidates_include_only_numbered_render_nodes() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-linux-render-nodes-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("create render-node fixture directory");
+        for name in ["renderD129", "card0", "renderD128", "renderDnope"] {
+            File::create(directory.join(name)).expect("create render-node fixture");
+        }
+
+        assert_eq!(
+            linux_render_device_candidates_in(&directory),
+            vec![directory.join("renderD128"), directory.join("renderD129")]
+        );
+
+        std::fs::remove_dir_all(directory).expect("remove render-node fixture directory");
+    }
+
+    #[test]
+    fn linux_vaapi_probe_exercises_upload_and_real_encoder() {
+        let device = Path::new("/dev/dri/renderD128");
+        let args = linux_vaapi_probe_args(device);
+        assert_eq!(
+            arg_value(&args, "-vaapi_device"),
+            Some("/dev/dri/renderD128")
+        );
+        assert_eq!(arg_value(&args, "-vf"), Some("format=nv12,hwupload"));
+        assert_eq!(arg_value(&args, "-c:v"), Some("h264_vaapi"));
+        assert_eq!(arg_value(&args, "-frames:v"), Some("3"));
+    }
+
+    #[test]
+    fn linux_encoder_selection_prefers_probed_vaapi_and_falls_back_to_openh264() {
+        let device = PathBuf::from("/dev/dri/renderD128");
+        let hardware =
+            select_linux_h264_encoder(LinuxH264EncoderPreference::Auto, Some(device.clone()), None)
+                .expect("probed VAAPI device");
+        assert_eq!(hardware.platform, FfmpegH264Platform::LinuxVaapi);
+        assert_eq!(hardware.vaapi_device, Some(device));
+        assert_eq!(hardware.backend(), EncodeBackend::HardwareVaapi);
+        assert_eq!(hardware.fallback_reason, None);
+
+        let software = select_linux_h264_encoder(
+            LinuxH264EncoderPreference::Auto,
+            None,
+            Some("driver rejected h264_vaapi".to_string()),
+        )
+        .expect("automatic OpenH264 fallback");
+        assert_eq!(software.platform, FfmpegH264Platform::LinuxSoftware);
+        assert_eq!(software.backend(), EncodeBackend::SoftwareOpenH264);
+        assert!(
+            software
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("driver rejected h264_vaapi"))
+        );
+
+        assert!(
+            select_linux_h264_encoder(
+                LinuxH264EncoderPreference::Vaapi,
+                None,
+                Some("probe failed".to_string()),
+            )
+            .is_err()
         );
     }
 
@@ -18068,7 +18573,72 @@ mod tests {
                 assert_eq!(arg_value(args, "-hw_encoding"), None);
                 assert_eq!(encoder.backend, EncodeBackend::SoftwareOpenH264);
             }
+            FfmpegH264Platform::LinuxVaapi | FfmpegH264Platform::LinuxSoftware => {
+                unreachable!("test defaults never select a Linux runtime encoder")
+            }
         }
+    }
+
+    #[test]
+    fn linux_vaapi_session_args_bind_the_probed_device_and_upload_frames() {
+        let params = base_params(true, false);
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: None,
+        };
+        let encoder = ResolvedFfmpegH264Encoder {
+            platform: FfmpegH264Platform::LinuxVaapi,
+            vaapi_device: Some(PathBuf::from("/dev/dri/renderD128")),
+            fallback_reason: None,
+        };
+        let fifo_path = Path::new("/tmp/videorc-linux-vaapi.yuv");
+        let bridge_args = bridge_recording_ffmpeg_args_with_encoder(
+            &capture,
+            &params,
+            Some(Path::new("/tmp/videorc-linux-vaapi-bridge.mkv")),
+            fifo_path,
+            EncoderBridgeVideoOutput::RawYuv420p,
+            &encoder,
+        )
+        .expect("Linux VAAPI bridge args");
+        assert_eq!(
+            arg_value(&bridge_args, "-vaapi_device"),
+            Some("/dev/dri/renderD128")
+        );
+        assert_eq!(arg_value(&bridge_args, "-c:v"), Some("h264_vaapi"));
+        assert!(
+            arg_value(&bridge_args, "-filter_complex")
+                .is_some_and(|filter| filter.contains("format=nv12,hwupload[v_main]"))
+        );
+        let device_position = bridge_args
+            .iter()
+            .position(|arg| arg == "-vaapi_device")
+            .expect("VAAPI device option");
+        let input_position = bridge_args
+            .iter()
+            .position(|arg| arg == "-i")
+            .expect("first input option");
+        assert!(device_position < input_position);
+
+        let legacy_args = ffmpeg_args_with_encoder(
+            &capture,
+            &params,
+            Some(Path::new("/tmp/videorc-linux-vaapi-legacy.mkv")),
+            &[],
+            None,
+            &encoder,
+        )
+        .expect("Linux VAAPI legacy args");
+        assert_eq!(arg_value(&legacy_args, "-c:v"), Some("h264_vaapi"));
+        assert!(
+            arg_value(&legacy_args, "-filter_complex")
+                .is_some_and(|filter| filter.contains("format=nv12,hwupload[v_main]"))
+        );
+        assert!(
+            arg_value(&legacy_args, "-filter_complex")
+                .is_some_and(|filter| filter.contains("[v_preview]"))
+        );
     }
 
     #[test]

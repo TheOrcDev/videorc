@@ -368,6 +368,7 @@ const streamOutputBridgeSchema = enumSchema([
 const encodeBackendSchema = enumSchema([
   'software-x264',
   'hardware-videotoolbox',
+  'hardware-vaapi',
   'hardware-media-foundation',
   'software-media-foundation',
   'software-open-h264'

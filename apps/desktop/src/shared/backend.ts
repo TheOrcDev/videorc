@@ -1239,10 +1239,11 @@ export type PreviewTransport =
 export type EncodeBackend =
   | 'software-x264'
   | 'hardware-videotoolbox'
+  | 'hardware-vaapi'
   | 'hardware-media-foundation'
   | 'software-media-foundation'
-  // libopenh264 software fallback on Windows — software Media Foundation ran
-  // below realtime on real devices (issue #149).
+  // libopenh264 software fallback on Windows and Linux. On Linux it is the
+  // required LGPL fallback when no DRM render node passes the VAAPI probe.
   | 'software-open-h264'
 
 export type StreamOutputTopologyRole = 'shared' | 'recording' | 'stream'

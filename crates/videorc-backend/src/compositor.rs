@@ -3332,7 +3332,7 @@ fn synthetic_hard_content_bgra(
     let mut bytes = vec![0; width * height * 4];
     // Deterministic per (frame, run): reproducible artifacts, zero skip blocks.
     let mut rng = sequence.wrapping_mul(0x9E37_79B9_7F4A_7C15).max(1);
-    for pixel in bytes.chunks_exact_mut(4) {
+    for pixel in bytes.as_chunks_mut::<4>().0 {
         let noise = xorshift64(&mut rng);
         pixel[0] = noise as u8;
         pixel[1] = (noise >> 8) as u8;
@@ -3689,7 +3689,7 @@ fn rgba_to_bgra_bytes(rgba: &[u8]) -> Vec<u8> {
 }
 
 fn rgba_to_bgra_in_place(bytes: &mut [u8]) {
-    for pixel in bytes.chunks_exact_mut(4) {
+    for pixel in bytes.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
 }

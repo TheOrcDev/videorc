@@ -7638,14 +7638,16 @@ function resolveBackendPermissionTargetPath(): string {
 }
 
 function resolvePackagedFfmpegBinDir(): string | null {
-  // Dev mode on Windows: use the pinned vendor FFmpeg from
-  // `pnpm ffmpeg:fetch:windows` when present, so development does not depend
-  // on a system-wide ffmpeg install. macOS dev keeps resolving via PATH.
+  // Dev mode on Windows and Linux: use the platform's pinned vendor FFmpeg
+  // when present, so runtime capability probes exercise the exact binary that
+  // will be packaged. macOS dev keeps resolving via PATH.
   const binDir = app.isPackaged
     ? join(process.resourcesPath, 'ffmpeg', 'bin')
     : process.platform === 'win32'
       ? join(workspaceRoot(), 'vendor', 'ffmpeg', 'windows-x64', 'bin')
-      : null
+      : process.platform === 'linux'
+        ? join(workspaceRoot(), 'vendor', 'ffmpeg', 'linux-x64', 'bin')
+        : null
   if (!binDir) {
     return null
   }

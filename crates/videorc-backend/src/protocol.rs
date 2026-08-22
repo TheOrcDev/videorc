@@ -1225,21 +1225,20 @@ pub struct StreamHealth {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum EncodeBackend {
-    /// libx264 (software). LEGACY: no code path selects this since the Linux
-    /// L1 port removed the non-macOS/non-Windows fallback — Linux returns a
-    /// typed PlatformEncoderUnsupported instead, and the LGPL-only ffmpeg
-    /// policy forbids reintroducing GPL x264. Kept only so historical
+    /// libx264 (software). LEGACY: no code path selects this; Linux L1.5 uses
+    /// OpenH264 for its LGPL software fallback. Kept only so historical
     /// diagnostics payloads still deserialize.
     SoftwareX264,
     /// h264_videotoolbox (hardware, sw fallback allowed).
     HardwareVideotoolbox,
+    /// h264_vaapi on a capability-probed Linux DRM render node.
+    HardwareVaapi,
     /// h264_mf (MediaFoundation hardware/software hybrid), used by Windows builds.
     HardwareMediaFoundation,
     /// h264_mf's software MFT fallback after the exact hardware profile probe failed.
     SoftwareMediaFoundation,
-    /// libopenh264 (software), the Windows fallback after the hardware probe
-    /// failed — software Media Foundation ran below realtime on real devices
-    /// (issue #149).
+    /// libopenh264 (software): the Linux LGPL fallback and the Windows fallback
+    /// after the hardware probe failed (issue #149).
     SoftwareOpenH264,
 }
 
@@ -3977,7 +3976,11 @@ mod tests {
     }
 
     #[test]
-    fn media_foundation_backends_match_the_desktop_wire_contract() {
+    fn h264_backends_match_the_desktop_wire_contract() {
+        assert_eq!(
+            serde_json::to_value(EncodeBackend::HardwareVaapi).unwrap(),
+            serde_json::json!("hardware-vaapi")
+        );
         assert_eq!(
             serde_json::to_value(EncodeBackend::HardwareMediaFoundation).unwrap(),
             serde_json::json!("hardware-media-foundation")
