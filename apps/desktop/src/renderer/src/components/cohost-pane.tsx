@@ -215,6 +215,9 @@ export function CohostPane({
         />
         <Robot aria-hidden className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
         <span className="shrink-0 text-xs font-medium text-foreground">Co-host</span>
+        <span className="shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground">
+          alpha
+        </span>
         {chip ? (
           <span
             className={cn(
@@ -392,6 +395,9 @@ function CohostNotice({ label, children }: { label: string; children: ReactNode 
       <Robot aria-hidden className="size-4 shrink-0" weight="duotone" />
       <Badge className="shrink-0" variant="outline">
         {label}
+        <span className="ml-1 shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground">
+          alpha
+        </span>
       </Badge>
       {children}
     </div>

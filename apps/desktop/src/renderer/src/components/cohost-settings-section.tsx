@@ -57,9 +57,9 @@ export function CohostSettingsSection(): ReactElement | null {
 
   return (
     <PanelSection
-      description="An AI producer reads your live chat, groups the questions people are actually asking, and drafts replies you approve. Nothing is ever sent without you."
+      description="Alpha — expect rough edges. An AI producer reads your live chat, groups the questions people are actually asking, and drafts replies you approve. Nothing is ever sent without you."
       icon={Robot}
-      title="Co-host"
+      title="Co-host (alpha)"
     >
       {locked ? (
         <Alert variant="warning">
