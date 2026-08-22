@@ -1549,6 +1549,44 @@ export function buildWindowsLocalGateSteps({
       }
     },
     {
+      label: 'native Windows ScreenCamera D3D11 direct-record smoke 1080p30',
+      command: 'pnpm',
+      args: ['smoke:windows-native-screen', '--', '--d3d11', '--require-d3d11'],
+      env: {
+        VIDEORC_PERF_APP_EXECUTABLE: executable,
+        VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'native-screen-camera-1080p30'),
+        VIDEORC_SMOKE_FFMPEG_PATH: packagedFfmpeg,
+        VIDEORC_SMOKE_FFPROBE_PATH: packagedFfprobe,
+        VIDEORC_SMOKE_TIMEOUT_MS: '240000',
+        VIDEORC_WINDOWS_NATIVE_SCREEN_RECORDING_MS: '8000',
+        VIDEORC_WINDOWS_INCLUDE_CAMERA: '1',
+        VIDEORC_WINDOWS_REQUIRE_DIRECT_D3D11_RECORDING: '1',
+        VIDEORC_SMOKE_VIDEO_WIDTH: '1920',
+        VIDEORC_SMOKE_VIDEO_HEIGHT: '1080',
+        VIDEORC_SMOKE_VIDEO_FPS: '30',
+        VIDEORC_SMOKE_VIDEO_BITRATE_KBPS: '6000'
+      }
+    },
+    {
+      label: 'native Windows ScreenCamera D3D11 direct-record smoke 1080p60',
+      command: 'pnpm',
+      args: ['smoke:windows-native-screen', '--', '--d3d11', '--require-d3d11'],
+      env: {
+        VIDEORC_PERF_APP_EXECUTABLE: executable,
+        VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'native-screen-camera-1080p60'),
+        VIDEORC_SMOKE_FFMPEG_PATH: packagedFfmpeg,
+        VIDEORC_SMOKE_FFPROBE_PATH: packagedFfprobe,
+        VIDEORC_SMOKE_TIMEOUT_MS: '240000',
+        VIDEORC_WINDOWS_NATIVE_SCREEN_RECORDING_MS: '8000',
+        VIDEORC_WINDOWS_INCLUDE_CAMERA: '1',
+        VIDEORC_WINDOWS_REQUIRE_DIRECT_D3D11_RECORDING: '1',
+        VIDEORC_SMOKE_VIDEO_WIDTH: '1920',
+        VIDEORC_SMOKE_VIDEO_HEIGHT: '1080',
+        VIDEORC_SMOKE_VIDEO_FPS: '60',
+        VIDEORC_SMOKE_VIDEO_BITRATE_KBPS: '6000'
+      }
+    },
+    {
       label: 'native Windows D3D11 Media Foundation encoded-bridge matrix',
       command: 'pnpm',
       args: [

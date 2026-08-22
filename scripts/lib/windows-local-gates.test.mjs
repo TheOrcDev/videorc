@@ -914,6 +914,8 @@ describe('buildWindowsLocalGateSteps', () => {
       'package desktop Windows dir',
       'packaged recording and bundled-background smoke',
       'native Windows ScreenOnly D3D11 zero-copy smoke',
+      'native Windows ScreenCamera D3D11 direct-record smoke 1080p30',
+      'native Windows ScreenCamera D3D11 direct-record smoke 1080p60',
       'native Windows D3D11 Media Foundation encoded-bridge matrix',
       'recording-time Windows D3D11 native-preview smoke',
       'protected physical Windows RTMP matrix (forced D3D11/MF)',
@@ -937,6 +939,20 @@ describe('buildWindowsLocalGateSteps', () => {
       steps.find((step) => step.label === 'native Windows ScreenOnly D3D11 zero-copy smoke').args,
       ['smoke:windows-native-screen', '--', '--d3d11', '--require-d3d11']
     )
+    for (const [label, fps] of [
+      ['native Windows ScreenCamera D3D11 direct-record smoke 1080p30', '30'],
+      ['native Windows ScreenCamera D3D11 direct-record smoke 1080p60', '60']
+    ]) {
+      const step = steps.find((candidate) => candidate.label === label)
+      assert.ok(step, `missing protected-lane step: ${label}`)
+      assert.deepEqual(step.args, ['smoke:windows-native-screen', '--', '--d3d11', '--require-d3d11'])
+      assert.equal(step.env.VIDEORC_WINDOWS_INCLUDE_CAMERA, '1')
+      assert.equal(step.env.VIDEORC_WINDOWS_REQUIRE_DIRECT_D3D11_RECORDING, '1')
+      assert.equal(step.env.VIDEORC_SMOKE_VIDEO_WIDTH, '1920')
+      assert.equal(step.env.VIDEORC_SMOKE_VIDEO_HEIGHT, '1080')
+      assert.equal(step.env.VIDEORC_SMOKE_VIDEO_FPS, fps)
+      assert.equal(step.env.VIDEORC_SMOKE_VIDEO_BITRATE_KBPS, '6000')
+    }
     assert.deepEqual(
       steps.find(
         (step) => step.label === 'native Windows D3D11 Media Foundation encoded-bridge matrix'
