@@ -2271,6 +2271,7 @@ pub async fn start_session(
     {
         let camera_overlay = if matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera) {
             let scene = scene_from_capture_config(SceneConfigParams {
+                transition_ms: None,
                 sources: params.sources.clone(),
                 layout: params.layout.clone(),
                 video: Some(params.output.video.clone()),
