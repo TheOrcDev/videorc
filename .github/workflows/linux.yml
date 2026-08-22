@@ -1,8 +1,8 @@
 name: Linux
 
-# Linux L1 is a compile-and-test gate, not a shipping application claim.
-# Capture, preview, encoding, packaging, and device acceptance land in later
-# phases tracked by docs/linux-port-plan.md.
+# Linux L1.5 adds the production encoder policy to the compile-and-test gate.
+# It still is not a shipping application claim: capture, preview, packaging,
+# and real-device acceptance land in later phases tracked by the port plan.
 
 on:
   push:
@@ -15,12 +15,33 @@ concurrency:
 
 jobs:
   gates:
-    name: Linux gates (Rust compile + test)
+    name: Linux gates (FFmpeg policy + Rust compile/test)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Cache pinned Linux FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/ffmpeg/_build
+            vendor/ffmpeg/linux-x64
+          key: linux-ffmpeg-${{ hashFiles('vendor/ffmpeg/linux-pin.json') }}
+
+      - name: Test Linux FFmpeg policy
+        run: node --test scripts/lib/ffmpeg-linux-pin.test.mjs
+
+      - name: Fetch and verify pinned Linux FFmpeg
+        # This executes the staged Linux binary and fails closed unless its
+        # configure flags and encoder table prove LGPL-only VAAPI + OpenH264.
+        run: node scripts/fetch-ffmpeg-linux.mjs
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -33,7 +54,7 @@ jobs:
       - name: Clippy
         # clippy -D warnings is the compile gate (compile errors fail it
         # regardless of the lint allows), matching ci.yml and windows.yml —
-        # no separate cargo check, no pnpm (nothing in this job runs JS), and
+        # no separate cargo check, no pnpm (the JS steps use Node directly), and
         # no fmt (rustfmt output is platform-independent; ci.yml owns it).
         # cfg(linux) makes macOS/Windows-only helpers dead or their imports
         # unused. Keep this allow list identical to windows.yml while the

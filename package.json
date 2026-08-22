@@ -30,6 +30,7 @@
     "release:notify:discord": "node scripts/notify-discord-release.mjs",
     "ffmpeg:build:macos": "bash scripts/build-ffmpeg-macos.sh",
     "ffmpeg:fetch:windows": "node scripts/fetch-ffmpeg-windows.mjs",
+    "ffmpeg:fetch:linux": "node scripts/fetch-ffmpeg-linux.mjs",
     "build:native-preview-addon": "node scripts/build-native-preview-addon.mjs",
     "build:native-preview-addon:release": "node scripts/build-native-preview-addon.mjs --release --universal",
     "package:backend": "cargo build --release -p videorc-backend",
