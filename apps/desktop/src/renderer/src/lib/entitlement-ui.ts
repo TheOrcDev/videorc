@@ -89,6 +89,11 @@ export function noiseCleanupGate(entitlements: EntitlementsSnapshot | null): Ent
   return featureGate(entitlements, 'noise-cleanup')
 }
 
+/** Live Chat Co-host (Premium): fail-closed like every other cloud-AI gate. */
+export function liveCohostGate(entitlements: EntitlementsSnapshot | null): EntitlementUiGate {
+  return featureGate(entitlements, 'live-cohost')
+}
+
 export function videoProfileEntitlementGate({
   entitlements,
   kind,

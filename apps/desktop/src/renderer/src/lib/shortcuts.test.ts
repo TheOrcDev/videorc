@@ -31,12 +31,31 @@ describe('SHORTCUTS registry', () => {
     }
   })
 
-  it('groups cover Navigation, Session, Windows, and Appearance', () => {
+  it('groups cover Navigation, Session, Windows, Comments, and Appearance', () => {
     expect([...shortcutsByGroup().keys()]).toEqual([
       'Navigation',
       'Session',
       'Windows',
+      'Comments',
       'Appearance'
     ])
+  })
+
+  // S2 (Live Chat Co-host): the pane advertises these chips, so the registry
+  // must carry the exact keys the pane handles — a chord typed only into the
+  // component is the bug this registry exists to prevent.
+  it('registers the co-host pane keyboard map', () => {
+    const cohost = SHORTCUTS.filter((entry) => entry.id.startsWith('cohost-'))
+    expect(cohost.map((entry) => entry.id)).toEqual([
+      'cohost-focus',
+      'cohost-move',
+      'cohost-reply',
+      'cohost-highlight',
+      'cohost-answered',
+      'cohost-dismiss'
+    ])
+    expect(cohost.every((entry) => entry.group === 'Comments')).toBe(true)
+    expect(cohost.find((entry) => entry.id === 'cohost-focus')?.keys).toEqual(['⌘', 'J'])
+    expect(cohost.find((entry) => entry.id === 'cohost-dismiss')?.keys).toEqual(['⌫'])
   })
 })

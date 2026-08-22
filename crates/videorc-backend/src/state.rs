@@ -642,6 +642,9 @@ pub struct AppState {
     /// card. The image slot above and this state are mutated under this
     /// state-machine lock so stale expiry tasks cannot clear newer cards.
     pub comment_highlight: crate::comment_highlight::CommentHighlightSlot,
+    /// Live Co-host engine: per-session open questions, flags, mood, and the
+    /// tick scheduler. Settings are loaded from `app_settings` at startup.
+    pub cohost: crate::cohost::CohostSlot,
 }
 
 impl AppState {
@@ -653,6 +656,7 @@ impl AppState {
     ) -> Self {
         let oauth_store_path = (database.path().to_string_lossy() != ":memory:")
             .then(|| database.path().with_extension("oauth-pending.json"));
+        let cohost_settings = crate::cohost::load_cohost_settings(&database);
         Self {
             token,
             admin_token: uuid::Uuid::new_v4().to_string(),
@@ -706,6 +710,7 @@ impl AppState {
             caption_overlay: crate::captions::new_caption_overlay_slots(),
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
             comment_highlight: crate::comment_highlight::new_comment_highlight_slot(),
+            cohost: crate::cohost::new_cohost_slot(cohost_settings),
         }
     }
 

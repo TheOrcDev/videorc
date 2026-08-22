@@ -326,6 +326,9 @@ import type {
   CaptionWindowSnapshot,
   CaptionsUpdate,
   CaptionsWindowState,
+  CohostActionCommand,
+  CohostState,
+  CohostWindowState,
   CommentHighlightCommand,
   CommentHighlightState,
   CommentsClearCommand,
@@ -438,6 +441,7 @@ let commentsWindowAlwaysOnTop = false
 let commentsWindowClosing = false
 let commentsWindowContentProtected = false
 let latestCommentHighlightState: CommentHighlightState = { generation: 0, phase: 'idle' }
+let latestCohostWindowState: CohostWindowState | null = null
 let latestLiveCommentsSnapshot: LiveChatSnapshot | null = null
 const commentsHistoryCache = new CommentsHistoryCache()
 const commentsViewSelection = new CommentsViewSelection({ kind: 'live' })
@@ -2645,6 +2649,17 @@ function emitCommentHighlightState(state: CommentHighlightState): void {
   latestCommentHighlightState = state
   if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
     sendElectronEvent(commentsWindow.webContents, 'comments-window:highlight-state', state)
+  }
+}
+
+// Co-host relay (Live Chat Co-host S2): the MAIN renderer owns the backend
+// socket, the entitlement snapshot and the renderer-local cloud-AI consent, so
+// it resolves the whole segment and pushes ONE value; the Comments window seeds
+// from the cache and follows pushes, exactly like the highlight relay.
+function emitCohostWindowState(state: CohostWindowState): void {
+  latestCohostWindowState = state
+  if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
+    sendElectronEvent(commentsWindow.webContents, 'comments-window:cohost', state)
   }
 }
 
@@ -12087,6 +12102,57 @@ app.whenReady().then(async () => {
     }
   })
   secureIpcHandle('comments-window:viewers-get', () => latestViewerSample)
+  secureIpcHandle('comments-window:cohost-push', (event, state: unknown) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+      return undefined
+    }
+    if (!state || typeof state !== 'object' || !('state' in state)) {
+      return undefined
+    }
+    emitCohostWindowState(state as CohostWindowState)
+  })
+  secureIpcHandle('comments-window:cohost-get', () => latestCohostWindowState)
+  secureIpcHandle(
+    'comments-window:cohost-action',
+    (event, value: unknown): Promise<CohostState> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        return Promise.reject(new Error('Only the Comments window can send co-host actions.'))
+      }
+      const requestId = commentsCommandRequestId(value)
+      if (
+        !value ||
+        typeof value !== 'object' ||
+        !('sessionId' in value) ||
+        !('kind' in value) ||
+        !('targetId' in value)
+      ) {
+        return Promise.reject(new Error('Co-host action requires a session, kind, and target.'))
+      }
+      const command = value as CohostActionCommand
+      if (
+        (command.kind !== 'answered' &&
+          command.kind !== 'dismiss-question' &&
+          command.kind !== 'dismiss-flag') ||
+        typeof command.targetId !== 'string' ||
+        !command.targetId.trim()
+      ) {
+        return Promise.reject(new Error('Co-host action requires a known kind and target id.'))
+      }
+      assertLiveCommentsCommandSession(command.sessionId)
+      return commentsCommandBroker.request(requestId, () => {
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:cohost-action-request', command)
+        return true
+      })
+    }
+  )
+  secureIpcHandle(
+    'comments-window:cohost-action-result-push',
+    (event, resolution: CommentsCommandResolution<CohostState>) => {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+      return commentsCommandBroker.resolve(resolution)
+    }
+  )
   // Send relay (Comments upgrade S5): the window types, the MAIN renderer owns
   // the backend call, and the per-platform results relay back to the window.
   secureIpcHandle(

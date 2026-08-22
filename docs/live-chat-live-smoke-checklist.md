@@ -17,6 +17,13 @@ send-result honesty, highlight slot, and event protocol end to end over a real W
       snapshots → event-stream reconnect → correlated/idempotent send persistence. The result
       matrix must include sent, failed, receive-only, and timed-out-unknown without claiming an
       X account is connected. No OAuth required.
+- [ ] `pnpm smoke:cohost-fake` — Live Co-host offline proof (no cloud, no account): launches
+      the debug backend against an isolated profile and a local fake `POST /api/ai/cohost/tick`,
+      scripts fake-connector lanes, and asserts the tick wire shape, one grouped question whose
+      askers/messageIds grow across ticks, a flagged message, 429/403/503 → paused/paused/error
+      with Retry-After and the backoff ladder honored, dismiss-never-returns, the 20 s trickle rule,
+      `liveChat.send` + `inReplyToQuestionId` answering, and 30 s of idle chat without a tick.
+      Askers are keyed on author + destination because the fake connector cannot script authors.
 
 ## Capture-performance regression
 
@@ -67,3 +74,27 @@ send-result honesty, highlight slot, and event protocol end to end over a real W
       platform dashboard**.
 - [ ] Click a live comment and confirm `On stream` appears only after the card is visible on the
       viewer-facing output; historical comments must not expose the highlight action.
+
+## Live co-host (Premium, opt-in)
+
+Prerequisites: Premium account signed in, AI consent ON, Settings → Streaming → Co-host enabled,
+web has `VIDEORC_AI_COHOST_DISABLED` off. Offline proof: `pnpm smoke:cohost-fake`.
+
+- [ ] Go Live with Twitch + YouTube chat attached. Confirm the Co-host chip reads
+      `listening` only after `cohost.start` succeeded; with consent OFF it must read
+      `paused · consent` and no tick request leaves the machine.
+- [ ] Have viewers ask the same question three times in different words. Confirm ONE grouped
+      question appears with all askers and platforms, and a `suggestedReply` in the chat's
+      language; confirm no tick fires while chat is idle for 30 s.
+- [ ] Press `R` on the question, edit the draft, send with ⌘↩. Confirm one message per
+      writable destination (X stays receive-only) and the question leaves the list on its own
+      (`answered` via `inReplyToQuestionId`) — never by auto-send.
+- [ ] Press `H` on a question: the source comment appears on the viewer-facing output for ~10 s
+      via the existing comment highlight; `A` and `⌫` remove questions and they never return.
+- [ ] Post a clearly toxic message from a viewer account. Confirm it shows under Flags with a
+      reason and that nothing is auto-deleted or auto-replied.
+- [ ] Sign out mid-stream: chip reads `paused · signed out`; sign back in and confirm listening
+      resumes without losing open questions. Exhaust the daily quota (or set the limit to 1 on
+      web): chip reads `quota` and resumes after `Retry-After`.
+- [ ] Verify in the web ops dashboard that `ai_usage_events` gained one `cohost-tick` row per
+      tick with model + tokens.

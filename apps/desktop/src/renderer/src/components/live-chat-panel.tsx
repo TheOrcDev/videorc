@@ -2,6 +2,7 @@ import { ChatCircle } from '@phosphor-icons/react'
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 
 import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platform-icon'
+import { CohostPane } from '@/components/cohost-pane'
 import { CommentRow, commentHighlightPresentationForMessage } from '@/components/comment-row'
 import { CommentsDestinationStatus } from '@/components/comments-destination-status'
 import { Button } from '@/components/ui/button'
@@ -17,11 +18,15 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type {
+  CohostFlag,
+  CohostQuestion,
+  CohostState,
   CommentHighlightState,
   LiveChatMessage,
   LiveChatSnapshot,
   StreamPlatform
 } from '@/lib/backend'
+import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import {
   LIVE_CHAT_PLATFORMS,
   MAX_RENDERED_LIVE_CHAT_MESSAGES,
@@ -46,7 +51,19 @@ export function LiveChatPanel({
   highlightState,
   highlightApplyingId = null,
   highlightFailure = null,
-  onHighlight
+  onHighlight,
+  cohostState = null,
+  cohostGate,
+  cohostConsented = false,
+  cohostEnabled = false,
+  cohostActionPending = false,
+  onCohostReply,
+  onCohostShowOnStream,
+  onCohostAnswered,
+  onCohostDismissQuestion,
+  onCohostDismissFlag,
+  onCohostEnableConsent,
+  onCohostUpgrade
 }: {
   snapshot: LiveChatSnapshot
   onClearLocal: () => Promise<void> | void
@@ -55,6 +72,19 @@ export function LiveChatPanel({
   highlightApplyingId?: string | null
   highlightFailure?: { messageId: string; reason: string } | null
   onHighlight?: (message: LiveChatMessage) => void
+  /** Latest `cohost.state`; null hides the Co-host segment entirely. */
+  cohostState?: CohostState | null
+  cohostGate?: EntitlementUiGate
+  cohostConsented?: boolean
+  cohostEnabled?: boolean
+  cohostActionPending?: boolean
+  onCohostReply?: (question: CohostQuestion) => void
+  onCohostShowOnStream?: (question: CohostQuestion) => void
+  onCohostAnswered?: (question: CohostQuestion) => void
+  onCohostDismissQuestion?: (question: CohostQuestion) => void
+  onCohostDismissFlag?: (flag: CohostFlag) => void
+  onCohostEnableConsent?: () => void
+  onCohostUpgrade?: (url: string) => void
 }): ReactElement {
   const [activePlatforms, setActivePlatforms] = useState<StreamPlatform[]>([])
   const [paused, setPaused] = useState(false)
@@ -123,7 +153,25 @@ export function LiveChatPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
-      <CommentsDestinationStatus providers={snapshot.providers} />
+      <CommentsDestinationStatus cohostState={cohostState} providers={snapshot.providers} />
+
+      {cohostState && cohostGate && snapshot.sessionId ? (
+        <CohostPane
+          actionPending={cohostActionPending}
+          consented={cohostConsented}
+          enabled={cohostEnabled}
+          gate={cohostGate}
+          highlightedMessageId={highlightedId}
+          state={cohostState}
+          onAnswered={(question) => onCohostAnswered?.(question)}
+          onDismissFlag={(flag) => onCohostDismissFlag?.(flag)}
+          onDismissQuestion={(question) => onCohostDismissQuestion?.(question)}
+          onEnableConsent={onCohostEnableConsent}
+          onReply={(question) => onCohostReply?.(question)}
+          onShowOnStream={onCohostShowOnStream}
+          onUpgrade={onCohostUpgrade}
+        />
+      ) : null}
 
       <div className="flex items-center justify-between gap-2">
         {filterablePlatforms.length > 1 ? (

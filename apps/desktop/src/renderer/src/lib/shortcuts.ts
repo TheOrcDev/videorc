@@ -8,7 +8,7 @@ export interface ShortcutEntry {
   /** Keys as displayed, in press order (⌘ modifiers split out for Kbd chips). */
   keys: string[]
   label: string
-  group: 'Navigation' | 'Session' | 'Windows' | 'Appearance'
+  group: 'Navigation' | 'Session' | 'Windows' | 'Comments' | 'Appearance'
 }
 
 export const SHORTCUTS: readonly ShortcutEntry[] = [
@@ -31,6 +31,16 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
   { id: 'notes-window', keys: ['⌘', '⇧', 'N'], label: 'Open notes window', group: 'Windows' },
   { id: 'comments-window', keys: ['⌘', '⇧', 'J'], label: 'Open comments window', group: 'Windows' },
   { id: 'captions-window', keys: ['⌘', '⇧', 'C'], label: 'Open captions reader', group: 'Windows' },
+
+  // Co-host pane (Comments window). Plain (cmd)J toggles the Comments window
+  // from the main window; inside the window it focuses the co-host pane, and
+  // the single-key actions apply to the selected row.
+  { id: 'cohost-focus', keys: ['⌘', 'J'], label: 'Focus co-host', group: 'Comments' },
+  { id: 'cohost-move', keys: ['↑', '↓'], label: 'Move between questions', group: 'Comments' },
+  { id: 'cohost-reply', keys: ['R'], label: 'Draft a reply', group: 'Comments' },
+  { id: 'cohost-highlight', keys: ['H'], label: 'Show the question on stream', group: 'Comments' },
+  { id: 'cohost-answered', keys: ['A'], label: 'Mark answered', group: 'Comments' },
+  { id: 'cohost-dismiss', keys: ['⌫'], label: 'Dismiss', group: 'Comments' },
 
   { id: 'theme-toggle', keys: ['D'], label: 'Toggle light / dark theme', group: 'Appearance' }
 ] as const

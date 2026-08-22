@@ -109,6 +109,7 @@
     "smoke:backend-single-instance": "node scripts/smoke-backend-single-instance.mjs",
     "smoke:backend-resilience": "node scripts/smoke-backend-resilience.mjs",
     "smoke:captions-contract": "cargo build -p videorc-backend && node scripts/smoke-captions-contract.mjs",
+    "smoke:cohost-fake": "cargo build -p videorc-backend && node scripts/smoke-cohost-fake.mjs",
     "smoke:captions-live": "node scripts/smoke-captions-live-app.mjs",
     "captions:contact-sheet": "node scripts/caption-style-contact-sheet.mjs",
     "smoke:repair-encoder": "node scripts/smoke-repair-encoder.mjs",

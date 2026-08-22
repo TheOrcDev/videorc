@@ -20,6 +20,7 @@ import {
 import { useTheme } from 'next-themes'
 import { useEffect, useState, type ReactElement } from 'react'
 
+import { CohostSettingsSection } from '@/components/cohost-settings-section'
 import { NavigableRow } from '@/components/navigable-row'
 import { StatusBadge } from '@/components/status-badge'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
@@ -389,6 +390,8 @@ export function SettingsTab({
             </p>
           </div>
         </PanelSection>
+
+        <CohostSettingsSection />
 
         <PanelSection
           action={

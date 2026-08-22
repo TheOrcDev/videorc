@@ -4,12 +4,16 @@ import ReactDOM from 'react-dom/client'
 import { CommentsReader } from '@/components/comments-reader'
 import { AppErrorBoundary } from '@/components/error-boundary'
 import type {
+  CohostQuestion,
+  CohostWindowState,
   CommentHighlightState,
   CommentsSendOperation,
   CommentsViewSnapshot,
   LiveChatMessage,
   ViewerSample
 } from '@/lib/backend'
+import { cohostHighlightMessageId } from '@/lib/cohost-view'
+import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { chatSendFailures, pendingCommentsSendOperation, sendablePlatforms } from '@/lib/chat-send'
 import type { ChatSendFailure } from '@/lib/chat-send'
 import { commentHighlightExpiryDelay, expireCommentHighlightState } from '@/lib/comment-highlight'
@@ -87,6 +91,10 @@ function CommentsWindowApp(): ReactElement {
     setSendFailures(chatSendFailures(operation))
   }, [])
   const [viewerSample, setViewerSample] = useState<ViewerSample | null>(null)
+  // Co-host: the MAIN renderer resolves Premium, consent and the engine state,
+  // and relays ONE value. This window never re-derives gating.
+  const [cohost, setCohost] = useState<CohostWindowState | null>(null)
+  const [cohostActionPending, setCohostActionPending] = useState(false)
   useEffect(() => {
     const applyView = (next: CommentsViewSnapshot): void => {
       const previous = viewRef.current
@@ -153,16 +161,101 @@ function CommentsWindowApp(): ReactElement {
       setHighlightState(state)
       setHighlightApplyingId(null)
     })
+    void window.videorc
+      ?.getCohostWindowState?.()
+      .then((state) => setCohost(state ?? null))
+      .catch(() => {})
+    const offCohost = window.videorc?.onCohostWindowState?.((state) => setCohost(state))
     return () => {
       offSnapshot?.()
       offDelta?.()
       offViewers?.()
       offState?.()
       offHighlight?.()
+      offCohost?.()
     }
   }, [applySendOperation])
   const { snapshot } = view
   const sendTargets = sendablePlatforms(snapshot.providers)
+  const live = view.mode.kind === 'live' && Boolean(snapshot.sessionId)
+
+  const requestHighlight = (message: LiveChatMessage): void => {
+    if (!snapshot.sessionId) return
+    const intent = ++highlightIntentRef.current
+    const command = {
+      requestId: crypto.randomUUID(),
+      sessionId: snapshot.sessionId,
+      messageId: message.id
+    }
+    setHighlightFailure(null)
+    setHighlightApplyingId(message.id)
+    void window.videorc
+      ?.sendCommentHighlight?.(command)
+      .then((state) => {
+        if (highlightIntentRef.current !== intent) return
+        setHighlightFailure(null)
+        setHighlightState(state)
+      })
+      .catch((error) => {
+        if (highlightIntentRef.current !== intent) return
+        setHighlightFailure({
+          messageId: message.id,
+          reason: error instanceof Error ? error.message : 'Highlight failed.'
+        })
+      })
+      .finally(() => {
+        if (highlightIntentRef.current === intent) setHighlightApplyingId(null)
+      })
+  }
+
+  // Co-host actions are correlated commands: the MAIN renderer owns the
+  // backend socket and makes the real `cohost.*` RPC, exactly like send and
+  // highlight.
+  const sendCohostAction =
+    (kind: 'answered' | 'dismiss-question' | 'dismiss-flag') =>
+    (targetId: string): void => {
+      if (!snapshot.sessionId) return
+      setCohostActionPending(true)
+      void window.videorc
+        ?.sendCohostAction?.({
+          requestId: crypto.randomUUID(),
+          sessionId: snapshot.sessionId,
+          kind,
+          targetId
+        })
+        .then((state) => setCohost((current) => (current ? { ...current, state } : current)))
+        .catch((error) =>
+          setSendFailures([
+            {
+              destinationId: 'cohost-command',
+              platform: 'custom',
+              reason: error instanceof Error ? error.message : 'Co-host action failed.'
+            }
+          ])
+        )
+        .finally(() => setCohostActionPending(false))
+    }
+
+  const showQuestionOnStream = (question: CohostQuestion): void => {
+    const messageId = cohostHighlightMessageId(question)
+    if (!messageId) return
+    const message = snapshot.messages.find((candidate) => candidate.id === messageId)
+    if (!message) return
+    requestHighlight(message)
+  }
+
+  // Fail-closed: without a relayed value the segment stays hidden entirely.
+  const cohostGate: EntitlementUiGate | undefined = cohost
+    ? cohost.entitled
+      ? { allowed: true }
+      : {
+          allowed: false,
+          featureId: 'live-cohost',
+          reason: cohost.entitlementReason ?? 'Live Co-host requires Videorc Premium.',
+          ...(cohost.upgradeUrl ? { upgradeUrl: cohost.upgradeUrl } : {})
+        }
+    : undefined
+
   return (
     <CommentsReader
       viewerSample={view.mode.kind === 'live' ? viewerSample : null}
@@ -176,6 +269,15 @@ function CommentsWindowApp(): ReactElement {
       sendOperation={sendOperation}
       sendPending={sendPending}
       sendTargets={sendTargets}
+      cohostActionPending={cohostActionPending}
+      cohostConsented={cohost?.consented === true}
+      cohostEnabled={cohost?.enabled === true}
+      cohostGate={cohostGate}
+      cohostState={cohost?.state ?? null}
+      onCohostAnswered={(question) => sendCohostAction('answered')(question.id)}
+      onCohostDismissFlag={(flag) => sendCohostAction('dismiss-flag')(flag.messageId)}
+      onCohostDismissQuestion={(question) => sendCohostAction('dismiss-question')(question.id)}
+      onCohostShowOnStream={live ? showQuestionOnStream : undefined}
       onBackToLive={
         view.mode.kind === 'history'
           ? () => {
@@ -204,38 +306,8 @@ function CommentsWindowApp(): ReactElement {
             }
           : undefined
       }
-      onHighlight={
-        view.mode.kind === 'live' && snapshot.sessionId
-          ? (message: LiveChatMessage) => {
-              const intent = ++highlightIntentRef.current
-              const command = {
-                requestId: crypto.randomUUID(),
-                sessionId: snapshot.sessionId!,
-                messageId: message.id
-              }
-              setHighlightFailure(null)
-              setHighlightApplyingId(message.id)
-              void window.videorc
-                ?.sendCommentHighlight?.(command)
-                .then((state) => {
-                  if (highlightIntentRef.current !== intent) return
-                  setHighlightFailure(null)
-                  setHighlightState(state)
-                })
-                .catch((error) => {
-                  if (highlightIntentRef.current !== intent) return
-                  setHighlightFailure({
-                    messageId: message.id,
-                    reason: error instanceof Error ? error.message : 'Highlight failed.'
-                  })
-                })
-                .finally(() => {
-                  if (highlightIntentRef.current === intent) setHighlightApplyingId(null)
-                })
-            }
-          : undefined
-      }
-      onSend={(text) => {
+      onHighlight={live ? requestHighlight : undefined}
+      onSend={(text, options) => {
         if (!snapshot.sessionId) return
         const operationId = crypto.randomUUID()
         sendPendingOperationIdRef.current = operationId
@@ -254,7 +326,10 @@ function CommentsWindowApp(): ReactElement {
             requestId: crypto.randomUUID(),
             operationId,
             sessionId: snapshot.sessionId,
-            text
+            text,
+            ...(options?.inReplyToQuestionId
+              ? { inReplyToQuestionId: options.inReplyToQuestionId }
+              : {})
           })
           .then((operation) => {
             if (sendPendingOperationIdRef.current !== operationId) return

@@ -7,6 +7,7 @@ mod camera_capture;
 mod captions;
 mod capture_input;
 mod capture_interruption;
+mod cohost;
 mod color;
 mod comment_highlight;
 mod compositor;
@@ -5149,6 +5150,76 @@ async fn handle_text_message_with_role(
             command.id,
             comment_highlight::clear_comment_highlight(state).await,
         ),
+        "cohost.status" => ServerResponse::ok(command.id, cohost::cohost_status(state).await),
+        "cohost.start" => {
+            match serde_json::from_value::<protocol::CohostStartParams>(command.params) {
+                Ok(params) => match cohost::start_cohost(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.stop" => ServerResponse::ok(command.id, cohost::stop_cohost(state).await),
+        "cohost.question.answered" => {
+            match serde_json::from_value::<protocol::CohostQuestionParams>(command.params) {
+                Ok(params) => match cohost::mark_question_answered(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.question.dismiss" => {
+            match serde_json::from_value::<protocol::CohostQuestionParams>(command.params) {
+                Ok(params) => match cohost::dismiss_question(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.flag.dismiss" => {
+            match serde_json::from_value::<protocol::CohostFlagParams>(command.params) {
+                Ok(params) => match cohost::dismiss_flag(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.settings.get" => {
+            ServerResponse::ok(command.id, cohost::get_cohost_settings(state).await)
+        }
+        "cohost.settings.set" => {
+            match serde_json::from_value::<protocol::CohostSettingsPatch>(command.params) {
+                Ok(patch) => match cohost::set_cohost_settings(state, patch).await {
+                    Ok(settings) => ServerResponse::ok(command.id, settings),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "captions.overlay.clear" => {
             match serde_json::from_value::<captions::ClearCaptionOverlayParams>(command.params) {
                 Ok(params) => {
@@ -8244,6 +8315,7 @@ mod tests {
         assert!(!websocket_event_is_coalescible("liveChat.message"));
         assert!(!websocket_event_is_coalescible("liveChat.snapshot"));
         assert!(!websocket_event_is_coalescible("liveChat.providerStatus"));
+        assert!(!websocket_event_is_coalescible("cohost.state"));
         assert!(!websocket_event_is_coalescible("recording.status"));
         assert!(!websocket_event_is_coalescible("screens.changed"));
         assert!(!websocket_event_is_coalescible("session.log"));

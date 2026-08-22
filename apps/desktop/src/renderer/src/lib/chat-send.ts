@@ -12,6 +12,26 @@ import type {
 
 export const CHAT_SEND_MAX_CHARS = 200
 
+/** Per-platform chat length caps. One send reaches every writable destination,
+ * so a draft is trimmed to the SMALLEST cap of the targets it will reach —
+ * otherwise a reply that fits YouTube gets silently cut on the stricter
+ * platform. Every platform is 200 today; X's 140-char cap drops in HERE when
+ * the X chat sender lands, and every counter/trim follows automatically. */
+export const CHAT_SEND_PLATFORM_MAX_CHARS: Record<StreamPlatform, number> = {
+  youtube: CHAT_SEND_MAX_CHARS,
+  twitch: CHAT_SEND_MAX_CHARS,
+  x: CHAT_SEND_MAX_CHARS,
+  custom: CHAT_SEND_MAX_CHARS
+}
+
+/** The cap a composer must enforce for the platforms it currently reaches. */
+export function chatDraftMaxChars(targets: readonly StreamPlatform[]): number {
+  return targets.reduce(
+    (cap, platform) => Math.min(cap, CHAT_SEND_PLATFORM_MAX_CHARS[platform] ?? CHAT_SEND_MAX_CHARS),
+    CHAT_SEND_MAX_CHARS
+  )
+}
+
 /** Platforms a message can actually reach right now. Backend write capability
  * is authoritative; the UI never hard-codes provider support. */
 export function sendablePlatforms(providers: LiveChatProviderState[]): StreamPlatform[] {
@@ -122,10 +142,13 @@ export function destinationDelivery(
   return operation?.destinations.find((destination) => destination.destinationId === destinationId)
 }
 
-export function validateChatDraft(draft: string): string | null {
+export function validateChatDraft(
+  draft: string,
+  maxChars: number = CHAT_SEND_MAX_CHARS
+): string | null {
   const text = draft.trim()
   if (text.length === 0) {
     return null
   }
-  return text.length > CHAT_SEND_MAX_CHARS ? null : text
+  return text.length > maxChars ? null : text
 }

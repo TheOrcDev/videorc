@@ -877,6 +877,95 @@ describe('backend RPC contract', () => {
     expect(() => parseBackendWireMessage('null')).toThrow('invalid websocket envelope')
   })
 
+  it('validates the Live Co-host RPCs and state event against the wire contract', () => {
+    const state = {
+      sessionId: 'session-1',
+      status: 'listening',
+      reason: null,
+      questions: [
+        {
+          id: 'q_1',
+          text: 'What keyboard is that?',
+          messageIds: ['session-1:twitch:default:m-1'],
+          askers: ['Viewer'],
+          platforms: ['twitch', 'youtube'],
+          priority: 'high',
+          suggestedReply: 'Keychron Q1!',
+          fromNotes: true,
+          firstSeenAt: '2026-08-22T10:00:00Z',
+          updatedAt: '2026-08-22T10:00:20Z'
+        }
+      ],
+      flags: [
+        {
+          messageId: 'session-1:twitch:default:m-2',
+          kind: 'spam',
+          severity: 'medium',
+          reason: 'Link spam.',
+          at: '2026-08-22T10:00:20Z'
+        }
+      ],
+      mood: 'hype',
+      lastTickAt: '2026-08-22T10:00:20Z',
+      tickSeq: 2,
+      partial: false
+    }
+    expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
+    expect(validateBackendRpcResult('cohost.status', state)).toEqual(state)
+    const off = {
+      sessionId: null,
+      status: 'off',
+      reason: null,
+      questions: [],
+      flags: [],
+      mood: null,
+      lastTickAt: null,
+      tickSeq: 0,
+      partial: false
+    }
+    expect(validateBackendRpcResult('cohost.stop', off)).toEqual(off)
+    expect(() =>
+      validateBackendEventPayload('cohost.state', { ...state, status: 'running' })
+    ).toThrow('cohost.state')
+    expect(() =>
+      validateBackendEventPayload('cohost.state', { ...state, reason: 'unknown-reason' })
+    ).toThrow('cohost.state')
+    expect(() => validateBackendEventPayload('cohost.state', { ...state, extra: 1 })).toThrow(
+      'cohost.state'
+    )
+
+    const start = { sessionId: 'session-1', consentToProcessChat: true, streamTitle: 'Rust night' }
+    expect(validateBackendRpcParams('cohost.start', start)).toEqual(start)
+    expect(validateBackendRpcParams('cohost.start', { sessionId: 'session-1' })).toEqual({
+      sessionId: 'session-1'
+    })
+    expect(() => validateBackendRpcParams('cohost.start', { sessionId: '' })).toThrow(
+      'cohost.start'
+    )
+    expect(validateBackendRpcParams('cohost.status', undefined)).toBeUndefined()
+    const question = { sessionId: 'session-1', questionId: 'q_1' }
+    expect(validateBackendRpcParams('cohost.question.answered', question)).toEqual(question)
+    expect(validateBackendRpcParams('cohost.question.dismiss', question)).toEqual(question)
+    const flag = { sessionId: 'session-1', messageId: 'session-1:twitch:default:m-2' }
+    expect(validateBackendRpcParams('cohost.flag.dismiss', flag)).toEqual(flag)
+
+    const settings = { enabled: true, tone: 'short', notes: 'Keychron Q1', autoHighlight: false }
+    expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
+    expect(validateBackendRpcParams('cohost.settings.set', { tone: 'professional' })).toEqual({
+      tone: 'professional'
+    })
+    expect(() => validateBackendRpcParams('cohost.settings.set', { tone: 'angry' })).toThrow(
+      'cohost.settings.set'
+    )
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', { notes: 'n'.repeat(4001) })
+    ).toThrow('cohost.settings.set')
+    expectTypeOf<BackendRpcResult<'cohost.start'>>().toEqualTypeOf<
+      BackendEventMap['cohost.state']
+    >()
+    expectTypeOf<BackendRpcParams<'cohost.start'>['sessionId']>().toEqualTypeOf<string>()
+  })
+
   it('bounds unregistered method and event payloads instead of passing arbitrary values', () => {
     expect(validateBackendRpcParams('screens.rename', { screenId: '1', name: 'Demo' })).toEqual({
       screenId: '1',

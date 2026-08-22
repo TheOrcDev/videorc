@@ -6,6 +6,8 @@ import type {
   CaptionWindowSnapshot,
   CaptionsUpdate,
   CaptionsWindowState,
+  CohostActionCommand,
+  CohostWindowState,
   CommentHighlightCommand,
   CommentHighlightState,
   CommentsClearCommand,
@@ -115,6 +117,10 @@ export const electronInvokeApiMethods = {
   'comments-window:clear-result-push': 'pushCommentsClearResult',
   'comments-window:viewers-push': 'pushViewerSample',
   'comments-window:viewers-get': 'getViewerSample',
+  'comments-window:cohost-push': 'pushCohostWindowState',
+  'comments-window:cohost-get': 'getCohostWindowState',
+  'comments-window:cohost-action': 'sendCohostAction',
+  'comments-window:cohost-action-result-push': 'pushCohostActionResult',
   'captions-window:open': 'openCaptionsWindow',
   'captions-window:close': 'closeCaptionsWindow',
   'captions-window:toggle': 'toggleCaptionsWindow',
@@ -179,6 +185,8 @@ export interface ElectronIpcEventMap {
   'comments-window:send-request': CommentsSendCommand
   'comments-window:clear-request': CommentsClearCommand
   'comments-window:viewers': ViewerSample | null
+  'comments-window:cohost': CohostWindowState
+  'comments-window:cohost-action-request': CohostActionCommand
   'captions-window:state': CaptionsWindowState
   'captions-window:snapshot': CaptionWindowSnapshot
   'captions-window:lines': CaptionsUpdate[]
@@ -211,6 +219,8 @@ export const electronEventChannels = [
   'comments-window:send-request',
   'comments-window:clear-request',
   'comments-window:viewers',
+  'comments-window:cohost',
+  'comments-window:cohost-action-request',
   'captions-window:state',
   'captions-window:snapshot',
   'captions-window:lines',
@@ -944,6 +954,10 @@ export const boundedPassthroughElectronInvokeChannels = [
   'comments-window:clear-result-push',
   'comments-window:viewers-push',
   'comments-window:viewers-get',
+  'comments-window:cohost-push',
+  'comments-window:cohost-get',
+  'comments-window:cohost-action',
+  'comments-window:cohost-action-result-push',
   'captions-window:open',
   'captions-window:close',
   'captions-window:toggle',
@@ -1056,6 +1070,8 @@ export const boundedPassthroughElectronEventChannels = [
   'comments-window:send-request',
   'comments-window:clear-request',
   'comments-window:viewers',
+  'comments-window:cohost',
+  'comments-window:cohost-action-request',
   'captions-window:state',
   'captions-window:snapshot',
   'glass:wallpaper',

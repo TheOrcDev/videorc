@@ -127,6 +127,14 @@ import {
 import type {
   AccountCallbackEnvelope,
   AiCapabilities,
+  CohostActionCommand,
+  CohostFlagParams,
+  CohostQuestion,
+  CohostQuestionParams,
+  CohostSettings,
+  CohostSettingsPatch,
+  CohostState,
+  CohostWindowState,
   CommentHighlightCommand,
   CommentHighlightState,
   CommentsClearCommand,
@@ -257,7 +265,20 @@ import {
   decideGoLiveCaptionsReadiness,
   type GoLiveCaptionsReadiness
 } from '@/lib/captions-preflight'
-import { goLiveEntitlementGate, videoProfileEntitlementGate } from '@/lib/entitlement-ui'
+import {
+  goLiveEntitlementGate,
+  liveCohostGate,
+  videoProfileEntitlementGate,
+  type EntitlementUiGate
+} from '@/lib/entitlement-ui'
+import { commentCanHighlight } from '@/components/comment-row'
+import {
+  applyCohostState,
+  cohostErrorToastReason,
+  cohostHighlightMessageId,
+  sortedCohostQuestions,
+  COHOST_ERROR_TOAST_MESSAGES
+} from '@/lib/cohost-view'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-view'
 import {
@@ -845,6 +866,16 @@ export type StudioContextValue = {
   commentHighlightApplyingId: string | null
   commentHighlightFailure: { messageId: string; reason: string } | null
   toggleCommentHighlight: (message: LiveChatMessage) => void
+  /** Live Chat Co-host (Premium): persisted settings + approve/dismiss actions.
+   * `cohostState` itself lives on the chat context with the chat snapshot. */
+  cohostSettings: CohostSettings | null
+  cohostGate: EntitlementUiGate
+  cohostActionPending: boolean
+  patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
+  markCohostQuestionAnswered: (questionId: string, sessionId?: string) => void
+  dismissCohostQuestion: (questionId: string, sessionId?: string) => void
+  dismissCohostFlag: (messageId: string, sessionId?: string) => void
+  showCohostQuestionOnStream: (question: CohostQuestion) => void
   streamMetadataDraft: StreamMetadataDraft | null
   streamMetadataValidation: StreamMetadataValidation | null
   goLivePreflight: GoLivePreflight | null
@@ -1061,6 +1092,8 @@ interface StudioDiagnosticsContextValue {
 
 interface StudioChatContextValue {
   liveChatSnapshot: LiveChatSnapshot
+  /** Latest `cohost.state`; null until the engine reports for the first time. */
+  cohostState: CohostState | null
 }
 
 interface StudioAudioContextValue {
@@ -2116,7 +2149,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return client.request<CommentsSendOperation>('liveChat.send', {
           operationId: command.operationId,
           sessionId: command.sessionId,
-          text: command.text
+          text: command.text,
+          // Co-host reply: the engine marks the question answered on a
+          // terminal sent/partial phase, so the pane clears itself.
+          ...(command.inReplyToQuestionId
+            ? { inReplyToQuestionId: command.inReplyToQuestionId }
+            : {})
         })
       })()
         .then(async (operation) => {
@@ -2608,6 +2646,242 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     toast.error(message)
   }, [])
+
+  // --- Live Chat Co-host (Premium cloud AI) --------------------------------
+  // The BACKEND owns the engine: the tick scheduler, the open-question set,
+  // flags and every failure reason. The renderer renders `cohost.state`, fires
+  // approve/dismiss RPCs, and supplies the two facts only it holds — the
+  // renderer-local cloud-AI consent and the entitlement snapshot. It NEVER
+  // talks to the web.
+  const [cohostState, setCohostState] = useState<CohostState | null>(null)
+  const [cohostSettings, setCohostSettings] = useState<CohostSettings | null>(null)
+  const [cohostActionPending, setCohostActionPending] = useState(false)
+  const cohostStateRef = useRef<CohostState | null>(null)
+  const cohostAutoHighlightedRef = useRef<Set<string>>(new Set())
+  const streamTitleRef = useRef<string | null>(null)
+  streamTitleRef.current = streamMetadataDraft?.title?.trim() || null
+
+  const commitCohostState = useCallback((next: CohostState): void => {
+    const previous = cohostStateRef.current
+    const merged = applyCohostState(previous, next)
+    if (merged === previous) return
+    cohostStateRef.current = merged
+    setCohostState(merged)
+    // Toast discipline: the pane and the destination chip already show every
+    // co-host state. Only a NEW error reason is news.
+    const reason = cohostErrorToastReason(previous, merged)
+    if (reason) {
+      toast.error(COHOST_ERROR_TOAST_MESSAGES[reason], { id: 'cohost-error' })
+    }
+  }, [])
+
+  const cohostGate = useMemo(() => liveCohostGate(entitlements), [entitlements])
+  const cohostEnabled = cohostSettings?.enabled === true
+  const cohostLiveSessionId = liveChatSnapshot.sessionId ?? null
+
+  // Persisted co-host preferences live in the backend profile, not in local
+  // settings — the engine reads the same row when it builds a tick.
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') return
+    let cancelled = false
+    void Promise.all([
+      client.request<CohostSettings>('cohost.settings.get').catch(() => null),
+      client.request<CohostState>('cohost.status').catch(() => null)
+    ]).then(([nextSettings, nextState]) => {
+      if (cancelled) return
+      if (nextSettings) setCohostSettings(nextSettings)
+      if (nextState) commitCohostState(nextState)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [client, commitCohostState, wsStatus])
+
+  // Start with the live-chat session, and re-assert on a consent flip.
+  // `cohost.start` is a no-op for a session already running, and the backend
+  // stops the engine itself when the session ends.
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') return
+    if (!cohostLiveSessionId || !cohostEnabled || !cohostGate.allowed) return
+    let cancelled = false
+    void client
+      .request<CohostState>('cohost.start', {
+        sessionId: cohostLiveSessionId,
+        consentToProcessChat: aiConsent,
+        streamTitle: streamTitleRef.current
+      })
+      .then((state) => {
+        if (!cancelled) commitCohostState(state)
+      })
+      .catch(() => {
+        // A failed start is not silent: the engine reports the reason through
+        // `cohost.state`, which the pane and the chip already render.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    aiConsent,
+    client,
+    cohostEnabled,
+    cohostGate.allowed,
+    cohostLiveSessionId,
+    commitCohostState,
+    wsStatus
+  ])
+
+  useEffect(() => {
+    cohostAutoHighlightedRef.current.clear()
+  }, [cohostLiveSessionId])
+
+  const patchCohostSettings = useCallback(
+    async (patch: CohostSettingsPatch): Promise<void> => {
+      if (!client) throw new Error('Backend socket is not connected.')
+      const next = await client.request<CohostSettings>('cohost.settings.set', patch)
+      setCohostSettings(next)
+    },
+    [client]
+  )
+
+  const runCohostAction = useCallback(
+    async (
+      method: 'cohost.question.answered' | 'cohost.question.dismiss' | 'cohost.flag.dismiss',
+      params: CohostQuestionParams | CohostFlagParams
+    ): Promise<CohostState> => {
+      if (!client) throw new Error('Backend socket is not connected.')
+      setCohostActionPending(true)
+      try {
+        const state = await client.request<CohostState>(method, params)
+        commitCohostState(state)
+        return state
+      } finally {
+        setCohostActionPending(false)
+      }
+    },
+    [client, commitCohostState]
+  )
+
+  const markCohostQuestionAnswered = useCallback(
+    (questionId: string, sessionId?: string): void => {
+      const target = sessionId ?? cohostStateRef.current?.sessionId
+      if (!target) return
+      void runCohostAction('cohost.question.answered', { sessionId: target, questionId }).catch(
+        (error: unknown) => reportError(error)
+      )
+    },
+    [reportError, runCohostAction]
+  )
+
+  const dismissCohostQuestion = useCallback(
+    (questionId: string, sessionId?: string): void => {
+      const target = sessionId ?? cohostStateRef.current?.sessionId
+      if (!target) return
+      void runCohostAction('cohost.question.dismiss', { sessionId: target, questionId }).catch(
+        (error: unknown) => reportError(error)
+      )
+    },
+    [reportError, runCohostAction]
+  )
+
+  const dismissCohostFlag = useCallback(
+    (messageId: string, sessionId?: string): void => {
+      const target = sessionId ?? cohostStateRef.current?.sessionId
+      if (!target) return
+      void runCohostAction('cohost.flag.dismiss', { sessionId: target, messageId }).catch(
+        (error: unknown) => reportError(error)
+      )
+    },
+    [reportError, runCohostAction]
+  )
+
+  // "Show on stream" is a FREE reuse of the existing comment highlight: the
+  // group's first source message is the one the overlay renders.
+  const showCohostQuestionOnStream = useCallback(
+    (question: CohostQuestion): void => {
+      const messageId = cohostHighlightMessageId(question)
+      if (!messageId) return
+      const message = liveChatSnapshotRef.current.messages.find(
+        (candidate) => candidate.id === messageId
+      )
+      if (!message || !commentCanHighlight(message)) return
+      toggleCommentHighlight(message)
+    },
+    [toggleCommentHighlight]
+  )
+
+  // "Show questions on stream automatically" (default off): highlight ONE new
+  // high-priority question, once, and only when the stream is not already
+  // showing a comment — it must never fight a highlight the streamer set by
+  // hand, and never re-show a question it already showed.
+  useEffect(() => {
+    if (!cohostSettings?.autoHighlight) return
+    if (!cohostState || cohostState.status !== 'listening') return
+    const alreadyShown = cohostAutoHighlightedRef.current
+    const candidate = sortedCohostQuestions(cohostState.questions).find(
+      (question) => question.priority === 'high' && !alreadyShown.has(question.id)
+    )
+    if (!candidate) return
+    alreadyShown.add(candidate.id)
+    if (commentHighlightState.phase === 'live' || commentHighlightApplyingId !== null) return
+    showCohostQuestionOnStream(candidate)
+  }, [
+    cohostSettings?.autoHighlight,
+    cohostState,
+    commentHighlightApplyingId,
+    commentHighlightState.phase,
+    showCohostQuestionOnStream
+  ])
+
+  // One relayed value for the detached Comments window: the window never
+  // re-derives Premium or consent, it renders what the main renderer resolved.
+  const cohostWindowState = useMemo<CohostWindowState>(
+    () => ({
+      state: cohostState,
+      entitled: cohostGate.allowed,
+      entitlementReason: cohostGate.allowed ? null : cohostGate.reason,
+      upgradeUrl: (cohostGate.allowed ? undefined : cohostGate.upgradeUrl) ?? null,
+      consented: aiConsent,
+      enabled: cohostEnabled
+    }),
+    [aiConsent, cohostEnabled, cohostGate, cohostState]
+  )
+
+  useEffect(() => {
+    void window.videorc?.pushCohostWindowState?.(cohostWindowState)
+  }, [cohostWindowState])
+
+  useEffect(() => {
+    const off = window.videorc?.onCohostActionRequest?.((command: CohostActionCommand) => {
+      void (async () => {
+        if (!client) throw new Error('Backend socket is not connected.')
+        if (command.kind === 'dismiss-flag') {
+          return runCohostAction('cohost.flag.dismiss', {
+            sessionId: command.sessionId,
+            messageId: command.targetId
+          })
+        }
+        return runCohostAction(
+          command.kind === 'answered' ? 'cohost.question.answered' : 'cohost.question.dismiss',
+          { sessionId: command.sessionId, questionId: command.targetId }
+        )
+      })()
+        .then(async (state) => {
+          await window.videorc?.pushCohostActionResult?.({
+            requestId: command.requestId,
+            ok: true,
+            value: state
+          })
+        })
+        .catch(async (error) => {
+          await window.videorc?.pushCohostActionResult?.({
+            requestId: command.requestId,
+            ok: false,
+            error: error instanceof Error ? error.message : 'Co-host action failed.'
+          })
+        })
+    })
+    return off
+  }, [client, runCohostAction])
 
   const refreshAiReadinessForClient = useCallback(
     async (
@@ -4608,6 +4882,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           applyLiveChatSendOperation(operation)
         }
       }),
+      nextClient.on('cohost.state', (payload) => {
+        commitCohostState(payload as CohostState)
+      }),
       nextClient.on('comments.highlight.status', (payload) => {
         commentHighlightRevision += 1
         const status = payload as CommentHighlightState
@@ -5092,6 +5369,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     applyPreviewSurfaceStatus,
     applyPreviewSurfaceStatusThrottled,
     applyRecordingStatus,
+    commitCohostState,
     commitDiagnosticStatsThrottled,
     connection,
     nativePreviewSurfaceEnabled,
@@ -10268,8 +10546,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [diagnosticStats, healthEvents, logs, previewSurfaceStatus, streamHealth]
   )
   const chatValue = useMemo<StudioChatContextValue>(
-    () => ({ liveChatSnapshot }),
-    [liveChatSnapshot]
+    () => ({ cohostState, liveChatSnapshot }),
+    [cohostState, liveChatSnapshot]
   )
   const audioValue = useMemo<StudioAudioContextValue>(
     () => ({ audioMeter, audioMeterLoading, meterLevel }),
@@ -10340,6 +10618,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       commentHighlightApplyingId,
       commentHighlightFailure,
       toggleCommentHighlight,
+      cohostSettings,
+      cohostGate,
+      cohostActionPending,
+      patchCohostSettings,
+      markCohostQuestionAnswered,
+      dismissCohostQuestion,
+      dismissCohostFlag,
+      showCohostQuestionOnStream,
       streamMetadataDraft,
       streamMetadataValidation,
       goLivePreflight,
@@ -10523,6 +10809,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       commentHighlightApplyingId,
       commentHighlightFailure,
       toggleCommentHighlight,
+      cohostSettings,
+      cohostGate,
+      cohostActionPending,
+      patchCohostSettings,
+      markCohostQuestionAnswered,
+      dismissCohostQuestion,
+      dismissCohostFlag,
+      showCohostQuestionOnStream,
       streamMetadataDraft,
       streamMetadataValidation,
       goLivePreflight,

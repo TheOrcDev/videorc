@@ -643,6 +643,7 @@ The release process must make source for the exact FFmpeg archive available besi
 - `pnpm smoke:platform-lifecycle`
 - `pnpm smoke:screens`
 - `pnpm smoke:multistream`
+- `pnpm smoke:cohost-fake`
 - `pnpm package:desktop`
 - `pnpm smoke:packaged`
 - `pnpm smoke:packaged:bundled`
