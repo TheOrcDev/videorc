@@ -1,3 +1,10 @@
+// Rust 1.98 clippy (CI `stable`) flags `chunks_exact(N)` with a constant N in
+// favour of `as_chunks::<N>()`. The pixel loops in the compositor/capture paths
+// are deliberately written with `chunks_exact`, which is the same speed and
+// keeps the row/pixel arithmetic explicit; silence the style lint crate-wide
+// rather than rewriting ten hot loops for a cosmetic suggestion.
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 mod account;
 mod ai;
 mod atomic_file;
