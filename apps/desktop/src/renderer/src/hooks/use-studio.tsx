@@ -317,6 +317,7 @@ import {
 import {
   reduceSessionStartFailure,
   SESSION_START_FAILED_TOAST_ID,
+  SESSION_START_FAILED_TOAST_TITLE,
   sessionStartFailureMessage,
   sessionStartFailureToastOptions,
   type SessionStartFailure
@@ -2701,8 +2702,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
       toast.error(
-        message,
-        sessionStartFailureToastOptions(retrySessionStart, () => {
+        SESSION_START_FAILED_TOAST_TITLE,
+        sessionStartFailureToastOptions(message, retrySessionStart, () => {
           // The user closed the toast: the Session-panel line goes with it.
           sessionStartRetryRef.current = null
           setSessionStartFailure((current) =>

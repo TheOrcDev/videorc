@@ -12,6 +12,10 @@
 
 /** Sonner key for the start-failure toast: re-reporting updates it in place. */
 export const SESSION_START_FAILED_TOAST_ID = 'session-start-failed'
+/** Shared title: sonner merges an update over the existing toast by id, so the
+ * health-event toast and the RPC-rejection toast must use the same shape
+ * (title + description) or the older description lingers under a new title. */
+export const SESSION_START_FAILED_TOAST_TITLE = 'Could not start'
 
 export interface SessionStartFailure {
   /** Backend / preflight reason, verbatim — it already reads as a sentence. */
@@ -47,6 +51,7 @@ export function reduceSessionStartFailure(
 
 export interface SessionStartFailureToastOptions {
   id: string
+  description: string
   duration: number
   action: { label: string; onClick: () => void }
   onDismiss: () => void
@@ -55,14 +60,17 @@ export interface SessionStartFailureToastOptions {
 /**
  * Persistent (`duration: Infinity`) and keyed so repeated failures never stack;
  * Retry re-runs the exact start that failed. Dismissing the toast also clears
- * the Session-panel line so the two surfaces never disagree.
+ * the Session-panel line so the two surfaces never disagree. Render with
+ * `toast.error(SESSION_START_FAILED_TOAST_TITLE, options)`.
  */
 export function sessionStartFailureToastOptions(
+  message: string,
   retry: () => void,
   dismiss: () => void
 ): SessionStartFailureToastOptions {
   return {
     id: SESSION_START_FAILED_TOAST_ID,
+    description: message,
     duration: Infinity,
     action: { label: 'Retry', onClick: retry },
     onDismiss: dismiss

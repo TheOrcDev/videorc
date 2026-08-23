@@ -1,6 +1,9 @@
 import type { StatusTone } from '@/components/status-badge'
 import type { DiagnosticStats, HealthEvent } from '@/lib/backend'
-import { SESSION_START_FAILED_TOAST_ID } from '@/lib/session-start-failure'
+import {
+  SESSION_START_FAILED_TOAST_ID,
+  SESSION_START_FAILED_TOAST_TITLE
+} from '@/lib/session-start-failure'
 import type { NativePreviewHostKind } from '../../../shared/backend'
 import { isNativePreviewCapability } from '../../../shared/native-preview-capability'
 
@@ -49,7 +52,7 @@ export function recordingStartupHealthToast(
     return {
       variant: 'error',
       id: SESSION_START_FAILED_TOAST_ID,
-      title: 'Recording could not start',
+      title: SESSION_START_FAILED_TOAST_TITLE,
       description: event.message,
       duration: Infinity
     }

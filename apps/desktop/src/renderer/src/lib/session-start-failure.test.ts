@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   reduceSessionStartFailure,
   SESSION_START_FAILED_TOAST_ID,
+  SESSION_START_FAILED_TOAST_TITLE,
   sessionStartFailureMessage,
   sessionStartFailureToastOptions
 } from './session-start-failure'
@@ -73,10 +74,12 @@ describe('sessionStartFailureToastOptions', () => {
   it('is persistent, keyed so it cannot stack, and carries a Retry action', () => {
     const retry = vi.fn()
     const dismiss = vi.fn()
-    const options = sessionStartFailureToastOptions(retry, dismiss)
+    const options = sessionStartFailureToastOptions(BARRIER_MESSAGE, retry, dismiss)
 
     expect(options.id).toBe(SESSION_START_FAILED_TOAST_ID)
     expect(options.id).toBe('session-start-failed')
+    expect(SESSION_START_FAILED_TOAST_TITLE).toBe('Could not start')
+    expect(options.description).toBe(BARRIER_MESSAGE)
     expect(options.duration).toBe(Infinity)
     expect(options.action.label).toBe('Retry')
 

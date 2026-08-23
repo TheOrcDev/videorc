@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { SESSION_START_FAILED_TOAST_ID } from './session-start-failure'
+import {
+  SESSION_START_FAILED_TOAST_ID,
+  SESSION_START_FAILED_TOAST_TITLE,
+  sessionStartFailureToastOptions
+} from './session-start-failure'
 import {
   RECORDING_STARTUP_BARRIER_TIMEOUT_CODE,
   RECORDING_STARTUP_CADENCE_UNSTEADY_CODE,
@@ -195,12 +199,23 @@ describe('recordingStartupHealthToast', () => {
       level: 'error',
       message: REFUSED_MESSAGE
     })
+    // Same title + description shape as the RPC-rejection toast: sonner merges
+    // an update over the existing toast by id, so this is what lets the
+    // rejection add Retry in place instead of stacking a second red toast.
     expect(result).toEqual({
       variant: 'error',
       id: SESSION_START_FAILED_TOAST_ID,
-      title: 'Recording could not start',
+      title: SESSION_START_FAILED_TOAST_TITLE,
       description: REFUSED_MESSAGE,
       duration: Infinity
+    })
+    expect(result).toMatchObject({
+      title: 'Could not start',
+      description: sessionStartFailureToastOptions(
+        REFUSED_MESSAGE,
+        () => {},
+        () => {}
+      ).description
     })
   })
 
