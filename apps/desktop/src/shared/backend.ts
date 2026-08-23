@@ -1341,6 +1341,9 @@ export interface WindowsD3d11MediaDiagnostics {
   deviceResets: number
   synchronizationTimeouts: number
   staleGenerationCallbacks: number
+  renderTickOverruns: number
+  renderTickLagMaxMs?: number
+  renderComposeStageMaxMs?: number
   fallbackReason?: string
 }
 
