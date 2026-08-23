@@ -48,6 +48,15 @@ export type SettingsState = {
    * the glide's interplay with idle camera restarts settles in the field.
    */
   animateSceneChanges?: boolean
+  /**
+   * Audio mixer (live feedback batch 3, B2). `monitorWhenIdle` keeps the
+   * visual-only analyser open while NO session runs; default OFF so an idle
+   * Studio never holds the microphone (no OS mic indicator) and the bars sit
+   * at floor. A running session always arms the meter regardless.
+   */
+  audioMixer?: {
+    monitorWhenIdle?: boolean
+  }
 }
 
 export type CaptionBurnTarget = 'off' | 'stream' | 'recording' | 'both'
@@ -326,7 +335,8 @@ export const defaultSettings: SettingsState = {
   outputDirectory: '',
   outputDirectoryHandle: undefined,
   keepOriginalRecording: false,
-  animateSceneChanges: false
+  animateSceneChanges: false,
+  audioMixer: { monitorWhenIdle: false }
 }
 
 export const rtmpDefaults: Record<RtmpPreset, string> = {

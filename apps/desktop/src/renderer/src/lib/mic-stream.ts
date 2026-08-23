@@ -13,8 +13,25 @@ type MicTrackLike = { stop: () => void }
 
 export type MicMediaStreamLike = { getTracks: () => MicTrackLike[] }
 
+/**
+ * Meter-stream processing is OFF: Chromium's defaults (echo cancellation,
+ * noise suppression, and especially auto gain control) pump room tone up to
+ * speech level in silence, so the bars would show a signal the recording
+ * never contains. The RECORDING path is the backend's own capture and is
+ * untouched by these constraints.
+ */
+export const MIC_METER_STREAM_PROCESSING = Object.freeze({
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false
+})
+
+export type MicStreamAudioConstraints = typeof MIC_METER_STREAM_PROCESSING & {
+  deviceId?: { exact: string }
+}
+
 export type MicStreamConstraints = {
-  audio: { deviceId: { exact: string } } | true
+  audio: MicStreamAudioConstraints
   video: false
 }
 
@@ -71,7 +88,9 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
         }
         const deviceId = matchMicrophoneDeviceId(deviceName, inputs)
         const stream = await media.getUserMedia({
-          audio: deviceId ? { deviceId: { exact: deviceId } } : true,
+          audio: deviceId
+            ? { ...MIC_METER_STREAM_PROCESSING, deviceId: { exact: deviceId } }
+            : { ...MIC_METER_STREAM_PROCESSING },
           video: false
         })
         if (closed) {

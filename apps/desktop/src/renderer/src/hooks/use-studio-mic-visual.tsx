@@ -11,6 +11,12 @@ import {
 
 import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useStudioCore } from '@/hooks/use-studio'
+import { isEditableTarget } from '@/lib/format'
+import {
+  audioMixerMonitorWhenIdle,
+  micVisualAnalyserEnabled,
+  withAudioMixerMonitorWhenIdle
+} from '@/lib/mic-visual-gate'
 import { createMicVisualFrameBuffer, type MicVisualFrameBuffer } from '@/lib/mic-visual-frame'
 import type {
   MicVisualLifecycleSnapshot,
@@ -20,6 +26,8 @@ import type {
 
 const StudioMicVisualContext = createContext<MicVisualPipeline | undefined>(undefined)
 const PEAK_LABEL_INTERVAL_MS = 250
+/** Single-key toggle for "Monitor input" (SHORTCUTS id `mic-monitor`). */
+const MONITOR_INPUT_KEY = 'm'
 const IDLE_LIFECYCLE: MicVisualLifecycleSnapshot = Object.freeze({
   status: 'idle',
   active: false
@@ -52,7 +60,10 @@ const IDLE_PIPELINE: MicVisualPipeline = Object.freeze({
 /**
  * Workspace-scoped owner for renderer microphone visuals. The backend remains
  * the recording/health authority; this provider opens one visual-only browser
- * stream only while Studio/Sources is visible and OS access is already granted.
+ * stream only while Studio/Sources is visible, OS access is already granted,
+ * and the meter is armed — by a running session, or by the persisted
+ * "Monitor input" setting while idle (micVisualAnalyserEnabled). An idle
+ * Studio with monitoring off never opens the microphone.
  */
 export function StudioMicVisualProvider({
   enabled,
@@ -61,7 +72,8 @@ export function StudioMicVisualProvider({
   enabled: boolean
   children: ReactNode
 }): ReactElement {
-  const { captureConfig, selectedMicrophone, mediaAccess } = useStudioCore()
+  const { captureConfig, selectedMicrophone, mediaAccess, isSessionActive, settings, setSettings } =
+    useStudioCore()
   const documentVisible = useDocumentVisible()
   const [pipeline, setPipeline] = useState<MicVisualPipeline | null>(null)
   const selectionKey = selectedMicrophone?.id
@@ -71,9 +83,16 @@ export function StudioMicVisualProvider({
     selectionKey,
     deviceName,
     permissionStatus,
-    enabled:
-      enabled && documentVisible && Boolean(selectionKey) && !captureConfig.audio.microphoneMuted
+    enabled: micVisualAnalyserEnabled({
+      workspaceVisible: enabled,
+      documentVisible,
+      microphoneSelected: Boolean(selectionKey),
+      muted: captureConfig.audio.microphoneMuted,
+      sessionActive: isSessionActive,
+      monitorWhenIdle: audioMixerMonitorWhenIdle(settings)
+    })
   }
+  useMonitorInputShortcut(enabled && Boolean(selectionKey) && !isSessionActive, setSettings)
 
   useEffect(() => {
     if (pipeline || !source.enabled) {
@@ -100,6 +119,37 @@ export function StudioMicVisualProvider({
       {children}
     </MicVisualPipelineProvider>
   )
+}
+
+/**
+ * M toggles "Monitor input" while Studio/Sources is on screen and no session
+ * runs (plain key, outside editable targets — same discipline as the D theme
+ * toggle and the Space session toggle). One home for both tabs; the mixer's
+ * switch and the picker's hint are the pointer surfaces of the same setting.
+ */
+function useMonitorInputShortcut(
+  armed: boolean,
+  setSettings: ReturnType<typeof useStudioCore>['setSettings']
+): void {
+  useEffect(() => {
+    if (!armed) {
+      return
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) {
+        return
+      }
+      if (event.key.toLowerCase() !== MONITOR_INPUT_KEY || isEditableTarget(event.target)) {
+        return
+      }
+      event.preventDefault()
+      setSettings((current) =>
+        withAudioMixerMonitorWhenIdle(current, !audioMixerMonitorWhenIdle(current))
+      )
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [armed, setSettings])
 }
 
 /** Public provider boundary used by the workspace and lifecycle integration tests. */

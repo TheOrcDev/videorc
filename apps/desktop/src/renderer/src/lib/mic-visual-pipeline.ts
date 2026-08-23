@@ -1,6 +1,6 @@
 import type { MediaAccessStatus } from './backend'
 import type { MicVisualFrameBuffer } from './mic-visual-frame'
-import { amplitudeToDb, dbToMeterLevel } from './mic-meter'
+import { amplitudeToDb, approachMeterLevel, dbToMeterLevel, gatedDbToMeterLevel } from './mic-meter'
 import {
   createMicStreamController,
   microphoneStreamAcquisitionEnabled,
@@ -96,36 +96,80 @@ const VISUAL_UPDATE_INTERVAL_MS = 48
 const VISUAL_LOW_HZ = 80
 const VISUAL_HIGH_HZ = 8000
 const EMPTY_HISTORY_RING = new Float32Array(0)
+/**
+ * Analyser time smoothing. 0.8 read every 48 ms made a symmetric ~215 ms
+ * attack AND release (mush); 0.3 only takes the FFT flicker off and leaves
+ * the feel to the meter ballistics below (15 ms attack / 350 ms decay).
+ */
+const VISUAL_ANALYSER_SMOOTHING = 0.3
+/**
+ * Bars read dBFS the AES17 way: a full-scale sine is 0 dBFS (its RMS is
+ * -3.01 dBFS; the +3 dB offset is the sqrt(2) below). Band levels are then
+ * the same -60..0 dBFS window as the waveform history and the backend's
+ * micLiveLevel, gated at MIC_METER_GATE_DB.
+ */
+const BAND_RMS_TO_DBFS_GAIN = Math.SQRT2
 
-function normalizeSpectrumDb(value: number): number {
-  if (!Number.isFinite(value)) {
-    return 0
-  }
-  const normalized = (Math.max(-100, Math.min(-10, value)) + 100) / 90
-  return Math.sqrt(normalized)
-}
-
-function spectrumBandsInto(
-  samples: Float32Array,
+/**
+ * Per-band RMS from the FFT, calibrated by the time-domain broadband RMS.
+ *
+ * getFloatFrequencyData returns each bin's magnitude in dB under the
+ * analyser's own window and scaling (spec: Blackman, |X|/N). Instead of
+ * trusting those absolute numbers, only the DISTRIBUTION is taken from the
+ * spectrum (bandPower / totalPower, Parseval) and the absolute scale from the
+ * exact, unwindowed broadband RMS of the same block, so bandRms² sums to the
+ * broadband RMS² regardless of the engine's FFT scaling. The previous mapping
+ * (sqrt of a -100..-10 dB window over raw bin dB) painted -70 dB room tone as
+ * 63 % bars; this maps it to 0.
+ */
+export function spectrumBandTargetsInto(
+  frequencyDb: Float32Array,
+  broadbandRms: number,
   sampleRate: number,
   fftSize: number,
-  bands: number[]
+  targets: number[],
+  binPowerScratch: Float32Array
 ): void {
+  targets.length = VISUAL_BAND_COUNT
+  const binCount = Math.min(frequencyDb.length, binPowerScratch.length)
+  let totalPower = 0
+  for (let index = 1; index < binCount; index += 1) {
+    const db = frequencyDb[index]
+    const power = Number.isFinite(db) ? 10 ** (db / 10) : 0
+    binPowerScratch[index] = power
+    totalPower += power
+  }
+  if (!(totalPower > 0) || !(broadbandRms > 0) || binCount < 2) {
+    targets.fill(0)
+    return
+  }
+
   const binHz = sampleRate / fftSize
   const highHz = Math.min(VISUAL_HIGH_HZ, sampleRate / 2)
   const ratio = highHz / VISUAL_LOW_HZ
-  bands.length = VISUAL_BAND_COUNT
-
   for (let band = 0; band < VISUAL_BAND_COUNT; band += 1) {
     const startHz = VISUAL_LOW_HZ * ratio ** (band / VISUAL_BAND_COUNT)
     const endHz = VISUAL_LOW_HZ * ratio ** ((band + 1) / VISUAL_BAND_COUNT)
     const start = Math.max(1, Math.floor(startHz / binHz))
-    const end = Math.max(start + 1, Math.min(samples.length, Math.ceil(endHz / binHz)))
-    let total = 0
+    const end = Math.max(start + 1, Math.min(binCount, Math.ceil(endHz / binHz)))
+    let bandPower = 0
     for (let index = start; index < end; index += 1) {
-      total += normalizeSpectrumDb(samples[index])
+      bandPower += binPowerScratch[index]
     }
-    bands[band] = total / Math.max(1, end - start)
+    const bandRms = broadbandRms * Math.sqrt(bandPower / totalPower)
+    targets[band] = gatedDbToMeterLevel(amplitudeToDb(bandRms * BAND_RMS_TO_DBFS_GAIN))
+  }
+}
+
+/** Advance every band toward its target with the shared attack/decay curve. */
+export function advanceBandLevelsInto(
+  bands: number[],
+  targets: readonly number[],
+  elapsedMs: number
+): void {
+  bands.length = targets.length
+  for (let band = 0; band < targets.length; band += 1) {
+    bands[band] = approachMeterLevel(bands[band] ?? 0, targets[band], elapsedMs)
   }
 }
 
@@ -218,10 +262,12 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
       context = preparedContext
       const analyser = preparedContext.createAnalyser()
       analyser.fftSize = 2048
-      analyser.smoothingTimeConstant = 0.8
+      analyser.smoothingTimeConstant = VISUAL_ANALYSER_SMOOTHING
       mediaSource = preparedContext.createMediaStreamSource(stream)
       mediaSource.connect(analyser)
       const frequencySamples = new Float32Array(analyser.frequencyBinCount)
+      const binPowerScratch = new Float32Array(analyser.frequencyBinCount)
+      const bandTargets = new Array<number>(VISUAL_BAND_COUNT).fill(0)
       const timeSamples = new Float32Array(analyser.fftSize)
       let lastUpdateAt = Number.NEGATIVE_INFINITY
       const sessionFrame: SessionFrame = {
@@ -232,7 +278,7 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
         peakDb: null,
         hasData: false
       }
-      const sampleFrame = (): void => {
+      const sampleFrame = (elapsedMs: number): void => {
         analyser.getFloatFrequencyData(frequencySamples)
         analyser.getFloatTimeDomainData(timeSamples)
         let sumSquares = 0
@@ -251,12 +297,15 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
         } else {
           sessionFrame.historyStart = (sessionFrame.historyStart + 1) % VISUAL_HISTORY_SIZE
         }
-        spectrumBandsInto(
+        spectrumBandTargetsInto(
           frequencySamples,
+          rms,
           preparedContext.sampleRate,
           analyser.fftSize,
-          sessionFrame.bands
+          bandTargets,
+          binPowerScratch
         )
+        advanceBandLevelsInto(sessionFrame.bands, bandTargets, elapsedMs)
         sessionFrame.peakDb = amplitudeToDb(peak)
         sessionFrame.hasData = true
       }
@@ -274,9 +323,10 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
         if (disposed || activeSession !== session || session.stopped) {
           return
         }
-        if (at - lastUpdateAt >= VISUAL_UPDATE_INTERVAL_MS) {
+        const elapsedMs = at - lastUpdateAt
+        if (elapsedMs >= VISUAL_UPDATE_INTERVAL_MS) {
           lastUpdateAt = at
-          sampleFrame()
+          sampleFrame(Number.isFinite(elapsedMs) ? elapsedMs : VISUAL_UPDATE_INTERVAL_MS)
           publishFrame()
         }
         if (!disposed && activeSession === session && !session.stopped) {
@@ -285,7 +335,7 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
       }
       scheduledFrame = dependencies.requestFrame(tick)
       session.animationFrame = scheduledFrame
-      sampleFrame()
+      sampleFrame(VISUAL_UPDATE_INTERVAL_MS)
       return { session }
     } catch {
       if (scheduledFrame) {

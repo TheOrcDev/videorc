@@ -36,6 +36,11 @@ import type {
 } from '../../../shared/backend'
 import { BackgroundAssetsProvider } from './use-background-assets'
 import {
+  StudioMicVisualProvider,
+  useStudioMicVisualLifecycle,
+  useStudioMicVisualPainter
+} from './use-studio-mic-visual'
+import {
   StudioProvider,
   buildStreamOutputTopologyProbeParams,
   resolvedStreamingProfileEntitlementGate,
@@ -849,6 +854,14 @@ type StudioObservation = {
   chat: ReturnType<typeof useStudioChat>
   core: StudioCoreContextValue
   recording: StudioRecordingContextValue
+}
+
+/** A mixer-like consumer: paints frames (which retains analyser demand) and reports lifecycle. */
+function MicVisualProbe({ observe }: { observe: (active: boolean) => void }): null {
+  useStudioMicVisualPainter(() => undefined)
+  const lifecycle = useStudioMicVisualLifecycle()
+  useEffect(() => observe(lifecycle.active), [lifecycle.active, observe])
+  return null
 }
 
 function Probe({ observe }: { observe: (value: StudioObservation) => void }): null {
@@ -4210,7 +4223,191 @@ describe('real StudioProvider lifecycle', () => {
     expect(acknowledgedProviderCallbacks).toEqual([])
     expect(await api.getPendingOAuthCallbacks()).toEqual(pendingProviderCallbacks)
   })
+
+  it('arms the visual mic meter for a session and never opens the mic while idle', async () => {
+    // Live feedback batch 3, B2: the owner saw the mixer react while not
+    // recording. With Monitor input at its default (off), an idle Studio must
+    // not touch getUserMedia; starting a session arms the analyser by itself;
+    // stopping releases it again.
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      platform: 'darwin',
+      getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'granted' })
+    })
+    const testDom = installProviderTestEnvironment(api)
+    const audio = installVisualMicAudioEnvironment()
+    restoreEnvironment = () => {
+      audio.restore()
+      testDom.restore()
+    }
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    const micLifecycle: boolean[] = []
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(StudioMicVisualProvider, {
+              enabled: true,
+              children: [
+                createElement(Probe, {
+                  key: 'studio',
+                  observe: (value) => {
+                    observations.push(value)
+                  }
+                }),
+                createElement(MicVisualProbe, {
+                  key: 'mic',
+                  observe: (active) => {
+                    micLifecycle.push(active)
+                  }
+                })
+              ]
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.mediaAccess?.microphone === 'granted' &&
+        latest()?.core.selectedMicrophone?.id === 'mic:1'
+    )
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(latest()?.core.isSessionActive).toBe(false)
+    expect(latest()?.core.settings.audioMixer?.monitorWhenIdle).toBe(false)
+    expect(audio.getUserMedia).not.toHaveBeenCalled()
+    expect(audio.contexts).toHaveLength(0)
+    expect(micLifecycle.at(-1)).toBe(false)
+
+    await act(async () => {
+      await latest()?.core.startSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    await waitForObservation(() => micLifecycle.at(-1) === true)
+    expect(audio.getUserMedia).toHaveBeenCalledTimes(1)
+    expect(audio.getUserMedia.mock.calls[0]?.[0]).toMatchObject({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      video: false
+    })
+    expect(audio.contexts).toHaveLength(1)
+
+    await act(async () => {
+      await latest()?.core.stopSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    await waitForObservation(() => micLifecycle.at(-1) === false)
+    expect(audio.contexts[0]?.close).toHaveBeenCalledTimes(1)
+    expect(audio.stopTrack).toHaveBeenCalledTimes(1)
+    expect(audio.getUserMedia).toHaveBeenCalledTimes(1)
+  }, 15_000)
 })
+
+/**
+ * navigator.mediaDevices + AudioContext fakes for the visual mic pipeline,
+ * layered over installProviderTestEnvironment (which supplies window/document).
+ */
+function installVisualMicAudioEnvironment(): {
+  contexts: Array<{ close: ReturnType<typeof vi.fn> }>
+  getUserMedia: ReturnType<typeof vi.fn>
+  stopTrack: ReturnType<typeof vi.fn>
+  restore: () => void
+} {
+  const contexts: Array<{ close: ReturnType<typeof vi.fn> }> = []
+  const stopTrack = vi.fn()
+  const getUserMedia = vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] }))
+  class FakeAudioContext {
+    sampleRate = 48_000
+    close = vi.fn(async () => undefined)
+
+    constructor() {
+      contexts.push(this)
+    }
+
+    createAnalyser(): {
+      fftSize: number
+      frequencyBinCount: number
+      smoothingTimeConstant: number
+      getFloatFrequencyData: (samples: Float32Array) => void
+      getFloatTimeDomainData: (samples: Float32Array) => void
+    } {
+      return {
+        fftSize: 2048,
+        frequencyBinCount: 1024,
+        smoothingTimeConstant: 0,
+        getFloatFrequencyData: (samples) => samples.fill(Number.NEGATIVE_INFINITY),
+        getFloatTimeDomainData: (samples) => samples.fill(0)
+      }
+    }
+
+    createMediaStreamSource(): { connect: () => void; disconnect: () => void } {
+      return { connect: () => {}, disconnect: () => {} }
+    }
+  }
+  const descriptors = new Map(
+    ['navigator', 'AudioContext'].map((name) => [
+      name,
+      Object.getOwnPropertyDescriptor(globalThis, name)
+    ])
+  )
+  // The analyser clock is a held frame queue here: lifecycle (open/close) is
+  // what this environment proves, and the provider env's rAF-as-setTimeout(0)
+  // would spin the sampler at `at = 0` forever.
+  const fakeWindow = window as unknown as Record<string, unknown>
+  const previousRequestFrame = fakeWindow.requestAnimationFrame
+  const previousCancelFrame = fakeWindow.cancelAnimationFrame
+  const heldFrames = new Map<number, FrameRequestCallback>()
+  let nextFrameId = 0
+  fakeWindow.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+    const id = ++nextFrameId
+    heldFrames.set(id, callback)
+    return id
+  }
+  fakeWindow.cancelAnimationFrame = (id: number): void => void heldFrames.delete(id)
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      mediaDevices: {
+        enumerateDevices: async () => [
+          { kind: 'audioinput', deviceId: 'mic-1', label: 'Microphone 1' }
+        ],
+        getUserMedia
+      }
+    }
+  })
+  Object.defineProperty(globalThis, 'AudioContext', {
+    configurable: true,
+    value: FakeAudioContext
+  })
+  return {
+    contexts,
+    getUserMedia,
+    stopTrack,
+    restore: () => {
+      fakeWindow.requestAnimationFrame = previousRequestFrame
+      fakeWindow.cancelAnimationFrame = previousCancelFrame
+      for (const [name, descriptor] of descriptors) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor)
+        else Reflect.deleteProperty(globalThis, name)
+      }
+    }
+  }
+}
 
 function createVideorcApi(options: {
   pending: () => Promise<AccountCallbackEnvelope[]>

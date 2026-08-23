@@ -5,6 +5,9 @@ import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
 import { BarVisualizer, paintBarVisualizer } from '@/components/ui/bar-visualizer'
 import { Button } from '@/components/ui/button'
+import { Kbd } from '@/components/ui/kbd'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioAudio, useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
 import {
@@ -15,6 +18,11 @@ import {
 import type { AudioMeterStatus } from '@/lib/backend'
 import { formatDb } from '@/lib/format'
 import { resampleMicVisualLevelsInto } from '@/lib/mic-visual-frame'
+import {
+  audioMixerMonitorLabel,
+  audioMixerMonitorWhenIdle,
+  withAudioMixerMonitorWhenIdle
+} from '@/lib/mic-visual-gate'
 import { advanceClipHoldDeadline, fallbackBandLevels } from '@/lib/mic-meter'
 import { systemAccessAction, systemAccessRows, type SystemAccessAction } from '@/lib/system-access'
 import { cn } from '@/lib/utils'
@@ -41,15 +49,19 @@ export function audioMixerSignalLive(
 
 /**
  * Audio mixer (SD4 + post-0.9.4 fix F7 + 2026-07-10 live-meter fix + Studio
- * audio ElevenLabs rework S3). The VISUAL is a multi-band bar visualizer over
- * the shared renderer mic pipeline at display rate. The provider's WebAudio
- * frame also supplies the peak-dB label and clip hold. The
- * backend stays the capture/health authority: its 1 Hz `micLiveLevel` and the
- * on-demand 700 ms "Check level" sample drive a deterministic coarse-band
- * fallback whenever the analyser cannot open the selected device. The stream
- * releases while the document is hidden (idle-CPU discipline). System audio
- * shows its honest "unavailable — pending native adapter" state; real capture
- * is Phase-2 (F3).
+ * audio ElevenLabs rework S3 + live feedback batch 3 B2). The VISUAL is a
+ * multi-band bar visualizer over the shared renderer mic pipeline at display
+ * rate: per-band dBFS over -60..0, gated at -55, 15 ms attack / 350 ms decay.
+ * The provider's WebAudio frame also supplies the peak-dB label and clip
+ * hold. The backend stays the capture/health authority: its 1 Hz
+ * `micLiveLevel` and the on-demand 700 ms "Check level" sample drive a
+ * deterministic coarse-band fallback (same dBFS scale) whenever the analyser
+ * cannot open the selected device. The analyser is armed by a running
+ * session or by the persisted "Monitor input" toggle (M); an idle Studio with
+ * monitoring off never opens the microphone, so the bars sit at floor and
+ * the OS shows no mic indicator. The stream also releases while the document
+ * is hidden (idle-CPU discipline). System audio shows its honest
+ * "unavailable — pending native adapter" state; real capture is Phase-2 (F3).
  */
 export function AudioMixer(): ReactElement {
   const {
@@ -60,7 +72,10 @@ export function AudioMixer(): ReactElement {
     deviceList,
     handleSystemPermission,
     mediaAccess,
-    runtimeInfo
+    runtimeInfo,
+    isSessionActive,
+    settings,
+    setSettings
   } = useStudioCore()
   const { audioMeter, audioMeterLoading } = useStudioAudio()
   const { diagnosticStats } = useStudioDiagnostics()
@@ -109,6 +124,12 @@ export function AudioMixer(): ReactElement {
   )
   const analyserDriven = micVisual.active && !muted
   const signalLive = audioMixerSignalLive(muted, micVisual.active, liveLevel)
+  const monitorWhenIdle = audioMixerMonitorWhenIdle(settings)
+  const monitorLabel = audioMixerMonitorLabel({ sessionActive: isSessionActive, signalLive })
+  // The M shortcut lives in StudioMicVisualProvider (one home for Studio and
+  // Sources); this switch is the pointer surface for the same setting.
+  const setMonitorWhenIdle = (next: boolean): void =>
+    setSettings((current) => withAudioMixerMonitorWhenIdle(current, next))
   const fallbackLevels = fallbackBandLevels(
     muted || !selectedMicrophone ? 0 : level,
     MIXER_BAR_COUNT
@@ -171,20 +192,48 @@ export function AudioMixer(): ReactElement {
             fallbackLevels={fallbackLevels}
             meterTone={meterTone}
           />
-          {signalLive ? (
-            <span className="shrink-0 text-xs text-muted-foreground">Live</span>
-          ) : (
-            <Button
-              className="shrink-0"
-              disabled={!selectedMicrophone || audioMeterLoading}
-              size="xs"
-              variant="outline"
-              onClick={() => void sampleAudioMeter()}
-            >
-              {audioMeterLoading ? 'Checking…' : 'Check level'}
-            </Button>
-          )}
+          <span
+            className={cn(
+              'min-w-16 shrink-0 text-right text-xs',
+              signalLive ? 'text-muted-foreground' : 'text-muted-foreground/60'
+            )}
+            data-videorc-mic-monitor-state={monitorLabel.toLowerCase()}
+          >
+            {monitorLabel}
+          </span>
         </div>
+        {/* Idle only: a session arms the meter by itself, so the toggle has
+            nothing to say while one runs. "Check level" stays as the
+            backend's one-shot reading for people who keep monitoring off. */}
+        {!isSessionActive ? (
+          <div className="flex items-center justify-between gap-2">
+            <Label
+              className="gap-2 text-xs font-normal text-muted-foreground"
+              htmlFor="audio-mixer-monitor-input"
+            >
+              <Switch
+                checked={monitorWhenIdle}
+                disabled={!selectedMicrophone}
+                id="audio-mixer-monitor-input"
+                size="sm"
+                onCheckedChange={setMonitorWhenIdle}
+              />
+              Monitor input
+              <Kbd>M</Kbd>
+            </Label>
+            {!signalLive ? (
+              <Button
+                className="shrink-0"
+                disabled={!selectedMicrophone || audioMeterLoading}
+                size="xs"
+                variant="outline"
+                onClick={() => void sampleAudioMeter()}
+              >
+                {audioMeterLoading ? 'Checking…' : 'Check level'}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
         {notice === 'permission' ? (
           <div className="flex items-center justify-between gap-2 text-xs text-warning">
             <span>Microphone permission is required before levels can be read.</span>
