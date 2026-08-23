@@ -46,6 +46,12 @@ import { displayKeyGlyphs, osSettingsName } from '@/lib/platform'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 import { isUpdateInstallable } from '@/lib/update-ui'
 
+/**
+ * Remote control is off by default, and an empty body made the card render as a
+ * bare header. One muted line says what the switch is for instead.
+ */
+export const REMOTE_CONTROL_OFF_HINT = 'Off — turn on to pair a Stream Deck or the Videorc remote.'
+
 // ST1 (UX rework): Settings holds app-level facts and tools only. Session
 // capture settings have ONE home each (Output ⌘6, Livestream ⌘5) — the rows
 // below NAVIGATE there instead of duplicating the controls, which is what the
@@ -146,357 +152,377 @@ export function SettingsTab({
 
   return (
     <div className="flex flex-col gap-5">
+      {/* B4 (live feedback batch 3): two content-height columns, NOT a stretch
+        grid — Remote control (header-only when off) used to inflate to the tall
+        Co-host card's row height. Left carries the two long-form cards, right
+        stacks the three shorter ones, so the columns land within a card of each
+        other and every card is exactly as tall as its own content. Below `lg`
+        the columns collapse and the sections read in priority order: storage,
+        permissions, co-host, shortcuts, remote. */}
       <ConfigGrid>
-        <PanelSection
-          description="Where recordings are written and what new sessions use."
-          icon={GearSix}
-          title="Recording & storage"
-        >
-          <FieldGroup>
-            <Field>
-              <FieldLabel htmlFor="output-directory">Output directory</FieldLabel>
-              <div className="flex gap-2">
-                <div
-                  id="output-directory"
-                  className="min-w-0 flex-1 truncate rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
-                >
-                  {outputDirectory || 'Videorc default recordings folder'}
-                </div>
-                <Button size="sm" variant="outline" onClick={() => void browseOutputDirectory()}>
-                  <FolderOpen data-icon="inline-start" />
-                  Browse
-                </Button>
-                <Button
-                  disabled={!directoryFacts?.exists}
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    if (outputDirectoryHandle) {
-                      void window.videorc?.revealSelectedResource?.(outputDirectoryHandle)
-                    }
-                  }}
-                >
-                  <FolderOpen data-icon="inline-start" />
-                  Reveal
-                </Button>
-              </div>
-              {!outputDirectory ? (
-                <p className="text-xs text-muted-foreground">
-                  Blank uses the default: ~/Movies/Videorc/Recordings.
-                </p>
-              ) : directoryFacts && !directoryFacts.exists ? (
-                <div className="flex flex-wrap items-center gap-2 text-xs text-warning">
-                  <Warning className="size-3.5 shrink-0" weight="fill" />
-                  <span>This folder authorization expired — choose it again.</span>
-                </div>
-              ) : directoryFacts && !directoryFacts.writable ? (
-                <p className="flex items-center gap-1.5 text-xs text-warning">
-                  <Warning className="size-3.5 shrink-0" weight="fill" />
-                  This folder is not writable — recordings will fail to save here.
-                </p>
-              ) : directoryFacts ? (
-                <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <CheckCircle className="size-3.5 shrink-0 text-success" weight="fill" />
-                  Folder writable
-                  {typeof directoryFacts.freeBytes === 'number'
-                    ? ` · ${formatFreeSpace(directoryFacts.freeBytes)} free`
-                    : ''}
-                </p>
-              ) : null}
-            </Field>
-            <Field>
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex min-w-0 flex-col gap-0.5">
-                  <FieldLabel htmlFor="keep-original-recording">Keep original recording</FieldLabel>
-                  <p className="text-xs text-muted-foreground">
-                    Keeps the capture MKV (lossless audio) next to the exported MP4 instead of
-                    deleting it. Uses more disk space.
-                  </p>
-                </div>
-                <Switch
-                  checked={settings.keepOriginalRecording}
-                  id="keep-original-recording"
-                  onCheckedChange={(checked) =>
-                    setSettings((current) => ({ ...current, keepOriginalRecording: checked }))
-                  }
-                />
-              </div>
-            </Field>
-            <Field>
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex min-w-0 flex-col gap-0.5">
-                  <FieldLabel htmlFor="animate-scene-changes">Animate scene changes</FieldLabel>
-                  <p className="text-xs text-muted-foreground">
-                    Layout switches glide into place instead of cutting — visible live on stream and
-                    in recordings.
-                  </p>
-                </div>
-                <Switch
-                  checked={settings.animateSceneChanges === true}
-                  id="animate-scene-changes"
-                  onCheckedChange={(checked) =>
-                    setSettings((current) => ({ ...current, animateSceneChanges: checked }))
-                  }
-                />
-              </div>
-            </Field>
-          </FieldGroup>
-
-          <div className="flex flex-col gap-0.5">
-            <NavigableRow
-              icon={FilmSlate}
-              label="Recording preset"
-              value={recordingQuality(captureConfig.video)}
-              onNavigate={() => openStudioPanel('recording')}
-            />
-            <NavigableRow
-              icon={Broadcast}
-              label="Stream destinations"
-              value={streamingSummary(captureConfig.streamEnabled, captureConfig.streaming.targets)}
-              onNavigate={() => openStudioPanel('live')}
-            />
-          </div>
-
-          {/* FFmpeg ships bundled with the packaged app, so normal users never set
-            a path. Show a quiet status; surface a friendly, actionable card only
-            when it is genuinely missing; keep the manual override in Advanced. */}
-          {health?.ffmpeg.available ? (
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <CheckCircle className="size-3.5 shrink-0 text-success" weight="fill" />
-              <span className="truncate">
-                FFmpeg ready{health.ffmpeg.version ? ` · ${health.ffmpeg.version}` : ''}
-              </span>
-            </div>
-          ) : health ? (
-            <div className="flex flex-col gap-2 rounded-row border border-warning/40 bg-warning/10 p-3">
-              <div className="flex items-center gap-2 text-sm font-medium text-warning-foreground dark:text-warning">
-                <Warning className="size-4 shrink-0" weight="fill" />
-                Recording needs FFmpeg
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {import.meta.env.DEV
-                  ? 'For local development, install it with \u201cbrew install ffmpeg\u201d.'
-                  : 'FFmpeg ships with Videorc, so this usually means the install is damaged. Reinstall Videorc.'}
-              </p>
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">Checking for FFmpeg\u2026</p>
-          )}
-
-          <Collapsible>
-            <CollapsibleTrigger className="group flex w-fit items-center gap-2 rounded-row px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-              <CaretDown className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
-              <span>Advanced</span>
-            </CollapsibleTrigger>
-            <CollapsibleContent className="flex flex-col gap-3 pt-2">
-              <div className="flex items-center gap-2 rounded-row border bg-muted/40 px-3 py-2 text-xs">
-                <span className="shrink-0 font-medium">Session database</span>
-                <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                  Managed privately in Videorc app data
-                </span>
-              </div>
-            </CollapsibleContent>
-          </Collapsible>
-        </PanelSection>
-
-        <PanelSection
-          description={`What ${osSettingsName(runtimeInfo?.platform)} lets Videorc capture right now.`}
-          icon={LockKey}
-          title="System access"
-          action={
-            <Button size="sm" variant="ghost" onClick={() => void refreshBackend()}>
-              <ArrowClockwise data-icon="inline-start" />
-              Refresh
-            </Button>
-          }
-        >
-          <div className="flex flex-col gap-1">
-            {accessRows.map((row) => {
-              const action = systemAccessAction({
-                pane: row.id,
-                state: row.state,
-                platform: runtimeInfo?.platform,
-                mediaAccessStatus:
-                  row.id === 'camera' || row.id === 'microphone' ? mediaAccess?.[row.id] : undefined
-              })
-              return (
-                <div
-                  key={row.id}
-                  className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-row px-2.5 py-2 text-sm"
-                >
-                  <span className="w-32 shrink-0 font-medium">{row.label}</span>
-                  {/* Q4 (plan 022): the permission TARGET is the actionable part —
-                      truncation clipped it to "Captur…"/"Voice a…". The row
-                      flex-wraps, so let the detail take a full line when tight
-                      instead of truncating; tooltip keeps the hover affordance. */}
-                  <span
-                    className="min-w-0 flex-1 basis-56 text-xs text-muted-foreground"
-                    title={`${row.purpose} ${row.detail}`}
-                  >
-                    {row.purpose} {row.detail}
-                  </span>
-                  {action ? (
-                    <Button
-                      size="xs"
-                      variant="outline"
-                      onClick={() => void handleSystemPermission(row.id)}
-                    >
-                      {action === 'request-media-access' ? 'Enable' : 'Open settings'}
-                    </Button>
-                  ) : row.state === 'granted' ? (
-                    <Button
-                      size="xs"
-                      variant="outline"
-                      onClick={() => void openSystemPermissionSettings(row.id)}
-                    >
-                      Manage
-                    </Button>
-                  ) : null}
-                  {row.state === 'granted' ? (
-                    <CheckCircle
-                      aria-label={`${row.label} granted`}
-                      className="size-4 shrink-0 text-success"
-                      weight="fill"
-                    />
-                  ) : row.state === 'not-granted' || row.state === 'device-issue' ? (
-                    <XCircle
-                      aria-label={
-                        row.state === 'device-issue'
-                          ? `${row.label} device issue`
-                          : `${row.label} not granted`
-                      }
-                      className="size-4 shrink-0 text-destructive"
-                      weight="fill"
-                    />
-                  ) : (
-                    <MinusCircle
-                      aria-label={`${row.label} checked on first use`}
-                      className="size-4 shrink-0 text-muted-foreground"
-                      weight="fill"
-                    />
-                  )}
-                </div>
-              )
-            })}
-          </div>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <Button size="sm" variant="outline" onClick={onOpenPermissionsSetup}>
-              <LockKey data-icon="inline-start" />
-              Set up permissions
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              Grants live in {osSettingsName(runtimeInfo?.platform)}. After changing one, come back
-              here — rows refresh automatically.
-            </p>
-          </div>
-        </PanelSection>
-
-        <CohostSettingsSection />
-
-        <PanelSection
-          action={
-            <Switch
-              aria-label="Enable remote control"
-              checked={remoteStatus?.enabled ?? false}
-              disabled={remotePending}
-              onCheckedChange={(checked) =>
-                void runRemoteAction(checked ? remoteControl.enable : remoteControl.disable)
-              }
-            />
-          }
-          description="Let a Stream Deck or other local remote start recordings, switch scenes, and mute your mic. Off by default; clients pair with the token below on this Mac only."
-          icon={GearSix}
-          title="Remote control"
-        >
-          {remoteStatus?.enabled ? (
+        <div className="flex flex-col gap-5">
+          <PanelSection
+            description="Where recordings are written and what new sessions use."
+            icon={GearSix}
+            title="Recording & storage"
+          >
             <FieldGroup>
               <Field>
-                <FieldLabel htmlFor="remote-token">Pairing token</FieldLabel>
+                <FieldLabel htmlFor="output-directory">Output directory</FieldLabel>
                 <div className="flex gap-2">
                   <div
-                    id="remote-token"
-                    className="min-w-0 flex-1 truncate rounded-md border bg-muted/30 px-3 py-2 font-mono text-xs text-muted-foreground"
+                    id="output-directory"
+                    className="min-w-0 flex-1 truncate rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
                   >
-                    {remoteStatus.token
-                      ? `${remoteStatus.token.slice(0, 8)}…${remoteStatus.token.slice(-4)}`
-                      : '—'}
+                    {outputDirectory || 'Videorc default recordings folder'}
                   </div>
+                  <Button size="sm" variant="outline" onClick={() => void browseOutputDirectory()}>
+                    <FolderOpen data-icon="inline-start" />
+                    Browse
+                  </Button>
                   <Button
+                    disabled={!directoryFacts?.exists}
                     size="sm"
                     variant="outline"
                     onClick={() => {
-                      if (remoteStatus.token) {
-                        void navigator.clipboard.writeText(remoteStatus.token)
+                      if (outputDirectoryHandle) {
+                        void window.videorc?.revealSelectedResource?.(outputDirectoryHandle)
                       }
                     }}
                   >
-                    Copy
-                  </Button>
-                  <Button
-                    disabled={remotePending}
-                    size="sm"
-                    variant="outline"
-                    onClick={() => void runRemoteAction(remoteControl.regenerate)}
-                  >
-                    Regenerate
+                    <FolderOpen data-icon="inline-start" />
+                    Reveal
                   </Button>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  {remoteStatus.connectedClients > 0
-                    ? `${remoteStatus.connectedClients} client${remoteStatus.connectedClients === 1 ? '' : 's'} connected.`
-                    : 'No clients connected.'}{' '}
-                  Regenerating disconnects every paired client. The Stream Deck plugin pairs
-                  automatically on this Mac.
-                </p>
+                {!outputDirectory ? (
+                  <p className="text-xs text-muted-foreground">
+                    Blank uses the default: ~/Movies/Videorc/Recordings.
+                  </p>
+                ) : directoryFacts && !directoryFacts.exists ? (
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-warning">
+                    <Warning className="size-3.5 shrink-0" weight="fill" />
+                    <span>This folder authorization expired — choose it again.</span>
+                  </div>
+                ) : directoryFacts && !directoryFacts.writable ? (
+                  <p className="flex items-center gap-1.5 text-xs text-warning">
+                    <Warning className="size-3.5 shrink-0" weight="fill" />
+                    This folder is not writable — recordings will fail to save here.
+                  </p>
+                ) : directoryFacts ? (
+                  <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <CheckCircle className="size-3.5 shrink-0 text-success" weight="fill" />
+                    Folder writable
+                    {typeof directoryFacts.freeBytes === 'number'
+                      ? ` · ${formatFreeSpace(directoryFacts.freeBytes)} free`
+                      : ''}
+                  </p>
+                ) : null}
               </Field>
-            </FieldGroup>
-          ) : null}
-        </PanelSection>
-
-        <PanelSection
-          description="Work system-wide, even when Videorc is in the background — bind them to Stream Deck keys or any macro tool. Electron accelerator syntax, e.g. Cmd+Shift+R."
-          icon={GearSix}
-          title="Global shortcuts"
-        >
-          <FieldGroup>
-            {(
-              [
-                ['recordToggle', 'Start / stop recording', 'Cmd+Shift+R'],
-                ['streamToggle', 'Go live / end stream', 'Cmd+Shift+L'],
-                ['micToggle', 'Mute / unmute mic', 'Cmd+Shift+M']
-              ] as const
-            ).map(([key, label, placeholder]) => (
-              <Field key={key}>
+              <Field>
                 <div className="flex items-center justify-between gap-3">
-                  <FieldLabel htmlFor={`global-shortcut-${key}`}>{label}</FieldLabel>
-                  <Input
-                    className="w-44 font-mono text-xs"
-                    id={`global-shortcut-${key}`}
-                    placeholder={placeholder}
-                    value={settings.globalShortcuts?.[key] ?? ''}
-                    onChange={(event) =>
-                      setSettings((current) => ({
-                        ...current,
-                        globalShortcuts: {
-                          ...current.globalShortcuts,
-                          [key]: event.target.value
-                        }
-                      }))
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <FieldLabel htmlFor="keep-original-recording">
+                      Keep original recording
+                    </FieldLabel>
+                    <p className="text-xs text-muted-foreground">
+                      Keeps the capture MKV (lossless audio) next to the exported MP4 instead of
+                      deleting it. Uses more disk space.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.keepOriginalRecording}
+                    id="keep-original-recording"
+                    onCheckedChange={(checked) =>
+                      setSettings((current) => ({ ...current, keepOriginalRecording: checked }))
                     }
                   />
                 </div>
               </Field>
-            ))}
-            <p className="text-xs text-muted-foreground">
-              Leave a field empty to release the key combination.
-            </p>
-          </FieldGroup>
-        </PanelSection>
+              <Field>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <FieldLabel htmlFor="animate-scene-changes">Animate scene changes</FieldLabel>
+                    <p className="text-xs text-muted-foreground">
+                      Layout switches glide into place instead of cutting — visible live on stream
+                      and in recordings.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.animateSceneChanges === true}
+                    id="animate-scene-changes"
+                    onCheckedChange={(checked) =>
+                      setSettings((current) => ({ ...current, animateSceneChanges: checked }))
+                    }
+                  />
+                </div>
+              </Field>
+            </FieldGroup>
+
+            <div className="flex flex-col gap-0.5">
+              <NavigableRow
+                icon={FilmSlate}
+                label="Recording preset"
+                value={recordingQuality(captureConfig.video)}
+                onNavigate={() => openStudioPanel('recording')}
+              />
+              <NavigableRow
+                icon={Broadcast}
+                label="Stream destinations"
+                value={streamingSummary(
+                  captureConfig.streamEnabled,
+                  captureConfig.streaming.targets
+                )}
+                onNavigate={() => openStudioPanel('live')}
+              />
+            </div>
+
+            {/* FFmpeg ships bundled with the packaged app, so normal users never set
+              a path. Show a quiet status; surface a friendly, actionable card only
+              when it is genuinely missing; keep the manual override in Advanced. */}
+            {health?.ffmpeg.available ? (
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <CheckCircle className="size-3.5 shrink-0 text-success" weight="fill" />
+                <span className="truncate">
+                  FFmpeg ready{health.ffmpeg.version ? ` · ${health.ffmpeg.version}` : ''}
+                </span>
+              </div>
+            ) : health ? (
+              <div className="flex flex-col gap-2 rounded-row border border-warning/40 bg-warning/10 p-3">
+                <div className="flex items-center gap-2 text-sm font-medium text-warning-foreground dark:text-warning">
+                  <Warning className="size-4 shrink-0" weight="fill" />
+                  Recording needs FFmpeg
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {import.meta.env.DEV
+                    ? 'For local development, install it with \u201cbrew install ffmpeg\u201d.'
+                    : 'FFmpeg ships with Videorc, so this usually means the install is damaged. Reinstall Videorc.'}
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">Checking for FFmpeg\u2026</p>
+            )}
+
+            <Collapsible>
+              <CollapsibleTrigger className="group flex w-fit items-center gap-2 rounded-row px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+                <CaretDown className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+                <span>Advanced</span>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="flex flex-col gap-3 pt-2">
+                <div className="flex items-center gap-2 rounded-row border bg-muted/40 px-3 py-2 text-xs">
+                  <span className="shrink-0 font-medium">Session database</span>
+                  <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                    Managed privately in Videorc app data
+                  </span>
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
+          </PanelSection>
+
+          <PanelSection
+            description={`What ${osSettingsName(runtimeInfo?.platform)} lets Videorc capture right now.`}
+            icon={LockKey}
+            title="System access"
+            action={
+              <Button size="sm" variant="ghost" onClick={() => void refreshBackend()}>
+                <ArrowClockwise data-icon="inline-start" />
+                Refresh
+              </Button>
+            }
+          >
+            <div className="flex flex-col gap-1">
+              {accessRows.map((row) => {
+                const action = systemAccessAction({
+                  pane: row.id,
+                  state: row.state,
+                  platform: runtimeInfo?.platform,
+                  mediaAccessStatus:
+                    row.id === 'camera' || row.id === 'microphone'
+                      ? mediaAccess?.[row.id]
+                      : undefined
+                })
+                return (
+                  <div
+                    key={row.id}
+                    className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-row px-2.5 py-2 text-sm"
+                  >
+                    <span className="w-32 shrink-0 font-medium">{row.label}</span>
+                    {/* Q4 (plan 022): the permission TARGET is the actionable part —
+                        truncation clipped it to "Captur…"/"Voice a…". The row
+                        flex-wraps, so let the detail take a full line when tight
+                        instead of truncating; tooltip keeps the hover affordance. */}
+                    <span
+                      className="min-w-0 flex-1 basis-56 text-xs text-muted-foreground"
+                      title={`${row.purpose} ${row.detail}`}
+                    >
+                      {row.purpose} {row.detail}
+                    </span>
+                    {action ? (
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        onClick={() => void handleSystemPermission(row.id)}
+                      >
+                        {action === 'request-media-access' ? 'Enable' : 'Open settings'}
+                      </Button>
+                    ) : row.state === 'granted' ? (
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        onClick={() => void openSystemPermissionSettings(row.id)}
+                      >
+                        Manage
+                      </Button>
+                    ) : null}
+                    {row.state === 'granted' ? (
+                      <CheckCircle
+                        aria-label={`${row.label} granted`}
+                        className="size-4 shrink-0 text-success"
+                        weight="fill"
+                      />
+                    ) : row.state === 'not-granted' || row.state === 'device-issue' ? (
+                      <XCircle
+                        aria-label={
+                          row.state === 'device-issue'
+                            ? `${row.label} device issue`
+                            : `${row.label} not granted`
+                        }
+                        className="size-4 shrink-0 text-destructive"
+                        weight="fill"
+                      />
+                    ) : (
+                      <MinusCircle
+                        aria-label={`${row.label} checked on first use`}
+                        className="size-4 shrink-0 text-muted-foreground"
+                        weight="fill"
+                      />
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <Button size="sm" variant="outline" onClick={onOpenPermissionsSetup}>
+                <LockKey data-icon="inline-start" />
+                Set up permissions
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                Grants live in {osSettingsName(runtimeInfo?.platform)}. After changing one, come
+                back here — rows refresh automatically.
+              </p>
+            </div>
+          </PanelSection>
+        </div>
+
+        <div className="flex flex-col gap-5">
+          <CohostSettingsSection />
+
+          <PanelSection
+            description="Work system-wide, even when Videorc is in the background — bind them to Stream Deck keys or any macro tool. Electron accelerator syntax, e.g. Cmd+Shift+R."
+            icon={GearSix}
+            title="Global shortcuts"
+          >
+            <FieldGroup>
+              {(
+                [
+                  ['recordToggle', 'Start / stop recording', 'Cmd+Shift+R'],
+                  ['streamToggle', 'Go live / end stream', 'Cmd+Shift+L'],
+                  ['micToggle', 'Mute / unmute mic', 'Cmd+Shift+M']
+                ] as const
+              ).map(([key, label, placeholder]) => (
+                <Field key={key}>
+                  <div className="flex items-center justify-between gap-3">
+                    <FieldLabel htmlFor={`global-shortcut-${key}`}>{label}</FieldLabel>
+                    <Input
+                      className="w-44 font-mono text-xs"
+                      id={`global-shortcut-${key}`}
+                      placeholder={placeholder}
+                      value={settings.globalShortcuts?.[key] ?? ''}
+                      onChange={(event) =>
+                        setSettings((current) => ({
+                          ...current,
+                          globalShortcuts: {
+                            ...current.globalShortcuts,
+                            [key]: event.target.value
+                          }
+                        }))
+                      }
+                    />
+                  </div>
+                </Field>
+              ))}
+              <p className="text-xs text-muted-foreground">
+                Leave a field empty to release the key combination.
+              </p>
+            </FieldGroup>
+          </PanelSection>
+
+          <PanelSection
+            action={
+              <Switch
+                aria-label="Enable remote control"
+                checked={remoteStatus?.enabled ?? false}
+                disabled={remotePending}
+                onCheckedChange={(checked) =>
+                  void runRemoteAction(checked ? remoteControl.enable : remoteControl.disable)
+                }
+              />
+            }
+            description="Let a Stream Deck or other local remote start recordings, switch scenes, and mute your mic. Off by default; clients pair with the token below on this Mac only."
+            icon={GearSix}
+            title="Remote control"
+          >
+            {remoteStatus?.enabled ? (
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="remote-token">Pairing token</FieldLabel>
+                  <div className="flex gap-2">
+                    <div
+                      id="remote-token"
+                      className="min-w-0 flex-1 truncate rounded-md border bg-muted/30 px-3 py-2 font-mono text-xs text-muted-foreground"
+                    >
+                      {remoteStatus.token
+                        ? `${remoteStatus.token.slice(0, 8)}…${remoteStatus.token.slice(-4)}`
+                        : '—'}
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        if (remoteStatus.token) {
+                          void navigator.clipboard.writeText(remoteStatus.token)
+                        }
+                      }}
+                    >
+                      Copy
+                    </Button>
+                    <Button
+                      disabled={remotePending}
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void runRemoteAction(remoteControl.regenerate)}
+                    >
+                      Regenerate
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {remoteStatus.connectedClients > 0
+                      ? `${remoteStatus.connectedClients} client${remoteStatus.connectedClients === 1 ? '' : 's'} connected.`
+                      : 'No clients connected.'}{' '}
+                    Regenerating disconnects every paired client. The Stream Deck plugin pairs
+                    automatically on this Mac.
+                  </p>
+                </Field>
+              </FieldGroup>
+            ) : (
+              <p className="text-xs text-muted-foreground">{REMOTE_CONTROL_OFF_HINT}</p>
+            )}
+          </PanelSection>
+        </div>
       </ConfigGrid>
 
-      {/* Lower region: the three short cards stack in one column beside the tall
+      {/* Lower region: the four short cards stack in one column beside the tall
         Shortcuts card, so the columns read as balanced. */}
-      <div className="grid items-start gap-5 lg:grid-cols-2">
+      <ConfigGrid>
         <div className="flex flex-col gap-5">
           <PanelSection
             description="How Videorc looks and behaves on this device."
@@ -614,7 +640,7 @@ export function SettingsTab({
             ))}
           </div>
         </PanelSection>
-      </div>
+      </ConfigGrid>
     </div>
   )
 }
