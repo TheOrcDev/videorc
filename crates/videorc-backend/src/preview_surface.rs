@@ -129,17 +129,7 @@ pub(crate) async fn suspend_preview_compositor_for_d3d11(
         (
             run_id,
             surface.status.started_at.clone(),
-            CompositorStartParams {
-                target_fps: surface.status.target_fps,
-                width: surface.status.width,
-                height: surface.status.height,
-                frame_consumer: CompositorFrameConsumer::NativePreview,
-                stream_output: None,
-                caption_overlay_on_primary: false,
-                caption_overlay_on_aux: false,
-                highlight_overlay_on_primary: false,
-                highlight_overlay_on_aux: false,
-            },
+            preview_compositor_params_for_surface(&surface.status),
         )
     };
     stop_compositor_if_run_id(state, &run_id).await?;
@@ -170,23 +160,144 @@ pub(crate) async fn suspend_preview_compositor_for_d3d11(
     })
 }
 
+/// Why a suspended CPU preview compositor could not be restored on the exact
+/// reservation it was suspended with. Every variant used to be a silent early
+/// return; on the Windows tester's box the preview surface was left with no
+/// producer after stop (frame age climbing to seconds). Each is now a WARN
+/// health event with a stable code, and `restore_suspended_preview_compositor`
+/// falls back to starting a compositor whenever the surface is live and has
+/// none.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviewCompositorRestoreSkip {
+    /// No reservation exists any more (already restored, or cleared by a
+    /// surface lifecycle change).
+    NoReservation,
+    /// A different (newer) D3D11 generation owns the reservation now.
+    GenerationMismatch { reserved: u64 },
+    /// The surface changed underneath the reservation (destroyed/recreated,
+    /// or it already runs another compositor), so the reservation is stale.
+    SurfaceChanged,
+    /// Another compositor run was active, so the idle-only start declined.
+    CompositorBusy,
+    /// The compositor start returned no run id.
+    NoRunId,
+    /// The surface changed while the compositor was starting; the new run
+    /// was stopped again rather than adopted.
+    SurfaceChangedDuringStart,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl PreviewCompositorRestoreSkip {
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::NoReservation => "preview-compositor-restore-no-reservation",
+            Self::GenerationMismatch { .. } => "preview-compositor-restore-generation-mismatch",
+            Self::SurfaceChanged => "preview-compositor-restore-surface-changed",
+            Self::CompositorBusy => "preview-compositor-restore-compositor-busy",
+            Self::NoRunId => "preview-compositor-restore-no-run-id",
+            Self::SurfaceChangedDuringStart => {
+                "preview-compositor-restore-surface-changed-during-start"
+            }
+        }
+    }
+
+    pub(crate) fn message(self, media_generation: u64) -> String {
+        let reason = match self {
+            Self::NoReservation => "no suspension reservation exists any more".to_string(),
+            Self::GenerationMismatch { reserved } => {
+                format!("D3D11 generation {reserved} owns the reservation now")
+            }
+            Self::SurfaceChanged => {
+                "the preview surface changed underneath the reservation".to_string()
+            }
+            Self::CompositorBusy => "another compositor run is still active".to_string(),
+            Self::NoRunId => "the compositor start returned no run id".to_string(),
+            Self::SurfaceChangedDuringStart => {
+                "the preview surface changed while the compositor was starting".to_string()
+            }
+        };
+        format!(
+            "Suspended CPU preview compositor was not restored on its reservation after Windows D3D11 generation {media_generation} ended: {reason}."
+        )
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn report_preview_compositor_restore_skip(
+    state: &AppState,
+    media_generation: u64,
+    skip: PreviewCompositorRestoreSkip,
+) {
+    let message = skip.message(media_generation);
+    state.emit_log("warn", message.clone());
+    let _ = crate::recording::emit_health_event(
+        state,
+        None,
+        crate::protocol::HealthLevel::Warn,
+        skip.code(),
+        &message,
+    );
+}
+
+/// Compositor start parameters that reproduce a live preview surface's own
+/// run (the same shape `create_preview_surface` starts with).
+#[cfg(any(target_os = "windows", test))]
+fn preview_compositor_params_for_surface(status: &PreviewSurfaceStatus) -> CompositorStartParams {
+    CompositorStartParams {
+        target_fps: status.target_fps,
+        width: status.width,
+        height: status.height,
+        frame_consumer: CompositorFrameConsumer::NativePreview,
+        stream_output: None,
+        caption_overlay_on_primary: false,
+        caption_overlay_on_aux: false,
+        highlight_overlay_on_primary: false,
+        highlight_overlay_on_aux: false,
+    }
+}
+
 #[cfg(any(target_os = "windows", test))]
 async fn restore_suspended_preview_compositor(state: AppState, media_generation: u64) {
     let _surface_lifecycle = state.preview_surface_lifecycle.lock().await;
+    if let Err(skip) =
+        restore_suspended_preview_compositor_on_reservation(&state, media_generation).await
+    {
+        report_preview_compositor_restore_skip(&state, media_generation, skip);
+        // A newer generation still owns the preview pixels; its own restore
+        // runs when it ends. Every other skip may leave the surface with no
+        // producer, so start one whenever the surface is live and idle.
+        if !matches!(
+            skip,
+            PreviewCompositorRestoreSkip::GenerationMismatch { .. }
+        ) {
+            ensure_live_preview_surface_has_compositor(&state, media_generation).await;
+        }
+    }
+}
+
+/// The exact-reservation restore. Caller holds the surface lifecycle lock.
+#[cfg(any(target_os = "windows", test))]
+async fn restore_suspended_preview_compositor_on_reservation(
+    state: &AppState,
+    media_generation: u64,
+) -> Result<(), PreviewCompositorRestoreSkip> {
     let reservation = {
         let mut surface = state.preview_surface.lock().await;
         let Some(reservation) = surface.d3d11_compositor_suspension.as_ref() else {
-            return;
+            return Err(PreviewCompositorRestoreSkip::NoReservation);
         };
         if reservation.media_generation != media_generation {
-            return;
+            return Err(PreviewCompositorRestoreSkip::GenerationMismatch {
+                reserved: reservation.media_generation,
+            });
         }
         if surface.status.state != PreviewSurfaceState::Live
             || surface.status.started_at != reservation.surface_started_at
             || surface.run_id.is_some()
         {
             surface.d3d11_compositor_suspension = None;
-            return;
+            return Err(PreviewCompositorRestoreSkip::SurfaceChanged);
         }
         surface
             .d3d11_compositor_suspension
@@ -195,10 +306,10 @@ async fn restore_suspended_preview_compositor(state: AppState, media_generation:
     };
     let Some(status) = start_synthetic_compositor_if_idle(state.clone(), reservation.params).await
     else {
-        return;
+        return Err(PreviewCompositorRestoreSkip::CompositorBusy);
     };
     let Some(run_id) = status.run_id else {
-        return;
+        return Err(PreviewCompositorRestoreSkip::NoRunId);
     };
     let mut surface = state.preview_surface.lock().await;
     if surface.status.state == PreviewSurfaceState::Live
@@ -207,9 +318,60 @@ async fn restore_suspended_preview_compositor(state: AppState, media_generation:
         && surface.d3d11_compositor_suspension.is_none()
     {
         surface.run_id = Some(run_id);
+        Ok(())
     } else {
         drop(surface);
-        let _ = stop_compositor_if_run_id(&state, &run_id).await;
+        let _ = stop_compositor_if_run_id(state, &run_id).await;
+        Err(PreviewCompositorRestoreSkip::SurfaceChangedDuringStart)
+    }
+}
+
+/// Fallback after a skipped restore: a live preview surface with no
+/// compositor run and no outstanding reservation gets a compositor started
+/// from its own status. Caller holds the surface lifecycle lock.
+#[cfg(any(target_os = "windows", test))]
+async fn ensure_live_preview_surface_has_compositor(state: &AppState, media_generation: u64) {
+    let (started_at, params) = {
+        let surface = state.preview_surface.lock().await;
+        if surface.status.state != PreviewSurfaceState::Live
+            || surface.run_id.is_some()
+            || surface.d3d11_compositor_suspension.is_some()
+        {
+            return;
+        }
+        (
+            surface.status.started_at.clone(),
+            preview_compositor_params_for_surface(&surface.status),
+        )
+    };
+    let Some(run_id) = start_synthetic_compositor_if_idle(state.clone(), params)
+        .await
+        .and_then(|status| status.run_id)
+    else {
+        state.emit_log(
+            "warn",
+            format!(
+                "Live preview surface has no compositor after Windows D3D11 generation {media_generation} ended and none could be started (another compositor run is active)."
+            ),
+        );
+        return;
+    };
+    let mut surface = state.preview_surface.lock().await;
+    if surface.status.state == PreviewSurfaceState::Live
+        && surface.status.started_at == started_at
+        && surface.run_id.is_none()
+        && surface.d3d11_compositor_suspension.is_none()
+    {
+        surface.run_id = Some(run_id);
+        state.emit_log(
+            "info",
+            format!(
+                "Started a replacement CPU preview compositor for the live preview surface after Windows D3D11 generation {media_generation} ended."
+            ),
+        );
+    } else {
+        drop(surface);
+        let _ = stop_compositor_if_run_id(state, &run_id).await;
     }
 }
 
@@ -1613,6 +1775,118 @@ mod tests {
             Some(restored_run.as_str())
         );
         destroy_preview_surface(&state).await;
+    }
+
+    #[tokio::test]
+    async fn lost_d3d11_reservation_still_restores_a_live_preview_surface() {
+        // Windows tester: after stop the preview surface sat with no producer
+        // because the restore's early return was silent. A lost reservation
+        // must now be reported AND the live, idle surface must get a
+        // compositor anyway.
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(640.0, 360.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await;
+        let suspension = suspend_preview_compositor_for_d3d11(&state, 31)
+            .await
+            .expect("live preview owns a suspendable compositor");
+        assert!(compositor_status(&state).await.run_id.is_none());
+        // Simulate the reservation being cleared underneath the suspension.
+        state
+            .preview_surface
+            .lock()
+            .await
+            .d3d11_compositor_suspension = None;
+
+        suspension.restore().await;
+
+        let restored_run = compositor_status(&state)
+            .await
+            .run_id
+            .expect("fallback starts a compositor for the live surface");
+        assert_eq!(
+            state.preview_surface.lock().await.run_id.as_deref(),
+            Some(restored_run.as_str())
+        );
+        let logs = state.recent_logs(50);
+        assert!(
+            logs.iter().any(|log| log.level == "warn"
+                && log
+                    .message
+                    .contains("no suspension reservation exists any more")),
+            "skip reason must be logged: {logs:?}"
+        );
+        assert!(
+            logs.iter().any(|log| log.level == "info"
+                && log
+                    .message
+                    .contains("Started a replacement CPU preview compositor")),
+            "fallback start must be logged: {logs:?}"
+        );
+        destroy_preview_surface(&state).await;
+    }
+
+    #[tokio::test]
+    async fn stale_d3d11_reservation_on_a_destroyed_surface_does_not_start_a_compositor() {
+        // The fallback is for a LIVE surface only: a destroyed surface must
+        // stay without a compositor, and the skip is still reported.
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(640.0, 360.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await;
+        let suspension = suspend_preview_compositor_for_d3d11(&state, 41)
+            .await
+            .expect("live preview owns a suspendable compositor");
+        destroy_preview_surface(&state).await;
+
+        suspension.restore().await;
+
+        assert!(compositor_status(&state).await.run_id.is_none());
+        assert!(state.preview_surface.lock().await.run_id.is_none());
+        let logs = state.recent_logs(50);
+        assert!(
+            logs.iter()
+                .any(|log| log.level == "warn" && log.message.contains("generation 41 ended")),
+            "skip reason must be logged: {logs:?}"
+        );
+    }
+
+    #[test]
+    fn preview_compositor_restore_skip_codes_are_stable_and_distinct() {
+        let skips = [
+            PreviewCompositorRestoreSkip::NoReservation,
+            PreviewCompositorRestoreSkip::GenerationMismatch { reserved: 9 },
+            PreviewCompositorRestoreSkip::SurfaceChanged,
+            PreviewCompositorRestoreSkip::CompositorBusy,
+            PreviewCompositorRestoreSkip::NoRunId,
+            PreviewCompositorRestoreSkip::SurfaceChangedDuringStart,
+        ];
+        let codes = skips.iter().map(|skip| skip.code()).collect::<Vec<_>>();
+        let mut unique = codes.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), codes.len());
+        assert!(
+            codes
+                .iter()
+                .all(|code| code.starts_with("preview-compositor-restore-"))
+        );
+        assert_eq!(
+            PreviewCompositorRestoreSkip::GenerationMismatch { reserved: 9 }.message(8),
+            "Suspended CPU preview compositor was not restored on its reservation after Windows D3D11 generation 8 ended: D3D11 generation 9 owns the reservation now."
+        );
     }
 
     #[test]

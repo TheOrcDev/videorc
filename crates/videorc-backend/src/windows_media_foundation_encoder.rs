@@ -71,6 +71,7 @@ use windows::Win32::System::Variant::{
 };
 use windows::core::{ComObject, GUID, IUnknown, Interface, Ref};
 
+use crate::diagnostics::RECORDING_FRAME_ACCOUNTING;
 use crate::frame_store::RetainedD3D11Texture;
 use crate::windows_d3d11_device::WindowsD3d11Device;
 use crate::windows_d3d11_encoder_contract::{
@@ -224,6 +225,19 @@ pub struct MediaFoundationH264Encoder {
     last_output_pts: Option<i64>,
     input_credits: usize,
     saw_first_idr: bool,
+    /// Bounded wait for `METransformNeedInput` once the MFT has granted its
+    /// first credit. The bridge writer caps this at two frame intervals so a
+    /// stalled MFT skips one frame (counted) instead of freezing the CFR
+    /// schedule for the full [`EVENT_TIMEOUT`]; every other caller keeps the
+    /// 3 s hard failure.
+    input_credit_timeout: Duration,
+    /// Cold start always gets the full [`EVENT_TIMEOUT`]; the cap applies only
+    /// after the MFT has proven it issues credits at all.
+    saw_first_input_credit: bool,
+    /// True for the session's recording leg: submissions and input-credit
+    /// waits feed [`RECORDING_FRAME_ACCOUNTING`].
+    accounts_session_frames: bool,
+    input_credit_timeouts: u64,
     drained: bool,
     mf_started: bool,
     com_started: bool,
@@ -700,10 +714,26 @@ impl MediaFoundationH264Encoder {
             last_output_pts: None,
             input_credits: 0,
             saw_first_idr: false,
+            input_credit_timeout: EVENT_TIMEOUT,
+            saw_first_input_credit: false,
+            accounts_session_frames: false,
+            input_credit_timeouts: 0,
             drained: false,
             mf_started,
             com_started,
         })
+    }
+
+    /// Bridge writer thread posture: cap steady-state input-credit waits at
+    /// `input_credit_timeout` (skip-and-count instead of a 3 s stall) and,
+    /// for the recording leg, feed the session frame accounting.
+    pub fn configure_for_bridge_writer(
+        &mut self,
+        input_credit_timeout: Duration,
+        accounts_session_frames: bool,
+    ) {
+        self.input_credit_timeout = input_credit_timeout.min(EVENT_TIMEOUT);
+        self.accounts_session_frames = accounts_session_frames;
     }
 
     pub fn identity(&self) -> &str {
@@ -735,7 +765,10 @@ impl MediaFoundationH264Encoder {
             self.config.i420_len()?,
             i420.len()
         );
-        let mut output = self.wait_for_input_credit(EVENT_TIMEOUT)?;
+        let (mut output, credit) = self.acquire_input_credit_for_frame()?;
+        if !credit {
+            return Ok(output);
+        }
         let use_d3d11_cpu_upload = self.input_subtype == MediaFoundationInputSubtype::Nv12
             && self.d3d11_cpu_upload.is_some();
         if use_d3d11_cpu_upload {
@@ -796,6 +829,7 @@ impl MediaFoundationH264Encoder {
         self.submitted_surface_slots
             .push_back(submitted_surface_slot);
         self.input_credits = self.input_credits.saturating_sub(1);
+        self.record_submitted_frame();
         output.extend(self.collect_available_events()?);
         Ok(output)
     }
@@ -824,7 +858,10 @@ impl MediaFoundationH264Encoder {
             "Media Foundation encoder {} was not configured for D3D11 texture input",
             self.identity
         );
-        let mut output = self.wait_for_input_credit(EVENT_TIMEOUT)?;
+        let (mut output, credit) = self.acquire_input_credit_for_frame()?;
+        if !credit {
+            return Ok(output);
+        }
         output.extend(self.wait_for_d3d11_surface(EVENT_TIMEOUT)?);
         let pts = scheduled_time_100ns(frame_index, self.config.fps)?;
         let duration = scheduled_duration_100ns(frame_index, self.config.fps)?;
@@ -857,8 +894,65 @@ impl MediaFoundationH264Encoder {
         self.submitted_surface_slots
             .push_back(Some(SubmittedSurfaceSlot::Direct(surface_slot)));
         self.input_credits = self.input_credits.saturating_sub(1);
+        self.record_submitted_frame();
         output.extend(self.collect_available_events()?);
         Ok(output)
+    }
+
+    fn record_submitted_frame(&self) {
+        if self.accounts_session_frames {
+            RECORDING_FRAME_ACCOUNTING.record_mf_submitted_frame();
+        }
+    }
+
+    /// Per-frame input credit with the writer posture applied: cold start and
+    /// unconfigured callers wait the full [`EVENT_TIMEOUT`] and fail hard;
+    /// a configured writer waits at most `input_credit_timeout` in steady
+    /// state and returns `(output, false)` so the caller skips the frame.
+    /// Output collected while waiting is always returned.
+    fn acquire_input_credit_for_frame(
+        &mut self,
+    ) -> Result<(Vec<MediaFoundationEncodedFrame>, bool)> {
+        let timeout = if self.saw_first_input_credit {
+            self.input_credit_timeout
+        } else {
+            EVENT_TIMEOUT
+        };
+        let wait_started_at = Instant::now();
+        let (output, credit) = self.poll_input_credit(timeout)?;
+        if self.accounts_session_frames {
+            RECORDING_FRAME_ACCOUNTING.record_mf_input_credit_wait(wait_started_at.elapsed());
+        }
+        if credit {
+            self.saw_first_input_credit = true;
+            return Ok((output, true));
+        }
+        if timeout >= EVENT_TIMEOUT {
+            return Err(self.input_credit_timeout_error(timeout));
+        }
+        self.input_credit_timeouts = self.input_credit_timeouts.saturating_add(1);
+        if self.accounts_session_frames {
+            RECORDING_FRAME_ACCOUNTING.record_mf_input_credit_timeout();
+        }
+        if self.input_credit_timeouts == 1 || self.input_credit_timeouts.is_multiple_of(300) {
+            tracing::warn!(
+                "Media Foundation encoder {} granted no input credit within {}ms; skipping the frame ({} skipped so far)",
+                self.identity,
+                timeout.as_millis(),
+                self.input_credit_timeouts
+            );
+        }
+        Ok((output, false))
+    }
+
+    fn input_credit_timeout_error(&self, timeout: Duration) -> anyhow::Error {
+        anyhow!(
+            "Media Foundation probe stage=need-input encoder={:?} input={} profile={}: no input credit within {}ms",
+            self.identity,
+            self.input_subtype.label(),
+            self.config.profile_label(),
+            timeout.as_millis()
+        )
     }
 
     pub fn drain(&mut self, timeout: Duration) -> Result<Vec<MediaFoundationEncodedFrame>> {
@@ -918,12 +1012,14 @@ impl MediaFoundationH264Encoder {
         Ok(output)
     }
 
-    fn wait_for_input_credit(
+    /// Bounded wait for an input credit that never fails on timeout: returns
+    /// the output drained meanwhile and whether a credit is now held.
+    fn poll_input_credit(
         &mut self,
         timeout: Duration,
-    ) -> Result<Vec<MediaFoundationEncodedFrame>> {
+    ) -> Result<(Vec<MediaFoundationEncodedFrame>, bool)> {
         if self.input_credits > 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), true));
         }
         let deadline = Instant::now() + timeout;
         let mut output = Vec::new();
@@ -931,7 +1027,7 @@ impl MediaFoundationH264Encoder {
             match self.next_event()? {
                 Some(event_type) if event_type == METransformNeedInput.0 as u32 => {
                     self.input_credits = self.input_credits.saturating_add(1);
-                    return Ok(output);
+                    return Ok((output, true));
                 }
                 Some(event_type) if event_type == METransformHaveOutput.0 as u32 => {
                     output.push(self.process_one_output()?);
@@ -940,13 +1036,7 @@ impl MediaFoundationH264Encoder {
                 None => thread::sleep(EVENT_POLL_INTERVAL),
             }
         }
-        bail!(
-            "Media Foundation probe stage=need-input encoder={:?} input={} profile={}: no input credit within {}ms",
-            self.identity,
-            self.input_subtype.label(),
-            self.config.profile_label(),
-            timeout.as_millis()
-        )
+        Ok((output, false))
     }
 
     fn wait_for_d3d11_surface(

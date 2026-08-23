@@ -145,6 +145,282 @@ impl PreviewTransportCounters {
 /// into every emitted [`DiagnosticStats`] by [`apply_runtime_resource_snapshot`].
 pub static PREVIEW_POLL_COUNTS: PreviewTransportCounters = PreviewTransportCounters::new();
 
+/// Which kind of frame a bridge writer tick fed to its encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeInputKind {
+    Fresh,
+    Repeated,
+    Synthetic,
+}
+
+/// Bounded sample window for the Media Foundation input-credit wait P95.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const MF_INPUT_CREDIT_WAIT_SAMPLE_LIMIT: usize = 1024;
+
+/// Process-global per-stage frame counters for the ACTIVE capture session,
+/// reset at every session start. The record compositor loop, the
+/// recording-leg bridge writer thread, and the Media Foundation encoder each
+/// bump their own stage; the stop path reads one snapshot into
+/// [`DiagnosticStats`] and the `recording-frame-accounting` health event.
+/// Relaxed atomics on the hot paths; no lock is taken per frame except the
+/// bounded MF wait sample push, which only the Windows writer thread does.
+/// Const-constructible, so it needs no runtime init.
+#[derive(Debug)]
+pub struct RecordingFrameAccounting {
+    compositor_ticks: AtomicU64,
+    compositor_tick_skipped: AtomicU64,
+    bridge_fresh_frames: AtomicU64,
+    bridge_repeated_frames: AtomicU64,
+    bridge_synthetic_frames: AtomicU64,
+    mf_submitted_frames: AtomicU64,
+    mf_input_credit_timeouts: AtomicU64,
+    mf_input_credit_wait_ms: std::sync::Mutex<Vec<f64>>,
+}
+
+/// One scalar read of [`RecordingFrameAccounting`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RecordingFrameAccountingSnapshot {
+    pub compositor_ticks: u64,
+    pub compositor_tick_skipped: u64,
+    pub bridge_fresh_frames: u64,
+    pub bridge_repeated_frames: u64,
+    pub bridge_synthetic_frames: u64,
+    pub mf_submitted_frames: u64,
+    pub mf_input_credit_timeouts: u64,
+    pub mf_input_credit_wait_p95_ms: Option<f64>,
+}
+
+impl RecordingFrameAccounting {
+    const fn new() -> Self {
+        Self {
+            compositor_ticks: AtomicU64::new(0),
+            compositor_tick_skipped: AtomicU64::new(0),
+            bridge_fresh_frames: AtomicU64::new(0),
+            bridge_repeated_frames: AtomicU64::new(0),
+            bridge_synthetic_frames: AtomicU64::new(0),
+            mf_submitted_frames: AtomicU64::new(0),
+            mf_input_credit_timeouts: AtomicU64::new(0),
+            mf_input_credit_wait_ms: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Session start: every stage counts from zero for the new session.
+    pub fn reset(&self) {
+        self.compositor_ticks.store(0, Ordering::Relaxed);
+        self.compositor_tick_skipped.store(0, Ordering::Relaxed);
+        self.bridge_fresh_frames.store(0, Ordering::Relaxed);
+        self.bridge_repeated_frames.store(0, Ordering::Relaxed);
+        self.bridge_synthetic_frames.store(0, Ordering::Relaxed);
+        self.mf_submitted_frames.store(0, Ordering::Relaxed);
+        self.mf_input_credit_timeouts.store(0, Ordering::Relaxed);
+        if let Ok(mut samples) = self.mf_input_credit_wait_ms.lock() {
+            samples.clear();
+        }
+    }
+
+    /// One record/stream compositor render tick, plus the whole frame
+    /// intervals the loop missed since its previous tick.
+    pub fn record_compositor_tick(&self, skipped_intervals: u64) {
+        self.compositor_ticks.fetch_add(1, Ordering::Relaxed);
+        if skipped_intervals > 0 {
+            self.compositor_tick_skipped
+                .fetch_add(skipped_intervals, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_bridge_input(&self, kind: BridgeInputKind) {
+        let counter = match kind {
+            BridgeInputKind::Fresh => &self.bridge_fresh_frames,
+            BridgeInputKind::Repeated => &self.bridge_repeated_frames,
+            BridgeInputKind::Synthetic => &self.bridge_synthetic_frames,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn record_mf_submitted_frame(&self) {
+        self.mf_submitted_frames.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn record_mf_input_credit_timeout(&self) {
+        self.mf_input_credit_timeouts
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn record_mf_input_credit_wait(&self, waited: Duration) {
+        if let Ok(mut samples) = self.mf_input_credit_wait_ms.lock() {
+            if samples.len() >= MF_INPUT_CREDIT_WAIT_SAMPLE_LIMIT {
+                let overflow = samples.len() + 1 - MF_INPUT_CREDIT_WAIT_SAMPLE_LIMIT;
+                samples.drain(0..overflow);
+            }
+            samples.push(waited.as_secs_f64() * 1000.0);
+        }
+    }
+
+    pub fn snapshot(&self) -> RecordingFrameAccountingSnapshot {
+        let mf_input_credit_wait_p95_ms = self
+            .mf_input_credit_wait_ms
+            .lock()
+            .ok()
+            .and_then(|samples| percentile_ms(&samples, 0.95));
+        RecordingFrameAccountingSnapshot {
+            compositor_ticks: self.compositor_ticks.load(Ordering::Relaxed),
+            compositor_tick_skipped: self.compositor_tick_skipped.load(Ordering::Relaxed),
+            bridge_fresh_frames: self.bridge_fresh_frames.load(Ordering::Relaxed),
+            bridge_repeated_frames: self.bridge_repeated_frames.load(Ordering::Relaxed),
+            bridge_synthetic_frames: self.bridge_synthetic_frames.load(Ordering::Relaxed),
+            mf_submitted_frames: self.mf_submitted_frames.load(Ordering::Relaxed),
+            mf_input_credit_timeouts: self.mf_input_credit_timeouts.load(Ordering::Relaxed),
+            mf_input_credit_wait_p95_ms,
+        }
+    }
+}
+
+fn percentile_ms(samples: &[f64], percentile: f64) -> Option<f64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rank = ((sorted.len() as f64 - 1.0) * percentile).round() as usize;
+    sorted.get(rank.min(sorted.len() - 1)).copied()
+}
+
+/// The single process-wide instance. Reset by the recording start path and
+/// read into every emitted [`DiagnosticStats`] by [`apply_runtime_resource_snapshot`].
+pub static RECORDING_FRAME_ACCOUNTING: RecordingFrameAccounting = RecordingFrameAccounting::new();
+
+pub fn apply_recording_frame_accounting(
+    mut stats: DiagnosticStats,
+    accounting: RecordingFrameAccountingSnapshot,
+) -> DiagnosticStats {
+    stats.compositor_ticks = accounting.compositor_ticks;
+    stats.compositor_tick_skipped = accounting.compositor_tick_skipped;
+    stats.encoder_bridge_fresh_frames = accounting.bridge_fresh_frames;
+    stats.encoder_bridge_mf_submitted_frames = accounting.mf_submitted_frames;
+    stats.encoder_bridge_mf_input_credit_timeouts = accounting.mf_input_credit_timeouts;
+    stats.encoder_bridge_mf_input_credit_wait_p95_ms = accounting.mf_input_credit_wait_p95_ms;
+    stats
+}
+
+/// Session over: the Windows D3D11 media authority for `session_id` no longer
+/// exists, so its `live`/`draining` state and fallback reason must not stay
+/// pinned to the idle diagnostics until the next session. A snapshot that
+/// already belongs to a different session is left untouched.
+pub fn apply_windows_d3d11_media_session_end(
+    mut stats: DiagnosticStats,
+    session_id: &str,
+) -> DiagnosticStats {
+    if stats.session_id.as_deref() != Some(session_id) {
+        return stats;
+    }
+    stats.windows_d3d11_media.state = crate::protocol::WindowsD3d11MediaState::Unavailable;
+    stats.windows_d3d11_media.fallback_reason = None;
+    stats.windows_d3d11_media.generation = None;
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
+fn format_optional_fps(value: Option<f64>) -> String {
+    value
+        .filter(|value| value.is_finite())
+        .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1}"))
+}
+
+fn format_optional_ms(value: Option<f64>) -> String {
+    value
+        .filter(|value| value.is_finite())
+        .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1}ms"))
+}
+
+fn format_optional_count(value: Option<u64>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+}
+
+fn estimated_frames(fps: Option<f64>, duration_ms: i64) -> Option<u64> {
+    let fps = fps.filter(|fps| fps.is_finite() && *fps > 0.0)?;
+    if duration_ms <= 0 {
+        return None;
+    }
+    Some((fps * duration_ms as f64 / 1000.0).round() as u64)
+}
+
+/// One-line per-stage frame accounting for the `recording-frame-accounting`
+/// health event emitted at session stop. Pure: reads the final
+/// [`DiagnosticStats`] snapshot only, so the next support bundle shows WHERE
+/// the target cadence was lost (capture -> compositor -> bridge -> encoder).
+pub fn format_recording_frame_accounting(stats: &DiagnosticStats, duration_ms: i64) -> String {
+    let duration_s = duration_ms.max(0) as f64 / 1000.0;
+    let bridge_input = stats
+        .encoder_bridge_fresh_frames
+        .saturating_add(stats.encoder_bridge_repeated_frames)
+        .saturating_add(stats.encoder_bridge_synthetic_frames);
+    let mut parts = vec![
+        format!(
+            "duration {duration_s:.1}s @ target {} fps (~{} frames)",
+            format_optional_fps(stats.target_fps),
+            format_optional_count(estimated_frames(stats.target_fps, duration_ms))
+        ),
+        format!(
+            "captured: screen {} fps (~{}), camera {} fps (~{})",
+            format_optional_fps(stats.preview_screen_source_fps),
+            format_optional_count(estimated_frames(
+                stats.preview_screen_source_fps,
+                duration_ms
+            )),
+            format_optional_fps(stats.preview_camera_source_fps),
+            format_optional_count(estimated_frames(
+                stats.preview_camera_source_fps,
+                duration_ms
+            ))
+        ),
+        format!(
+            "compositor: {} ticks, {} intervals skipped, render {} fps, {} dropped, {} cpu, {} cpu-fallback",
+            stats.compositor_ticks,
+            stats.compositor_tick_skipped,
+            format_optional_fps(stats.render_fps),
+            stats.preview_dropped_frames,
+            stats.compositor_cpu_frames,
+            stats.compositor_cpu_fallback_frames
+        ),
+        format!(
+            "bridge input: {bridge_input} ({} fresh, {} repeat, {} synthetic) at {} fps",
+            stats.encoder_bridge_fresh_frames,
+            stats.encoder_bridge_repeated_frames,
+            stats.encoder_bridge_synthetic_frames,
+            format_optional_fps(stats.encoder_bridge_input_fps)
+        ),
+        format!(
+            "submitted: {} (mf {}), coalesced-dropped {}, encoder-dropped {}",
+            stats
+                .encoder_bridge_zero_copy_frames
+                .saturating_add(stats.encoder_bridge_raw_video_copied_frames),
+            stats.encoder_bridge_mf_submitted_frames,
+            stats.encoder_bridge_output_queue_dropped_frames,
+            stats.encoder_bridge_dropped_frames
+        ),
+        format!(
+            "encoded output: {} frames ({} bytes, {} errors)",
+            stats.encoder_bridge_encoded_output_frames,
+            stats.encoder_bridge_encoded_output_bytes,
+            stats.encoder_bridge_encoded_output_errors
+        ),
+    ];
+    if stats.encoder_bridge_mf_submitted_frames > 0
+        || stats.encoder_bridge_mf_input_credit_timeouts > 0
+        || stats.encoder_bridge_mf_input_credit_wait_p95_ms.is_some()
+    {
+        parts.push(format!(
+            "mf input credit: wait p95 {}, {} timeouts",
+            format_optional_ms(stats.encoder_bridge_mf_input_credit_wait_p95_ms),
+            stats.encoder_bridge_mf_input_credit_timeouts
+        ));
+    }
+    format!("Frame accounting: {}.", parts.join("; "))
+}
+
 pub fn idle_diagnostics() -> DiagnosticStats {
     DiagnosticStats {
         session_id: None,
@@ -257,7 +533,14 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         encode_backend: None,
         compositor_backend: None,
         compositor_fallback_reason: None,
+        compositor_cpu_frames: 0,
         compositor_cpu_fallback_frames: 0,
+        compositor_ticks: 0,
+        compositor_tick_skipped: 0,
+        encoder_bridge_fresh_frames: 0,
+        encoder_bridge_mf_submitted_frames: 0,
+        encoder_bridge_mf_input_credit_timeouts: 0,
+        encoder_bridge_mf_input_credit_wait_p95_ms: None,
         windows_d3d11_media: Default::default(),
         websocket_transport: Default::default(),
         preview_image_poll_counts: PreviewImagePollCounts::default(),
@@ -428,6 +711,7 @@ pub fn apply_runtime_resource_snapshot(mut stats: DiagnosticStats) -> Diagnostic
     let snapshot = runtime_resource_sampler().snapshot();
     apply_runtime_resource_snapshot_value(&mut stats, snapshot);
     stats.preview_image_poll_counts = PREVIEW_POLL_COUNTS.snapshot();
+    let mut stats = apply_recording_frame_accounting(stats, RECORDING_FRAME_ACCOUNTING.snapshot());
     let (at_risk, reasons) = classify_recording_risk(&stats);
     stats.recording_at_risk = at_risk;
     stats.recording_risk_reasons = reasons;
@@ -1240,6 +1524,28 @@ pub fn apply_preview_surface_resize(
     stats
 }
 
+/// Cumulative CPU-rendered frames of one compositor run, split by meaning:
+/// `cpu` is the platform's expected path (no GPU compositor exists off macOS)
+/// and never a fault; `fallback` means a GPU compositor was expected and not
+/// reached. Windows used to count every frame as `fallback`, so a healthy
+/// session read as degraded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompositorCpuFrameCounts {
+    pub cpu: u64,
+    pub fallback: u64,
+}
+
+impl CompositorCpuFrameCounts {
+    /// Attribute one published frame to its CPU bucket (GPU frames count nowhere).
+    pub fn record(&mut self, backend: CompositorBackend) {
+        match backend {
+            CompositorBackend::Cpu => self.cpu = self.cpu.saturating_add(1),
+            CompositorBackend::CpuFallback => self.fallback = self.fallback.saturating_add(1),
+            CompositorBackend::Metal | CompositorBackend::D3d11 => {}
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn apply_compositor_stats(
     mut stats: DiagnosticStats,
@@ -1248,7 +1554,7 @@ pub fn apply_compositor_stats(
     preview_surface_backing: PreviewSurfaceBacking,
     compositor_backend: CompositorBackend,
     compositor_fallback_reason: Option<String>,
-    compositor_cpu_fallback_frames: u64,
+    compositor_cpu_frame_counts: CompositorCpuFrameCounts,
     render_fps: f64,
     frame_age_ms: u64,
     repeated_frames: u64,
@@ -1268,7 +1574,8 @@ pub fn apply_compositor_stats(
     }
     stats.compositor_backend = Some(compositor_backend);
     stats.compositor_fallback_reason = compositor_fallback_reason;
-    stats.compositor_cpu_fallback_frames = compositor_cpu_fallback_frames;
+    stats.compositor_cpu_frames = compositor_cpu_frame_counts.cpu;
+    stats.compositor_cpu_fallback_frames = compositor_cpu_frame_counts.fallback;
     stats
         .preview_source_fps
         .insert("synthetic-compositor".to_string(), render_fps);
@@ -2080,7 +2387,10 @@ mod tests {
             PreviewSurfaceBacking::ElectronBrowserWindow,
             CompositorBackend::CpuFallback,
             Some("VIDEORC_METAL_COMPOSITOR disabled".to_string()),
-            12,
+            CompositorCpuFrameCounts {
+                cpu: 0,
+                fallback: 12,
+            },
             29.9,
             17,
             0,
@@ -2099,10 +2409,171 @@ mod tests {
             Some("VIDEORC_METAL_COMPOSITOR disabled")
         );
         assert_eq!(stats.compositor_cpu_fallback_frames, 12);
+        assert_eq!(stats.compositor_cpu_frames, 0);
         assert_eq!(
             stats.preview_surface_backing,
             PreviewSurfaceBacking::ElectronBrowserWindow
         );
+    }
+
+    #[test]
+    fn compositor_cpu_frame_counts_split_expected_cpu_from_fallback() {
+        // Windows has no GPU compositor: its CPU frames are the expected path
+        // and must never land in the fallback (fault) bucket. GPU frames
+        // count nowhere.
+        let mut counts = CompositorCpuFrameCounts::default();
+        counts.record(CompositorBackend::Cpu);
+        counts.record(CompositorBackend::Cpu);
+        counts.record(CompositorBackend::CpuFallback);
+        counts.record(CompositorBackend::Metal);
+        counts.record(CompositorBackend::D3d11);
+        assert_eq!(
+            counts,
+            CompositorCpuFrameCounts {
+                cpu: 2,
+                fallback: 1
+            }
+        );
+
+        let stats = apply_compositor_stats(
+            idle_diagnostics(),
+            60,
+            PreviewTransport::Unavailable,
+            PreviewSurfaceBacking::None,
+            CompositorBackend::Cpu,
+            None,
+            counts,
+            59.5,
+            17,
+            0,
+            0,
+            4.0,
+            8.0,
+            12.0,
+        );
+        assert_eq!(stats.compositor_cpu_frames, 2);
+        assert_eq!(stats.compositor_cpu_fallback_frames, 1);
+    }
+
+    #[test]
+    fn windows_d3d11_media_session_end_resets_only_the_ended_session() {
+        let mut stats = starting_diagnostics("session-a", 60, "record");
+        stats.windows_d3d11_media.state = crate::protocol::WindowsD3d11MediaState::Draining;
+        stats.windows_d3d11_media.fallback_reason = Some("encoder stalled".to_string());
+        stats.windows_d3d11_media.generation = Some(7);
+        stats.windows_d3d11_media.texture_import_frames = 120;
+
+        // A different session's snapshot is not ours to clear.
+        let untouched = apply_windows_d3d11_media_session_end(stats.clone(), "session-b");
+        assert_eq!(
+            untouched.windows_d3d11_media.state,
+            crate::protocol::WindowsD3d11MediaState::Draining
+        );
+        assert_eq!(untouched.windows_d3d11_media.generation, Some(7));
+
+        let ended = apply_windows_d3d11_media_session_end(stats, "session-a");
+        assert_eq!(
+            ended.windows_d3d11_media.state,
+            crate::protocol::WindowsD3d11MediaState::Unavailable
+        );
+        assert_eq!(ended.windows_d3d11_media.fallback_reason, None);
+        assert_eq!(ended.windows_d3d11_media.generation, None);
+        // Session counters stay readable after stop; only the live identity goes.
+        assert_eq!(ended.windows_d3d11_media.texture_import_frames, 120);
+    }
+
+    #[test]
+    fn recording_frame_accounting_counters_reset_and_snapshot() {
+        let accounting = RecordingFrameAccounting::new();
+        accounting.record_compositor_tick(0);
+        accounting.record_compositor_tick(2);
+        accounting.record_bridge_input(BridgeInputKind::Fresh);
+        accounting.record_bridge_input(BridgeInputKind::Repeated);
+        accounting.record_bridge_input(BridgeInputKind::Repeated);
+        accounting.record_bridge_input(BridgeInputKind::Synthetic);
+        accounting.record_mf_submitted_frame();
+        accounting.record_mf_input_credit_timeout();
+        for wait_ms in [1.0, 2.0, 3.0, 4.0, 50.0] {
+            accounting.record_mf_input_credit_wait(Duration::from_secs_f64(wait_ms / 1000.0));
+        }
+        let snapshot = accounting.snapshot();
+        assert_eq!(snapshot.compositor_ticks, 2);
+        assert_eq!(snapshot.compositor_tick_skipped, 2);
+        assert_eq!(snapshot.bridge_fresh_frames, 1);
+        assert_eq!(snapshot.bridge_repeated_frames, 2);
+        assert_eq!(snapshot.bridge_synthetic_frames, 1);
+        assert_eq!(snapshot.mf_submitted_frames, 1);
+        assert_eq!(snapshot.mf_input_credit_timeouts, 1);
+        assert_eq!(snapshot.mf_input_credit_wait_p95_ms, Some(50.0));
+
+        accounting.reset();
+        assert_eq!(
+            accounting.snapshot(),
+            RecordingFrameAccountingSnapshot::default()
+        );
+
+        // The wait window stays bounded under a long session.
+        for _ in 0..(MF_INPUT_CREDIT_WAIT_SAMPLE_LIMIT * 2) {
+            accounting.record_mf_input_credit_wait(Duration::from_millis(1));
+        }
+        assert_eq!(
+            accounting.mf_input_credit_wait_ms.lock().unwrap().len(),
+            MF_INPUT_CREDIT_WAIT_SAMPLE_LIMIT
+        );
+    }
+
+    #[test]
+    fn recording_frame_accounting_message_names_every_stage() {
+        let mut stats = starting_diagnostics("session-a", 60, "record");
+        stats.preview_screen_source_fps = Some(59.0);
+        stats.preview_camera_source_fps = None;
+        stats.render_fps = Some(32.0);
+        stats.encoder_bridge_input_fps = Some(17.7);
+        stats.encoder_bridge_repeated_frames = 3;
+        stats.encoder_bridge_synthetic_frames = 0;
+        stats.encoder_bridge_zero_copy_frames = 119;
+        stats.encoder_bridge_output_queue_dropped_frames = 0;
+        stats.encoder_bridge_dropped_frames = 0;
+        stats.encoder_bridge_encoded_output_frames = 119;
+        stats.encoder_bridge_encoded_output_bytes = 4_096;
+        stats.compositor_cpu_frames = 214;
+        let stats = apply_recording_frame_accounting(
+            stats,
+            RecordingFrameAccountingSnapshot {
+                compositor_ticks: 214,
+                compositor_tick_skipped: 188,
+                bridge_fresh_frames: 116,
+                bridge_repeated_frames: 3,
+                bridge_synthetic_frames: 0,
+                mf_submitted_frames: 119,
+                mf_input_credit_timeouts: 2,
+                mf_input_credit_wait_p95_ms: Some(12.5),
+            },
+        );
+
+        let message = format_recording_frame_accounting(&stats, 6_700);
+        assert_eq!(
+            message,
+            "Frame accounting: duration 6.7s @ target 60.0 fps (~402 frames); \
+             captured: screen 59.0 fps (~395), camera n/a fps (~n/a); \
+             compositor: 214 ticks, 188 intervals skipped, render 32.0 fps, 0 dropped, 214 cpu, 0 cpu-fallback; \
+             bridge input: 119 (116 fresh, 3 repeat, 0 synthetic) at 17.7 fps; \
+             submitted: 119 (mf 119), coalesced-dropped 0, encoder-dropped 0; \
+             encoded output: 119 frames (4096 bytes, 0 errors); \
+             mf input credit: wait p95 12.5ms, 2 timeouts."
+        );
+
+        // Without a Media Foundation encoder (macOS) the MF clause is omitted
+        // rather than printing zeros that read like a measurement.
+        let macos = apply_recording_frame_accounting(
+            starting_diagnostics("session-b", 30, "record"),
+            RecordingFrameAccountingSnapshot::default(),
+        );
+        let message = format_recording_frame_accounting(&macos, 0);
+        assert!(
+            message.starts_with("Frame accounting: duration 0.0s @ target 30.0 fps (~n/a frames);")
+        );
+        assert!(!message.contains("mf input credit"));
     }
 
     #[test]
@@ -2351,7 +2822,7 @@ mod tests {
             PreviewSurfaceBacking::ElectronBrowserWindow,
             CompositorBackend::Metal,
             None,
-            0,
+            CompositorCpuFrameCounts::default(),
             60.0,
             12,
             1,
@@ -2368,7 +2839,7 @@ mod tests {
             PreviewSurfaceBacking::None,
             CompositorBackend::Metal,
             None,
-            0,
+            CompositorCpuFrameCounts::default(),
             60.0,
             13,
             3,

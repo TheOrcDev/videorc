@@ -1205,7 +1205,14 @@ const idleDiagnosticStats = (): DiagnosticStats => ({
   encoderBridgeStreamVideoToolboxFifoEnqueueP95Ms: undefined,
   encoderBridgeRecordingVideoToolboxFifoEnqueueMaxMs: undefined,
   encoderBridgeStreamVideoToolboxFifoEnqueueMaxMs: undefined,
+  compositorCpuFrames: 0,
   compositorCpuFallbackFrames: 0,
+  compositorTicks: 0,
+  compositorTickSkipped: 0,
+  encoderBridgeFreshFrames: 0,
+  encoderBridgeMfSubmittedFrames: 0,
+  encoderBridgeMfInputCreditTimeouts: 0,
+  encoderBridgeMfInputCreditWaitP95Ms: undefined,
   websocketTransport: {
     reliableResponseQueue: {
       currentDepth: 0,
