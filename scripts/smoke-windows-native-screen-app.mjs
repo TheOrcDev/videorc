@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -348,6 +348,35 @@ try {
     )
   }
 } finally {
+  let evidenceDiagnostics = null
+  try {
+    if (ws) {
+      evidenceDiagnostics = await request(ws, 10_000, 'diagnostics.stats')
+    }
+  } catch {
+    // Best effort only; the original failure must keep propagating.
+  }
+  try {
+    writeFileSync(
+      join(outputDirectory, 'native-screen-diagnostics-evidence.json'),
+      JSON.stringify(
+        {
+          includeCamera,
+          video,
+          requireDirectD3D11Recording,
+          d3d11Monitor: bmpEvidence,
+          finalDiagnostics: evidenceDiagnostics,
+          cameraEvidence,
+          recordingEvidence,
+          collectorHardFailures
+        },
+        null,
+        2
+      )
+    )
+  } catch (error) {
+    console.log(`Windows native screen smoke could not retain diagnostics evidence: ${error}`)
+  }
   if (ws) {
     if (includeCamera) {
       try {
@@ -716,19 +745,19 @@ async function monitorD3d11DuringRecording(ws, durationMs) {
   while (Date.now() - startedAt < durationMs) {
     const diagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
     assertD3d11Diagnostics(diagnostics, { requireOutput: false })
-    samples.push(diagnostics.windowsD3d11Media)
+    samples.push({
+      elapsedMs: Date.now() - startedAt,
+      media: diagnostics.windowsD3d11Media
+    })
     await sleep(Math.min(250, Math.max(1, durationMs - (Date.now() - startedAt))))
   }
   const first = samples[0] ?? {}
   const last = samples.at(-1) ?? {}
-  const textureAdvances = Math.max(
-    0,
-    Number(last.textureImportFrames ?? 0) - Number(first.textureImportFrames ?? 0)
-  )
-  const encoderAdvances = Math.max(
-    0,
-    Number(last.encoderGpuSamples ?? 0) - Number(first.encoderGpuSamples ?? 0)
-  )
+  const mediaAt = (sample) => sample?.media ?? {}
+  const counterDelta = (name) =>
+    Math.max(0, Number(mediaAt(last)[name] ?? 0) - Number(mediaAt(first)[name] ?? 0))
+  const textureAdvances = counterDelta('textureImportFrames')
+  const encoderAdvances = counterDelta('encoderGpuSamples')
   return {
     mode: 'disabled-d3d11',
     requests: 0,
@@ -737,7 +766,11 @@ async function monitorD3d11DuringRecording(ws, durationMs) {
     nonblankFrames: 0,
     sampleCount: samples.length,
     textureAdvances,
-    encoderAdvances
+    encoderAdvances,
+    texturePoolPressureEvents: counterDelta('texturePoolPressureEvents'),
+    previewPresents: counterDelta('previewPresents'),
+    synchronizationTimeouts: counterDelta('synchronizationTimeouts'),
+    samples
   }
 }
 
