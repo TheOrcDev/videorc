@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
 use crate::compositor_synthetic::SyntheticMovingSource;
 use crate::diagnostics::{
-    CompositorLiveSourceFetchStats, CompositorOutsideRenderTimingStats,
+    CompositorCpuFrameCounts, CompositorLiveSourceFetchStats, CompositorOutsideRenderTimingStats,
     CompositorSourceImportStats, apply_active_scene_revision,
     apply_compositor_live_source_fetch_stats, apply_compositor_outside_render_timing_stats,
     apply_compositor_source_import_stats, apply_compositor_stats, apply_compositor_timing_stats,
@@ -2004,6 +2004,28 @@ fn emit_runtime_diagnostics_event(state: &AppState, diagnostic_stats: Diagnostic
     }));
 }
 
+/// Windows record/stream compositor loops skip missed ticks instead of
+/// replaying them. The Windows CPU compositor renders 1080p60 below cadence
+/// (tester: 32 fps rendered for a 60 fps target); with `Delay` every late
+/// tick also shifts the whole schedule, so the bridge sees frames that are
+/// both late and bunched. `Skip` keeps the next tick on the wall-clock grid
+/// and the loss is counted honestly in `compositor_tick_skipped`. macOS keeps
+/// `Delay`: the Metal compositor holds cadence there and the preview
+/// smoothness gates were tuned against it (B5b, live feedback batch 3).
+#[cfg(target_os = "windows")]
+const WINDOWS_RECORD_COMPOSITOR_MISSED_TICK_BEHAVIOR: MissedTickBehavior = MissedTickBehavior::Skip;
+
+fn compositor_missed_tick_behavior(frame_consumer: CompositorFrameConsumer) -> MissedTickBehavior {
+    #[cfg(target_os = "windows")]
+    {
+        if frame_consumer.requires_cpu_fallback() {
+            return WINDOWS_RECORD_COMPOSITOR_MISSED_TICK_BEHAVIOR;
+        }
+    }
+    let _ = frame_consumer;
+    MissedTickBehavior::Delay
+}
+
 async fn run_synthetic_compositor_loop(
     state: AppState,
     params: CompositorRenderLoopParams,
@@ -2022,7 +2044,10 @@ async fn run_synthetic_compositor_loop(
     } = params;
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
     let mut ticker = tokio::time::interval(frame_interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ticker.set_missed_tick_behavior(compositor_missed_tick_behavior(frame_consumer));
+    // Only the record/stream compositor feeds the session's frame accounting;
+    // a preview-only loop must not inflate "ticks" for a session it never fed.
+    let accounts_session_frames = frame_consumer.requires_cpu_fallback();
     // Persisted GPU compositor (Some only on macOS when not disabled and a GPU exists);
     // built once and reused per frame. Held across the loop's awaits (it is Send).
     // Preview-owned compositors minify the scene into a small canvas; smooth
@@ -2063,7 +2088,7 @@ async fn run_synthetic_compositor_loop(
     let mut preview_surface_active = false;
     let mut latest_surface_status: Option<PreviewSurfaceStatus> = None;
     let mut latest_source_statuses: Vec<CompositorSourceStatus> = Vec::new();
-    let mut cpu_fallback_frames = 0_u64;
+    let mut cpu_frame_counts = CompositorCpuFrameCounts::default();
     let mut source_import_stats = CompositorSourceImportStats::default();
     let mut frame_pipeline = CompositorFramePipelineStatus {
         consumer: Some(frame_consumer.label().to_string()),
@@ -2079,6 +2104,7 @@ async fn run_synthetic_compositor_loop(
             }
             _ = ticker.tick() => {
                 let ticked_at = Instant::now();
+                let mut skipped_intervals = 0_u64;
                 if let Some(previous_tick_at) = previous_tick_at {
                     let tick_gap_ms =
                         ticked_at.duration_since(previous_tick_at).as_secs_f64() * 1000.0;
@@ -2086,10 +2112,15 @@ async fn run_synthetic_compositor_loop(
                     let expected_frames =
                         (tick_gap_ms / (frame_interval.as_secs_f64() * 1000.0)).floor() as u64;
                     if expected_frames > 1 {
-                        dropped_frames = dropped_frames.saturating_add(expected_frames - 1);
+                        skipped_intervals = expected_frames - 1;
+                        dropped_frames = dropped_frames.saturating_add(skipped_intervals);
                     }
                 }
                 previous_tick_at = Some(ticked_at);
+                if accounts_session_frames {
+                    crate::diagnostics::RECORDING_FRAME_ACCOUNTING
+                        .record_compositor_tick(skipped_intervals);
+                }
                 if ticked_at >= next_live_source_refresh_at {
                     let refresh_started_at = Instant::now();
                     live_sources = live_sources.refresh_sources_nonblocking(&state);
@@ -2128,12 +2159,7 @@ async fn run_synthetic_compositor_loop(
                     )
                         .await;
                 let fallback_frame_age_ms = published.fallback_frame_age_ms;
-                if matches!(
-                    published.compositor_backend,
-                    CompositorBackend::CpuFallback | CompositorBackend::Cpu
-                ) {
-                    cpu_fallback_frames = cpu_fallback_frames.saturating_add(1);
-                }
+                cpu_frame_counts.record(published.compositor_backend);
                 if is_repeated_compositor_frame(previous_fingerprint, published.fingerprint) {
                     repeated_frames = repeated_frames.saturating_add(1);
                 }
@@ -2326,7 +2352,7 @@ async fn run_synthetic_compositor_loop(
                             preview_surface_backing,
                             published.compositor_backend,
                             published.compositor_fallback_reason.clone(),
-                            cpu_fallback_frames,
+                            cpu_frame_counts,
                             measured_fps,
                             frame_age_ms,
                             repeated_frames,

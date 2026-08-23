@@ -565,6 +565,25 @@ enum BridgeFrameSource {
     SyntheticFallback,
 }
 
+impl BridgeFrameSource {
+    const fn accounting_kind(self) -> crate::diagnostics::BridgeInputKind {
+        match self {
+            Self::Fresh => crate::diagnostics::BridgeInputKind::Fresh,
+            Self::Repeated => crate::diagnostics::BridgeInputKind::Repeated,
+            Self::SyntheticFallback => crate::diagnostics::BridgeInputKind::Synthetic,
+        }
+    }
+}
+
+/// Steady-state cap for the bridge writer's Media Foundation input-credit
+/// wait: two frame intervals. A stalled MFT then costs one skipped (counted)
+/// frame instead of freezing the CFR schedule for the encoder's 3 s event
+/// timeout (tester: 119 encoded frames in 6.7 s at 1080p60).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn media_foundation_writer_input_credit_timeout(target_fps: u32) -> Duration {
+    Duration::from_secs_f64(2.0 / f64::from(target_fps.max(1)))
+}
+
 /// Classify a tick from the sequence of the frame it fed versus the last fed sequence.
 /// A repeat means the compositor did not publish a new frame before the encoder's CFR
 /// deadline, so the previous frame's bytes are encoded again as a duplicate.
@@ -1268,6 +1287,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     #[cfg(not(target_os = "windows"))]
     let direct_d3d11_enabled = false;
     let output_queue_policy = encoder_bridge_output_queue_policy(diagnostics_context);
+    // Only the recording leg (or the shared leg) feeds the session's frame
+    // accounting; a dedicated stream writer must not double-count it.
+    let accounts_session_frames = output_queue_policy.role != EncoderBridgeOutputRole::Stream;
     let fifo = match open_recording_fifo_writer(&fifo_path, &stop, true) {
         Ok(fifo) => fifo,
         Err(error) => {
@@ -1377,7 +1399,13 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             None => MediaFoundationH264Encoder::new(config),
         };
         let encoder = match encoder_result {
-            Ok(encoder) => encoder,
+            Ok(mut encoder) => {
+                encoder.configure_for_bridge_writer(
+                    media_foundation_writer_input_credit_timeout(target_fps),
+                    accounts_session_frames,
+                );
+                encoder
+            }
             Err(error) => {
                 let error = record_encoder_bridge_terminal_failure(
                     &terminal_failure,
@@ -2037,6 +2065,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         let direct_sequence = None;
         let current_sequence = direct_sequence.or_else(|| fed.as_ref().map(|frame| frame.sequence));
         let frame_source = classify_bridge_frame(last_fed_sequence, current_sequence);
+        if accounts_session_frames {
+            crate::diagnostics::RECORDING_FRAME_ACCOUNTING
+                .record_bridge_input(frame_source.accounting_kind());
+        }
         match frame_source {
             BridgeFrameSource::SyntheticFallback => {
                 synthetic_fallback_frames = synthetic_fallback_frames.saturating_add(1);
@@ -5247,6 +5279,40 @@ fn frame_count(duration_ms: u64, fps: u32) -> u64 {
 mod tests {
     use super::*;
     use crate::diagnostics::idle_diagnostics;
+
+    #[test]
+    fn media_foundation_writer_input_credit_cap_is_two_frame_intervals() {
+        assert_eq!(
+            media_foundation_writer_input_credit_timeout(60),
+            Duration::from_secs_f64(2.0 / 60.0)
+        );
+        assert_eq!(
+            media_foundation_writer_input_credit_timeout(30),
+            Duration::from_secs_f64(2.0 / 30.0)
+        );
+        // A zero target can never produce an infinite wait.
+        assert_eq!(
+            media_foundation_writer_input_credit_timeout(0),
+            Duration::from_secs(2)
+        );
+    }
+
+    #[test]
+    fn bridge_frame_sources_map_onto_session_accounting_kinds() {
+        use crate::diagnostics::BridgeInputKind;
+        assert_eq!(
+            BridgeFrameSource::Fresh.accounting_kind(),
+            BridgeInputKind::Fresh
+        );
+        assert_eq!(
+            BridgeFrameSource::Repeated.accounting_kind(),
+            BridgeInputKind::Repeated
+        );
+        assert_eq!(
+            BridgeFrameSource::SyntheticFallback.accounting_kind(),
+            BridgeInputKind::Synthetic
+        );
+    }
 
     #[test]
     fn diagnostics_channel_is_latest_wins_without_losing_terminal_error() {

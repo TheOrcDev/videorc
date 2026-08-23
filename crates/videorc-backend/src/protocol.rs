@@ -1791,9 +1791,37 @@ pub struct DiagnosticStats {
     /// Reason the shared compositor had to use CPU fallback.
     #[serde(default)]
     pub compositor_fallback_reason: Option<String>,
-    /// Cumulative frames rendered by CPU fallback during the active compositor run.
+    /// Cumulative frames rendered by the CPU compositor as the platform's
+    /// expected path (no GPU compositor exists off macOS). Never a fault.
+    #[serde(default)]
+    pub compositor_cpu_frames: u64,
+    /// Cumulative frames rendered by CPU FALLBACK during the active compositor
+    /// run: a GPU compositor was expected and not reached. Nonzero is a fault.
     #[serde(default)]
     pub compositor_cpu_fallback_frames: u64,
+    /// Cumulative render ticks of the active record/stream compositor run
+    /// (not the preview-only compositor). Frame accounting at stop.
+    #[serde(default)]
+    pub compositor_ticks: u64,
+    /// Cumulative frame intervals the record/stream compositor loop missed
+    /// entirely (ticks it was too late to render). Frame accounting at stop.
+    #[serde(default)]
+    pub compositor_tick_skipped: u64,
+    /// Recording-leg bridge writer ticks that fed a fresh compositor frame.
+    #[serde(default)]
+    pub encoder_bridge_fresh_frames: u64,
+    /// Frames the recording-leg bridge submitted to the Media Foundation
+    /// encoder (Windows only; zero elsewhere).
+    #[serde(default)]
+    pub encoder_bridge_mf_submitted_frames: u64,
+    /// Writer-thread Media Foundation input-credit waits that hit the
+    /// two-frame cap and skipped the frame instead of stalling the schedule.
+    #[serde(default)]
+    pub encoder_bridge_mf_input_credit_timeouts: u64,
+    /// P95 wall time the writer thread spent waiting for a Media Foundation
+    /// input credit (Windows only).
+    #[serde(default)]
+    pub encoder_bridge_mf_input_credit_wait_p95_ms: Option<f64>,
     /// Scalar-only state for the Windows D3D11 capture/compositor/presenter/MF
     /// authority. This remains present (with `unavailable`) on other platforms
     /// so support-bundle and renderer contracts stay deterministic.

@@ -2134,8 +2134,28 @@ export interface DiagnosticStats {
   compositorBackend?: CompositorBackend
   /** Why the compositor had to render on CPU fallback. */
   compositorFallbackReason?: string
-  /** Cumulative frames rendered by CPU fallback during the active compositor run. */
+  /**
+   * Cumulative frames rendered by the CPU compositor as the platform's expected path (no GPU
+   * compositor exists off macOS). Never a fault.
+   */
+  compositorCpuFrames: number
+  /**
+   * Cumulative frames rendered by CPU FALLBACK during the active compositor run: a GPU compositor
+   * was expected and not reached. Nonzero is a fault.
+   */
   compositorCpuFallbackFrames: number
+  /** Cumulative render ticks of the active record/stream compositor run (frame accounting). */
+  compositorTicks: number
+  /** Cumulative frame intervals the record/stream compositor loop missed entirely. */
+  compositorTickSkipped: number
+  /** Recording-leg bridge writer ticks that fed a fresh compositor frame. */
+  encoderBridgeFreshFrames: number
+  /** Frames the recording-leg bridge submitted to the Media Foundation encoder (Windows only). */
+  encoderBridgeMfSubmittedFrames: number
+  /** Writer-thread Media Foundation input-credit waits that hit the two-frame cap and skipped a frame. */
+  encoderBridgeMfInputCreditTimeouts: number
+  /** P95 wall time the writer thread spent waiting for a Media Foundation input credit (Windows only). */
+  encoderBridgeMfInputCreditWaitP95Ms?: number
   /** Scalar-only state for the Windows D3D11 media authority. */
   windowsD3d11Media?: WindowsD3d11MediaDiagnostics
   websocketTransport: WebSocketTransportDiagnosticStats

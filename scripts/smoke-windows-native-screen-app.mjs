@@ -787,8 +787,13 @@ function assertEncodedBridgeDiagnostics(
   if (requireOutput && !(diagnostics?.encoderBridgeEncodedOutputBytes > 0)) {
     failures.push(`encodedOutputBytes=${diagnostics?.encoderBridgeEncodedOutputBytes ?? 0}`)
   }
+  // Windows counts its expected CPU compositor frames under compositorCpuFrames (not a
+  // fault); the direct-D3D11 path must render NO CPU frames of either kind.
   if (requireNoCpuCompositor && (diagnostics?.compositorCpuFallbackFrames ?? 0) !== 0) {
     failures.push(`compositorCpuFallbackFrames=${diagnostics.compositorCpuFallbackFrames}`)
+  }
+  if (requireNoCpuCompositor && (diagnostics?.compositorCpuFrames ?? 0) !== 0) {
+    failures.push(`compositorCpuFrames=${diagnostics.compositorCpuFrames}`)
   }
   if (failures.length > 0) {
     const terminalError = diagnostics?.encoderBridgeError

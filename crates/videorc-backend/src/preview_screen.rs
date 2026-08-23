@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, TryLockError, mpsc as std_mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -198,16 +199,65 @@ impl PreviewScreenFrameSource {
 
     #[cfg(target_os = "windows")]
     pub fn begin_direct_d3d11_recording(&self) -> Option<PreviewScreenD3D11FrameSource> {
+        {
+            let guard = self
+                .shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.d3d11_frame_store.latest()?;
+        }
+        Some(PreviewScreenD3D11FrameSource {
+            shared: Arc::clone(&self.shared),
+            lease: PreviewScreenDirectD3d11ConsumerLease::acquire(&self.shared),
+        })
+    }
+}
+
+/// Refcount lease on the Windows Graphics Capture D3D11 frame store's
+/// direct-recording consumer. While held, the capture thread throttles its
+/// CPU preview readback (the recording reads textures directly). Released
+/// exactly once: explicitly by the recording stop path, or by `Drop` as the
+/// safety net when the bridge writer thread outlives stop. Releasing twice is
+/// a no-op, so the explicit release and the drop can both happen.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug)]
+pub struct PreviewScreenDirectD3d11ConsumerLease {
+    shared: Arc<StdMutex<PreviewScreenShared>>,
+    released: AtomicBool,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl PreviewScreenDirectD3d11ConsumerLease {
+    fn acquire(shared: &Arc<StdMutex<PreviewScreenShared>>) -> Arc<Self> {
+        {
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.direct_d3d11_consumers = guard.direct_d3d11_consumers.saturating_add(1);
+        }
+        Arc::new(Self {
+            shared: Arc::clone(shared),
+            released: AtomicBool::new(false),
+        })
+    }
+
+    /// Returns true only for the call that actually released the consumer.
+    pub fn release(&self) -> bool {
+        if self.released.swap(true, Ordering::AcqRel) {
+            return false;
+        }
         let mut guard = self
             .shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.d3d11_frame_store.latest()?;
-        guard.direct_d3d11_consumers = guard.direct_d3d11_consumers.saturating_add(1);
-        drop(guard);
-        Some(PreviewScreenD3D11FrameSource {
-            shared: Arc::clone(&self.shared),
-        })
+        guard.direct_d3d11_consumers = guard.direct_d3d11_consumers.saturating_sub(1);
+        true
+    }
+}
+
+impl Drop for PreviewScreenDirectD3d11ConsumerLease {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -215,6 +265,7 @@ impl PreviewScreenFrameSource {
 #[derive(Debug)]
 pub struct PreviewScreenD3D11FrameSource {
     shared: Arc<StdMutex<PreviewScreenShared>>,
+    lease: Arc<PreviewScreenDirectD3d11ConsumerLease>,
 }
 
 #[cfg(target_os = "windows")]
@@ -226,16 +277,11 @@ impl PreviewScreenD3D11FrameSource {
             .d3d11_frame_store
             .latest()
     }
-}
 
-#[cfg(target_os = "windows")]
-impl Drop for PreviewScreenD3D11FrameSource {
-    fn drop(&mut self) {
-        let mut guard = self
-            .shared
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.direct_d3d11_consumers = guard.direct_d3d11_consumers.saturating_sub(1);
+    /// A handle the recording stop path keeps so it can release the consumer
+    /// without waiting for the bridge writer (which owns `self`) to exit.
+    pub fn consumer_lease(&self) -> Arc<PreviewScreenDirectD3d11ConsumerLease> {
+        Arc::clone(&self.lease)
     }
 }
 
@@ -248,7 +294,10 @@ pub struct PreviewScreenShared {
     frame_store: FrameStore<PreviewScreenPixelFormat>,
     #[cfg(target_os = "windows")]
     d3d11_frame_store: FrameStore<PreviewScreenPixelFormat>,
-    #[cfg(target_os = "windows")]
+    /// Live direct-D3D11 recording consumers (see
+    /// [`PreviewScreenDirectD3d11ConsumerLease`]). Kept cfg-independent so
+    /// the lease's once-only release is unit-tested on every platform.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     direct_d3d11_consumers: usize,
     frames_captured: u64,
     dropped_frames: u64,
@@ -3335,6 +3384,37 @@ mod tests {
     use crate::protocol::{SourceSelection, VideoPreset};
     use crate::storage::Database;
     use tokio::sync::{broadcast, oneshot};
+
+    #[test]
+    fn direct_d3d11_consumer_lease_releases_exactly_once() {
+        let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+        let consumers = |shared: &Arc<StdMutex<PreviewScreenShared>>| {
+            shared.lock().unwrap().direct_d3d11_consumers
+        };
+        assert_eq!(consumers(&shared), 0);
+
+        let lease = PreviewScreenDirectD3d11ConsumerLease::acquire(&shared);
+        let stop_path_handle = Arc::clone(&lease);
+        assert_eq!(consumers(&shared), 1);
+
+        // The stop path releases without waiting for the writer thread.
+        assert!(stop_path_handle.release());
+        assert_eq!(consumers(&shared), 0);
+        // A second explicit release is a no-op, not an underflow.
+        assert!(!stop_path_handle.release());
+        assert_eq!(consumers(&shared), 0);
+
+        // The writer's handle dropping later (the safety net) changes nothing.
+        drop(stop_path_handle);
+        drop(lease);
+        assert_eq!(consumers(&shared), 0);
+
+        // Drop alone still releases when nobody called release explicitly.
+        let orphan = PreviewScreenDirectD3d11ConsumerLease::acquire(&shared);
+        assert_eq!(consumers(&shared), 1);
+        drop(orphan);
+        assert_eq!(consumers(&shared), 0);
+    }
 
     #[test]
     fn backing_scale_clamps_to_shipping_range() {

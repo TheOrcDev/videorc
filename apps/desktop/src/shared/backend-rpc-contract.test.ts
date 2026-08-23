@@ -737,6 +737,15 @@ describe('backend RPC contract', () => {
     const diagnostics = {
       skippedFrames: 0,
       droppedFrames: 2,
+      compositorBackend: 'cpu',
+      compositorCpuFrames: 214,
+      compositorCpuFallbackFrames: 0,
+      compositorTicks: 214,
+      compositorTickSkipped: 188,
+      encoderBridgeFreshFrames: 116,
+      encoderBridgeMfSubmittedFrames: 119,
+      encoderBridgeMfInputCreditTimeouts: 2,
+      encoderBridgeMfInputCreditWaitP95Ms: 12.5,
       previewImagePollCounts: {
         cameraPng: 0,
         screenPng: 0,
@@ -752,6 +761,15 @@ describe('backend RPC contract', () => {
     expect(() => validateBackendRpcResult('diagnostics.stats', { skippedFrames: -1 })).toThrow(
       'diagnostics.stats'
     )
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', { ...diagnostics, compositorCpuFrames: -1 })
+    ).toThrow('compositorCpuFrames')
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...diagnostics,
+        compositorTickSkipped: 1.5
+      })
+    ).toThrow('compositorTickSkipped')
     expect(() =>
       validateBackendRpcResult('diagnostics.stats', {
         ...diagnostics,

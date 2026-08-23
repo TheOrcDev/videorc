@@ -921,6 +921,13 @@ pub struct ActiveRecording {
     windows_d3d11_recovery: Option<WindowsD3d11RecoveryContext>,
     #[cfg(target_os = "windows")]
     windows_d3d11_preview_compositor_suspension: Option<PreviewCompositorSuspension>,
+    /// Stop-path handle for the direct-D3D11 screen consumer. The bridge
+    /// writer thread owns the frame source itself; releasing here at stop
+    /// un-throttles the CPU preview readback immediately instead of when that
+    /// thread finally exits (Drop stays the idempotent safety net).
+    #[cfg(target_os = "windows")]
+    direct_d3d11_consumer_lease:
+        Option<std::sync::Arc<crate::preview_screen::PreviewScreenDirectD3d11ConsumerLease>>,
     /// Authoritative, generation-scoped runtime state for this session's
     /// destinations. The stderr monitor updates this exact snapshot before
     /// publishing `stream.targets`, and polling RPCs clone it from the active
@@ -979,6 +986,8 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         windows_d3d11_recovery: None,
         #[cfg(target_os = "windows")]
         windows_d3d11_preview_compositor_suspension: None,
+        #[cfg(target_os = "windows")]
+        direct_d3d11_consumer_lease: None,
         stream_targets_snapshot: Arc::new(StdMutex::new(crate::streaming::StreamTargetsSnapshot {
             session_id: session_id.to_string(),
             targets: Vec::new(),
@@ -2211,6 +2220,9 @@ pub async fn start_session(
                 windows_d3d11_initial_diagnostics.fallback_reason.clone();
         }
     }
+    // Per-stage frame accounting counts from zero for this session (read
+    // back as one snapshot by the stop path).
+    crate::diagnostics::RECORDING_FRAME_ACCOUNTING.reset();
     {
         let mut diagnostics = state.diagnostics.lock().await;
         *diagnostics = initial_diagnostics.clone();
@@ -2338,6 +2350,10 @@ pub async fn start_session(
     };
     #[cfg(not(target_os = "windows"))]
     let direct_d3d11_recording_source = None;
+    #[cfg(target_os = "windows")]
+    let direct_d3d11_consumer_lease = direct_d3d11_recording_source
+        .as_ref()
+        .map(crate::preview_screen::PreviewScreenD3D11FrameSource::consumer_lease);
     if direct_d3d11_recording_source.is_some() {
         let direct_description = if cfg!(target_os = "windows")
             && matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera)
@@ -2820,6 +2836,8 @@ pub async fn start_session(
         windows_d3d11_recovery,
         #[cfg(target_os = "windows")]
         windows_d3d11_preview_compositor_suspension,
+        #[cfg(target_os = "windows")]
+        direct_d3d11_consumer_lease,
         stream_targets_snapshot: stream_targets_snapshot.clone(),
         captioned_copy_requested: session_caption_plan.captioned_copy,
         keep_original_media: params.output.keep_original_mkv,
@@ -3322,6 +3340,8 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
         }
         active.stop_requested = true;
     }
+    #[cfg(target_os = "windows")]
+    release_direct_d3d11_consumer(&state, active);
     if let Some(native_audio) = active.native_audio.as_ref() {
         native_audio.finish_recording_window();
     }
@@ -5370,6 +5390,9 @@ async fn monitor_session(
         // The pump must release the D3D generation before the suspended CPU
         // preview is eligible to restore its own compositor run.
         drop(active.windows_d3d11_media.take());
+        // Process exits that bypassed the stop RPC never reached the explicit
+        // release above; the lease is idempotent, so this is safe either way.
+        release_direct_d3d11_consumer(&state, &mut active);
         if let Some(suspension) = active.windows_d3d11_preview_compositor_suspension.take() {
             suspension.restore().await;
         }
@@ -5468,6 +5491,20 @@ async fn monitor_session(
     let ended_at = Utc::now().to_rfc3339();
     let duration_ms = recording_duration_ms(&monitored_recording.started_at, &ended_at);
     let final_diagnostics = final_session_diagnostics_snapshot(&state, &session_id).await;
+    // One INFO line per session naming every stage's frame count, so the next
+    // support bundle shows WHERE the target cadence was lost. Pure read of
+    // the final snapshot; no new locks on the stop path.
+    let _ = emit_health_event(
+        &state,
+        Some(&session_id),
+        HealthLevel::Info,
+        "recording-frame-accounting",
+        &crate::diagnostics::format_recording_frame_accounting(
+            &final_diagnostics,
+            duration_ms.unwrap_or(0),
+        ),
+    );
+    publish_windows_d3d11_media_session_end(&state, &session_id).await;
     let recording_bridge_terminal_failure = monitored_recording
         .recording_bridge_terminal_failure
         .clone();
@@ -9914,6 +9951,49 @@ impl WindowsD3d11FinalSnapshotPhase {
 
     fn permits_final_snapshot(self) -> bool {
         self == Self::MonitorJoined
+    }
+}
+
+/// Session over: the session's Windows D3D11 media authority is gone, so a
+/// `draining` (or `live`) snapshot must not stay pinned to the idle
+/// diagnostics until the next session starts. The final session snapshot
+/// was already taken and persisted; only the live diagnostics change here.
+async fn publish_windows_d3d11_media_session_end(state: &AppState, session_id: &str) {
+    let emitted = {
+        let mut diagnostics = state.diagnostics.lock().await;
+        if diagnostics.windows_d3d11_media.state
+            == crate::protocol::WindowsD3d11MediaState::Unavailable
+            && diagnostics.windows_d3d11_media.fallback_reason.is_none()
+        {
+            return;
+        }
+        let next = crate::diagnostics::apply_windows_d3d11_media_session_end(
+            diagnostics.clone(),
+            session_id,
+        );
+        if next == *diagnostics {
+            return;
+        }
+        *diagnostics = next.clone();
+        next
+    };
+    state.emit_event(
+        "diagnostics.stats",
+        apply_runtime_diagnostics_snapshot(emitted, state.ffmpeg_work.snapshot()),
+    );
+}
+
+/// Explicit stop-path release of the direct-D3D11 screen consumer. Idempotent:
+/// the bridge writer's own handle dropping later is a no-op afterwards.
+#[cfg(target_os = "windows")]
+fn release_direct_d3d11_consumer(state: &AppState, active: &mut ActiveRecording) {
+    if let Some(lease) = active.direct_d3d11_consumer_lease.take()
+        && lease.release()
+    {
+        state.emit_log(
+            "info",
+            "Released the direct D3D11 screen recording consumer at stop; CPU preview readback resumes at full rate.",
+        );
     }
 }
 
@@ -17104,6 +17184,8 @@ mod tests {
             windows_d3d11_recovery: None,
             #[cfg(target_os = "windows")]
             windows_d3d11_preview_compositor_suspension: None,
+            #[cfg(target_os = "windows")]
+            direct_d3d11_consumer_lease: None,
             stream_targets_snapshot: Arc::new(StdMutex::new(snapshot)),
             captioned_copy_requested: false,
             keep_original_media: false,
@@ -21762,6 +21844,8 @@ mod tests {
             windows_d3d11_recovery: None,
             #[cfg(target_os = "windows")]
             windows_d3d11_preview_compositor_suspension: None,
+            #[cfg(target_os = "windows")]
+            direct_d3d11_consumer_lease: None,
             stream_targets_snapshot: Arc::new(StdMutex::new(StreamTargetsSnapshot {
                 session_id: "live-audio-lock-test".to_string(),
                 targets: Vec::new(),
