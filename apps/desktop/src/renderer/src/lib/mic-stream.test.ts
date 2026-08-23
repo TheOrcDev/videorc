@@ -46,7 +46,17 @@ describe('createMicStreamController', () => {
     })
 
     await expect(controller.open('MacBook Pro Microphone')).resolves.toBe(stream)
-    expect(requested).toEqual([{ audio: { deviceId: { exact: 'mic-1' } }, video: false }])
+    expect(requested).toEqual([
+      {
+        audio: {
+          deviceId: { exact: 'mic-1' },
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
+        },
+        video: false
+      }
+    ])
   })
 
   it('falls back to the default input when the name cannot be matched', async () => {
@@ -61,7 +71,13 @@ describe('createMicStreamController', () => {
     })
 
     await expect(controller.open('Ghost Device')).resolves.toBe(stream)
-    expect(requested).toEqual([{ audio: true, video: false }])
+    // Processing stays off on the default input too: AGC would pump silence.
+    expect(requested).toEqual([
+      {
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        video: false
+      }
+    ])
   })
 
   it('resolves null without throwing when acquisition fails or media is missing', async () => {

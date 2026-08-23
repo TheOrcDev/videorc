@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { dbToMeterLevel } from './mic-meter'
 import {
+  advanceBandLevelsInto,
   createMicVisualFrameBuffer,
   createMicVisualPipeline,
   resampleMicVisualLevels,
   resampleMicVisualLevelsInto,
+  spectrumBandTargetsInto,
+  type MicVisualAnalyserLike,
   type MicVisualAudioContextLike,
   type MicVisualPipelineDependencies
 } from './mic-visual-pipeline'
@@ -13,16 +17,82 @@ type TestStream = {
   getTracks: () => Array<{ stop: () => void }>
 }
 
+const SAMPLE_RATE = 48_000
+const FFT_SIZE = 2048
+const BIN_COUNT = FFT_SIZE / 2
+const BIN_HZ = SAMPLE_RATE / FFT_SIZE
+const BAND_COUNT = 32
+
+/** Synthetic analyser content: a time-domain block plus a matching bin spectrum. */
+type AnalyserSignal = {
+  time: (index: number) => number
+  frequencyDb: (bin: number) => number
+}
+
+/** A pure sine at `hz` with peak amplitude `amplitude`, concentrated in one bin. */
+function sineSignal(amplitude: number, hz: number): AnalyserSignal {
+  const bin = Math.round(hz / BIN_HZ)
+  return {
+    time: (index) => amplitude * Math.sin((2 * Math.PI * hz * index) / SAMPLE_RATE),
+    // Any finite magnitude works: only the distribution is read from the FFT.
+    frequencyDb: (candidate) => (candidate === bin ? -13.6 : Number.NEGATIVE_INFINITY)
+  }
+}
+
+const SILENCE: AnalyserSignal = { time: () => 0, frequencyDb: () => Number.NEGATIVE_INFINITY }
+
+/** Index of the visual band that owns `hz` (same log spacing as the pipeline). */
+function bandFor(hz: number): number {
+  const ratio = Math.min(8000, SAMPLE_RATE / 2) / 80
+  return Math.min(BAND_COUNT - 1, Math.floor((Math.log(hz / 80) / Math.log(ratio)) * BAND_COUNT))
+}
+
+function fillFromSignal(signal: AnalyserSignal): {
+  frequency: Float32Array
+  time: Float32Array
+  rms: number
+} {
+  const frequency = new Float32Array(BIN_COUNT)
+  const time = new Float32Array(FFT_SIZE)
+  let sumSquares = 0
+  for (let bin = 0; bin < BIN_COUNT; bin += 1) frequency[bin] = signal.frequencyDb(bin)
+  for (let index = 0; index < FFT_SIZE; index += 1) {
+    time[index] = signal.time(index)
+    sumSquares += time[index] * time[index]
+  }
+  return { frequency, time, rms: Math.sqrt(sumSquares / FFT_SIZE) }
+}
+
+function bandTargets(signal: AnalyserSignal): number[] {
+  const { frequency, rms } = fillFromSignal(signal)
+  const targets: number[] = []
+  spectrumBandTargetsInto(
+    frequency,
+    rms,
+    SAMPLE_RATE,
+    FFT_SIZE,
+    targets,
+    new Float32Array(BIN_COUNT)
+  )
+  return targets
+}
+
 function pipelineHarness(): {
   dependencies: MicVisualPipelineDependencies<TestStream>
   getUserMedia: ReturnType<typeof vi.fn>
   contexts: Array<MicVisualAudioContextLike<TestStream> & { close: ReturnType<typeof vi.fn> }>
+  analysers: MicVisualAnalyserLike[]
   frames: Array<(at: number) => void>
   microtasks: Array<() => void>
   cancelFrame: ReturnType<typeof vi.fn>
   stoppedTracks: ReturnType<typeof vi.fn>
+  setSignal: (signal: AnalyserSignal) => void
 } {
   const stoppedTracks = vi.fn()
+  // Default content: a -12 dBFS DC block over a flat spectrum — every band
+  // carries energy, which the lifecycle tests lean on (bands > 0).
+  let signal: AnalyserSignal = { time: () => 0.25, frequencyDb: () => -60 }
+  const analysers: MicVisualAnalyserLike[] = []
   const stream: TestStream = { getTracks: () => [{ stop: stoppedTracks }] }
   const getUserMedia = vi.fn(async () => stream)
   const contexts: Array<
@@ -35,10 +105,14 @@ function pipelineHarness(): {
   return {
     getUserMedia,
     contexts,
+    analysers,
     frames,
     microtasks,
     cancelFrame,
     stoppedTracks,
+    setSignal: (next) => {
+      signal = next
+    },
     dependencies: {
       mediaDevices: {
         enumerateDevices: async () => [
@@ -48,14 +122,23 @@ function pipelineHarness(): {
       },
       createAudioContext: () => {
         const analyser = {
-          fftSize: 2048,
-          frequencyBinCount: 1024,
+          fftSize: FFT_SIZE,
+          frequencyBinCount: BIN_COUNT,
           smoothingTimeConstant: 0,
-          getFloatFrequencyData: vi.fn((samples: Float32Array) => samples.fill(-60)),
-          getFloatTimeDomainData: vi.fn((samples: Float32Array) => samples.fill(0.25))
+          getFloatFrequencyData: vi.fn((samples: Float32Array) => {
+            for (let bin = 0; bin < samples.length; bin += 1) {
+              samples[bin] = signal.frequencyDb(bin)
+            }
+          }),
+          getFloatTimeDomainData: vi.fn((samples: Float32Array) => {
+            for (let index = 0; index < samples.length; index += 1) {
+              samples[index] = signal.time(index)
+            }
+          })
         }
+        analysers.push(analyser)
         const context = {
-          sampleRate: 48_000,
+          sampleRate: SAMPLE_RATE,
           createAnalyser: () => analyser,
           createMediaStreamSource: () => ({ connect: vi.fn(), disconnect: vi.fn() }),
           close: vi.fn(async () => undefined)
@@ -402,6 +485,124 @@ describe('createMicVisualPipeline', () => {
     expect(lateTrackStop).toHaveBeenCalledTimes(1)
     expect(harness.contexts).toHaveLength(0)
     expect(pipeline.getLifecycleSnapshot()).toEqual({ status: 'idle', active: false })
+  })
+})
+
+describe('spectrumBandTargetsInto', () => {
+  it('reads a full-scale sine as ~0 dBFS in its band and floor everywhere else', () => {
+    const targets = bandTargets(sineSignal(1, 1000))
+    expect(targets).toHaveLength(BAND_COUNT)
+    const band = bandFor(1000)
+    expect(targets[band]).toBeCloseTo(1, 2)
+    targets.forEach((level, index) => {
+      if (index !== band) expect(level).toBe(0)
+    })
+  })
+
+  it('maps a sine at N dBFS to the shared -60..0 dBFS window', () => {
+    // Peak amplitude -30 dBFS → bar at half height (linear-in-dB), exactly
+    // like the waveform history and the backend micLiveLevel scale.
+    const minus30 = bandTargets(sineSignal(10 ** (-30 / 20), 1000))
+    expect(minus30[bandFor(1000)]).toBeCloseTo(dbToMeterLevel(-30), 2)
+    const minus12 = bandTargets(sineSignal(10 ** (-12 / 20), 2500))
+    expect(minus12[bandFor(2500)]).toBeCloseTo(dbToMeterLevel(-12), 2)
+  })
+
+  it('gates -60 dBFS and -70 dBFS room tone to the floor', () => {
+    expect(bandTargets(sineSignal(10 ** (-60 / 20), 1000)).every((level) => level === 0)).toBe(true)
+    expect(bandTargets(sineSignal(10 ** (-70 / 20), 1000)).every((level) => level === 0)).toBe(true)
+    // Broadband noise at -70 dBFS (the old mapping's 63 % bars) is floor too.
+    const { frequency } = fillFromSignal({ time: () => 0, frequencyDb: () => -80 })
+    const targets: number[] = []
+    spectrumBandTargetsInto(
+      frequency,
+      10 ** (-70 / 20),
+      SAMPLE_RATE,
+      FFT_SIZE,
+      targets,
+      new Float32Array(BIN_COUNT)
+    )
+    expect(targets.every((level) => level === 0)).toBe(true)
+    expect(bandTargets(SILENCE).every((level) => level === 0)).toBe(true)
+  })
+
+  it('splits the broadband level across bands by their share of the spectrum', () => {
+    // Two equal tones in two bands: each band carries half the power (-3 dB).
+    const low = Math.round(300 / BIN_HZ)
+    const high = Math.round(3000 / BIN_HZ)
+    const amplitude = 10 ** (-20 / 20)
+    const signal: AnalyserSignal = {
+      time: (index) =>
+        amplitude * Math.sin((2 * Math.PI * 300 * index) / SAMPLE_RATE) +
+        amplitude * Math.sin((2 * Math.PI * 3000 * index) / SAMPLE_RATE),
+      frequencyDb: (bin) => (bin === low || bin === high ? -20 : Number.NEGATIVE_INFINITY)
+    }
+    const targets = bandTargets(signal)
+    expect(targets[bandFor(300)]).toBeCloseTo(dbToMeterLevel(-20), 1)
+    expect(targets[bandFor(3000)]).toBeCloseTo(dbToMeterLevel(-20), 1)
+    expect(targets[bandFor(300)]).toBeCloseTo(targets[bandFor(3000)], 1)
+  })
+})
+
+describe('advanceBandLevelsInto', () => {
+  it('rises within one 48 ms tick and falls over ~350 ms per band', () => {
+    const bands: number[] = []
+    advanceBandLevelsInto(bands, [1, 0.5, 0], 48)
+    expect(bands[0]).toBeGreaterThan(0.95)
+    expect(bands[1]).toBeGreaterThan(0.47)
+    expect(bands[2]).toBe(0)
+
+    advanceBandLevelsInto(bands, [0, 0, 0], 48)
+    expect(bands[0]).toBeGreaterThan(0.8)
+    expect(bands[1]).toBeGreaterThan(0.4)
+    for (let tick = 0; tick < 20; tick += 1) advanceBandLevelsInto(bands, [0, 0, 0], 48)
+    expect(bands[0]).toBeLessThan(0.1)
+    expect(bands[0]).toBeGreaterThan(0)
+  })
+})
+
+describe('createMicVisualPipeline level feel', () => {
+  it('paints silence at floor, speech on the next tick, and lets it fall slowly', async () => {
+    const harness = pipelineHarness()
+    harness.setSignal(SILENCE)
+    const pipeline = retainedPipeline(harness.dependencies)
+    pipeline.configure({
+      deviceName: 'Studio microphone',
+      enabled: true,
+      permissionStatus: 'granted'
+    })
+    await vi.waitFor(() => expect(harness.frames).toHaveLength(1))
+    expect(harness.analysers[0].smoothingTimeConstant).toBe(0.3)
+
+    let at = 0
+    const tick = (): void => {
+      at += 48
+      harness.frames.at(-1)?.(at)
+    }
+    tick()
+    expect(pipeline.getFrameSnapshot().bands.every((level) => level === 0)).toBe(true)
+    expect(pipeline.getFrameSnapshot().peakDb).toBe(-60)
+
+    // A -12 dBFS tone arrives: its band is up on the very next tick.
+    harness.setSignal(sineSignal(10 ** (-12 / 20), 1000))
+    tick()
+    const band = bandFor(1000)
+    const spoken = pipeline.getFrameSnapshot()
+    expect(spoken.bands[band]).toBeGreaterThan(dbToMeterLevel(-12) * 0.95)
+    expect(spoken.bands[band]).toBeLessThanOrEqual(dbToMeterLevel(-12))
+    expect(spoken.peakDb).toBeCloseTo(-12, 0)
+    expect(spoken.bands.filter((level) => level > 0)).toHaveLength(1)
+
+    // Back to silence: the bar decays instead of snapping — still most of the
+    // way up after one tick, near floor only after ~1 s.
+    harness.setSignal(SILENCE)
+    tick()
+    const falling = pipeline.getFrameSnapshot().bands[band]
+    expect(falling).toBeLessThan(spoken.bands[band])
+    expect(falling).toBeGreaterThan(spoken.bands[band] * 0.8)
+    for (let count = 0; count < 20; count += 1) tick()
+    expect(pipeline.getFrameSnapshot().bands[band]).toBeLessThan(0.05)
+    expect(pipeline.getFrameSnapshot().peakDb).toBe(-60)
   })
 })
 

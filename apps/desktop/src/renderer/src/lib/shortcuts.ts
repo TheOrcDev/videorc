@@ -26,6 +26,9 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
   { id: 'search', keys: ['⌘', 'K'], label: 'Search & commands', group: 'Navigation' },
 
   { id: 'record-toggle', keys: ['␣'], label: 'Start / stop the session', group: 'Session' },
+  // Audio mixer (Studio): arms the visual-only mic analyser while no session
+  // runs. A running session always arms it.
+  { id: 'mic-monitor', keys: ['M'], label: 'Monitor mic input while idle', group: 'Session' },
 
   { id: 'preview-window', keys: ['⌘', 'P'], label: 'Open preview window', group: 'Windows' },
   { id: 'notes-window', keys: ['⌘', '⇧', 'N'], label: 'Open notes window', group: 'Windows' },

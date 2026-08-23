@@ -2,14 +2,35 @@ import { StrictMode, act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-const providerState = vi.hoisted(() => ({ microphoneMuted: false }))
+// Existing lifecycle cases run with idle monitoring ON so the gate is not
+// what they exercise; the gate cases below flip these explicitly.
+const providerState = vi.hoisted(() => ({
+  microphoneMuted: false,
+  sessionActive: false,
+  monitorWhenIdle: true,
+  setSettingsCalls: 0
+}))
 
 vi.mock('@/hooks/use-document-visible', () => ({ useDocumentVisible: () => true }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => ({
     captureConfig: { audio: { microphoneMuted: providerState.microphoneMuted } },
     mediaAccess: { microphone: 'granted' },
-    selectedMicrophone: { id: 'backend-mic-1', name: 'Studio microphone' }
+    selectedMicrophone: { id: 'backend-mic-1', name: 'Studio microphone' },
+    isSessionActive: providerState.sessionActive,
+    settings: { audioMixer: { monitorWhenIdle: providerState.monitorWhenIdle } },
+    setSettings: (
+      update:
+        | { audioMixer?: { monitorWhenIdle?: boolean } }
+        | ((current: { audioMixer?: { monitorWhenIdle?: boolean } }) => {
+            audioMixer?: { monitorWhenIdle?: boolean }
+          })
+    ) => {
+      providerState.setSettingsCalls += 1
+      const current = { audioMixer: { monitorWhenIdle: providerState.monitorWhenIdle } }
+      const next = typeof update === 'function' ? update(current) : update
+      providerState.monitorWhenIdle = next.audioMixer?.monitorWhenIdle === true
+    }
   })
 }))
 
@@ -42,6 +63,118 @@ describe('StudioMicVisualProvider', () => {
     restoreEnvironment?.()
     restoreEnvironment = undefined
     providerState.microphoneMuted = false
+    providerState.sessionActive = false
+    providerState.monitorWhenIdle = true
+    providerState.setSettingsCalls = 0
+  })
+
+  it('keeps the microphone closed while idle and arms it for a session automatically', async () => {
+    const environment = installBrowserAudioEnvironment()
+    restoreEnvironment = environment.restore
+    const lifecycleStates: boolean[] = []
+    providerState.monitorWhenIdle = false
+    const renderProvider = async (): Promise<void> => {
+      await act(async () => {
+        root?.render(
+          createElement(
+            StrictMode,
+            null,
+            createElement(StudioMicVisualProvider, {
+              enabled: true,
+              children: createElement(VisualConsumer, {
+                onLifecycle: (active) => lifecycleStates.push(active)
+              })
+            })
+          )
+        )
+        await import('../lib/browser-mic-visual-pipeline')
+        await Promise.resolve()
+      })
+    }
+
+    // Idle Studio, monitoring off: no getUserMedia, no AudioContext, no clock —
+    // the OS shows no mic indicator and the bars sit at floor.
+    root = createRoot(environment.container)
+    await renderProvider()
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(environment.getUserMedia).not.toHaveBeenCalled()
+    expect(environment.contexts).toHaveLength(0)
+    expect(environment.scheduledFrames.size).toBe(0)
+    expect(lifecycleStates.at(-1)).toBe(false)
+
+    // A session starts (recording or streaming): the meter arms itself.
+    providerState.sessionActive = true
+    await renderProvider()
+    await vi.waitFor(() => expect(environment.contexts).toHaveLength(1))
+    expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
+    expect(environment.scheduledFrames.size).toBe(1)
+    expect(lifecycleStates.at(-1)).toBe(true)
+
+    // Session ends with monitoring still off: the microphone is released.
+    providerState.sessionActive = false
+    await renderProvider()
+    await vi.waitFor(() => expect(environment.contexts[0].close).toHaveBeenCalledTimes(1))
+    expect(environment.stopTrack).toHaveBeenCalledTimes(1)
+    expect(environment.scheduledFrames.size).toBe(0)
+    expect(lifecycleStates.at(-1)).toBe(false)
+
+    // Monitor input on (the M shortcut flips the persisted setting): idle
+    // monitoring opens the analyser again.
+    environment.pressKey('m')
+    expect(providerState.setSettingsCalls).toBe(1)
+    expect(providerState.monitorWhenIdle).toBe(true)
+    await renderProvider()
+    await vi.waitFor(() => expect(environment.contexts).toHaveLength(2))
+    expect(environment.getUserMedia).toHaveBeenCalledTimes(2)
+    expect(lifecycleStates.at(-1)).toBe(true)
+  })
+
+  it('ignores the M shortcut while a session runs and inside editable fields', async () => {
+    const environment = installBrowserAudioEnvironment()
+    restoreEnvironment = environment.restore
+    providerState.monitorWhenIdle = false
+    providerState.sessionActive = true
+    root = createRoot(environment.container)
+    await act(async () => {
+      root?.render(
+        createElement(
+          StrictMode,
+          null,
+          createElement(StudioMicVisualProvider, {
+            enabled: true,
+            children: createElement(LifecycleObserver)
+          })
+        )
+      )
+      await Promise.resolve()
+    })
+    environment.pressKey('m')
+    expect(providerState.setSettingsCalls).toBe(0)
+
+    providerState.sessionActive = false
+    await act(async () => {
+      root?.render(
+        createElement(
+          StrictMode,
+          null,
+          createElement(StudioMicVisualProvider, {
+            enabled: true,
+            children: createElement(LifecycleObserver)
+          })
+        )
+      )
+      await Promise.resolve()
+    })
+    environment.pressKey('m', { editable: true })
+    environment.pressKey('m', { metaKey: true })
+    environment.pressKey('m', { repeat: true })
+    expect(providerState.setSettingsCalls).toBe(0)
+    environment.pressKey('M')
+    expect(providerState.setSettingsCalls).toBe(1)
+    expect(providerState.monitorWhenIdle).toBe(true)
   })
 
   it('tears down visual microphone resources and stops reporting live when muted', async () => {
@@ -138,9 +271,24 @@ function installBrowserAudioEnvironment(): {
   scheduledFrames: Map<number, FrameRequestCallback>
   getUserMedia: ReturnType<typeof vi.fn>
   stopTrack: ReturnType<typeof vi.fn>
+  /** Dispatch a document keydown the way the M shortcut listener sees it. */
+  pressKey: (
+    key: string,
+    options?: { editable?: boolean; metaKey?: boolean; repeat?: boolean }
+  ) => void
   restore: () => void
 } {
-  class FakeElement {}
+  class FakeElement {
+    closest(): FakeElement | null {
+      return null
+    }
+  }
+  class FakeInputElement extends FakeElement {
+    closest(): FakeElement {
+      return this
+    }
+  }
+  const documentTarget = new EventTarget()
   const contexts: Array<{ close: ReturnType<typeof vi.fn> }> = []
   const scheduledFrames = new Map<number, FrameRequestCallback>()
   const stopTrack = vi.fn()
@@ -172,8 +320,9 @@ function installBrowserAudioEnvironment(): {
     body: {},
     hidden: false,
     visibilityState: 'visible',
-    addEventListener: () => {},
-    removeEventListener: () => {}
+    addEventListener: documentTarget.addEventListener.bind(documentTarget),
+    removeEventListener: documentTarget.removeEventListener.bind(documentTarget),
+    dispatchEvent: documentTarget.dispatchEvent.bind(documentTarget)
   }
   const container = {
     nodeType: 1,
@@ -215,12 +364,17 @@ function installBrowserAudioEnvironment(): {
     }
   }
   const descriptors = new Map(
-    ['window', 'document', 'navigator', 'AudioContext', 'IS_REACT_ACT_ENVIRONMENT'].map((name) => [
-      name,
-      Object.getOwnPropertyDescriptor(globalThis, name)
-    ])
+    [
+      'window',
+      'document',
+      'navigator',
+      'AudioContext',
+      'HTMLElement',
+      'IS_REACT_ACT_ENVIRONMENT'
+    ].map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)])
   )
   Object.defineProperty(globalThis, 'window', { configurable: true, value: fakeWindow })
+  Object.defineProperty(globalThis, 'HTMLElement', { configurable: true, value: FakeElement })
   Object.defineProperty(globalThis, 'document', { configurable: true, value: fakeDocument })
   Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
@@ -248,6 +402,25 @@ function installBrowserAudioEnvironment(): {
     scheduledFrames,
     getUserMedia,
     stopTrack,
+    pressKey: (key, options = {}) => {
+      const event = new Event('keydown', { cancelable: true }) as Event & {
+        key: string
+        metaKey: boolean
+        ctrlKey: boolean
+        altKey: boolean
+        repeat: boolean
+      }
+      Object.assign(event, {
+        key,
+        metaKey: options.metaKey === true,
+        ctrlKey: false,
+        altKey: false,
+        repeat: options.repeat === true
+      })
+      const target = options.editable ? new FakeInputElement() : new FakeElement()
+      Object.defineProperty(event, 'target', { value: target })
+      documentTarget.dispatchEvent(event)
+    },
     restore: () => {
       for (const [name, descriptor] of descriptors) {
         if (descriptor) Object.defineProperty(globalThis, name, descriptor)
