@@ -1363,6 +1363,14 @@ const cohostFlagSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+const cohostErrorDetailSchema = objectSchema(
+  {
+    code: stringSchema({ minLength: 1, maxLength: 128 }),
+    message: stringSchema({ maxLength: 2000 }),
+    status: nullableSchema(numberSchema({ integer: true, min: 100, max: 599 }))
+  },
+  { allowUnknown: false }
+)
 const cohostStateSchema = objectSchema(
   {
     sessionId: nullableSchema(boundedString),
@@ -1379,6 +1387,8 @@ const cohostStateSchema = objectSchema(
         'gateway-error'
       ])
     ),
+    // Optional on the wire: a backend from before `detail` existed omits it.
+    detail: optionalSchema(nullableSchema(cohostErrorDetailSchema)),
     questions: arraySchema(cohostQuestionSchema, { maxLength: 40 }),
     flags: arraySchema(cohostFlagSchema, { maxLength: 50 }),
     mood: nullableSchema(enumSchema(['hype', 'calm', 'tense', 'mixed'])),

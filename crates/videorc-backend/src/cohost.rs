@@ -24,8 +24,8 @@ use crate::state::AppState;
 use crate::storage::Database;
 use crate::streaming::StreamPlatform;
 use crate::videorc_api::{
-    CohostApiError, CohostTickMessage, CohostTickOpenQuestion, CohostTickRequest,
-    CohostTickResponse, VideorcApiClient,
+    CohostApiError, CohostApiErrorKind, CohostTickMessage, CohostTickOpenQuestion,
+    CohostTickRequest, CohostTickResponse, VideorcApiClient,
 };
 
 pub const COHOST_STATE_EVENT: &str = "cohost.state";
@@ -42,7 +42,13 @@ const TICK_DELTA_CAP: usize = 60;
 const TICK_OPEN_QUESTIONS_CAP: usize = 40;
 const TICK_BURST_THRESHOLD: usize = 5;
 const TICK_IDLE_INTERVAL: Duration = Duration::from_secs(20);
-const TICK_MIN_GAP: Duration = Duration::from_secs(8);
+/// Contract floor between two tick requests. Independent of the HTTP timeout:
+/// ticks never overlap, so a slow tick delays the next one rather than
+/// shortening the gap.
+pub(crate) const TICK_MIN_GAP: Duration = Duration::from_secs(8);
+/// Hard cap on the detail message carried on the wire; server envelope
+/// messages are one sentence, and a proxy error page must not become a toast.
+const ERROR_DETAIL_MESSAGE_MAX_CHARS: usize = 400;
 const BACKOFF_STEPS_SECS: [u64; 5] = [5, 10, 20, 40, 60];
 const QUOTA_DEFAULT_RETRY: Duration = Duration::from_secs(3600);
 /// How often a paused precondition (signed out, Basic, no consent) is re-read.
@@ -209,15 +215,44 @@ pub struct CohostFlag {
     pub at: String,
 }
 
+/// What the last failed tick actually said, so the toast, the chip and a bug
+/// report can name the error instead of "AI returned an error". `code` is the
+/// server's envelope code verbatim (or a desktop-assigned `network` /
+/// `timeout` / `malformed-response`), `status` the HTTP status when one was
+/// received. Cleared the moment the engine is listening again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostErrorDetail {
+    pub code: String,
+    pub message: String,
+    pub status: Option<u16>,
+}
+
+impl CohostErrorDetail {
+    pub fn new(code: impl Into<String>, message: impl Into<String>, status: Option<u16>) -> Self {
+        let message: String = message.into();
+        Self {
+            code: code.into(),
+            message: truncate_chars(message.trim(), ERROR_DETAIL_MESSAGE_MAX_CHARS),
+            status,
+        }
+    }
+}
+
 /// The `cohost.state` event payload and the result of every `cohost.*` RPC.
 /// Nullable fields serialize as explicit `null` (the renderer reducer keys on
-/// them), never as absent keys.
+/// them), never as absent keys. `detail` is additionally `default` on read so
+/// a payload from before it existed still parses.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostState {
     pub session_id: Option<String>,
     pub status: CohostStatus,
     pub reason: Option<CohostReason>,
+    /// Present only while `reason` describes a failed tick (status `error`, or
+    /// `paused` by the server: quota, Premium, consent).
+    #[serde(default)]
+    pub detail: Option<CohostErrorDetail>,
     pub questions: Vec<CohostQuestion>,
     pub flags: Vec<CohostFlag>,
     pub mood: Option<CohostMood>,
@@ -232,6 +267,7 @@ impl CohostState {
             session_id: None,
             status: CohostStatus::Off,
             reason: None,
+            detail: None,
             questions: Vec::new(),
             flags: Vec::new(),
             mood: None,
@@ -297,6 +333,7 @@ struct CohostSession {
     stream_title: Option<String>,
     status: CohostStatus,
     reason: Option<CohostReason>,
+    detail: Option<CohostErrorDetail>,
     questions: Vec<CohostQuestion>,
     flags: Vec<CohostFlag>,
     mood: Option<CohostMood>,
@@ -336,6 +373,7 @@ impl CohostSession {
             stream_title,
             status: CohostStatus::Listening,
             reason: None,
+            detail: None,
             questions: Vec::new(),
             flags: Vec::new(),
             mood: None,
@@ -362,6 +400,7 @@ impl CohostSession {
             session_id: Some(self.session_id.clone()),
             status: self.status,
             reason: self.reason,
+            detail: self.detail.clone(),
             questions: self.questions.clone(),
             flags: self.flags.clone(),
             mood: self.mood,
@@ -472,6 +511,7 @@ impl CohostSession {
         self.next_attempt_at = None;
         self.status = CohostStatus::Listening;
         self.reason = None;
+        self.detail = None;
         self.last_tick_iso = Some(now_iso.to_string());
         self.partial = dropped > 0;
         self.mood = response.mood;
@@ -546,12 +586,12 @@ impl CohostSession {
     fn apply_failure(&mut self, error: &CohostApiError, now: Instant) {
         self.in_flight = false;
         let reason = error.reason();
-        match error {
-            CohostApiError::QuotaExhausted { retry_after, .. } => {
+        match error.kind {
+            CohostApiErrorKind::QuotaExhausted { retry_after } => {
                 self.status = CohostStatus::Paused;
                 self.next_attempt_at = Some(now + retry_after.unwrap_or(QUOTA_DEFAULT_RETRY));
             }
-            CohostApiError::PremiumRequired { .. } | CohostApiError::ConsentRequired { .. } => {
+            CohostApiErrorKind::PremiumRequired | CohostApiErrorKind::ConsentRequired => {
                 self.status = CohostStatus::Paused;
                 self.next_attempt_at = Some(now + PRECONDITION_RECHECK);
             }
@@ -563,12 +603,18 @@ impl CohostSession {
             }
         }
         self.reason = Some(reason);
+        // Every failed tick carries what the server (or the transport) said;
+        // the renderer decides how much of it to show per reason.
+        self.detail = Some(error.detail.clone());
     }
 
+    /// A local precondition pause (signed out, Basic, no consent). Not a tick
+    /// failure, so any earlier tick detail is stale and leaves with it.
     fn pause(&mut self, reason: CohostReason, now: Instant) -> bool {
         let changed = self.status != CohostStatus::Paused || self.reason != Some(reason);
         self.status = CohostStatus::Paused;
         self.reason = Some(reason);
+        self.detail = None;
         self.next_attempt_at = Some(now + PRECONDITION_RECHECK);
         changed
     }
@@ -1049,9 +1095,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
     let message_count = prepared.request.messages.len();
     let result = match VideorcApiClient::new() {
         Ok(client) => client.post_cohost_tick(&token, &prepared.request).await,
-        Err(error) => Err(CohostApiError::Network {
-            message: error.to_string(),
-        }),
+        Err(error) => Err(CohostApiError::network(error.to_string())),
     };
     let log = match &result {
         Ok(response) => Some((
@@ -1067,9 +1111,15 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         Err(error) => Some((
             "warn",
             format!(
-                "Co-host tick {} failed ({}): {}",
+                "Co-host tick {} failed ({}, {}{}): {}",
                 prepared.request.tick_seq,
                 serde_json::to_string(&error.reason()).unwrap_or_default(),
+                error.detail.code,
+                error
+                    .detail
+                    .status
+                    .map(|status| format!(", HTTP {status}"))
+                    .unwrap_or_default(),
                 error.message()
             ),
         )),
@@ -1144,6 +1194,12 @@ mod tests {
             is_deleted: false,
             raw_provider_type: Some("twitch".to_string()),
         }
+    }
+
+    /// A classified server failure with its envelope, as `post_cohost_tick`
+    /// would return it.
+    fn server_error(status: u16, code: &str, message: &str) -> CohostApiError {
+        crate::videorc_api::classify_cohost_failure(status, code, message.to_string(), None)
     }
 
     fn enabled_settings() -> CohostSettings {
@@ -1246,9 +1302,7 @@ mod tests {
             Some(TickGate::Idle)
         );
         // A network failure schedules a 5 s backoff before the next attempt.
-        let failure = Err(CohostApiError::Network {
-            message: "offline".to_string(),
-        });
+        let failure = Err(CohostApiError::network("offline"));
         assert!(engine.apply_tick_result(generation, 0, failure, start + secs(2), "now"));
         let snapshot = engine.snapshot();
         assert_eq!(snapshot.status, CohostStatus::Error);
@@ -1289,10 +1343,7 @@ mod tests {
             engine.apply_tick_result(
                 generation,
                 0,
-                Err(CohostApiError::GatewayError {
-                    code: "ai-gateway-error".to_string(),
-                    message: "boom".to_string(),
-                }),
+                Err(server_error(502, "ai-gateway-error", "boom")),
                 now,
                 "now",
             );
@@ -1573,93 +1624,78 @@ mod tests {
         let start = Instant::now();
         let cases = [
             (
-                CohostApiError::Unauthorized {
-                    message: "x".into(),
-                },
+                server_error(401, "unauthorized", "x"),
                 CohostStatus::Error,
                 CohostReason::SessionExpired,
                 5,
             ),
             (
-                CohostApiError::PremiumRequired {
-                    message: "x".into(),
-                },
+                server_error(403, "premium-required", "x"),
                 CohostStatus::Paused,
                 CohostReason::PremiumRequired,
                 5,
             ),
             (
-                CohostApiError::ConsentRequired {
-                    message: "x".into(),
-                },
+                server_error(400, "consent-required", "x"),
                 CohostStatus::Paused,
                 CohostReason::ConsentRequired,
                 5,
             ),
             (
-                CohostApiError::QuotaExhausted {
-                    retry_after: Some(secs(120)),
-                    message: "x".into(),
-                },
+                crate::videorc_api::classify_cohost_failure(
+                    429,
+                    "quota-exhausted",
+                    "x".into(),
+                    Some("120"),
+                ),
                 CohostStatus::Paused,
                 CohostReason::QuotaExhausted,
                 120,
             ),
             (
-                CohostApiError::QuotaExhausted {
-                    retry_after: None,
-                    message: "x".into(),
-                },
+                server_error(429, "quota-exhausted", "x"),
                 CohostStatus::Paused,
                 CohostReason::QuotaExhausted,
                 3600,
             ),
             (
-                CohostApiError::ServerUnconfigured {
-                    code: "cohost-disabled".into(),
-                    message: "x".into(),
-                },
+                server_error(503, "cohost-disabled", "x"),
                 CohostStatus::Error,
                 CohostReason::ServerUnconfigured,
                 5,
             ),
             (
-                CohostApiError::PromptVersionUnsupported {
-                    message: "x".into(),
-                },
+                server_error(400, "prompt-version-unsupported", "x"),
                 CohostStatus::Error,
                 CohostReason::ServerUnconfigured,
                 5,
             ),
             (
-                CohostApiError::GatewayError {
-                    code: "ai-gateway-error".into(),
-                    message: "x".into(),
-                },
+                server_error(502, "ai-gateway-error", "x"),
                 CohostStatus::Error,
                 CohostReason::GatewayError,
                 5,
             ),
             (
-                CohostApiError::InvalidRequest {
-                    message: "x".into(),
-                },
+                server_error(400, "invalid-request", "x"),
                 CohostStatus::Error,
                 CohostReason::GatewayError,
                 5,
             ),
             (
-                CohostApiError::MalformedResponse {
-                    message: "x".into(),
-                },
+                CohostApiError::malformed_response(200, "x"),
                 CohostStatus::Error,
                 CohostReason::GatewayError,
                 5,
             ),
             (
-                CohostApiError::Network {
-                    message: "x".into(),
-                },
+                CohostApiError::network("x"),
+                CohostStatus::Error,
+                CohostReason::Network,
+                5,
+            ),
+            (
+                CohostApiError::timeout("x"),
                 CohostStatus::Error,
                 CohostReason::Network,
                 5,
@@ -1675,6 +1711,8 @@ mod tests {
             let snapshot = engine.snapshot();
             assert_eq!(snapshot.status, status, "{error:?}");
             assert_eq!(snapshot.reason, Some(reason), "{error:?}");
+            // Every failed tick exposes what was actually said.
+            assert_eq!(snapshot.detail, Some(error.detail.clone()), "{error:?}");
             let next = engine.session.as_ref().unwrap().next_attempt_at.unwrap();
             assert_eq!(
                 next.duration_since(start).as_secs(),
@@ -1682,6 +1720,225 @@ mod tests {
                 "{error:?}"
             );
         }
+    }
+
+    #[test]
+    fn failed_tick_detail_is_captured_and_cleared_on_recovery() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        assert_eq!(engine.snapshot().detail, None);
+
+        // 502 from the 2026-08-23 incident: code + message + status all ride
+        // the snapshot.
+        engine.note_messages(&messages("session-1", 0..5));
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Err(server_error(
+                502,
+                "ai-gateway-error",
+                "The co-host tick failed on every configured model."
+            )),
+            start + secs(2),
+            "t1"
+        ));
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.status, CohostStatus::Error);
+        assert_eq!(snapshot.reason, Some(CohostReason::GatewayError));
+        assert_eq!(
+            snapshot.detail,
+            Some(CohostErrorDetail {
+                code: "ai-gateway-error".to_string(),
+                message: "The co-host tick failed on every configured model.".to_string(),
+                status: Some(502),
+            })
+        );
+
+        // A later 400 replaces it wholesale (no stale status from the 502).
+        engine.note_messages(&messages("session-1", 5..10));
+        engine
+            .prepare_tick(generation, true, true, start + secs(10))
+            .unwrap();
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Err(server_error(400, "invalid-request", "messages: too long")),
+            start + secs(11),
+            "t2"
+        ));
+        assert_eq!(
+            engine.snapshot().detail,
+            Some(CohostErrorDetail {
+                code: "invalid-request".to_string(),
+                message: "messages: too long".to_string(),
+                status: Some(400),
+            })
+        );
+
+        // A timeout has no HTTP status and the desktop's own code.
+        engine.note_messages(&messages("session-1", 10..15));
+        engine
+            .prepare_tick(generation, true, true, start + secs(30))
+            .unwrap();
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Err(CohostApiError::timeout(
+                "The co-host service did not answer within 12 s."
+            )),
+            start + secs(42),
+            "t3"
+        ));
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.reason, Some(CohostReason::Network));
+        assert_eq!(
+            snapshot.detail,
+            Some(CohostErrorDetail {
+                code: "timeout".to_string(),
+                message: "The co-host service did not answer within 12 s.".to_string(),
+                status: None,
+            })
+        );
+
+        // Recovery: a merged tick clears reason and detail together.
+        engine.note_messages(&messages("session-1", 15..20));
+        engine
+            .prepare_tick(generation, true, true, start + secs(80))
+            .unwrap();
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Ok(response(Vec::new())),
+            start + secs(81),
+            "t4"
+        ));
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.status, CohostStatus::Listening);
+        assert_eq!(snapshot.reason, None);
+        assert_eq!(snapshot.detail, None);
+    }
+
+    #[test]
+    fn precondition_pause_drops_stale_tick_detail() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        engine.note_messages(&messages("session-1", 0..5));
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Err(server_error(502, "ai-gateway-error", "boom")),
+            start + secs(2),
+            "t1"
+        ));
+        assert!(engine.snapshot().detail.is_some());
+        // Signed out while backing off: the pause is local, not a tick result.
+        assert_eq!(
+            engine.prepare_tick(generation, false, true, start + secs(10)),
+            Err(TickGate::Paused(CohostReason::SignedOut))
+        );
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.status, CohostStatus::Paused);
+        assert_eq!(snapshot.detail, None);
+    }
+
+    #[test]
+    fn error_detail_message_is_trimmed_and_capped() {
+        let long = "x".repeat(1000);
+        let detail = CohostErrorDetail::new("ai-gateway-error", format!("  {long}  "), Some(502));
+        assert_eq!(
+            detail.message.chars().count(),
+            ERROR_DETAIL_MESSAGE_MAX_CHARS
+        );
+        assert_eq!(detail.code, "ai-gateway-error");
+        assert_eq!(detail.status, Some(502));
+    }
+
+    #[test]
+    fn state_without_detail_key_still_parses_and_serializes_explicit_null() {
+        let legacy: CohostState = serde_json::from_value(serde_json::json!({
+            "sessionId": null,
+            "status": "off",
+            "reason": null,
+            "questions": [],
+            "flags": [],
+            "mood": null,
+            "lastTickAt": null,
+            "tickSeq": 0,
+            "partial": false
+        }))
+        .unwrap();
+        assert_eq!(legacy, CohostState::off());
+        let wire = serde_json::to_value(CohostState::off()).unwrap();
+        assert_eq!(wire["detail"], serde_json::Value::Null);
+        let errored = CohostState {
+            status: CohostStatus::Error,
+            reason: Some(CohostReason::GatewayError),
+            detail: Some(CohostErrorDetail::new(
+                "ai-gateway-error",
+                "boom",
+                Some(502),
+            )),
+            ..CohostState::off()
+        };
+        assert_eq!(
+            serde_json::to_value(&errored).unwrap()["detail"],
+            serde_json::json!({ "code": "ai-gateway-error", "message": "boom", "status": 502 })
+        );
+        let timed_out = CohostState {
+            detail: Some(CohostErrorDetail::new("timeout", "slow", None)),
+            ..CohostState::off()
+        };
+        assert_eq!(
+            serde_json::to_value(&timed_out).unwrap()["detail"]["status"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn tick_timeout_exceeds_min_gap_and_an_in_flight_tick_only_delays_the_next() {
+        // The HTTP timeout (12 s) is headroom; the cadence floor stays 8 s.
+        assert!(crate::videorc_api::COHOST_TICK_TIMEOUT > TICK_MIN_GAP);
+        assert_eq!(TICK_MIN_GAP.as_secs(), 8);
+
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        engine.note_messages(&messages("session-1", 0..5));
+        let sent_at = start + secs(1);
+        engine
+            .prepare_tick(generation, true, true, sent_at)
+            .unwrap();
+        // A burst arrives while the request is still out: never a second
+        // request in flight, even once the 8 s gap has passed.
+        engine.note_messages(&messages("session-1", 5..10));
+        for offset in [2, 8, 9, 12] {
+            assert_eq!(
+                engine
+                    .prepare_tick(generation, true, true, sent_at + secs(offset))
+                    .err(),
+                Some(TickGate::Idle),
+                "+{offset}s"
+            );
+        }
+        // The slow tick lands at +12 s: the gap since it was SENT is already
+        // ≥ 8 s, so the delayed next tick goes out right away.
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Ok(response(Vec::new())),
+            sent_at + secs(12),
+            "t1"
+        ));
+        let next = engine
+            .prepare_tick(generation, true, true, sent_at + secs(12))
+            .unwrap();
+        assert_eq!(next.request.tick_seq, 2);
+        assert_eq!(next.request.messages.len(), 5);
     }
 
     #[test]

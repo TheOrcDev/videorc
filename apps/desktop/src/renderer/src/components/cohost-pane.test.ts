@@ -220,4 +220,30 @@ describe('CohostPane', () => {
     expect(markup).toContain('Partial')
     expect(markup).toContain('Chat is hyped')
   })
+
+  it("names the failed tick in the server's words as the chip tooltip and a secondary line", () => {
+    const detail = 'ai-gateway-error (HTTP 502): The co-host tick failed on every configured model.'
+    const markup = renderPane({
+      state: state({
+        status: 'error',
+        reason: 'gateway-error',
+        detail: {
+          code: 'ai-gateway-error',
+          message: 'The co-host tick failed on every configured model.',
+          status: 502
+        }
+      })
+    })
+    expect(markup).toContain('error · AI error')
+    expect(markup).toContain(`title="${detail}"`)
+    expect(markup).toContain('data-slot="cohost-error-detail"')
+    expect(markup).toContain('once co-host is listening again')
+    expect(markup).not.toContain('Listening — questions')
+    // Monochrome: the detail line is muted copy, never a destructive accent.
+    expect(markup).not.toContain('text-destructive')
+
+    const healthy = renderPane({ state: state() })
+    expect(healthy).not.toContain('data-slot="cohost-error-detail"')
+    expect(healthy).toContain('Listening — questions from chat will appear here.')
+  })
 })

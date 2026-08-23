@@ -274,10 +274,9 @@ import {
 import { commentCanHighlight } from '@/components/comment-row'
 import {
   applyCohostState,
-  cohostErrorToastReason,
+  cohostErrorToast,
   cohostHighlightMessageId,
-  sortedCohostQuestions,
-  COHOST_ERROR_TOAST_MESSAGES
+  sortedCohostQuestions
 } from '@/lib/cohost-view'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-view'
@@ -2668,10 +2667,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     cohostStateRef.current = merged
     setCohostState(merged)
     // Toast discipline: the pane and the destination chip already show every
-    // co-host state. Only a NEW error reason is news.
-    const reason = cohostErrorToastReason(previous, merged)
-    if (reason) {
-      toast.error(COHOST_ERROR_TOAST_MESSAGES[reason], { id: 'cohost-error' })
+    // co-host state. Only a NEW failure (reason + server error code) is news;
+    // backoff retries of the same failure stay silent.
+    const errorToast = cohostErrorToast(previous, merged)
+    if (errorToast) {
+      toast.error(errorToast.message, { id: 'cohost-error' })
     }
   }, [])
 

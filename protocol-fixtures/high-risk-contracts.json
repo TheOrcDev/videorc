@@ -264,6 +264,7 @@
       "sessionId": "session-fixture",
       "status": "listening",
       "reason": null,
+      "detail": null,
       "questions": [
         {
           "id": "q_fixture",
@@ -293,6 +294,50 @@
       "partial": false
     },
     "offState": {
+      "sessionId": null,
+      "status": "off",
+      "reason": null,
+      "detail": null,
+      "questions": [],
+      "flags": [],
+      "mood": null,
+      "lastTickAt": null,
+      "tickSeq": 0,
+      "partial": false
+    },
+    "errorState": {
+      "sessionId": "session-fixture",
+      "status": "error",
+      "reason": "gateway-error",
+      "detail": {
+        "code": "ai-gateway-error",
+        "message": "The co-host tick failed on every configured model.",
+        "status": 502
+      },
+      "questions": [],
+      "flags": [],
+      "mood": null,
+      "lastTickAt": "2026-08-22T10:00:20Z",
+      "tickSeq": 3,
+      "partial": false
+    },
+    "timeoutState": {
+      "sessionId": "session-fixture",
+      "status": "error",
+      "reason": "network",
+      "detail": {
+        "code": "timeout",
+        "message": "The co-host service did not answer within 12 s.",
+        "status": null
+      },
+      "questions": [],
+      "flags": [],
+      "mood": null,
+      "lastTickAt": "2026-08-22T10:00:20Z",
+      "tickSeq": 3,
+      "partial": false
+    },
+    "legacyState": {
       "sessionId": null,
       "status": "off",
       "reason": null,
