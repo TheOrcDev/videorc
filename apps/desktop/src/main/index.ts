@@ -203,8 +203,13 @@ import { backendIsolationEnv } from './backend-isolation'
 import {
   AVATAR_CACHE_MAX_FILES,
   AVATAR_MAX_BYTES,
+  type AvatarCacheRejection,
   avatarCacheFileName,
-  avatarHostAllowed
+  avatarCacheRejectionKey,
+  avatarCacheRejectionMessage,
+  avatarUrlDecision,
+  httpStatusClass,
+  redactAvatarFetchError
 } from './avatar-cache'
 import { DARK_WINDOW_PALETTE, windowPalette } from './window-palette'
 import {
@@ -11355,11 +11360,29 @@ function avatarCacheDirectory(): string {
 
 const avatarFetchesInFlight = new Map<string, Promise<string | null>>()
 
-async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
-  if (typeof rawUrl !== 'string' || !avatarHostAllowed(rawUrl)) {
-    return null
+// Rejections used to be silent, so a monogram-only sidebar or Comments window
+// left nothing in a support bundle. Log each distinct (host, reason) once per
+// process — host/scheme/size/status class only, never the URL (CDN paths can
+// carry per-user tokens).
+const avatarRejectionsLogged = new Set<string>()
+
+function rejectChatAvatar(rejection: AvatarCacheRejection): null {
+  const key = avatarCacheRejectionKey(rejection)
+  if (!avatarRejectionsLogged.has(key)) {
+    avatarRejectionsLogged.add(key)
+    logBackend('warn', avatarCacheRejectionMessage(rejection))
   }
-  const fileName = avatarCacheFileName(rawUrl)
+  return null
+}
+
+async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
+  const decision = avatarUrlDecision(rawUrl)
+  if (!decision.allowed) {
+    return rejectChatAvatar(decision.rejection)
+  }
+  const { host } = decision
+  const avatarUrl = rawUrl as string
+  const fileName = avatarCacheFileName(avatarUrl)
   const localUrl = `${MANAGED_ASSET_SCHEME}://avatar/${fileName}`
   const filePath = join(avatarCacheDirectory(), fileName)
   if (existsSync(filePath)) {
@@ -11371,20 +11394,31 @@ async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
   }
   const fetchPromise = (async () => {
     try {
-      const response = await net.fetch(rawUrl)
+      const response = await net.fetch(avatarUrl)
       if (!response.ok) {
-        return null
+        return rejectChatAvatar({
+          kind: 'http-status',
+          host,
+          statusClass: httpStatusClass(response.status)
+        })
       }
       const bytes = Buffer.from(await response.arrayBuffer())
-      if (bytes.length === 0 || bytes.length > AVATAR_MAX_BYTES) {
-        return null
+      if (bytes.length === 0) {
+        return rejectChatAvatar({ kind: 'empty-body', host })
+      }
+      if (bytes.length > AVATAR_MAX_BYTES) {
+        return rejectChatAvatar({ kind: 'too-large', host, bytes: bytes.length })
       }
       mkdirSync(avatarCacheDirectory(), { recursive: true })
       writeFileSync(filePath, bytes)
       pruneAvatarCache()
       return localUrl
-    } catch {
-      return null
+    } catch (error) {
+      return rejectChatAvatar({
+        kind: 'fetch-error',
+        host,
+        message: redactAvatarFetchError(error)
+      })
     } finally {
       avatarFetchesInFlight.delete(fileName)
     }

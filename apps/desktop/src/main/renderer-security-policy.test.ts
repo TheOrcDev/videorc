@@ -16,6 +16,7 @@ import {
   trustedRendererDevServerUrl
 } from '../shared/renderer-security-policy'
 import { electronInvokeApiMethods } from '../shared/electron-ipc-contract'
+import { AUXILIARY_API_KEYS } from '../preload/api-policy'
 import {
   installRendererSessionPermissions,
   rendererWebPermissionAllowed,
@@ -255,6 +256,33 @@ describe('renderer security policy', () => {
     expect(roleCanInvokeChannel('comments', 'comments-window:push-snapshot')).toBe(false)
     expect(roleCanInvokeChannel('captions', 'captions-window:get-snapshot')).toBe(true)
     expect(roleCanInvokeChannel('captions', 'captions-window:push-snapshot')).toBe(false)
+  })
+
+  it('lets only the Comments window join main in caching chat avatars', () => {
+    // The detached Comments window draws the same chat rows as Studio; the
+    // host allowlist and the on-disk cache stay main-owned (avatar-cache.ts).
+    expect(roleCanInvokeChannel('main', 'avatars:cache')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'avatars:cache')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'avatars:cache')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'avatars:cache')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('cacheChatAvatar')
+    expect(AUXILIARY_API_KEYS.notes).not.toContain('cacheChatAvatar')
+    expect(AUXILIARY_API_KEYS.captions).not.toContain('cacheChatAvatar')
+  })
+
+  it('exposes an invoke to an auxiliary preload only when the channel policy admits that role', () => {
+    const channelByApiMethod = new Map<string, string>(
+      Object.entries(electronInvokeApiMethods).map(([channel, method]) => [method, channel])
+    )
+    for (const role of ['notes', 'comments', 'captions'] as const) {
+      for (const key of AUXILIARY_API_KEYS[role]) {
+        const channel = channelByApiMethod.get(key as string)
+        if (!channel) {
+          continue // event subscription, not an invoke
+        }
+        expect(roleCanInvokeChannel(role, channel), `${role} -> ${channel}`).toBe(true)
+      }
+    }
   })
 
   it('applies a restrictive CSP to every bundled renderer and a nonce to Notes', () => {
