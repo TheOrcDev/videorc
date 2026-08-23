@@ -24,6 +24,16 @@ fn windows_d3d11_terminal_source_error(
     })
 }
 
+/// Screen-camera composition keeps one more full-frame layer in flight and
+/// stretches NV12/BGRA lease residency past the screen-only envelope. Size the
+/// capture and primary render pools so transient fence lag cannot starve a CFR
+/// tick into a silent single-frame skip (5 slots stays inside the per-format
+/// pool ceiling of 8 even for split screen-camera sessions).
+#[cfg(any(target_os = "windows", test))]
+const fn windows_d3d11_render_pool_slots(camera_required: bool) -> usize {
+    if camera_required { 5 } else { 3 }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowsD3d11MediaMode {
     Disabled,
@@ -918,13 +928,13 @@ mod runtime {
             let pool = WindowsD3d11TexturePoolConfig::dimension_keyed(
                 WindowsD3d11BgraTextureDescriptor::new(plan.source_width, plan.source_height)
                     .map_err(|error| error.to_string())?,
-                3,
+                super::windows_d3d11_render_pool_slots(plan.camera_required),
                 WindowsD3d11BgraTextureDescriptor::new(plan.primary.width, plan.primary.height)
                     .map_err(|error| error.to_string())?,
                 3,
                 WindowsD3d11Nv12TextureDescriptor::new(plan.primary.width, plan.primary.height)
                     .map_err(|error| error.to_string())?,
-                3,
+                super::windows_d3d11_render_pool_slots(plan.camera_required),
                 plan.auxiliary
                     .map(|auxiliary| {
                         Ok((
@@ -2144,6 +2154,12 @@ mod tests {
         assert_eq!(snapshot.render_tick_lag_max_us, 0);
         assert_eq!(snapshot.render_compose_stage_max_us, 0);
         assert_eq!(snapshot.render_publish_stage_max_us, 0);
+    }
+
+    #[test]
+    fn windows_d3d11_screen_camera_sessions_size_deeper_render_pools() {
+        assert_eq!(windows_d3d11_render_pool_slots(false), 3);
+        assert_eq!(windows_d3d11_render_pool_slots(true), 5);
     }
 
     #[test]

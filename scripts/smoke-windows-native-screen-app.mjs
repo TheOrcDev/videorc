@@ -777,7 +777,8 @@ async function monitorD3d11DuringRecording(ws, durationMs) {
 function assertD3d11Diagnostics(diagnostics, { requireOutput }) {
   const failures = evaluateWindowsNativeScreenD3d11Diagnostics(diagnostics, {
     requireOutput,
-    expectFallback: options.expectFallback
+    expectFallback: options.expectFallback,
+    requireZeroPoolPressure: options.requireD3d11
   })
   if (failures.length > 0) {
     throw new Error(`Windows D3D11 media diagnostics failed: ${failures.join('; ')}`)
