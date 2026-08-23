@@ -483,6 +483,81 @@ describe('validateSupportBundle', () => {
     assert.match(result.failures.join('\n'), /gpuFallback/)
   })
 
+  it('accepts a bundle without backend crash records (older apps) and with valid ones', () => {
+    const bundle = validWindowsAcceptanceBundle()
+    assert.equal(validateSupportBundle(bundle, { windowsAcceptance: true }).ok, true)
+
+    bundle.rendererDiagnostics.runtimeInfo.backendCrashes = [
+      {
+        at: '2026-08-23T10:00:05.000Z',
+        generation: 2,
+        code: 101,
+        signal: null,
+        attempt: 2,
+        uptimeMs: 1200,
+        intentional: false,
+        stderrTail: ['{"panic":"boom","location":"main.rs:1","thread":"main"}']
+      },
+      {
+        at: '2026-08-23T10:00:00.000Z',
+        generation: 1,
+        code: null,
+        signal: 'SIGKILL',
+        attempt: 1,
+        uptimeMs: 65000,
+        intentional: false,
+        stderrTail: []
+      }
+    ]
+
+    const result = validateSupportBundle(bundle, { windowsAcceptance: true })
+
+    assert.deepEqual(result.failures, [])
+    assert.equal(result.ok, true)
+  })
+
+  it('rejects malformed backend crash records', () => {
+    const bundle = validBundle()
+    bundle.rendererDiagnostics.runtimeInfo.backendCrashes = [
+      {
+        at: '2026-08-23T10:00:00.000Z',
+        generation: 1,
+        code: null,
+        signal: null,
+        attempt: 0,
+        uptimeMs: -1,
+        intentional: false,
+        stderrTail: 'not-a-list'
+      },
+      {
+        at: '2026-08-23T10:00:05.000Z',
+        generation: 2,
+        code: 1,
+        signal: null,
+        attempt: null,
+        uptimeMs: 1,
+        intentional: false,
+        stderrTail: []
+      }
+    ]
+
+    const result = validateSupportBundle(bundle)
+
+    assert.equal(result.ok, false)
+    const failures = result.failures.join('\n')
+    assert.match(failures, /backendCrashes\.0 must name an exit code or a signal/)
+    assert.match(failures, /backendCrashes\.0\.attempt must be a positive integer or null/)
+    assert.match(failures, /backendCrashes\.0\.uptimeMs must be a non-negative integer/)
+    assert.match(failures, /backendCrashes\.0\.stderrTail must be an array of strings/)
+    assert.match(failures, /must be ordered most recent first \(record 1\)/)
+
+    bundle.rendererDiagnostics.runtimeInfo.backendCrashes = { at: 'x' }
+    assert.match(
+      validateSupportBundle(bundle).failures.join('\n'),
+      /backendCrashes must be an array of crash records/
+    )
+  })
+
   it('rejects software rendering without its persisted reason', () => {
     const bundle = validWindowsAcceptanceBundle()
     bundle.rendererDiagnostics.runtimeInfo.hardwareAccelerationDisabled = true

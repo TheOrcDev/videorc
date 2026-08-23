@@ -24,6 +24,7 @@ import {
   useStudioRecording
 } from '@/hooks/use-studio'
 import type {
+  BackendCrashRecord,
   DiagnosticBottleneck,
   DiagnosticStats,
   HealthEvent,
@@ -37,6 +38,7 @@ import type {
   SystemPermissionPane,
   WebSocketQueueDiagnosticStats
 } from '@/lib/backend'
+import { backendCrashView, latestBackendCrash } from '@/lib/backend-crash-view'
 import { compactTime, formatDroppedFrames, formatMetric } from '@/lib/format'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 import { isNativePreviewCapability } from '../../../../shared/native-preview-capability'
@@ -700,6 +702,7 @@ export function DiagnosticsTab(): ReactElement {
         </PanelSection>
 
         <PanelSection icon={TerminalWindow} title="Backend logs">
+          <LastBackendCrash record={latestBackendCrash(runtimeInfo?.backendCrashes)} />
           <ScrollArea className="h-64 pr-3">
             <div className="flex flex-col gap-1.5">
               {logs.length ? (
@@ -814,6 +817,35 @@ function LogList({ entries }: { entries: SessionLogEntry[] }): ReactElement {
           sourceId={entry.sourceId ?? undefined}
         />
       ))}
+    </div>
+  )
+}
+
+// Persisted crash evidence (runtimeInfo.backendCrashes, written by main at
+// the moment of the exit). The live log list below starts at the CURRENT
+// generation, so without this row a crash that already restarted is invisible.
+function LastBackendCrash({ record }: { record: BackendCrashRecord | null }): ReactElement | null {
+  if (!record) {
+    return null
+  }
+  const view = backendCrashView(record)
+  return (
+    <div className="mb-2 rounded-row border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs">
+      <div className="mb-1 flex flex-wrap items-center gap-2">
+        <Badge variant="destructive">{view.intentional ? 'exit' : 'crash'}</Badge>
+        <span className="font-medium">
+          Backend generation {record.generation} · {view.exit} · after {view.uptime}
+          {view.attempt !== null ? ` · restart attempt ${view.attempt}` : ''}
+        </span>
+        <span className="ml-auto text-muted-foreground">{compactTime(record.at)}</span>
+      </div>
+      <p className="break-words font-mono text-muted-foreground">
+        {view.headline ?? 'No stderr output was captured before the exit.'}
+      </p>
+      <p className="mt-1 text-muted-foreground">
+        Kept with the last {record.stderrTail.length} stderr line(s); Export support bundle includes
+        it.
+      </p>
     </div>
   )
 }

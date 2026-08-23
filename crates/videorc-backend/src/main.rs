@@ -39,6 +39,7 @@ mod mpeg_ts;
 mod native_preview_host;
 mod noise_cleanup;
 mod oauth;
+mod panic_hook;
 mod pipeline;
 mod posters;
 mod preflight;
@@ -197,6 +198,9 @@ use crate::youtube::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // One JSON line on stderr per panic so the supervisor's crash record
+    // (backend-crashes.json) names the cause; see panic_hook.rs.
+    panic_hook::install();
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env().add_directive("videorc_backend=info".parse()?),

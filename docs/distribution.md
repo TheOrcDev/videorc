@@ -554,8 +554,29 @@ Included sections:
 - current recording status
 - latest diagnostic stats
 - recent backend logs and health events
+- persisted backend crash records (`rendererDiagnostics.runtimeInfo.backendCrashes`,
+  last 5, most recent first): exit code/signal, supervisor generation and
+  restart attempt, uptime, and the dying process's last stderr lines — this is
+  what explains a "Backend crashed, restarting" toast after the restart already
+  happened
 - recent session summaries with media paths reduced to redacted basenames
 - redaction summary counters
+
+Durable backend evidence outside the bundle (both under Electron's `userData`
+directory, `~/Library/Application Support/Videorc/` on macOS and
+`%APPDATA%\Videorc\` on Windows):
+
+- `backend-crashes.json` — the crash records above, written atomically at the
+  moment of each non-intentional backend exit (and intentional stops with a
+  non-zero code).
+- `logs/backend.log` (+ `backend.log.1`, 2 × 2 MB rotation) — every backend
+  stderr line and supervisor lifecycle line, so packaged builds without a
+  terminal keep logs across restarts. A Rust panic writes one structured line,
+  `{"panic":…,"location":…,"thread":…}`, before the default panic output;
+  debug builds can force one at startup with `VIDEORC_DEV_PANIC_ON_START=1`.
+
+`pnpm smoke:backend-resilience` kills the backend with SIGKILL and asserts the
+record, the log file, and `runtimeInfo.backendCrashes` all carry the crash.
 
 Excluded by default:
 
