@@ -4107,6 +4107,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const offLog = window.videorc.onBackendLog(appendLog)
     // F-014: surface backend crashes instead of zombie-ing with a Ready badge.
     const offLifecycle = window.videorc.onBackendLifecycle?.((event) => {
+      // Crash evidence (runtimeInfo.backendCrashes) is written by main at the
+      // moment of the exit; re-read it so Diagnostics and the next bundle
+      // export carry the record without a relaunch.
+      if (event.state === 'restarting' || event.state === 'failed') {
+        window.videorc?.getRuntimeInfo?.().then((nextRuntimeInfo) => {
+          if (!disposed) {
+            setRuntimeInfo(nextRuntimeInfo)
+          }
+        })
+      }
       if (event.state === 'restarting') {
         toast.warning('Backend crashed', {
           id: 'backend-lifecycle',
@@ -7178,15 +7188,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     try {
       setLastError(null)
       setSupportBundleExportPending(true)
+      // Re-read runtime info at export time: backend crash records are
+      // appended by main while the app runs, and the startup snapshot would
+      // otherwise ship a bundle that predates the crash it is meant to explain.
+      const freshRuntimeInfo =
+        (await window.videorc?.getRuntimeInfo?.().catch(() => null)) ?? runtimeInfo
       const params: SupportBundleExportParams = {
         // S2 (plan 024): the backend only knows its crate version (stuck at
         // 0.9.0); forward the real Electron app version so the bundle
         // identifies the shipped build. Absent → backend degrades to crate.
-        appVersion: runtimeInfo?.version,
+        appVersion: freshRuntimeInfo?.version,
         rendererDiagnostics: {
           automaticSourceFallbacks: automaticSourceFallbacks.current,
           nativePreviewSurfaceStatus: previewSurfaceStatus,
-          runtimeInfo: runtimeInfo ?? undefined
+          runtimeInfo: freshRuntimeInfo ?? undefined
         }
       }
       const result = await client.request<SupportBundleExportResult>(

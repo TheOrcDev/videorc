@@ -2811,6 +2811,29 @@ export interface RuntimeInfo {
   disableAutoPreview?: boolean
   disableAutoSourcePreview?: boolean
   nativePreviewSurfaceStageSuspended?: boolean
+  /** Persisted backend crash evidence (most recent first, last 5). Survives
+   * supervisor restarts and app relaunches so a support bundle exported after
+   * "Backend crashed, restarting" still names the exit and its last stderr. */
+  backendCrashes?: BackendCrashRecord[]
+}
+
+/** One backend process exit worth keeping: every non-intentional exit plus
+ * intentional shutdowns that still reported a non-zero code. Written by the
+ * main-process supervisor to `userData/backend-crashes.json`. */
+export interface BackendCrashRecord {
+  /** ISO timestamp of the exit observation. */
+  at: string
+  /** Supervisor generation (1-based per app launch) of the process that died. */
+  generation: number
+  code: number | null
+  signal: string | null
+  /** Restart attempt number the supervisor assigned, or null when no restart
+   * was scheduled (app quitting, intentional stop with a non-zero code). */
+  attempt: number | null
+  uptimeMs: number
+  intentional: boolean
+  /** Last stderr lines of that process (each line truncated). */
+  stderrTail: string[]
 }
 
 export interface RuntimeGpuDevice {

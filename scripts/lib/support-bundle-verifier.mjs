@@ -107,6 +107,8 @@ export function validateSupportBundle(bundle, options = {}) {
     }
   }
 
+  inspectBackendCrashRecords(bundle, failures)
+
   inspectValue(bundle, [], failures, warnings)
   if (options.windowsAcceptance === true) {
     inspectWindowsAcceptance(bundle, failures, warnings)
@@ -117,6 +119,79 @@ export function validateSupportBundle(bundle, options = {}) {
     failures,
     warnings
   }
+}
+
+// Live-feedback batch 3 (B1): rendererDiagnostics.runtimeInfo.backendCrashes
+// carries the supervisor's persisted crash records (most recent first). The
+// field is optional (older apps omit it), but when present every record must
+// keep the shape the crash-capture flow promises, or the bundle is lying.
+const BACKEND_CRASH_RECORD_LIMIT = 5
+const BACKEND_CRASH_STDERR_TAIL_LIMIT = 50
+
+function inspectBackendCrashRecords(bundle, failures) {
+  const runtimeInfo = bundle.rendererDiagnostics?.runtimeInfo
+  if (!isPlainObject(runtimeInfo) || runtimeInfo.backendCrashes === undefined) {
+    return
+  }
+  const prefix = 'rendererDiagnostics.runtimeInfo.backendCrashes'
+  const records = runtimeInfo.backendCrashes
+  if (!Array.isArray(records)) {
+    failures.push(`${prefix} must be an array of crash records.`)
+    return
+  }
+  if (records.length > BACKEND_CRASH_RECORD_LIMIT) {
+    failures.push(`${prefix} must keep at most ${BACKEND_CRASH_RECORD_LIMIT} records.`)
+  }
+  let previousAt = null
+  records.forEach((record, index) => {
+    const label = `${prefix}.${index}`
+    if (!isPlainObject(record)) {
+      failures.push(`${label} must be an object.`)
+      return
+    }
+    if (typeof record.at !== 'string' || Number.isNaN(Date.parse(record.at))) {
+      failures.push(`${label}.at must be an ISO timestamp.`)
+    } else {
+      const at = Date.parse(record.at)
+      if (previousAt !== null && at > previousAt) {
+        failures.push(`${prefix} must be ordered most recent first (record ${index}).`)
+      }
+      previousAt = at
+    }
+    if (!Number.isInteger(record.generation) || record.generation < 0) {
+      failures.push(`${label}.generation must be a non-negative integer.`)
+    }
+    if (record.code !== null && !Number.isInteger(record.code)) {
+      failures.push(`${label}.code must be an integer or null.`)
+    }
+    if (record.signal !== null && (typeof record.signal !== 'string' || !record.signal)) {
+      failures.push(`${label}.signal must be a signal name or null.`)
+    }
+    if (record.code === null && record.signal === null && record.intentional !== true) {
+      failures.push(`${label} must name an exit code or a signal for a crash.`)
+    }
+    if (record.attempt !== null && (!Number.isInteger(record.attempt) || record.attempt < 1)) {
+      failures.push(`${label}.attempt must be a positive integer or null.`)
+    }
+    if (!Number.isInteger(record.uptimeMs) || record.uptimeMs < 0) {
+      failures.push(`${label}.uptimeMs must be a non-negative integer.`)
+    }
+    if (typeof record.intentional !== 'boolean') {
+      failures.push(`${label}.intentional must be a boolean.`)
+    }
+    if (!Array.isArray(record.stderrTail)) {
+      failures.push(`${label}.stderrTail must be an array of strings.`)
+    } else {
+      if (record.stderrTail.length > BACKEND_CRASH_STDERR_TAIL_LIMIT) {
+        failures.push(
+          `${label}.stderrTail must keep at most ${BACKEND_CRASH_STDERR_TAIL_LIMIT} lines.`
+        )
+      }
+      if (record.stderrTail.some((line) => typeof line !== 'string')) {
+        failures.push(`${label}.stderrTail must contain only strings.`)
+      }
+    }
+  })
 }
 
 function inspectWindowsAcceptance(bundle, failures, warnings) {

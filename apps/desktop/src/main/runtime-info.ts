@@ -1,6 +1,11 @@
 import { release } from 'node:os'
 
-import type { RuntimeGpuDevice, RuntimeInfo, SystemPermissionPane } from '../shared/backend'
+import type {
+  BackendCrashRecord,
+  RuntimeGpuDevice,
+  RuntimeInfo,
+  SystemPermissionPane
+} from '../shared/backend'
 
 export const MACOS_PERMISSION_URLS: Record<SystemPermissionPane, string> = {
   privacy: 'x-apple.systempreferences:com.apple.preference.security',
@@ -29,6 +34,8 @@ export interface RuntimeInfoInput {
   gpuInfo?: unknown
   hardwareAccelerationDisabled?: boolean
   gpuFallback?: RuntimeInfo['gpuFallback']
+  /** Persisted crash evidence, most recent first (see backend-crash-log.ts). */
+  backendCrashes?: readonly BackendCrashRecord[]
   env: Partial<
     Pick<
       NodeJS.ProcessEnv,
@@ -97,6 +104,7 @@ export function buildRuntimeInfo({
     retryScheduled: false,
     retryAttempts: 0
   },
+  backendCrashes = [],
   env
 }: RuntimeInfoInput): RuntimeInfo {
   const targetPath = permissionTargetPath(execPath)
@@ -111,6 +119,7 @@ export function buildRuntimeInfo({
     gpuDevices: normalizeRuntimeGpuDevices(gpuInfo),
     hardwareAccelerationDisabled,
     gpuFallback,
+    backendCrashes: [...backendCrashes],
     isPackaged,
     permissionTargetName: isPackaged ? 'Videorc' : 'Electron',
     permissionTargetPath: targetPath,

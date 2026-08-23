@@ -135,6 +135,50 @@ describe('runtime info helpers', () => {
     })
   })
 
+  it('carries persisted backend crash records into the bundle-bound runtime info', () => {
+    const crash = {
+      at: '2026-08-23T10:00:00.000Z',
+      generation: 2,
+      code: null,
+      signal: 'SIGKILL',
+      attempt: 1,
+      uptimeMs: 12_345,
+      intentional: false,
+      stderrTail: ['{"panic":"boom","location":"main.rs:1","thread":"main"}']
+    }
+    const info = buildRuntimeInfo({
+      appVersion: '9.9.9-test',
+      execPath: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+      backendCrashes: [crash],
+      env: {}
+    })
+
+    // Contract pinned by the support bundle: rendererDiagnostics.runtimeInfo
+    // is forwarded verbatim, so the record shape IS the bundle shape.
+    expect(info.backendCrashes).toEqual([crash])
+    expect(info.backendCrashes).not.toBe([crash])
+    expect(JSON.parse(JSON.stringify(info)).backendCrashes).toEqual([crash])
+    expect(Object.keys(crash).sort()).toEqual([
+      'at',
+      'attempt',
+      'code',
+      'generation',
+      'intentional',
+      'signal',
+      'stderrTail',
+      'uptimeMs'
+    ])
+  })
+
+  it('defaults backendCrashes to an empty list so the bundle field is always present', () => {
+    const info = buildRuntimeInfo({
+      appVersion: '9.9.9-test',
+      execPath: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+      env: {}
+    })
+    expect(info.backendCrashes).toEqual([])
+  })
+
   it('surfaces the running app version', () => {
     const info = buildRuntimeInfo({
       appVersion: '1.2.3',

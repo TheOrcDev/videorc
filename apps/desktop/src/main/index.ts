@@ -161,6 +161,17 @@ import {
   type MediaAccessResult
 } from './media-access'
 import {
+  BACKEND_CRASH_LOG_LIMIT,
+  BackendStderrTail,
+  appendBackendCrashRecord,
+  backendCrashLogPath,
+  buildBackendCrashRecord,
+  describeBackendCrashRecord,
+  readBackendCrashLog,
+  shouldRecordBackendExit
+} from './backend-crash-log'
+import { RotatingLogFile, backendLogFilePath, formatBackendLogFileLine } from './backend-log-file'
+import {
   GPU_RETRY_STABILITY_MS,
   clearGpuFallbackState,
   decideGpuFallback,
@@ -856,6 +867,26 @@ app.on('child-process-gone', (_event, details) => {
     }
   }
 })
+// Backend crash evidence that survives restarts (live-feedback batch 3, B1).
+// The supervisor used to keep exit code/signal in memory and stderr in a ring
+// that died with the process, so a bundle exported after "Backend crashed,
+// restarting (attempt 3)" said nothing about the crash. Records live in
+// userData/backend-crashes.json (last 5) and ride into the bundle through
+// runtimeInfo.backendCrashes; every backend log line also lands in a rotating
+// userData/logs/backend.log so packaged Windows builds keep logs at all.
+const backendCrashLogFile = backendCrashLogPath(app.getPath('userData'))
+let backendCrashRecords = readBackendCrashLog(backendCrashLogFile)
+const backendLogFile = new RotatingLogFile({
+  path: backendLogFilePath(app.getPath('userData')),
+  onError: (error) => {
+    safeConsole.warn(`Backend log file disabled: ${errorMessageText(error)}`)
+  }
+})
+interface BackendGenerationEvidence {
+  startedAtMs: number
+  stderrTail: BackendStderrTail
+}
+const backendGenerationEvidence = new WeakMap<BackendRuntime, BackendGenerationEvidence>()
 // Keep the detached preview window live while it sits behind the main window.
 // A scene change is made in the main window, so the preview is occluded at that
 // moment — and macOS/Chromium stops compositing a fully-occluded window, which
@@ -7750,9 +7781,11 @@ let backendCrashTimestamps: number[] = []
 let backendRestartTimer: ReturnType<typeof setTimeout> | null = null
 let backendLastStartAt = 0
 
-function scheduleBackendRestart(code: number | null, signal: NodeJS.Signals | null): void {
+/** Returns the restart attempt number, or null when no restart was scheduled
+ * (the app is quitting, or the crash budget is exhausted). */
+function scheduleBackendRestart(code: number | null, signal: NodeJS.Signals | null): number | null {
   if (appIsQuitting || backendQuitInProgress || backendQuitComplete) {
-    return
+    return null
   }
   const now = Date.now()
   // A long stable run forgives earlier crashes (sleep/wake storms must not
@@ -7771,7 +7804,7 @@ function scheduleBackendRestart(code: number | null, signal: NodeJS.Signals | nu
       'Backend crashed repeatedly; automatic restarts stopped. Restart Videorc to recover.'
     )
     sendToWindows('backend:lifecycle', { state: 'failed', code, signal, attempt })
-    return
+    return attempt
   }
   const delayMs = BACKEND_RESTART_BACKOFF_MS[attempt - 1]
   logBackend(
@@ -7783,6 +7816,44 @@ function scheduleBackendRestart(code: number | null, signal: NodeJS.Signals | nu
     backendRestartTimer = null
     startBackend()
   }, delayMs)
+  return attempt
+}
+
+function recordBackendExit(
+  runtime: BackendRuntime,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  intentional: boolean,
+  attempt: number | null
+): void {
+  if (!shouldRecordBackendExit({ intentional, code, signal })) {
+    return
+  }
+  const evidence = backendGenerationEvidence.get(runtime)
+  const record = buildBackendCrashRecord({
+    at: new Date().toISOString(),
+    generation: runtime.generation,
+    code,
+    signal,
+    attempt,
+    uptimeMs: evidence ? Date.now() - evidence.startedAtMs : 0,
+    intentional,
+    stderrTail: evidence?.stderrTail.snapshot() ?? []
+  })
+  try {
+    backendCrashRecords = appendBackendCrashRecord(backendCrashLogFile, record, backendCrashRecords)
+    logBackend(
+      'warn',
+      `Recorded backend crash evidence: ${describeBackendCrashRecord(record)}; ${record.stderrTail.length} stderr line(s) kept in ${backendCrashLogFile}.`
+    )
+  } catch (error) {
+    // Keep the in-memory copy so this launch's bundle still carries it.
+    backendCrashRecords = [record, ...backendCrashRecords].slice(0, BACKEND_CRASH_LOG_LIMIT)
+    logBackend(
+      'error',
+      `Could not persist backend crash evidence to ${backendCrashLogFile}: ${errorMessageText(error)}`
+    )
+  }
 }
 
 function cancelBackendRestart(): void {
@@ -7840,9 +7911,8 @@ function finalizeBackendRuntimeExit(
     backendProcess = null
   }
   clearBackendConnectionState()
-  if (!settlement.wasIntentional) {
-    scheduleBackendRestart(code, signal)
-  }
+  const attempt = settlement.wasIntentional ? null : scheduleBackendRestart(code, signal)
+  recordBackendExit(runtime, code, signal, settlement.wasIntentional, attempt)
 }
 
 function startBackendWithRegistryLock(): void {
@@ -7896,14 +7966,22 @@ function startBackendWithRegistryLock(): void {
   })
   backendProcess = child
   const runtime = backendRuntimeOwner.start(child)
+  const stderrTail = new BackendStderrTail()
+  backendGenerationEvidence.set(runtime, { startedAtMs: backendLastStartAt, stderrTail })
+  logBackend(
+    'info',
+    `Backend generation ${runtime.generation} spawned as pid ${child.pid ?? 'unknown'}.`
+  )
   let runtimeStdoutBuffer = ''
   child.stdout.on('data', (chunk: Buffer) => {
     runtimeStdoutBuffer = handleBackendStdout(chunk.toString(), runtime, runtimeStdoutBuffer)
   })
   child.stderr.on('data', (chunk: Buffer) => {
     for (const line of chunk.toString().split(/\r?\n/)) {
-      if (line.trim()) {
-        logBackend(inferBackendLogLevel(line), line.trim())
+      const trimmed = line.trim()
+      if (trimmed) {
+        stderrTail.push(trimmed)
+        logBackend(inferBackendLogLevel(line), trimmed)
       }
     }
   })
@@ -8509,6 +8587,7 @@ function logBackend(level: BackendLogEvent['level'], message: string): void {
   if (backendLogs.length > 200) {
     backendLogs.shift()
   }
+  backendLogFile.write(formatBackendLogFileLine(level, message, log.timestamp))
 
   sendToWindows('backend:log', log)
 
@@ -11070,6 +11149,7 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
       ),
       retryAttempts: gpuFallbackState?.retryAttempts ?? gpuFallbackLaunchState?.retryAttempts ?? 0
     },
+    backendCrashes: backendCrashRecords,
     env: process.env
   })
 }
