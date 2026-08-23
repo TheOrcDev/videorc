@@ -4400,6 +4400,39 @@ mod tests {
         let off: crate::cohost::CohostState = serde_json::from_value(off_wire.clone()).unwrap();
         assert_eq!(off, crate::cohost::CohostState::off());
         assert_eq!(serde_json::to_value(off).unwrap(), off_wire);
+
+        // `detail` rides a failed tick: server envelope code + message + HTTP
+        // status, or a desktop-assigned code with no status.
+        let error_wire = shared_high_risk_contract_fixture_value("/cohost/errorState");
+        let errored: crate::cohost::CohostState =
+            serde_json::from_value(error_wire.clone()).unwrap();
+        assert_eq!(
+            errored.detail,
+            Some(crate::cohost::CohostErrorDetail {
+                code: "ai-gateway-error".to_string(),
+                message: "The co-host tick failed on every configured model.".to_string(),
+                status: Some(502),
+            })
+        );
+        assert_eq!(serde_json::to_value(errored).unwrap(), error_wire);
+        let timeout_wire = shared_high_risk_contract_fixture_value("/cohost/timeoutState");
+        let timed_out: crate::cohost::CohostState =
+            serde_json::from_value(timeout_wire.clone()).unwrap();
+        assert_eq!(
+            timed_out.detail.as_ref().map(|detail| detail.code.as_str()),
+            Some("timeout")
+        );
+        assert_eq!(
+            timed_out.detail.as_ref().and_then(|detail| detail.status),
+            None
+        );
+        assert_eq!(serde_json::to_value(timed_out).unwrap(), timeout_wire);
+
+        // A payload from before `detail` existed still parses (serde default).
+        let legacy_wire = shared_high_risk_contract_fixture_value("/cohost/legacyState");
+        assert!(legacy_wire.get("detail").is_none());
+        let legacy: crate::cohost::CohostState = serde_json::from_value(legacy_wire).unwrap();
+        assert_eq!(legacy, crate::cohost::CohostState::off());
     }
 
     #[test]

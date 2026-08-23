@@ -1,12 +1,21 @@
 import { describe, expect, it } from 'vitest'
 
-import type { CohostFlag, CohostQuestion, CohostReason, CohostState } from '@/lib/backend'
+import type {
+  CohostErrorDetail,
+  CohostFlag,
+  CohostQuestion,
+  CohostReason,
+  CohostState
+} from '@/lib/backend'
 import {
   applyCohostState,
   cohostAgeLabel,
   cohostAskersLabel,
   cohostChipView,
-  cohostErrorToastReason,
+  cohostErrorDetailText,
+  cohostErrorToast,
+  cohostErrorToastKey,
+  cohostErrorToastMessage,
   cohostFlagRowKey,
   cohostHighlightMessageId,
   cohostPaneMode,
@@ -58,6 +67,19 @@ function state(overrides: Partial<CohostState> = {}): CohostState {
     tickSeq: 4,
     ...overrides
   }
+}
+
+/** The 2026-08-23 incident envelope: web answered 502 `ai-gateway-error`. */
+const GATEWAY_502: CohostErrorDetail = {
+  code: 'ai-gateway-error',
+  message: 'The co-host tick failed on every configured model.',
+  status: 502
+}
+
+const TIMEOUT: CohostErrorDetail = {
+  code: 'timeout',
+  message: 'The co-host service did not answer within 12 s.',
+  status: null
 }
 
 describe('applyCohostState', () => {
@@ -122,11 +144,13 @@ describe('cohostChipView', () => {
   it('is the only chip that earns the live accent while listening', () => {
     expect(cohostChipView(state({ questions: [question(), question({ id: 'q-2' })] }))).toEqual({
       label: 'Co-host: listening · 2 q',
-      tone: 'live'
+      tone: 'live',
+      detail: null
     })
     expect(cohostChipView(state({ questions: [] }))).toEqual({
       label: 'Co-host: listening',
-      tone: 'live'
+      tone: 'live',
+      detail: null
     })
   })
 
@@ -142,23 +166,77 @@ describe('cohostChipView', () => {
       ['gateway-error', 'Co-host: paused · AI error']
     ]
     for (const [reason, label] of cases) {
-      expect(cohostChipView(state({ status: 'paused', reason }))).toEqual({ label, tone: 'muted' })
+      expect(cohostChipView(state({ status: 'paused', reason }))).toEqual({
+        label,
+        tone: 'muted',
+        detail: null
+      })
     }
   })
 
   it('stays monochrome for off and error', () => {
     expect(cohostChipView(state({ status: 'off', reason: null }))).toEqual({
       label: 'Co-host: off',
-      tone: 'muted'
+      tone: 'muted',
+      detail: null
     })
     expect(cohostChipView(state({ status: 'error', reason: 'gateway-error' }))).toEqual({
       label: 'Co-host: error · AI error',
-      tone: 'muted'
+      tone: 'muted',
+      detail: null
     })
     expect(cohostChipView(state({ status: 'error', reason: null }))).toEqual({
       label: 'Co-host: error',
-      tone: 'muted'
+      tone: 'muted',
+      detail: null
     })
+  })
+
+  it("carries the failed tick in the server's own words as the chip detail", () => {
+    expect(
+      cohostChipView(state({ status: 'error', reason: 'gateway-error', detail: GATEWAY_502 }))
+    ).toEqual({
+      label: 'Co-host: error · AI error',
+      tone: 'muted',
+      detail: 'ai-gateway-error (HTTP 502): The co-host tick failed on every configured model.'
+    })
+    // No HTTP status for a desktop-side failure.
+    expect(
+      cohostChipView(state({ status: 'error', reason: 'network', detail: TIMEOUT }))?.detail
+    ).toBe('timeout: The co-host service did not answer within 12 s.')
+    // A server-side pause (quota) carries its detail too...
+    expect(
+      cohostChipView(
+        state({
+          status: 'paused',
+          reason: 'quota-exhausted',
+          detail: { code: 'quota-exhausted', message: 'Resets at midnight UTC.', status: 429 }
+        })
+      )?.detail
+    ).toBe('quota-exhausted (HTTP 429): Resets at midnight UTC.')
+    // ...but a stale detail never leaks onto a listening or off chip.
+    expect(cohostChipView(state({ detail: GATEWAY_502 }))?.detail).toBeNull()
+    expect(cohostChipView(state({ status: 'off', detail: GATEWAY_502 }))?.detail).toBeNull()
+    // Optional on the wire: an older backend omits the key entirely.
+    const { detail: _omitted, ...legacy } = state({ status: 'error', reason: 'gateway-error' })
+    expect(cohostChipView(legacy as CohostState)?.detail).toBeNull()
+  })
+})
+
+describe('cohostErrorDetailText', () => {
+  it('formats code, status and message, degrading when parts are missing', () => {
+    expect(cohostErrorDetailText(null)).toBeNull()
+    expect(cohostErrorDetailText(undefined)).toBeNull()
+    expect(cohostErrorDetailText(GATEWAY_502)).toBe(
+      'ai-gateway-error (HTTP 502): The co-host tick failed on every configured model.'
+    )
+    expect(cohostErrorDetailText({ code: 'ai-gateway-error', message: '  ', status: 502 })).toBe(
+      'ai-gateway-error (HTTP 502)'
+    )
+    expect(cohostErrorDetailText({ code: 'network', message: 'dns', status: null })).toBe(
+      'network: dns'
+    )
+    expect(cohostErrorDetailText({ code: '  ', message: 'x', status: 500 })).toBeNull()
   })
 })
 
@@ -293,23 +371,92 @@ describe('row copy', () => {
   })
 })
 
-describe('cohostErrorToastReason', () => {
+describe('cohostErrorToast', () => {
   it('says nothing for states the pane already shows', () => {
-    expect(cohostErrorToastReason(null, state())).toBeNull()
+    expect(cohostErrorToast(null, state())).toBeNull()
     expect(
-      cohostErrorToastReason(null, state({ status: 'paused', reason: 'quota-exhausted' }))
+      cohostErrorToast(null, state({ status: 'paused', reason: 'quota-exhausted' }))
     ).toBeNull()
+    expect(cohostErrorToastKey(state())).toBeNull()
+    expect(cohostErrorToastKey(state({ status: 'error', reason: null }))).toBeNull()
   })
 
   it('toasts a NEW error reason exactly once', () => {
     const errored = state({ status: 'error', reason: 'gateway-error' })
-    expect(cohostErrorToastReason(state(), errored)).toBe('gateway-error')
-    expect(cohostErrorToastReason(errored, errored)).toBeNull()
+    expect(cohostErrorToast(state(), errored)).toEqual({
+      reason: 'gateway-error',
+      key: 'gateway-error:',
+      message: 'Co-host stopped: Videorc AI returned an error.'
+    })
+    expect(cohostErrorToast(errored, errored)).toBeNull()
   })
 
   it('toasts again when the error reason changes', () => {
     const first = state({ status: 'error', reason: 'gateway-error' })
     const second = state({ status: 'error', reason: 'network' })
-    expect(cohostErrorToastReason(first, second)).toBe('network')
+    expect(cohostErrorToast(first, second)?.reason).toBe('network')
+  })
+
+  it("puts the server's code and message in the toast copy", () => {
+    const errored = state({ status: 'error', reason: 'gateway-error', detail: GATEWAY_502 })
+    expect(cohostErrorToast(state(), errored)).toEqual({
+      reason: 'gateway-error',
+      key: 'gateway-error:ai-gateway-error',
+      message:
+        'Co-host stopped: Videorc AI returned an error (ai-gateway-error: The co-host tick failed on every configured model).'
+    })
+    expect(cohostErrorToastMessage('network', TIMEOUT)).toBe(
+      'Co-host stopped: no connection to Videorc AI (timeout: The co-host service did not answer within 12 s).'
+    )
+    // A code without a message still names itself; no detail keeps the base copy.
+    expect(
+      cohostErrorToastMessage('gateway-error', {
+        code: 'ai-gateway-error',
+        message: '',
+        status: 502
+      })
+    ).toBe('Co-host stopped: Videorc AI returned an error (ai-gateway-error).')
+    expect(cohostErrorToastMessage('gateway-error', null)).toBe(
+      'Co-host stopped: Videorc AI returned an error.'
+    )
+    expect(cohostErrorToastMessage('gateway-error', undefined)).toBe(
+      'Co-host stopped: Videorc AI returned an error.'
+    )
+  })
+
+  it('dedupes on the (reason, code) pair, not per tick', () => {
+    const tick5 = state({
+      status: 'error',
+      reason: 'gateway-error',
+      detail: GATEWAY_502,
+      tickSeq: 5
+    })
+    const tick6 = { ...tick5, tickSeq: 6 }
+    const tick7 = { ...tick5, tickSeq: 7 }
+    expect(cohostErrorToast(state(), tick5)).not.toBeNull()
+    // Backoff retries of the same failure are silent...
+    expect(cohostErrorToast(tick5, tick6)).toBeNull()
+    expect(cohostErrorToast(tick6, tick7)).toBeNull()
+    // ...even when the server's sentence changes but the code does not.
+    expect(
+      cohostErrorToast(tick7, {
+        ...tick7,
+        tickSeq: 8,
+        detail: { ...GATEWAY_502, message: 'Model ladder exhausted (3 tried).' }
+      })
+    ).toBeNull()
+    // A different code under the same reason is news.
+    const upstream = {
+      ...tick7,
+      tickSeq: 9,
+      detail: { code: 'upstream-timeout', message: 'Gateway timed out.', status: 504 }
+    }
+    expect(cohostErrorToast(tick7, upstream)?.key).toBe('gateway-error:upstream-timeout')
+    // Recovery then the same failure again is news again.
+    const recovered = state({ tickSeq: 10 })
+    expect(cohostErrorToast(upstream, recovered)).toBeNull()
+    expect(cohostErrorToast(recovered, { ...tick5, tickSeq: 11 })?.key).toBe(
+      'gateway-error:ai-gateway-error'
+    )
   })
 })

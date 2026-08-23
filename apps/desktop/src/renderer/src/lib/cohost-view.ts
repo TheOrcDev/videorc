@@ -1,4 +1,5 @@
 import type {
+  CohostErrorDetail,
   CohostFlag,
   CohostPriority,
   CohostQuestion,
@@ -18,6 +19,7 @@ export const EMPTY_COHOST_STATE: CohostState = {
   sessionId: null,
   status: 'off',
   reason: null,
+  detail: null,
   questions: [],
   flags: [],
   mood: null,
@@ -69,6 +71,35 @@ export interface CohostChipView {
   label: string
   /** Only `listening` earns the live accent; every other state is monochrome. */
   tone: 'live' | 'muted'
+  /**
+   * What the failed tick actually said — "ai-gateway-error (HTTP 502): The
+   * co-host tick failed on every configured model." — for the chip's tooltip
+   * or a secondary line. Null while listening, off, or when the engine paused
+   * itself locally (signed out, Basic, consent).
+   */
+  detail: string | null
+}
+
+/** `state.detail` is optional on the wire (older backend); absent means null. */
+export function cohostErrorDetail(state: CohostState | null): CohostErrorDetail | null {
+  return state?.detail ?? null
+}
+
+function withoutTrailingPeriod(text: string): string {
+  return text.trim().replace(/\.+$/, '')
+}
+
+/**
+ * One line a streamer can paste into a bug report: the server's envelope code,
+ * the HTTP status when there was a response, and the server's own sentence.
+ */
+export function cohostErrorDetailText(detail: CohostErrorDetail | null | undefined): string | null {
+  if (!detail) return null
+  const code = detail.code.trim()
+  if (!code) return null
+  const head = detail.status !== null ? `${code} (HTTP ${detail.status})` : code
+  const message = detail.message.trim()
+  return message ? `${head}: ${message}` : head
 }
 
 const REASON_LABELS: Record<CohostReason, string> = {
@@ -90,20 +121,35 @@ export function cohostReasonLabel(reason: CohostReason | null): string | null {
 export function cohostChipView(state: CohostState | null): CohostChipView | null {
   if (!state) return null
   const reason = cohostReasonLabel(state.reason)
+  // The engine only sets `detail` on a failed tick, and clears it the moment
+  // it listens again; a stale detail on a listening/off state is never shown.
+  const detail =
+    state.status === 'error' || state.status === 'paused'
+      ? cohostErrorDetailText(cohostErrorDetail(state))
+      : null
   switch (state.status) {
     case 'off':
-      return { label: 'Co-host: off', tone: 'muted' }
+      return { label: 'Co-host: off', tone: 'muted', detail: null }
     case 'listening': {
       const count = state.questions.length
       return {
         label: count > 0 ? `Co-host: listening · ${count} q` : 'Co-host: listening',
-        tone: 'live'
+        tone: 'live',
+        detail: null
       }
     }
     case 'paused':
-      return { label: reason ? `Co-host: paused · ${reason}` : 'Co-host: paused', tone: 'muted' }
+      return {
+        label: reason ? `Co-host: paused · ${reason}` : 'Co-host: paused',
+        tone: 'muted',
+        detail
+      }
     case 'error':
-      return { label: reason ? `Co-host: error · ${reason}` : 'Co-host: error', tone: 'muted' }
+      return {
+        label: reason ? `Co-host: error · ${reason}` : 'Co-host: error',
+        tone: 'muted',
+        detail
+      }
   }
 }
 
@@ -291,17 +337,21 @@ export function cohostHighlightMessageId(
 
 // --- Error toast -----------------------------------------------------------
 
+export interface CohostErrorToast {
+  reason: CohostReason
+  /** `${reason}:${detail.code}` — the dedupe identity of this failure. */
+  key: string
+  message: string
+}
+
 /**
- * Toast discipline: the pane and the chip already show every co-host state, so
- * only a NEW error reason is news. Returns the reason to toast, or null.
+ * The identity a toast is deduplicated on: the reason AND the server's error
+ * code. A 502 `ai-gateway-error` followed by a 502 `upstream-timeout` is news
+ * twice; the same 502 on five backoff retries is news once.
  */
-export function cohostErrorToastReason(
-  previous: CohostState | null,
-  next: CohostState
-): CohostReason | null {
-  if (next.status !== 'error' || !next.reason) return null
-  if (previous?.status === 'error' && previous.reason === next.reason) return null
-  return next.reason
+export function cohostErrorToastKey(state: CohostState | null): string | null {
+  if (!state || state.status !== 'error' || !state.reason) return null
+  return `${state.reason}:${cohostErrorDetail(state)?.code ?? ''}`
 }
 
 export const COHOST_ERROR_TOAST_MESSAGES: Record<CohostReason, string> = {
@@ -313,4 +363,37 @@ export const COHOST_ERROR_TOAST_MESSAGES: Record<CohostReason, string> = {
   'server-unconfigured': 'Co-host stopped: Videorc AI is unavailable right now.',
   network: 'Co-host stopped: no connection to Videorc AI.',
   'gateway-error': 'Co-host stopped: Videorc AI returned an error.'
+}
+
+/**
+ * Toast copy with the server's words attached:
+ * "Co-host stopped: Videorc AI returned an error (ai-gateway-error: The
+ * co-host tick failed on every configured model)." The HTTP status stays in
+ * the chip tooltip — a toast is read in a second, not debugged.
+ */
+export function cohostErrorToastMessage(
+  reason: CohostReason,
+  detail: CohostErrorDetail | null | undefined
+): string {
+  const base = COHOST_ERROR_TOAST_MESSAGES[reason]
+  const code = detail?.code.trim() ?? ''
+  if (!code) return base
+  const message = detail ? withoutTrailingPeriod(detail.message) : ''
+  const suffix = message ? `${code}: ${message}` : code
+  return `${withoutTrailingPeriod(base)} (${suffix}).`
+}
+
+/**
+ * Toast discipline: the pane and the chip already show every co-host state, so
+ * only a NEW failure — a new (reason, code) pair — is news. Backoff retries of
+ * the same failure return null. Returns the toast to raise, or null.
+ */
+export function cohostErrorToast(
+  previous: CohostState | null,
+  next: CohostState
+): CohostErrorToast | null {
+  const key = cohostErrorToastKey(next)
+  if (!key || !next.reason) return null
+  if (previous?.status === 'error' && cohostErrorToastKey(previous) === key) return null
+  return { reason: next.reason, key, message: cohostErrorToastMessage(next.reason, next.detail) }
 }

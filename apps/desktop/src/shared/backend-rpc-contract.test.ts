@@ -934,6 +934,43 @@ describe('backend RPC contract', () => {
       'cohost.state'
     )
 
+    // `detail` names the failed tick; it is optional (older backend), nullable,
+    // and closed: a bad code/status shape fails the event like any other.
+    const detail = {
+      code: 'ai-gateway-error',
+      message: 'The co-host tick failed on every configured model.',
+      status: 502
+    }
+    const errored = { ...state, status: 'error', reason: 'gateway-error', detail }
+    expect(validateBackendEventPayload('cohost.state', errored)).toEqual(errored)
+    expect(validateBackendRpcResult('cohost.status', errored)).toEqual(errored)
+    const timedOut = {
+      ...state,
+      status: 'error',
+      reason: 'network',
+      detail: { code: 'timeout', message: 'No answer within 12 s.', status: null }
+    }
+    expect(validateBackendEventPayload('cohost.state', timedOut)).toEqual(timedOut)
+    expect(validateBackendEventPayload('cohost.state', { ...state, detail: null })).toEqual({
+      ...state,
+      detail: null
+    })
+    expect(() =>
+      validateBackendEventPayload('cohost.state', { ...errored, detail: { ...detail, code: '' } })
+    ).toThrow('cohost.state')
+    expect(() =>
+      validateBackendEventPayload('cohost.state', {
+        ...errored,
+        detail: { ...detail, status: '502' }
+      })
+    ).toThrow('cohost.state')
+    expect(() =>
+      validateBackendEventPayload('cohost.state', {
+        ...errored,
+        detail: { ...detail, extra: true }
+      })
+    ).toThrow('cohost.state')
+
     const start = { sessionId: 'session-1', consentToProcessChat: true, streamTitle: 'Rust night' }
     expect(validateBackendRpcParams('cohost.start', start)).toEqual(start)
     expect(validateBackendRpcParams('cohost.start', { sessionId: 'session-1' })).toEqual({

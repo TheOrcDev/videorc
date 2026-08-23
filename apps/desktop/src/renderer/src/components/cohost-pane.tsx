@@ -224,6 +224,7 @@ export function CohostPane({
               'truncate text-[11px]',
               chip.tone === 'live' ? 'text-success' : 'text-muted-foreground'
             )}
+            title={chip.detail ?? undefined}
           >
             {chip.label.replace(/^Co-host: /, '')}
           </span>
@@ -241,6 +242,17 @@ export function CohostPane({
 
       <CollapsibleContent>
         <Separator />
+        {chip?.detail ? (
+          // The failed tick in the server's own words, so "AI error" is never
+          // the whole story. Monochrome; the chip already carries the state.
+          <p
+            className="truncate px-2.5 py-1 text-[11px] text-subtle"
+            data-slot="cohost-error-detail"
+            title={chip.detail}
+          >
+            {chip.detail}
+          </p>
+        ) : null}
         <Command
           ref={rootRef}
           aria-label="Co-host questions and flags"
@@ -254,7 +266,9 @@ export function CohostPane({
           <CommandList className="max-h-48 px-1 py-1">
             {rows.length === 0 ? (
               <p className="px-2 py-3 text-xs text-subtle">
-                Listening — questions from chat will appear here.
+                {state?.status === 'listening'
+                  ? 'Listening — questions from chat will appear here.'
+                  : 'Questions from chat will appear here once co-host is listening again.'}
               </p>
             ) : (
               <>

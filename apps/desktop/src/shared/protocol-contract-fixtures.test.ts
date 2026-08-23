@@ -69,6 +69,9 @@ interface HighRiskContractFixtures {
     settings: CohostSettings
     state: CohostState
     offState: CohostState
+    errorState: CohostState
+    timeoutState: CohostState
+    legacyState: CohostState
   }
 }
 
@@ -184,7 +187,33 @@ describe('shared high-risk protocol fixture', () => {
     expect(validateBackendEventPayload('cohost.state', fixtures.cohost.offState)).toStrictEqual(
       fixtures.cohost.offState
     )
-    expect(fixtures.cohost.offState).toMatchObject({ sessionId: null, reason: null, mood: null })
+    expect(fixtures.cohost.offState).toMatchObject({
+      sessionId: null,
+      reason: null,
+      detail: null,
+      mood: null
+    })
+    // `detail` carries the failed tick's envelope verbatim, or a desktop code
+    // with no HTTP status; a pre-`detail` payload validates unchanged.
+    for (const shape of ['errorState', 'timeoutState', 'legacyState'] as const) {
+      expect(validateBackendEventPayload('cohost.state', fixtures.cohost[shape])).toStrictEqual(
+        fixtures.cohost[shape]
+      )
+      expect(validateBackendRpcResult('cohost.status', fixtures.cohost[shape])).toStrictEqual(
+        fixtures.cohost[shape]
+      )
+    }
+    expect(fixtures.cohost.errorState.detail).toStrictEqual({
+      code: 'ai-gateway-error',
+      message: 'The co-host tick failed on every configured model.',
+      status: 502
+    })
+    expect(fixtures.cohost.timeoutState.detail).toStrictEqual({
+      code: 'timeout',
+      message: 'The co-host service did not answer within 12 s.',
+      status: null
+    })
+    expect('detail' in fixtures.cohost.legacyState).toBe(false)
   })
 
   it('keeps comment pagination defaults and deletion DTOs identical', () => {

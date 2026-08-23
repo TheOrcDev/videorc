@@ -3530,11 +3530,29 @@ export interface CohostFlag {
   at: string
 }
 
+/**
+ * What the last failed tick actually said. `code` is the server's error
+ * envelope code verbatim (`ai-gateway-error`, `quota-exhausted`, ...) or a
+ * desktop-assigned `network` / `timeout` / `malformed-response`; `status` is
+ * the HTTP status when a response arrived. Cleared as soon as the engine is
+ * listening again.
+ */
+export interface CohostErrorDetail {
+  code: string
+  message: string
+  status: number | null
+}
+
 /** The `cohost.state` event payload and every `cohost.*` RPC result. */
 export interface CohostState {
   sessionId: string | null
   status: CohostStatus
   reason: CohostReason | null
+  /**
+   * Present only while `reason` describes a failed tick. Optional on the wire
+   * so a backend from before the field still validates; absent means null.
+   */
+  detail?: CohostErrorDetail | null
   questions: CohostQuestion[]
   flags: CohostFlag[]
   mood: CohostMood | null
