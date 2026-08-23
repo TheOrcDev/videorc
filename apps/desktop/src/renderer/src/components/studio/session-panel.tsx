@@ -6,6 +6,7 @@ import {
   Info,
   Record,
   StopCircle,
+  WarningCircle,
   type Icon
 } from '@phosphor-icons/react'
 import type { ReactElement, ReactNode } from 'react'
@@ -15,6 +16,7 @@ import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
+import type { SessionStartFailure } from '@/lib/session-start-failure'
 import { outputSummary, streamingSummary } from '@/lib/studio-session-view'
 
 // The session's primary actions rendered as a matched pair of glassy hero
@@ -36,11 +38,14 @@ export function SessionPanel({
   liveStreamBlockedReason,
   blockedReason = null,
   blockedJump = null,
+  startFailure = null,
   canStop,
   stopLabel,
   onRecord,
   onLiveStream,
-  onStop
+  onStop,
+  onRetryStart,
+  onDismissStartFailure
 }: {
   active: boolean
   startRequestPending: boolean
@@ -54,11 +59,16 @@ export function SessionPanel({
     label: string
     to: Parameters<ReturnType<typeof useWorkspaceNav>['setActive']>[0]
   } | null
+  /** The last refused Record / Go Live (B0): stays under the controls until
+   * the user starts again or dismisses it — a 4s toast was the only signal. */
+  startFailure?: SessionStartFailure | null
   canStop: boolean
   stopLabel: string
   onRecord: () => void
   onLiveStream: () => void
   onStop: () => void
+  onRetryStart?: () => void
+  onDismissStartFailure?: () => void
 }): ReactElement {
   const { captureConfig } = useStudioCore()
   const { openStudioPanel, setActive } = useWorkspaceNav()
@@ -132,6 +142,46 @@ export function SessionPanel({
                 {blockedJump.label}
               </button>
             ) : null}
+          </div>
+        ) : null}
+        {/* A refused start is the ONE place destructive red is allowed on chrome:
+            it is status, it persists, and it carries the backend's reason
+            verbatim (the toast can be missed mid-stream; this line cannot). */}
+        {!active && startFailure ? (
+          <div
+            className="flex items-start gap-1.5 text-xs"
+            data-testid="session-start-failure"
+            key={startFailure.at}
+            role="alert"
+          >
+            <WarningCircle className="mt-px size-3.5 shrink-0 text-destructive" weight="fill" />
+            <p
+              className="line-clamp-3 min-w-0 flex-1 text-destructive"
+              title={startFailure.message}
+            >
+              <span className="font-medium">Could not start.</span> {startFailure.message}
+            </p>
+            <span className="flex shrink-0 items-center gap-2">
+              {onRetryStart ? (
+                <button
+                  className="font-medium text-foreground underline-offset-2 hover:underline"
+                  disabled={startRequestPending}
+                  type="button"
+                  onClick={onRetryStart}
+                >
+                  Retry
+                </button>
+              ) : null}
+              {onDismissStartFailure ? (
+                <button
+                  className="text-muted-foreground underline-offset-2 hover:underline"
+                  type="button"
+                  onClick={onDismissStartFailure}
+                >
+                  Dismiss
+                </button>
+              ) : null}
+            </span>
           </div>
         ) : null}
       </div>

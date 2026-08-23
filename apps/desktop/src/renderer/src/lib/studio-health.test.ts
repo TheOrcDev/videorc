@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest'
 
-import { studioHealth, type StudioHealthInput } from './studio-health'
+import {
+  SESSION_START_FAILED_TOAST_ID,
+  SESSION_START_FAILED_TOAST_TITLE,
+  sessionStartFailureToastOptions
+} from './session-start-failure'
+import {
+  RECORDING_STARTUP_BARRIER_TIMEOUT_CODE,
+  RECORDING_STARTUP_CADENCE_UNSTEADY_CODE,
+  RECORDING_STARTUP_UNSTEADY_TOAST_ID,
+  recordingStartupHealthToast,
+  studioHealth,
+  type StudioHealthInput
+} from './studio-health'
 
 function stats(overrides: Partial<StudioHealthInput> = {}): StudioHealthInput {
   return {
@@ -156,5 +168,81 @@ describe('studioHealth', () => {
     expect(studioHealth(stats({ compositorBackend: 'cpu-fallback' }), true, 'darwin').tone).toBe(
       'error'
     )
+  })
+})
+
+describe('recordingStartupHealthToast', () => {
+  const UNSTEADY_MESSAGE =
+    'Recording started with an unsteady compositor at start: gaps 166/120/98 ms vs 300 ms budget (5 fresh 1920x1080 frame(s) in 5000ms); check the first seconds of the file.'
+  const REFUSED_MESSAGE =
+    'Recording startup blocked before encoding: waiting for compositor frame (recent gaps none ms; 0 fresh frame(s) in 2500ms); cadence budget 200ms.'
+
+  it('maps the unsteady-start WARN to a keyed warning toast carrying the backend copy', () => {
+    const result = recordingStartupHealthToast({
+      code: RECORDING_STARTUP_CADENCE_UNSTEADY_CODE,
+      level: 'warn',
+      message: UNSTEADY_MESSAGE
+    })
+    expect(result).toEqual({
+      variant: 'warning',
+      id: RECORDING_STARTUP_UNSTEADY_TOAST_ID,
+      title: 'Recording started on an unsteady compositor',
+      description: UNSTEADY_MESSAGE,
+      duration: 15000
+    })
+    expect(result?.id).toBe('recording-startup-cadence-unsteady')
+  })
+
+  it('maps the barrier refusal to a persistent error toast on the start-failure key', () => {
+    const result = recordingStartupHealthToast({
+      code: RECORDING_STARTUP_BARRIER_TIMEOUT_CODE,
+      level: 'error',
+      message: REFUSED_MESSAGE
+    })
+    // Same title + description shape as the RPC-rejection toast: sonner merges
+    // an update over the existing toast by id, so this is what lets the
+    // rejection add Retry in place instead of stacking a second red toast.
+    expect(result).toEqual({
+      variant: 'error',
+      id: SESSION_START_FAILED_TOAST_ID,
+      title: SESSION_START_FAILED_TOAST_TITLE,
+      description: REFUSED_MESSAGE,
+      duration: Infinity
+    })
+    expect(result).toMatchObject({
+      title: 'Could not start',
+      description: sessionStartFailureToastOptions(
+        REFUSED_MESSAGE,
+        () => {},
+        () => {}
+      ).description
+    })
+  })
+
+  it('ignores every other health event, including non-error barrier levels', () => {
+    expect(
+      recordingStartupHealthToast({
+        code: 'recording-startup-barrier-ready',
+        level: 'info',
+        message: 'Recording startup waited 120ms for 3 fresh compositor frame(s).'
+      })
+    ).toBeNull()
+    expect(
+      recordingStartupHealthToast({
+        code: 'recording-startup-cadence-retry',
+        level: 'info',
+        message: 'retrying the startup barrier once with a 300ms budget.'
+      })
+    ).toBeNull()
+    expect(
+      recordingStartupHealthToast({
+        code: RECORDING_STARTUP_BARRIER_TIMEOUT_CODE,
+        level: 'warn',
+        message: REFUSED_MESSAGE
+      })
+    ).toBeNull()
+    expect(
+      recordingStartupHealthToast({ code: 'mic-silent', level: 'warn', message: 'quiet' })
+    ).toBeNull()
   })
 })

@@ -59,7 +59,10 @@ export function StudioTab(): ReactElement {
     confirmGoLive,
     continueGoLiveWithReadyDestinations,
     continueGoLiveWithoutCaptions,
-    resolveGoLiveBlocker
+    resolveGoLiveBlocker,
+    sessionStartFailure,
+    dismissSessionStartFailure,
+    retrySessionStart
   } = studio
 
   const active = isSessionTransportActive(recording.state)
@@ -169,10 +172,13 @@ export function StudioTab(): ReactElement {
               canStop={canStop}
               liveStreamBlockedReason={liveStreamBlockedReason}
               recordBlockedReason={recordBlockedReason}
+              startFailure={sessionStartFailure}
               startRequestPending={startRequestPending}
               stopLabel={stopLabel}
+              onDismissStartFailure={dismissSessionStartFailure}
               onLiveStream={handleLiveStream}
               onRecord={handleRecord}
+              onRetryStart={retrySessionStart}
               onStop={stopSession}
             />
           </div>
