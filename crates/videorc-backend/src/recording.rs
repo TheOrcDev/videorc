@@ -6987,20 +6987,31 @@ const RECORDING_STARTUP_BARRIER_TIMEOUT: Duration = Duration::from_millis(2500);
 /// Consecutive target-resolution real-source compositor frames required before encoding.
 const RECORDING_STARTUP_BARRIER_MIN_FRAMES: u32 = 3;
 /// How many frame intervals the startup barrier allows between consecutive
-/// accepted compositor publishes. macOS Metal stays near the interval; Windows
-/// CPU compose + dshow delivery routinely lands 100–180ms gaps at session start
-/// (on-box: 130ms then 172ms over earlier 71ms/150ms budgets), so non-macOS uses
-/// a looser factor (~200ms at 30fps) plus a floor. Stalled pipelines still fail
-/// at multi-hundred-ms.
+/// accepted compositor publishes. Under live load (co-host ticks, chat, 1080p
+/// compose, FFmpeg spawn) the macOS Metal compositor hiccups to 100–170ms at
+/// session start — a 2.1× factor (71ms at 30fps) refused a real recording on
+/// 2026-08-23 for a single 166ms gap. macOS now uses 4.0× with the shared
+/// 200ms floor; Windows CPU compose + dshow delivery lands 100–180ms gaps
+/// routinely (on-box: 130ms then 172ms), so it keeps the looser 6.0×. Stalled
+/// pipelines still fail at multi-hundred-ms, and a cadence-only miss no longer
+/// refuses the session (see `await_recording_startup_barrier`).
 #[cfg(target_os = "macos")]
-const RECORDING_STARTUP_CADENCE_FRAME_INTERVAL_FACTOR: f64 = 2.1;
+const RECORDING_STARTUP_CADENCE_FRAME_INTERVAL_FACTOR: f64 = 4.0;
 #[cfg(not(target_os = "macos"))]
 const RECORDING_STARTUP_CADENCE_FRAME_INTERVAL_FACTOR: f64 = 6.0;
-/// Windows compose/dshow startup gaps are often wall-clock-bound rather than
-/// pure multiples of the target frame interval; keep a hard floor so 60fps
-/// sessions do not inherit an unrealistically tight cadence budget.
-#[cfg(not(target_os = "macos"))]
+/// Startup gaps are wall-clock-bound (scheduler, spawn, GPU queue) rather than
+/// pure multiples of the frame interval; keep a hard floor on every platform so
+/// 60fps sessions do not inherit an unrealistically tight cadence budget.
 const RECORDING_STARTUP_CADENCE_MIN_FRAME_GAP: Duration = Duration::from_millis(200);
+/// When the first barrier pass times out on cadence alone, one in-place retry
+/// runs with this much more budget before the session proceeds with a warning.
+const RECORDING_STARTUP_CADENCE_RETRY_BUDGET_FACTOR: f64 = 1.5;
+/// Emitted (WARN) when encoding starts on a compositor that never settled at
+/// start; the renderer turns it into a keyed warning toast.
+pub const RECORDING_STARTUP_CADENCE_UNSTEADY_CODE: &str = "recording-startup-cadence-unsteady";
+/// Emitted (ERROR) when the barrier refuses the session: no usable frame, or a
+/// resolution / scene-revision / missing-source block.
+pub const RECORDING_STARTUP_BARRIER_TIMEOUT_CODE: &str = "recording-startup-barrier-timeout";
 const RECORDING_CAMERA_CADENCE_READY_TIMEOUT: Duration = Duration::from_millis(3000);
 /// When the cadence has not settled by this point, the session is presumed to
 /// have drifted into degraded delivery (long-uptime capture cards do this) and
@@ -7047,6 +7058,40 @@ async fn await_microphone_warmup(state: &AppState, stats: Arc<AudioCaptureStats>
     true
 }
 
+/// What one startup-barrier pass means for the session, decided by a pure
+/// function so the record-with-warning ladder is testable without a compositor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordingStartupBarrierVerdict {
+    /// Consecutive fresh frames inside the budget: encode now.
+    Ready,
+    /// Usable frames arrived but not steadily enough. Never a refusal on its
+    /// own: retry once with a looser budget, then record with a warning.
+    CadenceOnly,
+    /// No usable frame at all, or a resolution / scene-revision / missing
+    /// source block: the barrier exists for exactly this, refuse the start.
+    Blocked,
+}
+
+fn classify_recording_startup_barrier(
+    result: &CompositorStartupBarrierResult,
+) -> RecordingStartupBarrierVerdict {
+    if result.ready {
+        RecordingStartupBarrierVerdict::Ready
+    } else if result.cadence_only && result.fresh_frames_seen > 0 {
+        RecordingStartupBarrierVerdict::CadenceOnly
+    } else {
+        RecordingStartupBarrierVerdict::Blocked
+    }
+}
+
+/// The cadence budget a cadence-only retry runs with (1.5× the first pass).
+fn recording_startup_retry_frame_gap_budget(max_frame_gap: Duration) -> Duration {
+    Duration::from_millis(
+        (max_frame_gap.as_millis() as f64 * RECORDING_STARTUP_CADENCE_RETRY_BUDGET_FACTOR).ceil()
+            as u64,
+    )
+}
+
 async fn await_recording_startup_barrier(
     state: &AppState,
     session_id: &str,
@@ -7056,69 +7101,199 @@ async fn await_recording_startup_barrier(
     required_scene_revision: Option<u64>,
     requirements: CompositorStartupSourceRequirements,
 ) -> Result<CompositorStartupBarrierResult> {
+    await_recording_startup_barrier_with_budget(
+        state,
+        session_id,
+        width,
+        height,
+        required_scene_revision,
+        requirements,
+        recording_startup_frame_gap_budget(target_fps),
+        RECORDING_STARTUP_BARRIER_TIMEOUT,
+    )
+    .await
+}
+
+/// Record-with-warning ladder for compositor cadence at session start
+/// (mirrors the 0.9.56 camera-cadence ladder):
+///
+/// 1. one barrier pass with the platform budget;
+/// 2. on a cadence-only timeout, one in-place retry with a 1.5× budget;
+/// 3. if that is still cadence-only, proceed to encode with a WARN health
+///    event and the `ready-unsteady` diagnostics state.
+///
+/// Only a structural block or a zero-frame stall refuses the session.
+#[allow(clippy::too_many_arguments)]
+async fn await_recording_startup_barrier_with_budget(
+    state: &AppState,
+    session_id: &str,
+    width: u32,
+    height: u32,
+    required_scene_revision: Option<u64>,
+    requirements: CompositorStartupSourceRequirements,
+    max_frame_gap: Duration,
+    timeout: Duration,
+) -> Result<CompositorStartupBarrierResult> {
     publish_recording_startup_barrier_diagnostics(
         state,
         "waiting",
-        &CompositorStartupBarrierResult {
-            ready: false,
-            wait_ms: 0,
-            frames_observed: 0,
-            first_source_frame_ms: None,
-            first_full_resolution_frame_ms: None,
-            timeout_reason: None,
-        },
+        &CompositorStartupBarrierResult::empty(),
         None,
     )
     .await;
 
-    let max_frame_gap = recording_startup_frame_gap_budget(target_fps);
-    let result = wait_for_compositor_startup_frames(
-        state,
-        CompositorStartupBarrierParams {
-            width,
-            height,
-            required_scene_revision,
-            min_consecutive_frames: RECORDING_STARTUP_BARRIER_MIN_FRAMES,
-            max_frame_gap: Some(max_frame_gap),
-            timeout: RECORDING_STARTUP_BARRIER_TIMEOUT,
-            requirements,
-        },
-    )
-    .await;
-
-    if result.ready {
-        publish_recording_startup_barrier_diagnostics(state, "ready", &result, None).await;
-        let _ = emit_health_event(
+    let run_pass = |frame_gap: Duration| {
+        wait_for_compositor_startup_frames(
             state,
-            Some(session_id),
-            HealthLevel::Info,
-            "recording-startup-barrier-ready",
-            &format!(
-                "Recording startup waited {}ms for {} fresh {}x{} compositor frame(s) with frame gaps at or below {}ms.",
-                result.wait_ms,
-                result.frames_observed,
+            CompositorStartupBarrierParams {
                 width,
                 height,
-                max_frame_gap.as_millis()
-            ),
-        );
-        return Ok(result);
+                required_scene_revision,
+                min_consecutive_frames: RECORDING_STARTUP_BARRIER_MIN_FRAMES,
+                max_frame_gap: Some(frame_gap),
+                timeout,
+                requirements,
+            },
+        )
+    };
+
+    let first = run_pass(max_frame_gap).await;
+    match classify_recording_startup_barrier(&first) {
+        RecordingStartupBarrierVerdict::Ready => {
+            publish_recording_startup_barrier_diagnostics(state, "ready", &first, None).await;
+            emit_recording_startup_barrier_ready(
+                state,
+                session_id,
+                &first,
+                width,
+                height,
+                max_frame_gap,
+                false,
+            );
+            return Ok(first);
+        }
+        RecordingStartupBarrierVerdict::Blocked => {
+            return Err(refuse_recording_startup(state, session_id, &first, max_frame_gap).await);
+        }
+        RecordingStartupBarrierVerdict::CadenceOnly => {}
     }
 
-    publish_recording_startup_barrier_diagnostics(state, "timed-out", &result, None).await;
+    let retry_frame_gap = recording_startup_retry_frame_gap_budget(max_frame_gap);
+    publish_recording_startup_barrier_diagnostics(state, "retrying", &first, None).await;
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Info,
+        "recording-startup-cadence-retry",
+        &format!(
+            "Compositor cadence was unsteady at start (gaps {} ms vs {}ms budget, {} fresh frame(s) in {}ms); retrying the startup barrier once with a {}ms budget.",
+            first.gap_history_label(),
+            max_frame_gap.as_millis(),
+            first.fresh_frames_seen,
+            first.wait_ms,
+            retry_frame_gap.as_millis()
+        ),
+    );
+
+    let mut second = run_pass(retry_frame_gap).await;
+    second.wait_ms = second.wait_ms.saturating_add(first.wait_ms);
+    match classify_recording_startup_barrier(&second) {
+        RecordingStartupBarrierVerdict::Ready => {
+            publish_recording_startup_barrier_diagnostics(state, "ready", &second, None).await;
+            emit_recording_startup_barrier_ready(
+                state,
+                session_id,
+                &second,
+                width,
+                height,
+                retry_frame_gap,
+                true,
+            );
+            Ok(second)
+        }
+        RecordingStartupBarrierVerdict::CadenceOnly => {
+            publish_recording_startup_barrier_diagnostics(state, "ready-unsteady", &second, None)
+                .await;
+            let _ = emit_health_event(
+                state,
+                Some(session_id),
+                HealthLevel::Warn,
+                RECORDING_STARTUP_CADENCE_UNSTEADY_CODE,
+                &format!(
+                    "Recording started with an unsteady compositor at start: gaps {} ms vs {} ms budget ({} fresh {}x{} frame(s) in {}ms); check the first seconds of the file.",
+                    second.gap_history_label(),
+                    retry_frame_gap.as_millis(),
+                    second.fresh_frames_seen,
+                    width,
+                    height,
+                    second.wait_ms
+                ),
+            );
+            Ok(second)
+        }
+        RecordingStartupBarrierVerdict::Blocked => {
+            Err(refuse_recording_startup(state, session_id, &second, retry_frame_gap).await)
+        }
+    }
+}
+
+fn emit_recording_startup_barrier_ready(
+    state: &AppState,
+    session_id: &str,
+    result: &CompositorStartupBarrierResult,
+    width: u32,
+    height: u32,
+    max_frame_gap: Duration,
+    after_retry: bool,
+) {
+    let suffix = if after_retry {
+        " after one cadence retry"
+    } else {
+        ""
+    };
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Info,
+        "recording-startup-barrier-ready",
+        &format!(
+            "Recording startup waited {}ms for {} fresh {}x{} compositor frame(s) with frame gaps at or below {}ms{suffix}.",
+            result.wait_ms,
+            result.frames_observed,
+            width,
+            height,
+            max_frame_gap.as_millis()
+        ),
+    );
+}
+
+/// Publish the refusal (diagnostics + ERROR health event) and build the error
+/// the start RPC returns. The compositor's reason already carries the recent
+/// gap history, the fresh-frame count and the wall time; the budget is added
+/// here so a refusal can be read without the support bundle.
+async fn refuse_recording_startup(
+    state: &AppState,
+    session_id: &str,
+    result: &CompositorStartupBarrierResult,
+    max_frame_gap: Duration,
+) -> anyhow::Error {
+    publish_recording_startup_barrier_diagnostics(state, "timed-out", result, None).await;
     let reason = result
         .timeout_reason
         .clone()
         .unwrap_or_else(|| "compositor did not produce ready frames".to_string());
-    let message = format!("Recording startup blocked before encoding: {reason}.");
+    let message = format!(
+        "Recording startup blocked before encoding: {reason}; cadence budget {}ms.",
+        max_frame_gap.as_millis()
+    );
     let _ = emit_health_event(
         state,
         Some(session_id),
         HealthLevel::Error,
-        "recording-startup-barrier-timeout",
+        RECORDING_STARTUP_BARRIER_TIMEOUT_CODE,
         &message,
     );
-    bail!(message)
+    anyhow::anyhow!(message)
 }
 
 async fn await_recording_camera_cadence_ready(
@@ -7354,20 +7529,14 @@ fn camera_cadence_mismatch_warning(measured_fps: Option<f64>, target_fps: u32) -
     ))
 }
 
+/// `max(frame_interval × factor, 200ms)` on every platform (factor 4.0 on
+/// macOS, 6.0 elsewhere). At 30 and 60fps the floor wins, so the budget is
+/// 200ms everywhere; the factor only matters below 20fps.
 fn recording_startup_frame_gap_budget(target_fps: u32) -> Duration {
     let frame_interval_ms =
         1000.0 / f64::from(target_fps.max(1)) * RECORDING_STARTUP_CADENCE_FRAME_INTERVAL_FACTOR;
-    let budget = Duration::from_millis(frame_interval_ms.ceil() as u64);
-    // Exactly one arm survives cfg-stripping and becomes the tail expression;
-    // `return` here would trip clippy::needless_return on that platform.
-    #[cfg(not(target_os = "macos"))]
-    {
-        budget.max(RECORDING_STARTUP_CADENCE_MIN_FRAME_GAP)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        budget
-    }
+    Duration::from_millis(frame_interval_ms.ceil() as u64)
+        .max(RECORDING_STARTUP_CADENCE_MIN_FRAME_GAP)
 }
 
 fn optional_ms(value: Option<f64>) -> String {
@@ -16251,33 +16420,493 @@ mod tests {
 
     #[test]
     fn recording_startup_frame_gap_budget_scales_with_target_fps() {
+        // The 200ms floor wins at every shipping frame rate on every platform:
+        // macOS 4.0 × 33.3ms = 134ms → 200ms; Windows 6.0 × 33.3ms = 200ms.
+        assert_eq!(
+            recording_startup_frame_gap_budget(30),
+            Duration::from_millis(200)
+        );
+        // 60fps: 67ms (macOS) / 100ms (Windows) → the floor (gaps are wall-clock).
+        assert_eq!(
+            recording_startup_frame_gap_budget(60),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            recording_startup_frame_gap_budget(24),
+            Duration::from_millis(200)
+        );
+        // The owner's 166ms live hiccup (2026-08-23, refused under the 71ms
+        // macOS budget) and the Windows tester's 172ms compose gap both pass.
+        assert!(recording_startup_frame_gap_budget(30) > Duration::from_millis(166));
+        assert!(recording_startup_frame_gap_budget(30) > Duration::from_millis(172));
+        // Below 20fps the factor takes over: 4.0 × 100ms (macOS) / 6.0 × 100ms.
         #[cfg(target_os = "macos")]
-        {
-            // 2.1 × 33.3ms ≈ 70 → 71ms ceil
-            assert_eq!(
-                recording_startup_frame_gap_budget(30),
-                Duration::from_millis(71)
-            );
-            assert_eq!(
-                recording_startup_frame_gap_budget(60),
-                Duration::from_millis(36)
-            );
-        }
+        assert_eq!(
+            recording_startup_frame_gap_budget(10),
+            Duration::from_millis(400)
+        );
         #[cfg(not(target_os = "macos"))]
-        {
-            // 6.0 × 33.3ms = 200ms — covers on-box Windows 172ms compose gaps
-            assert_eq!(
-                recording_startup_frame_gap_budget(30),
-                Duration::from_millis(200)
-            );
-            // 6.0 × 16.7ms ≈ 100ms, but the 200ms floor wins (gaps are wall-clock).
-            assert_eq!(
-                recording_startup_frame_gap_budget(60),
-                Duration::from_millis(200)
-            );
-            // The exact tester numbers that used to fail under the 71ms/150ms budgets.
-            assert!(recording_startup_frame_gap_budget(30) > Duration::from_millis(172));
+        assert_eq!(
+            recording_startup_frame_gap_budget(10),
+            Duration::from_millis(600)
+        );
+        // A stalled pipeline at multi-hundred-ms still trips the budget.
+        assert!(recording_startup_frame_gap_budget(30) < Duration::from_millis(700));
+    }
+
+    #[test]
+    fn recording_startup_retry_budget_is_one_and_a_half_times_the_first_pass() {
+        assert_eq!(
+            recording_startup_retry_frame_gap_budget(Duration::from_millis(200)),
+            Duration::from_millis(300)
+        );
+        assert_eq!(
+            recording_startup_retry_frame_gap_budget(Duration::from_millis(71)),
+            Duration::from_millis(107)
+        );
+    }
+
+    #[test]
+    fn recording_startup_barrier_verdict_splits_cadence_from_structural_blocks() {
+        let mut result = CompositorStartupBarrierResult::empty();
+        result.ready = true;
+        assert_eq!(
+            classify_recording_startup_barrier(&result),
+            RecordingStartupBarrierVerdict::Ready
+        );
+
+        // Cadence-only with usable frames: never a refusal on its own.
+        let mut unsteady = CompositorStartupBarrierResult::empty();
+        unsteady.cadence_only = true;
+        unsteady.fresh_frames_seen = 4;
+        unsteady.gap_history_ms = vec![166, 120, 98];
+        unsteady.timeout_reason = Some("latest compositor frame gap 166ms".to_string());
+        assert_eq!(
+            classify_recording_startup_barrier(&unsteady),
+            RecordingStartupBarrierVerdict::CadenceOnly
+        );
+        assert_eq!(unsteady.gap_history_label(), "166/120/98");
+
+        // Zero fresh frames is a stall even if the flag were set.
+        let mut stalled = CompositorStartupBarrierResult::empty();
+        stalled.cadence_only = true;
+        stalled.fresh_frames_seen = 0;
+        assert_eq!(
+            classify_recording_startup_barrier(&stalled),
+            RecordingStartupBarrierVerdict::Blocked
+        );
+
+        // Structural blocks (resolution, scene revision, missing source).
+        let mut blocked = CompositorStartupBarrierResult::empty();
+        blocked.fresh_frames_seen = 2;
+        blocked.cadence_only = false;
+        blocked.timeout_reason =
+            Some("latest compositor frame is 640x360, expected 1920x1080".to_string());
+        assert_eq!(
+            classify_recording_startup_barrier(&blocked),
+            RecordingStartupBarrierVerdict::Blocked
+        );
+        assert_eq!(blocked.gap_history_label(), "none");
+    }
+
+    fn startup_frame_evidence(
+        sequence: u64,
+        width: u32,
+        height: u32,
+        camera_sequence: Option<u64>,
+    ) -> crate::compositor::CompositorFrameEvidence {
+        crate::compositor::CompositorFrameEvidence {
+            sequence,
+            scene_revision: Some(1),
+            width,
+            height,
+            has_real_source: true,
+            camera_sequence,
+            screen_sequence: None,
+            has_image_source: false,
+            published_at: Instant::now(),
         }
+    }
+
+    fn startup_barrier_test_state(session_id: &str) -> AppState {
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session(session_id)
+            .unwrap();
+        state
+    }
+
+    /// Publishes 1920x1080 frames with an advancing camera: the first after
+    /// 10ms, then one per entry of `gaps_ms`, then one every `tail_period_ms`
+    /// until aborted (`None` = go quiet after the pattern).
+    fn spawn_startup_frame_writer(
+        state: AppState,
+        gaps_ms: Vec<u64>,
+        tail_period_ms: Option<u64>,
+    ) -> tokio::task::JoinHandle<()> {
+        spawn_startup_frame_writer_sized(state, 1920, 1080, gaps_ms, tail_period_ms)
+    }
+
+    fn spawn_startup_frame_writer_sized(
+        state: AppState,
+        width: u32,
+        height: u32,
+        gaps_ms: Vec<u64>,
+        tail_period_ms: Option<u64>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut sequence = 1_u64;
+            sleep(Duration::from_millis(10)).await;
+            crate::compositor::set_latest_frame_evidence_for_tests(
+                &state,
+                startup_frame_evidence(sequence, width, height, Some(sequence)),
+            )
+            .await;
+            for gap in gaps_ms {
+                sleep(Duration::from_millis(gap)).await;
+                sequence += 1;
+                crate::compositor::set_latest_frame_evidence_for_tests(
+                    &state,
+                    startup_frame_evidence(sequence, width, height, Some(sequence)),
+                )
+                .await;
+            }
+            let Some(period) = tail_period_ms else {
+                return;
+            };
+            loop {
+                sleep(Duration::from_millis(period)).await;
+                sequence += 1;
+                crate::compositor::set_latest_frame_evidence_for_tests(
+                    &state,
+                    startup_frame_evidence(sequence, width, height, Some(sequence)),
+                )
+                .await;
+            }
+        })
+    }
+
+    fn camera_startup_requirements() -> CompositorStartupSourceRequirements {
+        CompositorStartupSourceRequirements {
+            require_real_source: true,
+            require_camera_source: true,
+            require_screen_source: false,
+        }
+    }
+
+    async fn startup_barrier_diagnostics_state(state: &AppState) -> Option<String> {
+        state
+            .diagnostics
+            .lock()
+            .await
+            .recording_startup_barrier_state
+            .clone()
+    }
+
+    fn health_event_codes(state: &AppState, session_id: &str) -> Vec<String> {
+        state
+            .database
+            .list_health_events(session_id)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.code)
+            .collect()
+    }
+
+    /// The owner's live incident: 166ms then ~100ms hiccups at 30fps used to
+    /// refuse the whole session under the 71ms budget. Under the production
+    /// budget (200ms at 30 and 60fps) the same pattern records cleanly.
+    #[tokio::test]
+    async fn recording_startup_barrier_records_owner_hiccup_pattern_at_30_and_60_fps() {
+        for target_fps in [30_u32, 60] {
+            let session_id = format!("session-startup-hiccups-{target_fps}");
+            let state = startup_barrier_test_state(&session_id);
+            let writer = spawn_startup_frame_writer(state.clone(), vec![166, 100, 90], Some(33));
+
+            let result = await_recording_startup_barrier(
+                &state,
+                &session_id,
+                1920,
+                1080,
+                target_fps,
+                Some(1),
+                camera_startup_requirements(),
+            )
+            .await;
+            writer.abort();
+
+            let result = result.unwrap_or_else(|error| {
+                panic!("{target_fps}fps: 166/100/90ms hiccups must record, not refuse: {error}")
+            });
+            assert!(result.ready, "{target_fps}fps: {result:?}");
+            assert_eq!(
+                startup_barrier_diagnostics_state(&state).await.as_deref(),
+                Some("ready")
+            );
+            let codes = health_event_codes(&state, &session_id);
+            assert!(
+                codes
+                    .iter()
+                    .any(|code| code == "recording-startup-barrier-ready"),
+                "{target_fps}fps: {codes:?}"
+            );
+            assert!(
+                !codes
+                    .iter()
+                    .any(|code| code == RECORDING_STARTUP_BARRIER_TIMEOUT_CODE),
+                "{target_fps}fps: {codes:?}"
+            );
+        }
+    }
+
+    /// Cadence-only miss on the first pass, clean on the 1.5× retry: the
+    /// session records with no warning, and the retry is logged once.
+    #[tokio::test]
+    async fn recording_startup_barrier_retries_once_with_a_looser_budget() {
+        let session_id = "session-startup-retry";
+        let state = startup_barrier_test_state(session_id);
+        // 250ms gaps: over the 200ms budget, under the 300ms retry budget.
+        let writer = spawn_startup_frame_writer(state.clone(), Vec::new(), Some(250));
+
+        let result = await_recording_startup_barrier_with_budget(
+            &state,
+            session_id,
+            1920,
+            1080,
+            Some(1),
+            camera_startup_requirements(),
+            Duration::from_millis(200),
+            Duration::from_millis(700),
+        )
+        .await;
+        writer.abort();
+
+        let result = result.expect("a cadence-only first pass must not refuse the session");
+        assert!(result.ready, "{result:?}");
+        assert_eq!(
+            startup_barrier_diagnostics_state(&state).await.as_deref(),
+            Some("ready")
+        );
+        let codes = health_event_codes(&state, session_id);
+        assert_eq!(
+            codes
+                .iter()
+                .filter(|code| *code == "recording-startup-cadence-retry")
+                .count(),
+            1,
+            "exactly one retry: {codes:?}"
+        );
+        assert!(
+            codes
+                .iter()
+                .any(|code| code == "recording-startup-barrier-ready"),
+            "{codes:?}"
+        );
+        assert!(
+            !codes
+                .iter()
+                .any(|code| code == RECORDING_STARTUP_CADENCE_UNSTEADY_CODE),
+            "the retry settled, no warning due: {codes:?}"
+        );
+    }
+
+    /// Still cadence-only after the retry: record with the WARN event and the
+    /// `ready-unsteady` diagnostics state instead of refusing.
+    #[tokio::test]
+    async fn recording_startup_barrier_records_with_warning_when_cadence_never_settles() {
+        let session_id = "session-startup-unsteady";
+        let state = startup_barrier_test_state(session_id);
+        // 350ms gaps: over both the 200ms budget and the 300ms retry budget,
+        // but fresh frames keep arriving — an unsteady compositor, not a stall.
+        let writer = spawn_startup_frame_writer(state.clone(), Vec::new(), Some(350));
+
+        let result = await_recording_startup_barrier_with_budget(
+            &state,
+            session_id,
+            1920,
+            1080,
+            Some(1),
+            camera_startup_requirements(),
+            Duration::from_millis(200),
+            Duration::from_millis(900),
+        )
+        .await;
+        writer.abort();
+
+        let result = result.expect("cadence alone must never refuse a recording");
+        assert!(!result.ready, "{result:?}");
+        assert!(result.cadence_only, "{result:?}");
+        assert!(result.fresh_frames_seen >= 2, "{result:?}");
+        assert!(
+            result.gap_history_ms.iter().all(|gap| *gap >= 300),
+            "{result:?}"
+        );
+        assert_eq!(
+            startup_barrier_diagnostics_state(&state).await.as_deref(),
+            Some("ready-unsteady")
+        );
+        let events = state.database.list_health_events(session_id).unwrap();
+        let unsteady = events
+            .iter()
+            .find(|event| event.code == RECORDING_STARTUP_CADENCE_UNSTEADY_CODE)
+            .unwrap_or_else(|| panic!("missing unsteady warning: {events:?}"));
+        assert!(matches!(unsteady.level, HealthLevel::Warn), "{unsteady:?}");
+        assert!(
+            unsteady.message.contains("unsteady compositor")
+                && unsteady.message.contains("300 ms budget")
+                && unsteady
+                    .message
+                    .contains("check the first seconds of the file"),
+            "{}",
+            unsteady.message
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.code == RECORDING_STARTUP_BARRIER_TIMEOUT_CODE),
+            "{events:?}"
+        );
+    }
+
+    /// A true stall — no compositor frame at all — still refuses, with the
+    /// frame count in the message and a persistent ERROR health event.
+    #[tokio::test]
+    async fn recording_startup_barrier_refuses_a_zero_frame_stall() {
+        let session_id = "session-startup-stall";
+        let state = startup_barrier_test_state(session_id);
+
+        let error = await_recording_startup_barrier_with_budget(
+            &state,
+            session_id,
+            1920,
+            1080,
+            Some(1),
+            camera_startup_requirements(),
+            Duration::from_millis(200),
+            Duration::from_millis(300),
+        )
+        .await
+        .expect_err("a zero-frame stall must refuse the session");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("Recording startup blocked before encoding")
+                && message.contains("waiting for compositor frame")
+                && message.contains("0 fresh frame(s)")
+                && message.contains("recent gaps none")
+                && message.contains("cadence budget 200ms"),
+            "{message}"
+        );
+        assert_eq!(
+            startup_barrier_diagnostics_state(&state).await.as_deref(),
+            Some("timed-out")
+        );
+        let events = state.database.list_health_events(session_id).unwrap();
+        let refusal = events
+            .iter()
+            .find(|event| event.code == RECORDING_STARTUP_BARRIER_TIMEOUT_CODE)
+            .unwrap_or_else(|| panic!("missing refusal event: {events:?}"));
+        assert!(matches!(refusal.level, HealthLevel::Error), "{refusal:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.code == "recording-startup-cadence-retry"),
+            "a stall must not burn a cadence retry: {events:?}"
+        );
+    }
+
+    /// Frames 700ms apart that never advance the required camera are not
+    /// fresh frames: the barrier refuses instead of recording a frozen feed.
+    #[tokio::test]
+    async fn recording_startup_barrier_refuses_slow_frames_that_never_advance() {
+        let session_id = "session-startup-frozen";
+        let state = startup_barrier_test_state(session_id);
+        let writer_state = state.clone();
+        let writer = tokio::spawn(async move {
+            let mut sequence = 1_u64;
+            loop {
+                crate::compositor::set_latest_frame_evidence_for_tests(
+                    &writer_state,
+                    startup_frame_evidence(sequence, 1920, 1080, Some(7)),
+                )
+                .await;
+                sequence += 1;
+                sleep(Duration::from_millis(700)).await;
+            }
+        });
+
+        let error = await_recording_startup_barrier_with_budget(
+            &state,
+            session_id,
+            1920,
+            1080,
+            Some(1),
+            camera_startup_requirements(),
+            Duration::from_millis(200),
+            Duration::from_millis(1500),
+        )
+        .await
+        .expect_err("a camera that never advances must refuse the session");
+        writer.abort();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("advancing required sources") && message.contains("1 fresh frame(s)"),
+            "{message}"
+        );
+        assert_eq!(
+            startup_barrier_diagnostics_state(&state).await.as_deref(),
+            Some("timed-out")
+        );
+        assert!(
+            health_event_codes(&state, session_id)
+                .iter()
+                .any(|code| code == RECORDING_STARTUP_BARRIER_TIMEOUT_CODE)
+        );
+    }
+
+    /// Wrong-resolution frames are a structural block even when they arrive
+    /// steadily: hard fail with the observed resolution in the message.
+    #[tokio::test]
+    async fn recording_startup_barrier_refuses_wrong_resolution_frames() {
+        let session_id = "session-startup-resolution";
+        let state = startup_barrier_test_state(session_id);
+        let writer =
+            spawn_startup_frame_writer_sized(state.clone(), 640, 360, Vec::new(), Some(33));
+
+        let error = await_recording_startup_barrier_with_budget(
+            &state,
+            session_id,
+            1920,
+            1080,
+            Some(1),
+            camera_startup_requirements(),
+            Duration::from_millis(200),
+            Duration::from_millis(300),
+        )
+        .await
+        .expect_err("preview-sized frames must refuse the session");
+        writer.abort();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("latest compositor frame is 640x360, expected 1920x1080"),
+            "{message}"
+        );
+        let codes = health_event_codes(&state, session_id);
+        assert!(
+            codes
+                .iter()
+                .any(|code| code == RECORDING_STARTUP_BARRIER_TIMEOUT_CODE),
+            "{codes:?}"
+        );
+        assert!(
+            !codes
+                .iter()
+                .any(|code| code == RECORDING_STARTUP_CADENCE_UNSTEADY_CODE),
+            "{codes:?}"
+        );
     }
 
     #[tokio::test]

@@ -314,6 +314,14 @@ import {
   premiumRequiredIssueMessage,
   VIDEORC_PREMIUM_URL
 } from '@/lib/premium-upgrade'
+import {
+  reduceSessionStartFailure,
+  SESSION_START_FAILED_TOAST_ID,
+  sessionStartFailureMessage,
+  sessionStartFailureToastOptions,
+  type SessionStartFailure
+} from '@/lib/session-start-failure'
+import { recordingStartupHealthToast } from '@/lib/studio-health'
 import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
 import { effectiveSceneBackground } from '@/lib/background-assets'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
@@ -981,6 +989,12 @@ export type StudioContextValue = {
   cancelGoLiveConfirmation: () => void
   confirmGoLive: () => Promise<void>
   continueGoLiveWithReadyDestinations: () => Promise<void>
+  /** Why the last Record / Go Live was refused; null once the user starts
+   * again or dismisses it. Rendered next to the Record control (B0). */
+  sessionStartFailure: SessionStartFailure | null
+  dismissSessionStartFailure: () => void
+  /** Re-run the exact start that failed (same streaming override). */
+  retrySessionStart: () => void
   refreshScreens: () => Promise<void>
   importScreenImage: () => Promise<void>
   renameScreen: (screenId: string, name: string) => Promise<void>
@@ -2645,6 +2659,60 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     toast.error(message)
   }, [])
+
+  // --- Session-start failures are unmissable (B0) ----------------------------
+  // A refused Record / Go Live used to be one default 4s toast while the user
+  // was watching the stream. Now: one keyed persistent toast with Retry, plus a
+  // failure state the Session panel renders beside the Record control until the
+  // user starts again or dismisses it. The retry closure is held in a ref so the
+  // toast action (created once) always re-runs the LATEST failed start.
+  const [sessionStartFailure, setSessionStartFailure] = useState<SessionStartFailure | null>(null)
+  const sessionStartRetryRef = useRef<(() => void) | null>(null)
+  const dismissSessionStartFailure = useCallback(() => {
+    sessionStartRetryRef.current = null
+    setSessionStartFailure((current) => reduceSessionStartFailure(current, { type: 'dismissed' }))
+    toast.dismiss(SESSION_START_FAILED_TOAST_ID)
+  }, [])
+  const retrySessionStart = useCallback(() => {
+    const retry = sessionStartRetryRef.current
+    if (!retry) {
+      return
+    }
+    retry()
+  }, [])
+  const noteSessionStartAttempt = useCallback(() => {
+    setSessionStartFailure((current) =>
+      reduceSessionStartFailure(current, { type: 'start-attempted' })
+    )
+    toast.dismiss(SESSION_START_FAILED_TOAST_ID)
+  }, [])
+  const reportSessionStartFailure = useCallback(
+    (error: unknown, retry: () => void) => {
+      const message = sessionStartFailureMessage(error)
+      setLastError(message)
+      sessionStartRetryRef.current = retry
+      setSessionStartFailure((current) =>
+        reduceSessionStartFailure(current, { type: 'failed', message, at: Date.now() })
+      )
+      if (isPremiumUpgradeMessage(message)) {
+        // Premium gate: the upgrade link is the only useful action, and the
+        // Session-panel line still carries the reason persistently.
+        toast.error(message, premiumUpgradeToastOptions())
+        return
+      }
+      toast.error(
+        message,
+        sessionStartFailureToastOptions(retrySessionStart, () => {
+          // The user closed the toast: the Session-panel line goes with it.
+          sessionStartRetryRef.current = null
+          setSessionStartFailure((current) =>
+            reduceSessionStartFailure(current, { type: 'dismissed' })
+          )
+        })
+      )
+    },
+    [retrySessionStart]
+  )
 
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------
   // The BACKEND owns the engine: the tick scheduler, the open-question set,
@@ -4619,6 +4687,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         if (isRecordingQualityEvent(event.code)) {
           void refreshSessions(nextClient)
+        }
+        // Recording startup barrier (B0): an unsteady start is a keyed warning
+        // (the session DID start); a refusal shares the start-failure toast key
+        // so the RPC rejection that follows updates it in place with Retry.
+        const startupToast = recordingStartupHealthToast(event)
+        if (startupToast) {
+          const show = startupToast.variant === 'warning' ? toast.warning : toast.error
+          show(startupToast.title, {
+            id: startupToast.id,
+            description: startupToast.description,
+            duration: startupToast.duration
+          })
         }
         // Quality-gate toast policy: only interrupt for verdicts the user would
         // notice and can act on — the backend marks those warn-level (e.g. a
@@ -8969,6 +9049,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [captureConfig.streaming, client, endPreparedXBroadcasts]
   )
 
+  const runStartSessionRef = useRef<
+    ((streamingOverride?: StreamingSettings) => Promise<void>) | null
+  >(null)
   const runStartSession = useCallback(
     async (streamingOverride?: StreamingSettings) => {
       if (!client || startBlockedReason) {
@@ -8981,6 +9064,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       let streamingForStart: StreamingSettings | null = null
       try {
         setLastError(null)
+        noteSessionStartAttempt()
         streamingForStart = streamingOverride ?? null
         if (streamingForStart) {
           await probeStreamOutputTopology(
@@ -9109,7 +9193,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await completePreparedPlatformBroadcasts(streamingForStart)
         }
         platformLifecycleStreamingRef.current = null
-        reportError(error)
+        // Every start rejection — the compositor startup barrier, topology
+        // probe, platform activation, the RPC itself — is unmissable: keyed
+        // persistent toast + Session-panel line, Retry re-runs this exact start.
+        reportSessionStartFailure(error, () => {
+          void runStartSessionRef.current?.(streamingOverride)
+        })
         if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
           applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
         }
@@ -9125,9 +9214,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       client,
       completePreparedPlatformBroadcasts,
       isSessionActive,
+      noteSessionStartAttempt,
       probeStreamOutputTopology,
       refreshSessions,
       reportError,
+      reportSessionStartFailure,
       sceneEditMode,
       sceneWithBackground,
       settings,
@@ -9136,6 +9227,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       validatePlatformAccountsForClient
     ]
   )
+  runStartSessionRef.current = runStartSession
 
   const prepareOauthTargetsForGoLive = useCallback(async (): Promise<GoLivePartialSetup> => {
     if (!client) {
@@ -9380,6 +9472,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     startRequestPending
   ])
 
+  const confirmGoLiveRef = useRef<(() => Promise<void>) | null>(null)
   const confirmGoLive = useCallback(async () => {
     if (!client || goLiveConfirmationPending || startRequestPending) {
       return
@@ -9441,7 +9534,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setGoLiveConfirmationOpen(false)
       await runStartSession(setupDecision.streaming)
     } catch (error) {
-      reportError(error)
+      // A Go Live that dies BEFORE the start RPC (metadata, preflight, platform
+      // setup) is just as silent as a refused start: same persistent surface.
+      // The dialog stays open, so Retry re-runs the confirmation.
+      reportSessionStartFailure(error, () => {
+        void confirmGoLiveRef.current?.()
+      })
     } finally {
       setGoLiveConfirmationPending(false)
     }
@@ -9451,11 +9549,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     goLiveConfirmationPending,
     goLiveCaptionsReadiness,
     prepareOauthTargetsForGoLive,
-    reportError,
+    reportSessionStartFailure,
     runStartSession,
     startRequestPending,
     streamMetadataDraft
   ])
+  confirmGoLiveRef.current = confirmGoLive
 
   const continueGoLiveWithReadyDestinations = useCallback(async () => {
     if (goLiveCaptionsReadiness.blocksStart) {
@@ -10698,6 +10797,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelGoLiveConfirmation,
       confirmGoLive,
       continueGoLiveWithReadyDestinations,
+      sessionStartFailure,
+      dismissSessionStartFailure,
+      retrySessionStart,
       refreshScreens,
       importScreenImage,
       renameScreen,
@@ -10889,6 +10991,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelGoLiveConfirmation,
       confirmGoLive,
       continueGoLiveWithReadyDestinations,
+      sessionStartFailure,
+      dismissSessionStartFailure,
+      retrySessionStart,
       refreshScreens,
       importScreenImage,
       renameScreen,

@@ -1,7 +1,61 @@
 import type { StatusTone } from '@/components/status-badge'
-import type { DiagnosticStats } from '@/lib/backend'
+import type { DiagnosticStats, HealthEvent } from '@/lib/backend'
+import { SESSION_START_FAILED_TOAST_ID } from '@/lib/session-start-failure'
 import type { NativePreviewHostKind } from '../../../shared/backend'
 import { isNativePreviewCapability } from '../../../shared/native-preview-capability'
+
+/** Backend health-event codes for the recording startup barrier (recording.rs). */
+export const RECORDING_STARTUP_BARRIER_TIMEOUT_CODE = 'recording-startup-barrier-timeout'
+export const RECORDING_STARTUP_CADENCE_UNSTEADY_CODE = 'recording-startup-cadence-unsteady'
+/** Sonner key for the unsteady-start warning: one per start, never a stack. */
+export const RECORDING_STARTUP_UNSTEADY_TOAST_ID = 'recording-startup-cadence-unsteady'
+
+export interface HealthEventToast {
+  variant: 'warning' | 'error'
+  /** Sonner id — keyed so a repeat updates in place instead of stacking. */
+  id: string
+  title: string
+  description: string
+  duration: number
+}
+
+/**
+ * Toast copy for the two recording-startup health events (B0). Both used to be
+ * stored in the session record and shown nowhere persistent.
+ *
+ * - `recording-startup-cadence-unsteady` (warn): the session STARTED, but the
+ *   compositor never settled during the startup barrier and its retry — the
+ *   first seconds of the file deserve a look. Warning variant, 15s.
+ * - `recording-startup-barrier-timeout` (error): the session was refused. It
+ *   shares the start-failure toast key, so the start RPC rejection that
+ *   follows updates this toast in place (adding Retry) instead of stacking a
+ *   second red toast for the same failure. Persistent.
+ *
+ * Returns null for every other event; the caller keeps its own policies.
+ */
+export function recordingStartupHealthToast(
+  event: Pick<HealthEvent, 'code' | 'level' | 'message'>
+): HealthEventToast | null {
+  if (event.code === RECORDING_STARTUP_CADENCE_UNSTEADY_CODE) {
+    return {
+      variant: 'warning',
+      id: RECORDING_STARTUP_UNSTEADY_TOAST_ID,
+      title: 'Recording started on an unsteady compositor',
+      description: event.message,
+      duration: 15000
+    }
+  }
+  if (event.code === RECORDING_STARTUP_BARRIER_TIMEOUT_CODE && event.level === 'error') {
+    return {
+      variant: 'error',
+      id: SESSION_START_FAILED_TOAST_ID,
+      title: 'Recording could not start',
+      description: event.message,
+      duration: Infinity
+    }
+  }
+  return null
+}
 
 /** The slice of diagnostics the compact Studio health badge reads. Full stats live in the
  * Diagnostics tab; this is the at-a-glance "is the live program healthy" signal. */

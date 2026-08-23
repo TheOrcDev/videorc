@@ -422,10 +422,60 @@ pub struct CompositorStartupSourceRequirements {
 pub struct CompositorStartupBarrierResult {
     pub ready: bool,
     pub wait_ms: u64,
+    /// Current streak of consecutive accepted frames (reset by any block or
+    /// cadence violation) — the value the readiness threshold is judged on.
     pub frames_observed: u32,
+    /// Total fresh target-resolution frames with advancing required sources
+    /// seen during the wait, regardless of streak resets. Zero means the
+    /// compositor never produced a usable frame (a true stall).
+    pub fresh_frames_seen: u32,
+    /// Publish gaps (ms) between the last few accepted fresh frames, oldest
+    /// first, including the gaps that exceeded the cadence budget.
+    pub gap_history_ms: Vec<u64>,
+    /// True when the wait timed out on the cadence budget ALONE: at least one
+    /// fresh frame was observed, a gap exceeded the budget, and the latest
+    /// observation was not a resolution / scene-revision / missing-source
+    /// block. False for every structural block and for zero-frame stalls.
+    pub cadence_only: bool,
     pub first_source_frame_ms: Option<u64>,
     pub first_full_resolution_frame_ms: Option<u64>,
     pub timeout_reason: Option<String>,
+}
+
+/// How many recent inter-frame gaps the startup barrier remembers for its
+/// diagnostics; enough to tell one hiccup from a pattern.
+pub const COMPOSITOR_STARTUP_GAP_HISTORY_LEN: usize = 3;
+
+impl CompositorStartupBarrierResult {
+    pub fn empty() -> Self {
+        Self {
+            ready: false,
+            wait_ms: 0,
+            frames_observed: 0,
+            fresh_frames_seen: 0,
+            gap_history_ms: Vec::new(),
+            cadence_only: false,
+            first_source_frame_ms: None,
+            first_full_resolution_frame_ms: None,
+            timeout_reason: None,
+        }
+    }
+
+    /// `166/120/98` style rendering of the recent gap ring, oldest first.
+    pub fn gap_history_label(&self) -> String {
+        startup_gap_history_label(&self.gap_history_ms)
+    }
+}
+
+fn startup_gap_history_label(history: &[u64]) -> String {
+    if history.is_empty() {
+        return "none".to_string();
+    }
+    history
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[derive(Debug, Clone)]
@@ -1369,6 +1419,12 @@ pub async fn wait_for_compositor_startup_frames(
     let started_at = Instant::now();
     let min_consecutive = params.min_consecutive_frames.max(1);
     let mut frames_observed = 0_u32;
+    let mut fresh_frames_seen = 0_u32;
+    let mut gap_history_ms: Vec<u64> = Vec::with_capacity(COMPOSITOR_STARTUP_GAP_HISTORY_LEN);
+    let mut cadence_violations = 0_u32;
+    // The latest observation was a structural block (resolution, scene
+    // revision, missing source). Cleared by the next usable frame.
+    let mut blocked_structurally = false;
     let mut last_sequence = None;
     let mut last_accepted_evidence = None;
     let mut last_accepted_published_at = None;
@@ -1384,11 +1440,13 @@ pub async fn wait_for_compositor_startup_frames(
 
             if let Some(reason) = startup_frame_block_reason(evidence, params) {
                 frames_observed = 0;
+                blocked_structurally = true;
                 last_sequence = None;
                 last_accepted_evidence = None;
                 last_accepted_published_at = None;
                 timeout_reason = reason;
             } else {
+                blocked_structurally = false;
                 if first_full_resolution_frame_ms.is_none() {
                     first_full_resolution_frame_ms = Some(started_at.elapsed().as_millis() as u64);
                 }
@@ -1400,13 +1458,16 @@ pub async fn wait_for_compositor_startup_frames(
                         params.requirements,
                     )
                 {
-                    if let Some(max_frame_gap) = params.max_frame_gap
-                        && let Some(previous_published_at) = last_accepted_published_at
-                    {
+                    fresh_frames_seen = fresh_frames_seen.saturating_add(1);
+                    if let Some(previous_published_at) = last_accepted_published_at {
                         let frame_gap = evidence
                             .published_at
                             .saturating_duration_since(previous_published_at);
-                        if frame_gap > max_frame_gap {
+                        push_startup_gap(&mut gap_history_ms, frame_gap.as_millis() as u64);
+                        if let Some(max_frame_gap) = params.max_frame_gap
+                            && frame_gap > max_frame_gap
+                        {
+                            cadence_violations = cadence_violations.saturating_add(1);
                             frames_observed = 1;
                             last_sequence = Some(evidence.sequence);
                             last_accepted_evidence = Some(evidence);
@@ -1431,6 +1492,9 @@ pub async fn wait_for_compositor_startup_frames(
                         ready: true,
                         wait_ms: started_at.elapsed().as_millis() as u64,
                         frames_observed,
+                        fresh_frames_seen,
+                        gap_history_ms,
+                        cadence_only: false,
                         first_source_frame_ms,
                         first_full_resolution_frame_ms,
                         timeout_reason: None,
@@ -1445,10 +1509,23 @@ pub async fn wait_for_compositor_startup_frames(
         }
 
         if started_at.elapsed() >= params.timeout {
+            let wait_ms = started_at.elapsed().as_millis() as u64;
+            // Cadence-only: the compositor IS producing usable frames, just
+            // not three in a row inside the budget. Anything structural, or
+            // a wait that never saw a usable frame, is a real block.
+            let cadence_only =
+                !blocked_structurally && fresh_frames_seen > 0 && cadence_violations > 0;
+            let timeout_reason = format!(
+                "{timeout_reason} (recent gaps {} ms; {fresh_frames_seen} fresh frame(s) in {wait_ms}ms)",
+                startup_gap_history_label(&gap_history_ms)
+            );
             return CompositorStartupBarrierResult {
                 ready: false,
-                wait_ms: started_at.elapsed().as_millis() as u64,
+                wait_ms,
                 frames_observed,
+                fresh_frames_seen,
+                gap_history_ms,
+                cadence_only,
                 first_source_frame_ms,
                 first_full_resolution_frame_ms,
                 timeout_reason: Some(timeout_reason),
@@ -1457,6 +1534,24 @@ pub async fn wait_for_compositor_startup_frames(
 
         sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// Keep only the most recent `COMPOSITOR_STARTUP_GAP_HISTORY_LEN` gaps, oldest first.
+fn push_startup_gap(history: &mut Vec<u64>, gap_ms: u64) {
+    if history.len() >= COMPOSITOR_STARTUP_GAP_HISTORY_LEN {
+        history.remove(0);
+    }
+    history.push(gap_ms);
+}
+
+/// Test seam: inject one compositor frame-evidence sample without running a
+/// compositor, so startup-barrier callers in other modules can drive cadence.
+#[cfg(test)]
+pub(crate) async fn set_latest_frame_evidence_for_tests(
+    state: &AppState,
+    evidence: CompositorFrameEvidence,
+) {
+    state.compositor.lock().await.latest_frame_evidence = Some(evidence);
 }
 
 fn startup_frame_advances_required_sources(
@@ -7680,6 +7775,233 @@ mod tests {
                 .is_some_and(|reason| reason.contains("startup cadence budget")),
             "{result:?}"
         );
+        // Usable frames arrived, only the cadence missed: the caller may
+        // retry or record with a warning instead of refusing.
+        assert!(result.cadence_only, "{result:?}");
+        assert_eq!(result.fresh_frames_seen, 2, "{result:?}");
+        assert_eq!(result.gap_history_ms.len(), 1, "{result:?}");
+        assert!(result.gap_history_ms[0] >= 100, "{result:?}");
+        assert!(
+            result
+                .timeout_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("2 fresh frame(s) in")),
+            "{result:?}"
+        );
+    }
+
+    /// Cadence matrix: the owner's 166/100/90ms hiccup pattern is unsteady
+    /// under a tight budget (cadence-only, with the last three gaps on record)
+    /// and clean under the 200ms production budget, at 30 and at 60fps.
+    #[tokio::test]
+    async fn startup_barrier_reports_gap_history_and_cadence_only_for_hiccups() {
+        for (label, budget_ms, expect_ready) in [
+            ("30fps/tight", 71_u64, false),
+            ("60fps/tight", 36, false),
+            ("30fps/production", 200, true),
+            ("60fps/production", 200, true),
+        ] {
+            let state = test_state();
+            let writer_state = state.clone();
+            let writer = tokio::spawn(async move {
+                sleep(Duration::from_millis(10)).await;
+                let mut sequence = 1_u64;
+                set_latest_frame_evidence(&writer_state, 1, 1920, 1080, Some(1), None, false).await;
+                for gap in [166_u64, 100, 90, 100, 90, 100] {
+                    sleep(Duration::from_millis(gap)).await;
+                    sequence += 1;
+                    set_latest_frame_evidence(
+                        &writer_state,
+                        sequence,
+                        1920,
+                        1080,
+                        Some(sequence),
+                        None,
+                        false,
+                    )
+                    .await;
+                }
+            });
+
+            let result = wait_for_compositor_startup_frames(
+                &state,
+                CompositorStartupBarrierParams {
+                    width: 1920,
+                    height: 1080,
+                    required_scene_revision: Some(1),
+                    min_consecutive_frames: 3,
+                    max_frame_gap: Some(Duration::from_millis(budget_ms)),
+                    timeout: Duration::from_millis(750),
+                    requirements: CompositorStartupSourceRequirements {
+                        require_real_source: true,
+                        require_camera_source: true,
+                        require_screen_source: false,
+                    },
+                },
+            )
+            .await;
+            writer.abort();
+
+            assert_eq!(result.ready, expect_ready, "{label}: {result:?}");
+            assert!(result.fresh_frames_seen >= 3, "{label}: {result:?}");
+            // Ready after exactly three frames = two gaps; a timeout has seen
+            // the whole pattern and keeps only the last three.
+            assert_eq!(
+                result.gap_history_ms.len(),
+                if expect_ready {
+                    2
+                } else {
+                    COMPOSITOR_STARTUP_GAP_HISTORY_LEN
+                },
+                "{label}: {result:?}"
+            );
+            assert!(
+                result
+                    .gap_history_ms
+                    .iter()
+                    .all(|gap| (80..=230).contains(gap)),
+                "{label}: {result:?}"
+            );
+            if expect_ready {
+                assert!(!result.cadence_only, "{label}: {result:?}");
+                assert_eq!(result.timeout_reason, None, "{label}: {result:?}");
+            } else {
+                assert!(result.cadence_only, "{label}: {result:?}");
+                let reason = result.timeout_reason.clone().unwrap_or_default();
+                assert!(
+                    reason.contains("startup cadence budget")
+                        && reason
+                            .contains(&format!("recent gaps {} ms", result.gap_history_label())),
+                    "{label}: {reason}"
+                );
+            }
+        }
+    }
+
+    /// A stall is never cadence-only: no frame at all, or frames that stop
+    /// advancing the required camera, report zero/one fresh frame and no
+    /// cadence violation so the caller refuses instead of recording.
+    #[tokio::test]
+    async fn startup_barrier_stalls_are_not_cadence_only() {
+        let silent = wait_for_compositor_startup_frames(
+            &test_state(),
+            CompositorStartupBarrierParams {
+                width: 1920,
+                height: 1080,
+                required_scene_revision: Some(1),
+                min_consecutive_frames: 3,
+                max_frame_gap: Some(Duration::from_millis(200)),
+                timeout: Duration::from_millis(120),
+                requirements: any_real_source_requirements(),
+            },
+        )
+        .await;
+        assert!(!silent.ready && !silent.cadence_only, "{silent:?}");
+        assert_eq!(silent.fresh_frames_seen, 0);
+        assert_eq!(silent.gap_history_label(), "none");
+        assert!(
+            silent
+                .timeout_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("0 fresh frame(s)")),
+            "{silent:?}"
+        );
+
+        // One frame, then the camera freezes (sequence advances, camera does
+        // not): 700ms later the barrier has one fresh frame and no gaps.
+        let state = test_state();
+        set_latest_frame_evidence(&state, 1, 1920, 1080, Some(4), None, false).await;
+        let writer_state = state.clone();
+        let writer = tokio::spawn(async move {
+            let mut sequence = 2_u64;
+            loop {
+                sleep(Duration::from_millis(700)).await;
+                set_latest_frame_evidence(
+                    &writer_state,
+                    sequence,
+                    1920,
+                    1080,
+                    Some(4),
+                    None,
+                    false,
+                )
+                .await;
+                sequence += 1;
+            }
+        });
+        let frozen = wait_for_compositor_startup_frames(
+            &state,
+            CompositorStartupBarrierParams {
+                width: 1920,
+                height: 1080,
+                required_scene_revision: Some(1),
+                min_consecutive_frames: 3,
+                max_frame_gap: Some(Duration::from_millis(200)),
+                timeout: Duration::from_millis(1500),
+                requirements: CompositorStartupSourceRequirements {
+                    require_real_source: true,
+                    require_camera_source: true,
+                    require_screen_source: false,
+                },
+            },
+        )
+        .await;
+        writer.abort();
+        assert!(!frozen.ready && !frozen.cadence_only, "{frozen:?}");
+        assert_eq!(frozen.fresh_frames_seen, 1, "{frozen:?}");
+        assert!(frozen.gap_history_ms.is_empty(), "{frozen:?}");
+    }
+
+    /// A resolution block AFTER usable frames wins over earlier cadence
+    /// misses: the latest observation decides, so this is never cadence-only.
+    #[tokio::test]
+    async fn startup_barrier_structural_block_after_hiccups_is_not_cadence_only() {
+        let state = test_state();
+        let writer_state = state.clone();
+        let writer = tokio::spawn(async move {
+            sleep(Duration::from_millis(10)).await;
+            set_latest_frame_evidence(&writer_state, 1, 1920, 1080, Some(1), None, false).await;
+            sleep(Duration::from_millis(120)).await;
+            set_latest_frame_evidence(&writer_state, 2, 1920, 1080, Some(2), None, false).await;
+            sleep(Duration::from_millis(30)).await;
+            set_latest_frame_evidence(&writer_state, 3, 640, 360, Some(3), None, false).await;
+        });
+
+        let result = wait_for_compositor_startup_frames(
+            &state,
+            CompositorStartupBarrierParams {
+                width: 1920,
+                height: 1080,
+                required_scene_revision: Some(1),
+                min_consecutive_frames: 3,
+                max_frame_gap: Some(Duration::from_millis(50)),
+                timeout: Duration::from_millis(300),
+                requirements: any_real_source_requirements(),
+            },
+        )
+        .await;
+        writer.abort();
+
+        assert!(!result.ready && !result.cadence_only, "{result:?}");
+        assert_eq!(result.fresh_frames_seen, 2, "{result:?}");
+        assert!(
+            result
+                .timeout_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("640x360, expected 1920x1080")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn startup_gap_history_keeps_the_last_three_gaps_oldest_first() {
+        let mut history = Vec::new();
+        for gap in [166_u64, 120, 98, 33, 34] {
+            push_startup_gap(&mut history, gap);
+        }
+        assert_eq!(history, vec![98, 33, 34]);
+        assert_eq!(startup_gap_history_label(&history), "98/33/34");
+        assert_eq!(startup_gap_history_label(&[]), "none");
     }
 
     #[tokio::test]
