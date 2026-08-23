@@ -82,6 +82,12 @@ describe('BackendStderrTail', () => {
     expect(lines.at(-1)?.endsWith('…')).toBe(true)
   })
 
+  it('strips tracing ANSI colour codes so the record reads as plain text', () => {
+    const tail = new BackendStderrTail()
+    tail.push('\u001b[2m2026-08-23T14:13:03Z\u001b[0m \u001b[32m INFO\u001b[0m ready.')
+    expect(tail.snapshot()).toEqual(['2026-08-23T14:13:03Z  INFO ready.'])
+  })
+
   it('snapshots are copies', () => {
     const tail = new BackendStderrTail()
     tail.push('a')

@@ -1,6 +1,8 @@
 import { appendFileSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
+import { stripAnsi } from './backend-crash-log'
+
 // Rotating on-disk sink for backend stderr + supervisor lifecycle lines.
 //
 // Packaged builds have no terminal: before this file every backend stderr line
@@ -25,7 +27,7 @@ export function formatBackendLogFileLine(
   message: string,
   timestamp: string
 ): string {
-  return `${timestamp} [${level}] ${message.replace(/\r?\n/g, '\\n')}\n`
+  return `${timestamp} [${level}] ${stripAnsi(message).replace(/\r?\n/g, '\\n')}\n`
 }
 
 export interface RotatingLogFileFs {

@@ -31,6 +31,9 @@ describe('formatBackendLogFileLine', () => {
     expect(formatBackendLogFileLine('warn', 'a\nb', '2026-08-23T10:00:00.000Z')).toBe(
       '2026-08-23T10:00:00.000Z [warn] a\\nb\n'
     )
+    expect(formatBackendLogFileLine('info', '\u001b[32m INFO\u001b[0m ok', 'T')).toBe(
+      'T [info]  INFO ok\n'
+    )
   })
 })
 

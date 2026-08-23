@@ -43,7 +43,7 @@ export class BackendStderrTail {
     if (!trimmed) {
       return
     }
-    this.lines.push(truncateStderrLine(trimmed, this.maxLineChars))
+    this.lines.push(truncateStderrLine(stripAnsi(trimmed), this.maxLineChars))
     if (this.lines.length > this.maxLines) {
       this.lines.splice(0, this.lines.length - this.maxLines)
     }
@@ -52,6 +52,15 @@ export class BackendStderrTail {
   snapshot(): string[] {
     return [...this.lines]
   }
+}
+
+// tracing's default fmt layer colours stderr (ANSI SGR sequences); a crash
+// record is read by humans in JSON, so keep the words and drop the paint.
+// eslint-disable-next-line no-control-regex -- the escape byte is the point.
+const ANSI_SGR_PATTERN = /\u001b\[[0-9;]*m/g
+
+export function stripAnsi(line: string): string {
+  return line.replace(ANSI_SGR_PATTERN, '')
 }
 
 export function truncateStderrLine(
