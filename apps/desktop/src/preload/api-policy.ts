@@ -12,6 +12,7 @@ export const AUXILIARY_API_KEYS = {
     'onNotesWindowState'
   ],
   comments: [
+    'cacheChatAvatar',
     'sendCommentHighlight',
     'getCommentHighlightState',
     'onCommentHighlightState',

@@ -98,6 +98,11 @@ import {
 import { providerOAuthRetryDelayMs } from '@/lib/provider-oauth-retry'
 import { accountCallbackRetryDelayMs } from '@/lib/account-callback-retry'
 import {
+  INITIAL_ACCOUNT_READY_REFRESH_STATE,
+  reduceAccountReadyRefresh,
+  type AccountReadyRefreshState
+} from '@/lib/account-ready-refresh'
+import {
   LatestRequestByKey,
   SingleFlightByKey,
   SingleFlightGeneration
@@ -5551,26 +5556,48 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await refreshEntitlementsForClient(client)
   }, [client, refreshEntitlementsForClient])
 
-  // Purchases and token expiry must not remain stale. Focus covers return from
-  // the Premium browser; the bounded signed-in timer covers an app left open.
+  // Purchases and token expiry must not remain stale. App ready (first connect)
+  // covers a cold launch, focus covers return from the Premium browser, and
+  // the bounded signed-in timer covers an app left open.
+  const accountReadyRefreshRef = useRef<AccountReadyRefreshState>(
+    INITIAL_ACCOUNT_READY_REFRESH_STATE
+  )
   useEffect(() => {
     if (!client || wsStatus !== 'connected') {
+      accountReadyRefreshRef.current = reduceAccountReadyRefresh(accountReadyRefreshRef.current, {
+        type: 'disconnected'
+      }).state
       return
+    }
+    // The identity snapshot was otherwise frozen at the last interactive
+    // sign-in — account.refresh existed backend-side but was never wired,
+    // so a web-side avatar/name change never reached the app (owner
+    // report, 2026-08-19). Failures keep the current snapshot.
+    const refreshAccountSnapshot = (): void => {
+      void client
+        .requestTyped('account.refresh', undefined)
+        .then((snapshot) => setAccount(snapshot))
+        .catch(() => {})
     }
     const refreshOnFocus = (): void => {
       void refreshEntitlementsForClient(client).catch(() => {
         // Preserve the current fail-closed snapshot on transport failure.
       })
-      // The identity snapshot was otherwise frozen at the last interactive
-      // sign-in — account.refresh existed backend-side but was never wired,
-      // so a web-side avatar/name change never reached the app (owner
-      // report, 2026-08-19). Failures keep the current snapshot.
       if (account?.status === 'signed-in') {
-        void client
-          .requestTyped('account.refresh', undefined)
-          .then((snapshot) => setAccount(snapshot))
-          .catch(() => {})
+        refreshAccountSnapshot()
       }
+    }
+    // Cold launch: account.get returns the persisted snapshot, which for a
+    // Google-linked account may predate the avatar the web now serves. One
+    // refresh per connection, so the snapshot it sets does not re-trigger it.
+    const onReady = reduceAccountReadyRefresh(accountReadyRefreshRef.current, {
+      type: 'connected',
+      client,
+      signedIn: account?.status === 'signed-in'
+    })
+    accountReadyRefreshRef.current = onReady.state
+    if (onReady.refresh) {
+      refreshAccountSnapshot()
     }
     window.addEventListener('focus', refreshOnFocus)
     const timer =
