@@ -16511,9 +16511,17 @@ mod tests {
             recording_startup_frame_gap_budget(60),
             Duration::from_millis(200)
         );
+        // 24fps: macOS 4.0 × 41.7ms = 167ms → floor 200ms; Windows 6.0 × 41.7ms
+        // = 250ms — the factor beats the floor there.
+        #[cfg(target_os = "macos")]
         assert_eq!(
             recording_startup_frame_gap_budget(24),
             Duration::from_millis(200)
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            recording_startup_frame_gap_budget(24),
+            Duration::from_millis(250)
         );
         // The owner's 166ms live hiccup (2026-08-23, refused under the 71ms
         // macOS budget) and the Windows tester's 172ms compose gap both pass.
