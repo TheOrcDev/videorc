@@ -5092,6 +5092,36 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
     }
 }
 
+/// Whether the session's own pipeline counters say the recorded output was
+/// (partly) frozen: the encoder bridge re-fed compositor frames, or the
+/// compositor overwhelmingly re-served the identical camera frame handle.
+/// Screen held-serves are deliberately NOT a signal — ScreenCaptureKit only
+/// delivers on change, so a static desktop legitimately holds for minutes.
+/// This feeds `QualityExpectations::pipeline_reported_freezes`, which lets
+/// the quality gate count freezedetect hits as real pipeline freezes (exact
+/// decoded-frame corroboration cannot see re-encoded held frames).
+fn pipeline_reported_frozen_output(diagnostics: &DiagnosticStats) -> bool {
+    let bridge_total = diagnostics
+        .encoder_bridge_fresh_frames
+        .saturating_add(diagnostics.encoder_bridge_repeated_frames);
+    let bridge_repeats_dominate = bridge_total >= 60
+        && diagnostics
+            .encoder_bridge_repeated_frames
+            .saturating_mul(10)
+            >= bridge_total;
+    let camera_serves = diagnostics
+        .compositor_camera_source_fresh_serves
+        .saturating_add(diagnostics.compositor_camera_source_held_serves);
+    // A camera delivers continuously whenever it works at all, so held serves
+    // beyond twice the fresh serves mean the producer stalled mid-session.
+    let camera_holds_dominate = camera_serves >= 60
+        && diagnostics.compositor_camera_source_held_serves
+            > diagnostics
+                .compositor_camera_source_fresh_serves
+                .saturating_mul(2);
+    bridge_repeats_dominate || camera_holds_dominate
+}
+
 async fn final_session_diagnostics_snapshot(state: &AppState, session_id: &str) -> DiagnosticStats {
     let diagnostic_stats = {
         let diagnostics = state.diagnostics.lock().await;
@@ -5787,6 +5817,7 @@ async fn monitor_session(
                     monitored_recording.ffmpeg_path.clone(),
                     final_path,
                     gate,
+                    pipeline_reported_frozen_output(&final_diagnostics),
                 );
             }
             terminal_status
@@ -5919,12 +5950,14 @@ fn enqueue_post_recording_gate(
     ffmpeg_path: String,
     final_path: PathBuf,
     gate: PostRecordingGate,
+    pipeline_reported_freezes: bool,
 ) {
     tokio::spawn(async move {
         let path_str = final_path.display().to_string();
         let expectations = QualityExpectations {
             intended_fps: gate.intended_fps,
             expect_audio: gate.expect_audio,
+            pipeline_reported_freezes,
         };
         let mut job = RepairJob::pending(
             Uuid::new_v4().to_string(),
@@ -15231,6 +15264,40 @@ pub type LivePreviewSlot = Arc<Mutex<LivePreviewState>>;
 mod tests {
     use super::*;
     use crate::capture_input::AVFOUNDATION_VIDEO_PIXEL_FORMAT;
+
+    #[test]
+    fn pipeline_frozen_output_classifier_uses_bridge_repeats_and_camera_holds() {
+        let mut stats = crate::diagnostics::idle_diagnostics();
+        assert!(!pipeline_reported_frozen_output(&stats));
+
+        // The 0.9.71 second-session shape: bridge fed ~30fps but most frames
+        // were repeats.
+        stats.encoder_bridge_fresh_frames = 277;
+        stats.encoder_bridge_repeated_frames = 737;
+        assert!(pipeline_reported_frozen_output(&stats));
+
+        // Camera producer stalls while the bridge stays fresh.
+        let mut stats = crate::diagnostics::idle_diagnostics();
+        stats.compositor_camera_source_fresh_serves = 100;
+        stats.compositor_camera_source_held_serves = 900;
+        assert!(pipeline_reported_frozen_output(&stats));
+
+        // A static desktop: screen holds forever, camera and bridge healthy —
+        // legitimately still content, not a pipeline freeze.
+        let mut stats = crate::diagnostics::idle_diagnostics();
+        stats.compositor_screen_source_fresh_serves = 5;
+        stats.compositor_screen_source_held_serves = 5000;
+        stats.encoder_bridge_fresh_frames = 1000;
+        stats.compositor_camera_source_fresh_serves = 1000;
+        stats.compositor_camera_source_held_serves = 20;
+        assert!(!pipeline_reported_frozen_output(&stats));
+
+        // Short blips (< 2s of frames) never trip the classifier.
+        let mut stats = crate::diagnostics::idle_diagnostics();
+        stats.encoder_bridge_fresh_frames = 10;
+        stats.encoder_bridge_repeated_frames = 40;
+        assert!(!pipeline_reported_frozen_output(&stats));
+    }
     use crate::protocol::EntitlementSource;
     use crate::protocol::PreviewSurfaceState;
     use crate::protocol::{
@@ -17160,6 +17227,7 @@ mod tests {
             &QualityExpectations {
                 intended_fps: Some(30.0),
                 expect_audio: true,
+                pipeline_reported_freezes: false,
             },
             "t0".to_string(),
         )

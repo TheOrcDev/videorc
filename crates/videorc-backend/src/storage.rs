@@ -9361,6 +9361,7 @@ mod tests {
         let expectations = QualityExpectations {
             intended_fps: Some(30.0),
             expect_audio: true,
+            pipeline_reported_freezes: false,
         };
         let mut older_output_job = RepairJob::pending(
             "job-output-ready".to_string(),
@@ -10262,6 +10263,7 @@ mod tests {
         let expectations = QualityExpectations {
             intended_fps: Some(30.0),
             expect_audio: true,
+            pipeline_reported_freezes: false,
         };
 
         let pending = RepairJob::pending(

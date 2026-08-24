@@ -506,7 +506,21 @@ struct LiveSourceFetchState {
     consecutive_try_lock_misses: u32,
     try_lock_misses: u64,
     blocking_refreshes: u64,
+    // Freshness accounting for the 0.9.71 second-session-lag diagnosis: a
+    // "serve" is one compositor fetch of this source; it is fresh when the
+    // capture pipeline replaced the stored frame since the previous serve and
+    // held when the identical frame handle is re-served. Held ≫ fresh with a
+    // healthy lock (few try-lock misses) means the PRODUCER stopped
+    // delivering — the frozen-recording signature.
+    fresh_serves: u64,
+    held_serves: u64,
+    served_age_max_ms: u64,
+    last_served_frame: Option<*const ()>,
 }
+
+// The raw pointer is only ever compared for identity, never dereferenced, so
+// the fetch state stays safe to move across the compositor loop's await points.
+unsafe impl Send for LiveSourceFetchState {}
 
 impl LiveSourceFetchState {
     fn record_fresh_lock(&mut self) {
@@ -521,6 +535,16 @@ impl LiveSourceFetchState {
     fn record_blocking_refresh(&mut self) {
         self.consecutive_try_lock_misses = 0;
         self.blocking_refreshes = self.blocking_refreshes.saturating_add(1);
+    }
+
+    fn record_serve(&mut self, frame_identity: *const (), captured_age_ms: u64) {
+        if self.last_served_frame == Some(frame_identity) {
+            self.held_serves = self.held_serves.saturating_add(1);
+        } else {
+            self.fresh_serves = self.fresh_serves.saturating_add(1);
+            self.last_served_frame = Some(frame_identity);
+        }
+        self.served_age_max_ms = self.served_age_max_ms.max(captured_age_ms);
     }
 }
 
@@ -622,6 +646,12 @@ impl CompositorLiveSources {
             screen_try_lock_misses: self.screen_fetch.try_lock_misses,
             camera_blocking_refreshes: self.camera_fetch.blocking_refreshes,
             screen_blocking_refreshes: self.screen_fetch.blocking_refreshes,
+            camera_fresh_serves: self.camera_fetch.fresh_serves,
+            camera_held_serves: self.camera_fetch.held_serves,
+            camera_served_age_max_ms: self.camera_fetch.served_age_max_ms,
+            screen_fresh_serves: self.screen_fetch.fresh_serves,
+            screen_held_serves: self.screen_fetch.held_serves,
+            screen_served_age_max_ms: self.screen_fetch.served_age_max_ms,
         }
     }
 
@@ -660,6 +690,12 @@ impl CompositorLiveSources {
                 }
             }
         }
+        if let Some((frame, _layout)) = self.last_camera_frame.as_ref() {
+            self.camera_fetch.record_serve(
+                std::sync::Arc::as_ptr(frame).cast::<()>(),
+                frame.captured_at.elapsed().as_millis() as u64,
+            );
+        }
         self.last_camera_frame.clone()
     }
 
@@ -693,6 +729,12 @@ impl CompositorLiveSources {
                     self.screen_fetch.record_blocking_refresh();
                 }
             }
+        }
+        if let Some(frame) = self.last_screen_frame.as_ref() {
+            self.screen_fetch.record_serve(
+                std::sync::Arc::as_ptr(frame).cast::<()>(),
+                frame.captured_at.elapsed().as_millis() as u64,
+            );
         }
         self.last_screen_frame.clone()
     }

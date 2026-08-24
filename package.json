@@ -106,6 +106,7 @@
     "measure:av-sync": "node scripts/measure-av-sync.mjs",
     "smoke:dev": "node scripts/smoke-dev-app.mjs",
     "smoke:recording-matrix": "node scripts/smoke-recording-matrix-app.mjs",
+    "smoke:session-decay": "node scripts/smoke-recording-session-decay.mjs",
     "smoke:linux-encoder-acceptance": "node scripts/smoke-linux-encoder-acceptance.mjs",
     "smoke:remote-control": "node scripts/smoke-remote-control-app.mjs",
     "smoke:backend-single-instance": "node scripts/smoke-backend-single-instance.mjs",

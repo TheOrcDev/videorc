@@ -386,6 +386,15 @@ pub fn format_recording_frame_accounting(stats: &DiagnosticStats, duration_ms: i
             stats.compositor_cpu_fallback_frames
         ),
         format!(
+            "source serves: screen {} fresh / {} held (oldest {}ms), camera {} fresh / {} held (oldest {}ms)",
+            stats.compositor_screen_source_fresh_serves,
+            stats.compositor_screen_source_held_serves,
+            stats.compositor_screen_source_served_age_max_ms,
+            stats.compositor_camera_source_fresh_serves,
+            stats.compositor_camera_source_held_serves,
+            stats.compositor_camera_source_served_age_max_ms
+        ),
+        format!(
             "bridge input: {bridge_input} ({} fresh, {} repeat, {} synthetic) at {} fps",
             stats.encoder_bridge_fresh_frames,
             stats.encoder_bridge_repeated_frames,
@@ -593,6 +602,12 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         compositor_screen_source_try_lock_misses: 0,
         compositor_camera_source_blocking_refreshes: 0,
         compositor_screen_source_blocking_refreshes: 0,
+        compositor_camera_source_fresh_serves: 0,
+        compositor_camera_source_held_serves: 0,
+        compositor_camera_source_served_age_max_ms: 0,
+        compositor_screen_source_fresh_serves: 0,
+        compositor_screen_source_held_serves: 0,
+        compositor_screen_source_served_age_max_ms: 0,
         preview_repeated_frames: 0,
         preview_surface_resize_count: 0,
         preview_latency_ms: None,
@@ -1691,6 +1706,12 @@ pub struct CompositorLiveSourceFetchStats {
     pub screen_try_lock_misses: u64,
     pub camera_blocking_refreshes: u64,
     pub screen_blocking_refreshes: u64,
+    pub camera_fresh_serves: u64,
+    pub camera_held_serves: u64,
+    pub camera_served_age_max_ms: u64,
+    pub screen_fresh_serves: u64,
+    pub screen_held_serves: u64,
+    pub screen_served_age_max_ms: u64,
 }
 
 pub fn apply_compositor_live_source_fetch_stats(
@@ -1701,6 +1722,12 @@ pub fn apply_compositor_live_source_fetch_stats(
     stats.compositor_screen_source_try_lock_misses = fetch.screen_try_lock_misses;
     stats.compositor_camera_source_blocking_refreshes = fetch.camera_blocking_refreshes;
     stats.compositor_screen_source_blocking_refreshes = fetch.screen_blocking_refreshes;
+    stats.compositor_camera_source_fresh_serves = fetch.camera_fresh_serves;
+    stats.compositor_camera_source_held_serves = fetch.camera_held_serves;
+    stats.compositor_camera_source_served_age_max_ms = fetch.camera_served_age_max_ms;
+    stats.compositor_screen_source_fresh_serves = fetch.screen_fresh_serves;
+    stats.compositor_screen_source_held_serves = fetch.screen_held_serves;
+    stats.compositor_screen_source_served_age_max_ms = fetch.screen_served_age_max_ms;
     stats.updated_at = Utc::now().to_rfc3339();
     stats
 }

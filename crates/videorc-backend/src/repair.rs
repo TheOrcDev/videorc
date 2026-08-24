@@ -327,6 +327,14 @@ pub struct QualityExpectations {
     pub intended_fps: Option<f64>,
     /// Whether a microphone/audio source was selected for this recording.
     pub expect_audio: bool,
+    /// The session's own pipeline counters reported frozen output (compositor
+    /// held-frame serves dominating, or encoder-bridge repeats): freezedetect
+    /// hits are then REAL pipeline freezes even without exact decoded-frame
+    /// repeats. Exact-repeat corroboration cannot see a held frame that is
+    /// re-encoded every tick — lossy encoding makes each copy decode slightly
+    /// differently, which is how the 55%-frozen 0.9.71 recording passed as
+    /// "ready" (the 2026-08-24 second-session-lag incident).
+    pub pipeline_reported_freezes: bool,
 }
 
 impl Default for QualityExpectations {
@@ -334,6 +342,7 @@ impl Default for QualityExpectations {
         Self {
             intended_fps: None,
             expect_audio: true,
+            pipeline_reported_freezes: false,
         }
     }
 }
@@ -1535,18 +1544,25 @@ pub fn analyze_recording_cancellable(
 
     // A freezedetect hit only counts as a pipeline freeze when exact decoded-frame
     // repeats overlap it; the rest is still content (see corroborated_freezes).
+    // Exception: when the session's own counters already reported frozen output
+    // (`pipeline_reported_freezes`), every long freeze is pipeline-corroborated —
+    // a held frame re-encoded per tick never decodes to exact repeats.
     let container_fps = probe
         .video
         .as_ref()
         .and_then(|video| video.avg_fps.or(video.nominal_fps));
-    let (corroborated, similarity_only) = corroborated_freezes(
-        &freezes,
-        repeated_frames
-            .as_ref()
-            .map(|summary| summary.burst_runs.as_slice())
-            .unwrap_or(&[]),
-        container_fps,
-    );
+    let (corroborated, similarity_only) = if expectations.pipeline_reported_freezes {
+        (freezes.clone(), Vec::new())
+    } else {
+        corroborated_freezes(
+            &freezes,
+            repeated_frames
+                .as_ref()
+                .map(|summary| summary.burst_runs.as_slice())
+                .unwrap_or(&[]),
+            container_fps,
+        )
+    };
 
     let report = combine_report(
         base,
@@ -2170,6 +2186,9 @@ impl RepairJob {
         QualityExpectations {
             intended_fps: self.intended_fps,
             expect_audio: self.expect_audio,
+            // Resumed/interrupted jobs lose the session's live pipeline
+            // counters; fall back to exact-repeat corroboration only.
+            pipeline_reported_freezes: false,
         }
     }
 
@@ -3475,6 +3494,7 @@ mod tests {
             &QualityExpectations {
                 intended_fps: None,
                 expect_audio: true,
+                pipeline_reported_freezes: false,
             },
         );
         assert!(
@@ -3525,6 +3545,7 @@ mod tests {
             &QualityExpectations {
                 intended_fps: Some(30.0),
                 expect_audio: true,
+                pipeline_reported_freezes: false,
             },
         );
         assert!(matches!(status, GateStatus::Ready { .. }), "got {status:?}");
@@ -3575,6 +3596,7 @@ mod tests {
             &QualityExpectations {
                 intended_fps: Some(30.0),
                 expect_audio: true,
+                pipeline_reported_freezes: false,
             },
         );
         assert!(
@@ -3591,6 +3613,7 @@ mod tests {
         QualityExpectations {
             intended_fps: Some(30.0),
             expect_audio: true,
+            pipeline_reported_freezes: false,
         }
     }
 
