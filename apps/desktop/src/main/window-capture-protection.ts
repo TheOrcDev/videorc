@@ -34,16 +34,27 @@ export const WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS: Readonly<Record<VideorcWin
   })
 
 /**
- * Only Notes is a private teleprompter that must never enter a captured
- * display; Comments and Captions are part of the show and stay VISIBLE in
- * recordings (owner call, 2026-08-19 — "only notes should be invisible").
- * The rule is deliberately identical on every platform.
+ * Notes is a private teleprompter and must never enter a captured display.
+ * Main and preview are the operator's own control surfaces — they must not
+ * leak into Videorc's own preview or recordings either (owner call,
+ * 2026-08-24 — "the main app shows up in the preview view and in the
+ * recordings and it is not supposed to"), nor into other apps' captures.
+ * Comments and Captions are part of the show and stay VISIBLE in recordings
+ * (owner call, 2026-08-19). The rule is deliberately identical on every
+ * platform.
  */
+const CAPTURE_PROTECTED_ROLES: ReadonlySet<VideorcWindowRole> = new Set([
+  'main',
+  'preview',
+  'notes',
+  'proof-surface'
+])
+
 export function videorcWindowRequiresCaptureProtection(
   role: VideorcWindowRole,
   _platform: NodeJS.Platform
 ): boolean {
-  return role === 'notes'
+  return CAPTURE_PROTECTED_ROLES.has(role)
 }
 
 /**

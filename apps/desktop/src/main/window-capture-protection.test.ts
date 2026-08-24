@@ -17,12 +17,17 @@ describe('window capture protection policy', () => {
     'proof-surface'
   ]
 
-  it('protects ONLY the notes teleprompter, on every platform', () => {
+  it('protects operator surfaces and notes, keeps the show visible', () => {
     // Owner call, 2026-08-19: comments and captions are part of the show and
-    // must stay visible in recordings; notes is the one private window.
+    // must stay visible in recordings. Owner call, 2026-08-24: main, preview,
+    // and proof surfaces are private control surfaces — they must not appear
+    // in Videorc's own preview or recordings.
+    const protectedRoles = new Set<VideorcWindowRole>(['main', 'preview', 'notes', 'proof-surface'])
     for (const platform of ['darwin', 'win32', 'linux'] as const) {
       for (const role of everyRole) {
-        expect(videorcWindowRequiresCaptureProtection(role, platform)).toBe(role === 'notes')
+        expect(videorcWindowRequiresCaptureProtection(role, platform)).toBe(
+          protectedRoles.has(role)
+        )
       }
     }
   })
