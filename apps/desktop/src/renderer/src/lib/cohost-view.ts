@@ -397,3 +397,141 @@ export function cohostErrorToast(
   if (previous?.status === 'error' && cohostErrorToastKey(previous) === key) return null
   return { reason: next.reason, key, message: cohostErrorToastMessage(next.reason, next.detail) }
 }
+
+// --- Collapsed-pane salience (presence W2) ---------------------------------
+
+/**
+ * Unread questions while the pane is collapsed. The seen set is re-baselined
+ * every time the pane is OPEN, so expanding always clears the badge and
+ * collapsing starts counting from what the streamer actually looked at.
+ */
+export interface CohostUnreadState {
+  /** Question ids the streamer has had on screen. */
+  seenIds: readonly string[]
+  count: number
+}
+
+export const EMPTY_COHOST_UNREAD: CohostUnreadState = { seenIds: [], count: 0 }
+
+function sameIds(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index])
+}
+
+/** Pure reducer. Returns the SAME object when nothing changed, so the segment
+ * header does not re-render on every unrelated tick. */
+export function reduceCohostUnread(
+  current: CohostUnreadState,
+  next: { questionIds: readonly string[]; open: boolean }
+): CohostUnreadState {
+  if (next.open) {
+    if (current.count === 0 && sameIds(current.seenIds, next.questionIds)) return current
+    return { seenIds: [...next.questionIds], count: 0 }
+  }
+  const seen = new Set(current.seenIds)
+  const count = next.questionIds.filter((id) => !seen.has(id)).length
+  return count === current.count ? current : { ...current, count }
+}
+
+// --- Quiet keyed question toast --------------------------------------------
+
+/** One keyed toast slot: a newer question REPLACES the older one in place. */
+export const COHOST_QUESTION_TOAST_ID = 'cohost-question'
+/** At most one question toast a minute — mid-stream, a popup is an interruption. */
+export const COHOST_QUESTION_TOAST_THROTTLE_MS = 60_000
+
+const COHOST_QUESTION_TOAST_TEXT_CAP = 64
+
+/** "Co-host: 5 people asking — What keyboard is that? — ⌘J" */
+export function cohostQuestionToastMessage(question: CohostQuestion): string {
+  const askers = question.askers.length
+  const who =
+    askers > 1
+      ? `${askers} people asking`
+      : askers === 1
+        ? `${question.askers[0]} is asking`
+        : 'a new question'
+  const text = trimDraftToCap(question.text, COHOST_QUESTION_TOAST_TEXT_CAP)
+  return text ? `Co-host: ${who} — ${text} — ⌘J` : `Co-host: ${who} — ⌘J`
+}
+
+export interface CohostQuestionToast {
+  message: string
+  /** When the toast was raised, for the caller's throttle bookkeeping. */
+  atMs: number
+}
+
+/**
+ * Toast discipline: the pane already shows every question, so a toast is only
+ * news when the pane is COLLAPSED and a genuinely new HIGH-priority question
+ * arrived — throttled to one a minute and keyed so it never stacks.
+ */
+export function cohostQuestionToast({
+  previous,
+  next,
+  paneOpen,
+  lastToastAtMs,
+  nowMs
+}: {
+  previous: CohostState | null
+  next: CohostState
+  paneOpen: boolean
+  lastToastAtMs: number | null
+  nowMs: number
+}): CohostQuestionToast | null {
+  if (paneOpen) return null
+  if (next.status !== 'listening') return null
+  if (lastToastAtMs !== null && nowMs - lastToastAtMs < COHOST_QUESTION_TOAST_THROTTLE_MS) {
+    return null
+  }
+  const known = new Set(
+    previous && previous.sessionId === next.sessionId
+      ? previous.questions.map((question) => question.id)
+      : []
+  )
+  const candidate = sortedCohostQuestions(next.questions).find(
+    (question) => question.priority === 'high' && !known.has(question.id)
+  )
+  if (!candidate) return null
+  return { message: cohostQuestionToastMessage(candidate), atMs: nowMs }
+}
+
+// --- Off-but-useful nudge ---------------------------------------------------
+
+/** Persisted "don't offer this again" flag — one renderer-local boolean, the
+ * same mechanism as the audio mixer's monitor-when-idle preference. */
+export const COHOST_NUDGE_STORAGE_KEY = 'videorc.cohostNudgeDismissed'
+
+export function cohostNudgeDismissedFromStorage(raw: string | null | undefined): boolean {
+  return raw === '1' || raw === 'true'
+}
+
+export interface CohostNudgeInput {
+  /** The live chat session id, or null when no session is running. */
+  sessionId: string | null
+  /** Premium gate result — never nudge someone toward a locked feature. */
+  gateAllowed: boolean
+  consented: boolean
+  enabled: boolean
+  /** Persisted across launches. */
+  dismissedForever: boolean
+  /** Session the row was dismissed for in this run (max once per session). */
+  dismissedSessionId: string | null
+}
+
+/**
+ * The row only appears for the ONE audience it helps: live right now, allowed
+ * to run co-host, already consented to cloud AI — and simply has it off.
+ */
+export function cohostNudgeVisible({
+  sessionId,
+  gateAllowed,
+  consented,
+  enabled,
+  dismissedForever,
+  dismissedSessionId
+}: CohostNudgeInput): boolean {
+  if (!sessionId) return false
+  if (enabled || !gateAllowed || !consented) return false
+  if (dismissedForever) return false
+  return dismissedSessionId !== sessionId
+}

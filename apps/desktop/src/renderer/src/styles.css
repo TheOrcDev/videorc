@@ -286,6 +286,34 @@
     background: var(--glass-shine-sweep);
     box-shadow: var(--glass-shine-rim);
   }
+
+  /* Co-host "working on it" shimmer — the chat-app typing affordance. Opacity
+     only: nothing bounces, nothing moves, nothing reflows the toolbar row. The
+     dots inherit currentColor so they stay monochrome chrome. */
+  .typing-dot {
+    animation: typing-dot-shimmer 1.2s ease-in-out infinite;
+  }
+  .typing-dot:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+  .typing-dot:nth-child(3) {
+    animation-delay: 0.3s;
+  }
+  /* Tick in flight is the faster, more urgent version of the same idea. */
+  .typing-dot-fast {
+    animation-duration: 0.75s;
+  }
+}
+
+@keyframes typing-dot-shimmer {
+  0%,
+  70%,
+  100% {
+    opacity: 0.25;
+  }
+  35% {
+    opacity: 1;
+  }
 }
 
 @layer base {

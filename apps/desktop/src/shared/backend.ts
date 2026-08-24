@@ -3188,6 +3188,14 @@ export interface VideorcApi {
   sendCohostAction: (command: CohostActionCommand) => Promise<CohostState>
   onCohostActionRequest: (callback: (command: CohostActionCommand) => void) => () => void
   pushCohostActionResult: (resolution: CommentsCommandResolution<CohostState>) => Promise<boolean>
+  /** Turning co-host on (and granting cloud-AI consent) from the Comments
+   * window: the MAIN renderer owns both settings, so the window asks. The
+   * result is the relayed window state, so the switch never lies. */
+  sendCohostEnable: (command: CohostEnableCommand) => Promise<CohostWindowState>
+  onCohostEnableRequest: (callback: (command: CohostEnableCommand) => void) => () => void
+  pushCohostEnableResult: (
+    resolution: CommentsCommandResolution<CohostWindowState>
+  ) => Promise<boolean>
   getBundledBackgroundAssets: () => Promise<BackgroundImportResult[]>
   beginAccountSignIn: (authorizeUrl: string) => Promise<void>
   signOutAccount: () => Promise<VideorcAccountSnapshot>
@@ -3720,6 +3728,18 @@ export interface CohostActionCommand {
   kind: CohostActionKind
   /** Question id for question actions; the flagged message id for flags. */
   targetId: string
+}
+
+/**
+ * Correlated "turn the co-host on/off" from the Comments window (presence W2).
+ * Session-independent by design: the header popover is reachable while idle,
+ * which is exactly when a streamer discovers the feature.
+ */
+export interface CohostEnableCommand {
+  requestId: string
+  enabled: boolean
+  /** Grant renderer-local cloud-AI consent in the same click. */
+  grantConsent?: boolean
 }
 
 // Live captions (captions.* RPCs + events; premium cloud-AI feature).

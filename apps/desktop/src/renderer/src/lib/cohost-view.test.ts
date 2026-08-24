@@ -18,17 +18,24 @@ import {
   cohostErrorToastMessage,
   cohostFlagRowKey,
   cohostHighlightMessageId,
+  cohostNudgeDismissedFromStorage,
+  cohostNudgeVisible,
   cohostPaneMode,
   cohostQuestionRowKey,
+  cohostQuestionToast,
+  cohostQuestionToastMessage,
   cohostRowAt,
   cohostRows,
   draftForQuestion,
   moveCohostSelection,
+  reduceCohostUnread,
   resolveCohostSelection,
   sortedCohostFlags,
   sortedCohostQuestions,
   trimDraftToCap,
-  EMPTY_COHOST_STATE
+  COHOST_QUESTION_TOAST_THROTTLE_MS,
+  EMPTY_COHOST_STATE,
+  EMPTY_COHOST_UNREAD
 } from '@/lib/cohost-view'
 import { CHAT_SEND_MAX_CHARS } from '@/lib/chat-send'
 
@@ -458,5 +465,176 @@ describe('cohostErrorToast', () => {
     expect(cohostErrorToast(recovered, { ...tick5, tickSeq: 11 })?.key).toBe(
       'gateway-error:ai-gateway-error'
     )
+  })
+})
+
+describe('reduceCohostUnread', () => {
+  it('counts nothing while the pane is open, and re-baselines what is on screen', () => {
+    const next = reduceCohostUnread(EMPTY_COHOST_UNREAD, {
+      questionIds: ['q-1', 'q-2'],
+      open: true
+    })
+    expect(next.count).toBe(0)
+    expect(next.seenIds).toEqual(['q-1', 'q-2'])
+  })
+
+  it('counts only the questions that arrived after the collapse', () => {
+    const seen = reduceCohostUnread(EMPTY_COHOST_UNREAD, { questionIds: ['q-1'], open: true })
+    const collapsed = reduceCohostUnread(seen, { questionIds: ['q-1', 'q-2', 'q-3'], open: false })
+    expect(collapsed.count).toBe(2)
+    // Expanding clears the badge and moves the baseline forward.
+    const reopened = reduceCohostUnread(collapsed, {
+      questionIds: ['q-1', 'q-2', 'q-3'],
+      open: true
+    })
+    expect(reopened.count).toBe(0)
+    expect(
+      reduceCohostUnread(reopened, { questionIds: ['q-1', 'q-2', 'q-3'], open: false }).count
+    ).toBe(0)
+  })
+
+  it('returns the same object when nothing changed', () => {
+    const seen = reduceCohostUnread(EMPTY_COHOST_UNREAD, { questionIds: ['q-1'], open: true })
+    expect(reduceCohostUnread(seen, { questionIds: ['q-1'], open: true })).toBe(seen)
+    const collapsed = reduceCohostUnread(seen, { questionIds: ['q-1', 'q-2'], open: false })
+    expect(reduceCohostUnread(collapsed, { questionIds: ['q-1', 'q-2'], open: false })).toBe(
+      collapsed
+    )
+  })
+})
+
+describe('cohostQuestionToast', () => {
+  const previous = state({ questions: [question({ id: 'q-1' })] })
+  const arrival = state({
+    tickSeq: 5,
+    questions: [question({ id: 'q-1' }), question({ id: 'q-hot', priority: 'high' })]
+  })
+
+  it('raises one keyed toast for a new high-priority question on a collapsed pane', () => {
+    const raised = cohostQuestionToast({
+      previous,
+      next: arrival,
+      paneOpen: false,
+      lastToastAtMs: null,
+      nowMs: 1_000
+    })
+    expect(raised?.message).toContain('Co-host:')
+    expect(raised?.message).toContain('⌘J')
+    expect(raised?.atMs).toBe(1_000)
+  })
+
+  it('stays silent while the pane is open — the row is already on screen', () => {
+    expect(
+      cohostQuestionToast({
+        previous,
+        next: arrival,
+        paneOpen: true,
+        lastToastAtMs: null,
+        nowMs: 1_000
+      })
+    ).toBeNull()
+  })
+
+  it('never toasts a normal-priority question or one it already knew', () => {
+    expect(
+      cohostQuestionToast({
+        previous,
+        next: state({ tickSeq: 5, questions: [question({ id: 'q-1' }), question({ id: 'q-2' })] }),
+        paneOpen: false,
+        lastToastAtMs: null,
+        nowMs: 1_000
+      })
+    ).toBeNull()
+    expect(
+      cohostQuestionToast({
+        previous: arrival,
+        next: arrival,
+        paneOpen: false,
+        lastToastAtMs: null,
+        nowMs: 1_000
+      })
+    ).toBeNull()
+  })
+
+  it('throttles to one toast a minute', () => {
+    const laterArrival = state({
+      tickSeq: 6,
+      questions: [question({ id: 'q-1' }), question({ id: 'q-hot2', priority: 'high' })]
+    })
+    expect(
+      cohostQuestionToast({
+        previous,
+        next: laterArrival,
+        paneOpen: false,
+        lastToastAtMs: 1_000,
+        nowMs: 1_000 + COHOST_QUESTION_TOAST_THROTTLE_MS - 1
+      })
+    ).toBeNull()
+    expect(
+      cohostQuestionToast({
+        previous,
+        next: laterArrival,
+        paneOpen: false,
+        lastToastAtMs: 1_000,
+        nowMs: 1_000 + COHOST_QUESTION_TOAST_THROTTLE_MS
+      })
+    ).not.toBeNull()
+  })
+
+  it('does not toast from a state that is not listening', () => {
+    expect(
+      cohostQuestionToast({
+        previous,
+        next: { ...arrival, status: 'paused', reason: 'quota-exhausted' },
+        paneOpen: false,
+        lastToastAtMs: null,
+        nowMs: 1_000
+      })
+    ).toBeNull()
+  })
+
+  it('names how many people are asking', () => {
+    expect(
+      cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo', 'Cy', 'Dee', 'Eve'] }))
+    ).toBe('Co-host: 5 people asking — What keyboard is that? — ⌘J')
+    expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }))).toBe(
+      'Co-host: Ada is asking — What keyboard is that? — ⌘J'
+    )
+  })
+})
+
+describe('cohostNudgeVisible', () => {
+  const base = {
+    sessionId: 'session-1',
+    gateAllowed: true,
+    consented: true,
+    enabled: false,
+    dismissedForever: false,
+    dismissedSessionId: null
+  }
+
+  it('shows for the one audience it helps', () => {
+    expect(cohostNudgeVisible(base)).toBe(true)
+  })
+
+  it('never nudges toward a locked, unconsented, already-on, or idle co-host', () => {
+    expect(cohostNudgeVisible({ ...base, sessionId: null })).toBe(false)
+    expect(cohostNudgeVisible({ ...base, gateAllowed: false })).toBe(false)
+    expect(cohostNudgeVisible({ ...base, consented: false })).toBe(false)
+    expect(cohostNudgeVisible({ ...base, enabled: true })).toBe(false)
+  })
+
+  it('answers "no thanks" once per session and once forever', () => {
+    expect(cohostNudgeVisible({ ...base, dismissedSessionId: 'session-1' })).toBe(false)
+    // A new session is a new chance — unless the answer was persisted.
+    expect(cohostNudgeVisible({ ...base, dismissedSessionId: 'session-0' })).toBe(true)
+    expect(cohostNudgeVisible({ ...base, dismissedForever: true })).toBe(false)
+  })
+
+  it('reads the persisted flag from storage', () => {
+    expect(cohostNudgeDismissedFromStorage('1')).toBe(true)
+    expect(cohostNudgeDismissedFromStorage('true')).toBe(true)
+    expect(cohostNudgeDismissedFromStorage('0')).toBe(false)
+    expect(cohostNudgeDismissedFromStorage(null)).toBe(false)
   })
 })
