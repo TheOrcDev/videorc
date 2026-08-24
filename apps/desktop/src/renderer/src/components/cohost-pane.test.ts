@@ -234,16 +234,48 @@ describe('CohostPane', () => {
         }
       })
     })
-    expect(markup).toContain('error · AI error')
+    expect(markup).toContain('data-slot="cohost-pane-status"')
+    expect(markup).toContain('>error<')
+    expect(markup).toContain('data-tone="destructive"')
     expect(markup).toContain(`title="${detail}"`)
     expect(markup).toContain('data-slot="cohost-error-detail"')
     expect(markup).toContain('once co-host is listening again')
     expect(markup).not.toContain('Listening — questions')
-    // Monochrome: the detail line is muted copy, never a destructive accent.
+    // Monochrome: only the presence DOT carries the error accent; the label and
+    // the detail line stay chrome.
     expect(markup).not.toContain('text-destructive')
 
     const healthy = renderPane({ state: state() })
     expect(healthy).not.toContain('data-slot="cohost-error-detail"')
     expect(healthy).toContain('Listening — questions from chat will appear here.')
+  })
+  it('mirrors the working shimmer in the segment header while chat is queued', () => {
+    const reading = renderPane({ state: state({ pendingMessages: 4 }) })
+    expect(reading).toContain('data-slot="cohost-typing-dots"')
+    expect(reading).toContain('>reading 4 new…<')
+    // The empty state stops claiming "Listening —" while there is real work.
+    expect(reading).toContain('Reading 4 new messages…')
+    expect(reading).not.toContain('Listening — questions')
+
+    const thinking = renderPane({ state: state({ tickInFlight: true, pendingMessages: 4 }) })
+    expect(thinking).toContain('typing-dot-fast')
+    expect(thinking).toContain('>thinking…<')
+    expect(thinking).toContain('Thinking about the last batch…')
+  })
+
+  it('shows the presence dot for every state, live-green only while listening', () => {
+    expect(renderPane({ state: state() })).toContain('data-tone="live"')
+    expect(renderPane({ state: state({ status: 'off', sessionId: null }) })).toContain(
+      'data-tone="muted"'
+    )
+  })
+
+  it('flashes the grouped delta in place of the count', () => {
+    const markup = renderPane({
+      flash: 'grouped 2 questions',
+      state: state({ questions: [question()] })
+    })
+    expect(markup).toContain('grouped 2 questions')
+    expect(markup).not.toContain('>1 q<')
   })
 })

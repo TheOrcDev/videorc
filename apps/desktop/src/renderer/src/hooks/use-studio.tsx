@@ -133,6 +133,7 @@ import type {
   AccountCallbackEnvelope,
   AiCapabilities,
   CohostActionCommand,
+  CohostEnableCommand,
   CohostFlagParams,
   CohostQuestion,
   CohostQuestionParams,
@@ -2929,9 +2930,46 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [aiConsent, cohostEnabled, cohostGate, cohostState]
   )
 
+  const cohostWindowStateRef = useRef(cohostWindowState)
   useEffect(() => {
+    cohostWindowStateRef.current = cohostWindowState
     void window.videorc?.pushCohostWindowState?.(cohostWindowState)
   }, [cohostWindowState])
+
+  // "Turn on co-host" from the Comments window's presence popover or nudge.
+  // Both settings (engine enabled, cloud-AI consent) are main-renderer owned,
+  // so the window asks and gets the resolved window state back.
+  useEffect(() => {
+    const off = window.videorc?.onCohostEnableRequest?.((command: CohostEnableCommand) => {
+      void (async () => {
+        if (command.grantConsent === true) setAiConsent(true)
+        const settingsPatch: CohostSettingsPatch = { enabled: command.enabled }
+        if (!client) throw new Error('Backend socket is not connected.')
+        const next = await client.request<CohostSettings>('cohost.settings.set', settingsPatch)
+        setCohostSettings(next)
+        return {
+          ...cohostWindowStateRef.current,
+          consented: command.grantConsent === true || cohostWindowStateRef.current.consented,
+          enabled: next.enabled
+        } satisfies CohostWindowState
+      })()
+        .then(async (state) => {
+          await window.videorc?.pushCohostEnableResult?.({
+            requestId: command.requestId,
+            ok: true,
+            value: state
+          })
+        })
+        .catch(async (error) => {
+          await window.videorc?.pushCohostEnableResult?.({
+            requestId: command.requestId,
+            ok: false,
+            error: error instanceof Error ? error.message : 'Could not change the co-host setting.'
+          })
+        })
+    })
+    return off
+  }, [client, setAiConsent])
 
   useEffect(() => {
     const off = window.videorc?.onCohostActionRequest?.((command: CohostActionCommand) => {

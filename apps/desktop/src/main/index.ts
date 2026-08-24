@@ -343,6 +343,7 @@ import type {
   CaptionsUpdate,
   CaptionsWindowState,
   CohostActionCommand,
+  CohostEnableCommand,
   CohostState,
   CohostWindowState,
   CommentHighlightCommand,
@@ -12268,6 +12269,44 @@ app.whenReady().then(async () => {
   secureIpcHandle(
     'comments-window:cohost-action-result-push',
     (event, resolution: CommentsCommandResolution<CohostState>) => {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+      return commentsCommandBroker.resolve(resolution)
+    }
+  )
+  // Turning the co-host on from the window's presence popover / nudge. Unlike
+  // the row actions this is deliberately session-independent: a streamer who
+  // is not live yet is exactly who needs to find the switch.
+  secureIpcHandle(
+    'comments-window:cohost-enable',
+    (event, value: unknown): Promise<CohostWindowState> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        return Promise.reject(new Error('Only the Comments window can change co-host settings.'))
+      }
+      const requestId = commentsCommandRequestId(value)
+      if (!value || typeof value !== 'object' || !('enabled' in value)) {
+        return Promise.reject(new Error('Co-host enable requires an enabled flag.'))
+      }
+      const command = value as CohostEnableCommand
+      if (typeof command.enabled !== 'boolean') {
+        return Promise.reject(new Error('Co-host enable requires a boolean enabled flag.'))
+      }
+      if (command.grantConsent !== undefined && typeof command.grantConsent !== 'boolean') {
+        return Promise.reject(new Error('Co-host consent grant must be a boolean.'))
+      }
+      return commentsCommandBroker.request(requestId, () => {
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:cohost-enable-request', {
+          requestId,
+          enabled: command.enabled,
+          ...(command.grantConsent === true ? { grantConsent: true } : {})
+        })
+        return true
+      })
+    }
+  )
+  secureIpcHandle(
+    'comments-window:cohost-enable-result-push',
+    (event, resolution: CommentsCommandResolution<CohostWindowState>) => {
       if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
       return commentsCommandBroker.resolve(resolution)
     }

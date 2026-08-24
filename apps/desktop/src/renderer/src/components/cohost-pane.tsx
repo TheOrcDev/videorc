@@ -11,6 +11,7 @@ import {
 
 import { CohostFlagRow } from '@/components/cohost-flag-row'
 import { CohostQuestionRow } from '@/components/cohost-question-row'
+import { CohostPresenceDot, CohostTypingDots } from '@/components/cohost-status'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -18,8 +19,10 @@ import { Command, CommandList } from '@/components/ui/command'
 import { Kbd } from '@/components/ui/kbd'
 import { Separator } from '@/components/ui/separator'
 import type { CohostFlag, CohostQuestion, CohostState } from '@/lib/backend'
+import { cohostEmptyStateCopy, cohostPresenceView, cohostQuestionIds } from '@/lib/cohost-presence'
 import {
-  cohostChipView,
+  cohostErrorDetail,
+  cohostErrorDetailText,
   cohostFlagRowKey,
   cohostHighlightMessageId,
   cohostPaneMode,
@@ -27,13 +30,14 @@ import {
   cohostRowAt,
   cohostRows,
   moveCohostSelection,
+  reduceCohostUnread,
   resolveCohostSelection,
   sortedCohostFlags,
   sortedCohostQuestions,
-  COHOST_MOOD_LABELS
+  COHOST_MOOD_LABELS,
+  EMPTY_COHOST_UNREAD
 } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
-import { cn } from '@/lib/utils'
 
 /**
  * The Co-host segment above the live message list, in BOTH the in-app rail and
@@ -51,6 +55,9 @@ export function CohostPane({
   gate,
   consented,
   enabled,
+  starting = false,
+  flash = null,
+  expandSignal = 0,
   highlightedMessageId = null,
   actionPending = false,
   onReply,
@@ -60,12 +67,19 @@ export function CohostPane({
   onDismissFlag,
   onJumpToMessage,
   onEnableConsent,
+  onOpenChange,
   onUpgrade
 }: {
   state: CohostState | null
   gate: EntitlementUiGate
   consented: boolean
   enabled: boolean
+  /** The engine was asked to start but has not reported listening yet. */
+  starting?: boolean
+  /** One-shot "grouped 2 questions" delta from the owner surface. */
+  flash?: string | null
+  /** Bumped by the header status element to scroll to + expand this pane. */
+  expandSignal?: number
   highlightedMessageId?: string | null
   actionPending?: boolean
   onReply: (question: CohostQuestion) => void
@@ -75,6 +89,9 @@ export function CohostPane({
   onDismissFlag: (flag: CohostFlag) => void
   onJumpToMessage?: (messageId: string) => void
   onEnableConsent?: () => void
+  /** Reports the segment's open/closed state so the owner can throttle the
+   * collapsed-pane question toast against what is actually on screen. */
+  onOpenChange?: (open: boolean) => void
   onUpgrade?: (url: string) => void
 }): ReactElement | null {
   const mode = cohostPaneMode({ gate, consented, enabled })
@@ -82,12 +99,37 @@ export function CohostPane({
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const rootRef = useRef<HTMLDivElement>(null)
+  const paneRef = useRef<HTMLDivElement>(null)
+
+  const [unread, setUnread] = useState(EMPTY_COHOST_UNREAD)
+  const autoExpandedSessionRef = useRef<string | null>(null)
 
   const questions = useMemo(() => sortedCohostQuestions(state?.questions ?? []), [state?.questions])
   const flags = useMemo(() => sortedCohostFlags(state?.flags ?? []), [state?.flags])
   const rows = useMemo(() => cohostRows(state), [state])
   const activeKey = resolveCohostSelection(rows, selectedKey)
   const activeRow = cohostRowAt(rows, selectedKey)
+  const questionIds = useMemo(() => cohostQuestionIds(state), [state])
+  const presence = cohostPresenceView(state, nowMs, {
+    starting,
+    unread: open ? 0 : unread.count
+  })
+
+  // Unread while collapsed: the badge is the collapsed pane's only way to say
+  // "something arrived". Expanding re-baselines it to what is on screen.
+  useEffect(() => {
+    setUnread((current) => reduceCohostUnread(current, { questionIds, open }))
+  }, [open, questionIds])
+
+  // The FIRST question of a session opens the pane once — after that the
+  // streamer's collapse decision is theirs to keep.
+  useEffect(() => {
+    const sessionId = state?.sessionId ?? null
+    if (!sessionId || questionIds.length === 0) return
+    if (autoExpandedSessionRef.current === sessionId) return
+    autoExpandedSessionRef.current = sessionId
+    setOpen(true)
+  }, [questionIds.length, state?.sessionId])
 
   // Ages are the only time-dependent copy in the pane; one slow tick keeps them
   // honest without re-rendering the message list underneath.
@@ -96,6 +138,20 @@ export function CohostPane({
     const timer = setInterval(() => setNowMs(Date.now()), 30_000)
     return () => clearInterval(timer)
   }, [rows.length])
+
+  useEffect(() => {
+    onOpenChange?.(open)
+  }, [onOpenChange, open])
+
+  // The header status element takes you here: expand, scroll into view, focus.
+  useEffect(() => {
+    if (expandSignal <= 0) return
+    setOpen(true)
+    paneRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    // Focus lands on the row list once the collapsible content is mounted.
+    const frame = requestAnimationFrame(() => rootRef.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [expandSignal])
 
   // ⌘J focuses the pane. In the main window plain ⌘J already toggles the
   // Comments window, so this only ever fires where the pane is mounted.
@@ -145,7 +201,12 @@ export function CohostPane({
     return null
   }
 
-  const chip = cohostChipView(state)
+  // The failed tick in the server's own words. The engine clears `detail` the
+  // moment it listens again, so a stale detail is never shown.
+  const errorDetail =
+    state?.status === 'error' || state?.status === 'paused'
+      ? cohostErrorDetailText(cohostErrorDetail(state))
+      : null
   const primaryAction = (): void => {
     if (!activeRow) return
     if (activeRow.kind === 'question') {
@@ -203,6 +264,7 @@ export function CohostPane({
 
   return (
     <Collapsible
+      ref={paneRef}
       className="shrink-0 rounded-row border border-border/60 bg-card/30"
       data-slot="cohost-pane"
       open={open}
@@ -218,18 +280,26 @@ export function CohostPane({
         <span className="shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground">
           alpha
         </span>
-        {chip ? (
-          <span
-            className={cn(
-              'truncate text-[11px]',
-              chip.tone === 'live' ? 'text-success' : 'text-muted-foreground'
-            )}
-            title={chip.detail ?? undefined}
-          >
-            {chip.label.replace(/^Co-host: /, '')}
-          </span>
-        ) : null}
+        <CohostPresenceDot view={presence} />
+        <span
+          className="truncate text-[11px] text-muted-foreground"
+          data-slot="cohost-pane-status"
+          title={presence.tooltipLines.join('\n') || undefined}
+        >
+          {flash ?? presence.label.replace(/^Co-host\s*(·\s*)?/, '')}
+        </span>
+        {presence.dots ? <CohostTypingDots fast={presence.kind === 'thinking'} /> : null}
         <span className="flex-1" />
+        {presence.unreadBadge ? (
+          <Badge
+            aria-label={`${presence.unreadBadge} new questions`}
+            className="shrink-0 tabular-nums"
+            data-slot="cohost-unread-badge"
+            variant="secondary"
+          >
+            {presence.unreadBadge} new
+          </Badge>
+        ) : null}
         {state?.partial ? (
           <Badge title="Chat outran one AI pass; the newest messages were used." variant="outline">
             Partial
@@ -242,15 +312,15 @@ export function CohostPane({
 
       <CollapsibleContent>
         <Separator />
-        {chip?.detail ? (
+        {errorDetail ? (
           // The failed tick in the server's own words, so "AI error" is never
-          // the whole story. Monochrome; the chip already carries the state.
+          // the whole story. Monochrome; the dot already carries the state.
           <p
             className="truncate px-2.5 py-1 text-[11px] text-subtle"
             data-slot="cohost-error-detail"
-            title={chip.detail}
+            title={errorDetail}
           >
-            {chip.detail}
+            {errorDetail}
           </p>
         ) : null}
         <Command
@@ -265,10 +335,8 @@ export function CohostPane({
         >
           <CommandList className="max-h-48 px-1 py-1">
             {rows.length === 0 ? (
-              <p className="px-2 py-3 text-xs text-subtle">
-                {state?.status === 'listening'
-                  ? 'Listening — questions from chat will appear here.'
-                  : 'Questions from chat will appear here once co-host is listening again.'}
+              <p className="px-2 py-3 text-xs text-subtle" data-slot="cohost-empty-state">
+                {cohostEmptyStateCopy(presence, state)}
               </p>
             ) : (
               <>

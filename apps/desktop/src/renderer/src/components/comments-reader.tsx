@@ -1,7 +1,10 @@
 import { ChatCircle, Eye, PaperPlaneRight, PushPin } from '@phosphor-icons/react'
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import { toast } from 'sonner'
 
+import { CohostNudge } from '@/components/cohost-nudge'
 import { CohostPane } from '@/components/cohost-pane'
+import { CohostStatus } from '@/components/cohost-status'
 import { CommentRow, commentHighlightPresentationForMessage } from '@/components/comment-row'
 import { CommentsDestinationStatus } from '@/components/comments-destination-status'
 import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -31,7 +34,13 @@ import type {
   ViewerSample
 } from '@/lib/backend'
 import { chatDraftMaxChars, validateChatDraft, type ChatSendFailure } from '@/lib/chat-send'
-import { draftForQuestion } from '@/lib/cohost-view'
+import { cohostGroupedDeltaFlash } from '@/lib/cohost-presence'
+import {
+  cohostNudgeVisible,
+  cohostQuestionToast,
+  draftForQuestion,
+  COHOST_QUESTION_TOAST_ID
+} from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { liveChatEmptyMessage, sortMessagesChronological } from '@/lib/live-chat-view'
 import { cn } from '@/lib/utils'
@@ -69,6 +78,10 @@ export function CommentsReader({
   cohostConsented = false,
   cohostEnabled = false,
   cohostActionPending = false,
+  cohostStarting = false,
+  cohostNudgeDismissedForever = false,
+  onCohostEnable,
+  onCohostNudgeDismiss,
   onCohostShowOnStream,
   onCohostAnswered,
   onCohostDismissQuestion,
@@ -109,6 +122,13 @@ export function CommentsReader({
   cohostConsented?: boolean
   cohostEnabled?: boolean
   cohostActionPending?: boolean
+  /** The engine was asked to start but has not reported listening yet. */
+  cohostStarting?: boolean
+  /** Persisted "never offer the nudge again". */
+  cohostNudgeDismissedForever?: boolean
+  /** Turn the engine on/off from the header popover or the nudge row. */
+  onCohostEnable?: (enabled: boolean) => void
+  onCohostNudgeDismiss?: () => void
   onCohostShowOnStream?: (question: CohostQuestion) => void
   onCohostAnswered?: (question: CohostQuestion) => void
   onCohostDismissQuestion?: (question: CohostQuestion) => void
@@ -145,12 +165,89 @@ export function CommentsReader({
     cohostGate !== undefined &&
     mode === 'Live' &&
     viewMode?.kind !== 'history'
+  // Presence is PERMANENT: the header element renders for every state the
+  // build can be in, including off. Only a surface without the co-host wiring
+  // at all (no gate) omits it.
+  const cohostPresent = cohostGate !== undefined
+  const [cohostNowMs, setCohostNowMs] = useState(() => Date.now())
+  const [cohostFlash, setCohostFlash] = useState<string | null>(null)
+  const [cohostExpand, setCohostExpand] = useState(0)
+  const [cohostPaneOpen, setCohostPaneOpen] = useState(true)
+  const cohostPaneOpenRef = useRef(true)
+  const previousCohostStateRef = useRef<CohostState | null>(null)
+  const cohostToastAtRef = useRef<number | null>(null)
+  const [cohostNudgeDismissedSessionId, setCohostNudgeDismissedSessionId] = useState<string | null>(
+    null
+  )
 
   useEffect(() => {
     if (!viewerSample) return
     const timer = setInterval(() => setNowMs(Date.now()), 15_000)
     return () => clearInterval(timer)
   }, [viewerSample])
+
+  // The presence tooltip counts in real time ("last pass 12s ago"), so it gets
+  // its own one-second clock — but only while the co-host element is mounted.
+  useEffect(() => {
+    if (!cohostPresent) return
+    const timer = setInterval(() => setCohostNowMs(Date.now()), 1_000)
+    return () => clearInterval(timer)
+  }, [cohostPresent])
+
+  useEffect(() => {
+    cohostPaneOpenRef.current = cohostPaneOpen
+  }, [cohostPaneOpen])
+
+  // One pass through every co-host state change: the ~2s "grouped N questions"
+  // flash, and the keyed, throttled question toast for a collapsed pane.
+  useEffect(() => {
+    const previous = previousCohostStateRef.current
+    if (!cohostState) return
+    previousCohostStateRef.current = cohostState
+    const nowMs = Date.now()
+
+    const questionToast = cohostQuestionToast({
+      previous,
+      next: cohostState,
+      paneOpen: cohostPaneOpenRef.current,
+      lastToastAtMs: cohostToastAtRef.current,
+      nowMs
+    })
+    if (questionToast) {
+      cohostToastAtRef.current = questionToast.atMs
+      toast(questionToast.message, { id: COHOST_QUESTION_TOAST_ID })
+    }
+
+    const delta = cohostGroupedDeltaFlash(previous, cohostState)
+    if (delta) setCohostFlash(delta)
+  }, [cohostState])
+
+  useEffect(() => {
+    if (!cohostFlash) return
+    const timer = setTimeout(() => setCohostFlash(null), 2_000)
+    return () => clearTimeout(timer)
+  }, [cohostFlash])
+
+  const cohostNudge =
+    cohostGate !== undefined &&
+    cohostNudgeVisible({
+      sessionId: mode === 'Live' ? (snapshot.sessionId ?? null) : null,
+      gateAllowed: cohostGate.allowed,
+      consented: cohostConsented,
+      enabled: cohostEnabled,
+      dismissedForever: cohostNudgeDismissedForever,
+      dismissedSessionId: cohostNudgeDismissedSessionId
+    })
+
+  // Dismiss = "don't offer this again" (persisted by the owner). Turning it on
+  // only needs to hide the row for this session; `enabled` does the rest.
+  const dismissCohostNudge = useCallback(
+    (persist: boolean) => {
+      setCohostNudgeDismissedSessionId(snapshot.sessionId ?? null)
+      if (persist) onCohostNudgeDismiss?.()
+    },
+    [onCohostNudgeDismiss, snapshot.sessionId]
+  )
 
   useEffect(() => {
     const viewport = scrollViewport(scrollRootRef.current)
@@ -227,6 +324,23 @@ export function CommentsReader({
             {viewerChipLabel(viewerSample)}
           </span>
         ) : null}
+        {/* Permanent presence: whatever the co-host is doing (including
+            nothing), the streamer can read it here without opening anything. */}
+        {cohostPresent ? (
+          <CohostStatus
+            consented={cohostConsented}
+            enabled={cohostEnabled}
+            flash={cohostFlash}
+            gate={cohostGate!}
+            nowMs={cohostNowMs}
+            starting={cohostStarting}
+            state={cohostState}
+            onEnable={onCohostEnable}
+            onEnableConsent={onCohostEnableConsent}
+            onOpenPane={() => setCohostExpand((value) => value + 1)}
+            onUpgrade={onCohostUpgrade}
+          />
+        ) : null}
         <div className="flex items-center gap-0.5 [-webkit-app-region:no-drag]">
           {viewMode?.kind === 'history' && onBackToLive ? (
             <Button size="sm" type="button" variant="ghost" onClick={onBackToLive}>
@@ -261,14 +375,18 @@ export function CommentsReader({
             actionPending={cohostActionPending}
             consented={cohostConsented}
             enabled={cohostEnabled}
+            expandSignal={cohostExpand}
+            flash={cohostFlash}
             gate={cohostGate!}
             highlightedMessageId={highlightedId}
+            starting={cohostStarting}
             state={cohostState}
             onAnswered={(question) => onCohostAnswered?.(question)}
             onDismissFlag={(flag) => onCohostDismissFlag?.(flag)}
             onDismissQuestion={(question) => onCohostDismissQuestion?.(question)}
             onEnableConsent={onCohostEnableConsent}
             onJumpToMessage={scrollToMessage}
+            onOpenChange={setCohostPaneOpen}
             onReply={(question) =>
               setReplyPrefill((current) => ({
                 seq: (current?.seq ?? 0) + 1,
@@ -325,6 +443,7 @@ export function CommentsReader({
 
       {onSend && mode === 'Live' && viewMode?.kind !== 'history' ? (
         <SendRow
+          cohostNudge={cohostNudge}
           cohostState={cohostState}
           failures={sendFailures}
           operation={sendOperation}
@@ -332,6 +451,11 @@ export function CommentsReader({
           prefill={replyPrefill}
           providers={snapshot.providers}
           targets={sendTargets}
+          onCohostNudgeDismiss={() => dismissCohostNudge(true)}
+          onCohostNudgeTurnOn={() => {
+            dismissCohostNudge(false)
+            onCohostEnable?.(true)
+          }}
           onSend={onSend}
         />
       ) : null}
@@ -347,6 +471,9 @@ function SendRow({
   operation,
   prefill,
   cohostState,
+  cohostNudge,
+  onCohostNudgeTurnOn,
+  onCohostNudgeDismiss,
   onSend
 }: {
   targets: StreamPlatform[]
@@ -356,6 +483,10 @@ function SendRow({
   operation: CommentsSendOperation | null
   prefill: { seq: number; text: string; questionId: string } | null
   cohostState: CohostState | null
+  /** Show the off-but-useful co-host row under the destination strip. */
+  cohostNudge: boolean
+  onCohostNudgeTurnOn: () => void
+  onCohostNudgeDismiss: () => void
   onSend: (text: string, options?: { inReplyToQuestionId?: string }) => void
 }): ReactElement {
   const [draft, setDraft] = useState('')
@@ -444,6 +575,9 @@ function SendRow({
           providers={providers}
           sendTargets={targets}
         />
+        {cohostNudge ? (
+          <CohostNudge onDismiss={onCohostNudgeDismiss} onTurnOn={onCohostNudgeTurnOn} />
+        ) : null}
         {operation ? (
           <div className="mt-1.5 flex flex-col gap-1" aria-label="Latest comment delivery">
             <Badge

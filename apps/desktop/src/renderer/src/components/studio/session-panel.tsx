@@ -5,17 +5,20 @@ import {
   ImageSquare,
   Info,
   Record,
+  Robot,
   StopCircle,
   WarningCircle,
   type Icon
 } from '@phosphor-icons/react'
-import type { ReactElement, ReactNode } from 'react'
+import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
+import { CohostPresenceDot } from '@/components/cohost-status'
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { useWorkspaceNav } from '@/components/workspace-nav'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioChat, useStudioCore, useStudioShell } from '@/hooks/use-studio'
+import { cohostPresenceView } from '@/lib/cohost-presence'
 import type { SessionStartFailure } from '@/lib/session-start-failure'
 import { outputSummary, streamingSummary } from '@/lib/studio-session-view'
 
@@ -89,6 +92,9 @@ export function SessionPanel({
           value={outputSummary(video)}
           onNavigate={() => openStudioPanel('recording')}
         />
+        {/* Presence W3: while a session runs, whether the co-host is reading
+            chat is a session fact — knowable without the Comments window. */}
+        {active ? <CohostSessionRow /> : null}
       </div>
 
       <div className="flex flex-col gap-2 border-t border-border pt-4">
@@ -191,6 +197,39 @@ export function SessionPanel({
   )
 }
 
+/**
+ * One co-host line, same derivation as the Comments window header so the two
+ * surfaces cannot disagree. Dot + label only: this panel is a fact list, not a
+ * working surface, so the typing shimmer stays where the work is read.
+ */
+function CohostSessionRow(): ReactElement {
+  const { cohostState } = useStudioChat()
+  const { openCommentsWindow } = useStudioShell()
+  const [nowMs, setNowMs] = useState(() => Date.now())
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), 5_000)
+    return () => clearInterval(timer)
+  }, [])
+
+  const view = cohostPresenceView(cohostState, nowMs)
+
+  return (
+    <SessionRow
+      icon={Robot}
+      label="Co-host"
+      title={view.tooltipLines.join('\n') || undefined}
+      value={
+        <span className="flex min-w-0 items-center gap-1.5">
+          <CohostPresenceDot view={view} />
+          <span className="truncate">{view.label.replace(/^Co-host\s*(·\s*)?/, '')}</span>
+        </span>
+      }
+      onNavigate={() => void openCommentsWindow()}
+    />
+  )
+}
+
 // The takeover on-air switch (its ONE home — the Assets grid manages images,
 // this flips them). Live-safe: activation only needs the backend socket, so it
 // works mid-session; a takeover replaces the output regardless of scene.
@@ -264,11 +303,14 @@ function SessionRow({
   icon: RowIcon,
   label,
   value,
+  title,
   onNavigate
 }: {
   icon: Icon
   label: string
   value: ReactNode
+  /** Native tooltip for rows whose value is a summary of more facts. */
+  title?: string
   onNavigate?: () => void
 }): ReactElement {
   const body = (
@@ -286,6 +328,7 @@ function SessionRow({
     return (
       <button
         className="flex items-center gap-3 rounded-row px-2.5 py-2 text-sm transition-colors hover:bg-accent"
+        title={title}
         type="button"
         onClick={onNavigate}
       >
@@ -293,5 +336,9 @@ function SessionRow({
       </button>
     )
   }
-  return <div className="flex items-center gap-3 rounded-row px-2.5 py-2 text-sm">{body}</div>
+  return (
+    <div className="flex items-center gap-3 rounded-row px-2.5 py-2 text-sm" title={title}>
+      {body}
+    </div>
+  )
 }

@@ -99,6 +99,8 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:cohost-get': MAIN_AND_COMMENTS,
   'comments-window:cohost-action': MAIN_AND_COMMENTS,
   'comments-window:cohost-action-result-push': MAIN_ONLY,
+  'comments-window:cohost-enable': MAIN_AND_COMMENTS,
+  'comments-window:cohost-enable-result-push': MAIN_ONLY,
   'comments-window:send': MAIN_AND_COMMENTS,
   'comments-window:send-result-push': MAIN_ONLY,
   'comments-window:clear': MAIN_AND_COMMENTS,

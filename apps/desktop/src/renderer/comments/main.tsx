@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import ReactDOM from 'react-dom/client'
+import { toast } from 'sonner'
 
 import { CommentsReader } from '@/components/comments-reader'
 import { AppErrorBoundary } from '@/components/error-boundary'
@@ -13,7 +14,12 @@ import type {
   ViewerSample
 } from '@/lib/backend'
 import { offCohostWindowState } from '@/lib/backend'
-import { cohostHighlightMessageId } from '@/lib/cohost-view'
+import {
+  cohostHighlightMessageId,
+  cohostNudgeDismissedFromStorage,
+  COHOST_NUDGE_STORAGE_KEY
+} from '@/lib/cohost-view'
+import { Toaster } from '@/components/ui/sonner'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { chatSendFailures, pendingCommentsSendOperation, sendablePlatforms } from '@/lib/chat-send'
 import type { ChatSendFailure } from '@/lib/chat-send'
@@ -97,6 +103,9 @@ function CommentsWindowApp(): ReactElement {
   // unconditional: the window mounts on the off shape, never on null.
   const [cohost, setCohost] = useState<CohostWindowState>(offCohostWindowState)
   const [cohostActionPending, setCohostActionPending] = useState(false)
+  const [cohostNudgeDismissed, setCohostNudgeDismissed] = useState(() =>
+    cohostNudgeDismissedFromStorage(localStorage.getItem(COHOST_NUDGE_STORAGE_KEY))
+  )
   useEffect(() => {
     const applyView = (next: CommentsViewSnapshot): void => {
       const previous = viewRef.current
@@ -238,6 +247,21 @@ function CommentsWindowApp(): ReactElement {
         .finally(() => setCohostActionPending(false))
     }
 
+  // Turning the co-host on (and, from the consent CTA, granting cloud-AI
+  // consent) is main-renderer owned; the relay reply carries the truth back so
+  // the switch reflects what actually happened, not what was clicked.
+  const setCohostEnabled = (enabled: boolean, grantConsent = false): void => {
+    void window.videorc
+      ?.sendCohostEnable?.({ requestId: crypto.randomUUID(), enabled, grantConsent })
+      .then((state) => state && setCohost(state))
+      .catch((error) =>
+        toast.error(
+          error instanceof Error ? error.message : 'Could not change the co-host setting.',
+          { id: 'cohost-enable' }
+        )
+      )
+  }
+
   const showQuestionOnStream = (question: CohostQuestion): void => {
     const messageId = cohostHighlightMessageId(question)
     if (!messageId) return
@@ -257,110 +281,130 @@ function CommentsWindowApp(): ReactElement {
         ...(cohost.upgradeUrl ? { upgradeUrl: cohost.upgradeUrl } : {})
       }
 
+  // The engine was asked to start but has not reported listening yet — the one
+  // state the wire cannot express (it still reads `off`).
+  const cohostStarting =
+    live && cohost.enabled && cohost.entitled && cohost.consented && cohost.state.status === 'off'
+
   return (
-    <CommentsReader
-      viewerSample={view.mode.kind === 'live' ? viewerSample : null}
-      snapshot={snapshot}
-      viewMode={view.mode}
-      alwaysOnTop={alwaysOnTop}
-      highlightApplyingId={highlightApplyingId}
-      highlightFailure={highlightFailure}
-      highlightState={highlightState}
-      sendFailures={sendFailures}
-      sendOperation={sendOperation}
-      sendPending={sendPending}
-      sendTargets={sendTargets}
-      cohostActionPending={cohostActionPending}
-      cohostConsented={cohost.consented}
-      cohostEnabled={cohost.enabled}
-      cohostGate={cohostGate}
-      cohostState={cohost.state}
-      onCohostAnswered={(question) => sendCohostAction('answered')(question.id)}
-      onCohostDismissFlag={(flag) => sendCohostAction('dismiss-flag')(flag.messageId)}
-      onCohostDismissQuestion={(question) => sendCohostAction('dismiss-question')(question.id)}
-      onCohostShowOnStream={live ? showQuestionOnStream : undefined}
-      onBackToLive={
-        view.mode.kind === 'history'
-          ? () => {
-              void window.videorc?.setCommentsViewMode?.({ kind: 'live' })
-            }
-          : undefined
-      }
-      onClear={
-        view.mode.kind === 'live' && snapshot.sessionId
-          ? () => {
-              setSendFailures([])
-              void window.videorc
-                ?.clearComments?.({
-                  requestId: crypto.randomUUID(),
-                  sessionId: snapshot.sessionId!
-                })
-                .catch((error) =>
-                  setSendFailures([
-                    {
-                      destinationId: 'comments-clear-command',
-                      platform: 'custom',
-                      reason: error instanceof Error ? error.message : 'Could not clear Comments.'
-                    }
-                  ])
-                )
-            }
-          : undefined
-      }
-      onHighlight={live ? requestHighlight : undefined}
-      onSend={(text, options) => {
-        if (!snapshot.sessionId) return
-        const operationId = crypto.randomUUID()
-        sendPendingOperationIdRef.current = operationId
-        setSendPending(true)
-        setSendFailures([])
-        applySendOperation(
-          pendingCommentsSendOperation({
-            id: operationId,
-            sessionId: snapshot.sessionId,
-            text,
-            providers: snapshot.providers
-          })
-        )
-        void window.videorc
-          ?.sendChatFromCommentsWindow?.({
-            requestId: crypto.randomUUID(),
-            operationId,
-            sessionId: snapshot.sessionId,
-            text,
-            ...(options?.inReplyToQuestionId
-              ? { inReplyToQuestionId: options.inReplyToQuestionId }
-              : {})
-          })
-          .then((operation) => {
-            if (sendPendingOperationIdRef.current !== operationId) return
-            applySendOperation(operation)
-            if (commentsSendOperationTerminal(operation)) {
-              sendPendingOperationIdRef.current = null
-              setSendPending(false)
-            }
-          })
-          .catch((error) => {
-            if (sendPendingOperationIdRef.current !== operationId) return
-            if (!commentsSendTransportFailureCanReplace(sendOperationRef.current, operationId)) {
-              sendPendingOperationIdRef.current = null
-              setSendPending(false)
-              return
-            }
-            sendPendingOperationIdRef.current = null
-            setSendPending(false)
-            applySendOperation(null)
-            setSendFailures([
-              {
-                destinationId: 'comments-command',
-                platform: 'custom',
-                reason: error instanceof Error ? error.message : 'Send failed.'
+    <>
+      <CommentsReader
+        viewerSample={view.mode.kind === 'live' ? viewerSample : null}
+        snapshot={snapshot}
+        viewMode={view.mode}
+        alwaysOnTop={alwaysOnTop}
+        highlightApplyingId={highlightApplyingId}
+        highlightFailure={highlightFailure}
+        highlightState={highlightState}
+        sendFailures={sendFailures}
+        sendOperation={sendOperation}
+        sendPending={sendPending}
+        sendTargets={sendTargets}
+        cohostActionPending={cohostActionPending}
+        cohostConsented={cohost.consented}
+        cohostEnabled={cohost.enabled}
+        cohostGate={cohostGate}
+        cohostNudgeDismissedForever={cohostNudgeDismissed}
+        cohostStarting={cohostStarting}
+        cohostState={cohost.state}
+        onCohostAnswered={(question) => sendCohostAction('answered')(question.id)}
+        onCohostEnable={(enabled) => setCohostEnabled(enabled)}
+        onCohostEnableConsent={() => setCohostEnabled(true, true)}
+        onCohostNudgeDismiss={() => {
+          setCohostNudgeDismissed(true)
+          localStorage.setItem(COHOST_NUDGE_STORAGE_KEY, '1')
+        }}
+        onCohostDismissFlag={(flag) => sendCohostAction('dismiss-flag')(flag.messageId)}
+        onCohostDismissQuestion={(question) => sendCohostAction('dismiss-question')(question.id)}
+        onCohostShowOnStream={live ? showQuestionOnStream : undefined}
+        onBackToLive={
+          view.mode.kind === 'history'
+            ? () => {
+                void window.videorc?.setCommentsViewMode?.({ kind: 'live' })
               }
-            ])
-          })
-      }}
-      onToggleAlwaysOnTop={() => void window.videorc?.setCommentsWindowAlwaysOnTop?.(!alwaysOnTop)}
-    />
+            : undefined
+        }
+        onClear={
+          view.mode.kind === 'live' && snapshot.sessionId
+            ? () => {
+                setSendFailures([])
+                void window.videorc
+                  ?.clearComments?.({
+                    requestId: crypto.randomUUID(),
+                    sessionId: snapshot.sessionId!
+                  })
+                  .catch((error) =>
+                    setSendFailures([
+                      {
+                        destinationId: 'comments-clear-command',
+                        platform: 'custom',
+                        reason: error instanceof Error ? error.message : 'Could not clear Comments.'
+                      }
+                    ])
+                  )
+              }
+            : undefined
+        }
+        onHighlight={live ? requestHighlight : undefined}
+        onSend={(text, options) => {
+          if (!snapshot.sessionId) return
+          const operationId = crypto.randomUUID()
+          sendPendingOperationIdRef.current = operationId
+          setSendPending(true)
+          setSendFailures([])
+          applySendOperation(
+            pendingCommentsSendOperation({
+              id: operationId,
+              sessionId: snapshot.sessionId,
+              text,
+              providers: snapshot.providers
+            })
+          )
+          void window.videorc
+            ?.sendChatFromCommentsWindow?.({
+              requestId: crypto.randomUUID(),
+              operationId,
+              sessionId: snapshot.sessionId,
+              text,
+              ...(options?.inReplyToQuestionId
+                ? { inReplyToQuestionId: options.inReplyToQuestionId }
+                : {})
+            })
+            .then((operation) => {
+              if (sendPendingOperationIdRef.current !== operationId) return
+              applySendOperation(operation)
+              if (commentsSendOperationTerminal(operation)) {
+                sendPendingOperationIdRef.current = null
+                setSendPending(false)
+              }
+            })
+            .catch((error) => {
+              if (sendPendingOperationIdRef.current !== operationId) return
+              if (!commentsSendTransportFailureCanReplace(sendOperationRef.current, operationId)) {
+                sendPendingOperationIdRef.current = null
+                setSendPending(false)
+                return
+              }
+              sendPendingOperationIdRef.current = null
+              setSendPending(false)
+              applySendOperation(null)
+              setSendFailures([
+                {
+                  destinationId: 'comments-command',
+                  platform: 'custom',
+                  reason: error instanceof Error ? error.message : 'Send failed.'
+                }
+              ])
+            })
+        }}
+        onToggleAlwaysOnTop={() =>
+          void window.videorc?.setCommentsWindowAlwaysOnTop?.(!alwaysOnTop)
+        }
+      />
+      {/* The Comments window frames video and is dark-always; sonner needs its
+          own host here because this is a separate React root. */}
+      <Toaster offset={{ bottom: 16, right: 16 }} position="bottom-right" theme="dark" />
+    </>
   )
 }
 

@@ -59,6 +59,10 @@ const api: VideorcApi = {
   onCohostActionRequest: (callback) => subscribe('comments-window:cohost-action-request', callback),
   pushCohostActionResult: (resolution) =>
     invoke('comments-window:cohost-action-result-push', resolution),
+  sendCohostEnable: (command) => invoke('comments-window:cohost-enable', command),
+  onCohostEnableRequest: (callback) => subscribe('comments-window:cohost-enable-request', callback),
+  pushCohostEnableResult: (resolution) =>
+    invoke('comments-window:cohost-enable-result-push', resolution),
   clearComments: (command) => invoke('comments-window:clear', command),
   onCommentsClearRequest: (callback) => subscribe('comments-window:clear-request', callback),
   pushCommentsClearResult: (resolution) => invoke('comments-window:clear-result-push', resolution),
