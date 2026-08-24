@@ -196,6 +196,24 @@ use crate::youtube::{
     YouTubeStreamStatusResult,
 };
 
+/// Stderr writer that reports every write as successful even when the real
+/// write fails (e.g. the parent process died and the pipe broke). See the
+/// tracing init below for why log writes must never be able to kill the
+/// backend.
+struct FailSilentStderr;
+
+impl std::io::Write for FailSilentStderr {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = std::io::stderr().write(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stderr().flush();
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // One JSON line on stderr per panic so the supervisor's crash record
@@ -205,7 +223,12 @@ async fn main() -> Result<()> {
         .with_env_filter(
             EnvFilter::from_default_env().add_directive("videorc_backend=info".parse()?),
         )
-        .with_writer(std::io::stderr)
+        // NOT plain std::io::stderr: the fmt layer's writer panics on write
+        // failure, and a panic aborts the whole backend (panic hook → abort).
+        // If the supervisor/parent dies first, stderr becomes a broken pipe
+        // and the next log line would kill an otherwise healthy backend
+        // mid-recording. Logging must never be load-bearing.
+        .with_writer(|| FailSilentStderr)
         .init();
     // F-021 root cause: SkyLight ASSERTS (SIGABRT, "CGS_REQUIRE_INIT
     // did_initialize") if a window-server call runs before this process's

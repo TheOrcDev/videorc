@@ -2691,6 +2691,34 @@ pub async fn start_session(
             encoder_bridge_video_output,
             encoder_bridge_stream_profile.is_some(),
         );
+        // Start fence: a writer thread from a PREVIOUS session still running
+        // here means that session leaked its encoder (still encoding with no
+        // session attached). It competes with this session's capture pipeline
+        // and produces the frozen-frames failure, so wait briefly for it to
+        // die and otherwise say so loudly before recording anyway.
+        {
+            let fence_deadline = Instant::now() + Duration::from_secs(2);
+            while crate::encoder_bridge::live_synthetic_writers() > 0
+                && Instant::now() < fence_deadline
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let lingering = crate::encoder_bridge::live_synthetic_writers();
+            if lingering > 0 {
+                let message = format!(
+                    "{lingering} encoder writer(s) from a previous session are still running; \
+                     this recording may drop or freeze frames until they exit."
+                );
+                state.emit_log("warn", message.clone());
+                let _ = emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "encoder-bridge-writer-lingering",
+                    &message,
+                );
+            }
+        }
         let mut recording_bridge = start_synthetic_recording_bridge(
             state.clone(),
             session_id.clone(),
@@ -5429,7 +5457,45 @@ async fn monitor_session(
         drop(active);
     }
     #[cfg(not(target_os = "windows"))]
-    drop(retired_active);
+    if let Some(mut active) = retired_active {
+        // Deterministic, bounded bridge teardown — the macOS twin of the
+        // Windows stop_and_join_writer arm above. The muxer process is gone,
+        // so both writers must die before finalize/export/idle-preview work:
+        // relying on Drop's unbounded join (or on this function even reaching
+        // its end) left stopped sessions' writers alive and still encoding 4K
+        // through VideoToolbox, starving the next session's capture pipeline
+        // (2026-08-24 frozen-frames incident).
+        let bridges: Vec<EncoderBridgeRecordingSession> = active
+            .encoder_bridge
+            .take()
+            .into_iter()
+            .chain(active.encoder_bridge_stream.take())
+            .collect();
+        drop(active);
+        if !bridges.is_empty() {
+            let reap_result = tokio::task::spawn_blocking(move || {
+                let reaps: Vec<bool> = bridges
+                    .into_iter()
+                    .map(|bridge| bridge.stop_and_reap(Duration::from_secs(3)))
+                    .collect();
+                reaps.into_iter().all(|reaped| reaped)
+            })
+            .await;
+            if !matches!(reap_result, Ok(true)) {
+                let message = "Encoder bridge writer did not exit within 3s of session end; \
+                     thread detached and may keep encoder resources busy until it exits."
+                    .to_string();
+                state.emit_log("warn", message.clone());
+                let _ = emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "encoder-bridge-writer-leaked",
+                    &message,
+                );
+            }
+        }
+    }
 
     // Dropping ActiveRecording stops the native post-controls audio producer.
     // Close the caption bus now, drain the provider's final utterance within a
