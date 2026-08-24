@@ -862,6 +862,17 @@ mod runtime {
             self.recovery_count
         }
 
+        /// Newest primary-output sequence the pump has published to the frame
+        /// store, or `None` before the first composition. The encoder drain
+        /// uses this to wake as soon as a fresh frame exists instead of
+        /// discovering it one clock period late.
+        pub(crate) fn latest_published_sequence(&self) -> Option<u64> {
+            self.snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .primary_sequence
+        }
+
         pub(crate) fn latest_ticket(
             &self,
         ) -> Option<(u64, Instant, WindowsD3d11TextureLeaseTicket)> {
