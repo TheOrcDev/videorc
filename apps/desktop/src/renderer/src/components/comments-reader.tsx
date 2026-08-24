@@ -98,7 +98,12 @@ export function CommentsReader({
   sendOperation?: CommentsSendOperation | null
   sendFailures?: ChatSendFailure[]
   onSend?: (text: string, options?: { inReplyToQuestionId?: string }) => void
-  /** Latest `cohost.state`; null hides the Co-host segment entirely. */
+  /**
+   * Latest `cohost.state`. The relay always supplies a concrete state now —
+   * `offCohostState()` when the engine is off or has not reported yet — so
+   * presence is knowable from the first frame. Null is still tolerated for
+   * backward compat and hides the Co-host segment entirely.
+   */
   cohostState?: CohostState | null
   cohostGate?: EntitlementUiGate
   cohostConsented?: boolean

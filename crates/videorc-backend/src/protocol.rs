@@ -4431,6 +4431,13 @@ mod tests {
 
         let state_wire = shared_high_risk_contract_fixture_value("/cohost/state");
         let state: crate::cohost::CohostState = serde_json::from_value(state_wire.clone()).unwrap();
+        // Presence fields (W1): pending delta, scheduled next pass, in-flight
+        // flag, and the session lifetime counters ride every state payload.
+        assert!(!state.tick_in_flight);
+        assert_eq!(state.pending_messages, 4);
+        assert_eq!(state.next_tick_at.as_deref(), Some("2026-08-22T10:00:28Z"));
+        assert_eq!(state.messages_seen, 84);
+        assert_eq!(state.questions_total, 5);
         assert_eq!(serde_json::to_value(state).unwrap(), state_wire);
 
         let off_wire = shared_high_risk_contract_fixture_value("/cohost/offState");
@@ -4465,9 +4472,15 @@ mod tests {
         );
         assert_eq!(serde_json::to_value(timed_out).unwrap(), timeout_wire);
 
-        // A payload from before `detail` existed still parses (serde default).
+        // A payload from before `detail` and the presence fields existed still
+        // parses (serde defaults).
         let legacy_wire = shared_high_risk_contract_fixture_value("/cohost/legacyState");
         assert!(legacy_wire.get("detail").is_none());
+        assert!(legacy_wire.get("tickInFlight").is_none());
+        assert!(legacy_wire.get("pendingMessages").is_none());
+        assert!(legacy_wire.get("nextTickAt").is_none());
+        assert!(legacy_wire.get("messagesSeen").is_none());
+        assert!(legacy_wire.get("questionsTotal").is_none());
         let legacy: crate::cohost::CohostState = serde_json::from_value(legacy_wire).unwrap();
         assert_eq!(legacy, crate::cohost::CohostState::off());
     }

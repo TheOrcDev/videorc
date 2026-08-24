@@ -386,6 +386,7 @@ import type {
   VideorcAccountSnapshot,
   ViewerSample
 } from '../shared/backend'
+import { offCohostWindowState } from '../shared/backend'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -457,7 +458,9 @@ let commentsWindowAlwaysOnTop = false
 let commentsWindowClosing = false
 let commentsWindowContentProtected = false
 let latestCommentHighlightState: CommentHighlightState = { generation: 0, phase: 'idle' }
-let latestCohostWindowState: CohostWindowState | null = null
+// Off-shaped from the start (co-host presence W1): the Comments window's
+// mount-time `cohost-get` must always receive a concrete state, never null.
+let latestCohostWindowState: CohostWindowState = offCohostWindowState()
 let latestLiveCommentsSnapshot: LiveChatSnapshot | null = null
 const commentsHistoryCache = new CommentsHistoryCache()
 const commentsViewSelection = new CommentsViewSelection({ kind: 'live' })

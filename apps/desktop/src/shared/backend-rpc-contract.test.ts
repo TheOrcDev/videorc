@@ -933,6 +933,38 @@ describe('backend RPC contract', () => {
     }
     expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
     expect(validateBackendRpcResult('cohost.status', state)).toEqual(state)
+
+    // Presence fields (W1): optional so a pre-presence backend still
+    // validates (`state` above omits them), typed when present.
+    const working = {
+      ...state,
+      tickInFlight: true,
+      pendingMessages: 4,
+      nextTickAt: '2026-08-22T10:00:28Z',
+      messagesSeen: 84,
+      questionsTotal: 5
+    }
+    expect(validateBackendEventPayload('cohost.state', working)).toEqual(working)
+    expect(validateBackendRpcResult('cohost.status', working)).toEqual(working)
+    expect(validateBackendEventPayload('cohost.state', { ...working, nextTickAt: null })).toEqual({
+      ...working,
+      nextTickAt: null
+    })
+    expect(() =>
+      validateBackendEventPayload('cohost.state', { ...working, pendingMessages: -1 })
+    ).toThrow('cohost.state')
+    expect(() =>
+      validateBackendEventPayload('cohost.state', { ...working, pendingMessages: 1.5 })
+    ).toThrow('cohost.state')
+    expect(() =>
+      validateBackendEventPayload('cohost.state', { ...working, tickInFlight: 'yes' })
+    ).toThrow('cohost.state')
+    expect(() =>
+      validateBackendEventPayload('cohost.state', { ...working, nextTickAt: 12 })
+    ).toThrow('cohost.state')
+    expect(() =>
+      validateBackendEventPayload('cohost.state', { ...working, messagesSeen: -4 })
+    ).toThrow('cohost.state')
     const off = {
       sessionId: null,
       status: 'off',

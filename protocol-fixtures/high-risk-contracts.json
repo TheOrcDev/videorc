@@ -291,7 +291,12 @@
       "mood": "hype",
       "lastTickAt": "2026-08-22T10:00:20Z",
       "tickSeq": 2,
-      "partial": false
+      "partial": false,
+      "tickInFlight": false,
+      "pendingMessages": 4,
+      "nextTickAt": "2026-08-22T10:00:28Z",
+      "messagesSeen": 84,
+      "questionsTotal": 5
     },
     "offState": {
       "sessionId": null,
@@ -303,7 +308,12 @@
       "mood": null,
       "lastTickAt": null,
       "tickSeq": 0,
-      "partial": false
+      "partial": false,
+      "tickInFlight": false,
+      "pendingMessages": 0,
+      "nextTickAt": null,
+      "messagesSeen": 0,
+      "questionsTotal": 0
     },
     "errorState": {
       "sessionId": "session-fixture",
@@ -319,7 +329,12 @@
       "mood": null,
       "lastTickAt": "2026-08-22T10:00:20Z",
       "tickSeq": 3,
-      "partial": false
+      "partial": false,
+      "tickInFlight": false,
+      "pendingMessages": 2,
+      "nextTickAt": "2026-08-22T10:00:40Z",
+      "messagesSeen": 12,
+      "questionsTotal": 3
     },
     "timeoutState": {
       "sessionId": "session-fixture",
@@ -335,7 +350,12 @@
       "mood": null,
       "lastTickAt": "2026-08-22T10:00:20Z",
       "tickSeq": 3,
-      "partial": false
+      "partial": false,
+      "tickInFlight": false,
+      "pendingMessages": 0,
+      "nextTickAt": null,
+      "messagesSeen": 12,
+      "questionsTotal": 3
     },
     "legacyState": {
       "sessionId": null,

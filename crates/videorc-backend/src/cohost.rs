@@ -241,8 +241,9 @@ impl CohostErrorDetail {
 
 /// The `cohost.state` event payload and the result of every `cohost.*` RPC.
 /// Nullable fields serialize as explicit `null` (the renderer reducer keys on
-/// them), never as absent keys. `detail` is additionally `default` on read so
-/// a payload from before it existed still parses.
+/// them), never as absent keys. `detail` and the presence fields are
+/// additionally `default` on read so a payload from before they existed still
+/// parses.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostState {
@@ -259,6 +260,26 @@ pub struct CohostState {
     pub last_tick_at: Option<String>,
     pub tick_seq: u64,
     pub partial: bool,
+    /// A tick HTTP request is outstanding right now ("thinking").
+    #[serde(default)]
+    pub tick_in_flight: bool,
+    /// Delta messages collected but not yet sent in a tick — "I've seen your
+    /// chat and I'm on it".
+    #[serde(default)]
+    pub pending_messages: u32,
+    /// ISO-8601 instant of the scheduler's earliest possible next pass, present
+    /// only while `pending_messages > 0`: the burst rule (>= 5 pending) fires as
+    /// soon as the 8 s min gap allows, the trickle rule at anchor + 20 s, and a
+    /// backoff/quota window pushes both back.
+    #[serde(default)]
+    pub next_tick_at: Option<String>,
+    /// Session total of chat messages noted to the engine (entered a delta).
+    #[serde(default)]
+    pub messages_seen: u64,
+    /// Distinct question ids this session ever surfaced — lifetime count, not
+    /// the open count.
+    #[serde(default)]
+    pub questions_total: u64,
 }
 
 impl CohostState {
@@ -274,6 +295,11 @@ impl CohostState {
             last_tick_at: None,
             tick_seq: 0,
             partial: false,
+            tick_in_flight: false,
+            pending_messages: 0,
+            next_tick_at: None,
+            messages_seen: 0,
+            questions_total: 0,
         }
     }
 }
@@ -356,6 +382,12 @@ struct CohostSession {
     backoff_index: usize,
     next_attempt_at: Option<Instant>,
     in_flight: bool,
+    /// Session total of messages that entered a delta (presence indicator).
+    messages_seen: u64,
+    /// Every question id this session ever surfaced, so `questions_total`
+    /// counts each grouped question exactly once across ticks.
+    counted_question_ids: HashSet<String>,
+    questions_total: u64,
 }
 
 impl CohostSession {
@@ -392,10 +424,25 @@ impl CohostSession {
             backoff_index: 0,
             next_attempt_at: None,
             in_flight: false,
+            messages_seen: 0,
+            counted_question_ids: HashSet::new(),
+            questions_total: 0,
         }
     }
 
     fn snapshot(&self) -> CohostState {
+        self.snapshot_at(Instant::now())
+    }
+
+    fn snapshot_at(&self, now: Instant) -> CohostState {
+        let next_tick_at = next_tick_due_at(
+            self.pending.len(),
+            self.last_tick_at.unwrap_or(self.started_at),
+            self.last_tick_at,
+            self.next_attempt_at,
+            now,
+        )
+        .map(|due| iso_after(now, due));
         CohostState {
             session_id: Some(self.session_id.clone()),
             status: self.status,
@@ -407,6 +454,11 @@ impl CohostSession {
             last_tick_at: self.last_tick_iso.clone(),
             tick_seq: self.tick_seq,
             partial: self.partial,
+            tick_in_flight: self.in_flight,
+            pending_messages: u32::try_from(self.pending.len()).unwrap_or(u32::MAX),
+            next_tick_at,
+            messages_seen: self.messages_seen,
+            questions_total: self.questions_total,
         }
     }
 
@@ -453,6 +505,7 @@ impl CohostSession {
             }
             noted += 1;
         }
+        self.messages_seen = self.messages_seen.saturating_add(noted as u64);
         noted
     }
 
@@ -539,6 +592,9 @@ impl CohostSession {
                 if self.known_set.contains(&id) && !message_ids.contains(&id) {
                     message_ids.push(id);
                 }
+            }
+            if self.counted_question_ids.insert(incoming.id.clone()) {
+                self.questions_total = self.questions_total.saturating_add(1);
             }
             next_questions.push(CohostQuestion {
                 id: incoming.id,
@@ -656,6 +712,51 @@ pub(crate) fn tick_due(
     now.duration_since(anchor) >= TICK_IDLE_INTERVAL
 }
 
+/// Earliest instant the scheduler could send the next tick, pure for the test
+/// matrix and `None` on an empty delta. The burst rule (>= 5 pending) fires as
+/// soon as the 8 s min gap allows; the trickle rule fires at anchor + 20 s; a
+/// backoff/quota `next_attempt_at` pushes both back. Never in the past.
+pub(crate) fn next_tick_due_at(
+    pending: usize,
+    anchor: Instant,
+    last_tick: Option<Instant>,
+    next_attempt_at: Option<Instant>,
+    now: Instant,
+) -> Option<Instant> {
+    if pending == 0 {
+        return None;
+    }
+    let mut due = if pending >= TICK_BURST_THRESHOLD {
+        now
+    } else {
+        anchor + TICK_IDLE_INTERVAL
+    };
+    if let Some(last) = last_tick {
+        due = due.max(last + TICK_MIN_GAP);
+    }
+    if let Some(attempt) = next_attempt_at {
+        due = due.max(attempt);
+    }
+    Some(due.max(now))
+}
+
+/// Wall-clock ISO-8601 for a monotonic instant `due` relative to `now`.
+fn iso_after(now: Instant, due: Instant) -> String {
+    let delta = chrono::Duration::from_std(due.saturating_duration_since(now))
+        .unwrap_or_else(|_| chrono::Duration::zero());
+    (chrono::Utc::now() + delta).to_rfc3339()
+}
+
+/// Emission bucket for `pending_messages`: `cohost.state` is pushed when the
+/// bucket changes (0 -> 1, then every +5), never per message.
+pub(crate) fn pending_bucket(pending: usize) -> usize {
+    if pending == 0 {
+        0
+    } else {
+        1 + (pending - 1) / 5
+    }
+}
+
 /// Map one chat row onto the tick wire shape. Non-`message` events (paid,
 /// membership, system, moderation), tombstones, and custom RTMP rows (no chat
 /// platform) are excluded.
@@ -765,6 +866,14 @@ impl CohostEngine {
         self.session
             .as_mut()
             .map(|session| session.note_messages(messages))
+            .unwrap_or(0)
+    }
+
+    /// Messages buffered for the next tick (0 without a session).
+    pub(crate) fn pending_len(&self) -> usize {
+        self.session
+            .as_ref()
+            .map(|session| session.pending.len())
             .unwrap_or(0)
     }
 
@@ -967,16 +1076,27 @@ pub(crate) async fn stop_cohost_for_session_end(state: &AppState) {
 }
 
 /// Delivery-path hook: remember eligible rows for the next tick. Rows from a
-/// different session are ignored by the engine's own guard.
+/// different session are ignored by the engine's own guard. The UI learns
+/// about queued chat when `pending_messages` crosses an emission bucket
+/// (0 -> 1, then every +5) — a reaction per wave, never a per-message storm.
 pub(crate) async fn note_messages(state: &AppState, messages: &[LiveChatMessage]) {
     if messages.is_empty() {
         return;
     }
-    let mut engine = state.cohost.lock().await;
-    if engine.session.is_none() {
-        return;
-    }
-    engine.note_messages(messages);
+    let snapshot = {
+        let mut engine = state.cohost.lock().await;
+        if engine.session.is_none() {
+            return;
+        }
+        let bucket_before = pending_bucket(engine.pending_len());
+        engine.note_messages(messages);
+        let bucket_after = pending_bucket(engine.pending_len());
+        if bucket_before == bucket_after {
+            return;
+        }
+        engine.snapshot()
+    };
+    emit_state(state, &snapshot);
 }
 
 pub async fn mark_question_answered(
@@ -1068,13 +1188,15 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         let mut engine = state.cohost.lock().await;
         let prepared = engine.prepare_tick(generation, token.is_some(), premium, Instant::now());
         match prepared {
-            Ok(prepared) => Ok(prepared),
+            // The snapshot taken here carries tick_in_flight=true and the
+            // drained delta; emitting it below is the "thinking..." signal.
+            Ok(prepared) => Ok((prepared, engine.snapshot())),
             Err(TickGate::Stopped) => return false,
             Err(TickGate::Idle) => return true,
             Err(TickGate::Paused(reason)) => Err((reason, engine.snapshot())),
         }
     };
-    let prepared = match prepared {
+    let (prepared, in_flight_snapshot) = match prepared {
         Ok(prepared) => prepared,
         Err((reason, snapshot)) => {
             state.emit_log(
@@ -1088,6 +1210,9 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
             return true;
         }
     };
+    // tick_in_flight toggles true exactly here and false in apply_tick_result;
+    // both edges reach the renderer (this emit, and the post-tick emit below).
+    emit_state(state, &in_flight_snapshot);
     let Some(token) = token else {
         return true;
     };
@@ -2041,6 +2166,239 @@ mod tests {
         assert_eq!(json["partial"], false);
         assert_eq!(json["questions"], serde_json::json!([]));
         assert_eq!(json["flags"], serde_json::json!([]));
+        // Presence fields always ride the wire, defaults included.
+        assert_eq!(json["tickInFlight"], false);
+        assert_eq!(json["pendingMessages"], 0);
+        assert_eq!(json["nextTickAt"], serde_json::Value::Null);
+        assert_eq!(json["messagesSeen"], 0);
+        assert_eq!(json["questionsTotal"], 0);
+    }
+
+    #[test]
+    fn state_without_presence_fields_still_parses_to_defaults() {
+        // A payload from before the presence fields existed (<= 0.9.70).
+        let legacy: CohostState = serde_json::from_value(serde_json::json!({
+            "sessionId": "session-1",
+            "status": "listening",
+            "reason": null,
+            "detail": null,
+            "questions": [],
+            "flags": [],
+            "mood": null,
+            "lastTickAt": "2026-08-22T10:00:20Z",
+            "tickSeq": 2,
+            "partial": false
+        }))
+        .unwrap();
+        assert!(!legacy.tick_in_flight);
+        assert_eq!(legacy.pending_messages, 0);
+        assert_eq!(legacy.next_tick_at, None);
+        assert_eq!(legacy.messages_seen, 0);
+        assert_eq!(legacy.questions_total, 0);
+    }
+
+    #[test]
+    fn pending_bucket_emits_at_one_then_every_five() {
+        let cases = [
+            (0, 0),
+            (1, 1),
+            (2, 1),
+            (5, 1),
+            (6, 2),
+            (10, 2),
+            (11, 3),
+            (60, 12),
+        ];
+        for (pending, bucket) in cases {
+            assert_eq!(pending_bucket(pending), bucket, "pending={pending}");
+        }
+    }
+
+    #[test]
+    fn next_tick_due_at_matches_both_scheduler_rules() {
+        let start = Instant::now();
+        let now = start + secs(2);
+        // Empty delta: no next pass to announce.
+        assert_eq!(next_tick_due_at(0, start, None, None, now), None);
+        // Trickle rule: 1..4 pending fire at anchor + 20 s.
+        assert_eq!(
+            next_tick_due_at(1, start, None, None, now),
+            Some(start + secs(20))
+        );
+        assert_eq!(
+            next_tick_due_at(4, start, None, None, now),
+            Some(start + secs(20))
+        );
+        // Burst rule: >= 5 pending fire immediately without a previous tick...
+        assert_eq!(next_tick_due_at(5, start, None, None, now), Some(now));
+        // ...and as soon as the 8 s min gap allows after one.
+        let last = start + secs(1);
+        assert_eq!(
+            next_tick_due_at(9, last, Some(last), None, now),
+            Some(last + secs(8))
+        );
+        // Trickle after a tick: the 20 s rule dominates the 8 s floor.
+        assert_eq!(
+            next_tick_due_at(1, last, Some(last), None, now),
+            Some(last + secs(20))
+        );
+        // A backoff/quota window pushes both rules back.
+        let attempt = start + secs(40);
+        assert_eq!(
+            next_tick_due_at(5, last, Some(last), Some(attempt), now),
+            Some(attempt)
+        );
+        // The announced pass is never in the past.
+        let late = start + secs(90);
+        assert_eq!(
+            next_tick_due_at(1, last, Some(last), Some(attempt), late),
+            Some(late)
+        );
+    }
+
+    #[test]
+    fn tick_in_flight_toggles_around_the_request_on_success_and_failure() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        assert!(!engine.snapshot().tick_in_flight);
+        engine.note_messages(&messages("session-1", 0..7));
+        let queued = engine
+            .session
+            .as_ref()
+            .unwrap()
+            .snapshot_at(start + secs(1));
+        assert_eq!(queued.pending_messages, 7);
+        assert!(!queued.tick_in_flight);
+        assert!(
+            queued.next_tick_at.is_some(),
+            "pending messages must announce the next pass"
+        );
+
+        // Sending drains the delta and raises tick_in_flight until the result.
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        let in_flight = engine.snapshot();
+        assert!(in_flight.tick_in_flight);
+        assert_eq!(in_flight.pending_messages, 0);
+        assert_eq!(in_flight.next_tick_at, None);
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Ok(response(vec![question("q_1", &[])])),
+            start + secs(2),
+            "t1"
+        ));
+        let merged = engine.snapshot();
+        assert!(!merged.tick_in_flight);
+        assert_eq!(merged.pending_messages, 0);
+        assert_eq!(merged.messages_seen, 7);
+        assert_eq!(merged.questions_total, 1);
+
+        // Failure path clears the flag too.
+        engine.note_messages(&messages("session-1", 7..14));
+        engine
+            .prepare_tick(generation, true, true, start + secs(30))
+            .unwrap();
+        assert!(engine.snapshot().tick_in_flight);
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Err(CohostApiError::network("offline")),
+            start + secs(31),
+            "t2"
+        ));
+        let failed = engine.snapshot();
+        assert!(!failed.tick_in_flight);
+        assert_eq!(failed.pending_messages, 0);
+        assert_eq!(failed.messages_seen, 14);
+    }
+
+    #[test]
+    fn questions_total_counts_each_grouped_id_once_for_the_session() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..5);
+        engine.note_messages(&rows);
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Ok(response(vec![
+                question("q_1", &[rows[0].id.as_str()]),
+                question("q_2", &[rows[1].id.as_str()]),
+            ])),
+            start + secs(2),
+            "t1"
+        ));
+        assert_eq!(engine.snapshot().questions_total, 2);
+
+        // A kept id does not re-count; a dismissed id keeps its count; a new
+        // id adds one.
+        assert!(engine.mark_answered("session-1", "q_2").unwrap());
+        engine.note_messages(&messages("session-1", 5..10));
+        engine
+            .prepare_tick(generation, true, true, start + secs(30))
+            .unwrap();
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Ok(response(vec![
+                question("q_1", &[rows[2].id.as_str()]),
+                question("q_3", &[rows[3].id.as_str()]),
+            ])),
+            start + secs(31),
+            "t2"
+        ));
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.questions_total, 3);
+        assert_eq!(snapshot.questions.len(), 2, "open count stays distinct");
+        assert_eq!(snapshot.messages_seen, 10);
+    }
+
+    #[tokio::test]
+    async fn note_messages_emits_only_on_bucket_crossings() {
+        let state = test_state();
+        {
+            let mut engine = state.cohost.lock().await;
+            engine.settings.enabled = true;
+            engine.start_session("session-1".to_string(), true, None, Instant::now());
+        }
+        let mut events = state.events.subscribe();
+        let drain_states = |events: &mut broadcast::Receiver<crate::protocol::ServerEvent>| {
+            let mut states = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if event.event == COHOST_STATE_EVENT {
+                    states.push(event.payload);
+                }
+            }
+            states
+        };
+
+        // 0 -> 1 crosses into the first bucket: one emit.
+        note_messages(&state, &messages("session-1", 0..1)).await;
+        let states = drain_states(&mut events);
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0]["pendingMessages"], 1);
+        assert!(states[0]["nextTickAt"].is_string());
+        assert_eq!(states[0]["tickInFlight"], false);
+
+        // 1 -> 4 stays inside the bucket: silent.
+        note_messages(&state, &messages("session-1", 1..4)).await;
+        assert!(drain_states(&mut events).is_empty());
+
+        // 4 -> 7 crosses into the second bucket: one emit.
+        note_messages(&state, &messages("session-1", 4..7)).await;
+        let states = drain_states(&mut events);
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0]["pendingMessages"], 7);
+
+        // No engine session: never an emit.
+        state.cohost.lock().await.stop_session();
+        note_messages(&state, &messages("session-1", 7..9)).await;
+        assert!(drain_states(&mut events).is_empty());
     }
 
     #[tokio::test]

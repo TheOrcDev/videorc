@@ -193,6 +193,22 @@ describe('shared high-risk protocol fixture', () => {
       detail: null,
       mood: null
     })
+    // Presence fields (W1): the off shape is all defaults, the listening shape
+    // carries a pending delta with its announced next pass.
+    expect(fixtures.cohost.offState).toMatchObject({
+      tickInFlight: false,
+      pendingMessages: 0,
+      nextTickAt: null,
+      messagesSeen: 0,
+      questionsTotal: 0
+    })
+    expect(fixtures.cohost.state).toMatchObject({
+      tickInFlight: false,
+      pendingMessages: 4,
+      nextTickAt: '2026-08-22T10:00:28Z',
+      messagesSeen: 84,
+      questionsTotal: 5
+    })
     // `detail` carries the failed tick's envelope verbatim, or a desktop code
     // with no HTTP status; a pre-`detail` payload validates unchanged.
     for (const shape of ['errorState', 'timeoutState', 'legacyState'] as const) {
@@ -214,6 +230,17 @@ describe('shared high-risk protocol fixture', () => {
       status: null
     })
     expect('detail' in fixtures.cohost.legacyState).toBe(false)
+    // The legacy payload predates the presence fields; validating it proves
+    // the schema (and serde on the Rust side) defaults them.
+    for (const key of [
+      'tickInFlight',
+      'pendingMessages',
+      'nextTickAt',
+      'messagesSeen',
+      'questionsTotal'
+    ]) {
+      expect(key in fixtures.cohost.legacyState).toBe(false)
+    }
   })
 
   it('keeps comment pagination defaults and deletion DTOs identical', () => {
