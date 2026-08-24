@@ -1991,6 +1991,29 @@ pub struct DiagnosticStats {
     /// source-store contention or a visibly stale cached screen/window frame.
     #[serde(default)]
     pub compositor_screen_source_blocking_refreshes: u64,
+    /// Cumulative compositor ticks that served a camera frame the capture
+    /// pipeline had replaced since the previous tick (fresh content).
+    #[serde(default)]
+    pub compositor_camera_source_fresh_serves: u64,
+    /// Cumulative compositor ticks that re-served the identical camera frame
+    /// handle as the previous tick (held content; the producer delivered
+    /// nothing new). Held ≫ fresh during a session is the frozen-recording
+    /// signature of the 0.9.71 second-session lag.
+    #[serde(default)]
+    pub compositor_camera_source_held_serves: u64,
+    /// Oldest capture age (ms) of any camera frame the compositor served.
+    #[serde(default)]
+    pub compositor_camera_source_served_age_max_ms: u64,
+    /// Cumulative compositor ticks that served a fresh screen/window frame.
+    #[serde(default)]
+    pub compositor_screen_source_fresh_serves: u64,
+    /// Cumulative compositor ticks that re-served the identical screen/window
+    /// frame handle as the previous tick.
+    #[serde(default)]
+    pub compositor_screen_source_held_serves: u64,
+    /// Oldest capture age (ms) of any screen/window frame the compositor served.
+    #[serde(default)]
+    pub compositor_screen_source_served_age_max_ms: u64,
     pub preview_repeated_frames: u64,
     pub preview_surface_resize_count: u64,
     pub preview_latency_ms: Option<u64>,

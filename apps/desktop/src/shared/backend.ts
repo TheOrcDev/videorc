@@ -2259,6 +2259,18 @@ export interface DiagnosticStats {
   compositorCameraSourceBlockingRefreshes: number
   /** Bounded blocking screen/window refreshes after source-store contention or visibly stale cached screen/window frames. */
   compositorScreenSourceBlockingRefreshes: number
+  /** Compositor ticks that served a camera frame the capture pipeline replaced since the previous tick. */
+  compositorCameraSourceFreshServes: number
+  /** Compositor ticks that re-served the identical camera frame handle (producer delivered nothing new). */
+  compositorCameraSourceHeldServes: number
+  /** Oldest capture age (ms) of any camera frame the compositor served. */
+  compositorCameraSourceServedAgeMaxMs: number
+  /** Compositor ticks that served a fresh screen/window frame. */
+  compositorScreenSourceFreshServes: number
+  /** Compositor ticks that re-served the identical screen/window frame handle. */
+  compositorScreenSourceHeldServes: number
+  /** Oldest capture age (ms) of any screen/window frame the compositor served. */
+  compositorScreenSourceServedAgeMaxMs: number
   previewRepeatedFrames: number
   previewSurfaceResizeCount: number
   previewLatencyMs?: number

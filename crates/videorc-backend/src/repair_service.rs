@@ -41,6 +41,8 @@ fn expectations_from(params: &RepairFileParams) -> QualityExpectations {
     QualityExpectations {
         intended_fps: params.intended_fps,
         expect_audio: params.expect_audio.unwrap_or(true),
+        // Manual/batch repair runs have no live session counters.
+        pipeline_reported_freezes: false,
     }
 }
 
