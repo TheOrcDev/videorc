@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{self, Write as StdWrite};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Condvar, Mutex as StdMutex, OnceLock};
 use std::thread;
@@ -725,6 +725,39 @@ impl EncoderBridgeRecordingSession {
         self.stop.store(true, Ordering::Relaxed);
     }
 
+    /// Deterministic teardown: signal stop, then reap the writer thread within
+    /// `deadline`. Returns false when the writer failed to exit in time — the
+    /// thread is then deliberately detached (a hung writer must never block
+    /// session finalization) and the caller must report the leak loudly.
+    ///
+    /// Why this exists (2026-08-24 second-session-lag incident): the handles
+    /// used to die implicitly at the end of the session monitor, AFTER awaits
+    /// that can stall (idle-preview restart, export). Any stall left the
+    /// writer thread alive and still encoding 4K through VideoToolbox with no
+    /// session attached, competing with the next session's capture pipeline.
+    pub fn stop_and_reap(mut self, deadline: Duration) -> bool {
+        self.stop();
+        let mut reaped = true;
+        if let Some(writer) = self.writer.take() {
+            let deadline_at = std::time::Instant::now() + deadline;
+            while !writer.is_finished() && std::time::Instant::now() < deadline_at {
+                thread::sleep(Duration::from_millis(25));
+            }
+            if writer.is_finished() {
+                let _ = writer.join();
+            } else {
+                // Dropping the JoinHandle detaches the thread; Drop below
+                // must not retry the join (writer is already taken).
+                drop(writer);
+                reaped = false;
+            }
+        }
+        if let Some(task) = self.diagnostics_task.take() {
+            task.abort();
+        }
+        reaped
+    }
+
     #[cfg(target_os = "windows")]
     pub(crate) fn stop_and_join_writer(&mut self) {
         self.stop();
@@ -1274,7 +1307,33 @@ struct EncoderBridgeWriterEvent {
     error: Option<String>,
 }
 
+/// Live synthetic writer threads in this process. A session start observing a
+/// nonzero count from a PREVIOUS session means that session's writer never
+/// exited — the leaked-encoder condition behind the 2026-08-24 frozen-frames
+/// incident — and must be reported loudly before recording proceeds.
+static LIVE_SYNTHETIC_WRITERS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn live_synthetic_writers() -> usize {
+    LIVE_SYNTHETIC_WRITERS.load(Ordering::Relaxed)
+}
+
+struct SyntheticWriterLiveGuard;
+
+impl SyntheticWriterLiveGuard {
+    fn enter() -> Self {
+        LIVE_SYNTHETIC_WRITERS.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for SyntheticWriterLiveGuard {
+    fn drop(&mut self) {
+        LIVE_SYNTHETIC_WRITERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
+    let _live_guard = SyntheticWriterLiveGuard::enter();
     let SyntheticRecordingWriterParams {
         session_id,
         target_fps,
@@ -5325,6 +5384,74 @@ fn frame_count(duration_ms: u64, fps: u32) -> u64 {
 mod tests {
     use super::*;
     use crate::diagnostics::idle_diagnostics;
+
+    fn test_session_with_writer(
+        stop: Arc<AtomicBool>,
+        writer: thread::JoinHandle<()>,
+    ) -> EncoderBridgeRecordingSession {
+        EncoderBridgeRecordingSession {
+            stop,
+            terminal_failure: Arc::new(StdMutex::new(None)),
+            startup_ready: None,
+            fifo_path: PathBuf::from("/nonexistent-test-fifo"),
+            writer: Some(writer),
+            diagnostics_task: None,
+            #[cfg(target_os = "windows")]
+            d3d11_input: None,
+        }
+    }
+
+    /// Serializes the two live-writer-counter tests: the counter is process
+    /// global, so parallel test threads would race each other's deltas.
+    static LIVE_WRITER_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+    #[test]
+    fn stop_and_reap_joins_a_cooperative_writer_and_reports_success() {
+        let _serial = LIVE_WRITER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let base = live_synthetic_writers();
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_stop = stop.clone();
+        let writer = thread::spawn(move || {
+            let _live = SyntheticWriterLiveGuard::enter();
+            while !writer_stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let session = test_session_with_writer(stop, writer);
+        assert!(session.stop_and_reap(Duration::from_secs(2)));
+        assert!(live_synthetic_writers() <= base);
+    }
+
+    #[test]
+    fn stop_and_reap_detaches_a_hung_writer_and_reports_the_leak() {
+        let _serial = LIVE_WRITER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer = thread::spawn(move || {
+            let _live = SyntheticWriterLiveGuard::enter();
+            // Deliberately ignores the stop flag until released, like the
+            // leaked writers in the 2026-08-24 incident.
+            let _ = release_rx.recv();
+        });
+        let session = test_session_with_writer(stop.clone(), writer);
+        assert!(!session.stop_and_reap(Duration::from_millis(120)));
+        assert!(stop.load(Ordering::Relaxed), "stop flag must still be set");
+        assert_eq!(
+            live_synthetic_writers(),
+            1,
+            "leak stays visible in the counter"
+        );
+        release_tx.send(()).expect("release the fake writer");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while live_synthetic_writers() != 0 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(live_synthetic_writers(), 0);
+    }
 
     #[test]
     fn media_foundation_writer_input_credit_cap_is_two_frame_intervals() {

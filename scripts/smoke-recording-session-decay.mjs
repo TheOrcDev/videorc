@@ -29,6 +29,7 @@
 // (content-independent: a repeat means the compositor delivered no new frame
 // in time) become the hard freshness gate.
 
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -36,6 +37,10 @@ import { join, resolve } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
+import {
+  launchScreenMotionStimulus,
+  stopScreenMotionStimulus
+} from './lib/screen-motion-stimulus.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { pickDevice } from './lib/source-selection.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -53,6 +58,17 @@ const idleMs = Number(process.env.VIDEORC_DECAY_IDLE_MS ?? 8000)
 
 const realScreen = process.env.VIDEORC_DECAY_REAL_SCREEN === '1'
 const realCamera = process.env.VIDEORC_DECAY_REAL_CAMERA === '1'
+// VIDEORC_DECAY_PACKAGED_APP: drive the INSTALLED app instead of the dev app.
+// The packaged bundle carries the user's real TCC camera/screen grants, which
+// the ad-hoc dev Electron cannot obtain on this box (macOS refuses to prompt).
+const packagedAppExecutable =
+  process.env.VIDEORC_DECAY_PACKAGED_APP === '1'
+    ? (process.env.VIDEORC_PACKAGED_APP_EXECUTABLE ??
+      '/Applications/Videorc.app/Contents/MacOS/Videorc')
+    : null
+const packagedSmokeCapability = packagedAppExecutable
+  ? randomBytes(32).toString('base64url')
+  : undefined
 
 // One fixed shipping-shaped profile. 1080p30 holds full cadence under hard
 // content on every supported box (matrix smoke proves 1080p60 does), so any
@@ -199,15 +215,47 @@ async function recordSession({ ws, smoke, index, sources }) {
   const encoded = bridge.encoderBridgeEncodedOutputFrames
   const repeated = bridge.encoderBridgeRepeatedFrames
   let repeatRatio = null
-  if (typeof encoded === 'number' && encoded > 0 && typeof repeated === 'number') {
+  if (typeof encoded === 'number' && typeof repeated === 'number' && encoded + repeated >= 60) {
     repeatRatio = repeated / (encoded + repeated)
     // The bridge legitimately repeats a handful of frames around start/stop;
-    // a session that is >10% repeats recorded a slideshow.
+    // a session that is >10% repeats recorded a slideshow. Under 60 frames
+    // observed (a stats read racing the bridge ramp-up) there is no verdict.
     if (repeatRatio > 0.1) {
       failures.push(
         `bridge served ${(repeatRatio * 100).toFixed(1)}% repeated frames ` +
           `(${repeated} repeated vs ${encoded} encoded)`
       )
+    }
+  }
+  // The owner's 0.9.71–0.9.73 decay lives UPSTREAM of the bridge: capture
+  // producers (ScreenCaptureKit / camera) slow to 6–16 fps while the
+  // compositor faithfully re-serves held frames at full cadence — bridge
+  // repeats stay near zero, so only the source-serve counters can see it.
+  // With the motion stimulus on the real screen, fresh serves must track the
+  // session fps; held-serve dominance is the producer-stall signature.
+  if (realScreen) {
+    const fresh = bridge.compositorScreenSourceFreshServes
+    const held = bridge.compositorScreenSourceHeldServes
+    if (typeof fresh === 'number' && typeof held === 'number' && fresh + held >= 60) {
+      const freshRate = fresh / ((fresh + held) / PROFILE.fps)
+      if (held > fresh) {
+        failures.push(
+          `screen producer stalled: ${fresh} fresh vs ${held} held serves ` +
+            `(~${freshRate.toFixed(1)} fresh fps against ${PROFILE.fps} target)`
+        )
+      }
+    }
+  }
+  if (realCamera) {
+    const fresh = bridge.compositorCameraSourceFreshServes
+    const held = bridge.compositorCameraSourceHeldServes
+    if (
+      typeof fresh === 'number' &&
+      typeof held === 'number' &&
+      fresh + held >= 60 &&
+      held > fresh
+    ) {
+      failures.push(`camera producer stalled: ${fresh} fresh vs ${held} held serves`)
     }
   }
   return {
@@ -226,13 +274,23 @@ async function recordSession({ ws, smoke, index, sources }) {
 
 const results = []
 let stopApp = async () => {}
+let motionStimulus = null
 let launchedOk = false
 try {
   const launch = await launchDevApp({
+    spawnSpec: packagedAppExecutable ? { command: packagedAppExecutable, args: [] } : undefined,
+    packagedSmokeCommandCapability: packagedSmokeCapability,
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_STATE_DIR: outputDirectory,
       VIDEORC_USER_DATA_DIR: userDataDir,
+      ...(packagedAppExecutable
+        ? {
+            VIDEORC_PACKAGED_SMOKE_TEST: '1',
+            VIDEORC_SMOKE_COMMAND_CAPABILITY: packagedSmokeCapability,
+            VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
+          }
+        : {}),
       // Per-frame noise: every compositor-fresh frame is unique, so a held
       // frame is an exact duplicate and freezedetect sees it immediately.
       VIDEORC_SYNTHETIC_HARD_CONTENT: '1'
@@ -248,6 +306,13 @@ try {
   const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
   const smoke = launch.connections['preview-motion-ready']
   const sources = await resolveRealSources(ws)
+  if (realScreen) {
+    motionStimulus = await launchScreenMotionStimulus({
+      outputDirectory,
+      ffmpegPath
+    })
+    console.log('[session-decay] screen motion stimulus running')
+  }
 
   for (let index = 0; index < sessionCount; index += 1) {
     try {
@@ -288,6 +353,7 @@ try {
 } catch (error) {
   console.error(`Session decay smoke failed to launch: ${String(error?.message ?? error)}`)
 } finally {
+  if (motionStimulus) await stopScreenMotionStimulus(motionStimulus)
   await stopApp()
 }
 

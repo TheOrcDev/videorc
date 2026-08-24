@@ -2584,6 +2584,7 @@ mod tests {
             "Frame accounting: duration 6.7s @ target 60.0 fps (~402 frames); \
              captured: screen 59.0 fps (~395), camera n/a fps (~n/a); \
              compositor: 214 ticks, 188 intervals skipped, render 32.0 fps, 0 dropped, 214 cpu, 0 cpu-fallback; \
+             source serves: screen 0 fresh / 0 held (oldest 0ms), camera 0 fresh / 0 held (oldest 0ms); \
              bridge input: 119 (116 fresh, 3 repeat, 0 synthetic) at 17.7 fps; \
              submitted: 119 (mf 119), coalesced-dropped 0, encoder-dropped 0; \
              encoded output: 119 frames (4096 bytes, 0 errors); \
