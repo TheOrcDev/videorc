@@ -43,7 +43,7 @@ export function windowsNativeScreenRequiresFinalDiagnostics({
 
 export function evaluateWindowsNativeScreenD3d11Diagnostics(
   diagnostics,
-  { requireOutput = false, expectFallback = null } = {}
+  { requireOutput = false, expectFallback = null, requireZeroPoolPressure = false } = {}
 ) {
   const failures = []
   const media = diagnostics?.windowsD3d11Media
@@ -84,6 +84,9 @@ export function evaluateWindowsNativeScreenD3d11Diagnostics(
   }
   if ((media.adapterMismatches ?? 0) !== 0) {
     failures.push(`adapterMismatches=${media.adapterMismatches}`)
+  }
+  if (requireZeroPoolPressure && (media.texturePoolPressureEvents ?? 0) !== 0) {
+    failures.push(`texturePoolPressureEvents=${media.texturePoolPressureEvents}`)
   }
   if (typeof media.fallbackReason === 'string' && media.fallbackReason.trim()) {
     failures.push(`fallbackReason=${media.fallbackReason}`)

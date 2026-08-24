@@ -1451,6 +1451,15 @@ pub struct WindowsD3d11MediaDiagnostics {
     pub synchronization_timeouts: u64,
     #[serde(default)]
     pub stale_generation_callbacks: u64,
+    /// Render-loop ticks whose work exceeded the frame interval before pacing.
+    #[serde(default)]
+    pub render_tick_overruns: u64,
+    /// Worst overshoot of any render tick beyond its frame interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_tick_lag_max_ms: Option<f64>,
+    /// Worst observed D3D11 compose_scene stage duration on the render thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_compose_stage_max_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
 }

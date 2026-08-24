@@ -102,6 +102,29 @@ test('native Windows D3D11 diagnostics prove zero-copy output and named fallback
   )
 })
 
+test('required D3D11 lanes fail closed on texture pool pressure', () => {
+  const pressured = {
+    windowsD3d11Media: {
+      state: 'live',
+      captureBackend: 'windows-graphics-capture',
+      captureReadbackFrames: 0,
+      compositorCpuFallbackFrames: 0,
+      encoderSystemMemorySamples: 0,
+      rawVideoCopiedFrames: 0,
+      previewBmpRequests: 0,
+      previewBmpBytes: 0,
+      adapterMismatches: 0,
+      texturePoolPressureEvents: 2,
+      fallbackReason: null
+    }
+  }
+  assert.deepEqual(evaluateWindowsNativeScreenD3d11Diagnostics(pressured), [])
+  assert.deepEqual(
+    evaluateWindowsNativeScreenD3d11Diagnostics(pressured, { requireZeroPoolPressure: true }),
+    ['texturePoolPressureEvents=2']
+  )
+})
+
 test('native Windows screen requests final diagnostics only for diagnostics-gated lanes', () => {
   assert.equal(windowsNativeScreenRequiresFinalDiagnostics(), false)
   assert.equal(

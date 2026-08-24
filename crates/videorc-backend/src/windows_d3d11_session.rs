@@ -24,6 +24,16 @@ fn windows_d3d11_terminal_source_error(
     })
 }
 
+/// Screen-camera composition keeps one more full-frame layer in flight and
+/// stretches NV12/BGRA lease residency past the screen-only envelope. Size the
+/// capture and primary render pools so transient fence lag cannot starve a CFR
+/// tick into a silent single-frame skip (5 slots stays inside the per-format
+/// pool ceiling of 8 even for split screen-camera sessions).
+#[cfg(any(target_os = "windows", test))]
+const fn windows_d3d11_render_pool_slots(camera_required: bool) -> usize {
+    if camera_required { 5 } else { 3 }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowsD3d11MediaMode {
     Disabled,
@@ -557,6 +567,11 @@ mod runtime {
         pub(crate) latest_capture_sequence: Option<u64>,
         pub(crate) repeated_capture_frames: u64,
         pub(crate) pressure_skips: u64,
+        pub(crate) render_ticks: u64,
+        pub(crate) render_tick_overruns: u64,
+        pub(crate) render_tick_lag_max_us: u64,
+        pub(crate) render_compose_stage_max_us: u64,
+        pub(crate) render_publish_stage_max_us: u64,
         pub(crate) preview_offered_sequence: Option<u64>,
         pub(crate) preview_offer_failures: u64,
         pub(crate) preview_sequence: Option<u64>,
@@ -847,6 +862,17 @@ mod runtime {
             self.recovery_count
         }
 
+        /// Newest primary-output sequence the pump has published to the frame
+        /// store, or `None` before the first composition. The encoder drain
+        /// uses this to wake as soon as a fresh frame exists instead of
+        /// discovering it one clock period late.
+        pub(crate) fn latest_published_sequence(&self) -> Option<u64> {
+            self.snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .primary_sequence
+        }
+
         pub(crate) fn latest_ticket(
             &self,
         ) -> Option<(u64, Instant, WindowsD3d11TextureLeaseTicket)> {
@@ -913,13 +939,13 @@ mod runtime {
             let pool = WindowsD3d11TexturePoolConfig::dimension_keyed(
                 WindowsD3d11BgraTextureDescriptor::new(plan.source_width, plan.source_height)
                     .map_err(|error| error.to_string())?,
-                3,
+                super::windows_d3d11_render_pool_slots(plan.camera_required),
                 WindowsD3d11BgraTextureDescriptor::new(plan.primary.width, plan.primary.height)
                     .map_err(|error| error.to_string())?,
                 3,
                 WindowsD3d11Nv12TextureDescriptor::new(plan.primary.width, plan.primary.height)
                     .map_err(|error| error.to_string())?,
-                3,
+                super::windows_d3d11_render_pool_slots(plan.camera_required),
                 plan.auxiliary
                     .map(|auxiliary| {
                         Ok((
@@ -1415,6 +1441,7 @@ mod runtime {
             let tick = match cfr.advance(new_capture_sequence) {
                 Ok(Some(tick)) => tick,
                 Ok(None) => {
+                    record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
                     pace_render_tick(frame_started_at, frame_interval);
                     continue;
                 }
@@ -1429,6 +1456,7 @@ mod runtime {
                 .clone();
             let camera_frame = latest_camera_frame(camera.as_ref(), &mut last_camera_frame);
             if plan.camera_required && camera_frame.is_none() {
+                record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
                 pace_render_tick(frame_started_at, frame_interval);
                 continue;
             }
@@ -1521,12 +1549,19 @@ mod runtime {
                     .map(|_| vec![WindowsD3d11MediaRole::Stream])
                     .unwrap_or_default(),
             };
+            let compose_started_at = Instant::now();
             let composition = match client.compose_scene(scene, sources, consumers) {
                 Ok(composition) => composition,
                 Err(error) if is_transient_pressure(&error) => {
                     update_snapshot(&snapshot, |current| {
                         current.pressure_skips = current.pressure_skips.saturating_add(1);
+                        current.render_compose_stage_max_us =
+                            current.render_compose_stage_max_us.max(
+                                u64::try_from(compose_started_at.elapsed().as_micros())
+                                    .unwrap_or(u64::MAX),
+                            );
                     });
+                    record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
                     pace_render_tick(frame_started_at, frame_interval);
                     continue;
                 }
@@ -1541,6 +1576,8 @@ mod runtime {
                     break;
                 }
             };
+            let compose_stage_us =
+                u64::try_from(compose_started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
             if composition.diagnostics.production_readback_frames != 0 {
                 finish_with_error(
                     &snapshot,
@@ -1581,6 +1618,7 @@ mod runtime {
                     }
                 }
             }
+            let publish_started_at = Instant::now();
             let published = publish_composition(
                 composition.textures,
                 plan.primary_role,
@@ -1588,6 +1626,8 @@ mod runtime {
                 &primary_store,
                 auxiliary_store.as_ref(),
             );
+            let publish_stage_us =
+                u64::try_from(publish_started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
             let (preview_sequence, primary_sequence, auxiliary_sequence) = match published {
                 Ok(published) => published,
                 Err(error) => {
@@ -1605,6 +1645,11 @@ mod runtime {
                 current.preview_sequence = preview_sequence;
                 current.primary_sequence = Some(primary_sequence);
                 current.auxiliary_sequence = auxiliary_sequence;
+                current.render_ticks = current.render_ticks.saturating_add(1);
+                current.render_compose_stage_max_us =
+                    current.render_compose_stage_max_us.max(compose_stage_us);
+                current.render_publish_stage_max_us =
+                    current.render_publish_stage_max_us.max(publish_stage_us);
             });
             if let Some(sender) = startup_tx.take() {
                 let _ = sender.send(Ok(WindowsD3d11StartupEvidence {
@@ -1618,6 +1663,7 @@ mod runtime {
                     auxiliary_encoder_attached: true,
                 }));
             }
+            record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
             pace_render_tick(frame_started_at, frame_interval);
         }
         let _ = client.stop_capture();
@@ -1656,6 +1702,28 @@ mod runtime {
         if let Some(remaining) = frame_interval.checked_sub(started_at.elapsed()) {
             thread::sleep(remaining);
         }
+    }
+
+    /// Overshoot of one render tick beyond its frame interval, in micros.
+    pub(crate) fn tick_overrun_micros(total: Duration, interval: Duration) -> Option<u64> {
+        total
+            .checked_sub(interval)
+            .filter(|overrun| !overrun.is_zero())
+            .map(|overrun| u64::try_from(overrun.as_micros()).unwrap_or(u64::MAX))
+    }
+
+    fn record_render_tick_overrun(
+        snapshot: &Arc<StdMutex<WindowsD3d11SessionPumpSnapshot>>,
+        started_at: Instant,
+        frame_interval: Duration,
+    ) {
+        let Some(overrun_us) = tick_overrun_micros(started_at.elapsed(), frame_interval) else {
+            return;
+        };
+        update_snapshot(snapshot, |current| {
+            current.render_tick_overruns = current.render_tick_overruns.saturating_add(1);
+            current.render_tick_lag_max_us = current.render_tick_lag_max_us.max(overrun_us);
+        });
     }
 
     fn is_transient_pressure(error: &WindowsD3d11Error) -> bool {
@@ -2065,6 +2133,44 @@ mod tests {
             Some("D3D11 session pump stopped without a terminal result")
         );
         assert_eq!(windows_d3d11_terminal_source_error(None, false), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_d3d11_render_tick_overrun_accounting_is_interval_relative() {
+        use std::time::Duration;
+
+        let interval = Duration::from_millis(33);
+        assert_eq!(
+            runtime::tick_overrun_micros(Duration::from_millis(20), interval),
+            None
+        );
+        assert_eq!(runtime::tick_overrun_micros(interval, interval), None);
+        assert_eq!(
+            runtime::tick_overrun_micros(Duration::from_millis(34), interval),
+            Some(1_000)
+        );
+        assert_eq!(
+            runtime::tick_overrun_micros(Duration::from_secs(3600), Duration::from_micros(1)),
+            Some(3_599_999_999)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_d3d11_pump_snapshot_defaults_render_telemetry_to_zero() {
+        let snapshot = runtime::WindowsD3d11SessionPumpSnapshot::default();
+        assert_eq!(snapshot.render_ticks, 0);
+        assert_eq!(snapshot.render_tick_overruns, 0);
+        assert_eq!(snapshot.render_tick_lag_max_us, 0);
+        assert_eq!(snapshot.render_compose_stage_max_us, 0);
+        assert_eq!(snapshot.render_publish_stage_max_us, 0);
+    }
+
+    #[test]
+    fn windows_d3d11_screen_camera_sessions_size_deeper_render_pools() {
+        assert_eq!(windows_d3d11_render_pool_slots(false), 3);
+        assert_eq!(windows_d3d11_render_pool_slots(true), 5);
     }
 
     #[test]

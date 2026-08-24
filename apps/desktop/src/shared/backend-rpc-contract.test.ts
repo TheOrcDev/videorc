@@ -823,7 +823,10 @@ describe('backend RPC contract', () => {
       adapterMismatches: 0,
       deviceResets: 0,
       synchronizationTimeouts: 0,
-      staleGenerationCallbacks: 0
+      staleGenerationCallbacks: 0,
+      renderTickOverruns: 2,
+      renderTickLagMaxMs: 4.5,
+      renderComposeStageMaxMs: 1.25
     }
     const diagnostics = {
       skippedFrames: 0,

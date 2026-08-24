@@ -976,6 +976,9 @@ const windowsD3d11MediaDiagnosticsSchema = objectSchema(
     deviceResets: nonNegativeInteger,
     synchronizationTimeouts: nonNegativeInteger,
     staleGenerationCallbacks: nonNegativeInteger,
+    renderTickOverruns: nonNegativeInteger,
+    renderTickLagMaxMs: optionalSchema(numberSchema({ min: 0 })),
+    renderComposeStageMaxMs: optionalSchema(numberSchema({ min: 0 })),
     fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 16_384 }))
   },
   { allowUnknown: false }

@@ -134,6 +134,25 @@ const RAW_VIDEO_FIFO_STARTUP_PRIME_TIMEOUT: Duration = Duration::from_millis(250
 const WINDOWS_D3D11_GENERATION_RECOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(target_os = "windows")]
 const WINDOWS_D3D11_GENERATION_RECOVERY_POLL: Duration = Duration::from_millis(50);
+/// Cadence of the encoder drain's bounded wait for a freshly published
+/// primary frame. Small enough to drain two-frame pump bursts within one
+/// clock period; large enough that the idle wait stays negligible.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_D3D11_ENCODER_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Whether a newly published primary sequence must be drained before the next
+/// scheduled tick. `None` (no composition yet) is never newer.
+#[cfg(any(target_os = "windows", test))]
+const fn windows_d3d11_primary_sequence_is_newer(
+    published: Option<u64>,
+    last_seen: Option<u64>,
+) -> bool {
+    match (published, last_seen) {
+        (Some(published), Some(seen)) => published > seen,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
 const FIFO_WRITE_PROGRESS_YIELD_BUDGET: u32 = 64;
 const FIFO_WRITE_STALL_BACKOFF: Duration = Duration::from_micros(250);
 const VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK: usize = 8;
@@ -3948,6 +3967,11 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
     let mut terminal_error = None;
     let mut current_input = input.current();
     let mut recovery_wait_started_at = None;
+    // The frame store is single-slot latest-wins: a publish that lands while
+    // this loop sleeps destroys the previous frame before it is read. Track
+    // the newest sequence we have seen published so the pacing wait below can
+    // wake the moment fresh work exists instead of one clock period late.
+    let mut last_seen_published = current_input.latest_published_sequence();
 
     if let Err(error) = validate_windows_d3d11_encoder_input(&current_input) {
         finish_windows_d3d11_writer_failure(
@@ -3976,6 +4000,7 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                 Ok(Some(replacement)) => {
                     current_input = replacement;
                     last_submitted_sequence = None;
+                    last_seen_published = current_input.latest_published_sequence();
                     recovery_wait_started_at = None;
                     generation_started_at = Instant::now();
                     next_frame_at = generation_started_at;
@@ -3992,7 +4017,27 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
         }
         let now = Instant::now();
         if now < next_frame_at {
-            thread::sleep(next_frame_at - now);
+            // Bounded wait for the scheduled tick, cut short as soon as the
+            // pump publishes a sequence newer than the last one observed.
+            // Polling at 1ms costs at most ~33 wakeups per second while
+            // preserving the wall-anchored CFR schedule.
+            let mut wait_now = now;
+            while wait_now < next_frame_at {
+                let published = current_input.latest_published_sequence();
+                if windows_d3d11_primary_sequence_is_newer(published, last_seen_published) {
+                    last_seen_published = published;
+                    break;
+                }
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                thread::sleep(WINDOWS_D3D11_ENCODER_DRAIN_POLL_INTERVAL);
+                wait_now = Instant::now();
+            }
+            let published = current_input.latest_published_sequence();
+            if windows_d3d11_primary_sequence_is_newer(published, last_seen_published) {
+                last_seen_published = published;
+            }
         }
         next_frame_at += frame_interval;
         schedule_index = schedule_index.saturating_add(1);
@@ -4030,6 +4075,7 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                     Ok(Some(replacement)) => {
                         current_input = replacement;
                         last_submitted_sequence = None;
+                        last_seen_published = current_input.latest_published_sequence();
                         recovery_wait_started_at = None;
                         generation_started_at = Instant::now();
                         next_frame_at = generation_started_at;
@@ -5312,6 +5358,16 @@ mod tests {
             BridgeFrameSource::SyntheticFallback.accounting_kind(),
             BridgeInputKind::Synthetic
         );
+    }
+
+    #[test]
+    fn windows_d3d11_primary_sequence_newer_only_for_unseen_publications() {
+        assert!(!windows_d3d11_primary_sequence_is_newer(None, None));
+        assert!(!windows_d3d11_primary_sequence_is_newer(None, Some(7)));
+        assert!(windows_d3d11_primary_sequence_is_newer(Some(1), None));
+        assert!(windows_d3d11_primary_sequence_is_newer(Some(8), Some(7)));
+        assert!(!windows_d3d11_primary_sequence_is_newer(Some(7), Some(7)));
+        assert!(!windows_d3d11_primary_sequence_is_newer(Some(6), Some(7)));
     }
 
     #[test]

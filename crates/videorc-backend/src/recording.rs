@@ -9781,6 +9781,15 @@ fn windows_d3d11_fallback_diagnostics(
 }
 
 #[cfg(target_os = "windows")]
+fn u64_ms_option(micros: u64) -> Option<f64> {
+    if micros == 0 {
+        None
+    } else {
+        Some(micros as f64 / 1_000.0)
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn windows_d3d11_live_diagnostics(
     mode: WindowsD3d11MediaMode,
     snapshot: &WindowsD3d11SessionDiagnosticsSnapshot,
@@ -9898,6 +9907,9 @@ fn windows_d3d11_live_diagnostics(
             .saturating_add(u64::from(snapshot.device.device_loss_code.is_some())),
         synchronization_timeouts: snapshot.device.runtime.synchronization_timeouts,
         stale_generation_callbacks: snapshot.device.runtime.stale_generation_callbacks,
+        render_tick_overruns: snapshot.pump.render_tick_overruns,
+        render_tick_lag_max_ms: u64_ms_option(snapshot.pump.render_tick_lag_max_us),
+        render_compose_stage_max_ms: u64_ms_option(snapshot.pump.render_compose_stage_max_us),
         fallback_reason: terminal_error.or(capture_fallback),
     }
 }
