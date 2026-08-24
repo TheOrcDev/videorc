@@ -3182,7 +3182,8 @@ export interface VideorcApi {
   /** Co-host relay: the main renderer pushes state, the window seeds + follows
    * it, and window actions come back through the same correlated broker. */
   pushCohostWindowState: (state: CohostWindowState) => Promise<void>
-  getCohostWindowState: () => Promise<CohostWindowState | null>
+  /** Never null: main seeds the relay cache with `offCohostWindowState()`. */
+  getCohostWindowState: () => Promise<CohostWindowState>
   onCohostWindowState: (callback: (state: CohostWindowState) => void) => () => void
   sendCohostAction: (command: CohostActionCommand) => Promise<CohostState>
   onCohostActionRequest: (callback: (command: CohostActionCommand) => void) => () => void
@@ -3606,6 +3607,50 @@ export interface CohostState {
   tickSeq: number
   /** True when the last tick dropped messages under the 60-message delta cap. */
   partial: boolean
+  /**
+   * Presence fields (co-host presence W1). All optional on the wire so a
+   * backend from before them still validates; absent means the default
+   * (false / 0 / null).
+   */
+  /** A tick HTTP request is outstanding right now ("thinking"). */
+  tickInFlight?: boolean
+  /** Delta messages collected but not yet sent in a tick ("reading N new"). */
+  pendingMessages?: number
+  /**
+   * ISO-8601 instant of the scheduler's earliest next pass; present only while
+   * `pendingMessages > 0` (burst rule bounded by the 8 s min gap, trickle rule
+   * at anchor + 20 s, pushed back by a backoff/quota window).
+   */
+  nextTickAt?: string | null
+  /** Session total of chat messages the engine noted for ticks. */
+  messagesSeen?: number
+  /** Distinct question ids surfaced this session — lifetime, not open count. */
+  questionsTotal?: number
+}
+
+/**
+ * Off-shaped `cohost.state`: what the backend reports when no engine session
+ * exists. Presence is unconditional — surfaces render this instead of hiding
+ * (null never reaches the Comments window relay any more).
+ */
+export function offCohostState(): CohostState {
+  return {
+    sessionId: null,
+    status: 'off',
+    reason: null,
+    detail: null,
+    questions: [],
+    flags: [],
+    mood: null,
+    lastTickAt: null,
+    tickSeq: 0,
+    partial: false,
+    tickInFlight: false,
+    pendingMessages: 0,
+    nextTickAt: null,
+    messagesSeen: 0,
+    questionsTotal: 0
+  }
 }
 
 /**
@@ -3638,7 +3683,8 @@ export interface CohostFlagParams {
  * value; the window never re-derives gating.
  */
 export interface CohostWindowState {
-  state: CohostState | null
+  /** Always concrete: `offCohostState()` until the engine reports, never null. */
+  state: CohostState
   /** Premium gate result. Fail-closed: false until the main renderer says otherwise. */
   entitled: boolean
   entitlementReason: string | null
@@ -3647,6 +3693,21 @@ export interface CohostWindowState {
   consented: boolean
   /** Persisted `cohost.settings.enabled`. */
   enabled: boolean
+}
+
+/**
+ * Fail-closed seed for the Comments window relay: co-host presence must be
+ * knowable from the first frame, so the window mounts on this instead of null.
+ */
+export function offCohostWindowState(): CohostWindowState {
+  return {
+    state: offCohostState(),
+    entitled: false,
+    entitlementReason: null,
+    upgradeUrl: null,
+    consented: false,
+    enabled: false
+  }
 }
 
 export type CohostActionKind = 'answered' | 'dismiss-question' | 'dismiss-flag'

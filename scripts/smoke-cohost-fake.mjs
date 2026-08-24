@@ -18,7 +18,10 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 // drives the fake live-chat connector as scripted "lanes", and proves the
 // engine end to end without the cloud:
 //
-//   settings gate -> start requires the active chat session -> first tick has
+//   settings gate -> off-shaped status with default presence fields -> start
+//   requires the active chat session -> queued chat announces itself
+//   (pendingMessages bucket emit + nextTickAt) -> tickInFlight toggles around
+//   the request -> first tick has
 //   the exact wire shape -> repeated text groups into ONE question whose
 //   askers/messageIds grow across ticks -> marker message is flagged ->
 //   429 quota pauses and resumes after Retry-After -> 403 pauses
@@ -131,6 +134,16 @@ try {
     off.status === 'off' && off.sessionId === null,
     `Engine should be off before a chat session: ${JSON.stringify(off)}`
   )
+  // Presence W1: cohost.status is ALWAYS a concrete state; before any session
+  // it is the off shape with every presence field at its default.
+  expect(
+    off.tickInFlight === false &&
+      off.pendingMessages === 0 &&
+      off.nextTickAt === null &&
+      off.messagesSeen === 0 &&
+      off.questionsTotal === 0,
+    `Off state should carry default presence fields: ${JSON.stringify(off)}`
+  )
   await expectRejected(
     () => request(backend, timeoutMs, 'cohost.start', { sessionId, consentToProcessChat: true }),
     'cohost.start without an active Comments session'
@@ -157,6 +170,10 @@ try {
     started.status === 'listening' && started.sessionId === sessionId && started.tickSeq === 0,
     `cohost.start did not report listening: ${JSON.stringify(started)}`
   )
+  expect(
+    started.tickInFlight === false && started.pendingMessages === 0 && started.messagesSeen === 0,
+    `Fresh session should start with empty presence counters: ${JSON.stringify(started)}`
+  )
   const again = await request(backend, timeoutMs, 'cohost.start', {
     sessionId,
     consentToProcessChat: true
@@ -166,8 +183,35 @@ try {
     'Repeated cohost.start was not a no-op.'
   )
 
+  // --- Presence W1: queued chat is announced before the first tick -----------
+  phase('presence: pending bucket emit before tick 1')
+  const pendingState = await waitForState(
+    observed,
+    (state) => state.tickSeq === 0 && (state.pendingMessages ?? 0) >= 1,
+    'a pending-bucket cohost.state before the first tick'
+  )
+  expect(
+    pendingState.tickInFlight === false &&
+      typeof pendingState.nextTickAt === 'string' &&
+      !Number.isNaN(Date.parse(pendingState.nextTickAt)),
+    `Pending messages must announce the next pass: ${JSON.stringify({ pendingMessages: pendingState.pendingMessages, nextTickAt: pendingState.nextTickAt })}`
+  )
+  expect(
+    pendingState.messagesSeen >= pendingState.pendingMessages,
+    `messagesSeen should count every noted message: ${JSON.stringify({ messagesSeen: pendingState.messagesSeen, pendingMessages: pendingState.pendingMessages })}`
+  )
+
   // --- Tick 1: burst, exact wire shape, grouped question, flag ---------------
   phase('tick 1: burst (>= 5 new messages)')
+  const inFlight1 = await waitForState(
+    observed,
+    (state) => state.tickSeq === 1 && state.tickInFlight === true,
+    'the tick-in-flight cohost.state for tick 1'
+  )
+  expect(
+    inFlight1.pendingMessages === 0,
+    `Sending a tick drains the pending delta: ${JSON.stringify({ pendingMessages: inFlight1.pendingMessages })}`
+  )
   const s1 = await waitForTick(observed, 1)
   expect(
     s1.status === 'listening' && s1.reason === null,
@@ -176,6 +220,12 @@ try {
   expect(
     typeof s1.lastTickAt === 'string' && s1.partial === false && typeof s1.mood === 'string',
     `Tick 1 state lacks lastTickAt/partial/mood: ${JSON.stringify(s1)}`
+  )
+  // Presence W1: the merged tick clears the in-flight flag; pending stays at
+  // whatever arrived since the request went out (0 unless a message raced in).
+  expect(
+    s1.tickInFlight === false && s1.messagesSeen >= 5 && s1.questionsTotal >= 1,
+    `Merged tick 1 should reset in-flight and grow the session counters: ${JSON.stringify({ tickInFlight: s1.tickInFlight, messagesSeen: s1.messagesSeen, questionsTotal: s1.questionsTotal })}`
   )
   const r1 = requireRequest(1)
   assertRequestShape(r1.body)
@@ -441,6 +491,7 @@ try {
 
   console.log(
     `Live Co-host fake smoke PASS - ${fake.state.requests.length} ticks over ${totalMessages} messages: ` +
+      `off-shaped presence defaults, pending-bucket emit with nextTickAt, tickInFlight toggle, ` +
       `wire shape, 5-asker grouping across ${contributingTicks.size} ticks, flag, ` +
       `429/403/503 status+reason mapping with Retry-After and backoff honored, dismiss, ` +
       `20 s trickle rule, reply-answered, and ${IDLE_PROOF_MS / 1000} s idle without a tick.`
@@ -549,9 +600,11 @@ function collectCohostStates(ws) {
 }
 
 function waitForTick(observed, tickSeq) {
+  // tickSeq increments when the request is BUILT, so each tick emits twice:
+  // once in flight ("thinking") and once merged. Wait for the merged one.
   return waitForState(
     observed,
-    (state) => state.tickSeq === tickSeq,
+    (state) => state.tickSeq === tickSeq && state.tickInFlight !== true,
     `cohost.state for tick ${tickSeq}`
   )
 }

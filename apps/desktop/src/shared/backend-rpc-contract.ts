@@ -1405,7 +1405,14 @@ const cohostStateSchema = objectSchema(
     mood: nullableSchema(enumSchema(['hype', 'calm', 'tense', 'mixed'])),
     lastTickAt: nullableSchema(timestamp),
     tickSeq: nonNegativeInteger,
-    partial: booleanSchema
+    partial: booleanSchema,
+    // Presence fields (W1): optional on the wire so pre-presence backends
+    // still validate; the current backend always sends them.
+    tickInFlight: optionalSchema(booleanSchema),
+    pendingMessages: optionalSchema(nonNegativeInteger),
+    nextTickAt: optionalSchema(nullableSchema(timestamp)),
+    messagesSeen: optionalSchema(nonNegativeInteger),
+    questionsTotal: optionalSchema(nonNegativeInteger)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostState>

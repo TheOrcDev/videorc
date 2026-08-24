@@ -12,6 +12,7 @@ import type {
   LiveChatMessage,
   ViewerSample
 } from '@/lib/backend'
+import { offCohostWindowState } from '@/lib/backend'
 import { cohostHighlightMessageId } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { chatSendFailures, pendingCommentsSendOperation, sendablePlatforms } from '@/lib/chat-send'
@@ -92,8 +93,9 @@ function CommentsWindowApp(): ReactElement {
   }, [])
   const [viewerSample, setViewerSample] = useState<ViewerSample | null>(null)
   // Co-host: the MAIN renderer resolves Premium, consent and the engine state,
-  // and relays ONE value. This window never re-derives gating.
-  const [cohost, setCohost] = useState<CohostWindowState | null>(null)
+  // and relays ONE value. This window never re-derives gating. Presence is
+  // unconditional: the window mounts on the off shape, never on null.
+  const [cohost, setCohost] = useState<CohostWindowState>(offCohostWindowState)
   const [cohostActionPending, setCohostActionPending] = useState(false)
   useEffect(() => {
     const applyView = (next: CommentsViewSnapshot): void => {
@@ -163,7 +165,7 @@ function CommentsWindowApp(): ReactElement {
     })
     void window.videorc
       ?.getCohostWindowState?.()
-      .then((state) => setCohost(state ?? null))
+      .then((state) => state && setCohost(state))
       .catch(() => {})
     const offCohost = window.videorc?.onCohostWindowState?.((state) => setCohost(state))
     return () => {
@@ -223,7 +225,7 @@ function CommentsWindowApp(): ReactElement {
           kind,
           targetId
         })
-        .then((state) => setCohost((current) => (current ? { ...current, state } : current)))
+        .then((state) => setCohost((current) => ({ ...current, state })))
         .catch((error) =>
           setSendFailures([
             {
@@ -244,17 +246,16 @@ function CommentsWindowApp(): ReactElement {
     requestHighlight(message)
   }
 
-  // Fail-closed: without a relayed value the segment stays hidden entirely.
-  const cohostGate: EntitlementUiGate | undefined = cohost
-    ? cohost.entitled
-      ? { allowed: true }
-      : {
-          allowed: false,
-          featureId: 'live-cohost',
-          reason: cohost.entitlementReason ?? 'Live Co-host requires Videorc Premium.',
-          ...(cohost.upgradeUrl ? { upgradeUrl: cohost.upgradeUrl } : {})
-        }
-    : undefined
+  // Fail-closed: the relay seed is off-shaped and un-entitled, so the gate is
+  // always derivable — presence never depends on a push having arrived.
+  const cohostGate: EntitlementUiGate = cohost.entitled
+    ? { allowed: true }
+    : {
+        allowed: false,
+        featureId: 'live-cohost',
+        reason: cohost.entitlementReason ?? 'Live Co-host requires Videorc Premium.',
+        ...(cohost.upgradeUrl ? { upgradeUrl: cohost.upgradeUrl } : {})
+      }
 
   return (
     <CommentsReader
@@ -270,10 +271,10 @@ function CommentsWindowApp(): ReactElement {
       sendPending={sendPending}
       sendTargets={sendTargets}
       cohostActionPending={cohostActionPending}
-      cohostConsented={cohost?.consented === true}
-      cohostEnabled={cohost?.enabled === true}
+      cohostConsented={cohost.consented}
+      cohostEnabled={cohost.enabled}
       cohostGate={cohostGate}
-      cohostState={cohost?.state ?? null}
+      cohostState={cohost.state}
       onCohostAnswered={(question) => sendCohostAction('answered')(question.id)}
       onCohostDismissFlag={(flag) => sendCohostAction('dismiss-flag')(flag.messageId)}
       onCohostDismissQuestion={(question) => sendCohostAction('dismiss-question')(question.id)}

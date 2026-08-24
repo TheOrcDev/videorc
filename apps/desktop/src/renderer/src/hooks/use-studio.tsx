@@ -245,7 +245,7 @@ import type {
   YouTubeStreamStatusResult,
   ViewerSample
 } from '@/lib/backend'
-import { createEmptyLiveChatSnapshot } from '@/lib/backend'
+import { createEmptyLiveChatSnapshot, offCohostState } from '@/lib/backend'
 import { renderCaptionCueFramePng, renderCaptionOverlayPng } from '@/lib/caption-overlay'
 import { renderCommentHighlightPng } from '@/lib/caption-overlay'
 import {
@@ -2915,9 +2915,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   // One relayed value for the detached Comments window: the window never
   // re-derives Premium or consent, it renders what the main renderer resolved.
+  // Presence is unconditional: before the engine reports (or when it is off)
+  // the relay carries the off shape, never null.
   const cohostWindowState = useMemo<CohostWindowState>(
     () => ({
-      state: cohostState,
+      state: cohostState ?? offCohostState(),
       entitled: cohostGate.allowed,
       entitlementReason: cohostGate.allowed ? null : cohostGate.reason,
       upgradeUrl: (cohostGate.allowed ? undefined : cohostGate.upgradeUrl) ?? null,
