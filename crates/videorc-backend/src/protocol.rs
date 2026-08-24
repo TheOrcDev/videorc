@@ -1828,8 +1828,10 @@ pub struct DiagnosticStats {
     #[serde(default)]
     pub encoder_bridge_mf_input_credit_timeouts: u64,
     /// P95 wall time the writer thread spent waiting for a Media Foundation
-    /// input credit (Windows only).
-    #[serde(default)]
+    /// input credit (Windows only). MUST skip when None: the renderer contract
+    /// validates this key with a finite-number schema, and serde would emit
+    /// `null` — which blocked every macOS session start in 0.9.68–0.9.70.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoder_bridge_mf_input_credit_wait_p95_ms: Option<f64>,
     /// Scalar-only state for the Windows D3D11 capture/compositor/presenter/MF
     /// authority. This remains present (with `unavailable`) on other platforms
@@ -3833,6 +3835,19 @@ impl ServerEvent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mf_input_credit_wait_p95_is_absent_when_none() {
+        // 0.9.68 regression: serde emitted `"encoderBridgeMfInputCreditWaitP95Ms": null`
+        // and the renderer contract (optional finite number) rejected every
+        // diagnostics.stats payload on macOS, blocking session start.
+        let stats = crate::diagnostics::idle_diagnostics();
+        let json = serde_json::to_value(&stats).expect("stats serialize");
+        assert!(
+            json.get("encoderBridgeMfInputCreditWaitP95Ms").is_none(),
+            "None must serialize as an absent key, not null"
+        );
+    }
+
     use super::*;
 
     #[test]

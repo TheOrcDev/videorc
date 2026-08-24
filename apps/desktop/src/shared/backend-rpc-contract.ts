@@ -1011,7 +1011,9 @@ const diagnosticStatsSchema = boundedSemanticValue(
       encoderBridgeFreshFrames: optionalSchema(nonNegativeInteger),
       encoderBridgeMfSubmittedFrames: optionalSchema(nonNegativeInteger),
       encoderBridgeMfInputCreditTimeouts: optionalSchema(nonNegativeInteger),
-      encoderBridgeMfInputCreditWaitP95Ms: optionalSchema(numberSchema({ min: 0 })),
+      // Nullable for defense in depth: serde emits null if the backend ever
+      // regresses the skip_serializing_if on this Windows-only field.
+      encoderBridgeMfInputCreditWaitP95Ms: optionalSchema(nullableSchema(numberSchema({ min: 0 }))),
       windowsD3d11Media: optionalSchema(windowsD3d11MediaDiagnosticsSchema),
       previewImagePollCounts: optionalSchema(previewImagePollCountsSchema),
       updatedAt: optionalSchema(timestamp)

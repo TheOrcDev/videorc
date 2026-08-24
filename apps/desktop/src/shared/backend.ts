@@ -2158,7 +2158,7 @@ export interface DiagnosticStats {
   /** Writer-thread Media Foundation input-credit waits that hit the two-frame cap and skipped a frame. */
   encoderBridgeMfInputCreditTimeouts: number
   /** P95 wall time the writer thread spent waiting for a Media Foundation input credit (Windows only). */
-  encoderBridgeMfInputCreditWaitP95Ms?: number
+  encoderBridgeMfInputCreditWaitP95Ms?: number | null
   /** Scalar-only state for the Windows D3D11 media authority. */
   windowsD3d11Media?: WindowsD3d11MediaDiagnostics
   websocketTransport: WebSocketTransportDiagnosticStats
