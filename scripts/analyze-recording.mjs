@@ -15,6 +15,8 @@
 //   --out-dir <dir>      Where to write reports (default: beside the recording).
 //   --no-report          Print the verdict only; do not write report files.
 //   --json               Print the full report as JSON to stdout instead of text.
+//   --min-unique-frame-ratio <n>
+//                        Fail when decoded frame uniqueness is below n (opt-in).
 //   --ffmpeg <path>      ffmpeg binary (or VIDEORC_SMOKE_FFMPEG_PATH).
 //   --ffprobe <path>     ffprobe binary (or VIDEORC_SMOKE_FFPROBE_PATH).
 //
@@ -69,6 +71,9 @@ function parseArgs(argv) {
       case '--av-hardfail-ms':
         args.gates.avSyncHardFailMs = Number(next())
         break
+      case '--min-unique-frame-ratio':
+        args.gates.minUniqueFrameRatio = Number(next())
+        break
       case '-h':
       case '--help':
         args.help = true
@@ -87,6 +92,7 @@ function parseArgs(argv) {
 const HELP = `Analyze a finished recording against strict OBS-quality gates.
 
 Usage: node scripts/analyze-recording.mjs <file> [--fps 30] [--expect-audio]
+         [--min-unique-frame-ratio 0.95]
          [--out-dir DIR] [--no-report] [--json]
 
 Exits 0 when the recording passes every gate, 1 when it fails one.`
@@ -98,6 +104,15 @@ async function main() {
     process.exit(args.file ? 0 : 2)
   }
 
+  if (
+    args.gates.minUniqueFrameRatio != null &&
+    (!Number.isFinite(args.gates.minUniqueFrameRatio) ||
+      args.gates.minUniqueFrameRatio < 0 ||
+      args.gates.minUniqueFrameRatio > 1)
+  ) {
+    throw new Error('--min-unique-frame-ratio must be a finite number between 0 and 1')
+  }
+
   const ffmpegPath = args.ffmpegPath ?? process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
   const ffprobePath = args.ffprobePath ?? process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 
@@ -106,7 +121,7 @@ async function main() {
     ffprobePath,
     intendedFps: Number.isFinite(args.intendedFps) ? args.intendedFps : undefined,
     expectAudio: args.expectAudio,
-    gates: Object.keys(args.gates).length > 0 ? args.gates : undefined,
+    gates: Object.keys(args.gates).length > 0 ? args.gates : undefined
   })
 
   if (args.json) {
