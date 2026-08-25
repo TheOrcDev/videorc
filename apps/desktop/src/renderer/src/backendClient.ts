@@ -27,6 +27,7 @@ function loadBackendContractRuntime(): Promise<BackendContractRuntime> {
 
 type PendingRequest = {
   method: string
+  sent: boolean
   resolve: (value: unknown) => void
   reject: (reason?: unknown) => void
   socket: WebSocket
@@ -56,12 +57,31 @@ export class BackendRequestError extends Error {
   }
 }
 
+export class BackendAbortError extends Error {
+  readonly name = 'AbortError'
+
+  constructor(
+    method: string,
+    /** The request crossed WebSocket.send before the caller cancelled it. */
+    readonly outcomeUnknown: boolean
+  ) {
+    super(
+      outcomeUnknown
+        ? `Backend request "${method}" was cancelled after it was sent; its outcome is unknown.`
+        : `Backend request "${method}" was cancelled.`
+    )
+  }
+}
+
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 const METHOD_REQUEST_TIMEOUT_MS: Readonly<Record<string, number>> = {
   'preview.surface.present': 5_000,
   'preview.surface.status': 5_000,
   'compositor.status': 10_000,
   'diagnostics.stats': 10_000,
+  // Provider delivery is bounded at 8s. Leave room for the backend to persist
+  // and publish the terminal operation before Main's 15s relay deadline.
+  'liveChat.send': 12_000,
   'devices.list': 30_000,
   'stream.output.topology.probe': 120_000,
   'session.start': 120_000,
@@ -245,9 +265,12 @@ export class BackendClient {
     return new Promise((resolve, reject) => {
       let abortHandler: (() => void) | undefined
       const timeoutId = setTimeout(() => {
+        const pending = this.pending.get(id)
         this.rejectPending(
           id,
-          new Error(`Backend request "${method}" timed out after ${timeoutMs}ms.`)
+          pending?.sent
+            ? requestOutcomeUnknownError(method, `timed out after ${timeoutMs}ms after it was sent`)
+            : new Error(`Backend request "${method}" timed out before it was sent.`)
         )
       }, timeoutMs)
       const cleanup = (): void => {
@@ -258,6 +281,7 @@ export class BackendClient {
       }
       this.pending.set(id, {
         method,
+        sent: false,
         resolve: resolve as (value: unknown) => void,
         reject,
         socket: ws,
@@ -265,7 +289,10 @@ export class BackendClient {
       })
 
       if (options.signal) {
-        abortHandler = () => this.rejectPending(id, abortError(method))
+        abortHandler = () => {
+          const pending = this.pending.get(id)
+          this.rejectPending(id, pending?.sent ? abortError(method, true) : abortError(method))
+        }
         options.signal.addEventListener('abort', abortHandler, { once: true })
         if (options.signal.aborted) {
           abortHandler()
@@ -275,6 +302,8 @@ export class BackendClient {
 
       try {
         ws.send(JSON.stringify(command))
+        const pending = this.pending.get(id)
+        if (pending) pending.sent = true
       } catch (error) {
         this.rejectPending(id, sendError(method, error))
       }
@@ -377,7 +406,11 @@ export class BackendClient {
       }
       this.pending.delete(id)
       pending.cleanup()
-      pending.reject(error)
+      pending.reject(
+        pending.sent
+          ? requestOutcomeUnknownError(pending.method, error.message.toLowerCase())
+          : error
+      )
     }
   }
 
@@ -422,13 +455,18 @@ function normalizeTimeoutMs(value: number | undefined, fallback: number): number
     : fallback
 }
 
-function abortError(method: string): Error {
-  const error = new Error(`Backend request "${method}" was cancelled.`)
-  error.name = 'AbortError'
-  return error
+function abortError(method: string, outcomeUnknown = false): BackendAbortError {
+  return new BackendAbortError(method, outcomeUnknown)
 }
 
 function sendError(method: string, reason: unknown): Error {
   const detail = reason instanceof Error ? reason.message : String(reason)
   return new Error(`Could not send backend request "${method}": ${detail}`)
+}
+
+function requestOutcomeUnknownError(method: string, detail: string): BackendRequestError {
+  return new BackendRequestError(
+    'request-outcome-unknown',
+    `Backend request "${method}" ${detail}; its outcome is unknown.`
+  )
 }

@@ -67,7 +67,11 @@ interface PendingCommand {
 export class CommentsCommandBroker {
   private readonly pending = new Map<string, PendingCommand>()
 
-  constructor(private readonly timeoutMs = 10_000) {}
+  // Provider delivery is bounded at 8s in the backend and Studio gives the
+  // backend request 12s. Main owns the outer relay, so its deadline must be
+  // strictly longer or it can report "renderer did not reply" while Studio is
+  // still reconciling the durable operation.
+  constructor(private readonly timeoutMs = 15_000) {}
 
   request<T>(requestId: string, dispatch: () => boolean): Promise<T> {
     if (!requestId || this.pending.has(requestId)) {

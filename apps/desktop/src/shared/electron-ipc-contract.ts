@@ -64,6 +64,7 @@ export const electronInvokeApiMethods = {
   'backgrounds:bundled-assets': 'getBundledBackgroundAssets',
   'avatars:cache': 'cacheChatAvatar',
   'account:begin-sign-in': 'beginAccountSignIn',
+  'account:refresh': 'refreshAccount',
   'account:sign-out': 'signOutAccount',
   'account:callbacks-list': 'getPendingAccountCallbacks',
   'account:callback-ack': 'acknowledgeAccountCallback',
@@ -856,10 +857,21 @@ const optionalGenerationArgs = runtimeSchema<unknown[]>(
 const optionalGenerationOnlyArgs = tupleSchema([optionalSchema(nonNegativeSafeIntegerSchema)])
 
 const noArgs = tupleSchema([])
+const videorcAccountSnapshotSchema = objectSchema(
+  {
+    status: enumSchema(['signed-out', 'signed-in']),
+    username: optionalSchema(stringSchema({ maxLength: 4096 })),
+    displayName: optionalSchema(stringSchema({ maxLength: 4096 })),
+    email: optionalSchema(stringSchema({ maxLength: 4096 })),
+    avatarUrl: optionalSchema(stringSchema({ maxLength: 16_384 }))
+  },
+  { allowUnknown: false }
+)
 const boundedFallbackInvokeContract = invokeContract(boundedIpcArgsSchema)
 const specificRuntimeInvokeContracts = {
   'account:begin-sign-in': invokeContract(tupleSchema([accountAuthorizeUrl])),
-  'account:sign-out': invokeContract(noArgs),
+  'account:refresh': invokeContract(noArgs, videorcAccountSnapshotSchema),
+  'account:sign-out': invokeContract(noArgs, videorcAccountSnapshotSchema),
   'account:callback-ack': invokeContract(tupleSchema([boundedIdentifier])),
   'account:callbacks-list': invokeContract(noArgs),
   'oauth:callback-ack': invokeContract(tupleSchema([oauthCallbackIdentifierSchema]), booleanSchema),

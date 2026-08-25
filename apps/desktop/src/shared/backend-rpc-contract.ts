@@ -1048,6 +1048,14 @@ const diagnosticStatsSchema = boundedSemanticValue(
       // Nullable for defense in depth: serde emits null if the backend ever
       // regresses the skip_serializing_if on this Windows-only field.
       encoderBridgeMfInputCreditWaitP95Ms: optionalSchema(nullableSchema(numberSchema({ min: 0 }))),
+      encoderBridgeOutputQueueHighWaterFrames: optionalSchema(nonNegativeInteger),
+      encoderBridgeOutputQueueOldestFrameAgeHighWaterMs: optionalSchema(nonNegativeInteger),
+      encoderBridgeOutputLastProgressAgeMs: optionalSchema(nonNegativeInteger),
+      encoderBridgeOutputPressureRecoveryEvents: optionalSchema(nonNegativeInteger),
+      encoderBridgeOutputPreEncodeSkippedFrames: optionalSchema(nonNegativeInteger),
+      encoderBridgeVideoToolboxPendingEncodeFrames: optionalSchema(nonNegativeInteger),
+      encoderBridgeVideoToolboxPendingFifoFrames: optionalSchema(nonNegativeInteger),
+      encoderBridgeEncodedAccessUnitDroppedFrames: optionalSchema(nonNegativeInteger),
       windowsD3d11Media: optionalSchema(windowsD3d11MediaDiagnosticsSchema),
       previewImagePollCounts: optionalSchema(previewImagePollCountsSchema),
       compositorSourceCaptureTextureReuses: nonNegativeInteger,

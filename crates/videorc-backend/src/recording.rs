@@ -148,10 +148,15 @@ const NATIVE_AUDIO_SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
 const MIC_SILENT_CHECK_AFTER: Duration = Duration::from_secs(10);
 const MIC_SILENT_PEAK_EPSILON: f32 = 0.001;
 const CAPTIONS_NATIVE_AUDIO_REQUIRED_MESSAGE: &str = "Live captions require the supported native microphone audio path after gain and mute controls. This session was not started because the selected microphone path cannot supply caption audio. Continue without captions for this session or select a supported microphone.";
-/// Once split-input probing completes, the recording demux thread may absorb a
-/// bounded scheduling cushion without applying pipe backpressure; the live
-/// auxiliary input keeps the small latency-first queue.
-const SPLIT_RECORDING_INPUT_THREAD_QUEUE_PACKETS: usize = 64;
+#[cfg(target_os = "macos")]
+const TRANSIENT_FIFO_TEST_PAUSE_MS_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_MS";
+/// Once encoded-input probing completes, the recording demux thread may absorb
+/// a bounded scheduling cushion without applying pipe backpressure. Use the
+/// same 64-packet bound for record-only and split recording inputs; the 2026-08
+/// incidents showed ~50ms FIFO writes only on the record-only path that lacked
+/// this demux thread, while the live auxiliary input keeps its smaller
+/// latency-first queue.
+const ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS: usize = 64;
 const SPLIT_STREAM_INPUT_THREAD_QUEUE_PACKETS: usize = 8;
 /// FFmpeg starts per-input demux threads only after `avformat_find_stream_info`.
 /// A 65,536-byte probe on a low-complexity H.264 test pattern can therefore
@@ -232,30 +237,67 @@ fn spawn_authorized_capture_process(
 ) -> io::Result<tokio::process::Child> {
     spawn_owned_tokio(command)
 }
+
+/// Owns every FIFO created while a capture session is still being assembled.
+/// Startup has many fallible steps before FFmpeg is spawned; keeping the FIFO
+/// paths in a guard from the moment they are created prevents an early return
+/// from leaving a stale Unix FIFO or Windows named-pipe registration behind.
+#[derive(Debug, Default)]
+struct CaptureStartupResources {
+    fifo_paths: Vec<PathBuf>,
+}
+
+impl CaptureStartupResources {
+    fn track_fifo(&mut self, fifo_path: &Path) {
+        if !self.fifo_paths.iter().any(|path| path == fifo_path) {
+            self.fifo_paths.push(fifo_path.to_path_buf());
+        }
+    }
+
+    fn commit(&mut self) {
+        self.fifo_paths.clear();
+    }
+}
+
+impl Drop for CaptureStartupResources {
+    fn drop(&mut self) {
+        for fifo_path in &self.fifo_paths {
+            let _ = crate::fifo::cleanup(fifo_path);
+        }
+    }
+}
+
 /// Owns FFmpeg until its startup resources become part of an active recording.
 /// Any early error drops this guard, which terminates/reaps the child and
 /// removes its startup FIFOs before another capture can reuse those resources.
 struct UncommittedCaptureProcess {
     child: Option<tokio::process::Child>,
-    fifo_paths: Vec<PathBuf>,
+    startup_resources: CaptureStartupResources,
 }
 
 impl UncommittedCaptureProcess {
-    fn new(child: tokio::process::Child, fifo_paths: Vec<PathBuf>) -> Self {
+    fn new(child: tokio::process::Child, startup_resources: CaptureStartupResources) -> Self {
         Self {
             child: Some(child),
-            fifo_paths,
+            startup_resources,
         }
     }
 
-    fn child_mut(&mut self) -> &mut tokio::process::Child {
-        self.child
-            .as_mut()
-            .expect("uncommitted capture process must own its child")
+    /// Terminates and reaps FFmpeg before startup-owned FIFO writers are
+    /// joined. Native audio uses blocking FIFO writes once FFmpeg attaches;
+    /// merely relying on reverse local drop order can therefore deadlock an
+    /// early return if the audio session is dropped while FFmpeg still owns
+    /// the read end but is stalled on another startup input.
+    async fn terminate_and_reap_before_fifo_writer_join(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let _ = child.start_kill();
+        let _ = child.wait().await;
     }
 
     fn commit(mut self) -> tokio::process::Child {
-        self.fifo_paths.clear();
+        self.startup_resources.commit();
         self.child
             .take()
             .expect("uncommitted capture process must own its child")
@@ -264,9 +306,6 @@ impl UncommittedCaptureProcess {
 
 impl Drop for UncommittedCaptureProcess {
     fn drop(&mut self) {
-        for fifo_path in &self.fifo_paths {
-            let _ = crate::fifo::cleanup(fifo_path);
-        }
         let Some(mut child) = self.child.take() else {
             return;
         };
@@ -1714,6 +1753,7 @@ pub async fn start_session(
 
     stop_idle_live_preview_for_recording(state.clone()).await;
 
+    let mut startup_resources = CaptureStartupResources::default();
     let mut capture = resolve_capture_inputs(&ffmpeg_path, &params).await;
     let mut native_audio_source =
         prepare_native_audio_source(&state, &session_id, &mut capture, &params).await;
@@ -1769,6 +1809,9 @@ pub async fn start_session(
             capture.microphone = None;
         }
         let _ = crate::fifo::cleanup(&prepared.fifo_path);
+    }
+    if let Some(prepared) = native_audio_source.as_ref() {
+        startup_resources.track_fifo(&prepared.fifo_path);
     }
     let has_native_audio = native_audio_source.is_some();
     let session_start_publication_permit =
@@ -1833,6 +1876,7 @@ pub async fn start_session(
     let encoder_bridge_fifo = if use_encoder_bridge {
         let fifo_path = recording_encoder_bridge_fifo_path(&session_id);
         create_recording_encoder_bridge_fifo(&fifo_path)?;
+        startup_resources.track_fifo(&fifo_path);
         Some(fifo_path)
     } else {
         None
@@ -1853,18 +1897,22 @@ pub async fn start_session(
     )
     .await?;
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
-    if params.output.stream_enabled {
-        let provider_plan = resolve_provider_stream_output_plan(&params)?;
-        if let Err(error) = validate_provider_plan_against_effective_bridge(
-            &provider_plan,
+    let provider_stream_output_plan = if params.output.stream_enabled {
+        match resolve_provider_stream_output_plan_for_effective_bridge(
+            &params,
             encoder_bridge_video_output,
         ) {
-            if let Some(fifo_path) = encoder_bridge_fifo.as_ref() {
-                let _ = crate::fifo::cleanup(fifo_path);
+            Ok(plan) => Some(plan),
+            Err(error) => {
+                if let Some(fifo_path) = encoder_bridge_fifo.as_ref() {
+                    let _ = crate::fifo::cleanup(fifo_path);
+                }
+                return Err(error);
             }
-            return Err(error);
         }
-    }
+    } else {
+        None
+    };
     if let Some(reason) = windows_encoded_bridge_decision.fallback_reason.as_deref() {
         state.emit_log(
             "warn",
@@ -1915,7 +1963,11 @@ pub async fn start_session(
         );
     }
     let encoder_bridge_stream_output = if use_encoder_bridge {
-        recording_compositor_stream_output(&params, encoder_bridge_video_output)?
+        recording_compositor_stream_output_with_plan(
+            &params,
+            encoder_bridge_video_output,
+            provider_stream_output_plan.as_ref(),
+        )?
     } else {
         None
     };
@@ -1967,6 +2019,7 @@ pub async fn start_session(
     let encoder_bridge_stream_fifo = if encoder_bridge_stream_output.is_some() {
         let fifo_path = stream_encoder_bridge_fifo_path(&session_id);
         create_stream_encoder_bridge_fifo(&fifo_path)?;
+        startup_resources.track_fifo(&fifo_path);
         Some(fifo_path)
     } else {
         None
@@ -2230,6 +2283,7 @@ pub async fn start_session(
         if !use_encoder_bridge && (active_screen.is_some() || params.output.stream_enabled) {
             let fifo_path = screen_overlay_fifo_path(&session_id);
             create_screen_overlay_fifo(&fifo_path)?;
+            startup_resources.track_fifo(&fifo_path);
             Some(fifo_path)
         } else {
             None
@@ -2695,19 +2749,9 @@ pub async fn start_session(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut uncommitted_capture_process = UncommittedCaptureProcess::new(
+    let mut child =
         spawn_authorized_capture_process(&mut command, session_start_publication_permit)
-            .with_context(|| format!("Could not start {ffmpeg_path}"))?,
-        [
-            encoder_bridge_fifo.clone(),
-            encoder_bridge_stream_fifo.clone(),
-            screen_overlay_fifo.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
-    );
-    let child = uncommitted_capture_process.child_mut();
+            .with_context(|| format!("Could not start {ffmpeg_path}"))?;
 
     let stderr = child.stderr.take();
     let stdout = child.stdout.take();
@@ -2739,6 +2783,12 @@ pub async fn start_session(
             use_encoder_bridge.then(|| video_epoch.clone()),
         )
     });
+    // Declare the uncommitted process guard after every blocking FIFO writer.
+    // Rust drops locals in reverse declaration order, so even cancellation or
+    // a future unhandled early return starts terminating FFmpeg before native
+    // audio can join its writer. Known fallible branches below additionally
+    // await reaping, guaranteeing the FIFO read end is closed before return.
+    let mut uncommitted_capture_process = UncommittedCaptureProcess::new(child, startup_resources);
     #[cfg(target_os = "windows")]
     let windows_d3d11_primary_input = windows_d3d11_media
         .as_ref()
@@ -2748,9 +2798,18 @@ pub async fn start_session(
         .as_ref()
         .and_then(WindowsD3d11SessionPump::auxiliary_encoder_source);
     let (mut encoder_bridge, mut encoder_bridge_stream) = if use_encoder_bridge {
-        let bridge_fifo_path = encoder_bridge_fifo
+        let bridge_fifo_path = match encoder_bridge_fifo
             .clone()
-            .context("Encoder bridge FIFO path was unavailable")?;
+            .context("Encoder bridge FIFO path was unavailable")
+        {
+            Ok(path) => path,
+            Err(error) => {
+                uncommitted_capture_process
+                    .terminate_and_reap_before_fifo_writer_join()
+                    .await;
+                return Err(error);
+            }
+        };
         let recording_diagnostics_context = encoder_bridge_diagnostics_context(
             if encoder_bridge_stream_profile.is_some() {
                 EncoderBridgeOutputRole::Recording
@@ -2762,7 +2821,7 @@ pub async fn start_session(
             encoder_bridge_video_output,
             encoder_bridge_stream_profile.is_some(),
         );
-        let mut recording_bridge = Some(start_synthetic_recording_bridge(
+        let mut recording_bridge = match start_synthetic_recording_bridge(
             state.clone(),
             session_id.clone(),
             params.output.video.fps,
@@ -2784,7 +2843,15 @@ pub async fn start_session(
             params.output.stream_enabled && encoder_bridge_stream_profile.is_none(),
             recording_diagnostics_context,
             video_epoch.clone(),
-        )?);
+        ) {
+            Ok(bridge) => Some(bridge),
+            Err(error) => {
+                uncommitted_capture_process
+                    .terminate_and_reap_before_fifo_writer_join()
+                    .await;
+                return Err(error);
+            }
+        };
         let mut stream_bridge = None;
         let bridge_startup_result: Result<()> = async {
             stream_bridge = match (
@@ -2848,6 +2915,9 @@ pub async fn start_session(
                 &mut stream_bridge,
                 ENCODER_BRIDGE_TEARDOWN_GRACE,
             );
+            uncommitted_capture_process
+                .terminate_and_reap_before_fifo_writer_join()
+                .await;
             let _ =
                 finish_recording_encoder_bridge_teardown(&state, batch, "partial-start-failure")
                     .await;
@@ -2907,6 +2977,9 @@ pub async fn start_session(
                     &mut encoder_bridge_stream,
                     ENCODER_BRIDGE_TEARDOWN_GRACE,
                 );
+                uncommitted_capture_process
+                    .terminate_and_reap_before_fifo_writer_join()
+                    .await;
                 let _ = finish_recording_encoder_bridge_teardown(
                     &state,
                     batch,
@@ -5649,6 +5722,28 @@ async fn monitor_session(
 ) {
     let (status, stop_intent_preceded_exit) =
         wait_for_process_exit_ordered(child.wait(), stop_intent).await;
+    #[cfg(target_os = "macos")]
+    if std::env::var_os(TRANSIENT_FIFO_TEST_PAUSE_MS_ENV).is_some()
+        && status
+            .as_ref()
+            .ok()
+            .and_then(ExitStatus::code)
+            .is_some_and(|code| code == 0)
+    {
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Info,
+            "transient-fifo-ffmpeg-exit-zero",
+            "FFmpeg exited cleanly with code 0 after the transient FIFO pressure probe.",
+        );
+        tracing::info!(
+            target: "videorc::recording",
+            session_id = %session_id,
+            ffmpeg_exit_code = 0,
+            "VIDEORC_TEST_TRANSIENT_FIFO_FFMPEG_EXIT_CODE_0"
+        );
+    }
     if let Some(session) = ffmpeg_live_audio_session.as_ref()
         && session.mark_terminal()
     {
@@ -9625,6 +9720,19 @@ fn encoder_output_topology_plan_from_probe(
 fn encoder_output_topology_plan_from_session(
     params: &StartSessionParams,
 ) -> Result<EncoderOutputTopologyPlan> {
+    let separate_same_profile_roles_available =
+        separate_encoded_provider_output_role_available(params)
+            && separate_provider_roles_fit_bridge_envelope(params, &[]);
+    encoder_output_topology_plan_from_session_with_separate_roles(
+        params,
+        separate_same_profile_roles_available,
+    )
+}
+
+fn encoder_output_topology_plan_from_session_with_separate_roles(
+    params: &StartSessionParams,
+    separate_same_profile_roles_available: bool,
+) -> Result<EncoderOutputTopologyPlan> {
     match (params.output.record_enabled, params.output.stream_enabled) {
         (true, true) => {
             let mut companion_outputs =
@@ -9640,15 +9748,23 @@ fn encoder_output_topology_plan_from_session(
                     stream,
                 ));
             }
-            if caption_leg_plan(params).force_same_profile_split {
-                return Ok(EncoderOutputTopologyPlan::split(
+            if separate_same_profile_roles_available {
+                // Matching profiles still need independent recording and
+                // stream encoders whenever the encoded split path is proven.
+                // Sharing a bridge makes a slow or failed RTMP consumer an
+                // ambiguous recording failure domain (2026-08 incident).
+                Ok(EncoderOutputTopologyPlan::split(
                     params.output.video.clone(),
                     params.output.video.clone(),
-                ));
+                ))
+            } else {
+                // Raw/legacy fallbacks cannot instantiate the auxiliary
+                // encoded lane. Preserve the valid shared topology rather than
+                // claiming isolation the active capture path cannot provide.
+                Ok(EncoderOutputTopologyPlan::shared(
+                    params.output.video.clone(),
+                ))
             }
-            Ok(EncoderOutputTopologyPlan::shared(
-                params.output.video.clone(),
-            ))
         }
         (true, false) => Ok(EncoderOutputTopologyPlan::shared(
             params.output.video.clone(),
@@ -11856,7 +11972,7 @@ fn bridge_compositor_split_output_ffmpeg_args(
         recording_fifo_path,
         recording_video_output,
         params.output.video.fps,
-        SPLIT_RECORDING_INPUT_THREAD_QUEUE_PACKETS,
+        ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS,
     )?;
     let stream_video_input_index = append_bridge_encoded_video_input_args(
         &mut args,
@@ -12042,6 +12158,8 @@ fn append_bridge_recording_input_args(
         }
         EncoderBridgeVideoOutput::VideoToolboxH264AnnexB => {
             args.extend([
+                "-thread_queue_size".to_string(),
+                ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS.to_string(),
                 "-use_wallclock_as_timestamps".to_string(),
                 "1".to_string(),
                 "-f".to_string(),
@@ -12071,6 +12189,8 @@ fn append_bridge_recording_input_args(
                 ]);
             }
             args.extend([
+                "-thread_queue_size".to_string(),
+                ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS.to_string(),
                 "-f".to_string(),
                 "mpegts".to_string(),
                 "-i".to_string(),
@@ -14163,9 +14283,31 @@ fn comment_highlight_available(params: &StartSessionParams, use_encoder_bridge: 
     params.output.stream_enabled && use_encoder_bridge
 }
 
+#[cfg(test)]
 fn recording_compositor_stream_output(
     params: &StartSessionParams,
     video_output: EncoderBridgeVideoOutput,
+) -> Result<Option<CompositorAuxiliaryOutput>> {
+    if !params.output.record_enabled
+        || !params.output.stream_enabled
+        || !matches!(
+            video_output,
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+                | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+                | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        )
+    {
+        return Ok(None);
+    }
+    let provider_plan =
+        resolve_provider_stream_output_plan_for_effective_bridge(params, video_output)?;
+    recording_compositor_stream_output_with_plan(params, video_output, Some(&provider_plan))
+}
+
+fn recording_compositor_stream_output_with_plan(
+    params: &StartSessionParams,
+    video_output: EncoderBridgeVideoOutput,
+    provider_plan: Option<&ProviderStreamOutputPlan>,
 ) -> Result<Option<CompositorAuxiliaryOutput>> {
     if !params.output.record_enabled || !params.output.stream_enabled {
         return Ok(None);
@@ -14178,21 +14320,27 @@ fn recording_compositor_stream_output(
     ) {
         return Ok(None);
     }
+    let provider_plan = provider_plan.context(
+        "An authoritative provider output plan is required for record-and-stream isolation.",
+    )?;
     let recording = &params.output.video;
     let companion_outputs = companion_stream_outputs_for_recording(params, recording)?;
     if companion_outputs.is_empty() {
-        // When the stream shares the recording profile it shares frames too —
-        // a burn target that treats the legs DIFFERENTLY (one burned, one
-        // clean) forces a same-profile auxiliary leg (A0 verdict / R1 plan).
-        // Costs one extra render per frame while enabled.
-        if caption_leg_plan(params).force_same_profile_split {
-            return Ok(Some(CompositorAuxiliaryOutput {
-                width: recording.width,
-                height: recording.height,
-                frame_consumer: encoded_compositor_frame_consumer(video_output),
-            }));
+        if !provider_plan.separate_encoded_output_role {
+            // The effective bridge or profile envelope could not prove a
+            // second encoded role. Keep the valid shared topology rather than
+            // constructing an auxiliary compositor the encoder plan cannot
+            // consume.
+            return Ok(None);
         }
-        return Ok(None);
+        // A proven same-profile stream still owns an auxiliary
+        // compositor/encoder lane. This isolates recording from downstream
+        // stream pressure and preserves per-leg caption overlay semantics.
+        return Ok(Some(CompositorAuxiliaryOutput {
+            width: recording.width,
+            height: recording.height,
+            frame_consumer: encoded_compositor_frame_consumer(video_output),
+        }));
     }
     if companion_outputs.len() > 1 {
         bail!(
@@ -14304,6 +14452,45 @@ fn validate_provider_plan_against_effective_bridge(
     Ok(())
 }
 
+fn resolve_provider_stream_output_plan_for_effective_bridge(
+    params: &StartSessionParams,
+    effective_bridge: EncoderBridgeVideoOutput,
+) -> Result<ProviderStreamOutputPlan> {
+    let effective_separate_role_available = ensure_encoded_bridge_video_output(effective_bridge)
+        .is_ok()
+        && separate_encoded_provider_output_role_available(params);
+    if params.output.record_enabled
+        && !effective_separate_role_available
+        && resolved_enabled_stream_output_videos(params)?
+            .iter()
+            .any(|stream| !same_video_profile(&params.output.video, stream))
+    {
+        bail!(
+            "The effective encoder bridge cannot provide the separate encoded stream output required by the recording and stream profiles."
+        );
+    }
+    let plan = resolve_provider_stream_output_plan_with_separate_roles(
+        params,
+        effective_separate_role_available,
+    )?;
+
+    // A Windows Media Foundation probe may reject the requested dual encoder
+    // topology and fall back to the valid shared raw path. That fallback is
+    // safe only when recording and stream profiles truly match; genuinely
+    // different profiles retain the existing fail-closed requirement for a
+    // proven encoded companion role.
+    if params.output.record_enabled
+        && !plan.separate_encoded_output_role
+        && !same_video_profile(&params.output.video, &plan.stream_video)
+    {
+        bail!(
+            "The effective encoder bridge cannot provide the separate encoded stream output required by the recording and stream profiles."
+        );
+    }
+    validate_provider_plan_against_effective_bridge(&plan, effective_bridge)?;
+    Ok(plan)
+}
+
 fn resolve_provider_stream_output_plan(
     params: &StartSessionParams,
 ) -> Result<ProviderStreamOutputPlan> {
@@ -14335,7 +14522,9 @@ fn resolve_provider_stream_output_plan_with_separate_roles(
                 video: params.output.video.clone(),
             }],
             stream_video: params.output.video.clone(),
-            separate_encoded_output_role: false,
+            separate_encoded_output_role: params.output.record_enabled
+                && separate_encoded_output_role_available
+                && separate_provider_roles_fit_bridge_envelope(params, &[]),
         });
     };
 
@@ -14363,7 +14552,13 @@ fn resolve_provider_stream_output_plan_with_separate_roles(
         .all(|target| same_video_profile(&target.video, &targets[0].video));
     let recording_already_shares_target_profile = !params.output.record_enabled
         || same_video_profile(&params.output.video, &targets[0].video);
-    if targets_share_one_profile && recording_already_shares_target_profile {
+    let can_isolate_same_profile_roles = params.output.record_enabled
+        && separate_encoded_output_role_available
+        && separate_provider_roles_fit_bridge_envelope(params, &targets);
+    if targets_share_one_profile
+        && recording_already_shares_target_profile
+        && !can_isolate_same_profile_roles
+    {
         return Ok(ProviderStreamOutputPlan {
             stream_video: targets[0].video.clone(),
             targets,
@@ -14373,7 +14568,7 @@ fn resolve_provider_stream_output_plan_with_separate_roles(
 
     if separate_encoded_output_role_available
         && separate_provider_roles_fit_bridge_envelope(params, &targets)
-        && stream_targets_fit_recording_plus_one_companion(params, &targets)
+        && stream_targets_fit_recording_plus_one_stream_role(params, &targets)
     {
         // This is the only independent-output shape implemented today:
         // recording is one encoded role and every stream target is routed from
@@ -14513,7 +14708,7 @@ fn separate_provider_roles_fit_bridge_envelope(
         })
 }
 
-fn stream_targets_fit_recording_plus_one_companion(
+fn stream_targets_fit_recording_plus_one_stream_role(
     params: &StartSessionParams,
     targets: &[ResolvedStreamTargetVideo],
 ) -> bool {
@@ -14528,7 +14723,7 @@ fn stream_targets_fit_recording_plus_one_companion(
             _ => {}
         }
     }
-    companion.is_some()
+    true
 }
 
 fn provider_safe_shared_profile(video: &VideoSettings) -> VideoSettings {
@@ -16077,7 +16272,10 @@ mod tests {
         let child = spawn_owned_tokio(&mut command).expect("spawn capture child");
         let pid = child.id().expect("capture child pid");
 
-        drop(UncommittedCaptureProcess::new(child, Vec::new()));
+        drop(UncommittedCaptureProcess::new(
+            child,
+            CaptureStartupResources::default(),
+        ));
 
         timeout(Duration::from_secs(3), async {
             loop {
@@ -16090,6 +16288,158 @@ mod tests {
         .await
         .expect("uncommitted capture child terminates");
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_abort_reaps_fifo_reader_before_blocking_writer_join() {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::sync::mpsc as std_mpsc;
+
+        let path =
+            crate::fifo::transport_path(&format!("videorc-startup-abort-order-{}", Uuid::new_v4()));
+        crate::fifo::cleanup(&path).expect("remove stale startup-order FIFO");
+        crate::fifo::create(&path).expect("create startup-order FIFO");
+        let mut startup_resources = CaptureStartupResources::default();
+        startup_resources.track_fifo(&path);
+
+        // Give the FFmpeg stand-in an inherited FIFO read end while it runs a
+        // command that never drains stdin. This reproduces the startup shape
+        // that can leave native audio blocked in a full FIFO write.
+        let c_path = CString::new(path.display().to_string()).expect("valid FIFO path");
+        let reader_fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+        assert!(reader_fd >= 0, "open startup-order FIFO reader");
+        let reader = unsafe { File::from_raw_fd(reader_fd) };
+
+        let mut command = long_running_capture_command();
+        command.kill_on_drop(true).stdin(Stdio::from(reader));
+        let child = spawn_owned_tokio(&mut command).expect("spawn FIFO reader child");
+        let pid = child.id().expect("FIFO reader child pid");
+        drop(command);
+
+        let stop = AtomicBool::new(false);
+        let mut writer = crate::fifo::open_writer(
+            &path,
+            &stop,
+            Duration::from_millis(1),
+            false,
+            "startup-order writer stopped",
+        )
+        .expect("open startup-order FIFO writer");
+        let payload = [0_u8; 4096];
+        loop {
+            match writer.write(&payload) {
+                Ok(0) => panic!("startup-order FIFO accepted a zero-byte write"),
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill startup-order FIFO: {error}"),
+            }
+        }
+        // A PIPE_BUF-sized write may report WouldBlock with a few bytes still
+        // free because the write must remain atomic. Consume that remainder so
+        // the next one-byte blocking write is guaranteed to wait for a reader.
+        loop {
+            match writer.write(&[0]) {
+                Ok(1) => {}
+                Ok(written) => panic!("startup-order FIFO wrote {written} bytes for one byte"),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("finish filling startup-order FIFO: {error}"),
+            }
+        }
+        let flags = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0, "read startup-order FIFO flags");
+        assert_eq!(
+            unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) },
+            0,
+            "restore blocking startup-order FIFO writes"
+        );
+
+        let (write_started_tx, write_started_rx) = std_mpsc::channel();
+        let (write_result_tx, write_result_rx) = std_mpsc::channel();
+        let writer_thread = thread::spawn(move || {
+            write_started_tx
+                .send(())
+                .expect("publish blocked write start");
+            let result = writer.write_all(&[1]);
+            write_result_tx
+                .send(result)
+                .expect("publish blocked write result");
+        });
+        write_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocking FIFO write started");
+        assert!(
+            matches!(
+                write_result_rx.try_recv(),
+                Err(std_mpsc::TryRecvError::Empty)
+            ),
+            "full FIFO writer must still be blocked while its reader is alive"
+        );
+
+        let mut process = UncommittedCaptureProcess::new(child, startup_resources);
+        timeout(
+            Duration::from_secs(3),
+            process.terminate_and_reap_before_fifo_writer_join(),
+        )
+        .await
+        .expect("startup abort reaps the FIFO reader");
+
+        let write_result = write_result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("closed FIFO reader releases its blocked writer");
+        assert!(
+            write_result.is_err(),
+            "blocked FIFO write must fail after the reader is reaped"
+        );
+        writer_thread.join().expect("join released FIFO writer");
+        assert!(
+            !crate::process_job::process_is_running(pid).expect("probe reaped FIFO reader"),
+            "startup abort must reap FFmpeg before a FIFO writer can be joined"
+        );
+        drop(process);
+        assert!(
+            !path
+                .try_exists()
+                .expect("inspect startup-order FIFO cleanup")
+        );
+    }
+
+    #[test]
+    fn capture_startup_resources_cleanup_fifo_before_ffmpeg_spawn() {
+        let path = crate::fifo::transport_path(&format!(
+            "videorc-capture-startup-cleanup-{}",
+            Uuid::new_v4()
+        ));
+        crate::fifo::cleanup(&path).expect("remove stale startup FIFO");
+        crate::fifo::create(&path).expect("create startup FIFO");
+
+        let mut resources = CaptureStartupResources::default();
+        resources.track_fifo(&path);
+
+        #[cfg(windows)]
+        assert!(
+            crate::fifo::test_pipe_registry_contains(&path)
+                .expect("inspect startup named-pipe registry"),
+            "created startup named pipe must own a registered server handle"
+        );
+        #[cfg(unix)]
+        assert!(path.try_exists().expect("inspect created startup FIFO"));
+
+        drop(resources);
+
+        #[cfg(windows)]
+        assert!(
+            !crate::fifo::test_pipe_registry_contains(&path)
+                .expect("inspect cleaned startup named-pipe registry"),
+            "early-startup cleanup must remove and close the registered server handle"
+        );
+        #[cfg(unix)]
+        assert!(
+            !path.try_exists().expect("inspect cleaned startup FIFO"),
+            "early-startup cleanup must remove the filesystem FIFO"
+        );
+    }
+
     #[test]
     fn screen_overlay_writer_honors_stop_before_writing_frame() {
         let path = std::env::temp_dir().join(format!(
@@ -17130,6 +17480,84 @@ mod tests {
         let preflight_plan = encoder_output_topology_plan_from_probe(&normalized);
 
         assert_eq!(session_plan, preflight_plan);
+    }
+
+    #[test]
+    fn same_profile_record_and_stream_use_independent_encoded_output_roles() {
+        let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        params.streaming = None;
+
+        let topology = encoder_output_topology_plan_from_session(&params).unwrap();
+        assert_eq!(
+            topology.output_roles,
+            vec![
+                StreamOutputTopologyRole::Recording,
+                StreamOutputTopologyRole::Stream,
+            ],
+            "recording and streaming must not share one failure domain merely because their profiles match",
+        );
+        assert_eq!(topology.profiles.len(), 2);
+
+        let auxiliary = recording_compositor_stream_output(
+            &params,
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+        )
+        .unwrap()
+        .expect("same-profile stream must receive its own compositor/encoder leg");
+        assert_eq!(auxiliary.width, params.output.video.width);
+        assert_eq!(auxiliary.height, params.output.video.height);
+
+        let provider_plan = resolve_provider_stream_output_plan_with_separate_roles(&params, true)
+            .expect("same-profile provider plan");
+        assert!(provider_plan.separate_encoded_output_role);
+    }
+
+    #[test]
+    fn same_profile_record_and_stream_preserve_shared_topology_without_encoded_split() {
+        let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        params.streaming = None;
+
+        let topology =
+            encoder_output_topology_plan_from_session_with_separate_roles(&params, false)
+                .expect("raw/disabled fallback topology");
+
+        assert_eq!(
+            topology.output_roles,
+            vec![StreamOutputTopologyRole::Shared],
+            "an unavailable encoded auxiliary lane must preserve the valid shared raw fallback",
+        );
+        assert_eq!(topology.profiles.len(), 1);
+
+        let provider_plan = resolve_provider_stream_output_plan_for_effective_bridge(
+            &params,
+            EncoderBridgeVideoOutput::RawYuv420p,
+        )
+        .expect("same-profile runtime raw fallback remains valid");
+        assert!(!provider_plan.separate_encoded_output_role);
+        assert_eq!(provider_plan.stream_video, params.output.video);
+    }
+
+    #[test]
+    fn compositor_does_not_invent_an_auxiliary_role_when_provider_plan_is_shared() {
+        let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        params.streaming = None;
+        let provider_plan = ProviderStreamOutputPlan {
+            targets: vec![],
+            stream_video: params.output.video.clone(),
+            separate_encoded_output_role: false,
+        };
+
+        let auxiliary = recording_compositor_stream_output_with_plan(
+            &params,
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            Some(&provider_plan),
+        )
+        .unwrap();
+
+        assert_eq!(auxiliary, None);
     }
 
     #[test]
@@ -20197,6 +20625,39 @@ mod tests {
         assert!(arg_value(&args, "-allow_sw").is_none());
         assert!(arg_value(&args, "-realtime").is_none());
         assert!(arg_value(&args, "-prio_speed").is_none());
+    }
+
+    #[test]
+    fn encoded_record_only_inputs_have_a_bounded_ffmpeg_demux_queue() {
+        let params = base_params(true, false);
+        for (suffix, video_output) in [
+            ("h264", EncoderBridgeVideoOutput::VideoToolboxH264AnnexB),
+            ("ts", EncoderBridgeVideoOutput::VideoToolboxH264MpegTs),
+        ] {
+            let fifo_path = PathBuf::from(format!("/tmp/videorc-record-only.{suffix}"));
+            let args = bridge_recording_ffmpeg_args(
+                &CaptureInputs {
+                    video: VideoInput::TestPattern,
+                    camera_index: None,
+                    microphone: None,
+                },
+                &params,
+                Some(Path::new("/tmp/videorc-record-only.mkv")),
+                &fifo_path,
+                video_output,
+            )
+            .unwrap();
+
+            assert_eq!(
+                input_arg_value(
+                    &args,
+                    &fifo_path.display().to_string(),
+                    "-thread_queue_size",
+                ),
+                Some("64"),
+                "the record-only demuxer must absorb the same bounded encoded-packet cushion as the split recording leg",
+            );
+        }
     }
 
     #[test]
@@ -24768,10 +25229,11 @@ mod tests {
     }
 
     #[test]
-    fn captioned_stream_forces_a_same_profile_stream_leg_without_touching_recording() {
-        // Same-profile record+stream normally shares frames (no aux leg);
-        // stream burn-in must force a separate stream leg so the recording stays clean.
-        // No StreamingSettings → the stream output IS the recording profile.
+    fn captioned_stream_uses_the_isolated_same_profile_stream_leg_without_touching_recording() {
+        // Same-profile record+stream now uses independent encoded roles even
+        // without captions; stream burn-in reuses that isolated stream leg so
+        // the recording stays clean. No StreamingSettings means both profiles
+        // have the same dimensions and rate.
         let mut params = base_params(true, true);
         params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
         params.streaming = None;
@@ -24781,7 +25243,14 @@ mod tests {
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
         )
         .unwrap();
-        assert_eq!(without_burn_in, None);
+        assert_eq!(
+            without_burn_in,
+            Some(CompositorAuxiliaryOutput {
+                width: params.output.video.width,
+                height: params.output.video.height,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            })
+        );
 
         params.captions = Some(crate::protocol::CaptionsSessionParams {
             enabled: true,
@@ -24816,8 +25285,12 @@ mod tests {
                 EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
             )
             .unwrap(),
-            None,
-            "Recording selection creates a later copy and needs no live split"
+            Some(CompositorAuxiliaryOutput {
+                width: params.output.video.width,
+                height: params.output.video.height,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            }),
+            "Recording selection creates a later copy, while the stream keeps its independent pressure domain"
         );
         let recording_plan = caption_leg_plan(&params);
         assert_eq!((recording_plan.primary, recording_plan.aux), (false, false));
@@ -24873,8 +25346,12 @@ mod tests {
                 EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
             )
             .unwrap(),
-            None,
-            "session suppression must not force a same-profile auxiliary leg"
+            Some(CompositorAuxiliaryOutput {
+                width: params.output.video.width,
+                height: params.output.video.height,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            }),
+            "caption suppression must not disable the independent stream pressure domain"
         );
         validate_outputs(&params)
             .expect("session suppression must not trigger the live-burn 30fps preflight");
@@ -24907,7 +25384,11 @@ mod tests {
                 EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
             )
             .unwrap(),
-            None
+            Some(CompositorAuxiliaryOutput {
+                width: ineligible.output.video.width,
+                height: ineligible.output.video.height,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            })
         );
         validate_outputs(&ineligible)
             .expect("ineligible captions-off output may start with mid-session enable blocked");
@@ -25190,7 +25671,11 @@ mod tests {
                 EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
             )
             .unwrap(),
-            None
+            Some(CompositorAuxiliaryOutput {
+                width: same_size.output.video.width,
+                height: same_size.output.video.height,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            })
         );
     }
 
@@ -25297,7 +25782,11 @@ mod tests {
                 EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
             )
             .unwrap(),
-            None
+            Some(CompositorAuxiliaryOutput {
+                width: params.output.video.width,
+                height: params.output.video.height,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            })
         );
     }
 

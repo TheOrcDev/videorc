@@ -155,6 +155,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 const ENTITLEMENT_REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
+const ACCOUNT_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 
 use crate::backend_authority::{
     BackendBootstrap, BackendRole, authenticate_backend_token, authorize_backend_method,
@@ -165,7 +166,10 @@ use crate::oauth::{OAuthCompleteParams, OAuthStartParams, OAuthStartProviderPara
 use crate::preflight::GoLivePreflightParams;
 use crate::process_job::output_owned_tokio;
 use crate::state::{
-    AppState, TrackedWebSocketQueueMetrics, WebSocketQueueTicket, WebSocketTransportMetrics,
+    AppState, CommandCompletionGuard as WebSocketOperatorMutationGuard,
+    CommandCompletionSnapshot as WebSocketOperatorObservationFence,
+    TrackedWebSocketCommandLaneMetrics, TrackedWebSocketQueueMetrics, WebSocketQueueTicket,
+    WebSocketTransportMetrics,
 };
 use crate::storage::Database;
 use crate::streaming::{
@@ -3448,6 +3452,19 @@ const WEBSOCKET_READ_ONLY_CONCURRENCY: usize = 4;
 // cannot build a task backlog, while session.stop remains dispatchable during
 // FFmpeg's acknowledgement wait.
 const WEBSOCKET_AUDIO_PROCESSING_CONCURRENCY: usize = 1;
+const WEBSOCKET_OBSERVATION_LANE_QUEUE_CAPACITY: usize = 32;
+const WEBSOCKET_ACCOUNT_MAINTENANCE_QUEUE_CAPACITY: usize = 8;
+const WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY: usize = 16;
+const WEBSOCKET_STOP_LANE_QUEUE_CAPACITY: usize = 4;
+const WEBSOCKET_OBSERVATION_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
+const WEBSOCKET_ACCOUNT_MAINTENANCE_MAX_QUEUE_AGE: Duration = Duration::from_secs(15);
+const WEBSOCKET_LIVE_CONTROL_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
+const WEBSOCKET_DURABLE_CHAT_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
+const WEBSOCKET_STOP_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
+const WEBSOCKET_ORDERED_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
+const COMMAND_LANE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.accountMaintenance.block";
+const COMMAND_LANE_SMOKE_STATUS_METHOD: &str = "test.commandLanes.accountMaintenance.status";
+const COMMAND_LANE_SMOKE_RELEASE_METHOD: &str = "test.commandLanes.accountMaintenance.release";
 const WEBSOCKET_RELIABLE_BURST_LIMIT: usize = 8;
 // The desktop clients are loopback peers. Five seconds is deliberately far
 // above normal socket jitter while still bounding the lifetime of queued
@@ -3945,7 +3962,43 @@ fn websocket_command_is_read_only(text: &str) -> bool {
     serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
         matches!(
             command.method.as_str(),
-            "preview.surface.status" | "compositor.status" | "diagnostics.stats" | "health.ping"
+            "preview.surface.status"
+                | "compositor.status"
+                | "diagnostics.stats"
+                | "health.ping"
+                | "account.get"
+                | "captions.status.get"
+                | "comments.highlight.status"
+                | "scene.get"
+                | "liveChat.status"
+                | "liveChat.sendOperations.list"
+                | "liveChat.sendOperations.latest"
+                | "screens.list"
+                | "screens.active"
+                | "recording.status"
+                | COMMAND_LANE_SMOKE_STATUS_METHOD
+        )
+    })
+}
+
+fn websocket_command_is_layout_mutation(text: &str) -> bool {
+    serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
+        matches!(
+            command.method.as_str(),
+            "scene.layout.apply_live" | "scene.layout.apply_preview"
+        )
+    })
+}
+
+fn websocket_observation_requires_operator_fence(text: &str) -> bool {
+    serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
+        matches!(
+            command.method.as_str(),
+            "scene.get"
+                | "compositor.status"
+                | "screens.active"
+                | "captions.status.get"
+                | "comments.highlight.status"
         )
     })
 }
@@ -3975,6 +4028,313 @@ fn websocket_command_is_session_stop(text: &str) -> bool {
         .is_ok_and(|command| command.method == "session.stop")
 }
 
+fn websocket_command_is_session_start(text: &str) -> bool {
+    serde_json::from_str::<ClientCommand>(text)
+        .is_ok_and(|command| command.method == "session.start")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebSocketIsolatedCommandLaneKind {
+    Observation,
+    AccountMaintenance,
+    DurableChat,
+    LiveControl,
+    Stop,
+}
+
+fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedCommandLaneKind> {
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    match command.method.as_str() {
+        "account.refresh"
+        | "entitlements.refresh"
+        | "platformAccounts.refresh"
+        | "platformAccounts.validate"
+        | COMMAND_LANE_SMOKE_BLOCK_METHOD => {
+            Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance)
+        }
+        "liveChat.send" => Some(WebSocketIsolatedCommandLaneKind::DurableChat),
+        "screens.activate"
+        | "screens.clear"
+        | "screens.delete"
+        | "captions.start"
+        | "captions.stop"
+        | "captions.style.set"
+        | "comments.highlight.set"
+        | "comments.highlight.clear" => Some(WebSocketIsolatedCommandLaneKind::LiveControl),
+        "session.stop" | COMMAND_LANE_SMOKE_RELEASE_METHOD => {
+            Some(WebSocketIsolatedCommandLaneKind::Stop)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Clone)]
+struct WebSocketIsolatedCommandLane {
+    kind: WebSocketIsolatedCommandLaneKind,
+    capacity: std::sync::Arc<tokio::sync::Semaphore>,
+    sender: mpsc::Sender<WebSocketQueuedLaneCommand>,
+    max_queue_age: Duration,
+    metrics: TrackedWebSocketCommandLaneMetrics,
+    account_refresh_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl WebSocketIsolatedCommandLane {
+    fn new(
+        kind: WebSocketIsolatedCommandLaneKind,
+        capacity: usize,
+        max_queue_age: Duration,
+        metrics: TrackedWebSocketCommandLaneMetrics,
+    ) -> (Self, mpsc::Receiver<WebSocketQueuedLaneCommand>) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (
+            Self {
+                kind,
+                capacity: std::sync::Arc::new(tokio::sync::Semaphore::new(capacity)),
+                sender,
+                max_queue_age,
+                metrics,
+                account_refresh_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                    false,
+                )),
+            },
+            receiver,
+        )
+    }
+
+    fn full_error(&self, command_id: String) -> ServerResponse {
+        match self.kind {
+            WebSocketIsolatedCommandLaneKind::Observation => ServerResponse::error(
+                command_id,
+                "observation-lane-full",
+                "The observation lane is full; this request was not applied.",
+            ),
+            _ => ServerResponse::error(
+                command_id,
+                "command-lane-full",
+                "The command lane is full; this command was not applied.",
+            ),
+        }
+    }
+
+    fn duplicate_account_refresh_error(&self, command_id: String) -> ServerResponse {
+        ServerResponse::error(
+            command_id,
+            "account-maintenance-coalesced",
+            "Account maintenance is already running; this duplicate was not applied.",
+        )
+    }
+}
+
+struct WebSocketLaneAdmissionGuard {
+    _capacity_permit: tokio::sync::OwnedSemaphorePermit,
+    account_refresh_pending: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    _operator_mutation: Option<WebSocketOperatorMutationGuard>,
+    live_control_order: Option<WebSocketOperatorMutationGuard>,
+}
+
+impl Drop for WebSocketLaneAdmissionGuard {
+    fn drop(&mut self) {
+        if let Some(pending) = &self.account_refresh_pending {
+            pending.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+struct WebSocketQueuedLaneCommand {
+    command_id: String,
+    text: String,
+    dispatch_deadline: tokio::time::Instant,
+    queue_ticket: WebSocketQueueTicket,
+    dispatch_fence: Option<WebSocketCommandDispatchFence>,
+    _admission: WebSocketLaneAdmissionGuard,
+}
+
+enum WebSocketCommandDispatchFence {
+    /// Cross-lane ordering and reconciliation remain bounded by the accepted
+    /// command's queue-age contract. Work that cannot reach a safe dispatch
+    /// point in time is definitely not applied.
+    Bounded(WebSocketOperatorObservationFence),
+    /// Stop must not overtake or expire behind an already accepted
+    /// session.start. Otherwise Start could complete into a live capture after
+    /// Stop reported Idle or expired.
+    PriorSessionStart(WebSocketOperatorObservationFence),
+}
+
+struct WebSocketAcceptedCommand {
+    text: String,
+    _accepted_at: tokio::time::Instant,
+    dispatch_deadline: tokio::time::Instant,
+    operator_mutation: Option<WebSocketOperatorMutationGuard>,
+    live_control_order: Option<WebSocketOperatorMutationGuard>,
+    session_start: Option<WebSocketOperatorMutationGuard>,
+    dispatch_fence: Option<WebSocketCommandDispatchFence>,
+}
+
+fn accept_websocket_command(state: &AppState, text: String) -> WebSocketAcceptedCommand {
+    let accepted_at = tokio::time::Instant::now();
+    let lane_kind = websocket_isolated_command_lane(text.as_str());
+    let max_queue_age = if websocket_command_is_read_only(text.as_str()) {
+        WEBSOCKET_OBSERVATION_MAX_QUEUE_AGE
+    } else {
+        match lane_kind {
+            Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance) => {
+                WEBSOCKET_ACCOUNT_MAINTENANCE_MAX_QUEUE_AGE
+            }
+            Some(WebSocketIsolatedCommandLaneKind::DurableChat) => {
+                WEBSOCKET_DURABLE_CHAT_MAX_QUEUE_AGE
+            }
+            Some(WebSocketIsolatedCommandLaneKind::LiveControl) => {
+                WEBSOCKET_LIVE_CONTROL_MAX_QUEUE_AGE
+            }
+            Some(WebSocketIsolatedCommandLaneKind::Stop) => WEBSOCKET_STOP_MAX_QUEUE_AGE,
+            // Observation is classified above because it is a read-only
+            // property rather than a mutation-lane classifier result.
+            Some(WebSocketIsolatedCommandLaneKind::Observation) => {
+                WEBSOCKET_OBSERVATION_MAX_QUEUE_AGE
+            }
+            None => WEBSOCKET_ORDERED_MAX_QUEUE_AGE,
+        }
+    };
+    // One short process-global critical section establishes receipt order and
+    // makes every associated fence guard visible before this command can sit
+    // in a per-connection queue.
+    let admission = state
+        .websocket_command_admission
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let live_control = lane_kind == Some(WebSocketIsolatedCommandLaneKind::LiveControl);
+    let operator_mutation_command =
+        live_control || websocket_command_is_layout_mutation(text.as_str());
+    let session_start_command = websocket_command_is_session_start(text.as_str());
+    let operator_mutation = operator_mutation_command.then(|| state.operator_command_fence.begin());
+    let live_control_order = live_control.then(|| state.live_control_command_order.begin());
+    let session_start = session_start_command.then(|| state.session_start_command_fence.begin());
+    let dispatch_fence = if websocket_command_is_read_only(text.as_str())
+        && websocket_observation_requires_operator_fence(text.as_str())
+    {
+        Some(WebSocketCommandDispatchFence::Bounded(
+            state.operator_command_fence.observe(),
+        ))
+    } else if lane_kind == Some(WebSocketIsolatedCommandLaneKind::Stop)
+        && websocket_command_is_session_stop(text.as_str())
+    {
+        Some(WebSocketCommandDispatchFence::PriorSessionStart(
+            state.session_start_command_fence.observe(),
+        ))
+    } else if session_start_command {
+        Some(WebSocketCommandDispatchFence::Bounded(
+            state.operator_command_fence.observe(),
+        ))
+    } else if operator_mutation_command {
+        Some(WebSocketCommandDispatchFence::Bounded(
+            state.session_start_command_fence.observe(),
+        ))
+    } else {
+        None
+    };
+    drop(admission);
+    WebSocketAcceptedCommand {
+        text,
+        _accepted_at: accepted_at,
+        dispatch_deadline: accepted_at + max_queue_age,
+        operator_mutation,
+        live_control_order,
+        session_start,
+        dispatch_fence,
+    }
+}
+
+struct WebSocketOrderedCommand {
+    text: String,
+    dispatch_deadline: tokio::time::Instant,
+    dispatch_fence: Option<WebSocketCommandDispatchFence>,
+    _operator_mutation: Option<WebSocketOperatorMutationGuard>,
+    _session_start: Option<WebSocketOperatorMutationGuard>,
+}
+
+struct WebSocketIsolatedCommandLanes {
+    observation: WebSocketIsolatedCommandLane,
+    account: WebSocketIsolatedCommandLane,
+    durable_chat: WebSocketIsolatedCommandLane,
+    live_control: WebSocketIsolatedCommandLane,
+    stop: WebSocketIsolatedCommandLane,
+}
+
+struct WebSocketIsolatedCommandLaneReceivers {
+    observation: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    account: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    durable_chat: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    live_control: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    stop: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+}
+
+impl WebSocketIsolatedCommandLanes {
+    fn new(transport: &WebSocketTransportMetrics) -> (Self, WebSocketIsolatedCommandLaneReceivers) {
+        let (observation, observation_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::Observation,
+            WEBSOCKET_OBSERVATION_LANE_QUEUE_CAPACITY,
+            WEBSOCKET_OBSERVATION_MAX_QUEUE_AGE,
+            transport.register_command_lane("observation"),
+        );
+        let (account, account_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::AccountMaintenance,
+            WEBSOCKET_ACCOUNT_MAINTENANCE_QUEUE_CAPACITY,
+            WEBSOCKET_ACCOUNT_MAINTENANCE_MAX_QUEUE_AGE,
+            transport.register_command_lane("accountMaintenance"),
+        );
+        let (durable_chat, durable_chat_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::DurableChat,
+            WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY,
+            WEBSOCKET_DURABLE_CHAT_MAX_QUEUE_AGE,
+            transport.register_command_lane("durableChat"),
+        );
+        let (live_control, live_control_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::LiveControl,
+            WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY,
+            WEBSOCKET_LIVE_CONTROL_MAX_QUEUE_AGE,
+            transport.register_command_lane("liveControl"),
+        );
+        let (stop, stop_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::Stop,
+            WEBSOCKET_STOP_LANE_QUEUE_CAPACITY,
+            WEBSOCKET_STOP_MAX_QUEUE_AGE,
+            transport.register_command_lane("stop"),
+        );
+        (
+            Self {
+                observation,
+                account,
+                durable_chat,
+                live_control,
+                stop,
+            },
+            WebSocketIsolatedCommandLaneReceivers {
+                observation: observation_rx,
+                account: account_rx,
+                durable_chat: durable_chat_rx,
+                live_control: live_control_rx,
+                stop: stop_rx,
+            },
+        )
+    }
+
+    fn get(&self, kind: WebSocketIsolatedCommandLaneKind) -> WebSocketIsolatedCommandLane {
+        match kind {
+            WebSocketIsolatedCommandLaneKind::Observation => self.observation.clone(),
+            WebSocketIsolatedCommandLaneKind::AccountMaintenance => self.account.clone(),
+            WebSocketIsolatedCommandLaneKind::DurableChat => self.durable_chat.clone(),
+            WebSocketIsolatedCommandLaneKind::LiveControl => self.live_control.clone(),
+            WebSocketIsolatedCommandLaneKind::Stop => self.stop.clone(),
+        }
+    }
+}
+
+fn websocket_command_id(text: &str) -> String {
+    serde_json::from_str::<ClientCommand>(text)
+        .map(|command| command.id)
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
 async fn drain_websocket_layout_commands(tasks: &mut tokio::task::JoinSet<()>) {
     while let Some(completed) = tasks.join_next().await {
         if let Err(error) = completed {
@@ -3999,10 +4359,442 @@ fn reap_websocket_audio_processing_commands(tasks: &mut tokio::task::JoinSet<()>
     }
 }
 
+fn try_enqueue_websocket_lane_command(
+    lane: &WebSocketIsolatedCommandLane,
+    text: String,
+    dispatch_deadline: tokio::time::Instant,
+    operator_mutation: Option<WebSocketOperatorMutationGuard>,
+    live_control_order: Option<WebSocketOperatorMutationGuard>,
+    dispatch_fence: Option<WebSocketCommandDispatchFence>,
+) -> Result<(), ServerResponse> {
+    let command_id = websocket_command_id(text.as_str());
+    let account_refresh = lane.kind == WebSocketIsolatedCommandLaneKind::AccountMaintenance
+        && serde_json::from_str::<ClientCommand>(text.as_str())
+            .is_ok_and(|command| command.method == "account.refresh");
+    if account_refresh
+        && lane
+            .account_refresh_pending
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+    {
+        lane.metrics.record_rejected_before_dispatch();
+        return Err(lane.duplicate_account_refresh_error(command_id));
+    }
+    let account_refresh_pending = account_refresh.then(|| lane.account_refresh_pending.clone());
+    let capacity_permit = match lane.capacity.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            if let Some(pending) = account_refresh_pending {
+                pending.store(false, std::sync::atomic::Ordering::Release);
+            }
+            lane.metrics.record_rejected_before_dispatch();
+            return Err(lane.full_error(command_id));
+        }
+    };
+    let queue_ticket = lane.metrics.record_enqueue();
+    let dispatch_deadline = dispatch_deadline.min(tokio::time::Instant::now() + lane.max_queue_age);
+    let queued = WebSocketQueuedLaneCommand {
+        command_id: command_id.clone(),
+        text,
+        dispatch_deadline,
+        queue_ticket,
+        dispatch_fence,
+        _admission: WebSocketLaneAdmissionGuard {
+            _capacity_permit: capacity_permit,
+            account_refresh_pending,
+            _operator_mutation: operator_mutation,
+            live_control_order,
+        },
+    };
+    match lane.sender.try_send(queued) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let queued = error.into_inner();
+            lane.metrics.record_dispatch(queued.queue_ticket);
+            lane.metrics.record_rejected_before_dispatch();
+            drop(queued);
+            Err(lane.full_error(command_id))
+        }
+    }
+}
+
+async fn wait_for_websocket_lane_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn wait_for_websocket_dispatch_fence(
+    dispatch_fence: Option<WebSocketCommandDispatchFence>,
+    dispatch_deadline: tokio::time::Instant,
+) -> bool {
+    match dispatch_fence {
+        Some(WebSocketCommandDispatchFence::Bounded(fence)) => {
+            tokio::time::timeout_at(dispatch_deadline, fence.wait())
+                .await
+                .is_ok()
+        }
+        Some(WebSocketCommandDispatchFence::PriorSessionStart(fence)) => {
+            fence.wait().await;
+            true
+        }
+        None => true,
+    }
+}
+
+#[derive(Clone)]
+struct WebSocketCommandLaneWorkerContext {
+    state: AppState,
+    outgoing: mpsc::Sender<Message>,
+    reliable_metrics: TrackedWebSocketQueueMetrics,
+    slow_pressure: WebSocketSlowPressureSignal,
+    command_handler: WebSocketCommandHandler,
+}
+
+async fn run_websocket_command_lane_worker(
+    mut commands: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    max_concurrency: usize,
+    metrics: TrackedWebSocketCommandLaneMetrics,
+    context: WebSocketCommandLaneWorkerContext,
+) {
+    let mut pending = std::collections::VecDeque::<WebSocketQueuedLaneCommand>::new();
+    let mut active = tokio::task::JoinSet::new();
+    let mut accepting = true;
+
+    loop {
+        while active.len() < max_concurrency {
+            let Some(front) = pending.front() else {
+                break;
+            };
+            if front.dispatch_deadline <= tokio::time::Instant::now() {
+                let expired = pending.pop_front().expect("lane front exists");
+                let WebSocketQueuedLaneCommand {
+                    command_id,
+                    queue_ticket,
+                    _admission,
+                    ..
+                } = expired;
+                metrics.record_dispatch(queue_ticket);
+                metrics.record_expired_before_dispatch();
+                let response = ServerResponse::error(
+                    command_id,
+                    "command-expired-before-dispatch",
+                    "The command expired in its lane before dispatch and was not applied.",
+                );
+                drop(_admission);
+                let _ = queue_websocket_response(
+                    &context.outgoing,
+                    &context.reliable_metrics,
+                    &context.slow_pressure,
+                    response,
+                )
+                .await;
+                continue;
+            }
+
+            let command = pending.pop_front().expect("lane front exists");
+            metrics.record_dispatch(command.queue_ticket);
+            let command_state = context.state.clone();
+            let response_tx = context.outgoing.clone();
+            let response_metrics = context.reliable_metrics.clone();
+            let response_pressure = context.slow_pressure.clone();
+            let handler = context.command_handler.clone();
+            let lane_metrics = metrics.clone();
+            active.spawn(async move {
+                let WebSocketQueuedLaneCommand {
+                    command_id,
+                    text,
+                    dispatch_deadline,
+                    dispatch_fence,
+                    _admission,
+                    ..
+                } = command;
+                let order_ready = match _admission.live_control_order.as_ref() {
+                    Some(order) => {
+                        tokio::time::timeout_at(dispatch_deadline, order.wait_for_turn())
+                            .await
+                            .is_ok()
+                    }
+                    None => true,
+                };
+                let fence_ready = if order_ready {
+                    wait_for_websocket_dispatch_fence(dispatch_fence, dispatch_deadline).await
+                } else {
+                    false
+                };
+                let response = if fence_ready {
+                    handler(command_state, text).await
+                } else {
+                    lane_metrics.record_expired_before_dispatch();
+                    ServerResponse::error(
+                        command_id,
+                        "command-expired-before-dispatch",
+                        "The command expired while awaiting its reconciliation fence and was not applied.",
+                    )
+                };
+                // Application completion, rather than a slow peer's response
+                // queue, is the fence edge observed by Stop/reconciliation.
+                drop(_admission);
+                let _ = queue_websocket_response(
+                    &response_tx,
+                    &response_metrics,
+                    &response_pressure,
+                    response,
+                )
+                .await;
+            });
+        }
+
+        if !accepting && pending.is_empty() && active.is_empty() {
+            break;
+        }
+        let next_deadline = pending.front().map(|command| command.dispatch_deadline);
+        tokio::select! {
+            incoming = commands.recv(), if accepting => {
+                match incoming {
+                    Some(command) => pending.push_back(command),
+                    None => accepting = false,
+                }
+            }
+            completed = active.join_next(), if !active.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    tracing::warn!("WebSocket command lane task failed: {error}");
+                }
+            }
+            _ = wait_for_websocket_lane_deadline(next_deadline) => {
+                while pending
+                    .front()
+                    .is_some_and(|command| command.dispatch_deadline <= tokio::time::Instant::now())
+                {
+                    let expired = pending.pop_front().expect("expired lane front exists");
+                    let WebSocketQueuedLaneCommand {
+                        command_id,
+                        queue_ticket,
+                        _admission,
+                        ..
+                    } = expired;
+                    metrics.record_dispatch(queue_ticket);
+                    metrics.record_expired_before_dispatch();
+                    let response = ServerResponse::error(
+                        command_id,
+                        "command-expired-before-dispatch",
+                        "The command expired in its lane before dispatch and was not applied.",
+                    );
+                    drop(_admission);
+                    let _ = queue_websocket_response(
+                        &context.outgoing,
+                        &context.reliable_metrics,
+                        &context.slow_pressure,
+                        response,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+}
+
+fn spawn_websocket_command_lane_worker(
+    workers: &mut tokio::task::JoinSet<()>,
+    commands: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    max_concurrency: usize,
+    metrics: TrackedWebSocketCommandLaneMetrics,
+    context: &WebSocketCommandLaneWorkerContext,
+) {
+    workers.spawn(run_websocket_command_lane_worker(
+        commands,
+        max_concurrency,
+        metrics,
+        context.clone(),
+    ));
+}
+
 async fn run_websocket_command_dispatcher(
     state: AppState,
-    mut commands: mpsc::Receiver<String>,
+    mut commands: mpsc::Receiver<WebSocketAcceptedCommand>,
     command_metrics: TrackedWebSocketQueueMetrics,
+    outgoing: mpsc::Sender<Message>,
+    reliable_metrics: TrackedWebSocketQueueMetrics,
+    slow_pressure: WebSocketSlowPressureSignal,
+    command_handler: WebSocketCommandHandler,
+) {
+    let (ordered_tx, ordered_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+    let ordered_task = tokio::spawn(run_websocket_ordered_command_dispatcher(
+        state.clone(),
+        ordered_rx,
+        outgoing.clone(),
+        reliable_metrics.clone(),
+        slow_pressure.clone(),
+        command_handler.clone(),
+    ));
+    let (lanes, lane_receivers) =
+        WebSocketIsolatedCommandLanes::new(&state.websocket_transport_metrics);
+    let mut lane_workers = tokio::task::JoinSet::new();
+    let lane_worker_context = WebSocketCommandLaneWorkerContext {
+        state: state.clone(),
+        outgoing: outgoing.clone(),
+        reliable_metrics: reliable_metrics.clone(),
+        slow_pressure: slow_pressure.clone(),
+        command_handler: command_handler.clone(),
+    };
+    spawn_websocket_command_lane_worker(
+        &mut lane_workers,
+        lane_receivers.observation,
+        WEBSOCKET_READ_ONLY_CONCURRENCY,
+        lanes.observation.metrics.clone(),
+        &lane_worker_context,
+    );
+    spawn_websocket_command_lane_worker(
+        &mut lane_workers,
+        lane_receivers.account,
+        1,
+        lanes.account.metrics.clone(),
+        &lane_worker_context,
+    );
+    spawn_websocket_command_lane_worker(
+        &mut lane_workers,
+        lane_receivers.durable_chat,
+        1,
+        lanes.durable_chat.metrics.clone(),
+        &lane_worker_context,
+    );
+    spawn_websocket_command_lane_worker(
+        &mut lane_workers,
+        lane_receivers.live_control,
+        1,
+        lanes.live_control.metrics.clone(),
+        &lane_worker_context,
+    );
+    spawn_websocket_command_lane_worker(
+        &mut lane_workers,
+        lane_receivers.stop,
+        1,
+        lanes.stop.metrics.clone(),
+        &lane_worker_context,
+    );
+
+    while let Some(accepted) = commands.recv().await {
+        command_metrics.record_dequeue_oldest();
+        let WebSocketAcceptedCommand {
+            text,
+            dispatch_deadline,
+            operator_mutation,
+            live_control_order,
+            session_start,
+            dispatch_fence,
+            ..
+        } = accepted;
+        if dispatch_deadline <= tokio::time::Instant::now() {
+            let response = ServerResponse::error(
+                websocket_command_id(text.as_str()),
+                "command-expired-before-dispatch",
+                "The command expired in its connection queue before dispatch and was not applied.",
+            );
+            drop(operator_mutation);
+            drop(live_control_order);
+            drop(session_start);
+            drop(dispatch_fence);
+            if !queue_websocket_response(&outgoing, &reliable_metrics, &slow_pressure, response)
+                .await
+            {
+                break;
+            }
+            continue;
+        }
+
+        if websocket_command_is_read_only(text.as_str()) {
+            if let Err(response) = try_enqueue_websocket_lane_command(
+                &lanes.observation,
+                text,
+                dispatch_deadline,
+                operator_mutation,
+                live_control_order,
+                dispatch_fence,
+            ) && !queue_websocket_response(
+                &outgoing,
+                &reliable_metrics,
+                &slow_pressure,
+                response,
+            )
+            .await
+            {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(kind) = websocket_isolated_command_lane(text.as_str()) {
+            let lane = lanes.get(kind);
+            if let Err(response) = try_enqueue_websocket_lane_command(
+                &lane,
+                text,
+                dispatch_deadline,
+                operator_mutation,
+                live_control_order,
+                dispatch_fence,
+            ) && !queue_websocket_response(
+                &outgoing,
+                &reliable_metrics,
+                &slow_pressure,
+                response,
+            )
+            .await
+            {
+                break;
+            }
+            continue;
+        }
+
+        let ordered_command = WebSocketOrderedCommand {
+            dispatch_deadline,
+            dispatch_fence,
+            _operator_mutation: operator_mutation,
+            _session_start: session_start,
+            text,
+        };
+        if let Err(error) = ordered_tx.try_send(ordered_command) {
+            let command = match error {
+                mpsc::error::TrySendError::Full(command)
+                | mpsc::error::TrySendError::Closed(command) => command,
+            };
+            let command_id = websocket_command_id(command.text.as_str());
+            // Rejected work is definitely not applied, so release its global
+            // completion fences before awaiting a potentially slow peer.
+            drop(command);
+            let response = ServerResponse::error(
+                command_id,
+                "command-lane-full",
+                "The ordered command lane is full; this command was not applied.",
+            );
+            if !queue_websocket_response(&outgoing, &reliable_metrics, &slow_pressure, response)
+                .await
+            {
+                break;
+            }
+        }
+    }
+
+    drop(ordered_tx);
+    drop(lanes);
+    if let Err(error) = ordered_task.await {
+        tracing::warn!("WebSocket ordered command dispatcher failed: {error}");
+    }
+    while let Some(completed) = lane_workers.join_next().await {
+        if let Err(error) = completed {
+            tracing::warn!("WebSocket command lane worker failed: {error}");
+        }
+    }
+}
+
+async fn run_websocket_ordered_command_dispatcher(
+    state: AppState,
+    mut commands: mpsc::Receiver<WebSocketOrderedCommand>,
     outgoing: mpsc::Sender<Message>,
     reliable_metrics: TrackedWebSocketQueueMetrics,
     slow_pressure: WebSocketSlowPressureSignal,
@@ -4018,8 +4810,44 @@ async fn run_websocket_command_dispatcher(
     // duration, the 2026-07-16 owner incident).
     let mut stateful_task: Option<tokio::task::JoinHandle<bool>> = None;
 
-    while let Some(text) = commands.recv().await {
-        command_metrics.record_dequeue_oldest();
+    while let Some(command) = commands.recv().await {
+        let WebSocketOrderedCommand {
+            text,
+            dispatch_deadline,
+            dispatch_fence,
+            _operator_mutation,
+            _session_start,
+        } = command;
+        if dispatch_deadline <= tokio::time::Instant::now() {
+            let response = ServerResponse::error(
+                websocket_command_id(text.as_str()),
+                "command-expired-before-dispatch",
+                "The ordered command expired before dispatch and was not applied.",
+            );
+            drop(_operator_mutation);
+            drop(_session_start);
+            if !queue_websocket_response(&outgoing, &reliable_metrics, &slow_pressure, response)
+                .await
+            {
+                break;
+            }
+            continue;
+        }
+        if !wait_for_websocket_dispatch_fence(dispatch_fence, dispatch_deadline).await {
+            let response = ServerResponse::error(
+                websocket_command_id(text.as_str()),
+                "command-expired-before-dispatch",
+                "The command expired while awaiting its reconciliation fence and was not applied.",
+            );
+            drop(_operator_mutation);
+            drop(_session_start);
+            if !queue_websocket_response(&outgoing, &reliable_metrics, &slow_pressure, response)
+                .await
+            {
+                break;
+            }
+            continue;
+        }
         reap_websocket_audio_processing_commands(&mut audio_processing_tasks);
         while read_only_tasks.try_join_next().is_some() {}
         // Read-only queries answer concurrently with ANY in-flight command —
@@ -4038,6 +4866,8 @@ async fn run_websocket_command_dispatcher(
             let handler = command_handler.clone();
             read_only_tasks.spawn(async move {
                 let response = handler(command_state, text).await;
+                drop(_operator_mutation);
+                drop(_session_start);
                 let _ = queue_websocket_response(
                     &response_tx,
                     &response_metrics,
@@ -4063,6 +4893,8 @@ async fn run_websocket_command_dispatcher(
             let handler = command_handler.clone();
             layout_tasks.spawn(async move {
                 let response = handler(command_state, text).await;
+                drop(_operator_mutation);
+                drop(_session_start);
                 let _ = queue_websocket_response(
                     &response_tx,
                     &response_metrics,
@@ -4100,6 +4932,8 @@ async fn run_websocket_command_dispatcher(
             let handler = command_handler.clone();
             audio_processing_tasks.spawn(async move {
                 let response = handler(command_state, text).await;
+                drop(_operator_mutation);
+                drop(_session_start);
                 let _ = queue_websocket_response(
                     &response_tx,
                     &response_metrics,
@@ -4128,6 +4962,8 @@ async fn run_websocket_command_dispatcher(
         let handler = command_handler.clone();
         stateful_task = Some(tokio::spawn(async move {
             let response = handler(command_state, text).await;
+            drop(_operator_mutation);
+            drop(_session_start);
             queue_websocket_response(
                 &response_tx,
                 &response_metrics,
@@ -4500,7 +5336,8 @@ async fn websocket_session_with_handler_role_and_redaction(
         redact_renderer_paths,
     ));
 
-    let (command_tx, command_rx) = mpsc::channel::<String>(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+    let (command_tx, command_rx) =
+        mpsc::channel::<WebSocketAcceptedCommand>(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
     let command_dispatcher_task = tokio::spawn(run_websocket_command_dispatcher(
         state.clone(),
         command_rx,
@@ -4566,9 +5403,8 @@ async fn websocket_session_with_handler_role_and_redaction(
                     continue;
                 }
 
-                if !send_tracked_websocket_item(&command_tx, &command_metrics, text.to_string())
-                    .await
-                {
+                let accepted = accept_websocket_command(&state, text.to_string());
+                if !send_tracked_websocket_item(&command_tx, &command_metrics, accepted).await {
                     break;
                 }
             }
@@ -4613,6 +5449,144 @@ async fn websocket_session_with_handler_role_and_redaction(
         telemetry_evicted,
         "WebSocket telemetry queue closed."
     );
+}
+
+async fn apply_active_screen_output(
+    state: &AppState,
+    active_screen: Option<protocol::StreamScreen>,
+) -> Result<()> {
+    {
+        let recording = state.recording.lock().await;
+        if let Some(recording) = recording.as_ref() {
+            recording.set_active_screen_path(
+                active_screen
+                    .as_ref()
+                    .map(|screen| screen.image_path.as_str()),
+            )?;
+        }
+    }
+    // Standby preview uses the same compositor. Publish the takeover there
+    // before changing the authoritative persisted pointer.
+    update_compositor_active_screen(state, active_screen).await;
+    Ok(())
+}
+
+async fn apply_output_then_persist<T, ApplyOutput, Persist, RollbackOutput, RollbackFuture>(
+    apply_output: ApplyOutput,
+    persist: Persist,
+    rollback_output: RollbackOutput,
+) -> Result<T>
+where
+    ApplyOutput: std::future::Future<Output = Result<()>>,
+    Persist: FnOnce() -> Result<T>,
+    RollbackOutput: FnOnce() -> RollbackFuture,
+    RollbackFuture: std::future::Future<Output = Result<()>>,
+{
+    // The failure mode this ordering prevents is subtle but dangerous: DB was
+    // previously changed first, then a FIFO/image-path failure left
+    // screens.active claiming a takeover that never reached the output.
+    apply_output.await?;
+    match persist() {
+        Ok(value) => Ok(value),
+        Err(persist_error) => match rollback_output().await {
+            Ok(()) => Err(persist_error),
+            Err(rollback_error) => Err(anyhow::anyhow!(
+                "{persist_error}; output rollback also failed: {rollback_error}"
+            )),
+        },
+    }
+}
+
+async fn commit_active_screen_transition<T, Persist>(
+    state: &AppState,
+    next: Option<protocol::StreamScreen>,
+    persist: Persist,
+) -> Result<T>
+where
+    Persist: FnOnce() -> Result<T>,
+{
+    let _transition = state.active_screen_transition.lock().await;
+    let previous = match state.database.active_stream_screen_selection()? {
+        storage::ActiveStreamScreenSelection::Ready(screen) => Some(screen),
+        storage::ActiveStreamScreenSelection::Inactive
+        | storage::ActiveStreamScreenSelection::Unavailable { .. } => None,
+    };
+    apply_output_then_persist(apply_active_screen_output(state, next), persist, || {
+        apply_active_screen_output(state, previous)
+    })
+    .await
+}
+
+async fn delete_stream_screen_transition(state: &AppState, screen_id: &str) -> Result<()> {
+    let _transition = state.active_screen_transition.lock().await;
+    let (deleting_active, previous) = match state.database.active_stream_screen_selection()? {
+        storage::ActiveStreamScreenSelection::Inactive => (false, None),
+        storage::ActiveStreamScreenSelection::Ready(screen) => {
+            (screen.id == screen_id, Some(screen))
+        }
+        storage::ActiveStreamScreenSelection::Unavailable {
+            screen_id: active_screen_id,
+        } => (active_screen_id == screen_id, None),
+    };
+    if !deleting_active {
+        return state.database.delete_stream_screen(screen_id);
+    }
+    apply_output_then_persist(
+        apply_active_screen_output(state, None),
+        || state.database.delete_stream_screen(screen_id),
+        || apply_active_screen_output(state, previous),
+    )
+    .await
+}
+
+async fn resolve_active_screen_read<ClearOutput, ClearPointer>(
+    selection: storage::ActiveStreamScreenSelection,
+    clear_output: ClearOutput,
+    clear_pointer: ClearPointer,
+) -> Result<Option<protocol::StreamScreen>>
+where
+    ClearOutput: std::future::Future<Output = Result<()>>,
+    ClearPointer: FnOnce() -> Result<()>,
+{
+    match selection {
+        storage::ActiveStreamScreenSelection::Inactive => Ok(None),
+        storage::ActiveStreamScreenSelection::Ready(screen) => Ok(Some(screen)),
+        storage::ActiveStreamScreenSelection::Unavailable { screen_id } => {
+            clear_output.await.with_context(|| {
+                format!("Could not clear unavailable active Screen {screen_id} from output")
+            })?;
+            // Do not restore an invalid/tampered path if persistence fails. The
+            // output is safely clear and the explicit error lets the next read
+            // retry retiring the stale pointer.
+            clear_pointer().with_context(|| {
+                format!(
+                    "Active Screen {screen_id} output was cleared, but its persisted pointer could not be retired"
+                )
+            })?;
+            Ok(None)
+        }
+    }
+}
+
+async fn read_active_screen_transition(state: &AppState) -> Result<Option<protocol::StreamScreen>> {
+    let _transition = state.active_screen_transition.lock().await;
+    let selection = state.database.active_stream_screen_selection()?;
+    let retired_unavailable = matches!(
+        &selection,
+        storage::ActiveStreamScreenSelection::Unavailable { .. }
+    );
+    let active =
+        resolve_active_screen_read(selection, apply_active_screen_output(state, None), || {
+            state.database.clear_active_stream_screen()
+        })
+        .await?;
+    if retired_unavailable {
+        state.emit_event(
+            "screens.active.changed",
+            Option::<protocol::StreamScreen>::None,
+        );
+    }
+    Ok(active)
 }
 
 #[cfg(test)]
@@ -4843,6 +5817,70 @@ async fn handle_text_message_with_role(
     }
 
     let mut response = match command.method.as_str() {
+        #[cfg(debug_assertions)]
+        COMMAND_LANE_SMOKE_BLOCK_METHOD => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The command-lane blocker does not accept parameters.",
+                )
+            } else {
+                match state.command_lane_smoke_blocker.block().await {
+                    Ok(generation) => ServerResponse::ok(
+                        command.id,
+                        serde_json::json!({ "generation": generation, "released": true }),
+                    ),
+                    Err(active_generation) => ServerResponse::error(
+                        command.id,
+                        "command-lane-smoke-blocker-active",
+                        format!(
+                            "Command-lane smoke blocker generation {active_generation} is already active."
+                        ),
+                    ),
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        COMMAND_LANE_SMOKE_STATUS_METHOD => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The command-lane blocker status does not accept parameters.",
+                )
+            } else {
+                let (active, generation, active_generation) =
+                    state.command_lane_smoke_blocker.status();
+                ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({
+                        "active": active,
+                        "generation": generation,
+                        "activeGeneration": active_generation,
+                    }),
+                )
+            }
+        }
+        #[cfg(debug_assertions)]
+        COMMAND_LANE_SMOKE_RELEASE_METHOD => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The command-lane blocker release does not accept parameters.",
+                )
+            } else {
+                let released_generation = state.command_lane_smoke_blocker.release();
+                ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({
+                        "released": released_generation.is_some(),
+                        "generation": released_generation,
+                    }),
+                )
+            }
+        }
         "resource.capability.issue" => {
             match serde_json::from_value::<resource_authority::IssueResourceCapabilityParams>(
                 command.params,
@@ -4998,7 +6036,17 @@ async fn handle_text_message_with_role(
             let account_transition = state.account_auth_transition.lock().await;
             let mut clear_result = None;
             clear_account_credentials_after_caption_shutdown(state, || {
-                clear_result = Some(account::clear_persisted_account_and_advance_intent());
+                clear_result = Some(clear_account_credentials_fail_closed(
+                    || {
+                        if entitlements::clear_account_entitlements() {
+                            state.emit_event(
+                                "entitlements.updated",
+                                entitlements::current_entitlements(),
+                            );
+                        }
+                    },
+                    account::clear_persisted_account_and_advance_intent,
+                ));
             })
             .await;
             if let Some(Err(error)) = clear_result {
@@ -5007,11 +6055,6 @@ async fn handle_text_message_with_role(
                     "account-sign-out-persist-failed",
                     error.to_string(),
                 );
-            }
-            // The account no longer vouches for premium — drop hydrated
-            // entitlements with it (multistream gate closes immediately).
-            if entitlements::clear_account_entitlements() {
-                state.emit_event("entitlements.updated", entitlements::current_entitlements());
             }
             let signed_out = account::signed_out_account();
             *state.account_session.lock().await = Some(signed_out.clone());
@@ -5056,12 +6099,78 @@ async fn handle_text_message_with_role(
             }
         }
         "account.refresh" => {
+            // Capture generation + token atomically with account transitions,
+            // release the lock for bounded network I/O, then reacquire it for
+            // compare+commit. A stale refresh can never undo sign-out or
+            // replace a newer sign-in.
+            let captured = {
+                let account_transition = state.account_auth_transition.lock().await;
+                let captured = state
+                    .account_refresh_generation
+                    .fetch_update(
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                        |generation| generation.checked_add(1),
+                    )
+                    .map(|previous| previous + 1)
+                    .map_err(|_| anyhow::anyhow!("Account refresh generation was exhausted."))
+                    .and_then(account::capture_account_refresh_identity);
+                drop(account_transition);
+                captured
+            };
+            let prepared = match captured {
+                Ok(identity) => Some(
+                    tokio::time::timeout(
+                        ACCOUNT_REFRESH_TIMEOUT,
+                        account::prepare_account_refresh(identity),
+                    )
+                    .await,
+                ),
+                Err(error) => {
+                    tracing::warn!("Account refresh identity capture failed: {error:#}");
+                    None
+                }
+            };
             let account_transition = state.account_auth_transition.lock().await;
-            let resolved = account::refresh_account().await;
+            let current = {
+                let session = state.account_session.lock().await;
+                account::current_account(session.as_ref())
+            };
+            let (resolved, committed) = match prepared {
+                Some(Ok(prepared)) => match account::commit_account_refresh(
+                    prepared,
+                    state
+                        .account_refresh_generation
+                        .load(std::sync::atomic::Ordering::Acquire),
+                    || {
+                        // This callback runs inside the Unauthorized commit before
+                        // durable credentials are deleted. Keep it synchronous and
+                        // under account_auth_transition: premium gates read the
+                        // hydration directly, so spawning the revocation would
+                        // expose a SignedOut/Premium race.
+                        if entitlements::clear_account_entitlements() {
+                            state.emit_event(
+                                "entitlements.updated",
+                                entitlements::current_entitlements(),
+                            );
+                        }
+                    },
+                ) {
+                    Some(resolved) => (resolved, true),
+                    None => (current, false),
+                },
+                Some(Err(_)) => {
+                    tracing::warn!("Account refresh exceeded its bounded network deadline.");
+                    (current, false)
+                }
+                None => (current, false),
+            };
             *state.account_session.lock().await = Some(resolved.clone());
             drop(account_transition);
-            let entitlement_state = state.clone();
-            tokio::spawn(async move { refresh_account_entitlements(&entitlement_state).await });
+            if committed {
+                let entitlement_state = state.clone();
+                tokio::spawn(async move { refresh_account_entitlements(&entitlement_state).await });
+            }
             ServerResponse::ok(command.id, resolved)
         }
         "entitlements.get" => ServerResponse::ok(command.id, entitlements::current_entitlements()),
@@ -6953,7 +8062,7 @@ async fn handle_text_message_with_role(
                 ServerResponse::error(command.id, "screens-list-failed", error.to_string())
             }
         },
-        "screens.active" => match state.database.active_stream_screen() {
+        "screens.active" => match read_active_screen_transition(state).await {
             Ok(screen) => ServerResponse::ok(command.id, screen),
             Err(error) => {
                 ServerResponse::error(command.id, "screen-active-failed", error.to_string())
@@ -7021,30 +8130,31 @@ async fn handle_text_message_with_role(
         }
         "screens.delete" => {
             match serde_json::from_value::<protocol::ScreenIdParams>(command.params) {
-                Ok(params) => match state.database.delete_stream_screen(&params.screen_id) {
-                    Ok(()) => match state.database.list_stream_screens() {
-                        Ok(screens) => {
-                            state.emit_event("screens.changed", screens.clone());
-                            if let Ok(active) = state.database.active_stream_screen() {
-                                if active.is_none()
-                                    && let Some(recording) = state.recording.lock().await.as_ref()
-                                {
-                                    let _ = recording.set_active_screen_path(None);
+                Ok(params) => {
+                    let delete_result =
+                        delete_stream_screen_transition(state, &params.screen_id).await;
+                    match delete_result {
+                        Ok(()) => match state.database.list_stream_screens() {
+                            Ok(screens) => {
+                                state.emit_event("screens.changed", screens.clone());
+                                if let Ok(active) = state.database.active_stream_screen() {
+                                    state.emit_event("screens.active.changed", active);
                                 }
-                                state.emit_event("screens.active.changed", active);
+                                ServerResponse::ok(command.id, screens)
                             }
-                            ServerResponse::ok(command.id, screens)
-                        }
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "screens-list-failed",
+                                error.to_string(),
+                            ),
+                        },
                         Err(error) => ServerResponse::error(
                             command.id,
-                            "screens-list-failed",
+                            "screen-delete-failed",
                             error.to_string(),
                         ),
-                    },
-                    Err(error) => {
-                        ServerResponse::error(command.id, "screen-delete-failed", error.to_string())
                     }
-                },
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -7070,62 +8180,65 @@ async fn handle_text_message_with_role(
         }
         "screens.activate" => {
             match serde_json::from_value::<protocol::ScreenIdParams>(command.params) {
-                Ok(params) => match state.database.activate_stream_screen(&params.screen_id) {
-                    Ok(screen) => {
-                        if let Some(recording) = state.recording.lock().await.as_ref()
-                            && let Err(error) =
-                                recording.set_active_screen_path(Some(&screen.image_path))
-                        {
+                Ok(params) => {
+                    let screen = match state.database.stream_screen_by_id(&params.screen_id) {
+                        Ok(screen) if screen.status == protocol::StreamScreenStatus::Ready => {
+                            screen
+                        }
+                        Ok(_) => {
+                            return ServerResponse::error(
+                                command.id,
+                                "screen-activate-failed",
+                                "Screen image is missing and cannot be activated.",
+                            );
+                        }
+                        Err(error) => {
                             return ServerResponse::error(
                                 command.id,
                                 "screen-activate-failed",
                                 error.to_string(),
                             );
                         }
-                        // Always re-push the compositor scene: the STANDBY
-                        // preview uses the same compositor, so activation must
-                        // change what the user sees immediately, not only once
-                        // a recording's encoder bridge is running (no-op when
-                        // no scene exists yet).
-                        update_compositor_active_screen(state, Some(screen.clone())).await;
-                        state.emit_event("screens.active.changed", Some(screen.clone()));
-                        ServerResponse::ok(command.id, screen)
+                    };
+                    match commit_active_screen_transition(state, Some(screen.clone()), || {
+                        state.database.activate_stream_screen(&params.screen_id)
+                    })
+                    .await
+                    {
+                        Ok(screen) => {
+                            state.emit_event("screens.active.changed", Some(screen.clone()));
+                            ServerResponse::ok(command.id, screen)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "screen-activate-failed",
+                            error.to_string(),
+                        ),
                     }
-                    Err(error) => ServerResponse::error(
-                        command.id,
-                        "screen-activate-failed",
-                        error.to_string(),
-                    ),
-                },
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
         }
-        "screens.clear" => match state.database.clear_active_stream_screen() {
-            Ok(()) => {
-                if let Some(recording) = state.recording.lock().await.as_ref()
-                    && let Err(error) = recording.set_active_screen_path(None)
-                {
-                    return ServerResponse::error(
-                        command.id,
-                        "screen-clear-failed",
-                        error.to_string(),
+        "screens.clear" => {
+            match commit_active_screen_transition(state, None, || {
+                state.database.clear_active_stream_screen()
+            })
+            .await
+            {
+                Ok(()) => {
+                    state.emit_event(
+                        "screens.active.changed",
+                        Option::<protocol::StreamScreen>::None,
                     );
+                    ServerResponse::ok(command.id, Option::<protocol::StreamScreen>::None)
                 }
-                // Mirror screens.activate: the standby preview must drop the
-                // takeover the moment it is deactivated.
-                update_compositor_active_screen(state, None).await;
-                state.emit_event(
-                    "screens.active.changed",
-                    Option::<protocol::StreamScreen>::None,
-                );
-                ServerResponse::ok(command.id, Option::<protocol::StreamScreen>::None)
+                Err(error) => {
+                    ServerResponse::error(command.id, "screen-clear-failed", error.to_string())
+                }
             }
-            Err(error) => {
-                ServerResponse::error(command.id, "screen-clear-failed", error.to_string())
-            }
-        },
+        }
         "session.remux_mp4" => {
             match serde_json::from_value::<protocol::RemuxSessionParams>(command.params) {
                 Ok(params)
@@ -7414,6 +8527,17 @@ async fn clear_account_credentials_after_caption_shutdown(
     captions::stop_captions_for_sign_out(state, clear_credentials).await;
 }
 
+fn clear_account_credentials_fail_closed<T>(
+    revoke_entitlements_and_emit_update: impl FnOnce(),
+    clear_credentials: impl FnOnce() -> T,
+) -> T {
+    // Premium gates read the in-memory hydration without taking the async
+    // account-transition lock. Revoke first so another runtime thread cannot
+    // authorize Premium after durable credentials have been deleted.
+    revoke_entitlements_and_emit_update();
+    clear_credentials()
+}
+
 fn stored_ai_session_token() -> Result<String> {
     account::stored_session_token().context("Sign in to use cloud AI.")
 }
@@ -7429,52 +8553,170 @@ async fn get_ai_capabilities() -> Result<protocol::AiCapabilities> {
 /// a network failure keeps the last verified hydration (bounded by the 24h
 /// staleness ceiling in entitlements.rs) so a flaky connection cannot flap a
 /// paying user back to basic mid-day. Emits `entitlements.updated` on change.
-async fn refresh_account_entitlements(state: &AppState) {
-    let changed = match account::stored_session_token() {
-        None => entitlements::clear_account_entitlements(),
-        Some(token) => match videorc_api::VideorcApiClient::new() {
-            Ok(client) => match client.get_ai_capabilities(&token).await {
-                Ok(capabilities) => match capabilities.entitlement_token.as_deref() {
-                    // Prefer the signed token: verified locally, persisted for
-                    // offline grace until its exp.
-                    Some(entitlement_token) => {
-                        match entitlements::hydrate_account_entitlements_from_token(
-                            entitlement_token,
-                        ) {
-                            Ok(changed) => {
-                                account::persist_entitlement_token(entitlement_token);
-                                changed
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    "Entitlement token failed verification; falling back to the \
-                                     unsigned entitlement: {error:#}"
-                                );
-                                entitlements::hydrate_account_entitlements(
-                                    capabilities.entitlement.is_premium,
-                                )
-                            }
-                        }
-                    }
-                    // Older web deploy / unconfigured signing key: unsigned
-                    // boolean with its short staleness ceiling.
-                    None => entitlements::hydrate_account_entitlements(
-                        capabilities.entitlement.is_premium,
-                    ),
-                },
-                Err(error) => {
-                    tracing::info!(
-                        "Account entitlement refresh failed (keeping last verified): {error}"
-                    );
-                    false
-                }
-            },
-            Err(_) => false,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AccountEntitlementRefreshIdentity {
+    session_token: Option<String>,
+    sign_in_intent_generation: u64,
+    refresh_generation: u64,
+}
+
+enum PreparedAccountEntitlementRefreshOutcome {
+    NoStoredSession,
+    Capabilities(Box<protocol::AiCapabilities>),
+    KeepCached(String),
+}
+
+struct PreparedAccountEntitlementRefresh {
+    identity: AccountEntitlementRefreshIdentity,
+    outcome: PreparedAccountEntitlementRefreshOutcome,
+}
+
+/// Capture while holding `AppState.account_auth_transition`.
+fn capture_account_entitlement_refresh_identity(
+    state: &AppState,
+) -> Result<AccountEntitlementRefreshIdentity> {
+    let session_token = account::stored_session_token_result()?;
+    let sign_in_intent_generation = account::current_sign_in_intent_generation()?;
+    let refresh_generation = state
+        .account_entitlement_refresh_generation
+        .fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |generation| generation.checked_add(1),
+        )
+        .map(|previous| previous + 1)
+        .map_err(|_| anyhow::anyhow!("Account entitlement refresh generation was exhausted."))?;
+    Ok(AccountEntitlementRefreshIdentity {
+        session_token,
+        sign_in_intent_generation,
+        refresh_generation,
+    })
+}
+
+/// Read while holding `AppState.account_auth_transition` immediately before
+/// hydration/persistence.
+fn current_account_entitlement_refresh_identity(
+    state: &AppState,
+) -> Result<AccountEntitlementRefreshIdentity> {
+    Ok(AccountEntitlementRefreshIdentity {
+        session_token: account::stored_session_token_result()?,
+        sign_in_intent_generation: account::current_sign_in_intent_generation()?,
+        refresh_generation: state
+            .account_entitlement_refresh_generation
+            .load(std::sync::atomic::Ordering::Acquire),
+    })
+}
+
+async fn prepare_account_entitlement_refresh<Request, RequestFuture>(
+    identity: AccountEntitlementRefreshIdentity,
+    request: Request,
+) -> PreparedAccountEntitlementRefresh
+where
+    Request: FnOnce(String) -> RequestFuture,
+    RequestFuture: std::future::Future<Output = Result<protocol::AiCapabilities>>,
+{
+    let outcome = match identity.session_token.clone() {
+        None => PreparedAccountEntitlementRefreshOutcome::NoStoredSession,
+        Some(token) => match request(token).await {
+            Ok(capabilities) => {
+                PreparedAccountEntitlementRefreshOutcome::Capabilities(Box::new(capabilities))
+            }
+            Err(error) => PreparedAccountEntitlementRefreshOutcome::KeepCached(error.to_string()),
         },
     };
+    PreparedAccountEntitlementRefresh { identity, outcome }
+}
+
+fn commit_account_entitlement_refresh_if_current<T>(
+    expected: &AccountEntitlementRefreshIdentity,
+    current: &AccountEntitlementRefreshIdentity,
+    commit: impl FnOnce() -> T,
+) -> Option<T> {
+    (expected == current).then(commit)
+}
+
+fn apply_prepared_account_entitlement_refresh(
+    outcome: PreparedAccountEntitlementRefreshOutcome,
+) -> bool {
+    match outcome {
+        PreparedAccountEntitlementRefreshOutcome::NoStoredSession => {
+            entitlements::clear_account_entitlements()
+        }
+        PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+            match capabilities.entitlement_token.as_deref() {
+                // Prefer the signed token: verified locally, persisted for
+                // offline grace until its exp.
+                Some(entitlement_token) => {
+                    match entitlements::hydrate_account_entitlements_from_token(entitlement_token) {
+                        Ok(changed) => {
+                            account::persist_entitlement_token(entitlement_token);
+                            changed
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "Entitlement token failed verification; falling back to the \
+                                 unsigned entitlement: {error:#}"
+                            );
+                            entitlements::hydrate_account_entitlements(
+                                capabilities.entitlement.is_premium,
+                            )
+                        }
+                    }
+                }
+                // Older web deploy / unconfigured signing key: unsigned
+                // boolean with its short staleness ceiling.
+                None => {
+                    entitlements::hydrate_account_entitlements(capabilities.entitlement.is_premium)
+                }
+            }
+        }
+        PreparedAccountEntitlementRefreshOutcome::KeepCached(error) => {
+            tracing::info!("Account entitlement refresh failed (keeping last verified): {error}");
+            false
+        }
+    }
+}
+
+async fn refresh_account_entitlements(state: &AppState) {
+    // Phase 1: token + sign-in intent + refresh generation are one identity.
+    let identity = {
+        let transition = state.account_auth_transition.lock().await;
+        let identity = capture_account_entitlement_refresh_identity(state);
+        drop(transition);
+        identity
+    };
+    let Ok(identity) = identity else {
+        tracing::warn!("Account entitlement refresh identity capture failed.");
+        return;
+    };
+    // Phase 2: no auth/entitlement mutation while network I/O is pending.
+    let prepared = prepare_account_entitlement_refresh(identity, |token| async move {
+        let client = videorc_api::VideorcApiClient::new()?;
+        client.get_ai_capabilities(&token).await
+    })
+    .await;
+    // Phase 3: compare+hydrate+persist atomically with sign-in/sign-out. A
+    // newer refresh generation also wins for the same token/account.
+    let transition = state.account_auth_transition.lock().await;
+    let changed = match current_account_entitlement_refresh_identity(state) {
+        Ok(current) => {
+            commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
+                apply_prepared_account_entitlement_refresh(prepared.outcome)
+            })
+            .unwrap_or(false)
+        }
+        Err(error) => {
+            tracing::warn!("Account entitlement refresh commit check failed: {error:#}");
+            false
+        }
+    };
+    // Publish while the auth-transition lock still orders this snapshot. A
+    // concurrent sign-out must not emit Basic and then be followed by a stale
+    // Premium event from the refresh that it superseded.
     if changed {
         state.emit_event("entitlements.updated", entitlements::current_entitlements());
     }
+    drop(transition);
 }
 
 async fn get_ai_quota() -> Result<protocol::AiQuotaStatus> {
@@ -7631,6 +8873,63 @@ mod tests {
     fn entitlement_refresh_is_bounded_below_the_rpc_deadline() {
         assert_eq!(ENTITLEMENT_REFRESH_TIMEOUT, Duration::from_secs(10));
         assert!(ENTITLEMENT_REFRESH_TIMEOUT < Duration::from_secs(30));
+        assert_eq!(ACCOUNT_REFRESH_TIMEOUT, Duration::from_secs(8));
+        assert!(ACCOUNT_REFRESH_TIMEOUT < Duration::from_secs(10));
+    }
+
+    fn entitlement_refresh_identity(
+        token: Option<&str>,
+        sign_in_intent_generation: u64,
+        refresh_generation: u64,
+    ) -> AccountEntitlementRefreshIdentity {
+        AccountEntitlementRefreshIdentity {
+            session_token: token.map(str::to_string),
+            sign_in_intent_generation,
+            refresh_generation,
+        }
+    }
+
+    #[test]
+    fn account_entitlement_refresh_completion_after_sign_out_is_stale() {
+        let expected = entitlement_refresh_identity(Some("account-a"), 7, 1);
+        let signed_out = entitlement_refresh_identity(None, 8, 1);
+        let committed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = commit_account_entitlement_refresh_if_current(&expected, &signed_out, {
+            let committed = committed.clone();
+            move || committed.store(true, std::sync::atomic::Ordering::Release)
+        });
+        assert!(result.is_none());
+        assert!(!committed.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn account_entitlement_refresh_completion_cannot_cross_a_new_sign_in() {
+        let account_a = entitlement_refresh_identity(Some("account-a"), 7, 1);
+        let account_b = entitlement_refresh_identity(Some("account-b"), 8, 2);
+        let committed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = commit_account_entitlement_refresh_if_current(&account_a, &account_b, {
+            let committed = committed.clone();
+            move || committed.store(true, std::sync::atomic::Ordering::Release)
+        });
+        assert!(result.is_none());
+        assert!(!committed.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn older_overlapping_account_entitlement_refresh_completion_cannot_win() {
+        let older = entitlement_refresh_identity(Some("account-a"), 7, 1);
+        let newer = entitlement_refresh_identity(Some("account-a"), 7, 2);
+        let older_committed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let older_result = commit_account_entitlement_refresh_if_current(&older, &newer, {
+            let older_committed = older_committed.clone();
+            move || older_committed.store(true, std::sync::atomic::Ordering::Release)
+        });
+        assert!(older_result.is_none());
+        assert!(!older_committed.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            commit_account_entitlement_refresh_if_current(&newer, &newer, || "newer"),
+            Some("newer")
+        );
     }
 
     async fn receive_tracked_json(
@@ -7643,6 +8942,256 @@ mod tests {
             panic!("expected tracked websocket text message");
         };
         serde_json::from_str(text.as_str()).expect("tracked websocket JSON")
+    }
+
+    async fn send_test_websocket_command(
+        state: &AppState,
+        sender: &mpsc::Sender<WebSocketAcceptedCommand>,
+        metrics: &TrackedWebSocketQueueMetrics,
+        text: String,
+    ) -> bool {
+        send_tracked_websocket_item(sender, metrics, accept_websocket_command(state, text)).await
+    }
+
+    async fn assert_cross_connection_websocket_command_order(
+        first_method: &'static str,
+        second_method: &'static str,
+    ) {
+        let first_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let second_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_first = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let entered = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler: WebSocketCommandHandler = {
+            let first_entered = first_entered.clone();
+            let second_entered = second_entered.clone();
+            let release_first = release_first.clone();
+            let entered = entered.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let first_entered = first_entered.clone();
+                let second_entered = second_entered.clone();
+                let release_first = release_first.clone();
+                let entered = entered.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    entered.lock().await.push(command.id.clone());
+                    if command.id == "first" {
+                        first_entered.add_permits(1);
+                        release_first.acquire().await.unwrap().forget();
+                    } else if command.id == "second" {
+                        second_entered.add_permits(1);
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (first_tx, first_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (second_tx, second_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (first_outgoing_tx, mut first_outgoing_rx) =
+            mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let (second_outgoing_tx, mut second_outgoing_rx) =
+            mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let first_connection = transport.register_connection();
+        let first_metrics = first_connection.incoming_command_queue;
+        let first_reliable_metrics = first_connection.reliable_response_queue;
+        let second_connection = transport.register_connection();
+        let second_metrics = second_connection.incoming_command_queue;
+        let second_reliable_metrics = second_connection.reliable_response_queue;
+        let (first_pressure_tx, _first_pressure_rx) = mpsc::channel(1);
+        let first_pressure = WebSocketSlowPressureSignal::new(first_pressure_tx, transport.clone());
+        let (second_pressure_tx, _second_pressure_rx) = mpsc::channel(1);
+        let second_pressure =
+            WebSocketSlowPressureSignal::new(second_pressure_tx, transport.clone());
+        let state = test_state();
+
+        // Accept the first command on the old socket before its dispatcher can
+        // dequeue it. The new socket must honor that intake order even though
+        // its own dispatcher is already running.
+        assert!(
+            send_test_websocket_command(
+                &state,
+                &first_tx,
+                &first_metrics,
+                json!({ "id": "first", "method": first_method, "params": {} }).to_string(),
+            )
+            .await
+        );
+        let second_dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            second_rx,
+            second_metrics.clone(),
+            second_outgoing_tx,
+            second_reliable_metrics.clone(),
+            second_pressure,
+            handler.clone(),
+        ));
+        assert!(
+            send_test_websocket_command(
+                &state,
+                &second_tx,
+                &second_metrics,
+                json!({ "id": "second", "method": second_method, "params": {} }).to_string(),
+            )
+            .await
+        );
+        timeout(Duration::from_secs(1), async {
+            while transport.snapshot().incoming_command_queue.current_depth != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("new socket should dequeue its command and reach the global intake fence");
+        assert!(
+            timeout(Duration::from_millis(50), second_entered.acquire())
+                .await
+                .is_err(),
+            "{second_method} must not overtake prior {first_method} accepted on another socket"
+        );
+
+        let first_dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state,
+            first_rx,
+            first_metrics.clone(),
+            first_outgoing_tx,
+            first_reliable_metrics.clone(),
+            first_pressure,
+            handler,
+        ));
+        timeout(Duration::from_secs(1), first_entered.acquire())
+            .await
+            .expect("old-socket command should dispatch once its dispatcher starts")
+            .unwrap()
+            .forget();
+        assert!(
+            timeout(Duration::from_millis(50), second_entered.acquire())
+                .await
+                .is_err(),
+            "{second_method} must wait until prior {first_method} completes"
+        );
+
+        release_first.add_permits(1);
+        timeout(Duration::from_secs(1), second_entered.acquire())
+            .await
+            .expect("new-socket command should dispatch after the prior command completes")
+            .unwrap()
+            .forget();
+        drop(first_tx);
+        drop(second_tx);
+        first_dispatcher.await.unwrap();
+        second_dispatcher.await.unwrap();
+        let first_response =
+            receive_tracked_json(&mut first_outgoing_rx, &first_reliable_metrics).await;
+        let second_response =
+            receive_tracked_json(&mut second_outgoing_rx, &second_reliable_metrics).await;
+        assert_eq!(first_response["id"], "first");
+        assert_eq!(first_response["ok"], true);
+        assert_eq!(second_response["id"], "second");
+        assert_eq!(second_response["ok"], true);
+        assert_eq!(*entered.lock().await, ["first", "second"]);
+    }
+
+    async fn assert_active_screen_output_failure_prevents_persist(operation: &str) {
+        let persisted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let rollback_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result: Result<()> = apply_output_then_persist(
+            async { Err(anyhow::anyhow!("injected {operation} output failure")) },
+            {
+                let persisted = persisted.clone();
+                move || {
+                    persisted.store(true, std::sync::atomic::Ordering::Release);
+                    Ok(())
+                }
+            },
+            {
+                let rollback_called = rollback_called.clone();
+                move || async move {
+                    rollback_called.store(true, std::sync::atomic::Ordering::Release);
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            !persisted.load(std::sync::atomic::Ordering::Acquire),
+            "{operation} must not mutate screens.active until output apply succeeds"
+        );
+        assert!(
+            !rollback_called.load(std::sync::atomic::Ordering::Acquire),
+            "there is no persisted transition to roll back when output apply fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn screens_activate_output_failure_cannot_leave_database_ahead_of_output() {
+        assert_active_screen_output_failure_prevents_persist("activate").await;
+    }
+
+    #[tokio::test]
+    async fn screens_clear_output_failure_cannot_leave_database_ahead_of_output() {
+        assert_active_screen_output_failure_prevents_persist("clear").await;
+    }
+
+    #[tokio::test]
+    async fn screens_delete_active_output_failure_cannot_leave_database_ahead_of_output() {
+        assert_active_screen_output_failure_prevents_persist("delete-active").await;
+    }
+
+    #[tokio::test]
+    async fn screens_active_reconciliation_retires_stale_output_before_returning_inactive() {
+        let stale_output = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let persisted_pointer = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let stale_output_for_clear = stale_output.clone();
+        let stale_output_for_persist = stale_output.clone();
+        let persisted_pointer_for_clear = persisted_pointer.clone();
+
+        let active = resolve_active_screen_read(
+            storage::ActiveStreamScreenSelection::Unavailable {
+                screen_id: "missing-screen".to_string(),
+            },
+            async move {
+                stale_output_for_clear.store(false, std::sync::atomic::Ordering::Release);
+                Ok(())
+            },
+            move || {
+                assert!(
+                    !stale_output_for_persist.load(std::sync::atomic::Ordering::Acquire),
+                    "screens.active must clear the stale takeover output before retiring its pointer"
+                );
+                persisted_pointer_for_clear
+                    .store(false, std::sync::atomic::Ordering::Release);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(active.is_none());
+        assert!(!stale_output.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!persisted_pointer.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn screens_active_retirement_persist_failure_remains_fail_closed_and_explicit() {
+        let stale_output = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let stale_output_for_clear = stale_output.clone();
+
+        let error = resolve_active_screen_read(
+            storage::ActiveStreamScreenSelection::Unavailable {
+                screen_id: "tampered-screen".to_string(),
+            },
+            async move {
+                stale_output_for_clear.store(false, std::sync::atomic::Ordering::Release);
+                Ok(())
+            },
+            || Err(anyhow::anyhow!("injected pointer failure")),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(!stale_output.load(std::sync::atomic::Ordering::Acquire));
+        assert!(error.to_string().contains("output was cleared"));
+        assert!(error.to_string().contains("persisted pointer"));
     }
 
     // Regression: OAuthCallbackQuery once carried rename_all = "camelCase",
@@ -8389,6 +9938,130 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn websocket_authoritative_reconciliation_reads_use_the_observation_lane() {
+        for method in [
+            "account.get",
+            "captions.status.get",
+            "comments.highlight.status",
+            "scene.get",
+            "liveChat.status",
+            "liveChat.sendOperations.list",
+            "liveChat.sendOperations.latest",
+            "screens.list",
+            "screens.active",
+            "recording.status",
+        ] {
+            let command = json!({ "id": method, "method": method, "params": {} }).to_string();
+            assert!(
+                websocket_command_is_read_only(command.as_str()),
+                "{method} must reconcile independently from mutations"
+            );
+        }
+        assert!(!websocket_command_is_read_only(
+            json!({ "id": "screen", "method": "screens.activate", "params": {} })
+                .to_string()
+                .as_str()
+        ));
+    }
+
+    #[test]
+    fn websocket_operator_commands_use_the_live_control_lane() {
+        for method in [
+            "screens.activate",
+            "screens.clear",
+            "screens.delete",
+            "captions.start",
+            "captions.stop",
+        ] {
+            let command = json!({ "id": method, "method": method, "params": {} }).to_string();
+            assert_eq!(
+                websocket_isolated_command_lane(command.as_str()),
+                Some(WebSocketIsolatedCommandLaneKind::LiveControl),
+                "{method} must not wait behind maintenance or background mutations"
+            );
+        }
+
+        for method in ["scene.layout.apply_live", "scene.layout.apply_preview"] {
+            let command = json!({
+                "id": method,
+                "method": method,
+                "params": { "intentId": 1 }
+            })
+            .to_string();
+            assert_eq!(
+                websocket_isolated_command_lane(command.as_str()),
+                None,
+                "{method} must retain the ordered dispatcher's latest-wins overlap path"
+            );
+            assert!(
+                websocket_command_may_overlap(command.as_str()),
+                "{method} with an intentId must be eligible for concurrent latest-wins dispatch"
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_provider_validation_uses_the_account_maintenance_lane() {
+        for method in [
+            "account.refresh",
+            "entitlements.refresh",
+            "platformAccounts.refresh",
+            "platformAccounts.validate",
+            COMMAND_LANE_SMOKE_BLOCK_METHOD,
+        ] {
+            let command = json!({ "id": method, "method": method, "params": {} }).to_string();
+            assert_eq!(
+                websocket_isolated_command_lane(command.as_str()),
+                Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance),
+                "{method} must not block operator commands"
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_command_lane_smoke_controls_cannot_queue_behind_the_blocker() {
+        let durable_chat = json!({
+            "id": "chat",
+            "method": "liveChat.send",
+            "params": {}
+        })
+        .to_string();
+        assert_eq!(
+            websocket_isolated_command_lane(durable_chat.as_str()),
+            Some(WebSocketIsolatedCommandLaneKind::DurableChat)
+        );
+
+        let stop = json!({ "id": "stop", "method": "session.stop", "params": {} }).to_string();
+        assert_eq!(
+            websocket_isolated_command_lane(stop.as_str()),
+            Some(WebSocketIsolatedCommandLaneKind::Stop)
+        );
+
+        let status = json!({
+            "id": "smoke-status",
+            "method": COMMAND_LANE_SMOKE_STATUS_METHOD,
+            "params": {}
+        })
+        .to_string();
+        assert!(
+            websocket_command_is_read_only(status.as_str()),
+            "the readiness handshake must stay observable while AccountMaintenance is blocked"
+        );
+
+        let release = json!({
+            "id": "smoke-release",
+            "method": COMMAND_LANE_SMOKE_RELEASE_METHOD,
+            "params": {}
+        })
+        .to_string();
+        assert_eq!(
+            websocket_isolated_command_lane(release.as_str()),
+            Some(WebSocketIsolatedCommandLaneKind::Stop),
+            "the debug release control must remain reachable through a separate bounded lane"
+        );
+    }
+
     #[tokio::test]
     async fn websocket_read_only_queries_answer_while_a_stateful_command_is_in_flight() {
         // The 0.9.44 owner incident: session.stop (which awaits the MP4
@@ -8412,8 +10085,9 @@ mod tests {
         let reliable_metrics = connection.reliable_response_queue;
         let (pressure_tx, _pressure_rx) = mpsc::channel(1);
         let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport.clone());
+        let state = test_state();
         let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
-            test_state(),
+            state.clone(),
             command_rx,
             command_metrics.clone(),
             outgoing_tx,
@@ -8423,7 +10097,8 @@ mod tests {
         ));
 
         assert!(
-            send_tracked_websocket_item(
+            send_test_websocket_command(
+                &state,
                 &command_tx,
                 &command_metrics,
                 json!({ "id": "stop", "method": "session.stop", "params": {} }).to_string(),
@@ -8432,7 +10107,8 @@ mod tests {
         );
         for index in 0..3 {
             assert!(
-                send_tracked_websocket_item(
+                send_test_websocket_command(
+                    &state,
                     &command_tx,
                     &command_metrics,
                     json!({
@@ -8464,6 +10140,1130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_live_commands_do_not_wait_for_wedged_account_maintenance() {
+        let account_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_account = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let live_commands = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler: WebSocketCommandHandler = {
+            let account_entered = account_entered.clone();
+            let release_account = release_account.clone();
+            let live_commands = live_commands.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let account_entered = account_entered.clone();
+                let release_account = release_account.clone();
+                let live_commands = live_commands.clone();
+                Box::pin(async move {
+                    let command: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let id = command["id"].as_str().unwrap().to_string();
+                    let method = command["method"].as_str().unwrap().to_string();
+                    if method == "account.refresh" {
+                        account_entered.add_permits(1);
+                        release_account.acquire().await.unwrap().forget();
+                    } else {
+                        live_commands.lock().await.push(method);
+                    }
+                    ServerResponse::ok(id, json!({}))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (outgoing_tx, _outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let command_metrics = connection.incoming_command_queue;
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport.clone());
+        let state = test_state();
+        let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            command_rx,
+            command_metrics.clone(),
+            outgoing_tx,
+            reliable_metrics,
+            slow_pressure,
+            handler,
+        ));
+
+        send_test_websocket_command(
+            &state,
+            &command_tx,
+            &command_metrics,
+            json!({ "id": "account", "method": "account.refresh", "params": {} }).to_string(),
+        )
+        .await;
+        timeout(Duration::from_secs(1), account_entered.acquire())
+            .await
+            .expect("account maintenance should enter")
+            .unwrap()
+            .forget();
+
+        for (id, method) in [
+            ("screen", "screens.activate"),
+            ("scene", "scene.layout.apply_live"),
+            ("captions", "captions.start"),
+            ("chat", "liveChat.send"),
+            ("stop", "session.stop"),
+        ] {
+            send_test_websocket_command(
+                &state,
+                &command_tx,
+                &command_metrics,
+                json!({ "id": id, "method": method, "params": {} }).to_string(),
+            )
+            .await;
+        }
+
+        timeout(Duration::from_millis(250), async {
+            loop {
+                if live_commands.lock().await.len() == 5 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("live commands and Stop must dispatch despite wedged account maintenance");
+
+        let mut observed = live_commands.lock().await.clone();
+        observed.sort();
+        assert_eq!(
+            observed,
+            [
+                "captions.start",
+                "liveChat.send",
+                "scene.layout.apply_live",
+                "screens.activate",
+                "session.stop"
+            ]
+        );
+
+        release_account.add_permits(1);
+        drop(command_tx);
+        dispatcher.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_observation_lane_queues_a_bootstrap_sized_burst() {
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler: WebSocketCommandHandler = {
+            let release = release.clone();
+            let active = active.clone();
+            let max_active = max_active.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let release = release.clone();
+                let active = active.clone();
+                let max_active = max_active.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    let current = active.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+                    max_active.fetch_max(current, std::sync::atomic::Ordering::AcqRel);
+                    release.acquire().await.unwrap().forget();
+                    active.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let command_metrics = connection.incoming_command_queue;
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport.clone());
+        let state = test_state();
+        let lane_metrics = state.websocket_transport_metrics.clone();
+        let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            command_rx,
+            command_metrics.clone(),
+            outgoing_tx,
+            reliable_metrics.clone(),
+            slow_pressure,
+            handler,
+        ));
+
+        const BURST_SIZE: usize = 8;
+        for index in 0..BURST_SIZE {
+            assert!(
+                send_test_websocket_command(
+                    &state,
+                    &command_tx,
+                    &command_metrics,
+                    json!({
+                        "id": format!("observation-{index}"),
+                        "method": "health.ping",
+                        "params": {}
+                    })
+                    .to_string(),
+                )
+                .await
+            );
+        }
+        timeout(Duration::from_secs(1), async {
+            while active.load(std::sync::atomic::Ordering::Acquire)
+                < WEBSOCKET_READ_ONLY_CONCURRENCY
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the observation worker should fill its concurrency slots");
+        assert_eq!(
+            max_active.load(std::sync::atomic::Ordering::Acquire),
+            WEBSOCKET_READ_ONLY_CONCURRENCY
+        );
+
+        release.add_permits(BURST_SIZE);
+        drop(command_tx);
+        dispatcher.await.unwrap();
+
+        let mut response_ids = std::collections::HashSet::new();
+        while let Some(Message::Text(text)) = outgoing_rx.recv().await {
+            reliable_metrics.record_dequeue_oldest();
+            let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(response["ok"], true, "unexpected response: {response}");
+            response_ids.insert(response["id"].as_str().unwrap().to_string());
+        }
+        assert_eq!(response_ids.len(), BURST_SIZE);
+        let diagnostics = &lane_metrics.snapshot().command_lanes["observation"];
+        assert_eq!(diagnostics.rejected_before_dispatch_count, 0);
+        assert!(diagnostics.queue.max_depth > WEBSOCKET_READ_ONLY_CONCURRENCY as u64);
+    }
+
+    #[tokio::test]
+    async fn websocket_account_maintenance_queues_distinct_refresh_work_in_fifo_order() {
+        assert_eq!(
+            WEBSOCKET_ACCOUNT_MAINTENANCE_MAX_QUEUE_AGE,
+            Duration::from_secs(15)
+        );
+        assert!(WEBSOCKET_ACCOUNT_MAINTENANCE_MAX_QUEUE_AGE > ACCOUNT_REFRESH_TIMEOUT);
+        let first_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let second_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_first = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let entered = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler: WebSocketCommandHandler = {
+            let first_entered = first_entered.clone();
+            let second_entered = second_entered.clone();
+            let release_first = release_first.clone();
+            let entered = entered.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let first_entered = first_entered.clone();
+                let second_entered = second_entered.clone();
+                let release_first = release_first.clone();
+                let entered = entered.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    entered.lock().await.push(command.method.clone());
+                    if command.method == "entitlements.refresh" {
+                        first_entered.add_permits(1);
+                        release_first.acquire().await.unwrap().forget();
+                    } else if command.method == "platformAccounts.validate" {
+                        second_entered.add_permits(1);
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let command_metrics = connection.incoming_command_queue;
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport.clone());
+        let state = test_state();
+        let lane_metrics = state.websocket_transport_metrics.clone();
+        let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            command_rx,
+            command_metrics.clone(),
+            outgoing_tx,
+            reliable_metrics.clone(),
+            slow_pressure,
+            handler,
+        ));
+
+        assert!(
+            send_test_websocket_command(
+                &state,
+                &command_tx,
+                &command_metrics,
+                json!({ "id": "entitlements", "method": "entitlements.refresh", "params": {} })
+                    .to_string(),
+            )
+            .await
+        );
+        timeout(Duration::from_secs(1), first_entered.acquire())
+            .await
+            .expect("entitlements refresh should dispatch")
+            .unwrap()
+            .forget();
+        assert!(
+            send_test_websocket_command(
+                &state,
+                &command_tx,
+                &command_metrics,
+                json!({ "id": "platforms", "method": "platformAccounts.validate", "params": {} })
+                    .to_string(),
+            )
+            .await
+        );
+        assert!(
+            timeout(Duration::from_millis(50), second_entered.acquire())
+                .await
+                .is_err(),
+            "account maintenance must remain serial"
+        );
+
+        release_first.add_permits(1);
+        timeout(Duration::from_secs(1), second_entered.acquire())
+            .await
+            .expect("the distinct provider validation should remain queued")
+            .unwrap()
+            .forget();
+        drop(command_tx);
+        dispatcher.await.unwrap();
+
+        let mut responses = Vec::new();
+        while let Some(Message::Text(text)) = outgoing_rx.recv().await {
+            reliable_metrics.record_dequeue_oldest();
+            responses.push(serde_json::from_str::<serde_json::Value>(&text).unwrap());
+        }
+        assert_eq!(responses.len(), 2);
+        assert!(responses.iter().all(|response| response["ok"] == true));
+        assert_eq!(
+            *entered.lock().await,
+            ["entitlements.refresh", "platformAccounts.validate"]
+        );
+        assert_eq!(
+            lane_metrics.snapshot().command_lanes["accountMaintenance"]
+                .rejected_before_dispatch_count,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_scene_layout_retains_concurrent_latest_wins_path_while_account_is_wedged() {
+        let account_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_account = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let scenes_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_scenes = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let scene_active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_scene_active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler: WebSocketCommandHandler = {
+            let account_entered = account_entered.clone();
+            let release_account = release_account.clone();
+            let scenes_entered = scenes_entered.clone();
+            let release_scenes = release_scenes.clone();
+            let scene_active = scene_active.clone();
+            let max_scene_active = max_scene_active.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let account_entered = account_entered.clone();
+                let release_account = release_account.clone();
+                let scenes_entered = scenes_entered.clone();
+                let release_scenes = release_scenes.clone();
+                let scene_active = scene_active.clone();
+                let max_scene_active = max_scene_active.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.method == "account.refresh" {
+                        account_entered.add_permits(1);
+                        release_account.acquire().await.unwrap().forget();
+                    } else if command.method.starts_with("scene.layout.apply_") {
+                        let current =
+                            scene_active.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+                        max_scene_active.fetch_max(current, std::sync::atomic::Ordering::AcqRel);
+                        scenes_entered.add_permits(1);
+                        release_scenes.acquire().await.unwrap().forget();
+                        scene_active.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let command_metrics = connection.incoming_command_queue;
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport);
+        let state = test_state();
+        let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            command_rx,
+            command_metrics.clone(),
+            outgoing_tx,
+            reliable_metrics.clone(),
+            slow_pressure,
+            handler,
+        ));
+
+        send_test_websocket_command(
+            &state,
+            &command_tx,
+            &command_metrics,
+            json!({ "id": "account", "method": "account.refresh", "params": {} }).to_string(),
+        )
+        .await;
+        timeout(Duration::from_secs(1), account_entered.acquire())
+            .await
+            .expect("account refresh should wedge")
+            .unwrap()
+            .forget();
+        for (id, method, intent_id) in [
+            ("live-layout", "scene.layout.apply_live", 1),
+            ("preview-layout", "scene.layout.apply_preview", 2),
+        ] {
+            send_test_websocket_command(
+                &state,
+                &command_tx,
+                &command_metrics,
+                json!({ "id": id, "method": method, "params": { "intentId": intent_id } })
+                    .to_string(),
+            )
+            .await;
+        }
+        timeout(Duration::from_millis(250), scenes_entered.acquire_many(2))
+            .await
+            .expect("both latest-wins layouts must overlap despite wedged account maintenance")
+            .unwrap()
+            .forget();
+        assert_eq!(
+            max_scene_active.load(std::sync::atomic::Ordering::Acquire),
+            2
+        );
+
+        release_scenes.add_permits(2);
+        release_account.add_permits(1);
+        drop(command_tx);
+        dispatcher.await.unwrap();
+        let mut response_count = 0;
+        while let Some(Message::Text(text)) = outgoing_rx.recv().await {
+            reliable_metrics.record_dequeue_oldest();
+            let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(response["ok"], true);
+            response_count += 1;
+        }
+        assert_eq!(response_count, 3);
+    }
+
+    #[tokio::test]
+    async fn websocket_live_control_lane_dispatches_in_arrival_order() {
+        let first_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let later_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_first = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let entered = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler: WebSocketCommandHandler = {
+            let first_entered = first_entered.clone();
+            let later_entered = later_entered.clone();
+            let release_first = release_first.clone();
+            let entered = entered.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let first_entered = first_entered.clone();
+                let later_entered = later_entered.clone();
+                let release_first = release_first.clone();
+                let entered = entered.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    entered.lock().await.push(command.id.clone());
+                    if command.id == "screen" {
+                        first_entered.add_permits(1);
+                        release_first.acquire().await.unwrap().forget();
+                    } else {
+                        later_entered.add_permits(1);
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let command_metrics = connection.incoming_command_queue;
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport);
+        let state = test_state();
+        let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            command_rx,
+            command_metrics.clone(),
+            outgoing_tx,
+            reliable_metrics.clone(),
+            slow_pressure,
+            handler,
+        ));
+
+        for (id, method) in [
+            ("screen", "screens.activate"),
+            ("captions", "captions.start"),
+            ("highlight", "comments.highlight.set"),
+        ] {
+            send_test_websocket_command(
+                &state,
+                &command_tx,
+                &command_metrics,
+                json!({ "id": id, "method": method, "params": {} }).to_string(),
+            )
+            .await;
+        }
+        timeout(Duration::from_secs(1), first_entered.acquire())
+            .await
+            .expect("first live-control command should dispatch")
+            .unwrap()
+            .forget();
+        assert!(
+            timeout(Duration::from_millis(50), later_entered.acquire())
+                .await
+                .is_err(),
+            "later live-control commands must wait for the head command"
+        );
+
+        release_first.add_permits(1);
+        timeout(Duration::from_secs(1), later_entered.acquire_many(2))
+            .await
+            .expect("queued live-control commands should dispatch")
+            .unwrap()
+            .forget();
+        drop(command_tx);
+        dispatcher.await.unwrap();
+        let mut response_count = 0;
+        while let Some(Message::Text(text)) = outgoing_rx.recv().await {
+            reliable_metrics.record_dequeue_oldest();
+            let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(response["ok"], true);
+            response_count += 1;
+        }
+        assert_eq!(response_count, 3);
+        assert_eq!(*entered.lock().await, ["screen", "captions", "highlight"]);
+    }
+
+    #[tokio::test]
+    async fn websocket_live_control_fifo_is_global_across_reconnect() {
+        let slow_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let activate_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let clear_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_slow = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_activate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let entered = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler: WebSocketCommandHandler = {
+            let slow_entered = slow_entered.clone();
+            let activate_entered = activate_entered.clone();
+            let clear_entered = clear_entered.clone();
+            let release_slow = release_slow.clone();
+            let release_activate = release_activate.clone();
+            let entered = entered.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let slow_entered = slow_entered.clone();
+                let activate_entered = activate_entered.clone();
+                let clear_entered = clear_entered.clone();
+                let release_slow = release_slow.clone();
+                let release_activate = release_activate.clone();
+                let entered = entered.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    entered.lock().await.push(command.method.clone());
+                    match command.method.as_str() {
+                        "captions.start" => {
+                            slow_entered.add_permits(1);
+                            release_slow.acquire().await.unwrap().forget();
+                        }
+                        "screens.activate" => {
+                            activate_entered.add_permits(1);
+                            release_activate.acquire().await.unwrap().forget();
+                        }
+                        "screens.clear" => clear_entered.add_permits(1),
+                        _ => {}
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (old_tx, old_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (new_tx, new_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (old_outgoing_tx, mut old_outgoing_rx) =
+            mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let (new_outgoing_tx, mut new_outgoing_rx) =
+            mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let old_connection = transport.register_connection();
+        let old_metrics = old_connection.incoming_command_queue;
+        let old_reliable_metrics = old_connection.reliable_response_queue;
+        let new_connection = transport.register_connection();
+        let new_metrics = new_connection.incoming_command_queue;
+        let new_reliable_metrics = new_connection.reliable_response_queue;
+        let (old_pressure_tx, _old_pressure_rx) = mpsc::channel(1);
+        let old_pressure = WebSocketSlowPressureSignal::new(old_pressure_tx, transport.clone());
+        let (new_pressure_tx, _new_pressure_rx) = mpsc::channel(1);
+        let new_pressure = WebSocketSlowPressureSignal::new(new_pressure_tx, transport);
+        let state = test_state();
+
+        // Accept both old-socket commands before its dispatcher is allowed to
+        // dequeue them. This pins the reconnect race at socket intake rather
+        // than accidentally relying on old-dispatcher scheduling.
+        send_test_websocket_command(
+            &state,
+            &old_tx,
+            &old_metrics,
+            json!({ "id": "slow", "method": "captions.start", "params": {} }).to_string(),
+        )
+        .await;
+        send_test_websocket_command(
+            &state,
+            &old_tx,
+            &old_metrics,
+            json!({ "id": "activate", "method": "screens.activate", "params": {} }).to_string(),
+        )
+        .await;
+        assert_eq!(state.live_control_command_order.accepted_sequence(), 2);
+
+        let new_dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            new_rx,
+            new_metrics.clone(),
+            new_outgoing_tx,
+            new_reliable_metrics.clone(),
+            new_pressure,
+            handler.clone(),
+        ));
+        send_test_websocket_command(
+            &state,
+            &new_tx,
+            &new_metrics,
+            json!({ "id": "clear", "method": "screens.clear", "params": {} }).to_string(),
+        )
+        .await;
+        assert!(
+            timeout(Duration::from_millis(50), clear_entered.acquire())
+                .await
+                .is_err(),
+            "new socket clear must not overtake live controls still queued on the old socket"
+        );
+
+        let old_dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            old_rx,
+            old_metrics.clone(),
+            old_outgoing_tx,
+            old_reliable_metrics.clone(),
+            old_pressure,
+            handler,
+        ));
+        timeout(Duration::from_secs(1), slow_entered.acquire())
+            .await
+            .expect("old socket head command should dispatch once its dispatcher starts")
+            .unwrap()
+            .forget();
+
+        release_slow.add_permits(1);
+        timeout(Duration::from_secs(1), activate_entered.acquire())
+            .await
+            .expect("old socket activate should retain its global turn")
+            .unwrap()
+            .forget();
+        assert!(
+            timeout(Duration::from_millis(50), clear_entered.acquire())
+                .await
+                .is_err(),
+            "clear must remain behind activate until activate commits"
+        );
+        release_activate.add_permits(1);
+        timeout(Duration::from_secs(1), clear_entered.acquire())
+            .await
+            .expect("new socket clear should dispatch after older commands")
+            .unwrap()
+            .forget();
+
+        drop(old_tx);
+        drop(new_tx);
+        old_dispatcher.await.unwrap();
+        new_dispatcher.await.unwrap();
+        let mut response_count = 0;
+        while let Some(Message::Text(text)) = old_outgoing_rx.recv().await {
+            old_reliable_metrics.record_dequeue_oldest();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&text).unwrap()["ok"],
+                true
+            );
+            response_count += 1;
+        }
+        while let Some(Message::Text(text)) = new_outgoing_rx.recv().await {
+            new_reliable_metrics.record_dequeue_oldest();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&text).unwrap()["ok"],
+                true
+            );
+            response_count += 1;
+        }
+        assert_eq!(response_count, 3);
+        assert_eq!(
+            *entered.lock().await,
+            ["captions.start", "screens.activate", "screens.clear"]
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_session_start_waits_for_prior_live_control_across_reconnect() {
+        assert_cross_connection_websocket_command_order("screens.activate", "session.start").await;
+    }
+
+    #[tokio::test]
+    async fn websocket_live_control_waits_for_prior_session_start_across_reconnect() {
+        assert_cross_connection_websocket_command_order("session.start", "screens.activate").await;
+    }
+
+    #[tokio::test]
+    async fn websocket_layout_waits_for_prior_session_start_across_reconnect() {
+        assert_cross_connection_websocket_command_order("session.start", "scene.layout.apply_live")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn websocket_reconciliation_fence_waits_for_prior_layout_commit_across_reconnect() {
+        let mutation_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_mutation = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let read_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let committed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let read_saw_commit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler: WebSocketCommandHandler = {
+            let mutation_entered = mutation_entered.clone();
+            let release_mutation = release_mutation.clone();
+            let read_entered = read_entered.clone();
+            let committed = committed.clone();
+            let read_saw_commit = read_saw_commit.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let mutation_entered = mutation_entered.clone();
+                let release_mutation = release_mutation.clone();
+                let read_entered = read_entered.clone();
+                let committed = committed.clone();
+                let read_saw_commit = read_saw_commit.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.method == "scene.layout.apply_live" {
+                        mutation_entered.add_permits(1);
+                        release_mutation.acquire().await.unwrap().forget();
+                        committed.store(true, std::sync::atomic::Ordering::Release);
+                    } else if command.method == "scene.get" {
+                        read_saw_commit.store(
+                            committed.load(std::sync::atomic::Ordering::Acquire),
+                            std::sync::atomic::Ordering::Release,
+                        );
+                        read_entered.add_permits(1);
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (mutation_tx, mutation_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (read_tx, read_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (mutation_outgoing_tx, mut mutation_outgoing_rx) =
+            mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let (read_outgoing_tx, mut read_outgoing_rx) =
+            mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let mutation_connection = transport.register_connection();
+        let mutation_metrics = mutation_connection.incoming_command_queue;
+        let mutation_reliable_metrics = mutation_connection.reliable_response_queue;
+        let read_connection = transport.register_connection();
+        let read_metrics = read_connection.incoming_command_queue;
+        let read_reliable_metrics = read_connection.reliable_response_queue;
+        let (mutation_pressure_tx, _mutation_pressure_rx) = mpsc::channel(1);
+        let mutation_pressure =
+            WebSocketSlowPressureSignal::new(mutation_pressure_tx, transport.clone());
+        let (read_pressure_tx, _read_pressure_rx) = mpsc::channel(1);
+        let read_pressure = WebSocketSlowPressureSignal::new(read_pressure_tx, transport);
+        let state = test_state();
+
+        // Admission happens at socket intake. Keep the old dispatcher stopped
+        // so this regression covers a mutation accepted on a disconnected
+        // socket but not yet dequeued by its per-connection dispatcher.
+        send_test_websocket_command(
+            &state,
+            &mutation_tx,
+            &mutation_metrics,
+            json!({
+                "id": "layout",
+                "method": "scene.layout.apply_live",
+                "params": { "intentId": 1 }
+            })
+            .to_string(),
+        )
+        .await;
+
+        let read_dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            read_rx,
+            read_metrics.clone(),
+            read_outgoing_tx,
+            read_reliable_metrics.clone(),
+            read_pressure,
+            handler.clone(),
+        ));
+        send_test_websocket_command(
+            &state,
+            &read_tx,
+            &read_metrics,
+            json!({ "id": "scene", "method": "scene.get", "params": {} }).to_string(),
+        )
+        .await;
+        assert!(
+            timeout(Duration::from_millis(50), read_entered.acquire())
+                .await
+                .is_err(),
+            "authoritative read must not overtake a prior layout still queued on the old socket"
+        );
+
+        let mutation_dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            mutation_rx,
+            mutation_metrics.clone(),
+            mutation_outgoing_tx,
+            mutation_reliable_metrics.clone(),
+            mutation_pressure,
+            handler,
+        ));
+        timeout(Duration::from_secs(1), mutation_entered.acquire())
+            .await
+            .expect("layout mutation should dispatch once its old dispatcher starts")
+            .unwrap()
+            .forget();
+
+        release_mutation.add_permits(1);
+        timeout(Duration::from_secs(1), read_entered.acquire())
+            .await
+            .expect("authoritative read should dispatch after the mutation commits")
+            .unwrap()
+            .forget();
+        assert!(read_saw_commit.load(std::sync::atomic::Ordering::Acquire));
+        drop(mutation_tx);
+        drop(read_tx);
+        mutation_dispatcher.await.unwrap();
+        read_dispatcher.await.unwrap();
+        let mut response_count = 0;
+        while let Some(Message::Text(text)) = mutation_outgoing_rx.recv().await {
+            mutation_reliable_metrics.record_dequeue_oldest();
+            let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(response["ok"], true);
+            response_count += 1;
+        }
+        while let Some(Message::Text(text)) = read_outgoing_rx.recv().await {
+            read_reliable_metrics.record_dequeue_oldest();
+            let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(response["ok"], true);
+            response_count += 1;
+        }
+        assert_eq!(response_count, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_session_stop_waits_past_its_deadline_for_an_earlier_session_start() {
+        let start_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let stop_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_start = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let entered = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler: WebSocketCommandHandler = {
+            let start_entered = start_entered.clone();
+            let stop_entered = stop_entered.clone();
+            let release_start = release_start.clone();
+            let entered = entered.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let start_entered = start_entered.clone();
+                let stop_entered = stop_entered.clone();
+                let release_start = release_start.clone();
+                let entered = entered.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    entered.lock().await.push(command.method.clone());
+                    if command.method == "session.start" {
+                        start_entered.add_permits(1);
+                        release_start.acquire().await.unwrap().forget();
+                    } else if command.method == "session.stop" {
+                        stop_entered.add_permits(1);
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (start_command_tx, start_command_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (stop_command_tx, stop_command_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (start_outgoing_tx, mut start_outgoing_rx) =
+            mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let (stop_outgoing_tx, mut stop_outgoing_rx) =
+            mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let start_connection = transport.register_connection();
+        let start_command_metrics = start_connection.incoming_command_queue;
+        let start_reliable_metrics = start_connection.reliable_response_queue;
+        let stop_connection = transport.register_connection();
+        let stop_command_metrics = stop_connection.incoming_command_queue;
+        let stop_reliable_metrics = stop_connection.reliable_response_queue;
+        let (start_pressure_tx, _start_pressure_rx) = mpsc::channel(1);
+        let start_slow_pressure =
+            WebSocketSlowPressureSignal::new(start_pressure_tx, transport.clone());
+        let (stop_pressure_tx, _stop_pressure_rx) = mpsc::channel(1);
+        let stop_slow_pressure = WebSocketSlowPressureSignal::new(stop_pressure_tx, transport);
+        let state = test_state();
+        let dispatcher_metrics = state.websocket_transport_metrics.clone();
+
+        // Capture the Start generation at old-socket intake, then hold its
+        // dispatcher. A Stop on a reconnected socket must still observe and
+        // wait for that accepted Start.
+        send_test_websocket_command(
+            &state,
+            &start_command_tx,
+            &start_command_metrics,
+            json!({ "id": "start", "method": "session.start", "params": {} }).to_string(),
+        )
+        .await;
+        let stop_dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            stop_command_rx,
+            stop_command_metrics.clone(),
+            stop_outgoing_tx,
+            stop_reliable_metrics.clone(),
+            stop_slow_pressure,
+            handler.clone(),
+        ));
+        send_test_websocket_command(
+            &state,
+            &stop_command_tx,
+            &stop_command_metrics,
+            json!({ "id": "stop", "method": "session.stop", "params": {} }).to_string(),
+        )
+        .await;
+        loop {
+            let snapshot = dispatcher_metrics.snapshot();
+            if snapshot
+                .command_lanes
+                .get("stop")
+                .is_some_and(|lane| lane.queue.max_depth >= 1)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            stop_entered.try_acquire().is_err(),
+            "session.stop must not observe Idle while session.start is still establishing capture"
+        );
+
+        let start_dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            start_command_rx,
+            start_command_metrics.clone(),
+            start_outgoing_tx,
+            start_reliable_metrics.clone(),
+            start_slow_pressure,
+            handler,
+        ));
+        start_entered.acquire().await.unwrap().forget();
+        tokio::time::advance(WEBSOCKET_STOP_MAX_QUEUE_AGE + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            stop_entered.try_acquire().is_err(),
+            "session.stop must keep waiting after its ordinary lane deadline"
+        );
+
+        release_start.add_permits(1);
+        timeout(Duration::from_secs(1), stop_entered.acquire())
+            .await
+            .expect("session.stop should dispatch after session.start finishes")
+            .unwrap()
+            .forget();
+        drop(start_command_tx);
+        drop(stop_command_tx);
+        start_dispatcher.await.unwrap();
+        stop_dispatcher.await.unwrap();
+        let mut response_count = 0;
+        while let Some(Message::Text(text)) = start_outgoing_rx.recv().await {
+            start_reliable_metrics.record_dequeue_oldest();
+            let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(response["ok"], true);
+            response_count += 1;
+        }
+        while let Some(Message::Text(text)) = stop_outgoing_rx.recv().await {
+            stop_reliable_metrics.record_dequeue_oldest();
+            let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(response["ok"], true);
+            response_count += 1;
+        }
+        assert_eq!(response_count, 2);
+        assert_eq!(*entered.lock().await, ["session.start", "session.stop"]);
+    }
+
+    #[tokio::test]
+    async fn websocket_lane_expiry_reports_command_was_not_applied() {
+        let first_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_first = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let executed = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler: WebSocketCommandHandler = {
+            let first_entered = first_entered.clone();
+            let release_first = release_first.clone();
+            let executed = executed.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let first_entered = first_entered.clone();
+                let release_first = release_first.clone();
+                let executed = executed.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    executed.lock().await.push(command.id.clone());
+                    if command.id == "first" {
+                        first_entered.add_permits(1);
+                        release_first.acquire().await.unwrap().forget();
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(4);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let (lane, lane_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::LiveControl,
+            2,
+            Duration::from_millis(25),
+            transport.register_command_lane("liveControl"),
+        );
+        let connection = transport.register_connection();
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport.clone());
+        let mut workers = tokio::task::JoinSet::new();
+        let worker_context = WebSocketCommandLaneWorkerContext {
+            state: test_state(),
+            outgoing: outgoing_tx.clone(),
+            reliable_metrics: reliable_metrics.clone(),
+            slow_pressure: slow_pressure.clone(),
+            command_handler: handler.clone(),
+        };
+        spawn_websocket_command_lane_worker(
+            &mut workers,
+            lane_rx,
+            1,
+            lane.metrics.clone(),
+            &worker_context,
+        );
+
+        try_enqueue_websocket_lane_command(
+            &lane,
+            json!({ "id": "first", "method": "screens.activate", "params": {} }).to_string(),
+            tokio::time::Instant::now() + Duration::from_millis(25),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        timeout(Duration::from_secs(1), first_entered.acquire())
+            .await
+            .expect("first command should dispatch")
+            .unwrap()
+            .forget();
+        try_enqueue_websocket_lane_command(
+            &lane,
+            json!({ "id": "expired", "method": "captions.start", "params": {} }).to_string(),
+            tokio::time::Instant::now() + Duration::from_millis(25),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let expired = timeout(
+            Duration::from_millis(150),
+            receive_tracked_json(&mut outgoing_rx, &reliable_metrics),
+        )
+        .await
+        .expect("expiry must respond while the head command remains wedged");
+        assert_eq!(expired["id"], "expired");
+        assert_eq!(expired["ok"], false);
+        assert_eq!(expired["error"]["code"], "command-expired-before-dispatch");
+        assert_eq!(
+            *executed.lock().await,
+            ["first"],
+            "an expired command must never reach the handler"
+        );
+
+        release_first.add_permits(1);
+        drop(lane);
+        while workers.join_next().await.is_some() {}
+        drop(outgoing_tx);
+        let first = receive_tracked_json(&mut outgoing_rx, &reliable_metrics).await;
+        assert_eq!(first["id"], "first");
+        assert_eq!(first["ok"], true);
+        let snapshot = transport.snapshot();
+        let diagnostics = &snapshot.command_lanes["liveControl"];
+        assert_eq!(diagnostics.queue.current_depth, 0);
+        assert_eq!(diagnostics.queue.max_depth, 1);
+        assert_eq!(diagnostics.expired_before_dispatch_count, 1);
+        assert_eq!(diagnostics.rejected_before_dispatch_count, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_connection_queue_age_counts_toward_expiry_before_dispatch() {
+        let executed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler: WebSocketCommandHandler = {
+            let executed = executed.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let executed = executed.clone();
+                Box::pin(async move {
+                    executed.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(4);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let command_metrics = connection.incoming_command_queue;
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport);
+        let state = test_state();
+
+        assert!(
+            send_test_websocket_command(
+                &state,
+                &command_tx,
+                &command_metrics,
+                json!({ "id": "stale", "method": "screens.activate", "params": {} }).to_string(),
+            )
+            .await
+        );
+        tokio::time::advance(WEBSOCKET_LIVE_CONTROL_MAX_QUEUE_AGE + Duration::from_millis(1)).await;
+
+        let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state,
+            command_rx,
+            command_metrics,
+            outgoing_tx,
+            reliable_metrics.clone(),
+            slow_pressure,
+            handler,
+        ));
+        drop(command_tx);
+        dispatcher.await.unwrap();
+
+        let response = receive_tracked_json(&mut outgoing_rx, &reliable_metrics).await;
+        assert_eq!(response["id"], "stale");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "command-expired-before-dispatch");
+        assert_eq!(
+            executed.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "work expired in the connection queue must never reach the handler"
+        );
+    }
+
+    #[tokio::test]
     async fn websocket_layout_flood_has_bounded_work_and_returns_every_response() {
         let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let max_active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -8491,8 +11291,9 @@ mod tests {
         let reliable_metrics = connection.reliable_response_queue;
         let (pressure_tx, _pressure_rx) = mpsc::channel(1);
         let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport.clone());
+        let state = test_state();
         let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
-            test_state(),
+            state.clone(),
             command_rx,
             command_metrics.clone(),
             outgoing_tx,
@@ -8503,7 +11304,8 @@ mod tests {
 
         for index in 0..100 {
             assert!(
-                send_tracked_websocket_item(
+                send_test_websocket_command(
+                    &state,
                     &command_tx,
                     &command_metrics,
                     json!({
@@ -8933,6 +11735,35 @@ mod tests {
         assert_eq!(payload["microphoneGainDb"], 6.0);
         assert_eq!(payload["microphoneMuted"], true);
         assert_eq!(payload["reasonCode"], "no-active-session");
+    }
+
+    #[test]
+    fn account_sign_out_revokes_entitlements_before_credentials_are_cleared() {
+        let premium = std::cell::Cell::new(true);
+        let entitlement_update_emitted = std::cell::Cell::new(false);
+        let credentials_present = std::cell::Cell::new(true);
+
+        let result = clear_account_credentials_fail_closed(
+            || {
+                premium.set(false);
+                entitlement_update_emitted.set(true);
+            },
+            || {
+                assert!(
+                    !premium.get(),
+                    "premium gates must close before credentials are deleted"
+                );
+                assert!(
+                    entitlement_update_emitted.get(),
+                    "the Basic entitlement update must be emitted before credential deletion"
+                );
+                credentials_present.set(false);
+                "cleared"
+            },
+        );
+
+        assert_eq!(result, "cleared");
+        assert!(!credentials_present.get());
     }
 
     #[tokio::test]
@@ -9649,21 +12480,27 @@ mod tests {
         let (outgoing_tx, _outgoing_rx) = mpsc::channel(4);
         let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
         let connection = transport.register_connection();
+        let command_metrics = connection.incoming_command_queue;
+        let reliable_metrics = connection.reliable_response_queue;
         let (pressure_tx, _pressure_rx) = mpsc::channel(1);
         let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport);
+        let state = test_state();
         let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
-            test_state(),
+            state.clone(),
             command_rx,
-            connection.incoming_command_queue,
+            command_metrics.clone(),
             outgoing_tx,
-            connection.reliable_response_queue,
+            reliable_metrics,
             slow_pressure,
             handler,
         ));
 
         for id in ["legacy-first", "legacy-second"] {
-            command_tx
-                .send(
+            assert!(
+                send_test_websocket_command(
+                    &state,
+                    &command_tx,
+                    &command_metrics,
                     json!({
                         "id": id,
                         "method": "scene.layout.apply_preview",
@@ -9672,7 +12509,7 @@ mod tests {
                     .to_string(),
                 )
                 .await
-                .unwrap();
+            );
         }
         drop(command_tx);
 

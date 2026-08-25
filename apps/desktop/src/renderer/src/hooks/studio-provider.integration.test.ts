@@ -19,10 +19,17 @@ import type {
   CohostState,
   AudioMeterResult,
   BackendConnection,
+  CommentHighlightCommand,
+  CommentHighlightState,
   CompositorStatus,
+  CommentsCommandResolution,
+  CommentsSendCommand,
+  CommentsSendOperation,
   DeviceList,
   HealthEvent,
   LayoutSettings,
+  LiveChatMessage,
+  LiveChatSnapshot,
   NoiseCleanupJob,
   OAuthCallbackEnvelope,
   PreviewSurfaceBounds,
@@ -32,7 +39,9 @@ import type {
   Scene,
   SessionLogEntry,
   SessionSummary,
+  StreamScreen,
   StreamOutputTopologyProbeResult,
+  VideorcAccountSnapshot,
   VideorcApi
 } from '../../../shared/backend'
 import { BackgroundAssetsProvider } from './use-background-assets'
@@ -57,6 +66,7 @@ import {
 import { DEFAULT_BASIC_ENTITLEMENTS } from '../lib/entitlements'
 import { defaultCaptureConfig, videoPresets } from '../lib/capture'
 import { deriveNoiseCleanupView } from '../lib/noise-cleanup-view'
+import { SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY } from '../lib/screen-takeover-microphone'
 import type {
   WindowsLiveAudioSmokeRequest,
   WindowsLiveAudioSmokeState
@@ -81,6 +91,39 @@ const premiumEntitlements = {
     state: 'enabled' as const,
     reason: undefined
   }))
+}
+
+const takeoverScreen: StreamScreen = {
+  id: 'screen-takeover-1',
+  name: 'Be right back',
+  imagePath: 'C:\\screens\\brb.png',
+  sortOrder: 0,
+  status: 'ready',
+  createdAt: now,
+  updatedAt: now
+}
+
+const highlightMessage: LiveChatMessage = {
+  id: 'youtube:message-1',
+  providerMessageId: 'message-1',
+  platform: 'youtube',
+  sessionId: 'live-1',
+  authorName: 'Viewer',
+  authorBadges: [],
+  authorRoles: [],
+  publishedAt: now,
+  receivedAt: now,
+  messageText: 'Hello from chat',
+  fragments: [],
+  eventType: 'message',
+  isDeleted: false
+}
+
+const liveHighlightState: CommentHighlightState = {
+  sessionId: highlightMessage.sessionId,
+  messageId: highlightMessage.id,
+  generation: 1,
+  phase: 'live'
 }
 
 function cleanupJob(overrides: Partial<NoiseCleanupJob> = {}): NoiseCleanupJob {
@@ -275,6 +318,7 @@ class StudioBackend {
   recordingState: RecordingStatus['state'] = 'idle'
   recordingSessionId: string | undefined
   recordingStatusOverride: RecordingStatus | undefined
+  accountSnapshot: VideorcAccountSnapshot = { status: 'signed-out' }
   accountTransportFailuresRemaining = 0
   accountSignInSuperseded = false
   oauthTransportFailuresRemaining = 1
@@ -338,7 +382,19 @@ class StudioBackend {
     ],
     warnings: []
   }
+  screens: StreamScreen[] = []
+  activeScreen: StreamScreen | null = null
   audioMeterResult: AudioMeterResult = { status: 'ready', level: 0.4 }
+  liveChatSnapshot: LiveChatSnapshot = {
+    providers: [],
+    messages: [],
+    unreadCount: 0,
+    updatedAt: now
+  }
+  commentHighlightState: CommentHighlightState = { generation: 0, phase: 'idle' }
+  commentHighlightClearOutcomeUnknownRemaining = 0
+  liveChatSendOperations: CommentsSendOperation[] = []
+  liveChatSendFailure: { code: string; message: string } | null = null
 
   deferResponse(
     method: string,
@@ -410,7 +466,7 @@ class StudioBackend {
       case 'entitlements.refresh':
         return this.entitlements
       case 'account.get':
-        return { status: 'signed-out' }
+        return this.accountSnapshot
       case 'account.complete_sign_in':
         if (this.accountSignInSuperseded) {
           throw Object.assign(new Error('Desktop account sign-in was superseded.'), {
@@ -535,9 +591,42 @@ class StudioBackend {
       case 'captions.status.get':
         return { state: 'idle' }
       case 'liveChat.status':
-        return { providers: [], messages: [], unreadCount: 0, updatedAt: now }
+        return this.liveChatSnapshot
+      case 'liveChat.send':
+        if (this.liveChatSendFailure) {
+          throw Object.assign(new Error(this.liveChatSendFailure.message), {
+            code: this.liveChatSendFailure.code
+          })
+        }
+        return this.liveChatSendOperations.find(
+          (operation) => operation.id === String(params.operationId)
+        )
+      case 'liveChat.sendOperations.list':
+        return this.liveChatSendOperations.filter(
+          (operation) => operation.sessionId === String(params.sessionId)
+        )
       case 'comments.highlight.status':
-        return { generation: 0, phase: 'idle' }
+        return this.commentHighlightState
+      case 'comments.highlight.clear':
+        this.commentHighlightState = {
+          generation: this.commentHighlightState.generation + 1,
+          phase: 'idle'
+        }
+        if (this.commentHighlightClearOutcomeUnknownRemaining > 0) {
+          this.commentHighlightClearOutcomeUnknownRemaining -= 1
+          throw Object.assign(new Error('The highlight clear result was not observed.'), {
+            code: 'request-outcome-unknown'
+          })
+        }
+        return this.commentHighlightState
+      case 'comments.highlight.set':
+        this.commentHighlightState = {
+          sessionId: String(params.sessionId),
+          messageId: String(params.messageId),
+          generation: this.commentHighlightState.generation + 1,
+          phase: 'live'
+        }
+        return this.commentHighlightState
       case 'preview.live.status':
         return {
           state: 'unavailable',
@@ -625,8 +714,17 @@ class StudioBackend {
         }
       }
       case 'screens.list':
-        return []
+        return this.screens
       case 'screens.active':
+        return this.activeScreen
+      case 'screens.activate': {
+        const screen = this.screens.find((candidate) => candidate.id === params.screenId)
+        if (!screen) throw new Error('Screen not found.')
+        this.activeScreen = screen
+        return screen
+      }
+      case 'screens.clear':
+        this.activeScreen = null
         return null
       case 'streamTargets.metadata.get':
         return {
@@ -804,6 +902,7 @@ class TestWebSocket {
   readyState = TestWebSocket.OPEN
   readonly backend: StudioBackend
   readonly generation: number
+  readonly sentCommands: BackendCommand[] = []
   onopen: (() => void) | null = null
   onerror: (() => void) | null = null
   onmessage: ((event: { data: string }) => void) | null = null
@@ -821,6 +920,7 @@ class TestWebSocket {
       throw new Error(`Test WebSocket generation ${this.generation} is closed.`)
     }
     const command = JSON.parse(raw) as BackendCommand
+    this.sentCommands.push(command)
     this.backend.sentCommands.push(command)
     const deferredResponse = this.backend.takeDeferredResponse(command.method, command)
     if (command.method === 'session.start' && this.backend.emitRecordingStatusBeforeStartResponse) {
@@ -922,6 +1022,24 @@ function Probe({ observe }: { observe: (value: StudioObservation) => void }): nu
   return null
 }
 
+async function mountStudioProvider(
+  container: Element,
+  observe: (value: StudioObservation) => void
+): Promise<Root> {
+  let mountedRoot!: Root
+  await act(async () => {
+    mountedRoot = createRoot(container)
+    mountedRoot.render(
+      createElement(
+        BackgroundAssetsProvider,
+        null,
+        createElement(StudioProvider, null, createElement(Probe, { observe }))
+      )
+    )
+  })
+  return mountedRoot
+}
+
 describe('real StudioProvider lifecycle', () => {
   let restoreEnvironment: (() => void) | undefined
   let root: Root | null = null
@@ -936,6 +1054,278 @@ describe('real StudioProvider lifecycle', () => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
     vi.useRealTimers()
+  })
+
+  it('reconciles an outcome-unknown local comment highlight toggle', async () => {
+    const backend = new StudioBackend()
+    backend.liveChatSnapshot = {
+      sessionId: highlightMessage.sessionId,
+      providers: [],
+      messages: [highlightMessage],
+      unreadCount: 0,
+      updatedAt: now
+    }
+    backend.commentHighlightState = liveHighlightState
+    backend.commentHighlightClearOutcomeUnknownRemaining = 1
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.highlightedCommentId === highlightMessage.id
+    )
+
+    await act(async () => latest()!.core.toggleCommentHighlight(highlightMessage))
+
+    await waitForObservation(() => latest()?.core.commentHighlightState.phase === 'idle')
+    expect(latest()?.core.commentHighlightFailure).toBeNull()
+    expect(
+      backend.commands.filter((command) => command.method === 'comments.highlight.clear')
+    ).toHaveLength(1)
+  })
+
+  it('returns success to Main after reconciling an outcome-unknown detached highlight request', async () => {
+    const backend = new StudioBackend()
+    backend.liveChatSnapshot = {
+      sessionId: highlightMessage.sessionId,
+      providers: [],
+      messages: [highlightMessage],
+      unreadCount: 0,
+      updatedAt: now
+    }
+    backend.commentHighlightState = liveHighlightState
+    backend.commentHighlightClearOutcomeUnknownRemaining = 1
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let emitIpc: ((name: string, value: unknown) => void) | undefined
+    const resolutions: CommentsCommandResolution<CommentHighlightState>[] = []
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (emit) => {
+        emitIpc = emit
+      },
+      pushCommentHighlightResult: async (resolution) => {
+        resolutions.push(resolution)
+        return true
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.highlightedCommentId === highlightMessage.id
+    )
+
+    const command: CommentHighlightCommand = {
+      requestId: 'highlight-request-1',
+      sessionId: highlightMessage.sessionId,
+      messageId: highlightMessage.id
+    }
+    await act(async () => emitIpc?.('onCommentHighlightRequest', command))
+
+    await waitForObservation(() => resolutions.length === 1)
+    expect(resolutions).toEqual([
+      {
+        requestId: command.requestId,
+        ok: true,
+        value: { generation: 2, phase: 'idle' }
+      }
+    ])
+    expect(latest()?.core.commentHighlightFailure).toBeNull()
+  })
+
+  it('keeps an explicit chat-send operation-id collision as a failure', async () => {
+    const command: CommentsSendCommand = {
+      requestId: 'send-request-1',
+      operationId: 'operation-1',
+      sessionId: 'live-1',
+      text: 'the new unsent message'
+    }
+    const existingOperation: CommentsSendOperation = {
+      id: command.operationId,
+      sessionId: command.sessionId,
+      text: 'the earlier message',
+      phase: 'sent',
+      destinations: [],
+      createdAt: now,
+      updatedAt: now
+    }
+    const backend = new StudioBackend()
+    backend.liveChatSnapshot = {
+      sessionId: command.sessionId,
+      providers: [],
+      messages: [],
+      unreadCount: 0,
+      updatedAt: now
+    }
+    backend.liveChatSendOperations = [existingOperation]
+    backend.liveChatSendFailure = {
+      code: 'live-chat-send-failed',
+      message: 'operationId is already bound to a different Comments message.'
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let emitIpc: ((name: string, value: unknown) => void) | undefined
+    const resolutions: CommentsCommandResolution<CommentsSendOperation>[] = []
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (emit) => {
+        emitIpc = emit
+      },
+      pushChatSendResult: async (resolution) => {
+        resolutions.push(resolution)
+        return true
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    await waitForObservation(() => observations.at(-1)?.core.wsStatus === 'connected')
+    await act(async () => emitIpc?.('onChatSendRequest', command))
+    await waitForObservation(() => resolutions.length === 1)
+
+    expect(resolutions).toEqual([
+      {
+        requestId: command.requestId,
+        ok: false,
+        error: backend.liveChatSendFailure.message
+      }
+    ])
+    expect(
+      backend.commands.filter((candidate) => candidate.method === 'liveChat.sendOperations.list')
+    ).not.toHaveLength(0)
+  })
+
+  it('preserves takeover microphone ownership across bootstrap, reload, responses, and events', async () => {
+    const backend = new StudioBackend()
+    backend.screens = [takeoverScreen]
+    backend.activeScreen = takeoverScreen
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    let observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    const renderProvider = async (): Promise<void> => {
+      await act(async () => {
+        root = createRoot(testDom.container)
+        root.render(
+          createElement(
+            BackgroundAssetsProvider,
+            null,
+            createElement(
+              StudioProvider,
+              null,
+              createElement(Probe, {
+                observe: (value) => {
+                  observations.push(value)
+                }
+              })
+            )
+          )
+        )
+      })
+    }
+
+    await renderProvider()
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.activeScreen?.id === takeoverScreen.id &&
+        latest()?.core.captureConfig.audio.microphoneMuted === true
+    )
+    expect(
+      JSON.parse(localStorage.getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY) ?? 'null')
+    ).toEqual({ priorMicrophoneMuted: false })
+
+    // A full renderer reload retains both the backend takeover and ownership of
+    // the mute it introduced, so clearing can still restore the user's intent.
+    await act(async () => root?.unmount())
+    root = null
+    observations = []
+    await renderProvider()
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.activeScreen?.id === takeoverScreen.id &&
+        latest()?.core.captureConfig.audio.microphoneMuted === true
+    )
+
+    await act(async () => latest()?.core.clearActiveScreen())
+    await waitForObservation(
+      () =>
+        latest()?.core.activeScreen === null &&
+        latest()?.core.captureConfig.audio.microphoneMuted === false
+    )
+    expect(localStorage.getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY)).toBeNull()
+
+    await act(async () => latest()?.core.activateScreen(takeoverScreen.id))
+    await waitForObservation(
+      () =>
+        latest()?.core.activeScreen?.id === takeoverScreen.id &&
+        latest()?.core.captureConfig.audio.microphoneMuted === true
+    )
+
+    backend.activeScreen = null
+    const commandSocket = [...backend.sockets]
+      .reverse()
+      .find((socket) =>
+        socket.sentCommands.some((command) => command.method === 'screens.activate')
+      )
+    expect(commandSocket).toBeDefined()
+    await act(async () => {
+      commandSocket?.onmessage?.({
+        data: JSON.stringify({ event: 'screens.active.changed', payload: null })
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.activeScreen === null &&
+        latest()?.core.captureConfig.audio.microphoneMuted === false
+    )
+    expect(localStorage.getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY)).toBeNull()
   })
 
   it('shows one persistent recovery error when an active recording fails', async () => {
@@ -1052,6 +1442,79 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => latest()!.core.dismissSessionRuntimeNotice())
     expect(latest()?.core.sessionRuntimeNotice).toBeNull()
     expect(toastSpies.dismiss).toHaveBeenCalledWith('recording-stopped-unexpectedly')
+  })
+
+  it('publishes a terminal recording failure that races initial bootstrap', async () => {
+    const backend = new StudioBackend()
+    const failedStatus = {
+      state: 'failed' as const,
+      sessionId: 'session-failed-during-bootstrap',
+      outputPath: 'C:\\recordings\\session-failed-during-bootstrap.mkv',
+      message: 'The encoder stopped while Studio was loading.'
+    }
+    const releaseRecordingStatus = backend.deferResponse('recording.status', failedStatus)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'recording.status')
+    )
+    vi.clearAllMocks()
+
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'recording.status', payload: failedStatus })
+      })
+      releaseRecordingStatus()
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () => latest()?.core.sessionRuntimeNotice?.kind === 'recording-failed',
+      100
+    )
+
+    expect(latest()?.recording.recording.state).toBe('failed')
+    expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
+      kind: 'recording-failed',
+      sessionId: failedStatus.sessionId,
+      message: failedStatus.message
+    })
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Recording stopped unexpectedly',
+      expect.objectContaining({
+        id: 'recording-stopped-unexpectedly',
+        description: failedStatus.message
+      })
+    )
   })
 
   it('recovers a recording failure missed during reconnect from durable session history', async () => {
@@ -1188,6 +1651,28 @@ describe('real StudioProvider lifecycle', () => {
     toastOptions.cancel.onClick()
     expect(libraryNavigations).toEqual([{ tab: 'library', sessionId: 'session-failed-in-gap' }])
     expect(revealSession).toHaveBeenCalledWith('session-failed-in-gap')
+
+    await act(async () => {
+      reconnectedBackend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'health.event',
+          payload: {
+            ...failureEvent,
+            id: 'late-microphone-loss-after-failure',
+            level: 'warn',
+            code: 'microphone-input-lost',
+            message: 'The microphone stopped before the failed session ended.'
+          }
+        })
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
+      kind: 'recording-failed',
+      sessionId: 'session-failed-in-gap'
+    })
+    expect(toastSpies.warning).not.toHaveBeenCalled()
 
     vi.clearAllMocks()
     const failedSnapshotEvent: HealthEvent = {
@@ -4875,6 +5360,151 @@ describe('real StudioProvider lifecycle', () => {
     expect(observations.at(-1)?.core.lastError).toBeNull()
   })
 
+  it('does not let Settings overwrite a newer Main-owned account refresh', async () => {
+    const backend = new StudioBackend()
+    backend.accountSnapshot = signedInAccount
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const refreshedAccount: VideorcAccountSnapshot = {
+      ...signedInAccount,
+      displayName: 'Provider Test Refreshed'
+    }
+    let resolveProviderRefresh!: (snapshot: VideorcAccountSnapshot) => void
+    const providerRefresh = new Promise<VideorcAccountSnapshot>((resolve) => {
+      resolveProviderRefresh = resolve
+    })
+    const refreshAccount = vi.fn(async () =>
+      refreshAccount.mock.calls.length === 1 ? signedInAccount : providerRefresh
+    )
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      refreshAccount
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.account?.status === 'signed-in' &&
+        refreshAccount.mock.calls.length >= 1
+    )
+
+    const accountGetsBeforeRefresh = backend.sentCommands.filter(
+      (command) => command.method === 'account.get'
+    ).length
+    const releaseStaleAccountGet = backend.deferResponse('account.get', signedInAccount)
+    let maintenance!: Promise<void>
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'))
+      maintenance = latest()!.core.refreshBackend()
+      await Promise.resolve()
+    })
+    await waitForObservation(() => refreshAccount.mock.calls.length >= 2)
+
+    await act(async () => {
+      resolveProviderRefresh(refreshedAccount)
+      releaseStaleAccountGet()
+      await maintenance
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.account?.status === 'signed-in' &&
+        latest()?.core.account === refreshedAccount
+    )
+
+    expect(latest()?.core.account).toEqual(refreshedAccount)
+    expect(backend.sentCommands.filter((command) => command.method === 'account.get').length).toBe(
+      accountGetsBeforeRefresh
+    )
+  })
+
+  it('keeps a newer Basic entitlement event over a stale Premium focus response', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+
+    const releaseStalePremium = backend.deferResponse('entitlements.refresh', premiumEntitlements)
+    let maintenance!: Promise<void>
+    await act(async () => {
+      maintenance = latest()!.core.refreshBackend()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'entitlements.refresh' &&
+          backend.commands.every((completed) => completed.id !== command.id)
+      )
+    )
+
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'entitlements.updated', payload: DEFAULT_BASIC_ENTITLEMENTS })
+      })
+      releaseStalePremium()
+      await maintenance
+    })
+    await waitForObservation(() => latest()?.core.entitlements?.tier === 'basic')
+
+    expect(latest()?.core.entitlements).toEqual(DEFAULT_BASIC_ENTITLEMENTS)
+  })
+
   it('retries account exchange and ACK failures on the same healthy websocket', async () => {
     vi.useFakeTimers()
     const receivedAtMs = 1_000_000
@@ -5306,8 +5936,12 @@ function createVideorcApi(options: {
   getMediaAccessStatus?: VideorcApi['getMediaAccessStatus']
   requestMediaAccess?: VideorcApi['requestMediaAccess']
   openSystemPermissions?: VideorcApi['openSystemPermissions']
+  refreshAccount?: VideorcApi['refreshAccount']
+  signOutAccount?: VideorcApi['signOutAccount']
   backendConnection?: BackendConnection
   registerEmitter?: (emit: (name: string, value: unknown) => void) => void
+  pushCommentHighlightResult?: VideorcApi['pushCommentHighlightResult']
+  pushChatSendResult?: VideorcApi['pushChatSendResult']
 }): VideorcApi {
   const listeners = new Map<string, Set<(value: unknown) => void>>()
   const subscribe = (name: string, callback: (value: unknown) => void): (() => void) => {
@@ -5363,6 +5997,8 @@ function createVideorcApi(options: {
       getBundledBackgroundAssets: async () => [],
       getPendingAccountCallbacks: options.pending,
       acknowledgeAccountCallback: options.acknowledge,
+      ...(options.refreshAccount ? { refreshAccount: options.refreshAccount } : {}),
+      ...(options.signOutAccount ? { signOutAccount: options.signOutAccount } : {}),
       getPendingOAuthCallbacks: options.pendingProvider,
       acknowledgeOAuthCallback: options.acknowledgeProvider,
       getNativePreviewSurfaceMode: async () => false,
@@ -5390,6 +6026,8 @@ function createVideorcApi(options: {
       getViewerSample: async () => null,
       getCommentsSnapshot: async () => null,
       getCommentHighlightState: async () => ({ generation: 0, phase: 'idle' }),
+      pushCommentHighlightResult: options.pushCommentHighlightResult ?? (async () => true),
+      pushChatSendResult: options.pushChatSendResult ?? (async () => true),
       getCaptionSnapshot: async () => null,
       getCaptionLines: async () => null,
       getGlassWallpaper: async () => null,

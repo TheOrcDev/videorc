@@ -254,8 +254,21 @@ describe('buildRecordingStudioGateSteps', () => {
     )
     assert.match(matrixSource, /VIDEORC_TEST_VT_FIFO_PAUSE_AFTER_FRAMES/)
     assert.match(matrixSource, /VIDEORC_TEST_VT_FIFO_PAUSE_MS/)
+    const fifoPauseMs = Number(
+      matrixSource.match(/VIDEORC_TEST_VT_FIFO_PAUSE_MS:\s*'(\d+)'/)?.[1] ?? 0
+    )
+    assert.ok(
+      fifoPauseMs >= 600,
+      `FIFO pressure smoke must exceed the reported 528ms queue age (found ${fifoPauseMs}ms)`
+    )
     assert.match(matrixSource, /evaluateTransientFifoPressure/)
     assert.match(matrixSource, /requireTransientFifoPressure: true/)
+    assert.match(matrixSource, /encoderBridgeOutputQueueHighWaterFrames/)
+    assert.match(matrixSource, /encoderBridgeOutputQueueOldestFrameAgeHighWaterMs/)
+    assert.match(matrixSource, /encoderBridgeOutputPressureRecoveryEvents/)
+    assert.match(matrixSource, /encoderBridgeEncodedAccessUnitDroppedFrames/)
+    assert.match(matrixSource, /sessions\.healthEvents\.list/)
+    assert.match(matrixSource, /transient-fifo-ffmpeg-exit-zero/)
 
     const captionsSource = readFileSync(
       new URL('../smoke-captions-live-app.mjs', import.meta.url),

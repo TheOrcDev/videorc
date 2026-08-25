@@ -135,9 +135,20 @@ function sessionParams({ outputDirectoryCapability, combo }) {
 const STRESS_GATES = Object.freeze({
   ...MATRIX_GATES,
   frameCountTolerance: Number.POSITIVE_INFINITY,
+  cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY,
   maxDurationStretchRatio: Number.POSITIVE_INFINITY,
   keyframeMaxIntervalSeconds: null,
   maxTailMismatchMs: null
+})
+
+// The deterministic FIFO pause intentionally sheds frames before encoding and
+// preserves their timestamps as visible gaps. Keep every other artifact law,
+// then let the incident-specific gate below prove that the frame-count delta
+// is exactly accounted for by bounded pre-encode skips (never lost H.264 AUs).
+const TRANSIENT_FIFO_GATES = Object.freeze({
+  ...MATRIX_GATES,
+  frameCountTolerance: Number.POSITIVE_INFINITY,
+  cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY
 })
 
 async function recordCombo({
@@ -198,6 +209,14 @@ async function recordCombo({
       'encoderBridgeQueueDepth',
       'encoderBridgeOutputQueueOldestFrameAgeMs',
       'encoderBridgeOutputQueueCapacityPressureEvents',
+      'encoderBridgeOutputQueueHighWaterFrames',
+      'encoderBridgeOutputQueueOldestFrameAgeHighWaterMs',
+      'encoderBridgeOutputLastProgressAgeMs',
+      'encoderBridgeOutputPressureRecoveryEvents',
+      'encoderBridgeOutputPreEncodeSkippedFrames',
+      'encoderBridgeVideoToolboxPendingEncodeFrames',
+      'encoderBridgeVideoToolboxPendingFifoFrames',
+      'encoderBridgeEncodedAccessUnitDroppedFrames',
       'encoderBridgeOutputQueueDroppedFrames',
       'encoderBridgeDroppedFrames',
       'encoderBridgeRepeatedFrames',
@@ -228,6 +247,21 @@ async function recordCombo({
     console.log(`[matrix:${combo.label}] bridge diagnostics ${JSON.stringify(bridgeDiagnostics)}`)
   }
   const stopped = await request(ws, timeoutMs, 'session.stop')
+  let transientFifoCleanFfmpegExitCount = 0
+  if (requireTransientFifoPressure) {
+    const sessionId = stopped.sessionId ?? started.sessionId
+    if (!sessionId) {
+      throw new Error('transient FIFO pressure session returned no session ID for exit evidence')
+    }
+    const healthEvents = await request(ws, timeoutMs, 'sessions.healthEvents.list', {
+      sessionId,
+      limit: 120
+    })
+    transientFifoCleanFfmpegExitCount = (healthEvents.events ?? []).filter(
+      (event) => event.code === 'transient-fifo-ffmpeg-exit-zero'
+    ).length
+    bridgeDiagnostics.transientFifoCleanFfmpegExitCount = transientFifoCleanFfmpegExitCount
+  }
   const outputPath = stopped.outputPath ?? started.outputPath
   if (!outputPath || !existsSync(outputPath)) {
     throw new Error('recording produced no output file')
@@ -238,7 +272,11 @@ async function recordCombo({
     ffprobePath,
     intendedFps: combo.fps,
     expectAudio: true,
-    gates: stress ? STRESS_GATES : MATRIX_GATES
+    gates: stress
+      ? STRESS_GATES
+      : requireTransientFifoPressure
+        ? TRANSIENT_FIFO_GATES
+        : MATRIX_GATES
   })
   writeReports(quality)
 
@@ -252,7 +290,9 @@ async function recordCombo({
         activeStatus,
         stoppedStatus: stopped,
         diagnostics,
-        testPauseFiredCount: transientFifoPauseFiredCount
+        qualityMetrics: quality.metrics,
+        testPauseFiredCount: transientFifoPauseFiredCount,
+        cleanFfmpegExitCount: transientFifoCleanFfmpegExitCount
       })
     )
   }
@@ -261,7 +301,12 @@ async function recordCombo({
     failures.push(`dimensions ${width}x${height} != requested ${combo.width}x${combo.height}`)
   }
   const observedFps = quality.metrics.observedFps
-  if (!stress && observedFps != null && Math.abs(observedFps - combo.fps) > combo.fps * 0.02) {
+  if (
+    !stress &&
+    !requireTransientFifoPressure &&
+    observedFps != null &&
+    Math.abs(observedFps - combo.fps) > combo.fps * 0.02
+  ) {
     failures.push(`observed fps ${observedFps.toFixed(2)} != requested ${combo.fps}`)
   }
   return {
@@ -272,7 +317,8 @@ async function recordCombo({
     warnings: quality.verdict.warnings,
     metrics: quality.metrics,
     bridgeDiagnostics,
-    transientFifoPauseFiredCount
+    transientFifoPauseFiredCount,
+    transientFifoCleanFfmpegExitCount
   }
 }
 
@@ -369,10 +415,11 @@ try {
     )
   }
   // Deterministic reproduction for the 2026-08-25 owner failure: pause the
-  // macOS VideoToolbox FIFO worker once for 350ms after the session is warm.
-  // The queue becomes older than the 250ms admission budget but stays below
-  // its 16-frame ceiling. Recovery must preserve every access unit, keep the
-  // compositor and session live, and finish as MP4 on the user's stop.
+  // macOS VideoToolbox FIFO worker once for 700ms after the session is warm.
+  // The maintained gate requires the reproduced depth 16/16 and oldest
+  // >=528/250ms queue shape, followed by a recovery transition. Recovery must
+  // preserve every encoded access unit, keep the compositor and session live,
+  // and finish as MP4 with a clean FFmpeg exit on the user's stop.
   if (process.platform === 'darwin' && TRANSIENT_FIFO_COMBO) {
     results.push(
       ...(await runPass({
@@ -380,7 +427,9 @@ try {
         combos: [TRANSIENT_FIFO_COMBO],
         extraEnv: {
           VIDEORC_TEST_VT_FIFO_PAUSE_AFTER_FRAMES: '60',
-          VIDEORC_TEST_VT_FIFO_PAUSE_MS: '350'
+          // Reproduce the owner's 528ms/16-frame incident shape, rather than
+          // the old 350ms probe that could recover without filling the queue.
+          VIDEORC_TEST_VT_FIFO_PAUSE_MS: '700'
         },
         assertPreviewLiveness: true,
         requireTransientFifoPressure: true

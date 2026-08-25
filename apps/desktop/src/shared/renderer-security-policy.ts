@@ -18,6 +18,7 @@ export const IPC_INVOKE_ROLES = {
   'backend:get-connection': MAIN_ONLY,
   'backend:get-logs': MAIN_ONLY,
   'account:begin-sign-in': MAIN_ONLY,
+  'account:refresh': MAIN_ONLY,
   'account:sign-out': MAIN_ONLY,
   'account:callbacks-list': MAIN_ONLY,
   'account:callback-ack': MAIN_ONLY,

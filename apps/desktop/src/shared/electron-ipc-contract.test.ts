@@ -26,8 +26,8 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(101)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(101)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(102)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(102)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -69,6 +69,24 @@ describe('Electron IPC contract', () => {
   })
 
   it('validates account authorization URLs and callback identifiers', () => {
+    expect(validateElectronInvokeArgs('account:refresh', [])).toEqual([])
+    expect(
+      validateElectronInvokeResult('account:refresh', {
+        status: 'signed-in',
+        username: 'orc',
+        avatarUrl: 'https://example.com/avatar.png'
+      })
+    ).toEqual({
+      status: 'signed-in',
+      username: 'orc',
+      avatarUrl: 'https://example.com/avatar.png'
+    })
+    expect(() =>
+      validateElectronInvokeResult('account:refresh', {
+        status: 'signed-in',
+        adminToken: 'must-not-cross-ipc'
+      })
+    ).toThrow('account:refresh.result')
     expect(
       validateElectronInvokeArgs('account:begin-sign-in', [
         'https://www.videorc.com/desktop/authorize/v2?state=abc'

@@ -220,7 +220,8 @@ import {
   avatarCacheRejectionMessage,
   avatarUrlDecision,
   httpStatusClass,
-  redactAvatarFetchError
+  redactAvatarFetchError,
+  withAvatarFetchDeadline
 } from './avatar-cache'
 import { DARK_WINDOW_PALETTE, windowPalette } from './window-palette'
 import {
@@ -294,6 +295,7 @@ import {
   liveCommentsCommandAllowed,
   parseCommentsViewMode
 } from './comments-command-broker'
+import { AccountRefreshBroker } from './account-refresh-broker'
 import { reconcileCommentsSendOperation } from '../shared/comments-send-operation'
 import {
   captureStateAfterStatusPayload,
@@ -8352,6 +8354,7 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   ...SMOKE_BACKEND_RPC_METHOD_NAMES,
   'health.ping',
   'account.auth.begin_intent',
+  'account.refresh',
   'account.sign_out',
   'resource.capability.issue',
   'resource.capability.revoke',
@@ -8447,6 +8450,11 @@ async function requestBackendAdmin<T>(
     }
   })
 }
+
+const accountRefreshBroker = new AccountRefreshBroker(
+  () => captureStateBlocksInterruption(mainCaptureState, backendConnection !== null),
+  () => requestBackendAdmin<VideorcAccountSnapshot>('account.refresh', {}, 10_000)
+)
 
 async function waitForBackendAdminConnection(timeoutMs: number): Promise<BackendConnection> {
   const deadline = Date.now() + Math.max(1, timeoutMs)
@@ -9546,7 +9554,7 @@ async function runSmokePreviewMotionCommand(
     const outcome = params.outcome
     const delayMs =
       typeof params.delayMs === 'number' && Number.isFinite(params.delayMs)
-        ? Math.min(5_000, Math.max(0, Math.round(params.delayMs)))
+        ? Math.min(12_000, Math.max(0, Math.round(params.delayMs)))
         : 100
     const reason =
       typeof params.reason === 'string' && params.reason.trim()
@@ -11539,15 +11547,24 @@ async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
   }
   const fetchPromise = (async () => {
     try {
-      const response = await net.fetch(avatarUrl)
-      if (!response.ok) {
+      const result = await withAvatarFetchDeadline(async (signal) => {
+        const response = await net.fetch(avatarUrl, { signal })
+        if (!response.ok) {
+          return { ok: false as const, status: response.status }
+        }
+        return {
+          ok: true as const,
+          bytes: Buffer.from(await response.arrayBuffer())
+        }
+      })
+      if (!result.ok) {
         return rejectChatAvatar({
           kind: 'http-status',
           host,
-          statusClass: httpStatusClass(response.status)
+          statusClass: httpStatusClass(result.status)
         })
       }
-      const bytes = Buffer.from(await response.arrayBuffer())
+      const { bytes } = result
       if (bytes.length === 0) {
         return rejectChatAvatar({ kind: 'empty-body', host })
       }
@@ -11993,6 +12010,7 @@ app.whenReady().then(async () => {
     )
     await openOAuthUrl(accountSignInCoordinator().begin(authorizeUrl, intent.intentGeneration))
   })
+  secureIpcHandle('account:refresh', () => accountRefreshBroker.refresh())
   secureIpcHandle('account:sign-out', async () => {
     const account = await requestBackendAdmin<VideorcAccountSnapshot>(
       'account.sign_out',

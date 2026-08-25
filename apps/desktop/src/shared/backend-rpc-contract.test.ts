@@ -802,6 +802,14 @@ describe('backend RPC contract', () => {
       encoderBridgeMfSubmittedFrames: 119,
       encoderBridgeMfInputCreditTimeouts: 2,
       encoderBridgeMfInputCreditWaitP95Ms: 12.5,
+      encoderBridgeOutputQueueHighWaterFrames: 16,
+      encoderBridgeOutputQueueOldestFrameAgeHighWaterMs: 528,
+      encoderBridgeOutputLastProgressAgeMs: 12,
+      encoderBridgeOutputPressureRecoveryEvents: 1,
+      encoderBridgeOutputPreEncodeSkippedFrames: 4,
+      encoderBridgeVideoToolboxPendingEncodeFrames: 2,
+      encoderBridgeVideoToolboxPendingFifoFrames: 14,
+      encoderBridgeEncodedAccessUnitDroppedFrames: 0,
       previewImagePollCounts: {
         cameraPng: 0,
         screenPng: 0,
@@ -843,6 +851,12 @@ describe('backend RPC contract', () => {
         compositorTickSkipped: 1.5
       })
     ).toThrow('compositorTickSkipped')
+    expect(() =>
+      validateBackendEventPayload('diagnostics.stats', {
+        ...diagnostics,
+        encoderBridgeEncodedAccessUnitDroppedFrames: -1
+      })
+    ).toThrow('encoderBridgeEncodedAccessUnitDroppedFrames')
     expect(() =>
       validateBackendRpcResult('diagnostics.stats', {
         ...diagnostics,

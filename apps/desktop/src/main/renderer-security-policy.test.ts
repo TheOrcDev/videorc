@@ -243,6 +243,7 @@ describe('renderer security policy', () => {
     expect(studioSource).toContain('window.videorc?.signOutAccount')
     expect(studioSource).not.toContain("client.request<VideorcAccountSnapshot>('account.sign_out')")
     expect(roleCanInvokeChannel('comments', 'account:sign-out')).toBe(false)
+    expect(roleCanInvokeChannel('comments', 'account:refresh')).toBe(false)
   })
 
   it('declares every preload invoke and keeps auxiliary roles least-privileged', () => {

@@ -1,8 +1,10 @@
 import type {
   BackendLifecycleEvent,
   HealthEvent,
+  OAuthCallbackResult,
   RecordingStatus,
-  SessionSummary
+  SessionSummary,
+  XPlaybackEvent
 } from '@/lib/backend'
 import {
   sessionRuntimeNoticeTitle,
@@ -201,6 +203,36 @@ export function showBackendError(message: string, status: WsStatus): void {
   // wall of duplicate transport errors. A connected-state blip stays visible.
   if (!shouldToastBackendError(message, status)) return
   toast.error(message, isTransientBackendError(message) ? { id: 'backend-transport' } : undefined)
+}
+
+export function showXPlaybackEvent(event: XPlaybackEvent): void {
+  if (event.status === 'verified') {
+    toast.success('Viewers can watch your X broadcast.', { description: event.shareUrl })
+  } else if (event.status === 'pending') {
+    toast.warning('X is still provisioning playback.', {
+      description:
+        'Viewers may see a loading spinner for a few minutes. Keep streaming — Videorc keeps checking.'
+    })
+  } else {
+    toast.error('X never produced playback for this broadcast.', {
+      description:
+        'Viewers saw a loading spinner. Your local recording is unaffected; the next Go Live uses a replacement source if this repeats.'
+    })
+  }
+}
+
+export function showOAuthCallbackResult(result: OAuthCallbackResult): void {
+  if (result.status === 'success' && result.accountConnected) {
+    toast.success('Account connected.')
+  } else if (result.status === 'success' && result.platform === 'x' && result.tokenStored) {
+    toast.success(result.message ?? 'X live authorization complete.')
+  } else if (result.status === 'success') {
+    toast.success('OAuth callback received.')
+  } else {
+    toast.error('OAuth callback failed.', {
+      description: result.message ?? result.status ?? 'Connection could not be completed.'
+    })
+  }
 }
 
 export function showSessionFinished({

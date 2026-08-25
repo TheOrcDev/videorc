@@ -41,6 +41,16 @@ pub struct Database {
     path: PathBuf,
 }
 
+/// Persisted active-Screen selection before output reconciliation. An
+/// unavailable selection deliberately carries only its id: a missing or
+/// tampered path must never cross back into the compositor/recording output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActiveStreamScreenSelection {
+    Inactive,
+    Ready(StreamScreen),
+    Unavailable { screen_id: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionCloneFacts {
     pub title: String,
@@ -4688,7 +4698,7 @@ impl Database {
     }
 
     pub fn delete_stream_screen(&self, screen_id: &str) -> Result<()> {
-        let conn = self.lock()?;
+        let mut conn = self.lock()?;
         let screen = self
             .stream_screen_by_id_raw_locked(&conn, screen_id)
             .optional()?;
@@ -4699,20 +4709,39 @@ impl Database {
         // Invalid persisted paths are retired from SQLite without ever being
         // followed or deleted. In particular, a forged row cannot turn
         // screens.delete into an arbitrary file deletion primitive.
-        if let Ok(path) = resolve_managed_screen_image_path(
+        let managed_image_path = resolve_managed_screen_image_path(
             &self.screen_assets_dir(),
             &screen.id,
             Path::new(&screen.image_path),
-        ) {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("Could not delete {}", path.display()))?;
-        }
-        conn.execute(
+        )
+        .ok();
+
+        // Removing the row and clearing activeScreenId are one authoritative
+        // transition. The managed asset is deliberately left untouched until
+        // that transaction commits, so an SQLite failure can roll back to a
+        // fully usable Screen rather than a row pointing at a deleted file.
+        let transaction = conn.transaction()?;
+        transaction.execute(
             "DELETE FROM stream_screens WHERE id = ?1",
             params![screen_id],
         )?;
-        if self.active_screen_id_locked(&conn)?.as_deref() == Some(screen_id) {
-            self.save_setting_locked(&conn, "activeScreenId", &Option::<String>::None)?;
+        if self.active_screen_id_locked(&transaction)?.as_deref() == Some(screen_id) {
+            self.save_setting_locked(&transaction, "activeScreenId", &Option::<String>::None)?;
+        }
+        transaction.commit()?;
+        drop(conn);
+
+        // Once SQLite is authoritative, asset cleanup is best effort. A
+        // cleanup failure may leave an inert orphan, but must not report a
+        // false transactional failure that makes the caller roll output back
+        // to a Screen whose row is already gone.
+        if let Some(path) = managed_image_path
+            && let Err(error) = std::fs::remove_file(&path)
+        {
+            tracing::warn!(
+                path = %path.display(),
+                "Could not remove deleted Screen asset after database commit: {error}"
+            );
         }
         Ok(())
     }
@@ -4745,17 +4774,32 @@ impl Database {
         self.list_stream_screens()
     }
 
-    pub fn active_stream_screen(&self) -> Result<Option<StreamScreen>> {
+    pub(crate) fn active_stream_screen_selection(&self) -> Result<ActiveStreamScreenSelection> {
         let conn = self.lock()?;
         let Some(screen_id) = self.active_screen_id_locked(&conn)? else {
-            return Ok(None);
+            return Ok(ActiveStreamScreenSelection::Inactive);
         };
-        let screen = self.stream_screen_by_id_locked(&conn, &screen_id)?;
-        if screen.status == StreamScreenStatus::Ready {
-            return Ok(Some(screen));
-        }
-        self.save_setting_locked(&conn, "activeScreenId", &Option::<String>::None)?;
-        Ok(None)
+        let screen = self
+            .stream_screen_by_id_raw_locked(&conn, &screen_id)
+            .optional()?
+            .map(|screen| self.validate_stream_screen(screen));
+        Ok(match screen {
+            Some(screen) if screen.status == StreamScreenStatus::Ready => {
+                ActiveStreamScreenSelection::Ready(screen)
+            }
+            _ => ActiveStreamScreenSelection::Unavailable { screen_id },
+        })
+    }
+
+    /// Pure snapshot read. Retirement of a missing/tampered active asset owns
+    /// output state too, so only Main's active-screen transition may clear the
+    /// persisted pointer.
+    pub fn active_stream_screen(&self) -> Result<Option<StreamScreen>> {
+        Ok(match self.active_stream_screen_selection()? {
+            ActiveStreamScreenSelection::Ready(screen) => Some(screen),
+            ActiveStreamScreenSelection::Inactive
+            | ActiveStreamScreenSelection::Unavailable { .. } => None,
+        })
     }
 
     pub fn stream_screen_by_id(&self, screen_id: &str) -> Result<StreamScreen> {
@@ -9712,6 +9756,35 @@ mod tests {
     }
 
     #[test]
+    fn stream_screen_delete_keeps_active_row_and_asset_when_database_commit_fails() {
+        let database = test_database();
+        let screen = import_stub_screen(&database, "break.png");
+        let image_path = PathBuf::from(&screen.image_path);
+        database.activate_stream_screen(&screen.id).unwrap();
+        database
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_stream_screen_delete
+                 BEFORE DELETE ON stream_screens
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected delete failure');
+                 END;",
+            )
+            .unwrap();
+
+        let error = database.delete_stream_screen(&screen.id).unwrap_err();
+
+        assert!(error.to_string().contains("injected delete failure"));
+        assert!(image_path.is_file(), "asset deletion must follow DB commit");
+        assert_eq!(
+            database.active_stream_screen().unwrap().unwrap().id,
+            screen.id,
+            "row deletion and activeScreenId clear must roll back together"
+        );
+    }
+
+    #[test]
     fn stream_screens_report_missing_when_optimized_file_disappears() {
         let database = test_database();
         let screen = import_stub_screen(&database, "break.png");
@@ -9847,6 +9920,30 @@ mod tests {
         std::fs::remove_file(&missing.image_path).unwrap();
         let error = database.activate_stream_screen(&missing.id).unwrap_err();
         assert!(error.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn active_stream_screen_missing_read_leaves_retirement_to_output_transition_owner() {
+        let database = test_database();
+        let screen = import_stub_screen(&database, "break.png");
+        database.activate_stream_screen(&screen.id).unwrap();
+        std::fs::remove_file(&screen.image_path).unwrap();
+
+        assert!(database.active_stream_screen().unwrap().is_none());
+        assert_eq!(
+            database.active_stream_screen_selection().unwrap(),
+            ActiveStreamScreenSelection::Unavailable {
+                screen_id: screen.id.clone()
+            },
+            "a pure authoritative read must not clear the pointer without clearing output"
+        );
+        assert_eq!(
+            database.active_stream_screen_selection().unwrap(),
+            ActiveStreamScreenSelection::Unavailable {
+                screen_id: screen.id
+            },
+            "the transition owner must still be able to observe and retire it"
+        );
     }
 
     #[test]

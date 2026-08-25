@@ -1,6 +1,5 @@
 use std::ffi::{c_int, c_void};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -179,19 +178,16 @@ pub struct VideoToolboxH264AsyncAnnexBFrame {
     pub result: std::result::Result<VideoToolboxH264AnnexBFrame, String>,
 }
 
-fn send_bounded_async_annex_b_frame(
-    sender: &mpsc::SyncSender<VideoToolboxH264AsyncAnnexBFrame>,
-    rejected_frames: &AtomicU64,
+fn send_async_annex_b_frame(
+    sender: &mpsc::Sender<VideoToolboxH264AsyncAnnexBFrame>,
     frame: VideoToolboxH264AsyncAnnexBFrame,
 ) {
-    if sender.try_send(frame).is_err() {
-        // VideoToolbox callbacks must never block: complete_pending_frames may
-        // wait for this callback while the bridge thread is not draining. The
-        // bridge observes this counter on its next drain and explicitly fails
-        // the affected output; silently dropping an encoded access unit would
-        // corrupt any H.264 frames that reference it.
-        rejected_frames.fetch_add(1, Ordering::Release);
-    }
+    // This channel must not block a VideoToolbox callback: complete_pending_frames
+    // can wait for the callback on the same bridge thread. It is logically
+    // bounded by the bridge's submitted-frame admission ceiling (16), so an
+    // unbounded mpsc transport removes callback overflow without permitting an
+    // unbounded media backlog.
+    let _ = sender.send(frame);
 }
 
 impl VideoToolboxH264ProbeResult {
@@ -651,8 +647,7 @@ impl VideoToolboxH264Session {
         target: Arc<MetalCompositorTargetPixelBuffer>,
         timing: VideoToolboxFrameTiming,
         frame_index: u64,
-        sender: mpsc::SyncSender<VideoToolboxH264AsyncAnnexBFrame>,
-        rejected_frames: Arc<AtomicU64>,
+        sender: mpsc::Sender<VideoToolboxH264AsyncAnnexBFrame>,
     ) -> Result<()> {
         let pixel_buffer = target.pixel_buffer();
         let width = CVPixelBufferGetWidth(pixel_buffer);
@@ -694,9 +689,8 @@ impl VideoToolboxH264Session {
                         sample_buffer,
                         timing,
                     );
-                    send_bounded_async_annex_b_frame(
+                    send_async_annex_b_frame(
                         &sender,
-                        &rejected_frames,
                         VideoToolboxH264AsyncAnnexBFrame {
                             frame_index,
                             result,
@@ -1172,26 +1166,25 @@ mod tests {
     use crate::metal_compositor::{GpuSource, GpuSourceKind, MetalSceneCompositor};
 
     #[test]
-    fn bounded_async_output_rejects_without_blocking_and_counts_pressure() {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let rejected_frames = AtomicU64::new(0);
+    fn async_output_callback_burst_preserves_every_access_unit_without_blocking() {
+        let (sender, receiver) = mpsc::channel();
         let frame = |frame_index| VideoToolboxH264AsyncAnnexBFrame {
             frame_index,
             result: Err("fixture".to_string()),
         };
 
-        send_bounded_async_annex_b_frame(&sender, &rejected_frames, frame(1));
-        send_bounded_async_annex_b_frame(&sender, &rejected_frames, frame(2));
+        for frame_index in 0..32 {
+            send_async_annex_b_frame(&sender, frame(frame_index));
+        }
 
         assert_eq!(
             receiver
-                .try_recv()
-                .expect("first frame remains queued")
-                .frame_index,
-            1
+                .try_iter()
+                .map(|frame| frame.frame_index)
+                .collect::<Vec<_>>(),
+            (0..32).collect::<Vec<_>>(),
+            "a callback burst must preserve every AU in submission order",
         );
-        assert_eq!(rejected_frames.load(Ordering::Acquire), 1);
-        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

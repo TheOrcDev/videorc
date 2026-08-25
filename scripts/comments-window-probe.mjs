@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Comments window probe — headless verification of the detached comments window.
 // Drives the detached Comments window through its real preload/main broker:
-// correlated send, acknowledged + failed highlight, live/history cache
-// isolation, and reopen/frame persistence. It also captures every important
-// 420x640 visual state. Real-machine bound (Electron + a display).
+// correlated send (including an 11s delayed Studio acknowledgement),
+// acknowledged + failed highlight, live/history cache isolation, and
+// reopen/frame persistence. It also captures every important 420x640 visual
+// state. Real-machine bound (Electron + a display).
 //
 //   node scripts/comments-window-probe.mjs
 //
@@ -67,8 +68,8 @@ async function main() {
   const opened = await smokeCommand('comments-window-open')
   assertProbe(opened.open === true, 'open: comments window reports open', JSON.stringify(opened))
   assertProbe(
-    opened.protected === true,
-    'protection: comments window reports content protection enabled',
+    opened.protected === false,
+    'capture policy: comments window remains visible in recordings',
     JSON.stringify(opened)
   )
 
@@ -278,6 +279,48 @@ async function main() {
   assertCorrelatedTrace(failedHighlight.last?.command, 'failed highlight')
   await captureState('highlight-failed', 'failed highlight')
 
+  // The renderer gets 12s for the provider-backed send and Main gets 15s for
+  // the renderer relay. Hold the real relay open past the former 10s Main
+  // budget: the command must remain correlated and resolve instead of raising
+  // the owner's "Studio renderer did not reply" error one second too early.
+  const delayedOutboundText = 'Delayed acknowledgement from Comments'
+  const delayedFixture = await smokeCommand('comments-window-set-command-fixture', {
+    kind: 'send',
+    outcome: 'sent',
+    delayMs: 11_000
+  })
+  assertProbe(
+    delayedFixture.delayMs === 11_000,
+    'send budget: smoke fixture preserves an acknowledgement beyond the old 10s Main timeout',
+    JSON.stringify(delayedFixture)
+  )
+  const delayedSubmitted = await smokeCommand('comments-window-submit-message', {
+    text: delayedOutboundText
+  })
+  assertProbe(
+    delayedSubmitted.submitted === true,
+    'send budget: delayed composer message submitted',
+    JSON.stringify(delayedSubmitted)
+  )
+  const delayedSend = await waitFor(
+    async () => ({
+      reader: await smokeCommand('comments-window-reader-state'),
+      command: await smokeCommand('comments-window-command-trace')
+    }),
+    (s) =>
+      s.reader.text.includes(`You · ${delayedOutboundText} · sent`) &&
+      s.command.pendingCount === 0 &&
+      s.command.trace?.resolutionAccepted === true &&
+      s.command.trace?.terminal === 'resolved',
+    14_000
+  )
+  assertProbe(
+    delayedSend.ok,
+    'send budget: 11s Studio acknowledgement resolves through the 15s Main broker',
+    JSON.stringify(delayedSend.last)
+  )
+  assertCorrelatedTrace(delayedSend.last?.command, 'delayed send result', true)
+
   // The composer travels through the same correlated broker. This response is
   // intentionally partial: YouTube succeeds, Twitch fails, X is receive-only.
   const outboundText = 'Unified hello from Comments'
@@ -482,7 +525,7 @@ async function main() {
   console.log('\n=== Comments window probe summary ===')
   if (failures.length === 0) {
     console.log(
-      'PASS — correlated send/highlight, terminal failure, live/history isolation, captures, toggle, and frame persistence.'
+      'PASS — layered send timeout, correlated send/highlight, terminal failure, live/history isolation, captures, toggle, and frame persistence.'
     )
     for (const capture of captures) console.log(`CAPTURE ${capture.label}: ${capture.file}`)
     return 0

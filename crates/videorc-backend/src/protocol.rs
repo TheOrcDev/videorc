@@ -1498,10 +1498,20 @@ pub struct WebSocketQueueDiagnosticStats {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct WebSocketCommandLaneDiagnosticStats {
+    pub queue: WebSocketQueueDiagnosticStats,
+    pub expired_before_dispatch_count: u64,
+    pub rejected_before_dispatch_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct WebSocketTransportDiagnosticStats {
     pub reliable_response_queue: WebSocketQueueDiagnosticStats,
     pub incoming_command_queue: WebSocketQueueDiagnosticStats,
     pub coalesced_telemetry_queue: WebSocketQueueDiagnosticStats,
+    #[serde(default)]
+    pub command_lanes: std::collections::BTreeMap<String, WebSocketCommandLaneDiagnosticStats>,
     pub slow_pressure_disconnect_count: u64,
 }
 
@@ -1537,6 +1547,47 @@ pub struct PreviewSourceSurfaceBackingStats {
     pub oldest_age_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct EncoderBridgeRoleOutputPressureStats {
+    pub output_queue_high_water_frames: u64,
+    pub output_queue_oldest_frame_age_high_water_ms: Option<u64>,
+    pub output_last_progress_age_ms: Option<u64>,
+    pub output_pressure_recovery_events: u64,
+    pub output_pre_encode_skipped_frames: u64,
+    pub video_toolbox_pending_encode_frames: u64,
+    pub video_toolbox_pending_fifo_frames: u64,
+    pub encoded_access_unit_dropped_frames: u64,
+}
+
+/// Last cumulative/high-water backend sample for one split-output encoder.
+/// Kept out of the public diagnostic contract; it exists only so generic
+/// counters and timing high-waters can be merged without depending on which
+/// role reported last.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct EncoderBridgeRoleDiagnosticStats {
+    pub metal_target_frames: u64,
+    pub metal_target_copied_frames: u64,
+    pub metal_target_handle_frames: u64,
+    pub zero_copy_frames: u64,
+    pub video_toolbox_probe_frames: u64,
+    pub video_toolbox_probe_bytes: u64,
+    pub video_toolbox_probe_errors: u64,
+    pub video_toolbox_output_encode_ms: Option<u64>,
+    pub compositor_wait_p95_ms: Option<f64>,
+    pub video_toolbox_submit_p95_ms: Option<f64>,
+    pub raw_video_fifo_write_p95_ms: Option<f64>,
+    pub video_toolbox_fifo_write_p95_ms: Option<f64>,
+    pub video_toolbox_fifo_enqueue_p95_ms: Option<f64>,
+    pub video_toolbox_fifo_enqueue_max_ms: Option<f64>,
+    pub writer_loop_p95_ms: Option<f64>,
+    pub writer_sleep_p95_ms: Option<f64>,
+    pub writer_active_p95_ms: Option<f64>,
+    pub deadline_lag_p95_ms: Option<f64>,
+    pub deadline_lag_max_ms: Option<f64>,
+    pub late_deadline_ticks: u64,
+    pub schedule_skipped_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticStats {
@@ -1550,15 +1601,54 @@ pub struct DiagnosticStats {
     pub dropped_frames: u64,
     pub encoder_speed: Option<f64>,
     pub encoder_bridge_queue_depth: u64,
+    /// Peak combined pending encoder + FIFO depth observed by an output bridge.
+    #[serde(default)]
+    pub encoder_bridge_output_queue_high_water_frames: u64,
     /// Oldest frame currently waiting for VideoToolbox completion or FIFO output.
     #[serde(default)]
     pub encoder_bridge_output_queue_oldest_frame_age_ms: Option<u64>,
+    /// Peak oldest-frame age retained after a pressured queue recovers.
+    #[serde(default)]
+    pub encoder_bridge_output_queue_oldest_frame_age_high_water_ms: Option<u64>,
+    /// Milliseconds since the most recent encoder completion or complete FIFO AU write.
+    #[serde(default)]
+    pub encoder_bridge_output_last_progress_age_ms: Option<u64>,
     /// Cumulative enqueue attempts that encountered a full bounded output queue.
     #[serde(default)]
     pub encoder_bridge_output_queue_capacity_pressure_events: u64,
+    /// Cumulative pressured intervals that returned to the healthy budget.
+    #[serde(default)]
+    pub encoder_bridge_output_pressure_recovery_events: u64,
     /// Cumulative frames intentionally discarded by output backpressure policy.
     #[serde(default)]
     pub encoder_bridge_output_queue_dropped_frames: u64,
+    /// Recording compositor ticks skipped before encode while queued AUs drain.
+    #[serde(default)]
+    pub encoder_bridge_output_pre_encode_skipped_frames: u64,
+    /// Current VideoToolbox callback/in-flight and FIFO-writer stage depths.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_pending_encode_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_pending_fifo_frames: u64,
+    /// Encoded H.264 access units rejected after encode; zero is required.
+    #[serde(default)]
+    pub encoder_bridge_encoded_access_unit_dropped_frames: u64,
+    /// Last role-local pressure samples used to build the aggregate fields above.
+    /// These are process-internal because the public diagnostic contract already
+    /// exposes the useful aggregate plus the established per-role queue fields.
+    /// Keeping the samples here prevents a quiet split-output role from erasing
+    /// pressure evidence emitted by the other role.
+    #[serde(skip)]
+    pub(crate) encoder_bridge_recording_output_pressure: EncoderBridgeRoleOutputPressureStats,
+    #[serde(skip)]
+    pub(crate) encoder_bridge_stream_output_pressure: EncoderBridgeRoleOutputPressureStats,
+    /// Role-local samples used to build generic split-output sums/high-waters.
+    /// Starting diagnostics reset both fields, preventing prior-session state
+    /// from entering a new recording.
+    #[serde(skip)]
+    pub(crate) encoder_bridge_recording_role_diagnostics: EncoderBridgeRoleDiagnosticStats,
+    #[serde(skip)]
+    pub(crate) encoder_bridge_stream_role_diagnostics: EncoderBridgeRoleDiagnosticStats,
     pub encoder_bridge_input_fps: Option<f64>,
     pub encoder_bridge_dropped_frames: u64,
     /// FFmpeg progress-reported drops attributable to the recording bridge.
@@ -1727,6 +1817,9 @@ pub struct DiagnosticStats {
     /// True only when diagnostics prove separate record and stream output encoders.
     #[serde(default)]
     pub encoder_bridge_separate_output_encoders_active: bool,
+    /// In split-output sessions the generic timing fields below are the worst
+    /// role-local session high-water. This keeps them truthful and independent
+    /// of report order; established role-specific writer fields remain below.
     /// P95 time the bridge writer spent waiting for a fresh compositor frame.
     #[serde(default)]
     pub encoder_bridge_compositor_wait_p95_ms: Option<f64>,

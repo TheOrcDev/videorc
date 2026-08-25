@@ -54,6 +54,27 @@ describe('CommentsCommandBroker', () => {
     expect(broker.pendingCount).toBe(0)
   })
 
+  it('gives Studio longer than its backend send budget before declaring no reply', async () => {
+    vi.useFakeTimers()
+    const broker = new CommentsCommandBroker()
+    const pending = broker.request('send-request-1', () => true)
+    let settled = false
+    void pending
+      .catch(() => undefined)
+      .finally(() => {
+        settled = true
+      })
+
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(settled).toBe(false)
+    expect(broker.pendingCount).toBe(1)
+
+    const rejection = expect(pending).rejects.toThrow(/timed out/)
+    await vi.advanceTimersByTimeAsync(3_000)
+    await rejection
+    expect(broker.pendingCount).toBe(0)
+  })
+
   it('propagates a correlated renderer/backend failure to the caller', async () => {
     const broker = new CommentsCommandBroker()
     const pending = broker.request('clear-request-1', () => true)
