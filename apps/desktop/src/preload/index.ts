@@ -169,6 +169,7 @@ const api: VideorcApi = {
   checkDirectory: (capabilityId) => invoke('system:check-directory', capabilityId),
   onOAuthCallbackUrl: (callback) => subscribe('oauth:callback-url', callback),
   onShortcutNavigate: (callback) => subscribe('shortcut:navigate', callback),
+  onShortcutModifier: (callback) => subscribe('shortcut:modifier', callback),
   onBackendConnection: (callback) => subscribe('backend:connection', callback),
   onBackendLifecycle: (callback) => subscribe('backend:lifecycle', callback),
   onBackendLog: (callback) => subscribe('backend:log', callback),

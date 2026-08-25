@@ -1609,12 +1609,31 @@ function createWindow(): void {
     mainWindow.loadFile(rendererPath)
   }
 
+  // Deduped so a held key's repeat storm does not flood the renderer.
+  let lastPublishedShortcutModifier = false
+  const publishShortcutModifier = (held: boolean): void => {
+    if (held === lastPublishedShortcutModifier) {
+      return
+    }
+    lastPublishedShortcutModifier = held
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      sendElectronEvent(mainWindow.webContents, 'shortcut:modifier', held)
+    }
+  }
+
   // Page-navigation shortcuts must be caught here, not in the renderer:
   // Chromium reserves ⌘1–⌘9 (tab switching) and ⌘0 (zoom) and never delivers
   // them to the page's keydown, so a document listener silently misses them.
   // before-input-event runs ahead of that handling; we preventDefault and
   // forward the raw key to the renderer, which owns the key→tab mapping.
   mainWindow.webContents.on('before-input-event', (event, input) => {
+    // Modifier state is published from HERE because here is the only place it
+    // can be observed. The renderer never sees a ⌘+digit chord (we swallow it
+    // below), and in practice it never sees the keyup that ends one either —
+    // which left the sidebar's shortcut chips stuck on after every ⌘1–⌘9.
+    // before-input-event still receives every keyUp, so main stays truthful.
+    publishShortcutModifier(input.meta || input.control)
+
     if (input.type !== 'keyDown' || input.alt || input.shift) {
       return
     }
@@ -1629,6 +1648,10 @@ function createWindow(): void {
       }
     }
   })
+
+  // Focus leaving the window means the modifier can be released without any
+  // event ever reaching us (⌘Tab is exactly that).
+  mainWindow.on('blur', () => publishShortcutModifier(false))
 
   mainWindow.on('closed', () => {
     commentsCommandBroker.rejectAll()
