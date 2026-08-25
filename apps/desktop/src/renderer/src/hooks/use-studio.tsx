@@ -1261,6 +1261,10 @@ const idleDiagnosticStats = (): DiagnosticStats => ({
   compositorSourceIosurfaceImportFrames: 0,
   compositorSourceCvpixelbufferImportFrames: 0,
   compositorSourceByteUploadFrames: 0,
+  compositorSourceCaptureTextureReuses: 0,
+  compositorCameraSourceCaptureTextureReuses: 0,
+  compositorScreenSourceCaptureTextureReuses: 0,
+  compositorSourceTextureCacheFlushes: 0,
   compositorSourceImportFailures: 0,
   compositorCameraSourceIosurfaceImportFrames: 0,
   compositorCameraSourceCvpixelbufferImportFrames: 0,
@@ -1309,9 +1313,41 @@ const idleDiagnosticStats = (): DiagnosticStats => ({
   previewSurfaceResizeCount: 0,
   previewDroppedFrames: 0,
   previewCameraDroppedFrames: 0,
+  previewCameraCaptureCallbackCount: 0,
+  previewCameraDidDropCallbackCount: 0,
+  previewCameraFrameStorePublications: 0,
+  previewCameraDropReasons: {
+    frameWasLate: 0,
+    outOfBuffers: 0,
+    discontinuity: 0,
+    unknown: 0
+  },
+  previewCameraSurfaceBacking: {
+    liveCount: 0,
+    peakCount: 0,
+    estimatedBytes: 0,
+    peakEstimatedBytes: 0
+  },
   previewCameraCapabilityFormats: [],
   previewCameraFrameBytes: 0,
   previewScreenDroppedFrames: 0,
+  previewScreenCaptureCallbackCount: 0,
+  previewScreenFrameStorePublications: 0,
+  previewScreenFrameStatuses: {
+    complete: 0,
+    idle: 0,
+    blank: 0,
+    suspended: 0,
+    started: 0,
+    stopped: 0,
+    unknown: 0
+  },
+  previewScreenSurfaceBacking: {
+    liveCount: 0,
+    peakCount: 0,
+    estimatedBytes: 0,
+    peakEstimatedBytes: 0
+  },
   previewScreenFrameBytes: 0,
   previewScreenCaptureQueueDepth: 0,
   previewSourceFrameBufferCount: 0,

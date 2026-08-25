@@ -41,7 +41,8 @@ import {
   parseFramemd5,
   parseFreezedetect,
   parseSilencedetect,
-  renderMarkdownReport
+  renderMarkdownReport,
+  uniqueFrameStats
 } from './recording-analyzer.mjs'
 import { ffmpegAvailable } from './ffmpeg-available.mjs'
 
@@ -109,6 +110,32 @@ describe('maxConsecutiveRun', () => {
 
   it('handles the empty case', () => {
     assert.deepEqual(maxConsecutiveRun([], 2), { maxRun: 0, bursts: [] })
+  })
+})
+
+describe('uniqueFrameStats', () => {
+  it('reports all-unique decoded hashes', () => {
+    assert.deepEqual(uniqueFrameStats(['a', 'b', 'c']), {
+      observedFrameHashes: 3,
+      uniqueFrameCount: 3,
+      uniqueFrameRatio: 1
+    })
+  })
+
+  it('counts uniqueness across repeated runs', () => {
+    assert.deepEqual(uniqueFrameStats(['a', 'a', 'b', 'b', 'b']), {
+      observedFrameHashes: 5,
+      uniqueFrameCount: 2,
+      uniqueFrameRatio: 0.4
+    })
+  })
+
+  it('captures the 277/1014 incident artifact ratio', () => {
+    const hashes = Array.from({ length: 1014 }, (_, index) => `frame-${index % 277}`)
+    const result = uniqueFrameStats(hashes)
+    assert.equal(result.uniqueFrameCount, 277)
+    assert.equal(result.observedFrameHashes, 1014)
+    assert.ok(Math.abs(result.uniqueFrameRatio - 277 / 1014) < Number.EPSILON)
   })
 })
 
@@ -255,6 +282,9 @@ describe('evaluateGates', () => {
     repeatedBurstCount: 0,
     expectedFrames: 90,
     observedFrames: 90,
+    observedFrameHashes: 90,
+    uniqueFrameCount: 90,
+    uniqueFrameRatio: 1,
     maxAudioGapMs: 0,
     longestSilenceMs: 0,
     silenceCount: 0,
@@ -376,6 +406,44 @@ describe('evaluateGates', () => {
     assert.match(v.failures[0], /frame count 70 vs expected ~90/)
   })
 
+  it('applies the decoded unique-frame ratio only when explicitly armed', () => {
+    const incident = {
+      ...clean,
+      observedFrameHashes: 1014,
+      uniqueFrameCount: 277,
+      uniqueFrameRatio: 277 / 1014
+    }
+    assert.equal(evaluateGates(incident).pass, true)
+
+    const gated = evaluateGates(incident, {
+      ...DEFAULT_GATES,
+      minUniqueFrameRatio: 0.95
+    })
+    assert.equal(gated.pass, false)
+    assert.match(gated.failures.join(' '), /277\/1014.*below 95\.0%/)
+
+    const passing = evaluateGates(clean, {
+      ...DEFAULT_GATES,
+      minUniqueFrameRatio: 0.95
+    })
+    assert.equal(passing.pass, true)
+  })
+
+  it('fails closed when the unique-frame gate has no decoded video evidence', () => {
+    const gated = evaluateGates(
+      {
+        ...clean,
+        hasVideo: false,
+        observedFrameHashes: 0,
+        uniqueFrameCount: 0,
+        uniqueFrameRatio: null
+      },
+      { ...DEFAULT_GATES, minUniqueFrameRatio: 0.95 }
+    )
+    assert.equal(gated.pass, false)
+    assert.match(gated.failures.join(' '), /unique-frame ratio is unavailable/)
+  })
+
   it('fails timestamp stretch when container duration outruns decoded frames', () => {
     const observedFrames = 205
     const frameDerivedDurationSeconds = observedFrames / 30
@@ -411,7 +479,13 @@ describe('evaluateGates', () => {
   })
 
   it('warns on missing color tags by default and fails under requireColorTags', () => {
-    const untagged = { ...clean, colorSpace: null, colorPrimaries: null, colorTransfer: null, colorRange: null }
+    const untagged = {
+      ...clean,
+      colorSpace: null,
+      colorPrimaries: null,
+      colorTransfer: null,
+      colorRange: null
+    }
     const soft = evaluateGates(untagged)
     assert.equal(soft.pass, true)
     assert.ok(soft.warnings.some((warning) => /colorimetry not tagged/.test(warning)))
@@ -501,6 +575,9 @@ describe('renderMarkdownReport', () => {
         observedFps: 30,
         observedFrames: 450,
         expectedFrames: 450,
+        observedFrameHashes: 450,
+        uniqueFrameCount: 449,
+        uniqueFrameRatio: 449 / 450,
         frameDerivedDurationSeconds: 15,
         durationStretchRatio: 1,
         meanIntervalMs: 33.3,
@@ -526,6 +603,7 @@ describe('renderMarkdownReport', () => {
     })
 
     assert.match(markdown, /## Findings/)
+    assert.match(markdown, /Decoded uniqueness: 449\/450 unique \(99\.78%\)/)
     assert.match(markdown, /Freeze segments: 14\.000s for 100\.0ms/)
     assert.match(markdown, /Repeated-frame bursts: frame 420 \(about 14\.000s\), run 3/)
   })
@@ -667,6 +745,8 @@ describe(
         `unexpected failures: ${report.verdict.failures.join('; ')}`
       )
       assert.equal(report.metrics.maxRepeatedFrameRun, 1)
+      assert.equal(report.metrics.uniqueFrameCount, report.metrics.observedFrameHashes)
+      assert.equal(report.metrics.uniqueFrameRatio, 1)
       assert.equal(report.metrics.freezeCount, 0)
     })
 

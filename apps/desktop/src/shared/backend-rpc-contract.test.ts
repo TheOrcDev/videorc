@@ -27,6 +27,61 @@ import {
   type BackendRpcResult
 } from './backend-rpc-contract'
 
+const requiredCapturePressureDiagnosticFields = [
+  'compositorSourceCaptureTextureReuses',
+  'compositorCameraSourceCaptureTextureReuses',
+  'compositorScreenSourceCaptureTextureReuses',
+  'compositorSourceTextureCacheFlushes',
+  'previewCameraCaptureCallbackCount',
+  'previewCameraDidDropCallbackCount',
+  'previewCameraFrameStorePublications',
+  'previewCameraDropReasons',
+  'previewCameraSurfaceBacking',
+  'previewScreenCaptureCallbackCount',
+  'previewScreenFrameStorePublications',
+  'previewScreenFrameStatuses',
+  'previewScreenSurfaceBacking'
+] as const satisfies readonly (keyof DiagnosticStats)[]
+
+const idleCapturePressureDiagnostics = {
+  compositorSourceCaptureTextureReuses: 0,
+  compositorCameraSourceCaptureTextureReuses: 0,
+  compositorScreenSourceCaptureTextureReuses: 0,
+  compositorSourceTextureCacheFlushes: 0,
+  previewCameraCaptureCallbackCount: 0,
+  previewCameraDidDropCallbackCount: 0,
+  previewCameraFrameStorePublications: 0,
+  previewCameraDropReasons: {
+    frameWasLate: 0,
+    outOfBuffers: 0,
+    discontinuity: 0,
+    unknown: 0
+  },
+  previewCameraSurfaceBacking: {
+    liveCount: 0,
+    peakCount: 0,
+    estimatedBytes: 0,
+    peakEstimatedBytes: 0
+  },
+  previewScreenCaptureCallbackCount: 0,
+  previewScreenFrameStorePublications: 0,
+  previewScreenFrameStatuses: {
+    complete: 0,
+    idle: 0,
+    blank: 0,
+    suspended: 0,
+    started: 0,
+    stopped: 0,
+    unknown: 0
+  },
+  previewScreenSurfaceBacking: {
+    liveCount: 0,
+    peakCount: 0,
+    estimatedBytes: 0,
+    peakEstimatedBytes: 0
+  }
+} satisfies Pick<DiagnosticStats, (typeof requiredCapturePressureDiagnosticFields)[number]>
+
 describe('backend RPC contract', () => {
   it('keeps the Windows HWND in an exact generation-bound main-owned request', () => {
     const request = {
@@ -737,6 +792,7 @@ describe('backend RPC contract', () => {
     const diagnostics = {
       skippedFrames: 0,
       droppedFrames: 2,
+      ...idleCapturePressureDiagnostics,
       compositorBackend: 'cpu',
       compositorCpuFrames: 214,
       compositorCpuFallbackFrames: 0,
@@ -758,6 +814,23 @@ describe('backend RPC contract', () => {
     }
     expect(validateBackendRpcResult('diagnostics.stats', diagnostics)).toEqual(diagnostics)
     expect(validateBackendEventPayload('diagnostics.stats', diagnostics)).toEqual(diagnostics)
+    for (const field of requiredCapturePressureDiagnosticFields) {
+      const missing = { ...diagnostics }
+      Reflect.deleteProperty(missing, field)
+      expect(() => validateBackendRpcResult('diagnostics.stats', missing)).toThrow(field)
+      expect(() => validateBackendEventPayload('diagnostics.stats', missing)).toThrow(field)
+    }
+    const misspelled = {
+      ...diagnostics,
+      previewScreenFrameStatues: diagnostics.previewScreenFrameStatuses
+    }
+    Reflect.deleteProperty(misspelled, 'previewScreenFrameStatuses')
+    expect(() => validateBackendRpcResult('diagnostics.stats', misspelled)).toThrow(
+      'previewScreenFrameStatuses'
+    )
+    expect(() => validateBackendEventPayload('diagnostics.stats', misspelled)).toThrow(
+      'previewScreenFrameStatuses'
+    )
     expect(() => validateBackendRpcResult('diagnostics.stats', { skippedFrames: -1 })).toThrow(
       'diagnostics.stats'
     )
@@ -779,6 +852,115 @@ describe('backend RPC contract', () => {
         }
       })
     ).toThrow('productionPng')
+  })
+
+  it('carries the maximal capture-pressure fixture through the diagnostics mirror', () => {
+    type CapturePressureFields = Required<
+      Pick<
+        DiagnosticStats,
+        | 'compositorSourceCaptureTextureReuses'
+        | 'compositorCameraSourceCaptureTextureReuses'
+        | 'compositorScreenSourceCaptureTextureReuses'
+        | 'compositorSourceTextureCacheFlushes'
+        | 'previewCameraCaptureCallbackCount'
+        | 'previewCameraDidDropCallbackCount'
+        | 'previewCameraFrameStorePublications'
+        | 'previewCameraCaptureCallbackAgeMs'
+        | 'previewCameraLatestSequence'
+        | 'previewCameraCapturePixelFormat'
+        | 'previewCameraDropReasons'
+        | 'previewCameraSurfaceBacking'
+        | 'previewScreenCaptureCallbackCount'
+        | 'previewScreenFrameStorePublications'
+        | 'previewScreenCaptureCallbackAgeMs'
+        | 'previewScreenLatestSequence'
+        | 'previewScreenFrameStatuses'
+        | 'previewScreenSurfaceBacking'
+      >
+    >
+    const capturePressure: CapturePressureFields = {
+      compositorSourceCaptureTextureReuses: 120,
+      compositorCameraSourceCaptureTextureReuses: 70,
+      compositorScreenSourceCaptureTextureReuses: 50,
+      compositorSourceTextureCacheFlushes: 6,
+      previewCameraCaptureCallbackCount: 1_001,
+      previewCameraDidDropCallbackCount: 17,
+      previewCameraFrameStorePublications: 984,
+      previewCameraCaptureCallbackAgeMs: 12,
+      previewCameraLatestSequence: 984,
+      previewCameraCapturePixelFormat: 'BGRA',
+      previewCameraDropReasons: {
+        frameWasLate: 3,
+        outOfBuffers: 5,
+        discontinuity: 7,
+        unknown: 2
+      },
+      previewCameraSurfaceBacking: {
+        liveCount: 2,
+        peakCount: 4,
+        estimatedBytes: 66_355_200,
+        peakEstimatedBytes: 132_710_400,
+        oldestAgeMs: 42
+      },
+      previewScreenCaptureCallbackCount: 1_010,
+      previewScreenFrameStorePublications: 990,
+      previewScreenCaptureCallbackAgeMs: 9,
+      previewScreenLatestSequence: 990,
+      previewScreenFrameStatuses: {
+        complete: 990,
+        idle: 4,
+        blank: 3,
+        suspended: 2,
+        started: 1,
+        stopped: 1,
+        unknown: 9
+      },
+      previewScreenSurfaceBacking: {
+        liveCount: 3,
+        peakCount: 6,
+        estimatedBytes: 99_532_800,
+        peakEstimatedBytes: 199_065_600,
+        oldestAgeMs: 31
+      }
+    }
+    const diagnostics = {
+      skippedFrames: 0,
+      droppedFrames: 0,
+      ...capturePressure
+    }
+
+    expect(validateBackendRpcResult('diagnostics.stats', diagnostics)).toEqual(diagnostics)
+    expect(validateBackendEventPayload('diagnostics.stats', diagnostics)).toEqual(diagnostics)
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...diagnostics,
+        compositorSourceTextureCacheFlushes: -1
+      })
+    ).toThrow('compositorSourceTextureCacheFlushes')
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...diagnostics,
+        previewCameraCaptureCallbackAgeMs: null
+      })
+    ).toThrow('previewCameraCaptureCallbackAgeMs')
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...diagnostics,
+        previewCameraDropReasons: {
+          ...diagnostics.previewCameraDropReasons,
+          outOfBuffers: -1
+        }
+      })
+    ).toThrow('outOfBuffers')
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...diagnostics,
+        previewScreenFrameStatuses: {
+          ...diagnostics.previewScreenFrameStatuses,
+          stale: 1
+        }
+      })
+    ).toThrow('stale must be a known field')
   })
 
   it('validates scalar-only Windows D3D11 media diagnostics', () => {
@@ -831,6 +1013,7 @@ describe('backend RPC contract', () => {
     const diagnostics = {
       skippedFrames: 0,
       droppedFrames: 0,
+      ...idleCapturePressureDiagnostics,
       compositorBackend: 'd3d11',
       windowsD3d11Media
     }
@@ -845,12 +1028,14 @@ describe('backend RPC contract', () => {
         }
       })
     ).toThrow('protectedContentMaskedFrames')
-    expect(
-      validateBackendRpcResult('diagnostics.stats', {
-        skippedFrames: 0,
-        droppedFrames: 0
-      })
-    ).toEqual({ skippedFrames: 0, droppedFrames: 0 })
+    const diagnosticsWithoutWindowsMedia = {
+      skippedFrames: 0,
+      droppedFrames: 0,
+      ...idleCapturePressureDiagnostics
+    }
+    expect(validateBackendRpcResult('diagnostics.stats', diagnosticsWithoutWindowsMedia)).toEqual(
+      diagnosticsWithoutWindowsMedia
+    )
     expect(() =>
       validateBackendRpcResult('diagnostics.stats', {
         skippedFrames: 0,

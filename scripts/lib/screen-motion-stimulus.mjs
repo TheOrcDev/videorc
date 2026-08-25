@@ -404,6 +404,48 @@ export function stimulusVisibilityFromRgb(rgb, options = {}) {
   }
 }
 
+export function stimulusVisibilityFromBgraBmp(bmp, options = {}) {
+  const bytes = Buffer.isBuffer(bmp) ? bmp : Buffer.from(bmp ?? [])
+  if (bytes.length < 54 || bytes.subarray(0, 2).toString('ascii') !== 'BM') {
+    throw new Error(`Screen motion stimulus BMP is invalid or truncated (${bytes.length} bytes).`)
+  }
+  const pixelOffset = bytes.readUInt32LE(10)
+  const width = bytes.readInt32LE(18)
+  const signedHeight = bytes.readInt32LE(22)
+  const height = Math.abs(signedHeight)
+  const bitsPerPixel = bytes.readUInt16LE(28)
+  const compression = bytes.readUInt32LE(30)
+  const pixelBytes = width > 0 && height > 0 ? width * height * 4 : 0
+  if (
+    width <= 0 ||
+    height <= 0 ||
+    bitsPerPixel !== 32 ||
+    compression !== 0 ||
+    !Number.isSafeInteger(pixelBytes) ||
+    bytes.length < pixelOffset + pixelBytes
+  ) {
+    throw new Error(
+      `Screen motion stimulus BMP header/payload is unsupported: width=${width}, height=${signedHeight}, bpp=${bitsPerPixel}, compression=${compression}, bytes=${bytes.length}.`
+    )
+  }
+
+  const rgb = Buffer.allocUnsafe(width * height * 3)
+  let target = 0
+  for (let source = pixelOffset; source < pixelOffset + pixelBytes; source += 4) {
+    rgb[target] = bytes[source + 2]
+    rgb[target + 1] = bytes[source + 1]
+    rgb[target + 2] = bytes[source]
+    target += 3
+  }
+  return {
+    ...stimulusVisibilityFromRgb(rgb, options),
+    width,
+    height,
+    pixelOffset,
+    source: 'backend-screen-bmp'
+  }
+}
+
 export function stimulusTemporalVisibilityFromRgb(rgb, options = {}) {
   const aggregateVisibility = stimulusVisibilityFromRgb(rgb, options)
   const width = Number(options.width)

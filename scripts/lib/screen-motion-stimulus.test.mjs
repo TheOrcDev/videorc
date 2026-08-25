@@ -8,6 +8,7 @@ import {
   resolveWindowsStimulusBrowser,
   stopScreenMotionStimulus,
   stimulusTemporalVisibilityFromRgb,
+  stimulusVisibilityFromBgraBmp,
   stimulusVisibilityFromRgb,
   stimulusWindowOptionsFromDisplayBounds,
   windowsStimulusTaskkillArgs
@@ -157,6 +158,35 @@ describe('stimulusVisibilityFromRgb', () => {
 
     assert.equal(verdict.visible, true)
     assert.deepEqual(verdict.missingColors, ['green'])
+  })
+})
+
+describe('stimulusVisibilityFromBgraBmp', () => {
+  it('proves the stimulus signature in a backend top-down BGRA frame', () => {
+    const verdict = stimulusVisibilityFromBgraBmp(
+      bgraBmp([
+        [0, 0, 0],
+        [255, 255, 255],
+        [255, 43, 43],
+        [49, 255, 116],
+        [29, 111, 255],
+        [0, 229, 255],
+        [255, 43, 214],
+        [255, 232, 74]
+      ]),
+      { minimumColorPixels: 2, minimumColorRatio: 0 }
+    )
+
+    assert.equal(verdict.visible, true)
+    assert.equal(verdict.source, 'backend-screen-bmp')
+    assert.equal(verdict.height, 1)
+  })
+
+  it('fails closed for an invalid backend BMP payload', () => {
+    assert.throws(
+      () => stimulusVisibilityFromBgraBmp(Buffer.from('not-a-bmp')),
+      /invalid or truncated/
+    )
   })
 })
 
@@ -391,4 +421,25 @@ function rgbPixels(colors) {
     for (let index = 0; index < 3; index += 1) bytes.push(...color)
   }
   return Buffer.from(bytes)
+}
+
+function bgraBmp(colors) {
+  const pixels = []
+  for (const [red, green, blue] of colors) {
+    for (let index = 0; index < 3; index += 1) pixels.push(blue, green, red, 255)
+  }
+  const width = pixels.length / 4
+  const bytes = Buffer.alloc(54 + pixels.length)
+  bytes.write('BM', 0, 'ascii')
+  bytes.writeUInt32LE(bytes.length, 2)
+  bytes.writeUInt32LE(54, 10)
+  bytes.writeUInt32LE(40, 14)
+  bytes.writeInt32LE(width, 18)
+  bytes.writeInt32LE(-1, 22)
+  bytes.writeUInt16LE(1, 26)
+  bytes.writeUInt16LE(32, 28)
+  bytes.writeUInt32LE(0, 30)
+  bytes.writeUInt32LE(pixels.length, 34)
+  Buffer.from(pixels).copy(bytes, 54)
+  return bytes
 }

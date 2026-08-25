@@ -17,18 +17,19 @@ use crate::camera_capture::{
 };
 use crate::color::{ycbcr_bt709_full_to_bgr, ycbcr_bt709_video_to_bgr};
 use crate::diagnostics::{
-    PreviewCameraCaptureTimingStats, apply_preview_camera_capability_stats,
+    PreviewCameraCaptureStats, PreviewCameraCaptureTimingStats,
+    apply_preview_camera_capability_stats, apply_preview_camera_capture_stats,
     apply_preview_camera_capture_timing_stats, apply_preview_camera_source_stats,
     apply_preview_source_frame_store_stats,
 };
 use crate::ffmpeg::resolve_ffmpeg_path;
-use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats};
+use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats, SurfaceBackingTrackerHandle};
 use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
 #[cfg(any(target_os = "windows", test))]
 use crate::protocol::{CameraAspect, CameraShape, CameraSize, CameraTransformMode, LayoutPreset};
 use crate::protocol::{
-    CameraCapabilityFormat, LayoutSettings, PreviewCameraStartParams, PreviewCameraState,
-    PreviewCameraStatus, VideoSettings,
+    CameraCapabilityFormat, LayoutSettings, PreviewCameraDropReasonStats, PreviewCameraStartParams,
+    PreviewCameraState, PreviewCameraStatus, VideoSettings,
 };
 use crate::source_registry::{SourceConsumerReason, SourceKey};
 use crate::source_status::SourceLifecycleStatus;
@@ -108,6 +109,9 @@ pub type PreviewCameraSlot = Arc<tokio::sync::Mutex<PreviewCameraRuntime>>;
 #[derive(Debug)]
 pub struct PreviewCameraRuntime {
     pub status: PreviewCameraStatus,
+    /// Source-level ownership keeps surface-backed frames observable while a
+    /// capture session replaces its per-session `FrameStore`.
+    surface_backing_tracker: SurfaceBackingTrackerHandle,
     run_id: Option<String>,
     source_key: Option<SourceKey>,
     starting: Option<PreviewCameraStartKey>,
@@ -176,6 +180,50 @@ pub enum PreviewCameraPixelFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CameraCaptureDropReason {
+    FrameWasLate,
+    OutOfBuffers,
+    Discontinuity,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CameraCaptureDropReasonCounts {
+    frame_was_late: u64,
+    out_of_buffers: u64,
+    discontinuity: u64,
+    unknown: u64,
+}
+
+impl CameraCaptureDropReasonCounts {
+    fn record(&mut self, reason: CameraCaptureDropReason) {
+        let counter = match reason {
+            CameraCaptureDropReason::FrameWasLate => &mut self.frame_was_late,
+            CameraCaptureDropReason::OutOfBuffers => &mut self.out_of_buffers,
+            CameraCaptureDropReason::Discontinuity => &mut self.discontinuity,
+            CameraCaptureDropReason::Unknown => &mut self.unknown,
+        };
+        *counter = counter.saturating_add(1);
+    }
+
+    fn total(self) -> u64 {
+        self.frame_was_late
+            .saturating_add(self.out_of_buffers)
+            .saturating_add(self.discontinuity)
+            .saturating_add(self.unknown)
+    }
+
+    fn diagnostic_stats(self) -> PreviewCameraDropReasonStats {
+        PreviewCameraDropReasonStats {
+            frame_was_late: self.frame_was_late,
+            out_of_buffers: self.out_of_buffers,
+            discontinuity: self.discontinuity,
+            unknown: self.unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreviewCameraFrameInfo {
     pub sequence: u64,
     pub width: u32,
@@ -228,12 +276,24 @@ impl PreviewCameraFrameSource {
 #[derive(Debug, Default)]
 pub struct PreviewCameraShared {
     frame_store: FrameStore<PreviewCameraPixelFormat>,
+    capture_callback_count: u64,
     frames_captured: u64,
     dropped_frames: u64,
+    capture_drop_reasons: CameraCaptureDropReasonCounts,
+    capture_pixel_format: Option<u32>,
     frames_in_window: u64,
     window_started_at: Option<Instant>,
     source_fps: Option<f64>,
     capture_timings: CameraCaptureTimingWindow,
+}
+
+impl PreviewCameraShared {
+    fn with_surface_backing_tracker(tracker: SurfaceBackingTrackerHandle) -> Self {
+        Self {
+            frame_store: FrameStore::new_with_surface_backing_tracker(1, tracker),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -336,6 +396,7 @@ fn max_sample(samples: &[f64]) -> Option<f64> {
 pub fn initial_preview_camera_state() -> PreviewCameraRuntime {
     PreviewCameraRuntime {
         status: idle_status(Some("Native camera preview is not running.".to_string())),
+        surface_backing_tracker: SurfaceBackingTrackerHandle::default(),
         run_id: None,
         source_key: None,
         starting: None,
@@ -446,7 +507,15 @@ pub async fn start_preview_camera(
     stop_current_camera_for_restart(&state).await;
 
     let run_id = Uuid::new_v4().to_string();
-    let shared = Arc::new(StdMutex::new(PreviewCameraShared::default()));
+    let surface_backing_tracker = state
+        .preview_camera
+        .lock()
+        .await
+        .surface_backing_tracker
+        .clone();
+    let shared = Arc::new(StdMutex::new(
+        PreviewCameraShared::with_surface_backing_tracker(surface_backing_tracker),
+    ));
     let (stop_tx, stop_rx) = std_mpsc::channel();
     let (startup_tx, startup_rx) = std_mpsc::channel();
     let thread_shared = Arc::clone(&shared);
@@ -740,7 +809,7 @@ pub async fn preview_camera_frame_store_stats(state: &AppState) -> FrameStoreSta
     let shared = {
         let slot = state.preview_camera.lock().await;
         let Some(active) = slot.active.as_ref() else {
-            return FrameStoreStats::default();
+            return FrameStoreStats::from_surface_backing(slot.surface_backing_tracker.snapshot());
         };
         Arc::clone(&active.shared)
     };
@@ -1227,11 +1296,24 @@ async fn poll_camera_metrics(
             let guard = shared
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let latest_frame = guard.frame_store.latest();
             CameraSharedSnapshot {
                 frames_captured: guard.frames_captured,
                 dropped_frames: guard.dropped_frames,
                 source_fps: guard.source_fps,
-                latest_frame: guard.frame_store.latest(),
+                capture: PreviewCameraCaptureStats {
+                    callback_count: guard.capture_callback_count,
+                    did_drop_callback_count: guard.capture_drop_reasons.total(),
+                    frame_store_publications: guard.frames_captured,
+                    callback_age_ms: guard
+                        .capture_timings
+                        .last_callback_at
+                        .map(|at| at.elapsed().as_millis() as u64),
+                    latest_sequence: latest_frame.as_ref().map(|frame| frame.sequence),
+                    pixel_format: camera_capture_pixel_format_label(guard.capture_pixel_format),
+                    drop_reasons: guard.capture_drop_reasons.diagnostic_stats(),
+                },
+                latest_frame,
                 frame_store_stats: guard.frame_store.stats(),
                 capture_timings: guard.capture_timings.snapshot(),
             }
@@ -1266,6 +1348,7 @@ async fn poll_camera_metrics(
                 crate::preview_screen::preview_screen_frame_store_stats(&state).await;
             let mut diagnostics = state.diagnostics.lock().await;
             let stats = apply_preview_camera_source_stats(diagnostics.clone(), &status);
+            let stats = apply_preview_camera_capture_stats(stats, snapshot.capture);
             let stats = apply_preview_camera_capture_timing_stats(stats, snapshot.capture_timings);
             *diagnostics = apply_preview_source_frame_store_stats(
                 stats,
@@ -1282,9 +1365,20 @@ struct CameraSharedSnapshot {
     frames_captured: u64,
     dropped_frames: u64,
     source_fps: Option<f64>,
+    capture: PreviewCameraCaptureStats,
     latest_frame: Option<FrameHandle<PreviewCameraPixelFormat>>,
     frame_store_stats: FrameStoreStats,
     capture_timings: PreviewCameraCaptureTimingStats,
+}
+
+#[cfg(target_os = "macos")]
+fn camera_capture_pixel_format_label(pixel_format: Option<u32>) -> Option<String> {
+    pixel_format.map(macos::format_fourcc)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn camera_capture_pixel_format_label(_pixel_format: Option<u32>) -> Option<String> {
+    None
 }
 
 fn idle_status(message: Option<String>) -> PreviewCameraStatus {
@@ -2130,7 +2224,14 @@ mod macos {
         AVCaptureSessionPresetInputPriority, AVCaptureVideoDataOutput,
         AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeVideo,
     };
-    use objc2_core_media::{CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetDimensions};
+    use objc2_core_foundation::{CFString, CFType};
+    use objc2_core_media::{
+        CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetDimensions,
+        kCMSampleBufferAttachmentKey_DroppedFrameReason,
+        kCMSampleBufferDroppedFrameReason_Discontinuity,
+        kCMSampleBufferDroppedFrameReason_FrameWasLate,
+        kCMSampleBufferDroppedFrameReason_OutOfBuffers,
+    };
     use objc2_core_video::{
         CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBaseAddressOfPlane,
         CVPixelBufferGetBytesPerRow, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight,
@@ -2143,6 +2244,18 @@ mod macos {
         kCVPixelFormatType_422YpCbCr8_yuvs,
     };
     use objc2_foundation::{NSDictionary, NSNumber, NSObject, NSObjectProtocol, NSString};
+
+    unsafe extern "C-unwind" {
+        /// Borrow an existing CoreMedia attachment without retaining or allocating on the
+        /// AVFoundation callback queue. objc2-core-media gates its owning wrapper behind the
+        /// optional CMAttachment feature, so keep this narrow declaration local.
+        #[link_name = "CMGetAttachment"]
+        fn cm_get_attachment_borrowed(
+            target: &CFType,
+            key: &CFString,
+            attachment_mode_out: *mut u32,
+        ) -> *const CFType;
+    }
 
     struct CameraDelegateIvars {
         shared: Arc<StdMutex<PreviewCameraShared>>,
@@ -2171,15 +2284,17 @@ mod macos {
             fn capture_drop(
                 &self,
                 _output: &AVCaptureOutput,
-                _sample_buffer: &CMSampleBuffer,
+                sample_buffer: &CMSampleBuffer,
                 _connection: &AVCaptureConnection,
             ) {
+                let reason = capture_drop_reason(sample_buffer);
                 let mut guard = self
                     .ivars()
                     .shared
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 guard.dropped_frames = guard.dropped_frames.saturating_add(1);
+                guard.capture_drop_reasons.record(reason);
             }
         }
     );
@@ -2188,6 +2303,41 @@ mod macos {
         fn new(shared: Arc<StdMutex<PreviewCameraShared>>) -> Retained<Self> {
             let delegate = Self::alloc().set_ivars(CameraDelegateIvars { shared });
             unsafe { msg_send![super(delegate), init] }
+        }
+    }
+
+    fn capture_drop_reason(sample_buffer: &CMSampleBuffer) -> CameraCaptureDropReason {
+        // SAFETY: CMSampleBuffer is a CoreFoundation attachment bearer. AVFoundation owns both the
+        // sample buffer and its attachment throughout this callback, so the borrowed attachment is
+        // valid for these bounded type/constant comparisons.
+        let bearer = unsafe { &*(std::ptr::from_ref(sample_buffer).cast::<CFType>()) };
+        let reason = unsafe {
+            cm_get_attachment_borrowed(
+                bearer,
+                kCMSampleBufferAttachmentKey_DroppedFrameReason,
+                std::ptr::null_mut(),
+            )
+        };
+        classify_capture_drop_reason_value(unsafe { reason.as_ref() })
+    }
+
+    pub(super) fn classify_capture_drop_reason_value(
+        reason: Option<&CFType>,
+    ) -> CameraCaptureDropReason {
+        let Some(reason) = reason else {
+            return CameraCaptureDropReason::Unknown;
+        };
+        let Some(reason) = reason.downcast_ref::<CFString>() else {
+            return CameraCaptureDropReason::Unknown;
+        };
+        if reason == unsafe { kCMSampleBufferDroppedFrameReason_FrameWasLate } {
+            CameraCaptureDropReason::FrameWasLate
+        } else if reason == unsafe { kCMSampleBufferDroppedFrameReason_OutOfBuffers } {
+            CameraCaptureDropReason::OutOfBuffers
+        } else if reason == unsafe { kCMSampleBufferDroppedFrameReason_Discontinuity } {
+            CameraCaptureDropReason::Discontinuity
+        } else {
+            CameraCaptureDropReason::Unknown
         }
     }
 
@@ -2595,6 +2745,7 @@ mod macos {
                 .capture_timings
                 .record_callback_at(callback_started_at);
             guard.capture_timings.record_sample_pts(sample_pts_seconds);
+            guard.capture_callback_count = guard.capture_callback_count.saturating_add(1);
         }
 
         let Some(pixel_buffer) = (unsafe { sample_buffer.image_buffer() }) else {
@@ -2701,6 +2852,7 @@ mod macos {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Instant::now();
         guard.frames_captured = guard.frames_captured.saturating_add(1);
+        guard.capture_pixel_format = Some(pixel_format);
         guard.frames_in_window = guard.frames_in_window.saturating_add(1);
         let window_started = *guard.window_started_at.get_or_insert(now);
         let elapsed = window_started.elapsed();
@@ -2731,7 +2883,7 @@ mod macos {
     }
 
     /// Render a CoreVideo pixel-format OSType as its FourCC string (e.g. `420v`).
-    fn format_fourcc(format: u32) -> String {
+    pub(super) fn format_fourcc(format: u32) -> String {
         String::from_utf8_lossy(&format.to_be_bytes()).into_owned()
     }
 
@@ -2864,6 +3016,70 @@ mod tests {
     };
     use crate::storage::Database;
     use tokio::sync::broadcast;
+
+    #[test]
+    fn capture_drop_reason_counts_preserve_every_bucket() {
+        let mut counts = CameraCaptureDropReasonCounts::default();
+        for reason in [
+            CameraCaptureDropReason::FrameWasLate,
+            CameraCaptureDropReason::OutOfBuffers,
+            CameraCaptureDropReason::Discontinuity,
+            CameraCaptureDropReason::Unknown,
+        ] {
+            counts.record(reason);
+        }
+
+        assert_eq!(counts.frame_was_late, 1);
+        assert_eq!(counts.out_of_buffers, 1);
+        assert_eq!(counts.discontinuity, 1);
+        assert_eq!(counts.unknown, 1);
+        assert_eq!(counts.total(), 4);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn capture_drop_reason_classifies_every_apple_fixture() {
+        use objc2_core_foundation::{CFString, CFType};
+        use objc2_core_media::{
+            kCMSampleBufferAttachmentKey_DroppedFrameReason,
+            kCMSampleBufferDroppedFrameReason_Discontinuity,
+            kCMSampleBufferDroppedFrameReason_FrameWasLate,
+            kCMSampleBufferDroppedFrameReason_OutOfBuffers,
+        };
+
+        fn as_cf_type(value: &CFString) -> &CFType {
+            // SAFETY: Every concrete CoreFoundation value has the CFType root representation.
+            unsafe { &*(std::ptr::from_ref(value).cast::<CFType>()) }
+        }
+
+        for (value, expected) in [
+            (
+                unsafe { kCMSampleBufferDroppedFrameReason_FrameWasLate },
+                CameraCaptureDropReason::FrameWasLate,
+            ),
+            (
+                unsafe { kCMSampleBufferDroppedFrameReason_OutOfBuffers },
+                CameraCaptureDropReason::OutOfBuffers,
+            ),
+            (
+                unsafe { kCMSampleBufferDroppedFrameReason_Discontinuity },
+                CameraCaptureDropReason::Discontinuity,
+            ),
+            (
+                unsafe { kCMSampleBufferAttachmentKey_DroppedFrameReason },
+                CameraCaptureDropReason::Unknown,
+            ),
+        ] {
+            assert_eq!(
+                macos::classify_capture_drop_reason_value(Some(as_cf_type(value))),
+                expected
+            );
+        }
+        assert_eq!(
+            macos::classify_capture_drop_reason_value(None),
+            CameraCaptureDropReason::Unknown
+        );
+    }
 
     fn test_state() -> AppState {
         let (events, _) = broadcast::channel(16);
