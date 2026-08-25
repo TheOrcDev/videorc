@@ -337,6 +337,15 @@ export function DiagnosticsTab(): ReactElement {
               label="Slow-peer disconnects"
               value={diagnosticStats.websocketTransport.slowPressureDisconnectCount.toString()}
             />
+            {Object.entries(diagnosticStats.websocketTransport.commandLanes).map(
+              ([lane, stats]) => (
+                <DiagnosticMetric
+                  key={lane}
+                  label={`${lane} lane`}
+                  value={`${formatWebSocketQueue(stats.queue)} · ${stats.expiredBeforeDispatchCount} expired · ${stats.rejectedBeforeDispatchCount} rejected`}
+                />
+              )
+            )}
           </MetricGroup>
           <MetricGroup title="Preview">
             <DiagnosticMetric

@@ -28,6 +28,46 @@ export const AVATAR_CACHE_MAX_FILES = 200
  * avatar the web happily accepted. */
 export const AVATAR_MAX_BYTES = 2 * 1024 * 1024
 
+/** Avatar decoration is best-effort and must leave enough of Main's 15-second
+ * Comments relay budget for rasterization and the authoritative backend
+ * mutation. A stalled CDN therefore cannot keep a highlight command alive. */
+export const AVATAR_FETCH_TIMEOUT_MS = 4_000
+
+export class AvatarFetchTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Avatar fetch exceeded its ${timeoutMs}ms deadline.`)
+    this.name = 'AvatarFetchTimeoutError'
+  }
+}
+
+/**
+ * Bounds both response headers and body consumption. The race is intentional:
+ * it settles even if Electron's fetch implementation is slow to observe the
+ * abort, while the signal still cancels compliant network work promptly.
+ */
+export async function withAvatarFetchDeadline<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs = AVATAR_FETCH_TIMEOUT_MS
+): Promise<T> {
+  const controller = new AbortController()
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      const error = new AvatarFetchTimeoutError(timeoutMs)
+      controller.abort(error)
+      reject(error)
+    }, timeoutMs)
+  })
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => operation(controller.signal)),
+      deadline
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
+
 /**
  * Why an avatar was not cached. Carries only what support needs to see (host,
  * scheme, size / status class) — never the path or query, which on platform

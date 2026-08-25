@@ -69,6 +69,7 @@ const api: VideorcApi = {
   onCommentHighlightState: (callback) => subscribe('comments-window:highlight-state', callback),
   getBundledBackgroundAssets: () => invoke('backgrounds:bundled-assets'),
   beginAccountSignIn: (authorizeUrl) => invoke('account:begin-sign-in', authorizeUrl),
+  refreshAccount: () => invoke('account:refresh'),
   signOutAccount: () => invoke('account:sign-out'),
   getPendingAccountCallbacks: () => invoke('account:callbacks-list'),
   acknowledgeAccountCallback: (callbackId) => invoke('account:callback-ack', callbackId),

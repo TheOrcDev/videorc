@@ -5,6 +5,7 @@ import {
   idlePreviewLayoutProofRequired,
   layoutTransactionBackendSnapshotIsStable,
   layoutTransactionFailureReconciliation,
+  layoutTransactionFailureDisposition,
   layoutTransactionProofDisposition,
   layoutTransactionUnprovenSeverity,
   liveBackgroundCommitDecision,
@@ -139,6 +140,105 @@ describe('layout transaction policy', () => {
         latestCommit: committedA
       })
     ).toEqual({ source: 'backend-truth', snapshot: backendTruth })
+  })
+
+  it('requires outcome-unknown, a newer revision, and full scene equivalence', () => {
+    const requestedScene = {
+      layout: {
+        layoutPreset: 'screen-camera',
+        camera: { corner: 'bottom-right', size: 30 }
+      },
+      sources: [
+        { kind: 'screen', deviceId: 'screen-1' },
+        { kind: 'camera', deviceId: 'camera-1' }
+      ],
+      video: { width: 1920, height: 1080, fps: 30 },
+      background: { assetId: 'background-1' }
+    }
+
+    expect(
+      layoutTransactionFailureDisposition({
+        failureCode: 'request-outcome-unknown',
+        sceneRevisionBeforeRequest: 7,
+        requestedScene,
+        // Deliberately reverse key insertion order: semantic equality must not
+        // depend on JSON object serialization order.
+        backendTruth: {
+          sceneRevision: 8,
+          scene: {
+            background: { assetId: 'background-1' },
+            video: { fps: 30, height: 1080, width: 1920 },
+            sources: [
+              { deviceId: 'screen-1', kind: 'screen' },
+              { deviceId: 'camera-1', kind: 'camera' }
+            ],
+            layout: {
+              camera: { size: 30, corner: 'bottom-right' },
+              layoutPreset: 'screen-camera'
+            }
+          }
+        }
+      })
+    ).toBe('requested-scene-applied')
+    expect(
+      layoutTransactionFailureDisposition({
+        failureCode: 'request-outcome-unknown',
+        sceneRevisionBeforeRequest: 7,
+        requestedScene,
+        backendTruth: {
+          sceneRevision: 8,
+          scene: { ...requestedScene, background: { assetId: 'background-2' } }
+        }
+      })
+    ).toBe('backend-scene-different')
+    expect(
+      layoutTransactionFailureDisposition({
+        failureCode: 'request-outcome-unknown',
+        sceneRevisionBeforeRequest: 7,
+        requestedScene,
+        backendTruth: null
+      })
+    ).toBe('backend-truth-unavailable')
+  })
+
+  it('never treats definitely-not-applied source/background commands as success', () => {
+    const requestedScene = {
+      layout: { layoutPreset: 'screen-only' },
+      sources: [{ kind: 'screen', deviceId: 'screen-new' }],
+      video: { width: 1920, height: 1080, fps: 30 },
+      background: { assetId: 'background-new' }
+    }
+
+    for (const backendScene of [
+      { ...requestedScene, sources: [{ kind: 'screen', deviceId: 'screen-old' }] },
+      { ...requestedScene, background: { assetId: 'background-old' } }
+    ]) {
+      expect(
+        layoutTransactionFailureDisposition({
+          failureCode: 'command-expired-before-dispatch',
+          sceneRevisionBeforeRequest: 7,
+          requestedScene,
+          backendTruth: { sceneRevision: 7, scene: backendScene }
+        })
+      ).toBe('definitely-not-applied')
+    }
+  })
+
+  it('does not infer success without an authoritative newer scene revision', () => {
+    const scene = {
+      layout: { layoutPreset: 'screen-only' },
+      sources: [{ kind: 'screen', deviceId: 'screen-1' }],
+      video: { width: 1920, height: 1080, fps: 30 },
+      background: null
+    }
+    expect(
+      layoutTransactionFailureDisposition({
+        failureCode: 'request-outcome-unknown',
+        sceneRevisionBeforeRequest: 7,
+        requestedScene: scene,
+        backendTruth: { sceneRevision: 7, scene }
+      })
+    ).toBe('terminal-evidence-unavailable')
   })
 
   it('ignores a failed intent once a newer intent exists', () => {

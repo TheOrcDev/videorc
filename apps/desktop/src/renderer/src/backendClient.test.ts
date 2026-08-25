@@ -201,18 +201,47 @@ describe('BackendClient request lifetime', () => {
     expect(client.pendingRequestCount).toBe(0)
   })
 
-  it('cancels through AbortSignal and ignores a late response', async () => {
+  it('marks a sent request timeout as outcome unknown rather than not applied', async () => {
+    vi.useFakeTimers()
+    const { client } = await connectedClient()
+
+    const request = client.request('screens.activate', { screenId: 'screen-1' }, { timeoutMs: 25 })
+    const rejection = expect(request).rejects.toMatchObject({
+      name: 'BackendRequestError',
+      code: 'request-outcome-unknown'
+    })
+    await vi.advanceTimersByTimeAsync(25)
+
+    await rejection
+  })
+
+  it('preserves AbortError identity for a cancelled sent read and records unknown outcome', async () => {
     const { client, socket } = await connectedClient()
     const controller = new AbortController()
     const request = client.request('diagnostics.stats', undefined, { signal: controller.signal })
     const id = JSON.parse(socket.sent[0])['id'] as string
 
     controller.abort()
-    await expect(request).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(request).rejects.toMatchObject({ name: 'AbortError', outcomeUnknown: true })
     expect(client.pendingRequestCount).toBe(0)
 
     socket.respond({ id, ok: true, payload: { stale: true } })
     expect(client.pendingRequestCount).toBe(0)
+  })
+
+  it('preserves AbortError identity for a cancelled sent mutation', async () => {
+    const { client } = await connectedClient()
+    const controller = new AbortController()
+    const request = client.request(
+      'screens.activate',
+      { screenId: 'screen-1' },
+      {
+        signal: controller.signal
+      }
+    )
+
+    controller.abort()
+    await expect(request).rejects.toMatchObject({ name: 'AbortError', outcomeUnknown: true })
   })
 
   it('cleans up when WebSocket.send throws synchronously', async () => {
@@ -225,19 +254,34 @@ describe('BackendClient request lifetime', () => {
     expect(client.pendingRequestCount).toBe(0)
   })
 
-  it('rejects and clears every request owned by a closed socket', async () => {
+  it('marks sent requests outcome unknown when their socket closes', async () => {
     const { client, socket } = await connectedClient()
     expect(client.connected).toBe(true)
     const first = client.request('scene.get')
     const second = client.request('diagnostics.stats')
-    const firstRejection = expect(first).rejects.toThrow('Backend connection closed.')
-    const secondRejection = expect(second).rejects.toThrow('Backend connection closed.')
+    const firstRejection = expect(first).rejects.toMatchObject({
+      code: 'request-outcome-unknown'
+    })
+    const secondRejection = expect(second).rejects.toMatchObject({
+      code: 'request-outcome-unknown'
+    })
 
     socket.close()
 
     await Promise.all([firstRejection, secondRejection])
     expect(client.pendingRequestCount).toBe(0)
     expect(client.connected).toBe(false)
+  })
+
+  it('keeps a pre-send aborted request definitely not applied', async () => {
+    const { client, socket } = await connectedClient()
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(
+      client.request('screens.activate', { screenId: 'screen-1' }, { signal: controller.signal })
+    ).rejects.toMatchObject({ name: 'AbortError', outcomeUnknown: false })
+    expect(socket.sent).toEqual([])
   })
 
   it('clears timeout and cancellation hooks after a response', async () => {
@@ -294,6 +338,7 @@ describe('BackendClient request lifetime', () => {
 
   it('gives media jobs a longer finite method-specific timeout', () => {
     expect(backendRequestTimeoutMs('preview.surface.present')).toBe(5_000)
+    expect(backendRequestTimeoutMs('liveChat.send')).toBe(12_000)
     expect(backendRequestTimeoutMs('health.ping')).toBe(30_000)
     expect(backendRequestTimeoutMs('stream.output.topology.probe')).toBe(120_000)
     expect(backendRequestTimeoutMs('ai.run_post_recording')).toBe(30 * 60_000)

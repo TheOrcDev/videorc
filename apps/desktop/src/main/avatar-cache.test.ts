@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  AvatarFetchTimeoutError,
   AVATAR_MAX_BYTES,
   avatarCacheFileName,
   avatarCacheRejectionKey,
@@ -9,8 +10,38 @@ import {
   avatarUrlDecision,
   httpStatusClass,
   redactAvatarFetchError,
+  withAvatarFetchDeadline,
   type AvatarCacheRejection
 } from './avatar-cache'
+
+afterEach(() => vi.useRealTimers())
+
+describe('withAvatarFetchDeadline', () => {
+  it('settles at the deadline and aborts a fetch that never replies', async () => {
+    vi.useFakeTimers()
+    let fetchSignal: AbortSignal | undefined
+    const pending = withAvatarFetchDeadline((signal) => {
+      fetchSignal = signal
+      return new Promise<string>(() => undefined)
+    }, 50)
+    let settled = false
+    void pending
+      .catch(() => undefined)
+      .finally(() => {
+        settled = true
+      })
+
+    await vi.advanceTimersByTimeAsync(49)
+    expect(settled).toBe(false)
+    expect(fetchSignal?.aborted).toBe(false)
+
+    const rejection = expect(pending).rejects.toBeInstanceOf(AvatarFetchTimeoutError)
+    await vi.advanceTimersByTimeAsync(1)
+    await rejection
+    expect(fetchSignal?.aborted).toBe(true)
+    expect(settled).toBe(true)
+  })
+})
 
 describe('avatarHostAllowed', () => {
   it('allows the platform CDNs over https only', () => {

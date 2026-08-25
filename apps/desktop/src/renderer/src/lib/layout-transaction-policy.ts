@@ -82,6 +82,61 @@ export type LayoutTransactionFailureReconciliation<T> = {
   snapshot: T
 }
 
+export type LayoutTransactionFailureDisposition =
+  | 'requested-scene-applied'
+  | 'backend-scene-different'
+  | 'backend-truth-unavailable'
+  | 'terminal-evidence-unavailable'
+  | 'definitely-not-applied'
+
+/**
+ * Only a post-send outcome-unknown failure is eligible for reconciliation.
+ * A stable scene read must both advance beyond the pre-command revision and
+ * exactly match every observable part of the requested scene transaction.
+ */
+export function layoutTransactionFailureDisposition<T>(input: {
+  failureCode?: string
+  sceneRevisionBeforeRequest?: number
+  requestedScene: T
+  backendTruth: { sceneRevision: number; scene: T } | null
+}): LayoutTransactionFailureDisposition {
+  if (input.failureCode !== 'request-outcome-unknown') return 'definitely-not-applied'
+  if (!input.backendTruth) return 'backend-truth-unavailable'
+  if (
+    input.sceneRevisionBeforeRequest === undefined ||
+    input.backendTruth.sceneRevision <= input.sceneRevisionBeforeRequest
+  ) {
+    return 'terminal-evidence-unavailable'
+  }
+  return semanticJsonEqual(input.requestedScene, input.backendTruth.scene)
+    ? 'requested-scene-applied'
+    : 'backend-scene-different'
+}
+
+function semanticJsonEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => semanticJsonEqual(value, right[index]))
+    )
+  }
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
+  const leftRecord = left as Record<string, unknown>
+  const rightRecord = right as Record<string, unknown>
+  const leftKeys = Object.keys(leftRecord).sort()
+  const rightKeys = Object.keys(rightRecord).sort()
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key, index) =>
+        key === rightKeys[index] && semanticJsonEqual(leftRecord[key], rightRecord[key])
+    )
+  )
+}
+
 export function latestLayoutTransactionCommit<T extends { sceneRevision: number }>(
   current: T | null,
   candidate: T

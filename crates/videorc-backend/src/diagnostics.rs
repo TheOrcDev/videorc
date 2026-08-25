@@ -498,6 +498,22 @@ pub fn format_recording_frame_accounting(stats: &DiagnosticStats, duration_ms: i
             stats.encoder_bridge_dropped_frames
         ),
         format!(
+            "output pressure: depth {} (high-water {}), oldest {} (high-water {}), last progress {}, pressure {} / recoveries {} / pre-encode skips {}, stages encode {} + fifo {}, encoded-AU drops {}",
+            stats.encoder_bridge_queue_depth,
+            stats.encoder_bridge_output_queue_high_water_frames,
+            format_optional_age_ms(stats.encoder_bridge_output_queue_oldest_frame_age_ms),
+            format_optional_age_ms(
+                stats.encoder_bridge_output_queue_oldest_frame_age_high_water_ms
+            ),
+            format_optional_age_ms(stats.encoder_bridge_output_last_progress_age_ms),
+            stats.encoder_bridge_output_queue_capacity_pressure_events,
+            stats.encoder_bridge_output_pressure_recovery_events,
+            stats.encoder_bridge_output_pre_encode_skipped_frames,
+            stats.encoder_bridge_video_toolbox_pending_encode_frames,
+            stats.encoder_bridge_video_toolbox_pending_fifo_frames,
+            stats.encoder_bridge_encoded_access_unit_dropped_frames,
+        ),
+        format!(
             "encoded output: {} frames ({} bytes, {} errors)",
             stats.encoder_bridge_encoded_output_frames,
             stats.encoder_bridge_encoded_output_bytes,
@@ -529,9 +545,21 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         dropped_frames: 0,
         encoder_speed: None,
         encoder_bridge_queue_depth: 0,
+        encoder_bridge_output_queue_high_water_frames: 0,
         encoder_bridge_output_queue_oldest_frame_age_ms: None,
+        encoder_bridge_output_queue_oldest_frame_age_high_water_ms: None,
+        encoder_bridge_output_last_progress_age_ms: None,
         encoder_bridge_output_queue_capacity_pressure_events: 0,
+        encoder_bridge_output_pressure_recovery_events: 0,
         encoder_bridge_output_queue_dropped_frames: 0,
+        encoder_bridge_output_pre_encode_skipped_frames: 0,
+        encoder_bridge_video_toolbox_pending_encode_frames: 0,
+        encoder_bridge_video_toolbox_pending_fifo_frames: 0,
+        encoder_bridge_encoded_access_unit_dropped_frames: 0,
+        encoder_bridge_recording_output_pressure: Default::default(),
+        encoder_bridge_stream_output_pressure: Default::default(),
+        encoder_bridge_recording_role_diagnostics: Default::default(),
+        encoder_bridge_stream_role_diagnostics: Default::default(),
         encoder_bridge_input_fps: None,
         encoder_bridge_dropped_frames: 0,
         encoder_bridge_recording_dropped_frames: 0,
@@ -1218,9 +1246,21 @@ pub fn apply_stream_health(
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncoderBridgeDiagnosticSnapshot {
     pub queue_depth: u64,
+    pub output_queue_high_water_frames: u64,
     pub output_queue_oldest_frame_age_ms: Option<u64>,
+    pub output_queue_oldest_frame_age_high_water_ms: Option<u64>,
+    pub output_last_progress_age_ms: Option<u64>,
     pub output_queue_capacity_pressure_events: u64,
+    pub output_pressure_recovery_events: u64,
     pub output_queue_dropped_frames: u64,
+    pub output_pre_encode_skipped_frames: u64,
+    pub video_toolbox_pending_encode_frames: u64,
+    pub video_toolbox_pending_fifo_frames: u64,
+    pub encoded_access_unit_dropped_frames: u64,
+    pub recording_output_pressure: crate::protocol::EncoderBridgeRoleOutputPressureStats,
+    pub stream_output_pressure: crate::protocol::EncoderBridgeRoleOutputPressureStats,
+    pub recording_role_diagnostics: crate::protocol::EncoderBridgeRoleDiagnosticStats,
+    pub stream_role_diagnostics: crate::protocol::EncoderBridgeRoleDiagnosticStats,
     pub input_fps: Option<f64>,
     pub dropped_frames: u64,
     pub encoder_speed: Option<f64>,
@@ -1304,10 +1344,26 @@ pub fn apply_encoder_bridge_stats(
     target_fps: u32,
 ) -> DiagnosticStats {
     stats.encoder_bridge_queue_depth = bridge.queue_depth;
+    stats.encoder_bridge_output_queue_high_water_frames = bridge.output_queue_high_water_frames;
     stats.encoder_bridge_output_queue_oldest_frame_age_ms = bridge.output_queue_oldest_frame_age_ms;
+    stats.encoder_bridge_output_queue_oldest_frame_age_high_water_ms =
+        bridge.output_queue_oldest_frame_age_high_water_ms;
+    stats.encoder_bridge_output_last_progress_age_ms = bridge.output_last_progress_age_ms;
     stats.encoder_bridge_output_queue_capacity_pressure_events =
         bridge.output_queue_capacity_pressure_events;
+    stats.encoder_bridge_output_pressure_recovery_events = bridge.output_pressure_recovery_events;
     stats.encoder_bridge_output_queue_dropped_frames = bridge.output_queue_dropped_frames;
+    stats.encoder_bridge_output_pre_encode_skipped_frames = bridge.output_pre_encode_skipped_frames;
+    stats.encoder_bridge_video_toolbox_pending_encode_frames =
+        bridge.video_toolbox_pending_encode_frames;
+    stats.encoder_bridge_video_toolbox_pending_fifo_frames =
+        bridge.video_toolbox_pending_fifo_frames;
+    stats.encoder_bridge_encoded_access_unit_dropped_frames =
+        bridge.encoded_access_unit_dropped_frames;
+    stats.encoder_bridge_recording_output_pressure = bridge.recording_output_pressure;
+    stats.encoder_bridge_stream_output_pressure = bridge.stream_output_pressure;
+    stats.encoder_bridge_recording_role_diagnostics = bridge.recording_role_diagnostics;
+    stats.encoder_bridge_stream_role_diagnostics = bridge.stream_role_diagnostics;
     stats.encoder_bridge_input_fps = bridge.input_fps;
     stats.encoder_bridge_dropped_frames = bridge.dropped_frames;
     stats.encoder_bridge_recording_dropped_frames = bridge.recording_dropped_frames;
@@ -2810,6 +2866,7 @@ mod tests {
              surface backing: camera 2 live / 4 peak (64 live bytes / 128 peak bytes, oldest 42ms), screen 3 live / 6 peak (96 live bytes / 192 peak bytes, oldest 31ms); \
              bridge input: 119 (116 fresh, 3 repeat, 0 synthetic) at 17.7 fps; \
              submitted: 119 (mf 119), coalesced-dropped 0, encoder-dropped 0; \
+             output pressure: depth 0 (high-water 0), oldest n/a (high-water n/a), last progress n/a, pressure 0 / recoveries 0 / pre-encode skips 0, stages encode 0 + fifo 0, encoded-AU drops 0; \
              encoded output: 119 frames (4096 bytes, 0 errors); \
              mf input credit: wait p95 12.5ms, 2 timeouts."
         );
@@ -3199,6 +3256,12 @@ mod tests {
         assert_eq!(wire["encoderBridgeStreamDroppedFrames"], 0);
         assert!(wire["encoderBridgeRecordingEncoderSpeed"].is_null());
         assert!(wire["encoderBridgeStreamEncoderSpeed"].is_null());
+        assert_eq!(wire["encoderBridgeOutputQueueHighWaterFrames"], 0);
+        assert!(wire["encoderBridgeOutputQueueOldestFrameAgeHighWaterMs"].is_null());
+        assert!(wire["encoderBridgeOutputLastProgressAgeMs"].is_null());
+        assert_eq!(wire["encoderBridgeOutputPressureRecoveryEvents"], 0);
+        assert_eq!(wire["encoderBridgeOutputPreEncodeSkippedFrames"], 0);
+        assert_eq!(wire["encoderBridgeEncodedAccessUnitDroppedFrames"], 0);
     }
 
     #[test]
@@ -3207,9 +3270,21 @@ mod tests {
             starting_diagnostics("bridge", 30, "encoder-bridge"),
             EncoderBridgeDiagnosticSnapshot {
                 queue_depth: 1,
+                output_queue_high_water_frames: 1,
                 output_queue_oldest_frame_age_ms: Some(10),
+                output_queue_oldest_frame_age_high_water_ms: Some(10),
+                output_last_progress_age_ms: Some(2),
                 output_queue_capacity_pressure_events: 0,
+                output_pressure_recovery_events: 0,
                 output_queue_dropped_frames: 0,
+                output_pre_encode_skipped_frames: 0,
+                video_toolbox_pending_encode_frames: 1,
+                video_toolbox_pending_fifo_frames: 0,
+                encoded_access_unit_dropped_frames: 0,
+                recording_output_pressure: Default::default(),
+                stream_output_pressure: Default::default(),
+                recording_role_diagnostics: Default::default(),
+                stream_role_diagnostics: Default::default(),
                 input_fps: Some(29.8),
                 dropped_frames: 0,
                 encoder_speed: Some(1.02),
@@ -3299,9 +3374,21 @@ mod tests {
             stats,
             EncoderBridgeDiagnosticSnapshot {
                 queue_depth: 5,
+                output_queue_high_water_frames: 16,
                 output_queue_oldest_frame_age_ms: Some(180),
+                output_queue_oldest_frame_age_high_water_ms: Some(528),
+                output_last_progress_age_ms: Some(12),
                 output_queue_capacity_pressure_events: 4,
+                output_pressure_recovery_events: 1,
                 output_queue_dropped_frames: 2,
+                output_pre_encode_skipped_frames: 3,
+                video_toolbox_pending_encode_frames: 2,
+                video_toolbox_pending_fifo_frames: 3,
+                encoded_access_unit_dropped_frames: 0,
+                recording_output_pressure: Default::default(),
+                stream_output_pressure: Default::default(),
+                recording_role_diagnostics: Default::default(),
+                stream_role_diagnostics: Default::default(),
                 input_fps: Some(28.0),
                 dropped_frames: 3,
                 encoder_speed: Some(0.5),
@@ -3387,15 +3474,29 @@ mod tests {
         assert_eq!(lagging.encoder_bridge_recording_encoder_speed, Some(0.75));
         assert_eq!(lagging.encoder_bridge_stream_encoder_speed, Some(0.5));
         assert_eq!(lagging.encoder_bridge_queue_depth, 5);
+        assert_eq!(lagging.encoder_bridge_output_queue_high_water_frames, 16);
         assert_eq!(
             lagging.encoder_bridge_output_queue_oldest_frame_age_ms,
             Some(180)
         );
         assert_eq!(
+            lagging.encoder_bridge_output_queue_oldest_frame_age_high_water_ms,
+            Some(528)
+        );
+        assert_eq!(lagging.encoder_bridge_output_last_progress_age_ms, Some(12));
+        assert_eq!(
             lagging.encoder_bridge_output_queue_capacity_pressure_events,
             4
         );
+        assert_eq!(lagging.encoder_bridge_output_pressure_recovery_events, 1);
         assert_eq!(lagging.encoder_bridge_output_queue_dropped_frames, 2);
+        assert_eq!(lagging.encoder_bridge_output_pre_encode_skipped_frames, 3);
+        assert_eq!(
+            lagging.encoder_bridge_video_toolbox_pending_encode_frames,
+            2
+        );
+        assert_eq!(lagging.encoder_bridge_video_toolbox_pending_fifo_frames, 3);
+        assert_eq!(lagging.encoder_bridge_encoded_access_unit_dropped_frames, 0);
         assert_eq!(lagging.encoder_bridge_recording_queue_depth, 2);
         assert_eq!(
             lagging.encoder_bridge_recording_queue_oldest_frame_age_ms,
@@ -3543,6 +3644,7 @@ mod tests {
                 coalesced_count: 11,
                 evicted_or_dropped_count: 2,
             },
+            command_lanes: std::collections::BTreeMap::new(),
             slow_pressure_disconnect_count: 6,
         };
 

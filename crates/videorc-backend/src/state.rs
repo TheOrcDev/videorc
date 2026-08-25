@@ -18,7 +18,8 @@ use crate::preview_screen::{PreviewScreenSlot, initial_preview_screen_state};
 use crate::preview_surface::{PreviewSurfaceSlot, initial_preview_surface_state};
 use crate::protocol::{
     AudioMeterSampleSnapshot, BackendLogEvent, DiagnosticStats, Scene, ServerEvent,
-    VideorcAccountSnapshot, WebSocketQueueDiagnosticStats, WebSocketTransportDiagnosticStats,
+    VideorcAccountSnapshot, WebSocketCommandLaneDiagnosticStats, WebSocketQueueDiagnosticStats,
+    WebSocketTransportDiagnosticStats,
 };
 use crate::recording::{LivePreviewSlot, RecordingSlot, initial_live_preview_state};
 use crate::resource_authority::ResourceAuthority;
@@ -509,6 +510,55 @@ impl WebSocketQueueRegistry {
     }
 }
 
+#[derive(Debug, Default)]
+struct WebSocketCommandLaneRegistry {
+    queue: WebSocketQueueRegistry,
+    expired_before_dispatch_count: AtomicU64,
+    rejected_before_dispatch_count: AtomicU64,
+}
+
+impl WebSocketCommandLaneRegistry {
+    fn snapshot(&self, now: Instant) -> WebSocketCommandLaneDiagnosticStats {
+        WebSocketCommandLaneDiagnosticStats {
+            queue: self.queue.snapshot(now),
+            expired_before_dispatch_count: self
+                .expired_before_dispatch_count
+                .load(Ordering::Acquire),
+            rejected_before_dispatch_count: self
+                .rejected_before_dispatch_count
+                .load(Ordering::Acquire),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackedWebSocketCommandLaneMetrics {
+    queue: TrackedWebSocketQueueMetrics,
+    registry: Arc<WebSocketCommandLaneRegistry>,
+}
+
+impl TrackedWebSocketCommandLaneMetrics {
+    pub fn record_enqueue(&self) -> WebSocketQueueTicket {
+        self.queue.record_enqueue()
+    }
+
+    pub fn record_dispatch(&self, ticket: WebSocketQueueTicket) {
+        self.queue.record_dequeue(ticket);
+    }
+
+    pub fn record_expired_before_dispatch(&self) {
+        self.registry
+            .expired_before_dispatch_count
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_rejected_before_dispatch(&self) {
+        self.registry
+            .rejected_before_dispatch_count
+            .fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 #[derive(Debug)]
 pub struct WebSocketConnectionTransportMetrics {
     pub reliable_response_queue: TrackedWebSocketQueueMetrics,
@@ -521,6 +571,7 @@ pub struct WebSocketTransportMetrics {
     reliable_response_queue: WebSocketQueueRegistry,
     incoming_command_queue: WebSocketQueueRegistry,
     coalesced_telemetry_queue: WebSocketQueueRegistry,
+    command_lanes: StdMutex<BTreeMap<String, Arc<WebSocketCommandLaneRegistry>>>,
     slow_pressure_disconnect_count: AtomicU64,
 }
 
@@ -538,19 +589,239 @@ impl WebSocketTransportMetrics {
             .fetch_add(1, Ordering::AcqRel);
     }
 
+    pub fn register_command_lane(&self, name: &str) -> TrackedWebSocketCommandLaneMetrics {
+        let registry = {
+            let mut command_lanes = self
+                .command_lanes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            command_lanes
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(WebSocketCommandLaneRegistry::default()))
+                .clone()
+        };
+        TrackedWebSocketCommandLaneMetrics {
+            queue: registry.queue.register(),
+            registry,
+        }
+    }
+
     pub fn snapshot(&self) -> WebSocketTransportDiagnosticStats {
         self.snapshot_at(Instant::now())
     }
 
     fn snapshot_at(&self, now: Instant) -> WebSocketTransportDiagnosticStats {
+        let command_lanes = self
+            .command_lanes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(name, lane)| (name.clone(), lane.snapshot(now)))
+            .collect();
         WebSocketTransportDiagnosticStats {
             reliable_response_queue: self.reliable_response_queue.snapshot(now),
             incoming_command_queue: self.incoming_command_queue.snapshot(now),
             coalesced_telemetry_queue: self.coalesced_telemetry_queue.snapshot(now),
+            command_lanes,
             slow_pressure_disconnect_count: self
                 .slow_pressure_disconnect_count
                 .load(Ordering::Acquire),
         }
+    }
+}
+
+/// Debug-only synchronization seam for the maintained command-lane smoke.
+///
+/// The smoke holds one AccountMaintenance command inside the real WebSocket
+/// dispatcher, observes this generation through a separate status request,
+/// then proves the operator lanes still reply. The RPCs which reach this
+/// object remain protected by the normal admin + explicit smoke admission
+/// policy; release builds do not carry the state at all.
+#[cfg(debug_assertions)]
+#[derive(Debug, Default)]
+pub struct CommandLaneSmokeBlocker {
+    next_generation: AtomicU64,
+    active_generation: AtomicU64,
+    released: Notify,
+}
+
+#[cfg(debug_assertions)]
+impl CommandLaneSmokeBlocker {
+    pub async fn block(&self) -> Result<u64, u64> {
+        let generation = self
+            .next_generation
+            .load(Ordering::Acquire)
+            .saturating_add(1);
+        self.active_generation.compare_exchange(
+            0,
+            generation,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )?;
+        self.next_generation.store(generation, Ordering::Release);
+
+        loop {
+            // Register the waiter before checking the state so a release which
+            // races this edge cannot be lost between the load and await.
+            let released = self.released.notified();
+            if self.active_generation.load(Ordering::Acquire) != generation {
+                return Ok(generation);
+            }
+            released.await;
+        }
+    }
+
+    pub fn release(&self) -> Option<u64> {
+        let generation = self.active_generation.swap(0, Ordering::AcqRel);
+        if generation == 0 {
+            return None;
+        }
+        self.released.notify_waiters();
+        Some(generation)
+    }
+
+    pub fn status(&self) -> (bool, u64, Option<u64>) {
+        let generation = self.next_generation.load(Ordering::Acquire);
+        let active_generation = self.active_generation.load(Ordering::Acquire);
+        (
+            active_generation != 0,
+            generation,
+            (active_generation != 0).then_some(active_generation),
+        )
+    }
+}
+
+/// Process-global receipt/completion fence shared by every WebSocket
+/// dispatcher. A disconnected socket deliberately drains accepted work, so a
+/// per-connection fence cannot make a new socket's reconciliation or Stop
+/// authoritative.
+#[derive(Default)]
+pub struct CommandCompletionFence {
+    state: StdMutex<CommandCompletionFenceState>,
+    changed: Notify,
+}
+
+#[derive(Default)]
+struct CommandCompletionFenceState {
+    next_sequence: u64,
+    pending: std::collections::BTreeSet<u64>,
+}
+
+impl CommandCompletionFence {
+    pub fn begin(self: &Arc<Self>) -> CommandCompletionGuard {
+        // Allocation and insertion are one lock edge. Observation can never
+        // snapshot a generation whose pending guard is not visible yet.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sequence = state
+            .next_sequence
+            .checked_add(1)
+            .expect("command completion fence sequence exhausted");
+        state.next_sequence = sequence;
+        state.pending.insert(sequence);
+        drop(state);
+        CommandCompletionGuard {
+            fence: self.clone(),
+            sequence,
+        }
+    }
+
+    pub fn observe(self: &Arc<Self>) -> CommandCompletionSnapshot {
+        let through_sequence = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .next_sequence;
+        CommandCompletionSnapshot {
+            fence: self.clone(),
+            through_sequence,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn accepted_sequence(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .next_sequence
+    }
+
+    async fn wait_through(&self, through_sequence: u64) {
+        loop {
+            // Enable registration before inspecting pending so
+            // `notify_waiters` cannot land between the check and await.
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            let _ = changed.as_mut().enable();
+            let prior_pending = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pending
+                .range(..=through_sequence)
+                .next()
+                .is_some();
+            if !prior_pending {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+pub struct CommandCompletionGuard {
+    fence: Arc<CommandCompletionFence>,
+    sequence: u64,
+}
+
+impl CommandCompletionGuard {
+    /// Global FIFO admission for commands that lack intent IDs. Layout
+    /// mutations intentionally do not call this: their established path is
+    /// concurrent/latest-wins.
+    pub async fn wait_for_turn(&self) {
+        loop {
+            let changed = self.fence.changed.notified();
+            tokio::pin!(changed);
+            let _ = changed.as_mut().enable();
+            let prior_pending = self
+                .fence
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pending
+                .range(..self.sequence)
+                .next()
+                .is_some();
+            if !prior_pending {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+impl Drop for CommandCompletionGuard {
+    fn drop(&mut self) {
+        self.fence
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pending
+            .remove(&self.sequence);
+        self.fence.changed.notify_waiters();
+    }
+}
+
+pub struct CommandCompletionSnapshot {
+    fence: Arc<CommandCompletionFence>,
+    through_sequence: u64,
+}
+
+impl CommandCompletionSnapshot {
+    pub async fn wait(&self) {
+        self.fence.wait_through(self.through_sequence).await;
     }
 }
 
@@ -598,6 +869,10 @@ pub struct AppState {
     /// Serializes scene storage, revision allocation, compositor publication,
     /// and the scene-changed event as one commit edge.
     pub scene_commit: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes takeover output publication with the persisted active-screen
+    /// pointer so authoritative `screens.active` reads cannot observe a
+    /// different takeover than the recording/compositor output.
+    pub active_screen_transition: Arc<tokio::sync::Mutex<()>>,
     /// Serializes the commit edge of layout transactions while allowing source
     /// warm-up to run concurrently. A newer registered intent supersedes older
     /// waiters before they can replace the last good scene.
@@ -605,6 +880,17 @@ pub struct AppState {
     pub source_registry: Arc<tokio::sync::Mutex<SourceRegistry>>,
     pub diagnostics: Arc<tokio::sync::Mutex<DiagnosticStats>>,
     pub websocket_transport_metrics: Arc<WebSocketTransportMetrics>,
+    /// Defines one process-wide intake order while global fence/order metadata
+    /// is attached to a command before it enters a per-socket queue.
+    pub websocket_command_admission: Arc<StdMutex<()>>,
+    /// Completion truth for layout/live-control mutations across reconnects.
+    pub operator_command_fence: Arc<CommandCompletionFence>,
+    /// FIFO receipt order for non-idempotent live controls across reconnects.
+    pub live_control_command_order: Arc<CommandCompletionFence>,
+    /// Start completion truth used by Stop across reconnects/admin sockets.
+    pub session_start_command_fence: Arc<CommandCompletionFence>,
+    #[cfg(debug_assertions)]
+    pub command_lane_smoke_blocker: Arc<CommandLaneSmokeBlocker>,
     pub last_audio_meter: Arc<tokio::sync::Mutex<Option<AudioMeterSampleSnapshot>>>,
     pub logs: Arc<StdMutex<Vec<BackendLogEvent>>>,
     pub database: Database,
@@ -630,6 +916,14 @@ pub struct AppState {
     /// refresh, and sign-out so a stale completion cannot publish after a newer
     /// sign-in intent or explicit sign-out.
     pub account_auth_transition: Arc<tokio::sync::Mutex<()>>,
+    /// Latest accepted product-account refresh. This is separate from sign-in
+    /// intent generation so overlapping refreshes for the same account remain
+    /// latest-request-wins across WebSocket reconnects.
+    pub account_refresh_generation: Arc<AtomicU64>,
+    /// Latest accepted entitlement refresh. This is separate from sign-in
+    /// intent generation so overlapping refreshes for the same account are
+    /// still latest-request-wins.
+    pub account_entitlement_refresh_generation: Arc<AtomicU64>,
     pub captions: crate::captions::CaptionsSlot,
     /// Per-output burn-in caption bars (std mutex: read from the synchronous
     /// compositor render thread). Primary and auxiliary may use different
@@ -680,10 +974,17 @@ impl AppState {
             compositor_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             scene: Arc::new(tokio::sync::Mutex::new(default_scene())),
             scene_commit: Arc::new(tokio::sync::Mutex::new(())),
+            active_screen_transition: Arc::new(tokio::sync::Mutex::new(())),
             layout_intents: Arc::new(tokio::sync::Mutex::new(LayoutIntentState::default())),
             source_registry: Arc::new(tokio::sync::Mutex::new(SourceRegistry::new())),
             diagnostics: Arc::new(tokio::sync::Mutex::new(idle_diagnostics())),
             websocket_transport_metrics: Arc::new(WebSocketTransportMetrics::default()),
+            websocket_command_admission: Arc::new(StdMutex::new(())),
+            operator_command_fence: Arc::new(CommandCompletionFence::default()),
+            live_control_command_order: Arc::new(CommandCompletionFence::default()),
+            session_start_command_fence: Arc::new(CommandCompletionFence::default()),
+            #[cfg(debug_assertions)]
+            command_lane_smoke_blocker: Arc::new(CommandLaneSmokeBlocker::default()),
             last_audio_meter: Arc::new(tokio::sync::Mutex::new(None)),
             logs: Arc::new(StdMutex::new(Vec::new())),
             live_chat_persistence: LiveChatPersistence::new(database.clone()),
@@ -706,6 +1007,8 @@ impl AppState {
                 crate::account::restore_persisted_account(),
             )),
             account_auth_transition: Arc::new(tokio::sync::Mutex::new(())),
+            account_refresh_generation: Arc::new(AtomicU64::new(0)),
+            account_entitlement_refresh_generation: Arc::new(AtomicU64::new(0)),
             captions: crate::captions::new_captions_slot(),
             caption_overlay: crate::captions::new_caption_overlay_slots(),
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
@@ -777,6 +1080,28 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn command_completion_fence_snapshots_pending_work_and_orders_turns() {
+        let fence = Arc::new(CommandCompletionFence::default());
+        let first = fence.begin();
+        let second = fence.begin();
+        let snapshot = fence.observe();
+        assert_eq!(fence.accepted_sequence(), 2);
+
+        let second_turn = tokio::spawn(async move {
+            second.wait_for_turn().await;
+            drop(second);
+        });
+        let snapshot_complete = tokio::spawn(async move { snapshot.wait().await });
+        tokio::task::yield_now().await;
+        assert!(!second_turn.is_finished());
+        assert!(!snapshot_complete.is_finished());
+
+        drop(first);
+        second_turn.await.unwrap();
+        snapshot_complete.await.unwrap();
+    }
 
     #[test]
     fn websocket_queue_metrics_track_depth_oldest_age_and_lifetime_counters() {

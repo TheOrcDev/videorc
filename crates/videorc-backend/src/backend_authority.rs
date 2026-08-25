@@ -86,6 +86,20 @@ pub fn authorize_backend_method(
     method: &str,
     smoke_rpc_enabled: bool,
 ) -> Result<(), MethodAdmissionError> {
+    if command_lane_smoke_method(method) {
+        if role == BackendRole::Remote {
+            return Err(MethodAdmissionError::AdminOnly);
+        }
+        if !cfg!(debug_assertions) || !smoke_rpc_enabled {
+            return Err(MethodAdmissionError::SmokeDisabled);
+        }
+        // The maintained lane smoke must run on one renderer-role socket so
+        // its block and operator probes share the renderer's real dispatcher.
+        // This exception is compiled inert in release builds and requires the
+        // explicit smoke runtime switch in debug builds.
+        return Ok(());
+    }
+
     if smoke_or_test_method(method) {
         if role != BackendRole::Admin {
             return Err(MethodAdmissionError::AdminOnly);
@@ -109,6 +123,15 @@ pub fn authorize_backend_method(
         return Err(MethodAdmissionError::AdminOnly);
     }
     Ok(())
+}
+
+fn command_lane_smoke_method(method: &str) -> bool {
+    matches!(
+        method,
+        "test.commandLanes.accountMaintenance.block"
+            | "test.commandLanes.accountMaintenance.status"
+            | "test.commandLanes.accountMaintenance.release"
+    )
 }
 
 fn remote_allowed_method(method: &str) -> bool {
@@ -141,6 +164,7 @@ fn admin_only_method(method: &str) -> bool {
         || matches!(
             method,
             "account.auth.begin_intent"
+                | "account.refresh"
                 | "account.sign_out"
                 | "compositor.scene.update"
                 | "preview.surface.take_native_host_commands"
@@ -227,6 +251,7 @@ mod tests {
             "preview.surface.take_native_host_commands",
             "compositor.scene.update",
             "account.auth.begin_intent",
+            "account.refresh",
             "account.sign_out",
             "encoder_bridge.synthetic_record",
             "recording.start_test",
@@ -244,17 +269,54 @@ mod tests {
     }
 
     #[test]
+    fn renderer_command_lane_smoke_seam_requires_debug_and_explicit_opt_in() {
+        for method in [
+            "test.commandLanes.accountMaintenance.block",
+            "test.commandLanes.accountMaintenance.status",
+            "test.commandLanes.accountMaintenance.release",
+        ] {
+            assert_eq!(
+                authorize_backend_method(BackendRole::Renderer, method, false),
+                Err(MethodAdmissionError::SmokeDisabled),
+                "renderer seam must stay inert without the runtime switch"
+            );
+            let admitted = authorize_backend_method(BackendRole::Renderer, method, true);
+            if cfg!(debug_assertions) {
+                assert_eq!(admitted, Ok(()), "debug smoke should admit {method}");
+            } else {
+                assert_eq!(admitted, Err(MethodAdmissionError::SmokeDisabled));
+            }
+            assert_eq!(
+                authorize_backend_method(BackendRole::Remote, method, true),
+                Err(MethodAdmissionError::AdminOnly),
+                "remote-control clients must never reach {method}"
+            );
+        }
+    }
+
+    #[test]
     fn smoke_methods_need_debug_build_and_explicit_runtime_switch() {
-        assert_eq!(
-            authorize_backend_method(BackendRole::Admin, "encoder_bridge.synthetic_record", false),
-            Err(MethodAdmissionError::SmokeDisabled)
-        );
-        let admitted =
-            authorize_backend_method(BackendRole::Admin, "encoder_bridge.synthetic_record", true);
-        if cfg!(debug_assertions) {
-            assert_eq!(admitted, Ok(()));
-        } else {
-            assert_eq!(admitted, Err(MethodAdmissionError::SmokeDisabled));
+        for method in [
+            "encoder_bridge.synthetic_record",
+            "test.commandLanes.accountMaintenance.block",
+            "test.commandLanes.accountMaintenance.status",
+            "test.commandLanes.accountMaintenance.release",
+        ] {
+            assert_eq!(
+                authorize_backend_method(BackendRole::Admin, method, false),
+                Err(MethodAdmissionError::SmokeDisabled),
+                "{method} must require the explicit smoke switch"
+            );
+            let admitted = authorize_backend_method(BackendRole::Admin, method, true);
+            if cfg!(debug_assertions) {
+                assert_eq!(admitted, Ok(()), "debug smoke should admit {method}");
+            } else {
+                assert_eq!(
+                    admitted,
+                    Err(MethodAdmissionError::SmokeDisabled),
+                    "release builds must never admit {method}"
+                );
+            }
         }
     }
 

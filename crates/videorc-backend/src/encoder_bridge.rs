@@ -33,7 +33,8 @@ use crate::preview_camera::PreviewCameraFrameSource;
 use crate::preview_screen::PreviewScreenD3D11FrameSource;
 use crate::process_job::spawn_owned_tokio;
 use crate::protocol::{
-    DiagnosticStats, EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult, HealthLevel,
+    DiagnosticStats, EncoderBridgeRoleDiagnosticStats, EncoderBridgeRoleOutputPressureStats,
+    EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult, HealthLevel,
 };
 #[cfg(target_os = "windows")]
 use crate::scene_geometry::{PixelRect, SceneCrop, SceneMask};
@@ -72,13 +73,6 @@ const ENCODER_BRIDGE_DEADLINE_LAG_THRESHOLD: Duration = Duration::from_millis(1)
 /// events. A capacity-one watch channel keeps only the latest snapshot so a
 /// stalled diagnostics consumer cannot retain memory or block the media writer.
 const VIDEOTOOLBOX_FRESH_FRAME_HEADROOM: Duration = Duration::from_millis(4);
-/// VideoToolbox is configured with one frame of encoder delay and this queue is
-/// drained on every bridge tick. Two drain windows absorb callback bursts while
-/// keeping encoded access-unit memory bounded. Overflow explicitly fails the
-/// affected output because dropping an encoded H.264 access unit can corrupt
-/// its dependent reference chain.
-const VIDEOTOOLBOX_CALLBACK_OUTPUT_QUEUE_FRAMES: usize =
-    VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK * 2;
 // Calibrated from the 2026-07-10 real-device baselines. The 4K recording leg
 // peaked at depth 4 / 99ms and the companion 1080p stream leg at depth 2 /
 // 35ms. These ceilings leave transient headroom without restoring the old
@@ -89,6 +83,11 @@ const STREAM_OUTPUT_QUEUE_COALESCE_FRAMES: usize = 4;
 const STREAM_OUTPUT_QUEUE_COALESCE_AGE: Duration = Duration::from_millis(100);
 const STREAM_OUTPUT_QUEUE_MAX_FRAMES: usize = 8;
 const STREAM_OUTPUT_QUEUE_MAX_AGE: Duration = Duration::from_millis(150);
+/// Recording output pressure is recoverable while either VideoToolbox or the
+/// FIFO writer is still advancing. Queue depth/age are pressure signals, not a
+/// liveness verdict; only a complete lack of pipeline progress for this window
+/// may stop the output.
+const RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(2);
 /// A stream output over its age budget DEGRADES (latest-wins coalescing) for
 /// this long before the failure is treated as real. A single over-budget
 /// sample used to be a death sentence: one 166ms-old frame killed a
@@ -1043,6 +1042,11 @@ enum EncoderBridgePreEncodeAdmission {
     /// itself latest-wins, so skipping this submission coalesces superseded
     /// work and the next admitted tick reads the newest available frame.
     CoalesceLatestStreamFrame,
+    /// Recording has no live-latency contract. When its bounded encoded queue
+    /// is pressured but progressing, skip only the not-yet-encoded compositor
+    /// tick. The bridge clock has already advanced, so the next admitted AU
+    /// retains a truthful wall-time gap and every existing AU is delivered.
+    PauseRecordingFrame,
     /// Recording/shared output fails before a long hidden backlog. Streaming
     /// also fails at its hard ceiling because dropping already-encoded access
     /// units would corrupt the stream until the next independently decodable
@@ -1062,13 +1066,16 @@ struct EncoderBridgeOutputQueuePolicy {
 fn effective_encoder_bridge_output_role(
     diagnostics_context: EncoderBridgeDiagnosticsContext,
 ) -> EncoderBridgeOutputRole {
-    if diagnostics_context.role == EncoderBridgeOutputRole::Shared
-        && diagnostics_context.recording_output.is_none()
-        && diagnostics_context.stream_output.is_some()
-    {
-        EncoderBridgeOutputRole::Stream
-    } else {
-        diagnostics_context.role
+    if diagnostics_context.role != EncoderBridgeOutputRole::Shared {
+        return diagnostics_context.role;
+    }
+    match (
+        diagnostics_context.recording_output.is_some(),
+        diagnostics_context.stream_output.is_some(),
+    ) {
+        (true, false) => EncoderBridgeOutputRole::Recording,
+        (false, true) => EncoderBridgeOutputRole::Stream,
+        _ => EncoderBridgeOutputRole::Shared,
     }
 }
 
@@ -1119,23 +1126,42 @@ fn encoder_bridge_pre_encode_admission(
     EncoderBridgePreEncodeAdmission::Submit
 }
 
+fn encoder_bridge_progress_aware_pre_encode_admission(
+    policy: EncoderBridgeOutputQueuePolicy,
+    queue_depth: u64,
+    oldest_frame_age: Option<Duration>,
+    last_progress_age: Duration,
+) -> EncoderBridgePreEncodeAdmission {
+    if policy.role == EncoderBridgeOutputRole::Stream {
+        return encoder_bridge_pre_encode_admission(policy, queue_depth, oldest_frame_age);
+    }
+
+    // Recording age is evidence, not a live-latency SLA. Continue admitting
+    // while the bounded depth still has room so the maintained pressure probe
+    // can reproduce the exact 16-frame/~528ms incident shape. Once full, skip
+    // only pre-encode ticks while downstream progress remains recent. Existing
+    // encoded access units stay ordered and retained throughout the pause.
+    if queue_depth < policy.max_frames as u64 {
+        return EncoderBridgePreEncodeAdmission::Submit;
+    }
+    if last_progress_age < RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT {
+        EncoderBridgePreEncodeAdmission::PauseRecordingFrame
+    } else {
+        EncoderBridgePreEncodeAdmission::FailOutput
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EncoderBridgeOverBudgetEscalation {
     /// Keep the stream output alive: drop pre-encode like coalescing and re-check.
     Degrade,
-    /// Keep the recording output alive WITHOUT dropping: frames keep
-    /// submitting late while the encoder catches up. Late is fine for a
-    /// file; only wedged is fatal.
-    SubmitUnderPressure,
     /// The violation is sustained (or the queue truly full): fail the output.
     Fail,
 }
 
-/// Over-budget posture is role-specific. The stream role DEGRADES — its
-/// latest-wins coalescing makes dropped frames an honest, visible quality
-/// trade. Recording/shared outputs must never drop (that is the corruption
-/// the contract prevents) but they also have no downstream latency consumer:
-/// they SUBMIT UNDER PRESSURE and fail only when the breach is sustained.
+/// Stream output DEGRADES under transient pressure — its latest-wins
+/// coalescing makes dropped frames an honest, visible quality trade.
+/// Recording uses the separate progress-aware admission policy above.
 /// A single over-age sample used to kill a recording outright — the
 /// 2026-07-16 owner incident lost a 4K session 2s in at "oldest 251/250ms"
 /// while the encoder was merely warming up (depth 6/16, still progressing).
@@ -1153,30 +1179,37 @@ fn encoder_bridge_over_budget_escalation(
     if now.duration_since(over_budget_since) >= STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW {
         return EncoderBridgeOverBudgetEscalation::Fail;
     }
-    if policy.role == EncoderBridgeOutputRole::Stream {
-        EncoderBridgeOverBudgetEscalation::Degrade
-    } else {
-        EncoderBridgeOverBudgetEscalation::SubmitUnderPressure
-    }
+    EncoderBridgeOverBudgetEscalation::Degrade
 }
 
 fn encoder_bridge_output_pressure_error(
     policy: EncoderBridgeOutputQueuePolicy,
     queue_depth: u64,
     oldest_frame_age: Option<Duration>,
+    last_progress_age: Duration,
 ) -> io::Error {
     let age_ms = oldest_frame_age.map(|age| age.as_millis()).unwrap_or(0);
     let role = encoder_bridge_output_role_label(policy.role);
     let integrity = if policy.role == EncoderBridgeOutputRole::Stream {
         "encoded H.264 access units were preserved; the stream stopped instead of corrupting its reference chain"
     } else {
-        "recording frames were preserved; the output stopped instead of silently dropping or buffering them"
+        "all queued encoded access units were preserved; the recording stopped only after downstream progress ceased"
     };
-    io::Error::other(format!(
-        "{role} encoder output exceeded its bounded latency contract (depth {queue_depth}/{}, oldest {age_ms}/{}ms); {integrity}",
-        policy.max_frames,
-        policy.max_age.as_millis(),
-    ))
+    if policy.role == EncoderBridgeOutputRole::Stream {
+        io::Error::other(format!(
+            "{role} encoder output exceeded its bounded latency contract (depth {queue_depth}/{}, oldest {age_ms}/{}ms); {integrity}",
+            policy.max_frames,
+            policy.max_age.as_millis(),
+        ))
+    } else {
+        io::Error::other(format!(
+            "{role} encoder output made no progress for {}ms (limit {}ms; depth {queue_depth}/{}, oldest {age_ms}/{}ms); {integrity}",
+            last_progress_age.as_millis(),
+            RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT.as_millis(),
+            policy.max_frames,
+            policy.max_age.as_millis(),
+        ))
+    }
 }
 
 const fn encoder_bridge_output_role_label(role: EncoderBridgeOutputRole) -> &'static str {
@@ -1246,13 +1279,30 @@ struct EncoderBridgeProgress {
 #[derive(Debug, Clone, Copy, Default)]
 struct EncoderBridgeRuntimeStats {
     queue_depth: u64,
+    /// Peak combined pending encoder + FIFO depth observed this session.
+    output_queue_high_water_frames: u64,
     /// Age of the oldest frame awaiting VideoToolbox completion or FIFO write.
     output_queue_oldest_frame_age_ms: Option<u64>,
+    /// Peak oldest-frame age observed this session, retained after recovery.
+    output_queue_oldest_frame_age_high_water_ms: Option<u64>,
+    /// Time since the last encoder completion or complete FIFO AU write.
+    output_last_progress_age_ms: Option<u64>,
     /// Number of ticks where a role-specific soft or hard output limit applied.
     output_queue_capacity_pressure_events: u64,
+    /// Number of pressured intervals that returned to the healthy queue budget.
+    output_pressure_recovery_events: u64,
     /// Frames coalesced before encoding by the stream latest-wins policy.
-    /// Recording/shared output must always remain zero.
+    /// This does not count encoded H.264 access units.
     output_queue_dropped_frames: u64,
+    /// Recording ticks deliberately skipped before encode while queued AUs drain.
+    output_pre_encode_skipped_frames: u64,
+    /// Current per-stage VideoToolbox callback/in-flight depth.
+    video_toolbox_pending_encode_frames: u64,
+    /// Current per-stage encoded FIFO writer depth.
+    video_toolbox_pending_fifo_frames: u64,
+    /// Encoded H.264 AUs rejected after encode. Must remain zero in healthy and
+    /// recoverable-pressure sessions.
+    encoded_access_unit_dropped_frames: u64,
     input_fps: Option<f64>,
     dropped_frames: u64,
     encoder_speed: Option<f64>,
@@ -1325,6 +1375,456 @@ struct EncoderBridgeRoleProcessDiagnostics {
     stream_dropped_frames: u64,
     recording_encoder_speed: Option<f64>,
     stream_encoder_speed: Option<f64>,
+}
+
+/// Generic artifact diagnostics describe the local recording whenever split
+/// record/stream encoders are active. The post-recording freeze repair consumes
+/// these fields, so a later stream snapshot must neither erase recording
+/// evidence with zeroes nor inject stream-only defects into recording policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct EncoderBridgeRecordingArtifactDiagnostics {
+    input_fps: Option<f64>,
+    repeated_fed_frames: u64,
+    repeated_frame_bursts: u64,
+    max_repeated_frame_run: u64,
+    synthetic_fallback_frames: u64,
+    source_to_encode_age_ms: Option<u64>,
+    source_to_encode_age_p95_ms: Option<f64>,
+    repeated_frame_age_p95_ms: Option<f64>,
+    repeated_frame_age_max_ms: Option<u64>,
+}
+
+impl EncoderBridgeRecordingArtifactDiagnostics {
+    fn from_runtime(runtime: EncoderBridgeRuntimeStats) -> Self {
+        Self {
+            input_fps: runtime.input_fps,
+            repeated_fed_frames: runtime.repeated_fed_frames,
+            repeated_frame_bursts: runtime.repeated_frame_bursts,
+            max_repeated_frame_run: runtime.max_repeated_frame_run,
+            synthetic_fallback_frames: runtime.synthetic_fallback_frames,
+            source_to_encode_age_ms: runtime.source_to_encode_age_ms,
+            source_to_encode_age_p95_ms: runtime.source_to_encode_age_p95_ms,
+            repeated_frame_age_p95_ms: runtime.repeated_frame_age_p95_ms,
+            repeated_frame_age_max_ms: runtime.repeated_frame_age_max_ms,
+        }
+    }
+
+    fn from_stats(stats: &DiagnosticStats) -> Self {
+        Self {
+            input_fps: stats.encoder_bridge_input_fps,
+            repeated_fed_frames: stats.encoder_bridge_repeated_frames,
+            repeated_frame_bursts: stats.encoder_bridge_repeated_frame_bursts,
+            max_repeated_frame_run: stats.encoder_bridge_max_repeated_frame_run,
+            synthetic_fallback_frames: stats.encoder_bridge_synthetic_frames,
+            source_to_encode_age_ms: stats.encoder_bridge_source_age_ms,
+            source_to_encode_age_p95_ms: stats.encoder_bridge_source_age_p95_ms,
+            repeated_frame_age_p95_ms: stats.encoder_bridge_repeated_frame_age_p95_ms,
+            repeated_frame_age_max_ms: stats.encoder_bridge_repeated_frame_age_max_ms,
+        }
+    }
+}
+
+fn merge_encoder_bridge_recording_artifact_diagnostics(
+    base: &DiagnosticStats,
+    runtime: EncoderBridgeRuntimeStats,
+    diagnostics_context: EncoderBridgeDiagnosticsContext,
+) -> EncoderBridgeRecordingArtifactDiagnostics {
+    if diagnostics_context.separate_output_encoders_active
+        && diagnostics_context.recording_output.is_some()
+        && effective_encoder_bridge_output_role(diagnostics_context)
+            == EncoderBridgeOutputRole::Stream
+    {
+        EncoderBridgeRecordingArtifactDiagnostics::from_stats(base)
+    } else {
+        EncoderBridgeRecordingArtifactDiagnostics::from_runtime(runtime)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EncoderBridgeMergedRoleDiagnostics {
+    recording: EncoderBridgeRoleDiagnosticStats,
+    stream: EncoderBridgeRoleDiagnosticStats,
+    aggregate: EncoderBridgeRoleDiagnosticStats,
+}
+
+fn runtime_role_diagnostics(
+    runtime: EncoderBridgeRuntimeStats,
+) -> EncoderBridgeRoleDiagnosticStats {
+    EncoderBridgeRoleDiagnosticStats {
+        metal_target_frames: runtime.metal_target_frames,
+        metal_target_copied_frames: runtime.metal_target_copied_frames,
+        metal_target_handle_frames: runtime.metal_target_handle_frames,
+        zero_copy_frames: runtime.zero_copy_frames,
+        video_toolbox_probe_frames: runtime.video_toolbox_probe_frames,
+        video_toolbox_probe_bytes: runtime.video_toolbox_probe_bytes,
+        video_toolbox_probe_errors: runtime.video_toolbox_probe_errors,
+        video_toolbox_output_encode_ms: runtime.video_toolbox_output_encode_ms,
+        compositor_wait_p95_ms: runtime.compositor_wait_p95_ms,
+        video_toolbox_submit_p95_ms: runtime.video_toolbox_submit_p95_ms,
+        raw_video_fifo_write_p95_ms: runtime.raw_video_fifo_write_p95_ms,
+        video_toolbox_fifo_write_p95_ms: runtime.video_toolbox_fifo_write_p95_ms,
+        video_toolbox_fifo_enqueue_p95_ms: runtime.video_toolbox_fifo_enqueue_p95_ms,
+        video_toolbox_fifo_enqueue_max_ms: runtime.video_toolbox_fifo_enqueue_max_ms,
+        writer_loop_p95_ms: runtime.writer_loop_p95_ms,
+        writer_sleep_p95_ms: runtime.writer_sleep_p95_ms,
+        writer_active_p95_ms: runtime.writer_active_p95_ms,
+        deadline_lag_p95_ms: runtime.deadline_lag_p95_ms,
+        deadline_lag_max_ms: runtime.deadline_lag_max_ms,
+        late_deadline_ticks: runtime.late_deadline_ticks,
+        schedule_skipped_ms: runtime.schedule_skipped_ms,
+    }
+}
+
+fn max_optional_f64(left: Option<f64>, right: Option<f64>) -> Option<f64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn role_diagnostics_high_water(
+    previous: EncoderBridgeRoleDiagnosticStats,
+    current: EncoderBridgeRoleDiagnosticStats,
+) -> EncoderBridgeRoleDiagnosticStats {
+    EncoderBridgeRoleDiagnosticStats {
+        metal_target_frames: previous
+            .metal_target_frames
+            .max(current.metal_target_frames),
+        metal_target_copied_frames: previous
+            .metal_target_copied_frames
+            .max(current.metal_target_copied_frames),
+        metal_target_handle_frames: previous
+            .metal_target_handle_frames
+            .max(current.metal_target_handle_frames),
+        zero_copy_frames: previous.zero_copy_frames.max(current.zero_copy_frames),
+        video_toolbox_probe_frames: previous
+            .video_toolbox_probe_frames
+            .max(current.video_toolbox_probe_frames),
+        video_toolbox_probe_bytes: previous
+            .video_toolbox_probe_bytes
+            .max(current.video_toolbox_probe_bytes),
+        video_toolbox_probe_errors: previous
+            .video_toolbox_probe_errors
+            .max(current.video_toolbox_probe_errors),
+        video_toolbox_output_encode_ms: max_optional_u64(
+            previous.video_toolbox_output_encode_ms,
+            current.video_toolbox_output_encode_ms,
+        ),
+        compositor_wait_p95_ms: max_optional_f64(
+            previous.compositor_wait_p95_ms,
+            current.compositor_wait_p95_ms,
+        ),
+        video_toolbox_submit_p95_ms: max_optional_f64(
+            previous.video_toolbox_submit_p95_ms,
+            current.video_toolbox_submit_p95_ms,
+        ),
+        raw_video_fifo_write_p95_ms: max_optional_f64(
+            previous.raw_video_fifo_write_p95_ms,
+            current.raw_video_fifo_write_p95_ms,
+        ),
+        video_toolbox_fifo_write_p95_ms: max_optional_f64(
+            previous.video_toolbox_fifo_write_p95_ms,
+            current.video_toolbox_fifo_write_p95_ms,
+        ),
+        video_toolbox_fifo_enqueue_p95_ms: max_optional_f64(
+            previous.video_toolbox_fifo_enqueue_p95_ms,
+            current.video_toolbox_fifo_enqueue_p95_ms,
+        ),
+        video_toolbox_fifo_enqueue_max_ms: max_optional_f64(
+            previous.video_toolbox_fifo_enqueue_max_ms,
+            current.video_toolbox_fifo_enqueue_max_ms,
+        ),
+        writer_loop_p95_ms: max_optional_f64(
+            previous.writer_loop_p95_ms,
+            current.writer_loop_p95_ms,
+        ),
+        writer_sleep_p95_ms: max_optional_f64(
+            previous.writer_sleep_p95_ms,
+            current.writer_sleep_p95_ms,
+        ),
+        writer_active_p95_ms: max_optional_f64(
+            previous.writer_active_p95_ms,
+            current.writer_active_p95_ms,
+        ),
+        deadline_lag_p95_ms: max_optional_f64(
+            previous.deadline_lag_p95_ms,
+            current.deadline_lag_p95_ms,
+        ),
+        deadline_lag_max_ms: max_optional_f64(
+            previous.deadline_lag_max_ms,
+            current.deadline_lag_max_ms,
+        ),
+        late_deadline_ticks: previous
+            .late_deadline_ticks
+            .max(current.late_deadline_ticks),
+        schedule_skipped_ms: previous
+            .schedule_skipped_ms
+            .max(current.schedule_skipped_ms),
+    }
+}
+
+fn aggregate_role_diagnostics(
+    recording: EncoderBridgeRoleDiagnosticStats,
+    stream: EncoderBridgeRoleDiagnosticStats,
+) -> EncoderBridgeRoleDiagnosticStats {
+    EncoderBridgeRoleDiagnosticStats {
+        metal_target_frames: recording
+            .metal_target_frames
+            .saturating_add(stream.metal_target_frames),
+        metal_target_copied_frames: recording
+            .metal_target_copied_frames
+            .saturating_add(stream.metal_target_copied_frames),
+        metal_target_handle_frames: recording
+            .metal_target_handle_frames
+            .saturating_add(stream.metal_target_handle_frames),
+        zero_copy_frames: recording
+            .zero_copy_frames
+            .saturating_add(stream.zero_copy_frames),
+        video_toolbox_probe_frames: recording
+            .video_toolbox_probe_frames
+            .saturating_add(stream.video_toolbox_probe_frames),
+        video_toolbox_probe_bytes: recording
+            .video_toolbox_probe_bytes
+            .saturating_add(stream.video_toolbox_probe_bytes),
+        video_toolbox_probe_errors: recording
+            .video_toolbox_probe_errors
+            .saturating_add(stream.video_toolbox_probe_errors),
+        video_toolbox_output_encode_ms: max_optional_u64(
+            recording.video_toolbox_output_encode_ms,
+            stream.video_toolbox_output_encode_ms,
+        ),
+        compositor_wait_p95_ms: max_optional_f64(
+            recording.compositor_wait_p95_ms,
+            stream.compositor_wait_p95_ms,
+        ),
+        video_toolbox_submit_p95_ms: max_optional_f64(
+            recording.video_toolbox_submit_p95_ms,
+            stream.video_toolbox_submit_p95_ms,
+        ),
+        raw_video_fifo_write_p95_ms: max_optional_f64(
+            recording.raw_video_fifo_write_p95_ms,
+            stream.raw_video_fifo_write_p95_ms,
+        ),
+        video_toolbox_fifo_write_p95_ms: max_optional_f64(
+            recording.video_toolbox_fifo_write_p95_ms,
+            stream.video_toolbox_fifo_write_p95_ms,
+        ),
+        video_toolbox_fifo_enqueue_p95_ms: max_optional_f64(
+            recording.video_toolbox_fifo_enqueue_p95_ms,
+            stream.video_toolbox_fifo_enqueue_p95_ms,
+        ),
+        video_toolbox_fifo_enqueue_max_ms: max_optional_f64(
+            recording.video_toolbox_fifo_enqueue_max_ms,
+            stream.video_toolbox_fifo_enqueue_max_ms,
+        ),
+        writer_loop_p95_ms: max_optional_f64(
+            recording.writer_loop_p95_ms,
+            stream.writer_loop_p95_ms,
+        ),
+        writer_sleep_p95_ms: max_optional_f64(
+            recording.writer_sleep_p95_ms,
+            stream.writer_sleep_p95_ms,
+        ),
+        writer_active_p95_ms: max_optional_f64(
+            recording.writer_active_p95_ms,
+            stream.writer_active_p95_ms,
+        ),
+        deadline_lag_p95_ms: max_optional_f64(
+            recording.deadline_lag_p95_ms,
+            stream.deadline_lag_p95_ms,
+        ),
+        deadline_lag_max_ms: max_optional_f64(
+            recording.deadline_lag_max_ms,
+            stream.deadline_lag_max_ms,
+        ),
+        late_deadline_ticks: recording
+            .late_deadline_ticks
+            .saturating_add(stream.late_deadline_ticks),
+        schedule_skipped_ms: recording
+            .schedule_skipped_ms
+            .saturating_add(stream.schedule_skipped_ms),
+    }
+}
+
+fn merge_encoder_bridge_role_diagnostics(
+    base: &DiagnosticStats,
+    runtime: EncoderBridgeRuntimeStats,
+    diagnostics_context: EncoderBridgeDiagnosticsContext,
+) -> EncoderBridgeMergedRoleDiagnostics {
+    let current = runtime_role_diagnostics(runtime);
+    if !diagnostics_context.separate_output_encoders_active {
+        return EncoderBridgeMergedRoleDiagnostics {
+            recording: Default::default(),
+            stream: Default::default(),
+            aggregate: current,
+        };
+    }
+
+    let mut recording = base.encoder_bridge_recording_role_diagnostics;
+    let mut stream = base.encoder_bridge_stream_role_diagnostics;
+    match effective_encoder_bridge_output_role(diagnostics_context) {
+        EncoderBridgeOutputRole::Recording => {
+            recording = role_diagnostics_high_water(recording, current);
+        }
+        EncoderBridgeOutputRole::Stream => {
+            stream = role_diagnostics_high_water(stream, current);
+        }
+        EncoderBridgeOutputRole::Shared => {
+            debug_assert!(
+                false,
+                "a shared bridge cannot report separate output encoders"
+            );
+        }
+    }
+    EncoderBridgeMergedRoleDiagnostics {
+        recording,
+        stream,
+        aggregate: aggregate_role_diagnostics(recording, stream),
+    }
+}
+
+fn encoder_bridge_recording_diagnostics_target_fps(
+    target_fps: u32,
+    diagnostics_context: EncoderBridgeDiagnosticsContext,
+) -> u32 {
+    if diagnostics_context.separate_output_encoders_active {
+        diagnostics_context
+            .recording_output
+            .map_or(target_fps, |output| output.fps)
+    } else {
+        target_fps
+    }
+}
+
+fn merge_encoder_bridge_recording_error(
+    base: &DiagnosticStats,
+    error: Option<String>,
+    diagnostics_context: EncoderBridgeDiagnosticsContext,
+) -> Option<String> {
+    if diagnostics_context.separate_output_encoders_active
+        && diagnostics_context.recording_output.is_some()
+    {
+        if effective_encoder_bridge_output_role(diagnostics_context)
+            == EncoderBridgeOutputRole::Stream
+        {
+            return base.encoder_bridge_error.clone();
+        }
+        return error.or_else(|| base.encoder_bridge_error.clone());
+    }
+    error
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EncoderBridgeMergedOutputPressure {
+    recording: EncoderBridgeRoleOutputPressureStats,
+    stream: EncoderBridgeRoleOutputPressureStats,
+    aggregate: EncoderBridgeRoleOutputPressureStats,
+}
+
+fn runtime_output_pressure(
+    runtime: EncoderBridgeRuntimeStats,
+) -> EncoderBridgeRoleOutputPressureStats {
+    EncoderBridgeRoleOutputPressureStats {
+        output_queue_high_water_frames: runtime.output_queue_high_water_frames,
+        output_queue_oldest_frame_age_high_water_ms: runtime
+            .output_queue_oldest_frame_age_high_water_ms,
+        output_last_progress_age_ms: runtime.output_last_progress_age_ms,
+        output_pressure_recovery_events: runtime.output_pressure_recovery_events,
+        output_pre_encode_skipped_frames: runtime.output_pre_encode_skipped_frames,
+        video_toolbox_pending_encode_frames: runtime.video_toolbox_pending_encode_frames,
+        video_toolbox_pending_fifo_frames: runtime.video_toolbox_pending_fifo_frames,
+        encoded_access_unit_dropped_frames: runtime.encoded_access_unit_dropped_frames,
+    }
+}
+
+/// A bridge that has exited has no current queue or VideoToolbox stage depth.
+/// Keep cumulative/high-water incident evidence, but do not let one stopped
+/// split-output role make the surviving role look permanently backlogged.
+fn mark_encoder_bridge_output_inactive(
+    mut runtime: EncoderBridgeRuntimeStats,
+) -> EncoderBridgeRuntimeStats {
+    runtime.queue_depth = 0;
+    runtime.output_queue_oldest_frame_age_ms = None;
+    runtime.output_last_progress_age_ms = None;
+    runtime.video_toolbox_pending_encode_frames = 0;
+    runtime.video_toolbox_pending_fifo_frames = 0;
+    runtime
+}
+
+fn max_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn aggregate_output_pressure(
+    recording: EncoderBridgeRoleOutputPressureStats,
+    stream: EncoderBridgeRoleOutputPressureStats,
+) -> EncoderBridgeRoleOutputPressureStats {
+    EncoderBridgeRoleOutputPressureStats {
+        output_queue_high_water_frames: recording
+            .output_queue_high_water_frames
+            .max(stream.output_queue_high_water_frames),
+        output_queue_oldest_frame_age_high_water_ms: max_optional_u64(
+            recording.output_queue_oldest_frame_age_high_water_ms,
+            stream.output_queue_oldest_frame_age_high_water_ms,
+        ),
+        output_last_progress_age_ms: max_optional_u64(
+            recording.output_last_progress_age_ms,
+            stream.output_last_progress_age_ms,
+        ),
+        output_pressure_recovery_events: recording
+            .output_pressure_recovery_events
+            .saturating_add(stream.output_pressure_recovery_events),
+        output_pre_encode_skipped_frames: recording
+            .output_pre_encode_skipped_frames
+            .saturating_add(stream.output_pre_encode_skipped_frames),
+        video_toolbox_pending_encode_frames: recording
+            .video_toolbox_pending_encode_frames
+            .saturating_add(stream.video_toolbox_pending_encode_frames),
+        video_toolbox_pending_fifo_frames: recording
+            .video_toolbox_pending_fifo_frames
+            .saturating_add(stream.video_toolbox_pending_fifo_frames),
+        encoded_access_unit_dropped_frames: recording
+            .encoded_access_unit_dropped_frames
+            .saturating_add(stream.encoded_access_unit_dropped_frames),
+    }
+}
+
+fn merge_encoder_bridge_role_output_pressure(
+    base: &DiagnosticStats,
+    runtime: EncoderBridgeRuntimeStats,
+    diagnostics_context: EncoderBridgeDiagnosticsContext,
+) -> EncoderBridgeMergedOutputPressure {
+    if !diagnostics_context.separate_output_encoders_active {
+        return EncoderBridgeMergedOutputPressure {
+            recording: Default::default(),
+            stream: Default::default(),
+            aggregate: runtime_output_pressure(runtime),
+        };
+    }
+
+    let mut recording = base.encoder_bridge_recording_output_pressure;
+    let mut stream = base.encoder_bridge_stream_output_pressure;
+    match effective_encoder_bridge_output_role(diagnostics_context) {
+        EncoderBridgeOutputRole::Recording => recording = runtime_output_pressure(runtime),
+        EncoderBridgeOutputRole::Stream => stream = runtime_output_pressure(runtime),
+        EncoderBridgeOutputRole::Shared => {
+            debug_assert!(
+                false,
+                "a shared bridge cannot report separate output encoders"
+            );
+        }
+    }
+
+    EncoderBridgeMergedOutputPressure {
+        recording,
+        stream,
+        aggregate: aggregate_output_pressure(recording, stream),
+    }
 }
 
 fn merge_encoder_bridge_role_process_diagnostics(
@@ -2665,8 +3165,19 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut pending_video_toolbox_output_started_at = HashMap::<u64, Instant>::new();
     #[cfg(target_os = "macos")]
     let mut pending_video_toolbox_fifo_started_at = VecDeque::<Instant>::new();
+    #[cfg(target_os = "macos")]
+    let mut pending_completed_video_toolbox_frame = None::<CompletedVideoToolboxOutputFrame>;
     let mut output_queue_capacity_pressure_events = 0_u64;
     let mut output_queue_dropped_frames = 0_u64;
+    let mut output_queue_high_water_frames = 0_u64;
+    let mut output_queue_oldest_frame_age_high_water_ms = None::<u64>;
+    let mut output_pressure_recovery_events = 0_u64;
+    let mut output_pre_encode_skipped_frames = 0_u64;
+    // Encoded access units are retained across callback and FIFO pressure.
+    // This remains an explicit zero-valued integrity invariant for smoke gates.
+    let encoded_access_unit_dropped_frames = 0_u64;
+    let mut output_pressure_active = false;
+    let mut last_output_progress_at = Instant::now();
     // First instant the output queue went over its hard budget; cleared the
     // moment it recovers. Drives the sustained-violation escalation.
     let mut output_over_budget_since: Option<Instant> = None;
@@ -2700,6 +3211,17 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         () => {
             oldest_output_queue_age!().map(|age| age.as_millis() as u64)
         };
+    }
+    macro_rules! observe_output_queue {
+        ($depth:expr) => {{
+            output_queue_high_water_frames = output_queue_high_water_frames.max($depth);
+            if let Some(age_ms) = oldest_output_queue_age_ms!() {
+                output_queue_oldest_frame_age_high_water_ms = Some(
+                    output_queue_oldest_frame_age_high_water_ms
+                        .map_or(age_ms, |current| current.max(age_ms)),
+                );
+            }
+        }};
     }
     #[cfg(not(target_os = "macos"))]
     macro_rules! oldest_output_queue_age_ms {
@@ -2784,9 +3306,19 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         ($depth:expr) => {
             EncoderBridgeRuntimeStats {
                 queue_depth: $depth,
+                output_queue_high_water_frames,
                 output_queue_oldest_frame_age_ms: oldest_output_queue_age_ms!(),
+                output_queue_oldest_frame_age_high_water_ms,
+                output_last_progress_age_ms: Some(
+                    last_output_progress_at.elapsed().as_millis() as u64
+                ),
                 output_queue_capacity_pressure_events,
+                output_pressure_recovery_events,
                 output_queue_dropped_frames,
+                output_pre_encode_skipped_frames,
+                video_toolbox_pending_encode_frames: pending_video_toolbox_output_frames,
+                video_toolbox_pending_fifo_frames: pending_video_toolbox_fifo_frames,
+                encoded_access_unit_dropped_frames,
                 input_fps: current_input_fps!(),
                 dropped_frames: 0,
                 encoder_speed: None,
@@ -3048,20 +3580,26 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             let writer = video_toolbox_fifo_writer
                 .as_mut()
                 .expect("VideoToolbox FIFO writer must be running");
-            drain_video_toolbox_output_frames(
+            let pending_encode_before = pending_video_toolbox_output_frames;
+            let written_frames_before = video_toolbox_output_frames;
+            let drain_result = drain_video_toolbox_output_frames(
                 &mut video_toolbox_probe,
                 writer,
                 &mut pending_video_toolbox_output_frames,
                 &mut pending_video_toolbox_fifo_frames,
                 &mut pending_video_toolbox_output_started_at,
                 &mut pending_video_toolbox_fifo_started_at,
+                &mut pending_completed_video_toolbox_frame,
                 &mut output_queue_capacity_pressure_events,
                 &mut video_toolbox_probe_errors,
                 &mut video_toolbox_fifo_enqueue_times_ms,
                 &mut max_video_toolbox_fifo_enqueue_ms,
                 Some(VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK),
             )
-            .and_then(|()| {
+            .and_then(|progress| {
+                if progress.callback_completions > 0 {
+                    last_output_progress_at = Instant::now();
+                }
                 drain_video_toolbox_fifo_writer_results(
                     writer,
                     &mut pending_video_toolbox_fifo_frames,
@@ -3071,8 +3609,13 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     &mut video_toolbox_output_bytes,
                     &mut video_toolbox_fifo_write_times_ms,
                 )
-            })
-            .err()
+            });
+            if pending_video_toolbox_output_frames < pending_encode_before
+                || video_toolbox_output_frames > written_frames_before
+            {
+                last_output_progress_at = Instant::now();
+            }
+            drain_result.err()
         } else {
             None
         };
@@ -3095,13 +3638,15 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         } else {
             pending_raw_fifo_frames
         };
+        observe_output_queue!(queue_depth);
         let admission = if pipeline_error.is_some() || !video_output.uses_encoded_h264() {
             EncoderBridgePreEncodeAdmission::Submit
         } else {
-            encoder_bridge_pre_encode_admission(
+            encoder_bridge_progress_aware_pre_encode_admission(
                 output_queue_policy,
                 queue_depth,
                 oldest_output_queue_age!(),
+                last_output_progress_at.elapsed(),
             )
         };
         // Over-budget is a death sentence only when SUSTAINED (or the queue is
@@ -3109,7 +3654,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         // coalescing and recovers, instead of one over-age sample killing a
         // live session (2026-07-15 incident).
         let admission = match admission {
-            EncoderBridgePreEncodeAdmission::FailOutput => {
+            EncoderBridgePreEncodeAdmission::FailOutput
+                if output_queue_policy.role == EncoderBridgeOutputRole::Stream =>
+            {
                 let now = Instant::now();
                 let since = *output_over_budget_since.get_or_insert(now);
                 match encoder_bridge_over_budget_escalation(
@@ -3121,21 +3668,17 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     EncoderBridgeOverBudgetEscalation::Degrade => {
                         EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame
                     }
-                    EncoderBridgeOverBudgetEscalation::SubmitUnderPressure => {
-                        // Recording keeps every frame: submit late, surface
-                        // pressure in stats, never drop.
-                        output_queue_capacity_pressure_events =
-                            output_queue_capacity_pressure_events.saturating_add(1);
-                        tracing::warn!(
-                            "Recording encoder output over its age budget (depth {queue_depth}, since {:?} ago); submitting under pressure instead of failing.",
-                            now.duration_since(since)
-                        );
-                        EncoderBridgePreEncodeAdmission::Submit
-                    }
                     EncoderBridgeOverBudgetEscalation::Fail => {
                         EncoderBridgePreEncodeAdmission::FailOutput
                     }
                 }
+            }
+            EncoderBridgePreEncodeAdmission::FailOutput => {
+                // Recording reaches this arm only after the independent
+                // no-progress timeout. Do not restart another age/depth grace
+                // window: that was the coupling which converted pressure into
+                // either premature death or one last overflowing submission.
+                EncoderBridgePreEncodeAdmission::FailOutput
             }
             other => {
                 output_over_budget_since = None;
@@ -3143,11 +3686,32 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             }
         };
         match admission {
-            EncoderBridgePreEncodeAdmission::Submit => {}
-            EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame => {
+            EncoderBridgePreEncodeAdmission::Submit => {
+                if output_pressure_active {
+                    output_pressure_active = false;
+                    output_pressure_recovery_events =
+                        output_pressure_recovery_events.saturating_add(1);
+                    tracing::info!(
+                        role = encoder_bridge_output_role_label(output_queue_policy.role),
+                        queue_depth,
+                        recoveries = output_pressure_recovery_events,
+                        "encoder output queue recovered after bounded pressure"
+                    );
+                }
+            }
+            EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame
+            | EncoderBridgePreEncodeAdmission::PauseRecordingFrame => {
+                let recording_pause =
+                    admission == EncoderBridgePreEncodeAdmission::PauseRecordingFrame;
+                output_pressure_active = true;
                 output_queue_capacity_pressure_events =
                     output_queue_capacity_pressure_events.saturating_add(1);
-                output_queue_dropped_frames = output_queue_dropped_frames.saturating_add(1);
+                if recording_pause {
+                    output_pre_encode_skipped_frames =
+                        output_pre_encode_skipped_frames.saturating_add(1);
+                } else {
+                    output_queue_dropped_frames = output_queue_dropped_frames.saturating_add(1);
+                }
                 writer_active_times_ms.push(active_started_at.elapsed().as_secs_f64() * 1000.0);
                 writer_loop_times_ms.push(loop_started_at.elapsed().as_secs_f64() * 1000.0);
                 if window_started_at.elapsed() >= ENCODER_BRIDGE_DIAGNOSTIC_WINDOW {
@@ -3179,16 +3743,20 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 // The bridge timing sequence did advance above, so the next
                 // MPEG-TS PTS carries an explicit wall-time gap; the maintained
                 // final-artifact cadence/freeze gate checks that this remains
-                // honest rather than compressing the stream timeline.
+                // honest rather than compressing the timeline. For recording,
+                // every already-encoded AU remains queued and ordered; only this
+                // not-yet-encoded compositor tick is skipped.
                 continue;
             }
             EncoderBridgePreEncodeAdmission::FailOutput => {
+                output_pressure_active = true;
                 output_queue_capacity_pressure_events =
                     output_queue_capacity_pressure_events.saturating_add(1);
                 pipeline_error = Some(encoder_bridge_output_pressure_error(
                     output_queue_policy,
                     queue_depth,
                     oldest_output_queue_age!(),
+                    last_output_progress_at.elapsed(),
                 ));
             }
         }
@@ -3257,9 +3825,20 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                         target_fps,
                         EncoderBridgeRuntimeStats {
                             queue_depth,
+                            output_queue_high_water_frames,
                             output_queue_oldest_frame_age_ms: oldest_output_queue_age_ms!(),
+                            output_queue_oldest_frame_age_high_water_ms,
+                            output_last_progress_age_ms: Some(
+                                last_output_progress_at.elapsed().as_millis() as u64,
+                            ),
                             output_queue_capacity_pressure_events,
+                            output_pressure_recovery_events,
                             output_queue_dropped_frames,
+                            output_pre_encode_skipped_frames,
+                            video_toolbox_pending_encode_frames:
+                                pending_video_toolbox_output_frames,
+                            video_toolbox_pending_fifo_frames: pending_video_toolbox_fifo_frames,
+                            encoded_access_unit_dropped_frames,
                             input_fps: current_input_fps!(),
                             dropped_frames: 0,
                             encoder_speed: None,
@@ -3397,6 +3976,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         } else {
             pending_raw_fifo_frames
         };
+        let output_frames_before_write = video_toolbox_output_frames;
         let write_result = if let Some(error) = pipeline_error {
             Err(error)
         } else {
@@ -3646,6 +4226,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 }
             }
         };
+        if write_result.is_ok() && video_toolbox_output_frames > output_frames_before_write {
+            last_output_progress_at = Instant::now();
+        }
         if let Err(error) = write_result {
             // A closed downstream (EPIPE/EOF: FFmpeg exited or was stopped)
             // is not this bridge's verdict — the process exit status decides
@@ -3665,9 +4248,19 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 target_fps,
                 EncoderBridgeRuntimeStats {
                     queue_depth,
+                    output_queue_high_water_frames,
                     output_queue_oldest_frame_age_ms: oldest_output_queue_age_ms!(),
+                    output_queue_oldest_frame_age_high_water_ms,
+                    output_last_progress_age_ms: Some(
+                        last_output_progress_at.elapsed().as_millis() as u64,
+                    ),
                     output_queue_capacity_pressure_events,
+                    output_pressure_recovery_events,
                     output_queue_dropped_frames,
+                    output_pre_encode_skipped_frames,
+                    video_toolbox_pending_encode_frames: pending_video_toolbox_output_frames,
+                    video_toolbox_pending_fifo_frames: pending_video_toolbox_fifo_frames,
+                    encoded_access_unit_dropped_frames,
                     input_fps: current_input_fps!(),
                     dropped_frames: 0,
                     encoder_speed: None,
@@ -3720,14 +4313,19 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 &mut pending_video_toolbox_fifo_frames,
                 &mut pending_video_toolbox_output_started_at,
                 &mut pending_video_toolbox_fifo_started_at,
+                &mut pending_completed_video_toolbox_frame,
                 &mut output_queue_capacity_pressure_events,
                 &mut video_toolbox_probe_errors,
                 &mut video_toolbox_fifo_enqueue_times_ms,
                 &mut max_video_toolbox_fifo_enqueue_ms,
                 Some(VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK),
             )
-            .and_then(|()| {
-                drain_video_toolbox_fifo_writer_results(
+            .and_then(|progress| {
+                if progress.callback_completions > 0 {
+                    last_output_progress_at = Instant::now();
+                }
+                let written_frames_before = video_toolbox_output_frames;
+                let result = drain_video_toolbox_fifo_writer_results(
                     video_toolbox_fifo_writer
                         .as_mut()
                         .expect("VideoToolbox FIFO writer must be running"),
@@ -3737,7 +4335,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     &mut video_toolbox_output_frames,
                     &mut video_toolbox_output_bytes,
                     &mut video_toolbox_fifo_write_times_ms,
-                )
+                );
+                if video_toolbox_output_frames > written_frames_before {
+                    last_output_progress_at = Instant::now();
+                }
+                result
             })
         {
             let error = drain_state.record_video_toolbox_loop_error(
@@ -3753,9 +4355,19 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 EncoderBridgeRuntimeStats {
                     queue_depth: pending_video_toolbox_output_frames
                         .saturating_add(pending_video_toolbox_fifo_frames),
+                    output_queue_high_water_frames,
                     output_queue_oldest_frame_age_ms: oldest_output_queue_age_ms!(),
+                    output_queue_oldest_frame_age_high_water_ms,
+                    output_last_progress_age_ms: Some(
+                        last_output_progress_at.elapsed().as_millis() as u64,
+                    ),
                     output_queue_capacity_pressure_events,
+                    output_pressure_recovery_events,
                     output_queue_dropped_frames,
+                    output_pre_encode_skipped_frames,
+                    video_toolbox_pending_encode_frames: pending_video_toolbox_output_frames,
+                    video_toolbox_pending_fifo_frames: pending_video_toolbox_fifo_frames,
+                    encoded_access_unit_dropped_frames,
                     input_fps: current_input_fps!(),
                     dropped_frames: 0,
                     encoder_speed: None,
@@ -3864,9 +4476,19 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 target_fps,
                 EncoderBridgeRuntimeStats {
                     queue_depth,
+                    output_queue_high_water_frames,
                     output_queue_oldest_frame_age_ms: oldest_output_queue_age_ms!(),
+                    output_queue_oldest_frame_age_high_water_ms,
+                    output_last_progress_age_ms: Some(
+                        last_output_progress_at.elapsed().as_millis() as u64,
+                    ),
                     output_queue_capacity_pressure_events,
+                    output_pressure_recovery_events,
                     output_queue_dropped_frames,
+                    output_pre_encode_skipped_frames,
+                    video_toolbox_pending_encode_frames: pending_video_toolbox_output_frames,
+                    video_toolbox_pending_fifo_frames: pending_video_toolbox_fifo_frames,
+                    encoded_access_unit_dropped_frames,
                     input_fps: current_input_fps!(),
                     dropped_frames: 0,
                     encoder_speed: None,
@@ -3949,13 +4571,14 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 &mut pending_video_toolbox_fifo_frames,
                 &mut pending_video_toolbox_output_started_at,
                 &mut pending_video_toolbox_fifo_started_at,
+                &mut pending_completed_video_toolbox_frame,
                 &mut output_queue_capacity_pressure_events,
                 &mut video_toolbox_probe_errors,
                 &mut video_toolbox_fifo_enqueue_times_ms,
                 &mut max_video_toolbox_fifo_enqueue_ms,
                 None,
             )
-            .and_then(|()| {
+            .and_then(|_progress| {
                 drain_video_toolbox_fifo_writer_results(
                     writer,
                     &mut pending_video_toolbox_fifo_frames,
@@ -4083,15 +4706,33 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         }
         queue_depth = pending_raw_fifo_frames;
     }
+    // Final-drain failures retain their exact depth/age in the high-water
+    // fields and terminal error, while current-depth fields become truthful
+    // for an output thread that no longer exists.
+    output_queue_high_water_frames = output_queue_high_water_frames.max(queue_depth);
+    if let Some(age_ms) = oldest_output_queue_age_ms!() {
+        output_queue_oldest_frame_age_high_water_ms = Some(
+            output_queue_oldest_frame_age_high_water_ms
+                .map_or(age_ms, |current| current.max(age_ms)),
+        );
+    }
     emit_encoder_bridge_diagnostics_from_thread(
         &diagnostics_tx,
         session_id,
         target_fps,
-        EncoderBridgeRuntimeStats {
+        mark_encoder_bridge_output_inactive(EncoderBridgeRuntimeStats {
             queue_depth,
+            output_queue_high_water_frames,
             output_queue_oldest_frame_age_ms: oldest_output_queue_age_ms!(),
+            output_queue_oldest_frame_age_high_water_ms,
+            output_last_progress_age_ms: Some(last_output_progress_at.elapsed().as_millis() as u64),
             output_queue_capacity_pressure_events,
+            output_pressure_recovery_events,
             output_queue_dropped_frames,
+            output_pre_encode_skipped_frames,
+            video_toolbox_pending_encode_frames: pending_video_toolbox_output_frames,
+            video_toolbox_pending_fifo_frames: pending_video_toolbox_fifo_frames,
+            encoded_access_unit_dropped_frames,
             input_fps: current_input_fps!(),
             dropped_frames: 0,
             encoder_speed: None,
@@ -4127,7 +4768,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             deadline_lag_max_ms: max_deadline_lag_ms,
             late_deadline_ticks,
             schedule_skipped_ms,
-        },
+        }),
         diagnostics_context,
         terminal_writer_error,
     );
@@ -4171,9 +4812,8 @@ struct EncoderBridgeVideoToolboxProbe {
     enabled: bool,
     config: VideoToolboxBridgeEncoderConfig,
     session: Option<VideoToolboxH264Session>,
-    output_tx: std_mpsc::SyncSender<VideoToolboxH264AsyncAnnexBFrame>,
+    output_tx: std_mpsc::Sender<VideoToolboxH264AsyncAnnexBFrame>,
     output_rx: std_mpsc::Receiver<VideoToolboxH264AsyncAnnexBFrame>,
-    rejected_output_frames: Arc<std::sync::atomic::AtomicU64>,
     disabled_after_error: bool,
 }
 
@@ -4197,9 +4837,10 @@ impl EncoderBridgeVideoToolboxProbe {
         bitrate_kbps: Option<u32>,
         low_latency: bool,
     ) -> Self {
-        let (output_tx, output_rx) =
-            std_mpsc::sync_channel(VIDEOTOOLBOX_CALLBACK_OUTPUT_QUEUE_FRAMES);
-        let rejected_output_frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // The callback must never block while complete_pending_frames waits on
+        // the bridge thread. Admission caps submitted frames at the output
+        // policy ceiling, so this unbounded transport is logically bounded.
+        let (output_tx, output_rx) = std_mpsc::channel();
         Self {
             enabled,
             config: VideoToolboxBridgeEncoderConfig::from_recording_profile(
@@ -4212,7 +4853,6 @@ impl EncoderBridgeVideoToolboxProbe {
             session: None,
             output_tx,
             output_rx,
-            rejected_output_frames,
             disabled_after_error: false,
         }
     }
@@ -4310,7 +4950,6 @@ impl EncoderBridgeVideoToolboxProbe {
                 timing,
                 frame_index,
                 self.output_tx.clone(),
-                self.rejected_output_frames.clone(),
             )
             .is_err()
         {
@@ -4322,10 +4961,6 @@ impl EncoderBridgeVideoToolboxProbe {
 
     fn try_recv_output(&mut self) -> Option<VideoToolboxH264AsyncAnnexBFrame> {
         self.output_rx.try_recv().ok()
-    }
-
-    fn take_rejected_output_frames(&self) -> u64 {
-        self.rejected_output_frames.swap(0, Ordering::AcqRel)
     }
 
     fn complete_pending(&self) -> Result<()> {
@@ -4775,13 +5410,31 @@ struct VideoToolboxFifoWriter {
     frame_tx: Option<std_mpsc::SyncSender<QueuedVideoToolboxFrame>>,
     result_rx: std_mpsc::Receiver<VideoToolboxFifoWriterResult>,
     join: Option<thread::JoinHandle<()>>,
-    policy: EncoderBridgeOutputQueuePolicy,
     lifecycle: Option<EncoderBridgeWriterLifecycle>,
 }
 
 #[cfg(target_os = "macos")]
 struct QueuedVideoToolboxFrame {
     frame: VideoToolboxH264AnnexBFrame,
+}
+
+#[cfg(target_os = "macos")]
+struct CompletedVideoToolboxOutputFrame {
+    frame_index: u64,
+    frame: VideoToolboxH264AnnexBFrame,
+    submitted_at: Instant,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct VideoToolboxOutputDrainProgress {
+    callback_completions: u64,
+}
+
+#[cfg(target_os = "macos")]
+enum VideoToolboxFifoEnqueueOutcome {
+    Enqueued,
+    CapacityPressure(VideoToolboxH264AnnexBFrame),
 }
 
 #[cfg(target_os = "macos")]
@@ -4897,7 +5550,6 @@ impl VideoToolboxFifoWriter {
             frame_tx: Some(frame_tx),
             result_rx,
             join: Some(join),
-            policy,
             lifecycle,
         }
     }
@@ -4905,22 +5557,18 @@ impl VideoToolboxFifoWriter {
     fn enqueue(
         &self,
         frame: VideoToolboxH264AnnexBFrame,
-        capacity_pressure_events: &mut u64,
-    ) -> io::Result<()> {
+    ) -> io::Result<VideoToolboxFifoEnqueueOutcome> {
         let tx = self
             .frame_tx
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "H.264 FIFO writer closed"))?;
         match offer_preserving_output_frame(tx, QueuedVideoToolboxFrame { frame }) {
-            Ok(PreservingOutputFrameOffer::Enqueued) => Ok(()),
-            Ok(PreservingOutputFrameOffer::CapacityPressure(_frame)) => {
-                *capacity_pressure_events = capacity_pressure_events.saturating_add(1);
-                Err(io::Error::other(format!(
-                    "{} encoded H.264 FIFO reached its {}-frame safety ceiling; stopping this output without blocking the realtime bridge or silently continuing after a discarded access unit",
-                    encoder_bridge_output_role_label(self.policy.role),
-                    self.policy.max_frames
-                )))
+            Ok(PreservingOutputFrameOffer::Enqueued) => {
+                Ok(VideoToolboxFifoEnqueueOutcome::Enqueued)
             }
+            Ok(PreservingOutputFrameOffer::CapacityPressure(queued)) => Ok(
+                VideoToolboxFifoEnqueueOutcome::CapacityPressure(queued.frame),
+            ),
             Err(_) => Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "H.264 FIFO writer stopped",
@@ -5794,68 +6442,128 @@ fn drain_video_toolbox_output_frames(
     pending_video_toolbox_fifo_frames: &mut u64,
     pending_video_toolbox_output_started_at: &mut HashMap<u64, Instant>,
     pending_video_toolbox_fifo_started_at: &mut VecDeque<Instant>,
+    pending_completed_video_toolbox_frame: &mut Option<CompletedVideoToolboxOutputFrame>,
     output_queue_capacity_pressure_events: &mut u64,
     video_toolbox_probe_errors: &mut u64,
     video_toolbox_fifo_enqueue_times_ms: &mut Vec<f64>,
     max_video_toolbox_fifo_enqueue_ms: &mut Option<f64>,
     max_frames: Option<usize>,
-) -> io::Result<()> {
-    let rejected_output_frames = video_toolbox.take_rejected_output_frames();
-    fail_on_rejected_video_toolbox_output_frames(
-        rejected_output_frames,
-        output_queue_capacity_pressure_events,
-        video_toolbox_probe_errors,
-    )?;
+) -> io::Result<VideoToolboxOutputDrainProgress> {
     let mut drained = 0_usize;
+    let mut progress = VideoToolboxOutputDrainProgress::default();
+
+    // A callback may have completed after the bounded FIFO filled. Retain that
+    // already-encoded AU in the bridge and retry it before receiving another
+    // callback so encoded order cannot change and capacity never implies loss.
+    if let Some(completed) = pending_completed_video_toolbox_frame.take() {
+        match enqueue_completed_video_toolbox_output_frame(
+            fifo_writer,
+            completed,
+            pending_video_toolbox_output_frames,
+            pending_video_toolbox_fifo_frames,
+            pending_video_toolbox_output_started_at,
+            pending_video_toolbox_fifo_started_at,
+            video_toolbox_fifo_enqueue_times_ms,
+            max_video_toolbox_fifo_enqueue_ms,
+        )? {
+            Some(completed) => {
+                *output_queue_capacity_pressure_events =
+                    output_queue_capacity_pressure_events.saturating_add(1);
+                *pending_completed_video_toolbox_frame = Some(completed);
+                return Ok(progress);
+            }
+            None => drained = drained.saturating_add(1),
+        }
+    }
+
     while max_frames.is_none_or(|limit| drained < limit) {
         let Some(message) = video_toolbox.try_recv_output() else {
             break;
         };
+        progress.callback_completions = progress.callback_completions.saturating_add(1);
         let frame_index = message.frame_index;
         let submitted_at = pending_video_toolbox_output_started_at
-            .remove(&frame_index)
+            .get(&frame_index)
+            .copied()
             .unwrap_or_else(Instant::now);
-        *pending_video_toolbox_output_frames =
-            pending_video_toolbox_output_frames.saturating_sub(1);
         match message.result {
             Ok(frame) => {
-                let enqueue_started_at = Instant::now();
-                fifo_writer.enqueue(frame, output_queue_capacity_pressure_events)?;
-                let enqueue_ms = enqueue_started_at.elapsed().as_secs_f64() * 1000.0;
-                video_toolbox_fifo_enqueue_times_ms.push(enqueue_ms);
-                *max_video_toolbox_fifo_enqueue_ms = Some(
-                    max_video_toolbox_fifo_enqueue_ms
-                        .map_or(enqueue_ms, |current| current.max(enqueue_ms)),
-                );
-                *pending_video_toolbox_fifo_frames =
-                    pending_video_toolbox_fifo_frames.saturating_add(1);
-                pending_video_toolbox_fifo_started_at.push_back(submitted_at);
+                let completed = CompletedVideoToolboxOutputFrame {
+                    frame_index,
+                    frame,
+                    submitted_at,
+                };
+                if let Some(completed) = enqueue_completed_video_toolbox_output_frame(
+                    fifo_writer,
+                    completed,
+                    pending_video_toolbox_output_frames,
+                    pending_video_toolbox_fifo_frames,
+                    pending_video_toolbox_output_started_at,
+                    pending_video_toolbox_fifo_started_at,
+                    video_toolbox_fifo_enqueue_times_ms,
+                    max_video_toolbox_fifo_enqueue_ms,
+                )? {
+                    *output_queue_capacity_pressure_events =
+                        output_queue_capacity_pressure_events.saturating_add(1);
+                    *pending_completed_video_toolbox_frame = Some(completed);
+                    break;
+                }
             }
             Err(error) => {
+                pending_video_toolbox_output_started_at.remove(&frame_index);
+                *pending_video_toolbox_output_frames =
+                    pending_video_toolbox_output_frames.saturating_sub(1);
                 *video_toolbox_probe_errors = video_toolbox_probe_errors.saturating_add(1);
                 return Err(io::Error::other(error));
             }
         }
         drained = drained.saturating_add(1);
     }
-    Ok(())
+    Ok(progress)
 }
 
 #[cfg(target_os = "macos")]
-fn fail_on_rejected_video_toolbox_output_frames(
-    rejected_output_frames: u64,
-    output_queue_capacity_pressure_events: &mut u64,
-    video_toolbox_probe_errors: &mut u64,
-) -> io::Result<()> {
-    if rejected_output_frames == 0 {
-        return Ok(());
+#[allow(clippy::too_many_arguments)]
+fn enqueue_completed_video_toolbox_output_frame(
+    fifo_writer: &VideoToolboxFifoWriter,
+    completed: CompletedVideoToolboxOutputFrame,
+    pending_video_toolbox_output_frames: &mut u64,
+    pending_video_toolbox_fifo_frames: &mut u64,
+    pending_video_toolbox_output_started_at: &mut HashMap<u64, Instant>,
+    pending_video_toolbox_fifo_started_at: &mut VecDeque<Instant>,
+    video_toolbox_fifo_enqueue_times_ms: &mut Vec<f64>,
+    max_video_toolbox_fifo_enqueue_ms: &mut Option<f64>,
+) -> io::Result<Option<CompletedVideoToolboxOutputFrame>> {
+    let enqueue_started_at = Instant::now();
+    let CompletedVideoToolboxOutputFrame {
+        frame_index,
+        frame,
+        submitted_at,
+    } = completed;
+    match fifo_writer.enqueue(frame)? {
+        VideoToolboxFifoEnqueueOutcome::Enqueued => {
+            let enqueue_ms = enqueue_started_at.elapsed().as_secs_f64() * 1000.0;
+            video_toolbox_fifo_enqueue_times_ms.push(enqueue_ms);
+            *max_video_toolbox_fifo_enqueue_ms = Some(
+                max_video_toolbox_fifo_enqueue_ms
+                    .map_or(enqueue_ms, |current| current.max(enqueue_ms)),
+            );
+            pending_video_toolbox_output_started_at.remove(&frame_index);
+            *pending_video_toolbox_output_frames =
+                pending_video_toolbox_output_frames.saturating_sub(1);
+            *pending_video_toolbox_fifo_frames =
+                pending_video_toolbox_fifo_frames.saturating_add(1);
+            pending_video_toolbox_fifo_started_at.push_back(submitted_at);
+            Ok(None)
+        }
+        VideoToolboxFifoEnqueueOutcome::CapacityPressure(frame) => {
+            Ok(Some(CompletedVideoToolboxOutputFrame {
+                frame_index,
+                frame,
+                submitted_at,
+            }))
+        }
     }
-    *output_queue_capacity_pressure_events =
-        output_queue_capacity_pressure_events.saturating_add(rejected_output_frames);
-    *video_toolbox_probe_errors = video_toolbox_probe_errors.saturating_add(rejected_output_frames);
-    Err(io::Error::other(format!(
-        "bounded VideoToolbox callback queue rejected {rejected_output_frames} encoded frame(s); stopping this output because encoded H.264 access units cannot be dropped safely"
-    )))
 }
 
 #[cfg(target_os = "macos")]
@@ -6211,6 +6919,8 @@ async fn emit_encoder_bridge_diagnostics(
     diagnostics_context: EncoderBridgeDiagnosticsContext,
     error: Option<String>,
 ) {
+    let recording_diagnostics_target_fps =
+        encoder_bridge_recording_diagnostics_target_fps(target_fps, diagnostics_context);
     if matches!(
         effective_encoder_bridge_output_role(diagnostics_context),
         EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared
@@ -6223,19 +6933,19 @@ async fn emit_encoder_bridge_diagnostics(
             recording_queue_drop_watch_update(
                 watch,
                 session_id,
-                runtime.output_queue_dropped_frames,
+                runtime.output_pre_encode_skipped_frames,
             )
         };
         if fire {
             let message = format!(
-                "Recording output could not keep up: {} video frame(s) were replaced before they reached FFmpeg. The saved file may be choppy or shorter than expected.",
-                runtime.output_queue_dropped_frames
+                "Recording output is recovering from pressure: {} compositor tick(s) were skipped before encode. Every already-encoded frame is being preserved; the saved file keeps truthful timing but may show a brief held frame.",
+                runtime.output_pre_encode_skipped_frames
             );
             let _ = crate::recording::emit_health_event(
                 state,
                 Some(session_id),
                 crate::protocol::HealthLevel::Warn,
-                "recording-output-queue-drops",
+                "recording-output-pressure",
                 &message,
             );
         }
@@ -6271,7 +6981,7 @@ async fn emit_encoder_bridge_diagnostics(
 
     // L4 (plan 023): announce a degraded recording leg mid-session.
     if matches!(
-        diagnostics_context.role,
+        effective_encoder_bridge_output_role(diagnostics_context),
         EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared
     ) {
         let now_ms = std::time::SystemTime::now()
@@ -6283,11 +6993,17 @@ async fn emit_encoder_bridge_diagnostics(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let watch = guard.get_or_insert_with(RecordingFpsWatch::default);
-            recording_fps_watch_update(watch, session_id, runtime.input_fps, target_fps, now_ms)
+            recording_fps_watch_update(
+                watch,
+                session_id,
+                runtime.input_fps,
+                recording_diagnostics_target_fps,
+                now_ms,
+            )
         };
         if fire {
             let message = format!(
-                "Recording quality is degraded while streaming: the recording leg is producing                  {:.0} fps against the selected {target_fps} fps. The stream continues; the                  saved file will be choppy.",
+                "Recording quality is degraded while streaming: the recording leg is producing                  {:.0} fps against the selected {recording_diagnostics_target_fps} fps. The stream continues; the                  saved file will be choppy.",
                 runtime.input_fps.unwrap_or(0.0)
             );
             let _ = crate::recording::emit_health_event(
@@ -6305,12 +7021,25 @@ async fn emit_encoder_bridge_diagnostics(
         let base = if diagnostics.session_id.as_deref() == Some(session_id) {
             diagnostics.clone()
         } else {
-            starting_diagnostics(session_id, target_fps, "encoder-bridge")
+            starting_diagnostics(
+                session_id,
+                recording_diagnostics_target_fps,
+                "encoder-bridge",
+            )
         };
         let recording_output = diagnostics_context.recording_output;
         let stream_output = diagnostics_context.stream_output;
         let role_process_diagnostics =
             merge_encoder_bridge_role_process_diagnostics(&base, runtime, diagnostics_context);
+        let recording_artifact_diagnostics = merge_encoder_bridge_recording_artifact_diagnostics(
+            &base,
+            runtime,
+            diagnostics_context,
+        );
+        let role_diagnostics =
+            merge_encoder_bridge_role_diagnostics(&base, runtime, diagnostics_context);
+        let role_output_pressure =
+            merge_encoder_bridge_role_output_pressure(&base, runtime, diagnostics_context);
         let (
             recording_output_frames,
             recording_output_bytes,
@@ -6340,11 +7069,6 @@ async fn emit_encoder_bridge_diagnostics(
             recording_output_bytes.saturating_add(stream_output_bytes)
         } else {
             runtime.video_toolbox_output_bytes
-        };
-        let max_option = |left: Option<f64>, right: Option<f64>| match (left, right) {
-            (Some(left), Some(right)) => Some(left.max(right)),
-            (Some(value), None) | (None, Some(value)) => Some(value),
-            (None, None) => None,
         };
         let (
             recording_input_fps,
@@ -6386,34 +7110,6 @@ async fn emit_encoder_bridge_diagnostics(
                 (None, None, None, None, None, None, None, None, None, None)
             }
         };
-        let writer_loop_p95_ms = if diagnostics_context.separate_output_encoders_active {
-            max_option(recording_writer_loop_p95_ms, stream_writer_loop_p95_ms)
-        } else {
-            runtime.writer_loop_p95_ms
-        };
-        let writer_active_p95_ms = if diagnostics_context.separate_output_encoders_active {
-            max_option(recording_writer_active_p95_ms, stream_writer_active_p95_ms)
-        } else {
-            runtime.writer_active_p95_ms
-        };
-        let video_toolbox_fifo_enqueue_p95_ms =
-            if diagnostics_context.separate_output_encoders_active {
-                max_option(
-                    recording_video_toolbox_fifo_enqueue_p95_ms,
-                    stream_video_toolbox_fifo_enqueue_p95_ms,
-                )
-            } else {
-                runtime.video_toolbox_fifo_enqueue_p95_ms
-            };
-        let video_toolbox_fifo_enqueue_max_ms =
-            if diagnostics_context.separate_output_encoders_active {
-                max_option(
-                    recording_video_toolbox_fifo_enqueue_max_ms,
-                    stream_video_toolbox_fifo_enqueue_max_ms,
-                )
-            } else {
-                runtime.video_toolbox_fifo_enqueue_max_ms
-            };
         let (
             recording_queue_depth,
             recording_queue_oldest_frame_age_ms,
@@ -6485,48 +7181,75 @@ async fn emit_encoder_bridge_diagnostics(
         } else {
             runtime.queue_depth
         };
-        let error = if diagnostics_context.separate_output_encoders_active {
-            error.or_else(|| base.encoder_bridge_error.clone())
-        } else {
-            error
-        };
+        let error = merge_encoder_bridge_recording_error(&base, error, diagnostics_context);
         let next = apply_encoder_bridge_stats(
             base,
             EncoderBridgeDiagnosticSnapshot {
                 queue_depth,
+                output_queue_high_water_frames: role_output_pressure
+                    .aggregate
+                    .output_queue_high_water_frames,
                 output_queue_oldest_frame_age_ms,
+                output_queue_oldest_frame_age_high_water_ms: role_output_pressure
+                    .aggregate
+                    .output_queue_oldest_frame_age_high_water_ms,
+                output_last_progress_age_ms: role_output_pressure
+                    .aggregate
+                    .output_last_progress_age_ms,
                 output_queue_capacity_pressure_events,
+                output_pressure_recovery_events: role_output_pressure
+                    .aggregate
+                    .output_pressure_recovery_events,
                 output_queue_dropped_frames,
-                input_fps: runtime.input_fps,
+                output_pre_encode_skipped_frames: role_output_pressure
+                    .aggregate
+                    .output_pre_encode_skipped_frames,
+                video_toolbox_pending_encode_frames: role_output_pressure
+                    .aggregate
+                    .video_toolbox_pending_encode_frames,
+                video_toolbox_pending_fifo_frames: role_output_pressure
+                    .aggregate
+                    .video_toolbox_pending_fifo_frames,
+                encoded_access_unit_dropped_frames: role_output_pressure
+                    .aggregate
+                    .encoded_access_unit_dropped_frames,
+                recording_output_pressure: role_output_pressure.recording,
+                stream_output_pressure: role_output_pressure.stream,
+                recording_role_diagnostics: role_diagnostics.recording,
+                stream_role_diagnostics: role_diagnostics.stream,
+                input_fps: recording_artifact_diagnostics.input_fps,
                 dropped_frames: role_process_diagnostics.dropped_frames,
                 encoder_speed: role_process_diagnostics.encoder_speed,
                 recording_dropped_frames: role_process_diagnostics.recording_dropped_frames,
                 stream_dropped_frames: role_process_diagnostics.stream_dropped_frames,
                 recording_encoder_speed: role_process_diagnostics.recording_encoder_speed,
                 stream_encoder_speed: role_process_diagnostics.stream_encoder_speed,
-                repeated_fed_frames: runtime.repeated_fed_frames,
-                repeated_frame_bursts: runtime.repeated_frame_bursts,
-                max_repeated_frame_run: runtime.max_repeated_frame_run,
-                synthetic_fallback_frames: runtime.synthetic_fallback_frames,
-                source_to_encode_age_ms: runtime.source_to_encode_age_ms,
-                source_to_encode_age_p95_ms: runtime.source_to_encode_age_p95_ms,
-                repeated_frame_age_p95_ms: runtime.repeated_frame_age_p95_ms,
-                repeated_frame_age_max_ms: runtime.repeated_frame_age_max_ms,
-                metal_target_frames: runtime.metal_target_frames,
+                repeated_fed_frames: recording_artifact_diagnostics.repeated_fed_frames,
+                repeated_frame_bursts: recording_artifact_diagnostics.repeated_frame_bursts,
+                max_repeated_frame_run: recording_artifact_diagnostics.max_repeated_frame_run,
+                synthetic_fallback_frames: recording_artifact_diagnostics.synthetic_fallback_frames,
+                source_to_encode_age_ms: recording_artifact_diagnostics.source_to_encode_age_ms,
+                source_to_encode_age_p95_ms: recording_artifact_diagnostics
+                    .source_to_encode_age_p95_ms,
+                repeated_frame_age_p95_ms: recording_artifact_diagnostics.repeated_frame_age_p95_ms,
+                repeated_frame_age_max_ms: recording_artifact_diagnostics.repeated_frame_age_max_ms,
+                metal_target_frames: role_diagnostics.aggregate.metal_target_frames,
                 raw_video_copied_frames: role_process_diagnostics.raw_video_copied_frames,
                 recording_raw_video_copied_frames: role_process_diagnostics
                     .recording_raw_video_copied_frames,
                 stream_raw_video_copied_frames: role_process_diagnostics
                     .stream_raw_video_copied_frames,
-                metal_target_copied_frames: runtime.metal_target_copied_frames,
-                metal_target_handle_frames: runtime.metal_target_handle_frames,
-                zero_copy_frames: runtime.zero_copy_frames,
-                video_toolbox_probe_frames: runtime.video_toolbox_probe_frames,
-                video_toolbox_probe_bytes: runtime.video_toolbox_probe_bytes,
-                video_toolbox_probe_errors: runtime.video_toolbox_probe_errors,
+                metal_target_copied_frames: role_diagnostics.aggregate.metal_target_copied_frames,
+                metal_target_handle_frames: role_diagnostics.aggregate.metal_target_handle_frames,
+                zero_copy_frames: role_diagnostics.aggregate.zero_copy_frames,
+                video_toolbox_probe_frames: role_diagnostics.aggregate.video_toolbox_probe_frames,
+                video_toolbox_probe_bytes: role_diagnostics.aggregate.video_toolbox_probe_bytes,
+                video_toolbox_probe_errors: role_diagnostics.aggregate.video_toolbox_probe_errors,
                 video_toolbox_output_frames,
                 video_toolbox_output_bytes,
-                video_toolbox_output_encode_ms: runtime.video_toolbox_output_encode_ms,
+                video_toolbox_output_encode_ms: role_diagnostics
+                    .aggregate
+                    .video_toolbox_output_encode_ms,
                 recording_output_width: recording_output.map(|output| output.width),
                 recording_output_height: recording_output.map(|output| output.height),
                 recording_output_fps: recording_output.map(|output| output.fps),
@@ -6544,19 +7267,25 @@ async fn emit_encoder_bridge_diagnostics(
                 stream_video_toolbox_output_bytes: stream_output_bytes,
                 separate_output_encoders_active: diagnostics_context
                     .separate_output_encoders_active,
-                compositor_wait_p95_ms: runtime.compositor_wait_p95_ms,
-                video_toolbox_submit_p95_ms: runtime.video_toolbox_submit_p95_ms,
-                raw_video_fifo_write_p95_ms: runtime.raw_video_fifo_write_p95_ms,
-                video_toolbox_fifo_write_p95_ms: runtime.video_toolbox_fifo_write_p95_ms,
-                video_toolbox_fifo_enqueue_p95_ms,
-                video_toolbox_fifo_enqueue_max_ms,
-                writer_loop_p95_ms,
-                writer_sleep_p95_ms: runtime.writer_sleep_p95_ms,
-                writer_active_p95_ms,
-                deadline_lag_p95_ms: runtime.deadline_lag_p95_ms,
-                deadline_lag_max_ms: runtime.deadline_lag_max_ms,
-                late_deadline_ticks: runtime.late_deadline_ticks,
-                schedule_skipped_ms: runtime.schedule_skipped_ms,
+                compositor_wait_p95_ms: role_diagnostics.aggregate.compositor_wait_p95_ms,
+                video_toolbox_submit_p95_ms: role_diagnostics.aggregate.video_toolbox_submit_p95_ms,
+                raw_video_fifo_write_p95_ms: role_diagnostics.aggregate.raw_video_fifo_write_p95_ms,
+                video_toolbox_fifo_write_p95_ms: role_diagnostics
+                    .aggregate
+                    .video_toolbox_fifo_write_p95_ms,
+                video_toolbox_fifo_enqueue_p95_ms: role_diagnostics
+                    .aggregate
+                    .video_toolbox_fifo_enqueue_p95_ms,
+                video_toolbox_fifo_enqueue_max_ms: role_diagnostics
+                    .aggregate
+                    .video_toolbox_fifo_enqueue_max_ms,
+                writer_loop_p95_ms: role_diagnostics.aggregate.writer_loop_p95_ms,
+                writer_sleep_p95_ms: role_diagnostics.aggregate.writer_sleep_p95_ms,
+                writer_active_p95_ms: role_diagnostics.aggregate.writer_active_p95_ms,
+                deadline_lag_p95_ms: role_diagnostics.aggregate.deadline_lag_p95_ms,
+                deadline_lag_max_ms: role_diagnostics.aggregate.deadline_lag_max_ms,
+                late_deadline_ticks: role_diagnostics.aggregate.late_deadline_ticks,
+                schedule_skipped_ms: role_diagnostics.aggregate.schedule_skipped_ms,
                 recording_input_fps,
                 stream_input_fps,
                 recording_queue_depth,
@@ -6577,7 +7306,7 @@ async fn emit_encoder_bridge_diagnostics(
                 stream_video_toolbox_fifo_enqueue_max_ms,
                 error,
             },
-            target_fps,
+            recording_diagnostics_target_fps,
         );
         *diagnostics = next.clone();
         next
@@ -6630,6 +7359,29 @@ fn frame_count(duration_ms: u64, fps: u32) -> u64 {
 mod tests {
     use super::*;
     use crate::diagnostics::idle_diagnostics;
+
+    fn store_recording_artifact_diagnostics(
+        stats: &mut DiagnosticStats,
+        recording: EncoderBridgeRecordingArtifactDiagnostics,
+    ) {
+        stats.encoder_bridge_input_fps = recording.input_fps;
+        stats.encoder_bridge_repeated_frames = recording.repeated_fed_frames;
+        stats.encoder_bridge_repeated_frame_bursts = recording.repeated_frame_bursts;
+        stats.encoder_bridge_max_repeated_frame_run = recording.max_repeated_frame_run;
+        stats.encoder_bridge_synthetic_frames = recording.synthetic_fallback_frames;
+        stats.encoder_bridge_source_age_ms = recording.source_to_encode_age_ms;
+        stats.encoder_bridge_source_age_p95_ms = recording.source_to_encode_age_p95_ms;
+        stats.encoder_bridge_repeated_frame_age_p95_ms = recording.repeated_frame_age_p95_ms;
+        stats.encoder_bridge_repeated_frame_age_max_ms = recording.repeated_frame_age_max_ms;
+    }
+
+    fn store_role_diagnostics(
+        stats: &mut DiagnosticStats,
+        diagnostics: EncoderBridgeMergedRoleDiagnostics,
+    ) {
+        stats.encoder_bridge_recording_role_diagnostics = diagnostics.recording;
+        stats.encoder_bridge_stream_role_diagnostics = diagnostics.stream;
+    }
 
     fn test_lifecycle_publisher(
         capacity: usize,
@@ -7429,7 +8181,7 @@ mod tests {
     }
 
     #[test]
-    fn recording_over_budget_submits_under_pressure_then_fails_when_sustained() {
+    fn recording_pressure_pauses_while_progressing_and_fails_only_after_no_progress() {
         for role in [
             EncoderBridgeOutputRole::Recording,
             EncoderBridgeOutputRole::Shared,
@@ -7438,38 +8190,33 @@ mod tests {
                 role,
                 ..EncoderBridgeDiagnosticsContext::default()
             });
-            let since = Instant::now();
-            // Recording outputs never drop, but a single over-age sample is no
-            // longer a death sentence (2026-07-16 owner incident: 4K session
-            // killed 2s in at "oldest 251/250ms" during encoder warmup): they
-            // submit under pressure and fail only when sustained.
             assert_eq!(
-                encoder_bridge_over_budget_escalation(policy, 6, since, since),
-                EncoderBridgeOverBudgetEscalation::SubmitUnderPressure
-            );
-            assert_eq!(
-                encoder_bridge_over_budget_escalation(
+                encoder_bridge_progress_aware_pre_encode_admission(
                     policy,
                     6,
-                    since,
-                    since + STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW - Duration::from_millis(1),
+                    Some(Duration::from_millis(528)),
+                    Duration::from_millis(20),
                 ),
-                EncoderBridgeOverBudgetEscalation::SubmitUnderPressure
+                EncoderBridgePreEncodeAdmission::Submit,
+                "recording age is diagnostic while bounded depth remains"
             );
-            // Continuously over budget for the whole window → real failure.
             assert_eq!(
-                encoder_bridge_over_budget_escalation(
+                encoder_bridge_progress_aware_pre_encode_admission(
                     policy,
-                    6,
-                    since,
-                    since + STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW,
+                    16,
+                    Some(Duration::from_millis(528)),
+                    RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT - Duration::from_millis(1),
                 ),
-                EncoderBridgeOverBudgetEscalation::Fail
+                EncoderBridgePreEncodeAdmission::PauseRecordingFrame
             );
-            // A queue at its frame ceiling is a stalled consumer — immediate.
             assert_eq!(
-                encoder_bridge_over_budget_escalation(policy, 16, since, since),
-                EncoderBridgeOverBudgetEscalation::Fail
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    16,
+                    Some(Duration::from_millis(528)),
+                    RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
+                ),
+                EncoderBridgePreEncodeAdmission::FailOutput
             );
         }
     }
@@ -7504,6 +8251,31 @@ mod tests {
     }
 
     #[test]
+    fn progressing_recording_pressure_at_the_incident_ceiling_does_not_stop_output() {
+        let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            recording_output: Some(EncoderBridgeOutputProfile {
+                width: 3840,
+                height: 2160,
+                fps: 30,
+                bitrate_kbps: 8_000,
+            }),
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+
+        assert_eq!(
+            encoder_bridge_progress_aware_pre_encode_admission(
+                policy,
+                16,
+                Some(Duration::from_millis(528)),
+                Duration::from_millis(12),
+            ),
+            EncoderBridgePreEncodeAdmission::PauseRecordingFrame,
+            "the reproduced 4K30 depth 16/16, oldest 528ms sample was still making downstream progress and must pause before encode instead of stopping the recording",
+        );
+    }
+
+    #[test]
     fn hard_pressure_error_names_the_role_budget_and_integrity_choice() {
         let recording_policy =
             encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
@@ -7514,12 +8286,14 @@ mod tests {
             recording_policy,
             16,
             Some(Duration::from_millis(251)),
+            RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
         )
         .to_string();
         assert!(recording_error.contains("recording encoder output"));
         assert!(recording_error.contains("depth 16/16"));
         assert!(recording_error.contains("oldest 251/250ms"));
-        assert!(recording_error.contains("recording frames were preserved"));
+        assert!(recording_error.contains("no progress for 2000ms"));
+        assert!(recording_error.contains("all queued encoded access units were preserved"));
 
         let stream_policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
             role: EncoderBridgeOutputRole::Stream,
@@ -7529,6 +8303,7 @@ mod tests {
             stream_policy,
             8,
             Some(Duration::from_millis(151)),
+            Duration::from_millis(20),
         )
         .to_string();
         assert!(stream_error.contains("stream encoder output"));
@@ -7554,6 +8329,25 @@ mod tests {
             encoder_bridge_pre_encode_admission(policy, 4, None),
             EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame
         );
+    }
+
+    #[test]
+    fn record_only_shared_diagnostics_use_recording_role_and_label() {
+        let context = EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Shared,
+            recording_output: Some(EncoderBridgeOutputProfile {
+                width: 3840,
+                height: 2160,
+                fps: 30,
+                bitrate_kbps: 8_000,
+            }),
+            stream_output: None,
+            ..EncoderBridgeDiagnosticsContext::default()
+        };
+
+        let policy = encoder_bridge_output_queue_policy(context);
+        assert_eq!(policy.role, EncoderBridgeOutputRole::Recording);
+        assert_eq!(encoder_bridge_output_role_label(policy.role), "recording");
     }
 
     #[test]
@@ -7599,6 +8393,449 @@ mod tests {
         assert_eq!(merged.recording_encoder_speed, Some(0.82));
         assert_eq!(merged.stream_encoder_speed, Some(1.03));
         assert_eq!(merged.encoder_speed, Some(0.82));
+    }
+
+    #[test]
+    fn split_output_diagnostics_are_order_independent_and_reset_between_sessions() {
+        let recording_context = EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            recording_output: Some(EncoderBridgeOutputProfile {
+                width: 3840,
+                height: 2160,
+                fps: 30,
+                bitrate_kbps: 30_000,
+            }),
+            stream_output: Some(EncoderBridgeOutputProfile {
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                bitrate_kbps: 6_000,
+            }),
+            separate_output_encoders_active: true,
+            ..EncoderBridgeDiagnosticsContext::default()
+        };
+        let stream_context = EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Stream,
+            ..recording_context
+        };
+        let recording_runtime = EncoderBridgeRuntimeStats {
+            input_fps: Some(29.7),
+            repeated_fed_frames: 737,
+            repeated_frame_bursts: 11,
+            max_repeated_frame_run: 303,
+            synthetic_fallback_frames: 2,
+            source_to_encode_age_ms: Some(211),
+            source_to_encode_age_p95_ms: Some(48.0),
+            repeated_frame_age_p95_ms: Some(132.0),
+            repeated_frame_age_max_ms: Some(211),
+            metal_target_frames: 1_001,
+            metal_target_copied_frames: 3,
+            metal_target_handle_frames: 1_001,
+            zero_copy_frames: 998,
+            video_toolbox_probe_frames: 7,
+            video_toolbox_probe_bytes: 8_192,
+            video_toolbox_probe_errors: 1,
+            video_toolbox_output_encode_ms: Some(44),
+            compositor_wait_p95_ms: Some(4.5),
+            video_toolbox_submit_p95_ms: Some(2.5),
+            raw_video_fifo_write_p95_ms: Some(11.0),
+            video_toolbox_fifo_write_p95_ms: Some(3.0),
+            video_toolbox_fifo_enqueue_p95_ms: Some(7.0),
+            video_toolbox_fifo_enqueue_max_ms: Some(14.0),
+            writer_loop_p95_ms: Some(12.0),
+            writer_sleep_p95_ms: Some(8.0),
+            writer_active_p95_ms: Some(4.0),
+            deadline_lag_p95_ms: Some(4.0),
+            deadline_lag_max_ms: Some(9.0),
+            late_deadline_ticks: 7,
+            schedule_skipped_ms: 33,
+            ..Default::default()
+        };
+        let stream_runtime = EncoderBridgeRuntimeStats {
+            input_fps: Some(8.88),
+            repeated_fed_frames: 0,
+            repeated_frame_bursts: 0,
+            max_repeated_frame_run: 0,
+            synthetic_fallback_frames: 91,
+            source_to_encode_age_ms: Some(900),
+            source_to_encode_age_p95_ms: Some(800.0),
+            repeated_frame_age_p95_ms: Some(700.0),
+            repeated_frame_age_max_ms: Some(900),
+            metal_target_frames: 88,
+            metal_target_copied_frames: 77,
+            metal_target_handle_frames: 66,
+            zero_copy_frames: 55,
+            video_toolbox_probe_frames: 44,
+            video_toolbox_probe_bytes: 33,
+            video_toolbox_probe_errors: 22,
+            video_toolbox_output_encode_ms: Some(999),
+            compositor_wait_p95_ms: Some(662.0),
+            video_toolbox_submit_p95_ms: Some(661.0),
+            raw_video_fifo_write_p95_ms: Some(660.0),
+            video_toolbox_fifo_write_p95_ms: Some(659.0),
+            video_toolbox_fifo_enqueue_p95_ms: Some(658.0),
+            video_toolbox_fifo_enqueue_max_ms: Some(657.0),
+            writer_loop_p95_ms: Some(656.0),
+            writer_sleep_p95_ms: Some(655.0),
+            writer_active_p95_ms: Some(654.0),
+            deadline_lag_p95_ms: Some(653.0),
+            deadline_lag_max_ms: Some(652.0),
+            late_deadline_ticks: 651,
+            schedule_skipped_ms: 650,
+            ..Default::default()
+        };
+        let expected_artifact =
+            EncoderBridgeRecordingArtifactDiagnostics::from_runtime(recording_runtime);
+        let recording_role = runtime_role_diagnostics(recording_runtime);
+        let stream_role = runtime_role_diagnostics(stream_runtime);
+        let expected_role_diagnostics = EncoderBridgeMergedRoleDiagnostics {
+            recording: recording_role,
+            stream: stream_role,
+            aggregate: aggregate_role_diagnostics(recording_role, stream_role),
+        };
+        let recording_error = Some("recording encoder failed".to_string());
+        let stream_error = Some("stream encoder failed".to_string());
+
+        let mut stream_then_recording_stats = idle_diagnostics();
+        let stream_first_artifact = merge_encoder_bridge_recording_artifact_diagnostics(
+            &stream_then_recording_stats,
+            stream_runtime,
+            stream_context,
+        );
+        assert_eq!(
+            stream_first_artifact,
+            EncoderBridgeRecordingArtifactDiagnostics::from_stats(&stream_then_recording_stats),
+            "a stream report cannot claim recording-owned artifact diagnostics"
+        );
+        let stream_first_role_diagnostics = merge_encoder_bridge_role_diagnostics(
+            &stream_then_recording_stats,
+            stream_runtime,
+            stream_context,
+        );
+        let stream_first_error = merge_encoder_bridge_recording_error(
+            &stream_then_recording_stats,
+            stream_error.clone(),
+            stream_context,
+        );
+        assert_eq!(stream_first_error, None);
+        store_recording_artifact_diagnostics(
+            &mut stream_then_recording_stats,
+            stream_first_artifact,
+        );
+        store_role_diagnostics(
+            &mut stream_then_recording_stats,
+            stream_first_role_diagnostics,
+        );
+        stream_then_recording_stats.encoder_bridge_error = stream_first_error;
+        let retained_stream_high_water = merge_encoder_bridge_role_diagnostics(
+            &stream_then_recording_stats,
+            EncoderBridgeRuntimeStats {
+                metal_target_frames: 1,
+                compositor_wait_p95_ms: Some(1.0),
+                late_deadline_ticks: 1,
+                ..Default::default()
+            },
+            stream_context,
+        );
+        assert_eq!(retained_stream_high_water.stream, stream_role);
+
+        let stream_then_recording_artifact = merge_encoder_bridge_recording_artifact_diagnostics(
+            &stream_then_recording_stats,
+            recording_runtime,
+            recording_context,
+        );
+        let stream_then_recording_role_diagnostics = merge_encoder_bridge_role_diagnostics(
+            &stream_then_recording_stats,
+            recording_runtime,
+            recording_context,
+        );
+        let stream_then_recording_error = merge_encoder_bridge_recording_error(
+            &stream_then_recording_stats,
+            recording_error.clone(),
+            recording_context,
+        );
+
+        let mut recording_then_stream_stats = idle_diagnostics();
+        let recording_first_artifact = merge_encoder_bridge_recording_artifact_diagnostics(
+            &recording_then_stream_stats,
+            recording_runtime,
+            recording_context,
+        );
+        let recording_first_role_diagnostics = merge_encoder_bridge_role_diagnostics(
+            &recording_then_stream_stats,
+            recording_runtime,
+            recording_context,
+        );
+        let recording_first_error = merge_encoder_bridge_recording_error(
+            &recording_then_stream_stats,
+            recording_error,
+            recording_context,
+        );
+        store_recording_artifact_diagnostics(
+            &mut recording_then_stream_stats,
+            recording_first_artifact,
+        );
+        store_role_diagnostics(
+            &mut recording_then_stream_stats,
+            recording_first_role_diagnostics,
+        );
+        recording_then_stream_stats.encoder_bridge_error = recording_first_error;
+        assert_eq!(
+            merge_encoder_bridge_recording_error(
+                &recording_then_stream_stats,
+                None,
+                recording_context,
+            ),
+            recording_then_stream_stats.encoder_bridge_error,
+            "a later healthy sample cannot erase a recorded recording-leg error"
+        );
+        let recording_then_stream_artifact = merge_encoder_bridge_recording_artifact_diagnostics(
+            &recording_then_stream_stats,
+            stream_runtime,
+            stream_context,
+        );
+        let recording_then_stream_role_diagnostics = merge_encoder_bridge_role_diagnostics(
+            &recording_then_stream_stats,
+            stream_runtime,
+            stream_context,
+        );
+        let recording_then_stream_error = merge_encoder_bridge_recording_error(
+            &recording_then_stream_stats,
+            stream_error,
+            stream_context,
+        );
+
+        assert_eq!(stream_then_recording_artifact, expected_artifact);
+        assert_eq!(recording_then_stream_artifact, expected_artifact);
+        assert_eq!(
+            stream_then_recording_artifact,
+            recording_then_stream_artifact
+        );
+        assert_eq!(
+            stream_then_recording_role_diagnostics,
+            expected_role_diagnostics
+        );
+        assert_eq!(
+            recording_then_stream_role_diagnostics,
+            expected_role_diagnostics
+        );
+        assert_eq!(
+            stream_then_recording_error.as_deref(),
+            Some("recording encoder failed")
+        );
+        assert_eq!(recording_then_stream_error, stream_then_recording_error);
+        assert_eq!(
+            expected_role_diagnostics.aggregate.metal_target_frames,
+            1_089
+        );
+        assert_eq!(
+            expected_role_diagnostics
+                .aggregate
+                .video_toolbox_probe_errors,
+            23
+        );
+        assert_eq!(
+            expected_role_diagnostics
+                .aggregate
+                .video_toolbox_output_encode_ms,
+            Some(999)
+        );
+        assert_eq!(
+            expected_role_diagnostics.aggregate.compositor_wait_p95_ms,
+            Some(662.0)
+        );
+        assert_eq!(expected_role_diagnostics.aggregate.late_deadline_ticks, 658);
+        assert_eq!(expected_role_diagnostics.aggregate.schedule_skipped_ms, 683);
+        assert_eq!(
+            encoder_bridge_recording_diagnostics_target_fps(60, recording_context),
+            30
+        );
+        assert_eq!(
+            encoder_bridge_recording_diagnostics_target_fps(60, stream_context),
+            30,
+            "stream-first diagnostics must classify recording cadence against the recording profile"
+        );
+        assert_eq!(
+            merge_encoder_bridge_recording_artifact_diagnostics(
+                &idle_diagnostics(),
+                stream_runtime,
+                EncoderBridgeDiagnosticsContext::default(),
+            ),
+            EncoderBridgeRecordingArtifactDiagnostics::from_runtime(stream_runtime),
+            "a non-split bridge remains the owner of generic diagnostics"
+        );
+        assert_eq!(
+            merge_encoder_bridge_role_diagnostics(
+                &idle_diagnostics(),
+                stream_runtime,
+                EncoderBridgeDiagnosticsContext::default(),
+            )
+            .aggregate,
+            stream_role
+        );
+        assert_eq!(
+            merge_encoder_bridge_recording_error(
+                &idle_diagnostics(),
+                Some("shared encoder failed".to_string()),
+                EncoderBridgeDiagnosticsContext::default(),
+            )
+            .as_deref(),
+            Some("shared encoder failed")
+        );
+        assert_eq!(
+            encoder_bridge_recording_diagnostics_target_fps(
+                60,
+                EncoderBridgeDiagnosticsContext::default(),
+            ),
+            60
+        );
+
+        store_recording_artifact_diagnostics(
+            &mut recording_then_stream_stats,
+            recording_then_stream_artifact,
+        );
+        store_role_diagnostics(
+            &mut recording_then_stream_stats,
+            recording_then_stream_role_diagnostics,
+        );
+        recording_then_stream_stats.encoder_bridge_error = recording_then_stream_error;
+        let next_session = starting_diagnostics("next-session", 30, "encoder-bridge");
+        assert_eq!(
+            next_session.encoder_bridge_recording_role_diagnostics,
+            EncoderBridgeRoleDiagnosticStats::default()
+        );
+        assert_eq!(
+            next_session.encoder_bridge_stream_role_diagnostics,
+            EncoderBridgeRoleDiagnosticStats::default()
+        );
+        assert_eq!(next_session.encoder_bridge_repeated_frames, 0);
+        assert_eq!(next_session.encoder_bridge_error, None);
+        assert_eq!(
+            merge_encoder_bridge_recording_artifact_diagnostics(
+                &next_session,
+                stream_runtime,
+                stream_context,
+            ),
+            EncoderBridgeRecordingArtifactDiagnostics::default()
+        );
+        let next_session_stream =
+            merge_encoder_bridge_role_diagnostics(&next_session, stream_runtime, stream_context);
+        assert_eq!(next_session_stream.recording, Default::default());
+        assert_eq!(next_session_stream.stream, stream_role);
+        assert_eq!(next_session_stream.aggregate, stream_role);
+        assert_eq!(
+            merge_encoder_bridge_recording_error(
+                &next_session,
+                Some("new stream error".to_string()),
+                stream_context,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn split_output_pressure_diagnostics_preserve_recording_incident_when_stream_reports_last() {
+        let recording_context = EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            recording_output: Some(EncoderBridgeOutputProfile {
+                width: 3840,
+                height: 2160,
+                fps: 30,
+                bitrate_kbps: 30_000,
+            }),
+            stream_output: Some(EncoderBridgeOutputProfile {
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate_kbps: 6_000,
+            }),
+            separate_output_encoders_active: true,
+            ..EncoderBridgeDiagnosticsContext::default()
+        };
+        let recording = merge_encoder_bridge_role_output_pressure(
+            &idle_diagnostics(),
+            EncoderBridgeRuntimeStats {
+                output_queue_high_water_frames: 16,
+                output_queue_oldest_frame_age_high_water_ms: Some(528),
+                output_last_progress_age_ms: Some(42),
+                output_pressure_recovery_events: 1,
+                output_pre_encode_skipped_frames: 3,
+                video_toolbox_pending_encode_frames: 10,
+                video_toolbox_pending_fifo_frames: 6,
+                encoded_access_unit_dropped_frames: 0,
+                ..Default::default()
+            },
+            recording_context,
+        );
+        let mut base = idle_diagnostics();
+        base.encoder_bridge_recording_output_pressure = recording.recording;
+        base.encoder_bridge_stream_output_pressure = recording.stream;
+
+        let stream = merge_encoder_bridge_role_output_pressure(
+            &base,
+            EncoderBridgeRuntimeStats {
+                output_queue_high_water_frames: 2,
+                output_queue_oldest_frame_age_high_water_ms: Some(35),
+                output_last_progress_age_ms: Some(7),
+                output_pressure_recovery_events: 2,
+                output_pre_encode_skipped_frames: 0,
+                video_toolbox_pending_encode_frames: 1,
+                video_toolbox_pending_fifo_frames: 1,
+                encoded_access_unit_dropped_frames: 0,
+                ..Default::default()
+            },
+            EncoderBridgeDiagnosticsContext {
+                role: EncoderBridgeOutputRole::Stream,
+                ..recording_context
+            },
+        );
+
+        assert_eq!(stream.recording, recording.recording);
+        assert_eq!(stream.stream.output_queue_high_water_frames, 2);
+        assert_eq!(stream.aggregate.output_queue_high_water_frames, 16);
+        assert_eq!(
+            stream.aggregate.output_queue_oldest_frame_age_high_water_ms,
+            Some(528)
+        );
+        assert_eq!(stream.aggregate.output_last_progress_age_ms, Some(42));
+        assert_eq!(stream.aggregate.output_pressure_recovery_events, 3);
+        assert_eq!(stream.aggregate.output_pre_encode_skipped_frames, 3);
+        assert_eq!(stream.aggregate.video_toolbox_pending_encode_frames, 11);
+        assert_eq!(stream.aggregate.video_toolbox_pending_fifo_frames, 7);
+        assert_eq!(stream.aggregate.encoded_access_unit_dropped_frames, 0);
+    }
+
+    #[test]
+    fn stopped_split_output_clears_current_depth_but_retains_incident_evidence() {
+        let inactive = mark_encoder_bridge_output_inactive(EncoderBridgeRuntimeStats {
+            queue_depth: 16,
+            output_queue_high_water_frames: 16,
+            output_queue_oldest_frame_age_ms: Some(528),
+            output_queue_oldest_frame_age_high_water_ms: Some(528),
+            output_last_progress_age_ms: Some(2_000),
+            output_queue_capacity_pressure_events: 9,
+            output_pressure_recovery_events: 1,
+            output_pre_encode_skipped_frames: 4,
+            video_toolbox_pending_encode_frames: 10,
+            video_toolbox_pending_fifo_frames: 6,
+            encoded_access_unit_dropped_frames: 0,
+            ..Default::default()
+        });
+
+        assert_eq!(inactive.queue_depth, 0);
+        assert_eq!(inactive.output_queue_oldest_frame_age_ms, None);
+        assert_eq!(inactive.output_last_progress_age_ms, None);
+        assert_eq!(inactive.video_toolbox_pending_encode_frames, 0);
+        assert_eq!(inactive.video_toolbox_pending_fifo_frames, 0);
+        assert_eq!(inactive.output_queue_high_water_frames, 16);
+        assert_eq!(
+            inactive.output_queue_oldest_frame_age_high_water_ms,
+            Some(528)
+        );
+        assert_eq!(inactive.output_queue_capacity_pressure_events, 9);
+        assert_eq!(inactive.output_pressure_recovery_events, 1);
+        assert_eq!(inactive.output_pre_encode_skipped_frames, 4);
+        assert_eq!(inactive.encoded_access_unit_dropped_frames, 0);
     }
 
     #[test]
@@ -7651,6 +8888,103 @@ mod tests {
         };
         assert_eq!(preserved, 2);
         assert_eq!(frame_rx.recv().expect("drain oldest frame"), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn full_videotoolbox_fifo_retries_completed_access_unit_without_dropping_it() {
+        let frame = |value| VideoToolboxH264AnnexBFrame {
+            timing: VideoToolboxFrameTiming::new(value, 30, 1, 30),
+            bytes: vec![value as u8; 4],
+            nal_types: vec![5],
+            is_idr: true,
+        };
+        let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
+        frame_tx
+            .send(QueuedVideoToolboxFrame { frame: frame(1) })
+            .expect("fill bounded FIFO");
+        let (_result_tx, result_rx) = std_mpsc::channel();
+        let mut fifo_writer = VideoToolboxFifoWriter {
+            frame_tx: Some(frame_tx),
+            result_rx,
+            join: None,
+            lifecycle: None,
+        };
+        let mut video_toolbox =
+            EncoderBridgeVideoToolboxProbe::new(false, 3_840, 2_160, 30, Some(8_000), false);
+        video_toolbox
+            .output_tx
+            .send(VideoToolboxH264AsyncAnnexBFrame {
+                frame_index: 2,
+                result: Ok(frame(2)),
+            })
+            .expect("queue completed callback AU");
+
+        let submitted_at = Instant::now();
+        let mut pending_output_frames = 1;
+        let mut pending_fifo_frames = 1;
+        let mut pending_output_started_at = HashMap::from([(2, submitted_at)]);
+        let mut pending_fifo_started_at = VecDeque::from([submitted_at]);
+        let mut retained_completed_frame = None;
+        let mut pressure_events = 0;
+        let mut probe_errors = 0;
+        let mut enqueue_times_ms = Vec::new();
+        let mut max_enqueue_ms = None;
+
+        let first_progress = drain_video_toolbox_output_frames(
+            &mut video_toolbox,
+            &mut fifo_writer,
+            &mut pending_output_frames,
+            &mut pending_fifo_frames,
+            &mut pending_output_started_at,
+            &mut pending_fifo_started_at,
+            &mut retained_completed_frame,
+            &mut pressure_events,
+            &mut probe_errors,
+            &mut enqueue_times_ms,
+            &mut max_enqueue_ms,
+            None,
+        )
+        .expect("full FIFO is pressure, not loss");
+
+        assert_eq!(first_progress.callback_completions, 1);
+        assert!(retained_completed_frame.is_some());
+        assert_eq!(pending_output_frames, 1);
+        assert_eq!(pending_fifo_frames, 1);
+        assert!(pending_output_started_at.contains_key(&2));
+        assert_eq!(pressure_events, 1);
+        assert_eq!(probe_errors, 0);
+        let first = frame_rx.recv().expect("drain first AU");
+        assert_eq!(first.frame.bytes, vec![1; 4]);
+
+        let retry_progress = drain_video_toolbox_output_frames(
+            &mut video_toolbox,
+            &mut fifo_writer,
+            &mut pending_output_frames,
+            &mut pending_fifo_frames,
+            &mut pending_output_started_at,
+            &mut pending_fifo_started_at,
+            &mut retained_completed_frame,
+            &mut pressure_events,
+            &mut probe_errors,
+            &mut enqueue_times_ms,
+            &mut max_enqueue_ms,
+            None,
+        )
+        .expect("retained AU retries after drain");
+
+        assert_eq!(
+            retry_progress.callback_completions, 0,
+            "retrying a retained AU must not double-count encoder progress",
+        );
+        assert!(retained_completed_frame.is_none());
+        assert_eq!(pending_output_frames, 0);
+        assert_eq!(pending_fifo_frames, 2);
+        assert!(!pending_output_started_at.contains_key(&2));
+        assert_eq!(pressure_events, 1);
+        assert_eq!(probe_errors, 0);
+        let second = frame_rx.recv().expect("receive preserved second AU");
+        assert_eq!(second.frame.bytes, vec![2; 4]);
     }
 
     #[test]
@@ -8079,24 +9413,6 @@ mod tests {
             read_encoder_bridge_terminal_failure(&terminal_failure).as_deref(),
             Some(message.as_str())
         );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn callback_queue_rejection_is_counted_and_fails_output_explicitly() {
-        let mut capacity_pressure_events = 3;
-        let mut encoder_errors = 5;
-
-        let error = fail_on_rejected_video_toolbox_output_frames(
-            2,
-            &mut capacity_pressure_events,
-            &mut encoder_errors,
-        )
-        .expect_err("an encoded-frame rejection must stop the affected output");
-
-        assert_eq!(capacity_pressure_events, 5);
-        assert_eq!(encoder_errors, 7);
-        assert!(error.to_string().contains("cannot be dropped safely"));
     }
 
     // Plan 023 L4: the recording-degraded watch fires exactly once per session

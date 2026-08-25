@@ -1955,10 +1955,17 @@ export interface WebSocketQueueDiagnosticStats {
   evictedOrDroppedCount: number
 }
 
+export interface WebSocketCommandLaneDiagnosticStats {
+  queue: WebSocketQueueDiagnosticStats
+  expiredBeforeDispatchCount: number
+  rejectedBeforeDispatchCount: number
+}
+
 export interface WebSocketTransportDiagnosticStats {
   reliableResponseQueue: WebSocketQueueDiagnosticStats
   incomingCommandQueue: WebSocketQueueDiagnosticStats
   coalescedTelemetryQueue: WebSocketQueueDiagnosticStats
+  commandLanes: Record<string, WebSocketCommandLaneDiagnosticStats>
   slowPressureDisconnectCount: number
 }
 
@@ -1998,12 +2005,27 @@ export interface DiagnosticStats {
   droppedFrames: number
   encoderSpeed?: number
   encoderBridgeQueueDepth: number
+  /** Peak combined pending encoder + FIFO depth retained after recovery. */
+  encoderBridgeOutputQueueHighWaterFrames?: number
   /** Oldest frame waiting for VideoToolbox completion or FIFO output. */
   encoderBridgeOutputQueueOldestFrameAgeMs?: number
+  /** Peak oldest-frame age retained after recovery. */
+  encoderBridgeOutputQueueOldestFrameAgeHighWaterMs?: number
+  /** Milliseconds since the latest encoder completion or complete FIFO AU write. */
+  encoderBridgeOutputLastProgressAgeMs?: number
   /** Enqueue attempts that encountered a full bounded output queue. */
   encoderBridgeOutputQueueCapacityPressureEvents: number
+  /** Pressured intervals that returned to the healthy output budget. */
+  encoderBridgeOutputPressureRecoveryEvents?: number
   /** Frames intentionally discarded by output backpressure policy. */
   encoderBridgeOutputQueueDroppedFrames: number
+  /** Recording compositor ticks skipped before encode while queued AUs drain. */
+  encoderBridgeOutputPreEncodeSkippedFrames?: number
+  /** Current per-stage VideoToolbox output depths. */
+  encoderBridgeVideoToolboxPendingEncodeFrames?: number
+  encoderBridgeVideoToolboxPendingFifoFrames?: number
+  /** Encoded H.264 AUs rejected after encode; healthy/recovered sessions require zero. */
+  encoderBridgeEncodedAccessUnitDroppedFrames?: number
   encoderBridgeInputFps?: number
   encoderBridgeDroppedFrames: number
   /** FFmpeg progress-reported drops attributable to the recording bridge. */
@@ -3269,6 +3291,9 @@ export interface VideorcApi {
   ) => Promise<boolean>
   getBundledBackgroundAssets: () => Promise<BackgroundImportResult[]>
   beginAccountSignIn: (authorizeUrl: string) => Promise<void>
+  /** Best-effort product-account identity refresh owned by Electron Main's
+   * independent admin socket. Never shares the renderer's live-control lane. */
+  refreshAccount: () => Promise<VideorcAccountSnapshot>
   signOutAccount: () => Promise<VideorcAccountSnapshot>
   getPendingAccountCallbacks: () => Promise<AccountCallbackEnvelope[]>
   acknowledgeAccountCallback: (callbackId: string) => Promise<boolean>
