@@ -15,6 +15,8 @@
  * Adding an icon: check whether an existing slot already means what you need.
  * If it does, reuse it. Only add a slot for a genuinely new meaning.
  */
+import type { ComponentType, SVGProps } from 'react'
+
 import {
   ArrowClockwise,
   ArrowCounterClockwise,
@@ -100,16 +102,31 @@ import {
   X,
   XCircle,
   XLogo,
-  YoutubeLogo,
-  type Icon
+  YoutubeLogo
 } from '@phosphor-icons/react'
 
 /**
- * The shape every registry icon satisfies: a component taking `className`,
- * `size` and (today) a Phosphor `weight`. Modules that store an icon in
- * metadata — the workspace nav, row primitives — type the field as `AppIcon`.
+ * The props every registry icon accepts.
+ *
+ * Declared structurally rather than re-exported from the icon package, so the
+ * app's own type is what call sites depend on: swapping icon sets then means
+ * changing this file, not 50 others. `weight` stays in the surface because
+ * ~113 call sites pass it; a single-weight set may accept and ignore it.
  */
-export type AppIcon = Icon
+export type AppIconProps = {
+  size?: number | string
+  weight?: 'thin' | 'light' | 'regular' | 'bold' | 'fill' | 'duotone'
+} & Omit<SVGProps<SVGSVGElement>, 'ref' | 'weight'>
+
+/**
+ * An icon component. Modules that store an icon in metadata — the workspace
+ * nav, row primitives — type the field as `AppIcon`.
+ */
+export type AppIcon = ComponentType<AppIconProps>
+
+// The current set still comes from Phosphor. Each slot is annotated `AppIcon`,
+// so the compiler — not the reviewer — checks that whatever this file points
+// at really does accept the app's prop surface.
 
 /**
  * Navigation — one slot per sidebar destination. These are the icons the
