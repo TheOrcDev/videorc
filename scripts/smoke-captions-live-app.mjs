@@ -20,6 +20,7 @@ import {
 } from './lib/captions-live-artifact.mjs'
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import { evaluateMicrophoneLossContinuity } from './lib/microphone-loss-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 // Maintained viewer-facing live-caption gate. Unlike smoke:captions-contract,
@@ -274,9 +275,32 @@ try {
   }
   const overlaySnapshot = await waitForCaptionOverlay(smoke)
 
-  // Leave the settled line on screen long enough for multiple independently
-  // decoded frames. Its readable dwell is longer than this capture window.
+  // Disconnect the actual synthetic native producer, not the caption bus.
+  // This exercises the same sender EOF and NativeAudioInputState transition as
+  // a physical microphone disappearing mid-recording. FFmpeg must keep video
+  // authoritative and pad the now-finite microphone leg with silence.
+  const disconnectResult = await requestDebugBackend(smoke, 'audio.test.disconnect', {
+    sessionId: started.sessionId
+  })
+  await waitFor(
+    () =>
+      observed.healthEvents.some(
+        (event) => event.sessionId === started.sessionId && event.code === 'microphone-input-lost'
+      ),
+    timeoutMs,
+    'microphone-input-lost health event'
+  )
+  await waitForRendererRuntimeNotice(
+    smoke,
+    'Microphone stopped — recording continues with silence',
+    'persistent microphone-loss warning'
+  )
+
+  // Leave the settled caption on screen and the microphone disconnected long
+  // enough for multiple independently decoded video frames plus a measurable
+  // padded-silence tail.
   await sleep(captionCaptureMs)
+  const statusAfterLoss = await request(backend, timeoutMs, 'recording.status', {})
   const stopRequestedAt = Date.now()
   const stopped = await request(backend, timeoutMs, 'session.stop', {})
   sessionActive = false
@@ -328,12 +352,23 @@ try {
     height: 360,
     minDurationSeconds
   })
-  const [streamArtifact, cleanRecording, captionedArtifact, recordingAudio] = await Promise.all([
-    analyzeCaptionsLiveArtifact(receivedPath, { ffmpegPath }),
-    analyzeCaptionsAbsentArtifact(recordingPath, { ffmpegPath }),
-    analyzeCaptionsLiveArtifact(captionedCopyPath, { ffmpegPath }),
-    analyzeMediaAudioAmplitude(recordingPath, { ffmpegPath })
-  ])
+  const postLossWindowSeconds = Math.min(1, recordingProbe.format.durationSeconds / 4)
+  const postLossWindowStartSeconds = Math.max(
+    0,
+    recordingProbe.format.durationSeconds - postLossWindowSeconds - 0.1
+  )
+  const [streamArtifact, cleanRecording, captionedArtifact, recordingAudio, postLossAudio] =
+    await Promise.all([
+      analyzeCaptionsLiveArtifact(receivedPath, { ffmpegPath }),
+      analyzeCaptionsAbsentArtifact(recordingPath, { ffmpegPath }),
+      analyzeCaptionsLiveArtifact(captionedCopyPath, { ffmpegPath }),
+      analyzeMediaAudioAmplitude(recordingPath, { ffmpegPath }),
+      analyzeMediaAudioAmplitude(recordingPath, {
+        ffmpegPath,
+        startSeconds: postLossWindowStartSeconds,
+        durationSeconds: postLossWindowSeconds
+      })
+    ])
   const srt = readFileSync(srtPath, 'utf8')
   if (!srt.includes(finalText)) {
     throw new Error(`SRT sidecar omitted the settled caption: ${srtPath}`)
@@ -351,6 +386,17 @@ try {
     throw new Error(
       `Original recording did not contain the post-gain native PCM: ${JSON.stringify(recordingAudio)}`
     )
+  }
+  const microphoneLossFailures = evaluateMicrophoneLossContinuity({
+    sessionId: started.sessionId,
+    disconnectResult,
+    healthEvents: observed.healthEvents,
+    statusAfterLoss,
+    stoppedStatus: { ...stopped, outputPath: recordingPath },
+    postLossAudio
+  })
+  if (microphoneLossFailures.length > 0) {
+    throw new Error(`Microphone-loss continuity failed: ${microphoneLossFailures.join('; ')}`)
   }
   const diagnostics = await request(backend, timeoutMs, 'diagnostics.stats', {})
   writeFileSync(
@@ -373,6 +419,7 @@ try {
         observed,
         proof: {
           injections: { mutedInjection, baselineInjection, gainedInjection },
+          microphoneLoss: { disconnectResult, statusAfterLoss, postLossAudio },
           captionWavAmplitude: { muted: mutedAudio, baseline: baselineAudio, gained: gainedAudio },
           gainRatio,
           recordingAudio,
@@ -396,7 +443,8 @@ try {
 
   console.log(
     `Captions live smoke PASS — pre-controls PCM proved mute and +${gainDb}dB ordering, the renderer ` +
-      `published captions to RTMP, the original recording stayed clean, and finalization produced ` +
+      `published captions to RTMP, microphone loss continued with padded silence, the original ` +
+      `recording stayed clean, and finalization produced ` +
       `both SRT and a captioned copy (${streamProbe.video.width}x${streamProbe.video.height}, ` +
       `${streamProbe.format.durationSeconds.toFixed(2)}s stream). ` +
       `Evidence: ${outputDirectory}`
@@ -651,6 +699,28 @@ async function waitForCaptionOverlay(smoke) {
     await sleep(50)
   }
   throw new Error(`Timed out waiting for renderer caption overlay: ${JSON.stringify(latest)}`)
+}
+
+async function waitForRendererRuntimeNotice(smoke, expectedText, label) {
+  const deadline = Date.now() + Math.min(timeoutMs, 30_000)
+  let latest = null
+  while (Date.now() < deadline) {
+    latest = await smokeCommand(smoke, 'eval-js', {
+      code: `
+        const notice = document.querySelector('[data-testid="session-runtime-notice"]')
+        return {
+          present: notice !== null,
+          role: notice?.getAttribute('role') ?? null,
+          text: notice?.textContent?.trim() ?? null,
+          visible: notice?.getAttribute('role') === 'alert' &&
+            notice?.textContent?.includes(${JSON.stringify(expectedText)}) === true
+        }
+      `
+    }).catch(() => null)
+    if (latest?.result?.visible) return
+    await sleep(50)
+  }
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify(latest)}`)
 }
 
 function safeFakeCounters(state) {

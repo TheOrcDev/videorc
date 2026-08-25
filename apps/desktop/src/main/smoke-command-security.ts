@@ -113,6 +113,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
  * from becoming a generic admin proxy.
  */
 export const SMOKE_BACKEND_RPC_METHOD_NAMES = new Set([
+  'audio.test.disconnect',
   'audio.test.inject-pcm',
   'captions.test.inject-audio',
   'captions.test.snapshot',

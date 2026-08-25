@@ -62,6 +62,8 @@ export function StudioTab(): ReactElement {
     resolveGoLiveBlocker,
     sessionStartFailure,
     dismissSessionStartFailure,
+    sessionRuntimeNotice,
+    dismissSessionRuntimeNotice,
     retrySessionStart
   } = studio
 
@@ -173,9 +175,11 @@ export function StudioTab(): ReactElement {
               liveStreamBlockedReason={liveStreamBlockedReason}
               recordBlockedReason={recordBlockedReason}
               startFailure={sessionStartFailure}
+              runtimeNotice={sessionRuntimeNotice}
               startRequestPending={startRequestPending}
               stopLabel={stopLabel}
               onDismissStartFailure={dismissSessionStartFailure}
+              onDismissRuntimeNotice={dismissSessionRuntimeNotice}
               onLiveStream={handleLiveStream}
               onRecord={handleRecord}
               onRetryStart={retrySessionStart}

@@ -28,6 +28,7 @@ import type {
   PreviewSurfaceBounds,
   PreviewSurfaceStatus,
   PreviewWindowState,
+  RecordingStatus,
   Scene,
   SessionLogEntry,
   SessionSummary,
@@ -271,7 +272,9 @@ class StudioBackend {
   currentLayout = defaultCaptureConfig.layout
   currentScene = sceneForLayout(this.currentLayout)
   revision = 1
-  recordingState: 'idle' | 'recording' = 'idle'
+  recordingState: RecordingStatus['state'] = 'idle'
+  recordingSessionId: string | undefined
+  recordingStatusOverride: RecordingStatus | undefined
   accountTransportFailuresRemaining = 0
   accountSignInSuperseded = false
   oauthTransportFailuresRemaining = 1
@@ -462,7 +465,14 @@ class StudioBackend {
         }
         return this.audioMeterResult
       case 'recording.status':
-        return { state: this.recordingState, message: 'Ready.' }
+        if (this.recordingStatusOverride) {
+          return this.recordingStatusOverride
+        }
+        return {
+          state: this.recordingState,
+          ...(this.recordingSessionId ? { sessionId: this.recordingSessionId } : {}),
+          message: 'Ready.'
+        }
       case 'stream.output.topology.probe':
         return {
           capabilityKey: `stream-output-topology-v1:${'0'.repeat(64)}`,
@@ -926,6 +936,837 @@ describe('real StudioProvider lifecycle', () => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
     vi.useRealTimers()
+  })
+
+  it('shows one persistent recovery error when an active recording fails', async () => {
+    const backend = new StudioBackend()
+    backend.recordingState = 'recording'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const revealSession = vi.fn(async () => {})
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      revealSession
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    const libraryNavigations: unknown[] = []
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.recording.recording.state === 'recording'
+    )
+    window.addEventListener('videorc:navigate-workspace', (event) => {
+      libraryNavigations.push((event as CustomEvent).detail)
+    })
+    vi.clearAllMocks()
+
+    const encoderFailure: HealthEvent = {
+      id: 'health-encoder-failure',
+      sessionId: 'session-failed',
+      level: 'error',
+      code: 'encoder-bridge-failed',
+      message: 'The encoder bridge stopped before capture finalization.',
+      permissionPane: null,
+      createdAt: '2026-08-25T09:55:26.585Z'
+    }
+    const failedStatus = {
+      state: 'failed' as const,
+      sessionId: 'session-failed',
+      outputPath: 'C:\\recordings\\session-failed.mkv',
+      message: 'Encoder FIFO write exceeded the complete-frame delivery budget.'
+    }
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'health.event', payload: encoderFailure })
+      })
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'recording.status', payload: failedStatus })
+      })
+      // The backend can repeat both the terminal status and its correlated
+      // health event. They still represent one user-visible failure.
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'health.event', payload: encoderFailure })
+      })
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'recording.status', payload: failedStatus })
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'failed')
+
+    expect(toastSpies.error).toHaveBeenCalledTimes(1)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Recording stopped unexpectedly',
+      expect.objectContaining({
+        id: 'recording-stopped-unexpectedly',
+        description: failedStatus.message,
+        duration: Infinity,
+        action: expect.objectContaining({ label: 'Open Library' }),
+        cancel: expect.objectContaining({ label: 'Show in Finder' })
+      })
+    )
+    expect(toastSpies.success).not.toHaveBeenCalled()
+    expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
+      kind: 'recording-failed',
+      activity: 'recording',
+      sessionId: 'session-failed',
+      outputPath: failedStatus.outputPath,
+      message: failedStatus.message
+    })
+
+    const toastOptions = toastSpies.error.mock.calls[0]?.[1] as {
+      action: { onClick: () => void }
+      cancel: { onClick: () => void }
+    }
+    toastOptions.action.onClick()
+    toastOptions.cancel.onClick()
+    expect(libraryNavigations).toEqual([{ tab: 'library', sessionId: 'session-failed' }])
+    expect(revealSession).toHaveBeenCalledWith('session-failed')
+
+    await act(async () => latest()!.core.dismissSessionRuntimeNotice())
+    expect(latest()?.core.sessionRuntimeNotice).toBeNull()
+    expect(toastSpies.dismiss).toHaveBeenCalledWith('recording-stopped-unexpectedly')
+  })
+
+  it('recovers a recording failure missed during reconnect from durable session history', async () => {
+    const initialBackend = new StudioBackend()
+    initialBackend.recordingState = 'recording'
+    TestWebSocket.backend = initialBackend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let emit: ((name: string, value: unknown) => void) | undefined
+    const revealSession = vi.fn(async () => {})
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      revealSession,
+      registerEmitter: (nextEmit) => {
+        emit = nextEmit
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    const libraryNavigations: unknown[] = []
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.recording.recording.state === 'recording'
+    )
+    await act(async () => {
+      initialBackend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: {
+            state: 'recording',
+            sessionId: 'session-failed-in-gap',
+            startedAt: now,
+            message: 'Recording.'
+          }
+        })
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () => latest()?.recording.recording.sessionId === 'session-failed-in-gap'
+    )
+    window.addEventListener('videorc:navigate-workspace', (event) => {
+      libraryNavigations.push((event as CustomEvent).detail)
+    })
+    vi.clearAllMocks()
+
+    const failureEvent: HealthEvent = {
+      id: 'health-failure-in-gap',
+      sessionId: 'session-failed-in-gap',
+      level: 'error',
+      code: 'encoder-bridge-failed',
+      message: 'Encoder FIFO write exceeded the complete-frame delivery budget.',
+      permissionPane: null,
+      createdAt: '2026-08-25T11:00:00.000Z'
+    }
+    const reconnectedBackend = new StudioBackend()
+    reconnectedBackend.sessionSummaries = [
+      sessionSummary({
+        id: 'session-failed-in-gap',
+        status: 'failed',
+        mode: 'record',
+        outputPath: 'C:\\recordings\\session-failed-in-gap.mkv',
+        healthEventCount: 1
+      })
+    ]
+    reconnectedBackend.sessionHealthEvents = [failureEvent]
+    TestWebSocket.backend = reconnectedBackend
+
+    await act(async () => {
+      emit?.('backend:connection', {
+        host: '127.0.0.1',
+        port: 9992,
+        token: 'failure-gap-reconnect-token'
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.core.sessionRuntimeNotice?.kind === 'recording-failed')
+
+    expect(latest()?.recording.recording.state).toBe('idle')
+    expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
+      kind: 'recording-failed',
+      activity: 'recording',
+      sessionId: 'session-failed-in-gap',
+      outputPath: 'C:\\recordings\\session-failed-in-gap.mkv',
+      message: failureEvent.message
+    })
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Recording stopped unexpectedly',
+      expect.objectContaining({
+        id: 'recording-stopped-unexpectedly',
+        description: failureEvent.message,
+        duration: Infinity,
+        action: expect.objectContaining({ label: 'Open Library' }),
+        cancel: expect.objectContaining({ label: 'Show in Finder' })
+      })
+    )
+    expect(reconnectedBackend.commands).toContainEqual(
+      expect.objectContaining({
+        method: 'sessions.healthEvents.list',
+        params: expect.objectContaining({ sessionId: 'session-failed-in-gap' })
+      })
+    )
+
+    const toastOptions = toastSpies.error.mock.calls.at(-1)?.[1] as {
+      action: { onClick: () => void }
+      cancel: { onClick: () => void }
+    }
+    toastOptions.action.onClick()
+    toastOptions.cancel.onClick()
+    expect(libraryNavigations).toEqual([{ tab: 'library', sessionId: 'session-failed-in-gap' }])
+    expect(revealSession).toHaveBeenCalledWith('session-failed-in-gap')
+
+    vi.clearAllMocks()
+    const failedSnapshotEvent: HealthEvent = {
+      ...failureEvent,
+      id: 'health-failed-snapshot',
+      sessionId: 'session-failed-snapshot',
+      message: 'FFmpeg exited before the recording could be finalized.'
+    }
+    const failedSnapshotBackend = new StudioBackend()
+    failedSnapshotBackend.recordingStatusOverride = {
+      state: 'failed',
+      sessionId: 'session-failed-snapshot'
+    }
+    failedSnapshotBackend.sessionSummaries = [
+      sessionSummary({
+        id: 'session-failed-snapshot',
+        status: 'failed',
+        mode: 'record+stream',
+        outputPath: 'C:\\recordings\\session-failed-snapshot.mkv',
+        healthEventCount: 1
+      })
+    ]
+    failedSnapshotBackend.sessionHealthEvents = [failedSnapshotEvent]
+    TestWebSocket.backend = failedSnapshotBackend
+
+    await act(async () => {
+      emit?.('backend:connection', {
+        host: '127.0.0.1',
+        port: 9995,
+        token: 'failed-snapshot-reconnect-token'
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () => latest()?.core.sessionRuntimeNotice?.sessionId === 'session-failed-snapshot'
+    )
+
+    expect(latest()?.recording.recording.state).toBe('failed')
+    expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
+      kind: 'recording-failed',
+      activity: 'recording',
+      sessionId: 'session-failed-snapshot',
+      outputPath: 'C:\\recordings\\session-failed-snapshot.mkv',
+      message: failedSnapshotEvent.message
+    })
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Recording stopped unexpectedly',
+      expect.objectContaining({
+        description: failedSnapshotEvent.message,
+        cancel: expect.objectContaining({ label: 'Show in Finder' })
+      })
+    )
+  })
+
+  it('recovers a microphone loss missed during reconnect for the still-active session', async () => {
+    const initialBackend = new StudioBackend()
+    initialBackend.recordingState = 'recording'
+    initialBackend.recordingSessionId = 'session-mic-lost-in-gap'
+    TestWebSocket.backend = initialBackend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let emit: ((name: string, value: unknown) => void) | undefined
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (nextEmit) => {
+        emit = nextEmit
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.recording.recording.sessionId === 'session-mic-lost-in-gap'
+    )
+    vi.clearAllMocks()
+
+    const microphoneLost: HealthEvent = {
+      id: 'health-mic-lost-in-gap',
+      sessionId: 'session-mic-lost-in-gap',
+      level: 'warn',
+      code: 'microphone-input-lost',
+      message:
+        'Microphone "Desk Mic" stopped after 92.3 seconds. Videorc replaced the missing input with silence.',
+      permissionPane: null,
+      createdAt: '2026-08-25T11:10:00.000Z'
+    }
+    const reconnectedBackend = new StudioBackend()
+    reconnectedBackend.recordingState = 'recording'
+    reconnectedBackend.recordingSessionId = 'session-mic-lost-in-gap'
+    reconnectedBackend.sessionSummaries = [
+      sessionSummary({
+        id: 'session-mic-lost-in-gap',
+        status: 'running',
+        mode: 'record',
+        healthEventCount: 1
+      })
+    ]
+    reconnectedBackend.sessionHealthEvents = [microphoneLost]
+    TestWebSocket.backend = reconnectedBackend
+
+    await act(async () => {
+      emit?.('backend:connection', {
+        host: '127.0.0.1',
+        port: 9993,
+        token: 'microphone-gap-reconnect-token'
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () => latest()?.core.sessionRuntimeNotice?.kind === 'microphone-input-lost'
+    )
+
+    expect(latest()?.recording.recording.state).toBe('recording')
+    expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
+      kind: 'microphone-input-lost',
+      activity: 'recording',
+      phase: 'active',
+      sessionId: 'session-mic-lost-in-gap',
+      message: microphoneLost.message
+    })
+    expect(toastSpies.warning).toHaveBeenCalledTimes(1)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Microphone stopped — recording continues with silence',
+      {
+        id: 'microphone-input-lost',
+        description: microphoneLost.message,
+        duration: Infinity
+      }
+    )
+    expect(reconnectedBackend.commands).toContainEqual(
+      expect.objectContaining({
+        method: 'sessions.healthEvents.list',
+        params: expect.objectContaining({ sessionId: 'session-mic-lost-in-gap' })
+      })
+    )
+
+    const secondReconnectBackend = new StudioBackend()
+    secondReconnectBackend.recordingState = 'recording'
+    secondReconnectBackend.recordingSessionId = 'session-mic-lost-in-gap'
+    secondReconnectBackend.sessionSummaries = reconnectedBackend.sessionSummaries
+    secondReconnectBackend.sessionHealthEvents = [microphoneLost]
+    TestWebSocket.backend = secondReconnectBackend
+    await act(async () => {
+      emit?.('backend:connection', {
+        host: '127.0.0.1',
+        port: 9994,
+        token: 'microphone-gap-second-reconnect-token'
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        secondReconnectBackend.commands.some(
+          (command) => command.method === 'sessions.healthEvents.list'
+        )
+    )
+
+    expect(toastSpies.warning).toHaveBeenCalledTimes(1)
+
+    vi.clearAllMocks()
+    const replacementSessionBackend = new StudioBackend()
+    replacementSessionBackend.recordingState = 'stopping'
+    replacementSessionBackend.recordingSessionId = 'replacement-session'
+    replacementSessionBackend.sessionSummaries = [
+      sessionSummary({
+        id: 'session-mic-lost-in-gap',
+        status: 'failed',
+        mode: 'record',
+        healthEventCount: 1
+      }),
+      sessionSummary({
+        id: 'replacement-session',
+        status: 'running',
+        mode: 'record',
+        healthEventCount: 0
+      })
+    ]
+    replacementSessionBackend.sessionHealthEvents = [
+      {
+        ...microphoneLost,
+        id: 'old-session-terminal-failure',
+        level: 'error',
+        code: 'encoder-bridge-failed',
+        message: 'The prior session failed while the renderer was disconnected.'
+      }
+    ]
+    TestWebSocket.backend = replacementSessionBackend
+    await act(async () => {
+      emit?.('backend:connection', {
+        host: '127.0.0.1',
+        port: 9996,
+        token: 'replacement-session-reconnect-token'
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () => latest()?.recording.recording.sessionId === 'replacement-session'
+    )
+
+    expect(latest()?.core.sessionRuntimeNotice).toBeNull()
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    expect(toastSpies.warning).not.toHaveBeenCalled()
+    expect(
+      replacementSessionBackend.commands.some(
+        (command) => command.method === 'sessions.healthEvents.list'
+      )
+    ).toBe(false)
+  })
+
+  it('does not resurrect historical runtime failures during a fresh bootstrap', async () => {
+    const backend = new StudioBackend()
+    backend.sessionSummaries = [
+      sessionSummary({
+        id: 'historical-failed-session',
+        status: 'failed',
+        mode: 'record',
+        healthEventCount: 2
+      })
+    ]
+    backend.sessionHealthEvents = [
+      {
+        id: 'historical-mic-loss',
+        sessionId: 'historical-failed-session',
+        level: 'warn',
+        code: 'microphone-input-lost',
+        message: 'Historical microphone loss.',
+        permissionPane: null,
+        createdAt: '2026-08-24T10:00:00.000Z'
+      },
+      {
+        id: 'historical-recording-failure',
+        sessionId: 'historical-failed-session',
+        level: 'error',
+        code: 'ffmpeg-exit',
+        message: 'Historical recording failure.',
+        permissionPane: null,
+        createdAt: '2026-08-24T10:01:00.000Z'
+      }
+    ]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () => latest()?.core.wsStatus === 'connected' && latest()?.core.sessions.length === 1
+    )
+
+    expect(latest()?.core.sessionRuntimeNotice).toBeNull()
+    expect(
+      backend.commands.some((command) => command.method === 'sessions.healthEvents.list')
+    ).toBe(false)
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    expect(toastSpies.warning).not.toHaveBeenCalled()
+  })
+
+  it('warns once when the microphone is lost while recording and still reports a saved take', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    vi.clearAllMocks()
+
+    const microphoneLost: HealthEvent = {
+      id: 'health-microphone-lost',
+      sessionId: 'session-with-silence',
+      level: 'warn',
+      code: 'microphone-input-lost',
+      message: 'The selected microphone stopped providing audio.',
+      permissionPane: null,
+      createdAt: '2026-08-25T10:01:00.000Z'
+    }
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: {
+            state: 'recording',
+            sessionId: 'session-with-silence',
+            startedAt: now,
+            message: 'Recording.'
+          }
+        })
+      })
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'health.event', payload: microphoneLost })
+      })
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'health.event',
+          payload: { ...microphoneLost, id: 'health-microphone-lost-repeat' }
+        })
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+
+    expect(toastSpies.warning).toHaveBeenCalledTimes(1)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Microphone stopped — recording continues with silence',
+      {
+        id: 'microphone-input-lost',
+        description: microphoneLost.message,
+        duration: Infinity
+      }
+    )
+    expect(latest()?.recording.recording.state).toBe('recording')
+
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: {
+            state: 'idle',
+            sessionId: 'session-with-silence',
+            outputPath: 'C:\\recordings\\session-with-silence.mp4',
+            durationMs: 5_000,
+            message: 'Saved.'
+          }
+        })
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+
+    expect(toastSpies.success).toHaveBeenCalledTimes(1)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Recording saved',
+      expect.objectContaining({ duration: 12000 })
+    )
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
+      kind: 'microphone-input-lost',
+      activity: 'recording',
+      phase: 'ended',
+      sessionId: 'session-with-silence',
+      message: microphoneLost.message
+    })
+    expect(toastSpies.warning).toHaveBeenCalledTimes(2)
+    expect(toastSpies.warning).toHaveBeenLastCalledWith(
+      'Microphone stopped — saved recording contains silence',
+      {
+        id: 'microphone-input-lost',
+        description: microphoneLost.message,
+        duration: Infinity
+      }
+    )
+
+    vi.clearAllMocks()
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: {
+            state: 'streaming',
+            sessionId: 'next-session',
+            startedAt: '2026-08-25T10:05:00.000Z',
+            message: 'Live.'
+          }
+        })
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.recording.recording.sessionId === 'next-session')
+    expect(latest()?.core.sessionRuntimeNotice).toBeNull()
+    expect(toastSpies.dismiss).toHaveBeenCalledWith('microphone-input-lost')
+
+    vi.clearAllMocks()
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'health.event',
+          payload: {
+            ...microphoneLost,
+            id: 'health-stale-microphone-lost',
+            sessionId: 'session-with-silence'
+          }
+        })
+      })
+      await Promise.resolve()
+    })
+
+    expect(toastSpies.warning).not.toHaveBeenCalled()
+    expect(latest()?.core.sessionRuntimeNotice).toBeNull()
+
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'health.event',
+          payload: {
+            ...microphoneLost,
+            id: 'health-live-microphone-lost',
+            sessionId: 'next-session'
+          }
+        })
+      })
+      await Promise.resolve()
+    })
+
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Microphone stopped — live session continues with silence',
+      expect.objectContaining({ id: 'microphone-input-lost' })
+    )
+    expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
+      kind: 'microphone-input-lost',
+      activity: 'live-stream',
+      phase: 'active',
+      sessionId: 'next-session'
+    })
+
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: {
+            state: 'idle',
+            sessionId: 'next-session',
+            message: 'Live session ended.'
+          }
+        })
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+
+    expect(toastSpies.success).not.toHaveBeenCalled()
+    expect(toastSpies.warning).toHaveBeenLastCalledWith(
+      'Microphone stopped during the live session',
+      expect.objectContaining({ id: 'microphone-input-lost' })
+    )
+    expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
+      kind: 'microphone-input-lost',
+      activity: 'live-stream',
+      phase: 'ended'
+    })
+
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: {
+            state: 'streaming',
+            sessionId: 'late-live-loss',
+            message: 'Live.'
+          }
+        })
+      })
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: {
+            state: 'stopping',
+            sessionId: 'late-live-loss',
+            message: 'Ending live session.'
+          }
+        })
+      })
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: {
+            state: 'idle',
+            sessionId: 'late-live-loss',
+            message: 'Live session ended.'
+          }
+        })
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+
+    vi.clearAllMocks()
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'health.event',
+          payload: {
+            ...microphoneLost,
+            id: 'health-late-live-microphone-lost',
+            sessionId: 'late-live-loss'
+          }
+        })
+      })
+      await Promise.resolve()
+    })
+
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Microphone stopped during the live session',
+      expect.objectContaining({ id: 'microphone-input-lost' })
+    )
+    expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
+      kind: 'microphone-input-lost',
+      activity: 'live-stream',
+      phase: 'ended',
+      sessionId: 'late-live-loss'
+    })
   })
 
   it('keeps a committed live source selection when output proof catches up late', async () => {

@@ -14,11 +14,14 @@ import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
 import { CohostPresenceDot } from '@/components/cohost-status'
 import { PanelSection } from '@/components/panel-section'
+import { SessionRuntimeAlert } from '@/components/studio/session-runtime-alert'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioChat, useStudioCore, useStudioShell } from '@/hooks/use-studio'
 import { cohostPresenceView } from '@/lib/cohost-presence'
+import type { SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import type { SessionStartFailure } from '@/lib/session-start-failure'
 import { outputSummary, streamingSummary } from '@/lib/studio-session-view'
 
@@ -42,13 +45,15 @@ export function SessionPanel({
   blockedReason = null,
   blockedJump = null,
   startFailure = null,
+  runtimeNotice = null,
   canStop,
   stopLabel,
   onRecord,
   onLiveStream,
   onStop,
   onRetryStart,
-  onDismissStartFailure
+  onDismissStartFailure,
+  onDismissRuntimeNotice
 }: {
   active: boolean
   startRequestPending: boolean
@@ -65,6 +70,9 @@ export function SessionPanel({
   /** The last refused Record / Go Live (B0): stays under the controls until
    * the user starts again or dismisses it — a 4s toast was the only signal. */
   startFailure?: SessionStartFailure | null
+  /** Mid-session recording failure/degradation: persists until dismissed or
+   * the next session begins. */
+  runtimeNotice?: SessionRuntimeNotice | null
   canStop: boolean
   stopLabel: string
   onRecord: () => void
@@ -72,6 +80,7 @@ export function SessionPanel({
   onStop: () => void
   onRetryStart?: () => void
   onDismissStartFailure?: () => void
+  onDismissRuntimeNotice?: () => void
 }): ReactElement {
   const { captureConfig } = useStudioCore()
   const { openStudioPanel, setActive } = useWorkspaceNav()
@@ -157,41 +166,47 @@ export function SessionPanel({
             it is status, it persists, and it carries the backend's reason
             verbatim (the toast can be missed mid-stream; this line cannot). */}
         {!active && startFailure ? (
-          <div
-            className="flex items-start gap-1.5 text-xs"
-            data-testid="session-start-failure"
-            key={startFailure.at}
-            role="alert"
-          >
-            <AlertIcon className="mt-px size-3.5 shrink-0 text-destructive" weight="fill" />
-            <p
-              className="line-clamp-3 min-w-0 flex-1 text-destructive"
-              title={startFailure.message}
-            >
-              <span className="font-medium">Could not start.</span> {startFailure.message}
-            </p>
-            <span className="flex shrink-0 items-center gap-2">
-              {onRetryStart ? (
-                <button
-                  className="font-medium text-foreground underline-offset-2 hover:underline"
-                  disabled={startRequestPending}
-                  type="button"
-                  onClick={onRetryStart}
-                >
-                  Retry
-                </button>
-              ) : null}
-              {onDismissStartFailure ? (
-                <button
-                  className="text-muted-foreground underline-offset-2 hover:underline"
-                  type="button"
-                  onClick={onDismissStartFailure}
-                >
-                  Dismiss
-                </button>
-              ) : null}
-            </span>
-          </div>
+          <Alert data-testid="session-start-failure" key={startFailure.at} variant="destructive">
+            <AlertIcon weight="fill" />
+            <AlertTitle>Could not start.</AlertTitle>
+            <AlertDescription className="min-w-0">
+              <p className="line-clamp-3" title={startFailure.message}>
+                {startFailure.message}
+              </p>
+              <div className="flex flex-wrap gap-1 pt-2">
+                {onRetryStart ? (
+                  <Button
+                    disabled={startRequestPending}
+                    size="xs"
+                    type="button"
+                    variant="ghost"
+                    onClick={onRetryStart}
+                  >
+                    Retry
+                  </Button>
+                ) : null}
+                {onDismissStartFailure ? (
+                  <Button size="xs" type="button" variant="ghost" onClick={onDismissStartFailure}>
+                    Dismiss
+                  </Button>
+                ) : null}
+              </div>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        {runtimeNotice && onDismissRuntimeNotice ? (
+          <SessionRuntimeAlert
+            notice={runtimeNotice}
+            onDismiss={onDismissRuntimeNotice}
+            onOpenLibrary={() => setActive('library')}
+            onRevealOutput={
+              runtimeNotice.kind === 'recording-failed' &&
+              runtimeNotice.activity === 'recording' &&
+              runtimeNotice.sessionId
+                ? () => void window.videorc?.revealSession?.(runtimeNotice.sessionId!)
+                : undefined
+            }
+          />
         ) : null}
       </div>
 

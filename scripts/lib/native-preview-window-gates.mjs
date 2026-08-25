@@ -14,9 +14,11 @@ export function previewWindowSurfaceReady(
     bounds.width > 0 &&
     Number.isFinite(bounds?.height) &&
     bounds.height > 0
+  const nativePresenterHostKindReady =
+    expectedHostKind === undefined || surfaceStatus?.nativePreviewHostKind === expectedHostKind
   const placementReady = expectNativePresenter
     ? windowState?.nativeOwnsPlacement === true &&
-      surfaceStatus?.nativePreviewHostKind === expectedHostKind &&
+      nativePresenterHostKindReady &&
       surfaceStatus?.framePollingSuppressed === true
     : windowState?.surface?.visible === true &&
       surfaceStatus?.nativePreviewHostKind === 'proof-surface' &&
@@ -68,8 +70,7 @@ export function nativePreviewSurfaceStatusReady(
   { expectedTransport, expectedBacking, expectedHostKind, previousFrames = 0 } = {}
 ) {
   const isProofSurface =
-    expectedTransport === 'electron-proof-surface' &&
-    expectedBacking === 'electron-browser-window'
+    expectedTransport === 'electron-proof-surface' && expectedBacking === 'electron-browser-window'
   const hostKindReady =
     expectedHostKind === undefined ||
     status?.nativePreviewHostKind === expectedHostKind ||

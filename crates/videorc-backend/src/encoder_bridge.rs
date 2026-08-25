@@ -103,6 +103,12 @@ const STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW: Duration = Duration::from_secs(2);
 const RAW_VIDEO_FIFO_QUEUE_MAX_FRAMES: usize = 0;
 #[cfg(not(target_os = "windows"))]
 const FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const VIDEOTOOLBOX_FIFO_WRITE_STALL_TOLERANCE: Duration = FIFO_FRAME_WRITE_HARD_TIMEOUT;
+#[cfg(all(target_os = "macos", debug_assertions))]
+const VIDEORC_TEST_VT_FIFO_PAUSE_AFTER_FRAMES_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_AFTER_FRAMES";
+#[cfg(all(target_os = "macos", debug_assertions))]
+const VIDEORC_TEST_VT_FIFO_PAUSE_MS_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_MS";
 // Media Foundation can stop draining the raw-video pipe for several seconds
 // while its MFT catches up. A raw YUV frame is indivisible once writing starts:
 // timing it out truncates a plane, kills FFmpeg, strands the recovery MKV, and
@@ -4776,7 +4782,63 @@ struct VideoToolboxFifoWriter {
 #[cfg(target_os = "macos")]
 struct QueuedVideoToolboxFrame {
     frame: VideoToolboxH264AnnexBFrame,
-    submitted_at: Instant,
+}
+
+#[cfg(target_os = "macos")]
+struct VideoToolboxFifoTestPause {
+    after_frames: u64,
+    duration: Duration,
+    fired: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl VideoToolboxFifoTestPause {
+    fn take_before_write(&mut self, written_frames: u64) -> Option<Duration> {
+        if self.fired || written_frames < self.after_frames {
+            return None;
+        }
+        self.fired = true;
+        Some(self.duration)
+    }
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn parse_video_toolbox_fifo_test_pause(
+    role: EncoderBridgeOutputRole,
+    after_frames: Option<&str>,
+    pause_ms: Option<&str>,
+) -> Option<VideoToolboxFifoTestPause> {
+    if !matches!(
+        role,
+        EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared
+    ) {
+        return None;
+    }
+    let after_frames = after_frames?.trim().parse::<u64>().ok()?;
+    let pause_ms = pause_ms?.trim().parse::<u64>().ok()?;
+    if pause_ms == 0 {
+        return None;
+    }
+    Some(VideoToolboxFifoTestPause {
+        after_frames,
+        duration: Duration::from_millis(pause_ms),
+        fired: false,
+    })
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn video_toolbox_fifo_test_pause_from_env(
+    role: EncoderBridgeOutputRole,
+) -> Option<VideoToolboxFifoTestPause> {
+    parse_video_toolbox_fifo_test_pause(
+        role,
+        std::env::var(VIDEORC_TEST_VT_FIFO_PAUSE_AFTER_FRAMES_ENV)
+            .ok()
+            .as_deref(),
+        std::env::var(VIDEORC_TEST_VT_FIFO_PAUSE_MS_ENV)
+            .ok()
+            .as_deref(),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -4811,17 +4873,10 @@ impl VideoToolboxFifoWriter {
         // One extra slot preserves a terminal flush error without deadlocking
         // close_and_join if the bridge is already tearing down.
         let (result_tx, result_rx) = std_mpsc::sync_channel(policy.max_frames + 2);
-        // The per-frame write deadline bounds COMPLETE-frame delivery. The
-        // stream role gets the sustained-violation grace on top of its queue
-        // budget so a transient downstream freeze degrades instead of killing
-        // the writer (a 500ms FFmpeg stall used to trip the 150ms budget and
-        // end the stream). Recording keeps its strict budget: silently
-        // buffering recording frames is the corruption its contract prevents.
-        let write_frame_age = if policy.role == EncoderBridgeOutputRole::Stream {
-            policy.max_age + STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW
-        } else {
-            policy.max_age
-        };
+        #[cfg(debug_assertions)]
+        let test_pause = video_toolbox_fifo_test_pause_from_env(policy.role);
+        #[cfg(not(debug_assertions))]
+        let test_pause = None;
         let join = spawn_registered_fifo_writer(
             lifecycle.clone(),
             thread::Builder::new().name(format!("videorc-{:?}-h264-fifo-writer", policy.role)),
@@ -4832,7 +4887,8 @@ impl VideoToolboxFifoWriter {
                     frame_rx,
                     result_tx,
                     stop,
-                    write_frame_age,
+                    VIDEOTOOLBOX_FIFO_WRITE_STALL_TOLERANCE,
+                    test_pause,
                 );
             },
         )
@@ -4849,20 +4905,13 @@ impl VideoToolboxFifoWriter {
     fn enqueue(
         &self,
         frame: VideoToolboxH264AnnexBFrame,
-        submitted_at: Instant,
         capacity_pressure_events: &mut u64,
     ) -> io::Result<()> {
         let tx = self
             .frame_tx
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "H.264 FIFO writer closed"))?;
-        match offer_preserving_output_frame(
-            tx,
-            QueuedVideoToolboxFrame {
-                frame,
-                submitted_at,
-            },
-        ) {
+        match offer_preserving_output_frame(tx, QueuedVideoToolboxFrame { frame }) {
             Ok(PreservingOutputFrameOffer::Enqueued) => Ok(()),
             Ok(PreservingOutputFrameOffer::CapacityPressure(_frame)) => {
                 *capacity_pressure_events = capacity_pressure_events.saturating_add(1);
@@ -4958,20 +5007,40 @@ fn run_video_toolbox_fifo_writer_loop<W: StdWrite>(
     frame_rx: std_mpsc::Receiver<QueuedVideoToolboxFrame>,
     result_tx: std_mpsc::SyncSender<VideoToolboxFifoWriterResult>,
     stop: Arc<AtomicBool>,
-    max_frame_age: Duration,
+    write_stall_tolerance: Duration,
+    mut test_pause: Option<VideoToolboxFifoTestPause>,
 ) {
+    let mut written_frames = 0_u64;
     while let Ok(queued) = frame_rx.recv() {
         let encoded_bytes = queued.frame.bytes.len() as u64;
+        if let Some(duration) = test_pause
+            .as_mut()
+            .and_then(|pause| pause.take_before_write(written_frames))
+        {
+            tracing::warn!(
+                target: "videorc::encoder_bridge",
+                test_hook = "videotoolbox-fifo-pause",
+                written_frames,
+                pause_ms = duration.as_millis() as u64,
+                "VIDEORC_TEST_VT_FIFO_PAUSE_FIRED"
+            );
+            thread::sleep(duration);
+        }
         let write_started_at = Instant::now();
-        let deadline = queued.submitted_at + max_frame_age;
+        // Queue age is pressure diagnostics, not FIFO liveness. A recording
+        // access unit that waited behind transient encoder pressure is still
+        // valid content and must receive a fresh write window (#149's raw
+        // writer contract). The hard timeout still bounds the complete write.
+        let deadline = write_started_at + write_stall_tolerance;
         match h264_pipe_writer.write_frame_until(
             &mut sink,
             &queued.frame,
             &stop,
             deadline,
-            max_frame_age,
+            write_stall_tolerance,
         ) {
             Ok(()) => {
+                written_frames = written_frames.saturating_add(1);
                 let _ = result_tx.send(VideoToolboxFifoWriterResult::FrameWritten {
                     encoded_bytes,
                     write_ms: write_started_at.elapsed().as_secs_f64() * 1000.0,
@@ -5046,7 +5115,7 @@ impl VideoToolboxH264PipeWriter {
         frame: &VideoToolboxH264AnnexBFrame,
         stop: &AtomicBool,
         deadline: Instant,
-        max_frame_age: Duration,
+        write_stall_tolerance: Duration,
     ) -> io::Result<()> {
         let bytes = self.frame_bytes(frame)?;
         write_all_until(
@@ -5054,7 +5123,7 @@ impl VideoToolboxH264PipeWriter {
             bytes,
             stop,
             deadline,
-            max_frame_age,
+            write_stall_tolerance,
             FIFO_FRAME_WRITE_HARD_TIMEOUT,
             // Stop closes the sender and prevents new access units. Finish the
             // one already in flight so an ordinary user stop cannot manufacture
@@ -5751,7 +5820,7 @@ fn drain_video_toolbox_output_frames(
         match message.result {
             Ok(frame) => {
                 let enqueue_started_at = Instant::now();
-                fifo_writer.enqueue(frame, submitted_at, output_queue_capacity_pressure_events)?;
+                fifo_writer.enqueue(frame, output_queue_capacity_pressure_events)?;
                 let enqueue_ms = enqueue_started_at.elapsed().as_secs_f64() * 1000.0;
                 video_toolbox_fifo_enqueue_times_ms.push(enqueue_ms);
                 *max_video_toolbox_fifo_enqueue_ms = Some(
@@ -8684,6 +8753,71 @@ mod tests {
             | u64::from((bytes[4] >> 1) & 0x7f)
     }
 
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[test]
+    fn videotoolbox_fifo_test_pause_is_disabled_for_missing_or_invalid_configuration() {
+        for (after_frames, pause_ms) in [
+            (None, None),
+            (Some("60"), None),
+            (None, Some("350")),
+            (Some(""), Some("350")),
+            (Some("sixty"), Some("350")),
+            (Some("60"), Some("")),
+            (Some("60"), Some("0")),
+            (Some("60"), Some("-1")),
+        ] {
+            assert!(
+                parse_video_toolbox_fifo_test_pause(
+                    EncoderBridgeOutputRole::Recording,
+                    after_frames,
+                    pause_ms,
+                )
+                .is_none(),
+                "invalid pause configuration must remain disabled"
+            );
+        }
+        assert!(
+            parse_video_toolbox_fifo_test_pause(
+                EncoderBridgeOutputRole::Stream,
+                Some("60"),
+                Some("350"),
+            )
+            .is_none(),
+            "the recording-pressure hook must never pause the stream-only writer"
+        );
+    }
+
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[test]
+    fn videotoolbox_fifo_test_pause_parses_recording_and_shared_configuration() {
+        for role in [
+            EncoderBridgeOutputRole::Recording,
+            EncoderBridgeOutputRole::Shared,
+        ] {
+            let pause = parse_video_toolbox_fifo_test_pause(role, Some(" 60 "), Some(" 350 "))
+                .expect("valid recording pressure hook");
+            assert_eq!(pause.after_frames, 60);
+            assert_eq!(pause.duration, Duration::from_millis(350));
+        }
+    }
+
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[test]
+    fn videotoolbox_fifo_test_pause_fires_once_before_the_selected_access_unit() {
+        let mut pause = parse_video_toolbox_fifo_test_pause(
+            EncoderBridgeOutputRole::Recording,
+            Some("2"),
+            Some("350"),
+        )
+        .expect("valid recording pressure hook");
+
+        assert_eq!(pause.take_before_write(0), None);
+        assert_eq!(pause.take_before_write(1), None);
+        assert_eq!(pause.take_before_write(2), Some(Duration::from_millis(350)));
+        assert_eq!(pause.take_before_write(2), None);
+        assert_eq!(pause.take_before_write(3), None);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn videotoolbox_fifo_writer_reports_written_frames() {
@@ -8698,7 +8832,6 @@ mod tests {
                         nal_types: vec![1],
                         is_idr: false,
                     },
-                    submitted_at: Instant::now(),
                 })
                 .expect("queue frame");
         }
@@ -8713,6 +8846,7 @@ mod tests {
             result_tx,
             Arc::new(AtomicBool::new(false)),
             Duration::from_millis(250),
+            None,
         );
 
         let results = result_rx.try_iter().collect::<Vec<_>>();
@@ -8735,6 +8869,64 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn videotoolbox_fifo_writer_writes_an_access_unit_older_than_the_queue_age_budget() {
+        let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(3);
+        let bytes = vec![0x44; 64];
+        frame_tx
+            .send(QueuedVideoToolboxFrame {
+                frame: VideoToolboxH264AnnexBFrame {
+                    timing: VideoToolboxFrameTiming::new(0, 30, 1, 30),
+                    bytes: bytes.clone(),
+                    nal_types: vec![1],
+                    is_idr: false,
+                },
+            })
+            .expect("queue frame");
+        drop(frame_tx);
+        // Model an access unit that has already waited behind transient
+        // encoder/FIFO pressure for longer than the queue-health budget.
+        thread::sleep(RECORDING_OUTPUT_QUEUE_MAX_AGE + Duration::from_millis(50));
+        let sink = SharedCountingSink::default();
+
+        run_video_toolbox_fifo_writer_loop(
+            sink.clone(),
+            VideoToolboxH264PipeWriter::for_output(
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            ),
+            frame_rx,
+            result_tx,
+            Arc::new(AtomicBool::new(false)),
+            RECORDING_OUTPUT_QUEUE_MAX_AGE,
+            None,
+        );
+
+        assert_eq!(
+            sink.bytes(),
+            bytes,
+            "a late recording access unit must still be written completely"
+        );
+        assert!(matches!(
+            result_rx.recv().expect("written frame result"),
+            VideoToolboxFifoWriterResult::FrameWritten { .. }
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn videotoolbox_fifo_write_stall_tolerance_is_not_the_queue_age_budget() {
+        assert!(
+            VIDEOTOOLBOX_FIFO_WRITE_STALL_TOLERANCE > RECORDING_OUTPUT_QUEUE_MAX_AGE,
+            "queue pressure must not become a FIFO liveness verdict"
+        );
+        assert_eq!(
+            VIDEOTOOLBOX_FIFO_WRITE_STALL_TOLERANCE,
+            FIFO_FRAME_WRITE_HARD_TIMEOUT
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn videotoolbox_fifo_writer_finishes_in_flight_access_unit_after_stop() {
         let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
         let (result_tx, result_rx) = std_mpsc::sync_channel(3);
@@ -8747,7 +8939,6 @@ mod tests {
                     nal_types: vec![1],
                     is_idr: false,
                 },
-                submitted_at: Instant::now(),
             })
             .expect("queue frame");
         drop(frame_tx);
@@ -8763,6 +8954,7 @@ mod tests {
             result_tx,
             stop,
             Duration::from_millis(250),
+            None,
         );
 
         assert_eq!(sink.bytes(), bytes);
@@ -8785,7 +8977,6 @@ mod tests {
                     nal_types: vec![1],
                     is_idr: false,
                 },
-                submitted_at: Instant::now(),
             })
             .expect("queue frame");
         drop(frame_tx);
@@ -8800,6 +8991,7 @@ mod tests {
             result_tx,
             Arc::new(AtomicBool::new(false)),
             Duration::from_millis(20),
+            None,
         );
 
         assert!(started_at.elapsed() < Duration::from_millis(500));
@@ -8819,6 +9011,48 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn videotoolbox_fifo_writer_finishes_an_access_unit_while_the_sink_makes_progress() {
+        let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(3);
+        let bytes = vec![0x44; 8];
+        frame_tx
+            .send(QueuedVideoToolboxFrame {
+                frame: VideoToolboxH264AnnexBFrame {
+                    timing: VideoToolboxFrameTiming::new(0, 30, 1, 30),
+                    bytes: bytes.clone(),
+                    nal_types: vec![1],
+                    is_idr: false,
+                },
+            })
+            .expect("queue frame");
+        drop(frame_tx);
+        let written = SharedCountingSink::default();
+
+        run_video_toolbox_fifo_writer_loop(
+            SlowProgressSink {
+                written: written.clone(),
+                chunk_size: 2,
+                delay: Duration::from_millis(10),
+            },
+            VideoToolboxH264PipeWriter::for_output(
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            ),
+            frame_rx,
+            result_tx,
+            Arc::new(AtomicBool::new(false)),
+            Duration::from_millis(25),
+            None,
+        );
+
+        assert_eq!(written.bytes(), bytes);
+        assert!(matches!(
+            result_rx.recv().expect("written frame result"),
+            VideoToolboxFifoWriterResult::FrameWritten { .. }
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn videotoolbox_fifo_writer_classifies_a_closed_downstream() {
         let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
         let (result_tx, result_rx) = std_mpsc::sync_channel(3);
@@ -8830,7 +9064,6 @@ mod tests {
                     nal_types: vec![1],
                     is_idr: false,
                 },
-                submitted_at: Instant::now(),
             })
             .expect("queue frame");
         drop(frame_tx);
@@ -8854,6 +9087,7 @@ mod tests {
             result_tx,
             Arc::new(AtomicBool::new(false)),
             Duration::from_millis(250),
+            None,
         );
 
         let result = result_rx.recv().expect("terminal writer result");
