@@ -176,6 +176,7 @@ describe('smoke command security', () => {
   it('keeps the protected backend bridge on a small debug-only RPC allowlist', () => {
     expect(SMOKE_BACKEND_RPC_METHOD_NAMES).toEqual(
       new Set([
+        'audio.test.disconnect',
         'audio.test.inject-pcm',
         'captions.test.inject-audio',
         'captions.test.snapshot',
@@ -184,6 +185,17 @@ describe('smoke command security', () => {
         'recording.start_test'
       ])
     )
+    expect(
+      validateSmokeBackendRpcRequest({
+        method: 'audio.test.disconnect',
+        params: { sessionId: 'session-1' },
+        timeoutMs: 30_000
+      })
+    ).toEqual({
+      method: 'audio.test.disconnect',
+      params: { sessionId: 'session-1' },
+      timeoutMs: 30_000
+    })
     expect(
       validateSmokeBackendRpcRequest({
         method: 'captions.test.snapshot',

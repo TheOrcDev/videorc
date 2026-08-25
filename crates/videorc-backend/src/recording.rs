@@ -19,9 +19,9 @@ use uuid::Uuid;
 
 use crate::audio::{
     AudioCaptureStats, AudioProcessingSettings, NATIVE_AUDIO_CHANNELS, NATIVE_AUDIO_SAMPLE_RATE,
-    NativeAudioCaptureSession, NativeAudioSource, attach_fifo_writer, audio_capture_coverage,
-    create_native_audio_fifo, native_audio_fifo_path, parse_coreaudio_microphone_id,
-    parse_windows_dshow_microphone_id, start_native_audio_source,
+    NativeAudioCaptureSession, NativeAudioInputState, NativeAudioSource, attach_fifo_writer,
+    audio_capture_coverage, create_native_audio_fifo, native_audio_fifo_path,
+    parse_coreaudio_microphone_id, parse_windows_dshow_microphone_id, start_native_audio_source,
 };
 use crate::camera_capture::{
     native_camera_name_for_id, parse_native_camera_id, parse_windows_dshow_camera_id,
@@ -3451,7 +3451,7 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     #[cfg(target_os = "windows")]
     release_direct_d3d11_consumer(&state, active);
     if let Some(native_audio) = active.native_audio.as_ref() {
-        native_audio.finish_recording_window();
+        native_audio.request_stop();
     }
     active
         .pipeline
@@ -5083,7 +5083,7 @@ async fn stop_recording_process_for_shutdown(
         let _ = stdin.shutdown().await;
     }
     if let Some(native_audio) = recording.native_audio.as_ref() {
-        native_audio.finish_recording_window();
+        native_audio.request_stop();
     }
 
     if recording.pid != 0 {
@@ -5319,6 +5319,8 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             audio.session_peak(),
                             audio.device_name.clone(),
                             audio.recording_window_elapsed_secs(),
+                            audio.input_state(),
+                            audio.claim_source_loss_event(),
                         )
                     })
                 }
@@ -5332,17 +5334,30 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             session_peak,
             device_name,
             capture_elapsed_secs,
+            input_state,
+            source_loss_event_after_ms,
         )) = counters
         else {
             return;
         };
+
+        if let Some(source_loss_after_ms) = source_loss_event_after_ms {
+            silent_mic_reported = true;
+            emit_microphone_input_lost_health_event(
+                &state,
+                &session_id,
+                &device_name,
+                source_loss_after_ms,
+            );
+        }
 
         // Early truthful warning (plan 021 F3): a mic that has produced nothing
         // this deep into the recording will not fix itself — tell the user NOW,
         // while stopping and fixing still saves the take. A TCC-unauthorized
         // process receives silent zeros (frames count, peak stays 0), so both
         // "no frames" and "all-silence" trip the check. Fires at most once.
-        if !silent_mic_reported
+        if input_state != NativeAudioInputState::SourceLost
+            && !silent_mic_reported
             && started_at.elapsed() >= MIC_SILENT_CHECK_AFTER
             && let Some(kind) = silent_mic_verdict(captured_frames, session_peak)
         {
@@ -5383,6 +5398,30 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
         );
     }
+}
+
+fn emit_microphone_input_lost_health_event(
+    state: &AppState,
+    session_id: &str,
+    device_name: &str,
+    source_loss_after_ms: u64,
+) {
+    let message = microphone_input_lost_message(device_name, source_loss_after_ms);
+    state.emit_log("warn", &message);
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Warn,
+        "microphone-input-lost",
+        &message,
+    );
+}
+
+fn microphone_input_lost_message(device_name: &str, source_loss_after_ms: u64) -> String {
+    format!(
+        "Microphone \"{device_name}\" stopped after {:.1} seconds. Videorc replaced the missing input with silence.",
+        source_loss_after_ms as f64 / 1_000.0
+    )
 }
 
 /// Whether the session's own pipeline counters say the recorded output was
@@ -5635,6 +5674,9 @@ async fn monitor_session(
                     captured_frames: audio.captured_frames(),
                     dropped_frames: audio.dropped_frames(),
                     session_peak: audio.session_peak(),
+                    input_state: audio.input_state(),
+                    source_loss_after_ms: audio.source_loss_after_ms(),
+                    unreported_source_loss_after_ms: audio.claim_source_loss_event(),
                 }
             });
             MonitoredRecording {
@@ -5852,6 +5894,14 @@ async fn monitor_session(
             "diagnostics.stats",
             apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
         );
+        if let Some(source_loss_after_ms) = native_audio_stats.unreported_source_loss_after_ms {
+            emit_microphone_input_lost_health_event(
+                &state,
+                &session_id,
+                &native_audio_stats.device_name,
+                source_loss_after_ms,
+            );
+        }
         state.emit_log(
             if native_audio_stats.dropped_frames > 0 {
                 "warn"
@@ -5859,8 +5909,12 @@ async fn monitor_session(
                 "info"
             },
             format!(
-                "Native microphone capture ended for {}: {} frames captured, {} frames dropped.",
+                "Native microphone capture ended for {}: state={:?}, sourceLossAfterMs={}, {} frames captured, {} frames dropped.",
                 native_audio_stats.device_name,
+                native_audio_stats.input_state,
+                native_audio_stats
+                    .source_loss_after_ms
+                    .map_or_else(|| "none".to_string(), |value| value.to_string()),
                 native_audio_stats.captured_frames,
                 native_audio_stats.dropped_frames
             ),
@@ -5880,10 +5934,12 @@ async fn monitor_session(
         }
         // Silent-mic verdict at finalize (plan 021 F3): the user must learn the
         // file has no sound from the app, not from playing it back.
-        if let Some(kind) = silent_mic_verdict(
-            native_audio_stats.captured_frames,
-            native_audio_stats.session_peak,
-        ) {
+        if native_audio_stats.input_state != NativeAudioInputState::SourceLost
+            && let Some(kind) = silent_mic_verdict(
+                native_audio_stats.captured_frames,
+                native_audio_stats.session_peak,
+            )
+        {
             let message = match kind {
                 SilentMicKind::NoFrames => format!(
                     "Microphone \"{}\" captured no audio — this recording has a silent audio track. Check the input device in Settings.",
@@ -7175,6 +7231,9 @@ struct NativeAudioStats {
     captured_frames: u64,
     dropped_frames: u64,
     session_peak: f32,
+    input_state: NativeAudioInputState,
+    source_loss_after_ms: Option<u64>,
+    unreported_source_loss_after_ms: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -11684,13 +11743,13 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
                 }
             }
         }
-        append_audio_encoding_args(
+        append_audio_encoding_with_video_clock(
             &mut args,
             &input_layout,
             &params.audio,
             !stream_targets.is_empty(),
+            true,
         );
-        args.push("-shortest".to_string());
     }
 
     let stream_legs = stream_targets
@@ -11832,8 +11891,7 @@ fn bridge_compositor_split_output_ffmpeg_args(
     ) {
         append_media_foundation_h264_color_metadata_args(&mut args);
     }
-    append_audio_encoding_args(&mut args, &input_layout, &params.audio, true);
-    args.push("-shortest".to_string());
+    append_audio_encoding_with_video_clock(&mut args, &input_layout, &params.audio, true, true);
     args.push(ffmpeg_file_path(output_path));
 
     let stream_input_layout = InputLayout {
@@ -12160,8 +12218,7 @@ fn append_bridge_copy_output_args(
     ) {
         append_media_foundation_h264_color_metadata_args(args);
     }
-    append_audio_encoding_args(args, input_layout, audio, streaming_audio);
-    args.push("-shortest".to_string());
+    append_audio_encoding_with_video_clock(args, input_layout, audio, streaming_audio, true);
 }
 
 fn append_media_foundation_h264_color_metadata_args(args: &mut Vec<String>) {
@@ -12301,11 +12358,12 @@ fn ffmpeg_args_with_encoder(
         encoder.platform,
         !stream_targets.is_empty(),
     );
-    append_audio_encoding_args(
+    append_audio_encoding_with_video_clock(
         &mut args,
         &input_layout,
         &params.audio,
         !stream_targets.is_empty(),
+        false,
     );
 
     let stream_legs = stream_targets
@@ -12790,6 +12848,30 @@ fn append_audio_encoding_args(
     }
 }
 
+/// Applies audio encoding and its duration contract as one inseparable output
+/// policy. Microphone inputs are padded after their existing processing, so a
+/// microphone output must use video EOF as its authoritative clock. Encoder-
+/// bridge outputs also retain their pre-existing shortest-input contract for
+/// synthetic/test audio. Keeping both decisions here prevents a future caller
+/// from enabling unbounded `apad` without the matching output terminator while
+/// leaving unrelated legacy audio duration unchanged.
+fn append_audio_encoding_with_video_clock(
+    args: &mut Vec<String>,
+    input_layout: &InputLayout,
+    audio: &AudioSettings,
+    streaming: bool,
+    preserve_bridge_shortest: bool,
+) {
+    append_audio_encoding_args(args, input_layout, audio, streaming);
+    let microphone_is_padded = input_layout
+        .audio_inputs
+        .iter()
+        .any(|input| input.track.source == AudioTrackSource::Microphone);
+    if preserve_bridge_shortest || microphone_is_padded {
+        args.push("-shortest".to_string());
+    }
+}
+
 fn capture_audio_filter(input_layout: &InputLayout, audio: &AudioSettings) -> String {
     let has_microphone = input_layout
         .audio_inputs
@@ -12839,6 +12921,12 @@ fn capture_audio_filter(input_layout: &InputLayout, audio: &AudioSettings) -> St
         filters.push(MONO_TO_STEREO_FILTER.to_string());
     }
     filters.push(CAPTURE_AUDIO_FILTER.to_string());
+    if has_microphone {
+        // EOF from a disconnected/stalled microphone becomes generated silence
+        // inside FFmpeg. The paired `-shortest` output policy above makes video
+        // EOF authoritative, so padding can never keep a session alive by itself.
+        filters.push("apad".to_string());
+    }
     filters.join(",")
 }
 
@@ -15847,6 +15935,14 @@ mod tests {
         // Real audio, however quiet, is not a silent track.
         assert_eq!(silent_mic_verdict(48_000, 0.002), None);
         assert_eq!(silent_mic_verdict(48_000, 0.9), None);
+    }
+
+    #[test]
+    fn microphone_input_lost_message_is_activity_neutral() {
+        assert_eq!(
+            microphone_input_lost_message("Desk Mic", 92_345),
+            "Microphone \"Desk Mic\" stopped after 92.3 seconds. Videorc replaced the missing input with silence."
+        );
     }
 
     fn starting_test_status() -> RecordingStatus {
@@ -20184,7 +20280,7 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "0:a?"));
         assert_eq!(
             arg_value(&args, "-af"),
-            Some("aresample=async=1:first_pts=0")
+            Some("aresample=async=1:first_pts=0,apad")
         );
     }
 
@@ -22880,7 +22976,7 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "title=Microphone"));
         assert_eq!(
             arg_value(&args, "-af"),
-            Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0")
+            Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0,apad")
         );
         assert_eq!(arg_value(&args, "-ar"), Some("48000"));
         assert_eq!(arg_value(&args, "-ac"), Some("2"));
@@ -23299,7 +23395,7 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "title=Microphone"));
         assert_eq!(
             arg_value(&args, "-af"),
-            Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0")
+            Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0,apad")
         );
         assert_eq!(arg_value(&args, "-ar"), Some("48000"));
         assert_eq!(arg_value(&args, "-ac"), Some("2"));
@@ -23349,10 +23445,44 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "1:a?"));
         assert_eq!(
             arg_value(&args, "-af"),
-            Some("aresample=async=1:first_pts=0")
+            Some("aresample=async=1:first_pts=0,apad")
         );
         assert_eq!(arg_value(&args, "-ac"), Some("2"));
         assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+    }
+
+    #[test]
+    fn microphone_eof_is_padded_while_video_remains_the_output_clock() {
+        let params = base_params(true, false);
+        let output = Path::new("/tmp/videorc-microphone-continuity.mkv");
+        let args = ffmpeg_args(
+            &CaptureInputs {
+                video: VideoInput::MacScreen { index: 3 },
+                camera_index: None,
+                microphone: Some(MicrophoneInput::CoreAudio {
+                    device_id: 42,
+                    fifo_path: Some(PathBuf::from("/tmp/videorc-audio-continuity.f32le")),
+                }),
+            },
+            &params,
+            Some(output),
+            &[],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            arg_value(&args, "-af"),
+            Some("aresample=async=1:first_pts=0,apad")
+        );
+        let output_position = args
+            .iter()
+            .position(|arg| arg == output.to_str().unwrap())
+            .expect("recording output is present");
+        assert!(
+            args[..output_position].iter().any(|arg| arg == "-shortest"),
+            "apad must always be paired with output-scoped -shortest: {args:?}"
+        );
     }
 
     #[test]
@@ -23402,17 +23532,17 @@ mod tests {
 
         assert_eq!(
             arg_value(&delayed, "-af"),
-            Some("adelay=120:all=1,pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0")
+            Some("adelay=120:all=1,pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0,apad")
         );
         assert_eq!(
             arg_value(&trimmed, "-af"),
             Some(
-                "atrim=start=0.120,asetpts=PTS-STARTPTS,pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0"
+                "atrim=start=0.120,asetpts=PTS-STARTPTS,pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0,apad"
             )
         );
         assert_eq!(
             arg_value(&disabled, "-af"),
-            Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0")
+            Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0,apad")
         );
     }
 
@@ -23437,7 +23567,7 @@ mod tests {
         // chain carries the channel/resample processing only — no compensating trim.
         assert_eq!(
             arg_value(&args, "-af"),
-            Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0")
+            Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0,apad")
         );
     }
 
@@ -23467,7 +23597,7 @@ mod tests {
 
         assert_eq!(
             arg_value(&args, "-af"),
-            Some("aresample=async=1:first_pts=0")
+            Some("aresample=async=1:first_pts=0,apad")
         );
 
         // An explicit user trim still flows into the chain.
@@ -23489,7 +23619,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             arg_value(&trimmed, "-af"),
-            Some("atrim=start=0.250,asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0")
+            Some("atrim=start=0.250,asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,apad")
         );
     }
 
@@ -23539,7 +23669,56 @@ mod tests {
             arg_value(&args, "-af"),
             Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0")
         );
+        assert!(
+            !args.iter().any(|arg| arg == "-shortest"),
+            "legacy non-microphone audio must preserve its existing duration policy"
+        );
         assert_eq!(arg_value(&args, "-ac"), Some("2"));
+    }
+
+    #[test]
+    fn legacy_non_microphone_audio_preserves_its_existing_duration_policy() {
+        let params = base_params(true, false);
+        let args = ffmpeg_args(
+            &CaptureInputs {
+                video: VideoInput::TestPattern,
+                camera_index: None,
+                microphone: None,
+            },
+            &params,
+            Some(Path::new("/tmp/videorc-test-tone-duration.mkv")),
+            &[],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            arg_value(&args, "-af"),
+            Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0")
+        );
+        assert!(!args.iter().any(|arg| arg == "-shortest"));
+    }
+
+    #[test]
+    fn bridge_preserves_its_shortest_policy_without_audio_inputs() {
+        let input_layout = InputLayout {
+            video_input_index: 0,
+            camera_input_index: None,
+            screen_overlay_input_index: None,
+            audio_inputs: Vec::new(),
+            microphone_graph_gain: false,
+        };
+        let mut args = Vec::new();
+
+        append_audio_encoding_with_video_clock(
+            &mut args,
+            &input_layout,
+            &AudioSettings::default(),
+            true,
+            true,
+        );
+
+        assert_eq!(args, vec!["-shortest"]);
     }
 
     #[test]
@@ -23745,6 +23924,73 @@ mod tests {
         assert_eq!(std::fs::read(&preexisting).unwrap(), b"must survive");
 
         cleanup_prepared_mp4_export_staging(&staging).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Runs the production microphone filter/duration policy through real
+    /// FFmpeg: a one-second mic EOF must become silence until the three-second
+    /// video EOF, then `-shortest` must terminate the padded output.
+    #[test]
+    #[ignore = "spawns ffmpeg and ffprobe; run on recording-studio hosts"]
+    fn real_ffmpeg_microphone_eof_keeps_video_as_the_output_clock() {
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-real-microphone-continuity-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("microphone-continuity.mkv");
+        let input_layout = microphone_input_layout(false);
+        let audio = AudioSettings::default();
+        let mut args = vec![
+            "-y".to_string(),
+            "-hide_banner".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-f".to_string(),
+            "lavfi".to_string(),
+            "-i".to_string(),
+            "color=size=64x64:rate=10:duration=3".to_string(),
+            "-f".to_string(),
+            "lavfi".to_string(),
+            "-i".to_string(),
+            "sine=frequency=440:sample_rate=48000:duration=1".to_string(),
+            "-map".to_string(),
+            "0:v".to_string(),
+        ];
+        append_audio_output_args(&mut args, &input_layout);
+        args.extend(["-c:v".to_string(), "mpeg4".to_string()]);
+        append_audio_encoding_with_video_clock(&mut args, &input_layout, &audio, true, false);
+        args.push(output.display().to_string());
+
+        let status = std::process::Command::new("ffmpeg")
+            .args(&args)
+            .status()
+            .expect("ffmpeg should be on PATH for this ignored test");
+        assert!(status.success(), "microphone continuity FFmpeg failed");
+
+        let probe = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+            ])
+            .arg(&output)
+            .output()
+            .expect("ffprobe should be on PATH for this ignored test");
+        assert!(probe.status.success(), "microphone continuity probe failed");
+        let duration = String::from_utf8(probe.stdout)
+            .unwrap()
+            .trim()
+            .parse::<f64>()
+            .unwrap();
+        assert!(
+            (2.9..=3.1).contains(&duration),
+            "audio EOF shortened the {duration:.3}s output instead of padding to video EOF"
+        );
+
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -23977,7 +24223,7 @@ mod tests {
         assert!(with_mic.iter().any(|arg| arg == "title=Microphone"));
         assert_eq!(
             arg_value(&with_mic, "-af"),
-            Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0")
+            Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0,apad")
         );
         assert_eq!(arg_value(&with_mic, "-ac"), Some("2"));
         assert_eq!(arg_value(&with_mic, "-c:a"), Some("pcm_s16le"));

@@ -31,6 +31,33 @@ export function performanceAppSpawnSpec(env = process.env) {
   return { command, args: [], cwd: dirname(command) }
 }
 
+/**
+ * Turns arbitrary text-stream chunks into complete lines. stdout and stderr
+ * need separate instances: a trailing fragment from one stream must never be
+ * joined to the next chunk delivered by the other.
+ */
+export function createLineBuffer(onLine) {
+  let remainder = ''
+
+  const emit = (line) => {
+    onLine(line.endsWith('\r') ? line.slice(0, -1) : line)
+  }
+
+  return {
+    write(text) {
+      const lines = `${remainder}${text}`.split('\n')
+      remainder = lines.pop() ?? ''
+      for (const line of lines) emit(line)
+    },
+    flush() {
+      if (!remainder) return
+      const line = remainder
+      remainder = ''
+      emit(line)
+    }
+  }
+}
+
 export function windowsAcceptanceProfileDir({
   env = {},
   platform = process.platform,
@@ -311,51 +338,58 @@ export function launchDevApp({
       }
     }
 
-    const handle = (text) => {
-      for (const line of text.split(/\r?\n/)) {
-        if (!line.trim()) continue
-        rememberRecentOutput(recentOutput, line)
-        if (onLine && !stopping) onLine(line)
-        const idx = line.indexOf(MARKER_PREFIX)
-        if (idx === -1) continue
-        const rest = line.slice(idx + MARKER_PREFIX.length)
-        const spaceIdx = rest.indexOf(' ')
-        if (spaceIdx === -1) continue
-        const marker = rest.slice(0, spaceIdx)
-        if (!requiredMarkers.includes(marker)) continue
-        let connection
-        try {
-          connection = JSON.parse(rest.slice(spaceIdx + 1))
-        } catch {
-          // A non-JSON tail for a known marker: ignore and keep waiting.
-          continue
-        }
-        if (marker === 'preview-motion-ready') {
-          if (packagedSmokeCommandCapability && connection?.capability === undefined) {
-            connection = { ...connection, capability: packagedSmokeCommandCapability }
-          }
-          try {
-            assertSmokeCommandConnection(connection)
-          } catch (error) {
-            void rejectAfterStop(
-              `Invalid [smoke] preview-motion-ready marker: ${error?.message ?? error}`
-            )
-            return
-          }
-        }
-        connections[marker] = connection
-        settleIfReady()
+    const handleLine = (line) => {
+      if (!line.trim()) return
+      rememberRecentOutput(recentOutput, line)
+      if (onLine && !stopping) onLine(line)
+      const idx = line.indexOf(MARKER_PREFIX)
+      if (idx === -1) return
+      const rest = line.slice(idx + MARKER_PREFIX.length)
+      const spaceIdx = rest.indexOf(' ')
+      if (spaceIdx === -1) return
+      const marker = rest.slice(0, spaceIdx)
+      if (!requiredMarkers.includes(marker)) return
+      let connection
+      try {
+        connection = JSON.parse(rest.slice(spaceIdx + 1))
+      } catch {
+        // A non-JSON tail for a known marker: ignore and keep waiting.
+        return
       }
+      if (marker === 'preview-motion-ready') {
+        if (packagedSmokeCommandCapability && connection?.capability === undefined) {
+          connection = { ...connection, capability: packagedSmokeCommandCapability }
+        }
+        try {
+          assertSmokeCommandConnection(connection)
+        } catch (error) {
+          void rejectAfterStop(
+            `Invalid [smoke] preview-motion-ready marker: ${error?.message ?? error}`
+          )
+          return
+        }
+      }
+      connections[marker] = connection
+      settleIfReady()
     }
+
+    const stdoutLines = createLineBuffer(handleLine)
+    const stderrLines = createLineBuffer(handleLine)
 
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
-    child.stdout.on('data', handle)
-    child.stderr.on('data', handle)
+    child.stdout.on('data', (text) => stdoutLines.write(text))
+    child.stderr.on('data', (text) => stderrLines.write(text))
+    child.stdout.on('end', () => stdoutLines.flush())
+    child.stderr.on('end', () => stderrLines.flush())
     child.on('error', (error) => {
       void rejectAfterStop(error.message)
     })
-    child.on('exit', (code, signal) => {
+    // `close` follows both `exit` and stdio shutdown. Waiting for it keeps the
+    // final output chunks in order before flushing a possible unterminated line.
+    child.on('close', (code, signal) => {
+      stdoutLines.flush()
+      stderrLines.flush()
       void rejectAfterStop(
         `Dev app exited before handshake completed: code=${code} signal=${signal}`
       )

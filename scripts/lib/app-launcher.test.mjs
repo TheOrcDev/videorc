@@ -6,6 +6,7 @@ import { resolve } from 'node:path'
 
 import {
   appSpawnSpec,
+  createLineBuffer,
   devAppFailureMessage,
   devAppSpawnOptions,
   devAppSpawnSpec,
@@ -16,6 +17,10 @@ import {
   stopProcess,
   windowsAcceptanceProfileDir
 } from './app-launcher.mjs'
+import {
+  countTransientFifoPauseMarkers,
+  TRANSIENT_FIFO_PAUSE_FIRED_MARKER
+} from './transient-fifo-pressure-gates.mjs'
 
 const SMOKE_ENV_KEYS = [
   'VIDEORC_APP_DATA_DIR',
@@ -312,6 +317,27 @@ test('dev app launch failures include the latest child output', () => {
   assert.match(message, /vite failed to bind port 5173/)
   assert.match(message, /electron-vite exited with code 1/)
   assert.equal(devAppFailureMessage('plain failure', []), 'plain failure')
+})
+
+test('line buffering preserves a FIFO hook marker split across stdout chunks', () => {
+  const stdoutLines = []
+  const stderrLines = []
+  const stdout = createLineBuffer((line) => stdoutLines.push(line))
+  const stderr = createLineBuffer((line) => stderrLines.push(line))
+
+  const splitAt = Math.floor(TRANSIENT_FIFO_PAUSE_FIRED_MARKER.length / 2)
+  stdout.write(`WARN ${TRANSIENT_FIFO_PAUSE_FIRED_MARKER.slice(0, splitAt)}`)
+  stderr.write('independent stderr fragment')
+  stdout.write(`${TRANSIENT_FIFO_PAUSE_FIRED_MARKER.slice(splitAt)}\r`)
+  stdout.write('\nnext stdout line\n')
+  stderr.flush()
+
+  assert.deepEqual(stdoutLines, [`WARN ${TRANSIENT_FIFO_PAUSE_FIRED_MARKER}`, 'next stdout line'])
+  assert.deepEqual(stderrLines, ['independent stderr fragment'])
+  assert.equal(
+    stdoutLines.reduce((count, line) => count + countTransientFifoPauseMarkers(line), 0),
+    1
+  )
 })
 
 test(

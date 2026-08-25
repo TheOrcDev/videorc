@@ -154,6 +154,7 @@ import type {
   AudioProcessingUpdateResult,
   BackendConnection,
   BackendHealth,
+  BackendLifecycleEvent,
   BackendLogEvent,
   CommentsWindowState,
   CompositorFrameReady,
@@ -212,6 +213,7 @@ import type {
   SessionCommentsPage,
   SessionDeletionOperation,
   SessionDetails,
+  SessionHealthEventsPage,
   SessionListPage,
   SessionLogEntry,
   SessionSummary,
@@ -314,12 +316,7 @@ import {
   pendingCompositorStatusSupersedes,
   type NativePreviewRendererTimingFields
 } from '@/lib/native-preview-present-policy'
-import { isTransientBackendError, shouldToastBackendError } from '@/lib/backend-transport'
-import {
-  isPremiumUpgradeMessage,
-  premiumRequiredIssueMessage,
-  VIDEORC_PREMIUM_URL
-} from '@/lib/premium-upgrade'
+import { isPremiumUpgradeMessage, premiumRequiredIssueMessage } from '@/lib/premium-upgrade'
 import {
   reduceSessionStartFailure,
   SESSION_START_FAILED_TOAST_ID,
@@ -328,7 +325,7 @@ import {
   sessionStartFailureToastOptions,
   type SessionStartFailure
 } from '@/lib/session-start-failure'
-import { recordingStartupHealthToast } from '@/lib/studio-health'
+import type { SessionRuntimeActivity, SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
 import { effectiveSceneBackground } from '@/lib/background-assets'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
@@ -373,48 +370,14 @@ type CaptionOverlayWork = {
   position: 'top' | 'bottom'
 }
 
-function openPremiumUpgradePage(): void {
-  const opener = window.videorc?.openOAuthUrl
-  if (opener) {
-    void opener(VIDEORC_PREMIUM_URL)
-    return
-  }
-
-  window.open(VIDEORC_PREMIUM_URL, '_blank', 'noopener,noreferrer')
-}
-
-function premiumUpgradeToastOptions(description?: string) {
-  return {
-    description,
-    duration: 15000,
-    action: {
-      label: 'View Premium',
-      onClick: openPremiumUpgradePage
-    }
-  }
-}
-
-function sourceFallbackActiveSessionMessage(state: RecordingStatus['state']): string {
-  if (state === 'streaming') {
-    return 'Source changed while streaming. Check the output before continuing.'
-  }
-  return 'Source changed while recording. Check the output before continuing.'
-}
-
 const NATIVE_PREVIEW_SURFACE_PRESENT_REPORT_INTERVAL_MS = 250
 const WORKSPACE_NAVIGATE_EVENT = 'videorc:navigate-workspace'
 const AI_CONSENT_STORAGE_KEY = 'videorc.aiConsent'
+const RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID = 'recording-stopped-unexpectedly'
+const MICROPHONE_INPUT_LOST_TOAST_ID = 'microphone-input-lost'
 
-function isRecordingQualityEvent(code: string): boolean {
-  return code.startsWith('recording-quality-')
-}
-
-function openLibraryFromQualityToast(sessionId?: string): void {
-  window.dispatchEvent(
-    new CustomEvent(WORKSPACE_NAVIGATE_EVENT, {
-      detail: { tab: 'library', sessionId: sessionId ?? null }
-    })
-  )
+function loadSessionRuntimeRecovery() {
+  return import('@/lib/session-runtime-recovery')
 }
 
 // Steady-state telemetry (surface counters, diagnostics stats) commits to
@@ -1000,6 +963,10 @@ export type StudioContextValue = {
    * again or dismisses it. Rendered next to the Record control (B0). */
   sessionStartFailure: SessionStartFailure | null
   dismissSessionStartFailure: () => void
+  /** A mid-session failure or degraded recording condition. It stays beside
+   * the transport controls until dismissed or the next session starts. */
+  sessionRuntimeNotice: SessionRuntimeNotice | null
+  dismissSessionRuntimeNotice: () => void
   /** Re-run the exact start that failed (same streaming override). */
   retrySessionStart: () => void
   refreshScreens: () => Promise<void>
@@ -2493,7 +2460,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   settingsRef.current = settings
   // Stable handle for callbacks that only need to READ the config (labels,
   // lookups) without re-creating themselves on every config change.
-  const lastRecordingStateRef = useRef<string | null>(null)
+  const lastRecordingStateRef = useRef<RecordingStatus['state'] | null>(null)
+  const lastSessionActivityRef = useRef<SessionRuntimeActivity>('recording')
   // The idle status tick that ends a session does not reliably carry the
   // finished session's id; remember the last one seen so the saved-toast
   // actions can target the right recording.
@@ -2501,6 +2469,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Quality-gate toast dedupe: the gate can re-emit an updated not-100 verdict for
   // the same session (fast assessment, then post-repair); one toast is enough.
   const qualityToastSessionsRef = useRef<Set<string>>(new Set())
+  const recordingFailureSessionRef = useRef<string | null>(null)
+  const microphoneInputLostSessionRef = useRef<string | null>(null)
+  const sessionRuntimeEpochRef = useRef(0)
   const captureConfigRef = useRef(captureConfig)
   const liveAudioProcessingSyncRef = useRef<{
     token: object
@@ -2697,23 +2668,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // Always keep the diagnostic record, even for suppressed transients.
     setLastError(message)
     if (isPremiumUpgradeMessage(message)) {
-      toast.error(message, premiumUpgradeToastOptions())
+      void loadSessionRuntimeRecovery().then((runtime) => runtime.showPremiumUpgrade(message))
       return
     }
-    // S1 (plan 024): a permission grant restarts the backend; the requests that
-    // fan out into the ~1s reconnect window reject with the transient transport
-    // strings. The Session badge already narrates "Connecting…"/"Backend
-    // offline", so suppress those toasts entirely while not connected instead of
-    // stacking a wall of red. A transport blip WHILE connected still surfaces —
-    // once, via a keyed id so it can never stack.
-    if (!shouldToastBackendError(message, wsStatusRef.current)) {
-      return
-    }
-    if (isTransientBackendError(message)) {
-      toast.error(message, { id: 'backend-transport' })
-      return
-    }
-    toast.error(message)
+    const status = wsStatusRef.current
+    void loadSessionRuntimeRecovery().then((runtime) => runtime.showBackendError(message, status))
   }, [])
 
   // --- Session-start failures are unmissable (B0) ----------------------------
@@ -2723,12 +2682,31 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // user starts again or dismisses it. The retry closure is held in a ref so the
   // toast action (created once) always re-runs the LATEST failed start.
   const [sessionStartFailure, setSessionStartFailure] = useState<SessionStartFailure | null>(null)
+  const [sessionRuntimeNotice, setSessionRuntimeNotice] = useState<SessionRuntimeNotice | null>(
+    null
+  )
+  const sessionRuntimeNoticeRef = useRef<SessionRuntimeNotice | null>(null)
+  const replaceSessionRuntimeNotice = useCallback((notice: SessionRuntimeNotice | null) => {
+    sessionRuntimeNoticeRef.current = notice
+    setSessionRuntimeNotice(notice)
+  }, [])
   const sessionStartRetryRef = useRef<(() => void) | null>(null)
   const dismissSessionStartFailure = useCallback(() => {
     sessionStartRetryRef.current = null
     setSessionStartFailure((current) => reduceSessionStartFailure(current, { type: 'dismissed' }))
     toast.dismiss(SESSION_START_FAILED_TOAST_ID)
   }, [])
+  const dismissSessionRuntimeNotice = useCallback(() => {
+    sessionRuntimeEpochRef.current += 1
+    replaceSessionRuntimeNotice(null)
+    toast.dismiss(RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID)
+    toast.dismiss(MICROPHONE_INPUT_LOST_TOAST_ID)
+  }, [replaceSessionRuntimeNotice])
+  const clearSessionRuntimeState = useCallback(() => {
+    recordingFailureSessionRef.current = null
+    microphoneInputLostSessionRef.current = null
+    dismissSessionRuntimeNotice()
+  }, [dismissSessionRuntimeNotice])
   const retrySessionStart = useCallback(() => {
     const retry = sessionStartRetryRef.current
     if (!retry) {
@@ -2740,8 +2718,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setSessionStartFailure((current) =>
       reduceSessionStartFailure(current, { type: 'start-attempted' })
     )
+    clearSessionRuntimeState()
     toast.dismiss(SESSION_START_FAILED_TOAST_ID)
-  }, [])
+  }, [clearSessionRuntimeState])
   const reportSessionStartFailure = useCallback(
     (error: unknown, retry: () => void) => {
       const message = sessionStartFailureMessage(error)
@@ -2753,7 +2732,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (isPremiumUpgradeMessage(message)) {
         // Premium gate: the upgrade link is the only useful action, and the
         // Session-panel line still carries the reason persistently.
-        toast.error(message, premiumUpgradeToastOptions())
+        void loadSessionRuntimeRecovery().then((runtime) => runtime.showPremiumUpgrade(message))
         return
       }
       toast.error(
@@ -2768,6 +2747,73 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       )
     },
     [retrySessionStart]
+  )
+
+  const publishRecordingFailure = useCallback(
+    async (status: RecordingStatus, activityOverride?: SessionRuntimeActivity): Promise<void> => {
+      const activity = activityOverride ?? lastSessionActivityRef.current
+      const continuationEpoch = sessionRuntimeEpochRef.current
+      const expectedSessionId = status.sessionId ?? lastRecordingSessionIdRef.current ?? undefined
+      const runtime = await loadSessionRuntimeRecovery()
+      if (
+        !runtime.sessionRuntimeContinuationIsCurrent(
+          continuationEpoch,
+          sessionRuntimeEpochRef.current,
+          expectedSessionId,
+          recordingRef.current.sessionId ?? lastRecordingSessionIdRef.current ?? undefined
+        )
+      ) {
+        return
+      }
+      const presentation = runtime.recordingFailurePresentation({
+        status,
+        activity,
+        ...(lastRecordingSessionIdRef.current
+          ? { fallbackSessionId: lastRecordingSessionIdRef.current }
+          : {}),
+        currentDedupeKey: recordingFailureSessionRef.current
+      })
+      if (!presentation) return
+      recordingFailureSessionRef.current = presentation.dedupeKey
+      replaceSessionRuntimeNotice(presentation.notice)
+      runtime.showRecordingFailure(presentation)
+    },
+    [replaceSessionRuntimeNotice]
+  )
+
+  const publishMicrophoneInputLost = useCallback(
+    async (event: HealthEvent): Promise<void> => {
+      const continuationEpoch = sessionRuntimeEpochRef.current
+      const expectedSessionId = event.sessionId ?? lastRecordingSessionIdRef.current ?? undefined
+      const runtime = await loadSessionRuntimeRecovery()
+      if (
+        !runtime.sessionRuntimeContinuationIsCurrent(
+          continuationEpoch,
+          sessionRuntimeEpochRef.current,
+          expectedSessionId,
+          recordingRef.current.sessionId ?? lastRecordingSessionIdRef.current ?? undefined
+        )
+      ) {
+        return
+      }
+      const presentation = runtime.microphoneLossPresentation({
+        event,
+        recording: recordingRef.current,
+        ...(lastRecordingSessionIdRef.current
+          ? { lastSessionId: lastRecordingSessionIdRef.current }
+          : {}),
+        lastActivity: lastSessionActivityRef.current,
+        currentDedupeKey: microphoneInputLostSessionRef.current
+      })
+      if (!presentation) return
+      microphoneInputLostSessionRef.current = presentation.dedupeKey
+      lastSessionActivityRef.current = presentation.activity
+      if (sessionRuntimeNoticeRef.current?.kind !== 'recording-failed') {
+        replaceSessionRuntimeNotice(presentation.notice)
+      }
+      runtime.showMicrophoneLoss(presentation)
+    },
+    [replaceSessionRuntimeNotice]
   )
 
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------
@@ -3196,6 +3242,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const applyRecordingStatus = useCallback((status: RecordingStatus) => {
+    if (status.state === 'recording' || status.state === 'streaming') {
+      lastSessionActivityRef.current = status.state === 'streaming' ? 'live-stream' : 'recording'
+    }
     recordingRef.current = status
     setRecording(status)
     syncFramePollingSuppressionRef.current?.()
@@ -4244,6 +4293,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   useEffect(() => {
     let disposed = false
+    let latestLifecycleEvent: BackendLifecycleEvent | null = null
 
     if (typeof window === 'undefined' || !window.videorc) {
       // The preload bridge is unavailable (e.g. rendered outside Electron).
@@ -4270,6 +4320,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const offLog = window.videorc.onBackendLog(appendLog)
     // F-014: surface backend crashes instead of zombie-ing with a Ready badge.
     const offLifecycle = window.videorc.onBackendLifecycle?.((event) => {
+      latestLifecycleEvent = event
       // Crash evidence (runtimeInfo.backendCrashes) is written by main at the
       // moment of the exit; re-read it so Diagnostics and the next bundle
       // export carry the record without a relaunch.
@@ -4280,25 +4331,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         })
       }
-      if (event.state === 'restarting') {
-        toast.warning('Backend crashed', {
-          id: 'backend-lifecycle',
-          description: `Restarting automatically (attempt ${event.attempt ?? 1})…`
-        })
-      } else if (event.state === 'failed') {
-        toast.error('Backend crashed repeatedly', {
-          id: 'backend-lifecycle',
-          description: 'Automatic restarts stopped. Restart Videorc to recover.',
-          duration: Infinity
-        })
-      } else if (event.state === 'lost') {
-        toast.error('Backend shutdown could not be confirmed', {
-          id: 'backend-lifecycle',
-          description: 'A replacement was not started. Quit and reopen Videorc to recover safely.',
-          duration: Infinity
-        })
-      } else if (event.state === 'running') {
+      if (event.state === 'running') {
         toast.dismiss('backend-lifecycle')
+      } else {
+        void loadSessionRuntimeRecovery().then((runtime) => {
+          if (!disposed && latestLifecycleEvent === event) runtime.showBackendLifecycle(event)
+        })
       }
     })
 
@@ -4329,10 +4367,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ].slice(-50)
 
       if (isActiveRecordingState(sessionState)) {
-        toast.warning(sourceFallbackActiveSessionMessage(sessionState), {
-          duration: 10_000,
-          id: 'source-reconciliation:active-session'
-        })
+        void loadSessionRuntimeRecovery().then((runtime) =>
+          runtime.showSourceFallbackActiveSession(sessionState)
+        )
       }
     },
     []
@@ -4359,6 +4396,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     let disposed = false
     const generation = bootstrapGenerationRef.current + 1
     bootstrapGenerationRef.current = generation
+    sessionRuntimeEpochRef.current += 1
+    const priorSessionState = lastRecordingStateRef.current ?? recordingRef.current.state
+    const priorSessionId = lastRecordingSessionIdRef.current ?? recordingRef.current.sessionId
+    const priorSessionWasActive = ['recording', 'streaming', 'stopping'].includes(priorSessionState)
     const focusRefreshCoordinator = focusRefreshCoordinatorRef.current
     const sessionListRefreshRequests = sessionListRefreshRequestRef.current
     const sessionListMoreSingleFlight = sessionListMoreSingleFlightRef.current
@@ -4669,25 +4710,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           const outputSessionId = job.outputSessionId
           if (outputSessionId && !announcedNoiseCleanupCompletionsRef.current.has(job.id)) {
             announcedNoiseCleanupCompletionsRef.current.add(job.id)
-            toast.success('Noise cleanup complete', {
-              id: `noise-cleanup-completed-${job.id}`,
-              description: 'A separate cleaned copy is ready. The original was not changed.',
-              duration: 15_000,
-              action: {
-                label: 'Play',
-                onClick: () => {
-                  const openSession = window.videorc?.openSession
-                  if (!openSession) return
-                  void openSession(outputSessionId).then((problem) => {
-                    if (problem) toast.error(problem)
-                  })
-                }
-              },
-              cancel: {
-                label: 'Show in Finder',
-                onClick: () => void window.videorc?.revealSession?.(outputSessionId)
-              }
-            })
+            void loadSessionRuntimeRecovery().then((runtime) =>
+              runtime.showNoiseCleanupCompleted(job.id, outputSessionId)
+            )
           }
         }
       }),
@@ -4695,7 +4720,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bootstrapGuard.mark('recording')
         bootstrapGuard.mark('sessions')
         const status = payload as RecordingStatus
-        const previousState = lastRecordingStateRef.current
+        const previousState = lastRecordingStateRef.current ?? recordingRef.current.state
+        const previousSessionId =
+          lastRecordingSessionIdRef.current ?? recordingRef.current.sessionId
         lastRecordingStateRef.current = status.state
         if (status.sessionId) {
           lastRecordingSessionIdRef.current = status.sessionId
@@ -4712,44 +4739,53 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // only refresh on the transition).
         if (
           ['recording', 'streaming'].includes(status.state) &&
-          !['recording', 'streaming'].includes(previousState ?? '')
+          (!['recording', 'streaming'].includes(previousState ?? '') ||
+            (status.sessionId && status.sessionId !== previousSessionId))
         ) {
+          clearSessionRuntimeState()
+          void loadSessionRuntimeRecovery()
           void refreshSessions(nextClient)
         }
-        // A finished recording gets its two natural next steps: watch it, or
-        // find it in the Library. (The publish pitch lives in the Publish tab,
-        // not in this toast — owner call, 2026-08-16.)
+        // A terminal session moves a persistent degradation notice to past
+        // tense. A saved recording also gets its two natural next steps: watch
+        // it, or find it in the Library. Stream-only sessions have no local
+        // artifact, so they must not claim that a recording was saved.
         if (
           status.state === 'idle' &&
           ['recording', 'streaming', 'stopping'].includes(previousState ?? '')
         ) {
-          const finishedSessionId = status.sessionId ?? lastRecordingSessionIdRef.current
-          const openInLibrary = (): void =>
-            openLibraryFromQualityToast(finishedSessionId ?? undefined)
-          toast.success('Recording saved', {
-            action: {
-              label: 'Play',
-              onClick: () => {
-                if (!finishedSessionId || !window.videorc?.openSession) {
-                  openInLibrary()
-                  return
-                }
-                void window.videorc.openSession(finishedSessionId).then((problem) => {
-                  // The export can still be finalizing right after the toast
-                  // fires; the Library row shows the honest state, so land
-                  // there instead of erroring on an eager click.
-                  if (problem) {
-                    openInLibrary()
-                  }
-                })
-              }
-            },
-            cancel: {
-              label: 'Open in Library',
-              onClick: openInLibrary
-            },
-            duration: 12000
+          const finishedActivity = lastSessionActivityRef.current
+          const finishedSessionId =
+            status.sessionId ?? lastRecordingSessionIdRef.current ?? undefined
+          const continuationEpoch = sessionRuntimeEpochRef.current
+          void loadSessionRuntimeRecovery().then((runtime) => {
+            if (
+              recordingRef.current.state !== 'idle' ||
+              !runtime.sessionRuntimeContinuationIsCurrent(
+                continuationEpoch,
+                sessionRuntimeEpochRef.current,
+                finishedSessionId,
+                recordingRef.current.sessionId ?? lastRecordingSessionIdRef.current ?? undefined
+              )
+            ) {
+              return
+            }
+            runtime.showSessionFinished({
+              status,
+              ...(lastRecordingSessionIdRef.current
+                ? { lastSessionId: lastRecordingSessionIdRef.current }
+                : {}),
+              activity: finishedActivity,
+              currentNotice: sessionRuntimeNoticeRef.current,
+              replaceNotice: replaceSessionRuntimeNotice
+            })
           })
+        }
+        if (
+          status.state === 'failed' &&
+          ['recording', 'streaming', 'stopping'].includes(previousState ?? '')
+        ) {
+          void publishRecordingFailure(status)
         }
       }),
       // Viewer rider V2: relay the latest concurrent-viewer sample to the
@@ -4790,58 +4826,31 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : current
           })
         }
-        if (isRecordingQualityEvent(event.code)) {
+        if (event.code.startsWith('recording-quality-')) {
           void refreshSessions(nextClient)
         }
-        // Recording startup barrier (B0): an unsteady start is a keyed warning
-        // (the session DID start); a refusal shares the start-failure toast key
-        // so the RPC rejection that follows updates it in place with Retry.
-        const startupToast = recordingStartupHealthToast(event)
-        if (startupToast) {
-          const show = startupToast.variant === 'warning' ? toast.warning : toast.error
-          show(startupToast.title, {
-            id: startupToast.id,
-            description: startupToast.description,
-            duration: startupToast.duration
+        if (event.code === 'microphone-input-lost') {
+          void publishMicrophoneInputLost(event)
+        } else {
+          const qualityDedupeKey = event.sessionId ?? event.message
+          const continuationEpoch = sessionRuntimeEpochRef.current
+          void loadSessionRuntimeRecovery().then((runtime) => {
+            if (
+              !runtime.sessionRuntimeContinuationIsCurrent(
+                continuationEpoch,
+                sessionRuntimeEpochRef.current,
+                event.sessionId ?? undefined,
+                recordingRef.current.sessionId ?? lastRecordingSessionIdRef.current ?? undefined
+              )
+            ) {
+              return
+            }
+            const shownKey = runtime.showSessionHealthEvent(
+              event,
+              qualityToastSessionsRef.current.has(qualityDedupeKey)
+            )
+            if (shownKey) qualityToastSessionsRef.current.add(shownKey)
           })
-        }
-        // Quality-gate toast policy: only interrupt for verdicts the user would
-        // notice and can act on — the backend marks those warn-level (e.g. a
-        // missing stream). Analyzer residuals and internal check/repair failures
-        // arrive info-level and live in the Library row + Diagnostics instead.
-        if (event.code === 'recording-quality-not-100' && event.level === 'warn') {
-          const dedupeKey = event.sessionId ?? event.message
-          if (!qualityToastSessionsRef.current.has(dedupeKey)) {
-            qualityToastSessionsRef.current.add(dedupeKey)
-            toast.warning('Recording is not 100%', {
-              description: event.message,
-              duration: 15000,
-              action: {
-                label: 'Open Library',
-                onClick: () => openLibraryFromQualityToast(event.sessionId ?? undefined)
-              }
-            })
-          }
-        } else if (event.code === 'camera-cadence-mismatch') {
-          // The camera is healthy but delivering a different rate than the session
-          // (e.g. a 24p HDMI feed into a 30fps session). The health event stays in
-          // the session record and diagnostics; a toast on every record start was
-          // noise for setups that live with a fixed-rate HDMI source.
-        } else if (event.code === 'mic-silent') {
-          // Plan 021 F3: the user must hear about a silent mic from the app,
-          // not from playing the file back. Warn = mid-session (stopping and
-          // fixing still saves the take); error = finalize verdict.
-          if (event.level === 'error') {
-            toast.error('Recording has no sound', {
-              description: event.message,
-              duration: 15000
-            })
-          } else {
-            toast.warning('Microphone is silent', {
-              description: event.message,
-              duration: 15000
-            })
-          }
         }
       }),
       nextClient.on('session.log', (payload) => {
@@ -5277,6 +5286,35 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return
         }
 
+        let runtimeRecovery:
+          | {
+              kind: 'recording-failed'
+              status: RecordingStatus
+              activity: SessionRuntimeActivity
+            }
+          | { kind: 'microphone-input-lost'; event: HealthEvent }
+          | null = null
+        if (
+          priorSessionWasActive ||
+          ['recording', 'streaming', 'failed'].includes(nextRecording.state)
+        ) {
+          const recovery = await loadSessionRuntimeRecovery()
+          runtimeRecovery = await recovery.recoverSessionRuntime({
+            recording: nextRecording,
+            sessions: nextSessions.items,
+            ...(priorSessionId ? { priorSessionId } : {}),
+            priorSessionState,
+            loadHealthEvents: (sessionId) =>
+              bootstrapRequest<SessionHealthEventsPage>('sessions.healthEvents.list', {
+                sessionId,
+                limit: SESSION_DETAIL_BUFFER_LIMIT
+              }).then((page) => page.events)
+          })
+          if (!generationIsCurrent()) {
+            return
+          }
+        }
+
         let resolvedPreviewSurface = nextPreviewSurface
         if (
           previewSurfaceStatusRequiresMainAuthority(nextPreviewSurface) &&
@@ -5308,7 +5346,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           setDeviceList(nextDevices)
         }
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'recording')) {
+          if (
+            ['recording', 'streaming', 'stopping'].includes(nextRecording.state) &&
+            nextRecording.sessionId !== priorSessionId
+          ) {
+            clearSessionRuntimeState()
+          }
           applyRecordingStatus(nextRecording)
+          if (nextRecording.sessionId) {
+            lastRecordingSessionIdRef.current = nextRecording.sessionId
+          }
+          if (runtimeRecovery?.kind === 'recording-failed') {
+            await publishRecordingFailure(runtimeRecovery.status, runtimeRecovery.activity)
+          } else if (runtimeRecovery?.kind === 'microphone-input-lost') {
+            await publishMicrophoneInputLost(runtimeRecovery.event)
+          }
+          lastRecordingStateRef.current = nextRecording.state
         }
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'diagnostics')) {
           setDiagnosticStats(nextDiagnostics)
@@ -5481,6 +5534,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
     return () => {
       disposed = true
+      sessionRuntimeEpochRef.current += 1
       focusRefreshCoordinator.invalidate()
       sessionListRefreshRequests.clear()
       sessionListMoreSingleFlight.clear()
@@ -5556,12 +5610,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     applyRecordingStatus,
     commitCohostState,
     commitDiagnosticStatsThrottled,
+    clearSessionRuntimeState,
     connection,
     nativePreviewSurfaceEnabled,
+    publishMicrophoneInputLost,
+    publishRecordingFailure,
     queueNativePreviewCompositorPresent,
     resetNativePreviewCompositorTiming,
     publishCommentHighlightState,
     refreshPlatformAccountsForClient,
+    replaceSessionRuntimeNotice,
     replaceLiveChatSnapshotState,
     updateLiveChatSnapshot,
     validatePlatformAccountsForClient,
@@ -9642,9 +9700,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (preflightDecision.kind === 'blocked') {
         const premiumIssue = premiumRequiredIssueMessage(preflight)
         if (premiumIssue) {
-          toast.error(
-            'Premium required for this Go Live setup.',
-            premiumUpgradeToastOptions(premiumIssue)
+          void loadSessionRuntimeRecovery().then((runtime) =>
+            runtime.showPremiumUpgrade('Premium required for this Go Live setup.', premiumIssue)
           )
         } else {
           toast.error('Resolve Go Live issues before starting.')
@@ -10195,9 +10252,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         video
       })
       if (!gate.allowed) {
-        toast.error(
-          'Premium required for this media profile.',
-          premiumUpgradeToastOptions(gate.reason)
+        void loadSessionRuntimeRecovery().then((runtime) =>
+          runtime.showPremiumUpgrade('Premium required for this media profile.', gate.reason)
         )
         return
       }
@@ -10931,6 +10987,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       continueGoLiveWithReadyDestinations,
       sessionStartFailure,
       dismissSessionStartFailure,
+      sessionRuntimeNotice,
+      dismissSessionRuntimeNotice,
       retrySessionStart,
       refreshScreens,
       importScreenImage,
@@ -11125,6 +11183,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       continueGoLiveWithReadyDestinations,
       sessionStartFailure,
       dismissSessionStartFailure,
+      sessionRuntimeNotice,
+      dismissSessionRuntimeNotice,
       retrySessionStart,
       refreshScreens,
       importScreenImage,

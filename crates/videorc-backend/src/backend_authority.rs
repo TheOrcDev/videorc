@@ -231,6 +231,7 @@ mod tests {
             "encoder_bridge.synthetic_record",
             "recording.start_test",
             "captions.test.inject-audio",
+            "audio.test.disconnect",
             "audio.test.inject-pcm",
             "test.future.mutation",
         ] {

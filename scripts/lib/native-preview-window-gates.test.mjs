@@ -154,6 +154,36 @@ test('native Metal readiness accepts hidden proof host only with native placemen
     }),
     true
   )
+
+  evidence.surfaceStatus.nativePreviewHostKind = 'external-module'
+  assert.equal(
+    previewWindowSurfaceReady(evidence, {
+      expectedTransport: 'native-surface',
+      expectedBacking: 'cametal-layer',
+      expectedHostKind: 'in-process',
+      expectNativeMetalPreview: true
+    }),
+    false
+  )
+})
+
+test('native Metal readiness accepts an in-process host when host kind is not pinned', () => {
+  const evidence = windowsEvidence()
+  evidence.windowState.surface.visible = false
+  evidence.windowState.nativeOwnsPlacement = true
+  evidence.surfaceStatus.transport = 'native-surface'
+  evidence.surfaceStatus.backing = 'cametal-layer'
+  evidence.surfaceStatus.nativePreviewHostKind = 'in-process'
+  evidence.surfaceStatus.framePollingSuppressed = true
+
+  assert.equal(
+    previewWindowSurfaceReady(evidence, {
+      expectedTransport: 'native-surface',
+      expectedBacking: 'cametal-layer',
+      expectNativeMetalPreview: true
+    }),
+    true
+  )
 })
 
 test('native Windows D3D11 readiness requires the canonical presenter triple and polling suppression', () => {

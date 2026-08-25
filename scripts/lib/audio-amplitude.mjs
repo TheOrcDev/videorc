@@ -79,15 +79,25 @@ export function inspectMultipartPcm16Wav(body) {
 
 export async function analyzeMediaAudioAmplitude(
   filePath,
-  { ffmpegPath = 'ffmpeg', sampleRate = 16_000 } = {}
+  { ffmpegPath = 'ffmpeg', sampleRate = 16_000, startSeconds, durationSeconds } = {}
 ) {
+  const windowArgs = []
+  if (startSeconds !== undefined) {
+    assertNonNegativeSeconds(startSeconds, 'startSeconds')
+    windowArgs.push('-ss', String(startSeconds))
+  }
+  if (durationSeconds !== undefined) {
+    assertPositiveSeconds(durationSeconds, 'durationSeconds')
+  }
   const pcm = await runBinary(ffmpegPath, [
     '-nostdin',
     '-hide_banner',
     '-loglevel',
     'error',
+    ...windowArgs,
     '-i',
     filePath,
+    ...(durationSeconds === undefined ? [] : ['-t', String(durationSeconds)]),
     '-map',
     '0:a:0',
     '-vn',
@@ -104,7 +114,21 @@ export async function analyzeMediaAudioAmplitude(
     channels: 1,
     sampleRate,
     bitsPerSample: 16,
+    ...(startSeconds === undefined ? {} : { startSeconds }),
+    ...(durationSeconds === undefined ? {} : { durationSeconds }),
     ...measurePcm16Le(pcm)
+  }
+}
+
+function assertNonNegativeSeconds(value, name) {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new TypeError(`${name} must be a finite, non-negative number.`)
+  }
+}
+
+function assertPositiveSeconds(value, name) {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new TypeError(`${name} must be a finite, positive number.`)
   }
 }
 

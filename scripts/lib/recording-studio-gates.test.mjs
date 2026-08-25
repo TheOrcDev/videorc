@@ -238,9 +238,35 @@ describe('buildRecordingStudioGateSteps', () => {
     )
     for (const flow of [scenarioFlow, stopRaceFlow]) {
       assert.match(flow, /await resolveFinalRecordingPath\(\{[\s\S]*?started,[\s\S]*?stopped,/)
-      assert.match(flow, /recordingStatusEvents,[\s\S]*?healthEvents,[\s\S]*?stopRequestedAt,[\s\S]*?timeoutMs/)
+      assert.match(
+        flow,
+        /recordingStatusEvents,[\s\S]*?healthEvents,[\s\S]*?stopRequestedAt,[\s\S]*?timeoutMs/
+      )
     }
     assert.match(source, /recordingStatusEvents\.push\(\{ \.\.\.message\.payload, receivedAt \}\)/)
     assert.match(source, /healthEvents\.push\(\{ \.\.\.message\.payload, receivedAt \}\)/)
+  })
+
+  it('keeps deterministic FIFO pressure and microphone-loss artifact coverage maintained', () => {
+    const matrixSource = readFileSync(
+      new URL('../smoke-recording-matrix-app.mjs', import.meta.url),
+      'utf8'
+    )
+    assert.match(matrixSource, /VIDEORC_TEST_VT_FIFO_PAUSE_AFTER_FRAMES/)
+    assert.match(matrixSource, /VIDEORC_TEST_VT_FIFO_PAUSE_MS/)
+    assert.match(matrixSource, /evaluateTransientFifoPressure/)
+    assert.match(matrixSource, /requireTransientFifoPressure: true/)
+
+    const captionsSource = readFileSync(
+      new URL('../smoke-captions-live-app.mjs', import.meta.url),
+      'utf8'
+    )
+    assert.match(captionsSource, /audio\.test\.disconnect/)
+    assert.match(captionsSource, /microphone-input-lost/)
+    assert.match(captionsSource, /evaluateMicrophoneLossContinuity/)
+    assert.match(captionsSource, /postLossAudio/)
+    assert.match(captionsSource, /Microphone stopped — recording continues with silence/)
+    assert.match(captionsSource, /data-testid=\"session-runtime-notice\"/)
+    assert.match(captionsSource, /notice\?\.getAttribute\('role'\) === 'alert'/)
   })
 })

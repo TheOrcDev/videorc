@@ -27,6 +27,11 @@ import { launchDevApp } from './lib/app-launcher.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import {
+  countTransientFifoPauseMarkers,
+  evaluateTransientFifoPressure,
+  missingRecordingMatrixResultFailures
+} from './lib/transient-fifo-pressure-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const outputDirectory = resolve(
@@ -64,6 +69,18 @@ const MATRIX = [
     !process.env.VIDEORC_MATRIX_ONLY ||
     process.env.VIDEORC_MATRIX_ONLY.split(',').includes(combo.label)
 )
+
+const HARD_COMBOS = MATRIX.filter((combo) => ['4K30', '1080p60'].includes(combo.label)).map(
+  (combo) => (combo.label === '4K30' ? { ...combo, stress: true } : combo)
+)
+const TRANSIENT_FIFO_COMBO = MATRIX.find((combo) => combo.label === '4K30')
+const EXPECTED_RESULT_LABELS = [
+  ...MATRIX.map((combo) => combo.label),
+  ...HARD_COMBOS.map((combo) => `${combo.label}:hard`),
+  ...(process.platform === 'darwin' && TRANSIENT_FIFO_COMBO
+    ? [`${TRANSIENT_FIFO_COMBO.label}:transient-fifo-pressure`]
+    : [])
+]
 
 // The strict quality-law gates. requireMotion stays off: the test pattern is
 // deliberately reused from the layout smoke and can be near-static.
@@ -123,7 +140,15 @@ const STRESS_GATES = Object.freeze({
   maxTailMismatchMs: null
 })
 
-async function recordCombo({ ws, smoke, combo, assertPreviewLiveness = false, stress = false }) {
+async function recordCombo({
+  ws,
+  smoke,
+  combo,
+  assertPreviewLiveness = false,
+  stress = false,
+  requireTransientFifoPressure = false,
+  getTransientFifoPauseFiredCount = () => 0
+}) {
   // The output-directory capability is single-use: one grant per session.start.
   const { capabilityId } = await requestSmokeCommand(
     smoke,
@@ -131,6 +156,7 @@ async function recordCombo({ ws, smoke, combo, assertPreviewLiveness = false, st
     { kind: 'output-directory', path: outputDirectory },
     { timeoutMs }
   )
+  const transientFifoPauseFiredBefore = getTransientFifoPauseFiredCount()
   const started = await request(
     ws,
     timeoutMs,
@@ -163,6 +189,7 @@ async function recordCombo({ ws, smoke, combo, assertPreviewLiveness = false, st
   } else {
     await new Promise((resolveSleep) => setTimeout(resolveSleep, recordingMs))
   }
+  const activeStatus = await request(ws, timeoutMs, 'recording.status')
   const diagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
   const bridgeDiagnostics = Object.fromEntries(
     [
@@ -171,6 +198,7 @@ async function recordCombo({ ws, smoke, combo, assertPreviewLiveness = false, st
       'encoderBridgeQueueDepth',
       'encoderBridgeOutputQueueOldestFrameAgeMs',
       'encoderBridgeOutputQueueCapacityPressureEvents',
+      'encoderBridgeOutputQueueDroppedFrames',
       'encoderBridgeDroppedFrames',
       'encoderBridgeRepeatedFrames',
       'encoderBridgeEncodedOutputFrames',
@@ -188,6 +216,11 @@ async function recordCombo({ ws, smoke, combo, assertPreviewLiveness = false, st
       .filter((key) => diagnostics[key] !== undefined)
       .map((key) => [key, diagnostics[key]])
   )
+  const transientFifoPauseFiredCount =
+    getTransientFifoPauseFiredCount() - transientFifoPauseFiredBefore
+  if (requireTransientFifoPressure) {
+    bridgeDiagnostics.transientFifoTestPauseFiredCount = transientFifoPauseFiredCount
+  }
   if (
     process.env.VIDEORC_MATRIX_PRINT_BRIDGE_DIAGNOSTICS === '1' ||
     process.env.VIDEORC_SMOKE_PRINT_APP_OUTPUT === '1'
@@ -213,6 +246,16 @@ async function recordCombo({ ws, smoke, combo, assertPreviewLiveness = false, st
   if (livenessFailure) {
     failures.push(livenessFailure)
   }
+  if (requireTransientFifoPressure) {
+    failures.push(
+      ...evaluateTransientFifoPressure({
+        activeStatus,
+        stoppedStatus: stopped,
+        diagnostics,
+        testPauseFiredCount: transientFifoPauseFiredCount
+      })
+    )
+  }
   const { width, height } = quality.metrics
   if (width !== combo.width || height !== combo.height) {
     failures.push(`dimensions ${width}x${height} != requested ${combo.width}x${combo.height}`)
@@ -228,12 +271,20 @@ async function recordCombo({ ws, smoke, combo, assertPreviewLiveness = false, st
     failures,
     warnings: quality.verdict.warnings,
     metrics: quality.metrics,
-    bridgeDiagnostics
+    bridgeDiagnostics,
+    transientFifoPauseFiredCount
   }
 }
 
-async function runPass({ passLabel, combos, extraEnv = {}, assertPreviewLiveness = false }) {
+async function runPass({
+  passLabel,
+  combos,
+  extraEnv = {},
+  assertPreviewLiveness = false,
+  requireTransientFifoPressure = false
+}) {
   const passResults = []
+  let transientFifoPauseFiredCount = 0
   let stopApp = async () => {}
   try {
     const launch = await launchDevApp({
@@ -246,6 +297,7 @@ async function runPass({ passLabel, combos, extraEnv = {}, assertPreviewLiveness
       timeoutMs,
       requiredMarkers: ['backend-ready', 'preview-motion-ready'],
       onLine: (line) => {
+        transientFifoPauseFiredCount += countTransientFifoPauseMarkers(line)
         if (process.env.VIDEORC_SMOKE_PRINT_APP_OUTPUT === '1') console.log(line)
       }
     })
@@ -261,7 +313,9 @@ async function runPass({ passLabel, combos, extraEnv = {}, assertPreviewLiveness
           smoke,
           combo,
           assertPreviewLiveness,
-          stress: combo.stress ?? false
+          stress: combo.stress ?? false,
+          requireTransientFifoPressure,
+          getTransientFifoPauseFiredCount: () => transientFifoPauseFiredCount
         })
         result.combo = label
         passResults.push(result)
@@ -304,22 +358,45 @@ try {
   // exactly that way. Preview must stay live THROUGH the recording.
   // 1080p60 must hold FULL cadence under noise (proven headroom); 4K noise is
   // beyond any real content, so 4K30 runs as a survival stress combo.
-  const hardCombos = MATRIX.filter((combo) => ['4K30', '1080p60'].includes(combo.label)).map(
-    (combo) => (combo.label === '4K30' ? { ...combo, stress: true } : combo)
-  )
-  if (hardCombos.length > 0) {
+  if (HARD_COMBOS.length > 0) {
     results.push(
       ...(await runPass({
         passLabel: 'hard',
-        combos: hardCombos,
+        combos: HARD_COMBOS,
         extraEnv: { VIDEORC_SYNTHETIC_HARD_CONTENT: '1' },
         assertPreviewLiveness: true
+      }))
+    )
+  }
+  // Deterministic reproduction for the 2026-08-25 owner failure: pause the
+  // macOS VideoToolbox FIFO worker once for 350ms after the session is warm.
+  // The queue becomes older than the 250ms admission budget but stays below
+  // its 16-frame ceiling. Recovery must preserve every access unit, keep the
+  // compositor and session live, and finish as MP4 on the user's stop.
+  if (process.platform === 'darwin' && TRANSIENT_FIFO_COMBO) {
+    results.push(
+      ...(await runPass({
+        passLabel: 'transient-fifo-pressure',
+        combos: [TRANSIENT_FIFO_COMBO],
+        extraEnv: {
+          VIDEORC_TEST_VT_FIFO_PAUSE_AFTER_FRAMES: '60',
+          VIDEORC_TEST_VT_FIFO_PAUSE_MS: '350'
+        },
+        assertPreviewLiveness: true,
+        requireTransientFifoPressure: true
       }))
     )
   }
 } catch (error) {
   console.error(`Recording matrix pass failed to launch: ${String(error?.message ?? error)}`)
 }
+
+results.push(
+  ...missingRecordingMatrixResultFailures({
+    expectedLabels: EXPECTED_RESULT_LABELS,
+    results
+  })
+)
 
 const resultsPath = join(outputDirectory, 'recording-matrix-results.json')
 try {

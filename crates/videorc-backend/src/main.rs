@@ -5642,6 +5642,36 @@ async fn handle_text_message_with_role(
             }
         }
         #[cfg(debug_assertions)]
+        "audio.test.disconnect" => {
+            let session_id = command
+                .params
+                .get("sessionId")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let injector = {
+                let recording = state.recording.lock().await;
+                recording
+                    .as_ref()
+                    .filter(|active| active.session_id == session_id)
+                    .and_then(|active| active.native_audio.as_ref())
+                    .and_then(|native_audio| native_audio.caption_contract_test_injector())
+            };
+            match injector {
+                Some(injector) => ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({
+                        "disconnected": injector.disconnect_source(),
+                    }),
+                ),
+                None => ServerResponse::error(
+                    command.id,
+                    "caption-contract-test-disabled",
+                    "The matching caption contract test microphone session is not active.",
+                ),
+            }
+        }
+        #[cfg(debug_assertions)]
         "audio.test.inject-pcm" => {
             let session_id = command
                 .params
