@@ -803,6 +803,7 @@ describe('backend RPC contract', () => {
       encoderBridgeMfInputCreditTimeouts: 2,
       encoderBridgeMfInputCreditWaitP95Ms: 12.5,
       encoderBridgeOutputQueueHighWaterFrames: 16,
+      encoderBridgeOutputQueueOldestFrameAgeMs: 240,
       encoderBridgeOutputQueueOldestFrameAgeHighWaterMs: 528,
       encoderBridgeOutputLastProgressAgeMs: 12,
       encoderBridgeOutputPressureRecoveryEvents: 1,
@@ -822,6 +823,26 @@ describe('backend RPC contract', () => {
     }
     expect(validateBackendRpcResult('diagnostics.stats', diagnostics)).toEqual(diagnostics)
     expect(validateBackendEventPayload('diagnostics.stats', diagnostics)).toEqual(diagnostics)
+    for (const field of [
+      'encoderBridgeOutputQueueOldestFrameAgeMs',
+      'encoderBridgeOutputQueueOldestFrameAgeHighWaterMs',
+      'encoderBridgeOutputLastProgressAgeMs'
+    ]) {
+      for (const invalid of [null, -1, Number.POSITIVE_INFINITY]) {
+        expect(() =>
+          validateBackendRpcResult('diagnostics.stats', {
+            ...diagnostics,
+            [field]: invalid
+          })
+        ).toThrow(field)
+        expect(() =>
+          validateBackendEventPayload('diagnostics.stats', {
+            ...diagnostics,
+            [field]: invalid
+          })
+        ).toThrow(field)
+      }
+    }
     for (const field of requiredCapturePressureDiagnosticFields) {
       const missing = { ...diagnostics }
       Reflect.deleteProperty(missing, field)
