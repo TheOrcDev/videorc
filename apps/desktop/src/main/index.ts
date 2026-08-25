@@ -9093,6 +9093,10 @@ async function runSmokePreviewMotionCommand(
     return destroyNativePreviewSurface()
   }
 
+  if (command === 'drain-native-preview-host-commands') {
+    return drainBackendNativePreviewHostCommands()
+  }
+
   if (command === 'apply-native-preview-host-commands') {
     if (!Array.isArray(params.commands)) {
       throw new Error('Native preview host command smoke requires a commands array.')

@@ -278,13 +278,16 @@ describe('smoke command security', () => {
   })
 
   it('restricts an authenticated packaged harness to the preview gate command subset', async () => {
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('app-quit')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('authorize-smoke-resource')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('import-smoke-background')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('inspect-packaged-bundled-background')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('windows-live-audio-harness')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('notes-window-open')).toBe(true)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('notes-window-save-document')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('comments-window-open')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('captions-window-open')).toBe(true)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('drain-native-preview-host-commands')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('eval-js')).toBe(false)
     const capability = 'x'.repeat(43)
     const server = createServer((request, response) => {

@@ -13,15 +13,16 @@ use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 use crate::diagnostics::{
-    PreviewScreenCaptureTimingStats, apply_preview_screen_capture_timing_stats,
-    apply_preview_screen_source_stats, apply_preview_source_frame_store_stats,
+    PreviewScreenCaptureStats, PreviewScreenCaptureTimingStats, apply_preview_screen_capture_stats,
+    apply_preview_screen_capture_timing_stats, apply_preview_screen_source_stats,
+    apply_preview_source_frame_store_stats,
 };
 use crate::ffmpeg::resolve_ffmpeg_path;
-use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats};
+use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats, SurfaceBackingTrackerHandle};
 use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
 use crate::protocol::{
-    PreviewScreenSourceKind, PreviewScreenStartParams, PreviewScreenState, PreviewScreenStatus,
-    VideoSettings,
+    PreviewScreenFrameStatusStats, PreviewScreenSourceKind, PreviewScreenStartParams,
+    PreviewScreenState, PreviewScreenStatus, VideoSettings,
 };
 #[cfg(target_os = "windows")]
 use crate::screen_capture::parse_windows_dxgi_source_id;
@@ -107,6 +108,9 @@ pub type PreviewScreenSlot = Arc<tokio::sync::Mutex<PreviewScreenRuntime>>;
 #[derive(Debug)]
 pub struct PreviewScreenRuntime {
     pub status: PreviewScreenStatus,
+    /// Source-level ownership keeps surface-backed frames observable while a
+    /// capture session replaces its per-session `FrameStore`.
+    surface_backing_tracker: SurfaceBackingTrackerHandle,
     run_id: Option<String>,
     source_key: Option<SourceKey>,
     starting: Option<PreviewScreenStartKey>,
@@ -158,6 +162,104 @@ pub(crate) struct PreviewScreenStop {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewScreenPixelFormat {
     Bgra8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenCaptureFrameStatus {
+    Complete,
+    Idle,
+    Blank,
+    Suspended,
+    Started,
+    Stopped,
+    Unknown,
+}
+
+impl ScreenCaptureFrameStatus {
+    fn is_valid_current_image(self) -> bool {
+        self == Self::Complete
+    }
+}
+
+fn classify_screen_capture_frame_status(raw: Option<i64>) -> ScreenCaptureFrameStatus {
+    match raw {
+        Some(0) => ScreenCaptureFrameStatus::Complete,
+        Some(1) => ScreenCaptureFrameStatus::Idle,
+        Some(2) => ScreenCaptureFrameStatus::Blank,
+        Some(3) => ScreenCaptureFrameStatus::Suspended,
+        Some(4) => ScreenCaptureFrameStatus::Started,
+        Some(5) => ScreenCaptureFrameStatus::Stopped,
+        _ => ScreenCaptureFrameStatus::Unknown,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ScreenCaptureFrameStatusCounts {
+    complete: u64,
+    idle: u64,
+    blank: u64,
+    suspended: u64,
+    started: u64,
+    stopped: u64,
+    unknown: u64,
+}
+
+impl ScreenCaptureFrameStatusCounts {
+    fn record(&mut self, status: ScreenCaptureFrameStatus) {
+        let counter = match status {
+            ScreenCaptureFrameStatus::Complete => &mut self.complete,
+            ScreenCaptureFrameStatus::Idle => &mut self.idle,
+            ScreenCaptureFrameStatus::Blank => &mut self.blank,
+            ScreenCaptureFrameStatus::Suspended => &mut self.suspended,
+            ScreenCaptureFrameStatus::Started => &mut self.started,
+            ScreenCaptureFrameStatus::Stopped => &mut self.stopped,
+            ScreenCaptureFrameStatus::Unknown => &mut self.unknown,
+        };
+        *counter = counter.saturating_add(1);
+    }
+
+    #[cfg(test)]
+    fn total(self) -> u64 {
+        self.complete
+            .saturating_add(self.idle)
+            .saturating_add(self.blank)
+            .saturating_add(self.suspended)
+            .saturating_add(self.started)
+            .saturating_add(self.stopped)
+            .saturating_add(self.unknown)
+    }
+
+    fn diagnostic_stats(self) -> PreviewScreenFrameStatusStats {
+        PreviewScreenFrameStatusStats {
+            complete: self.complete,
+            idle: self.idle,
+            blank: self.blank,
+            suspended: self.suspended,
+            started: self.started,
+            stopped: self.stopped,
+            unknown: self.unknown,
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn record_screen_capture_callback_status(
+    shared: &Arc<StdMutex<PreviewScreenShared>>,
+    callback_at: Instant,
+    status: ScreenCaptureFrameStatus,
+) -> bool {
+    let mut guard = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.capture_timings.record_callback_at(callback_at);
+    guard.capture_callback_count = guard.capture_callback_count.saturating_add(1);
+    guard.frame_statuses.record(status);
+    if status.is_valid_current_image() {
+        true
+    } else {
+        guard.dropped_frames = guard.dropped_frames.saturating_add(1);
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,13 +401,24 @@ pub struct PreviewScreenShared {
     /// the lease's once-only release is unit-tested on every platform.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     direct_d3d11_consumers: usize,
+    capture_callback_count: u64,
     frames_captured: u64,
     dropped_frames: u64,
+    frame_statuses: ScreenCaptureFrameStatusCounts,
     frames_in_window: u64,
     window_started_at: Option<Instant>,
     source_fps: Option<f64>,
     last_error: Option<String>,
     capture_timings: ScreenCaptureTimingWindow,
+}
+
+impl PreviewScreenShared {
+    fn with_surface_backing_tracker(tracker: SurfaceBackingTrackerHandle) -> Self {
+        Self {
+            frame_store: FrameStore::new_with_surface_backing_tracker(1, tracker),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -382,6 +495,7 @@ fn max_sample(samples: &[f64]) -> Option<f64> {
 pub fn initial_preview_screen_state() -> PreviewScreenRuntime {
     PreviewScreenRuntime {
         status: idle_status(Some("Native screen preview is not running.".to_string())),
+        surface_backing_tracker: SurfaceBackingTrackerHandle::default(),
         run_id: None,
         source_key: None,
         starting: None,
@@ -526,7 +640,15 @@ async fn start_preview_screen_with_restart_signal(
     signal_screen_restart_ready(&mut restart_ready);
 
     let run_id = Uuid::new_v4().to_string();
-    let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+    let surface_backing_tracker = state
+        .preview_screen
+        .lock()
+        .await
+        .surface_backing_tracker
+        .clone();
+    let shared = Arc::new(StdMutex::new(
+        PreviewScreenShared::with_surface_backing_tracker(surface_backing_tracker),
+    ));
     let (stop_tx, stop_rx) = std_mpsc::channel();
     let (startup_tx, startup_rx) = std_mpsc::channel();
     let thread_shared = Arc::clone(&shared);
@@ -890,6 +1012,7 @@ pub async fn preview_screen_status(state: &AppState) -> PreviewScreenStatus {
             crate::preview_camera::preview_camera_frame_store_stats(state).await;
         let mut diagnostics = state.diagnostics.lock().await;
         let stats = apply_preview_screen_source_stats(diagnostics.clone(), &status);
+        let stats = apply_preview_screen_capture_stats(stats, snapshot.capture);
         let stats = apply_preview_screen_capture_timing_stats(stats, snapshot.capture_timings);
         *diagnostics = apply_preview_source_frame_store_stats(
             stats,
@@ -905,7 +1028,7 @@ pub async fn preview_screen_frame_store_stats(state: &AppState) -> FrameStoreSta
     let shared = {
         let slot = state.preview_screen.lock().await;
         let Some(active) = slot.active.as_ref() else {
-            return FrameStoreStats::default();
+            return FrameStoreStats::from_surface_backing(slot.surface_backing_tracker.snapshot());
         };
         Arc::clone(&active.shared)
     };
@@ -1522,11 +1645,22 @@ fn screen_shared_snapshot(shared: &Arc<StdMutex<PreviewScreenShared>>) -> Screen
     let guard = shared
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let latest_frame = guard.frame_store.latest();
     ScreenSharedSnapshot {
         frames_captured: guard.frames_captured,
         dropped_frames: guard.dropped_frames,
         source_fps: guard.source_fps,
-        latest_frame: guard.frame_store.latest(),
+        capture: PreviewScreenCaptureStats {
+            callback_count: guard.capture_callback_count,
+            frame_store_publications: guard.frames_captured,
+            callback_age_ms: guard
+                .capture_timings
+                .last_callback_at
+                .map(|at| at.elapsed().as_millis() as u64),
+            latest_sequence: latest_frame.as_ref().map(|frame| frame.sequence),
+            frame_statuses: guard.frame_statuses.diagnostic_stats(),
+        },
+        latest_frame,
         latest_d3d11_frame: latest_d3d11_frame(&guard),
         frame_store_stats: guard.frame_store.stats(),
         last_error: guard.last_error.clone(),
@@ -1604,6 +1738,7 @@ async fn poll_screen_metrics(
                 crate::preview_camera::preview_camera_frame_store_stats(&state).await;
             let mut diagnostics = state.diagnostics.lock().await;
             let stats = apply_preview_screen_source_stats(diagnostics.clone(), &status);
+            let stats = apply_preview_screen_capture_stats(stats, snapshot.capture);
             let stats = apply_preview_screen_capture_timing_stats(stats, snapshot.capture_timings);
             *diagnostics = apply_preview_source_frame_store_stats(
                 stats,
@@ -1620,6 +1755,7 @@ struct ScreenSharedSnapshot {
     frames_captured: u64,
     dropped_frames: u64,
     source_fps: Option<f64>,
+    capture: PreviewScreenCaptureStats,
     latest_frame: Option<FrameHandle<PreviewScreenPixelFormat>>,
     latest_d3d11_frame: Option<FrameHandle<PreviewScreenPixelFormat>>,
     frame_store_stats: FrameStoreStats,
@@ -2358,6 +2494,7 @@ mod macos {
     use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::ProtocolObject;
     use objc2::{AnyThread, DefinedClass, define_class, msg_send};
+    use objc2_core_foundation::{CFDictionary, CFNumber, CFType};
     use objc2_core_graphics::{
         CGDirectDisplayID, CGDisplayCopyDisplayMode, CGDisplayMode, CGPreflightScreenCaptureAccess,
     };
@@ -2370,8 +2507,8 @@ mod macos {
     };
     use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
     use objc2_screen_capture_kit::{
-        SCContentFilter, SCDisplay, SCFrameStatus, SCShareableContent, SCStream,
-        SCStreamConfiguration, SCStreamDelegate, SCStreamOutput, SCStreamOutputType, SCWindow,
+        SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
+        SCStreamDelegate, SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType, SCWindow,
     };
 
     use super::*;
@@ -3000,20 +3137,12 @@ mod macos {
         shared: &Arc<StdMutex<PreviewScreenShared>>,
     ) {
         let callback_started_at = Instant::now();
-        {
-            let mut guard = shared
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard
-                .capture_timings
-                .record_callback_at(callback_started_at);
-        }
-
-        if !sample_buffer_is_complete(sample_buffer) {
-            let mut guard = shared
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.dropped_frames = guard.dropped_frames.saturating_add(1);
+        let frame_status = sample_buffer_frame_status(sample_buffer);
+        if !record_screen_capture_callback_status(shared, callback_started_at, frame_status) {
+            // Keep the latest complete frame published. ScreenCaptureKit uses
+            // idle and transition statuses for static content; clearing or
+            // republishing them would turn a valid static frame into a false
+            // source advance.
             return;
         }
 
@@ -3162,9 +3291,27 @@ mod macos {
         );
     }
 
-    fn sample_buffer_is_complete(_sample_buffer: &CMSampleBuffer) -> bool {
-        let _ = SCFrameStatus::Complete;
-        true
+    fn sample_buffer_frame_status(sample_buffer: &CMSampleBuffer) -> ScreenCaptureFrameStatus {
+        classify_screen_capture_frame_status(sample_buffer_frame_status_raw(sample_buffer))
+    }
+
+    fn sample_buffer_frame_status_raw(sample_buffer: &CMSampleBuffer) -> Option<i64> {
+        // ScreenCaptureKit stores SCFrameStatus in the first per-sample attachment dictionary.
+        // Keep this callback path bounded and allocation-free: inspect exactly one retained array
+        // element and one borrowed dictionary value without copying either collection.
+        let attachments = unsafe { sample_buffer.sample_attachments_array(false) }?;
+        if attachments.is_empty() {
+            return None;
+        }
+        // SAFETY: CoreMedia guarantees one CFDictionary per sample in this attachment array. The
+        // array is retained and not mutated while the borrowed dictionary/value references live.
+        let dictionaries = unsafe { attachments.cast_unchecked::<CFDictionary<CFType, CFType>>() };
+        let dictionary = unsafe { dictionaries.get_unchecked(0) };
+        // SAFETY: SCStreamFrameInfoStatus is a process-lifetime NSString/CFString constant. The
+        // toll-free CFType view is valid and the extern static access is contained here.
+        let key = unsafe { &*(std::ptr::from_ref(SCStreamFrameInfoStatus).cast::<CFType>()) };
+        let value = unsafe { dictionary.get_unchecked(key) }?;
+        value.downcast_ref::<CFNumber>()?.as_i64()
     }
 
     fn find_display(content: &SCShareableContent, display_id: u32) -> Option<Retained<SCDisplay>> {
@@ -3384,6 +3531,85 @@ mod tests {
     use crate::protocol::{SourceSelection, VideoPreset};
     use crate::storage::Database;
     use tokio::sync::{broadcast, oneshot};
+
+    #[test]
+    fn capture_drop_reason_screen_frame_status_classifies_complete_and_noncomplete_fixtures() {
+        let fixtures = [
+            (Some(0), ScreenCaptureFrameStatus::Complete, true),
+            (Some(1), ScreenCaptureFrameStatus::Idle, false),
+            (Some(2), ScreenCaptureFrameStatus::Blank, false),
+            (Some(3), ScreenCaptureFrameStatus::Suspended, false),
+            (Some(4), ScreenCaptureFrameStatus::Started, false),
+            (Some(5), ScreenCaptureFrameStatus::Stopped, false),
+            (Some(99), ScreenCaptureFrameStatus::Unknown, false),
+            (None, ScreenCaptureFrameStatus::Unknown, false),
+        ];
+        let mut counts = ScreenCaptureFrameStatusCounts::default();
+
+        for (raw, expected, valid_current_image) in fixtures {
+            let status = classify_screen_capture_frame_status(raw);
+            assert_eq!(status, expected);
+            assert_eq!(status.is_valid_current_image(), valid_current_image);
+            counts.record(status);
+        }
+
+        assert_eq!(counts.complete, 1);
+        assert_eq!(counts.idle, 1);
+        assert_eq!(counts.blank, 1);
+        assert_eq!(counts.suspended, 1);
+        assert_eq!(counts.started, 1);
+        assert_eq!(counts.stopped, 1);
+        assert_eq!(counts.unknown, 2);
+        assert_eq!(counts.total(), 8);
+    }
+
+    #[test]
+    fn capture_drop_reason_noncomplete_screen_callbacks_preserve_static_complete_frame() {
+        let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+        let (expected_identity, expected_sequence) = {
+            let mut guard = shared.lock().unwrap();
+            guard.frames_captured = 1;
+            let frame = guard.frame_store.publish(
+                1,
+                1,
+                1,
+                PreviewScreenPixelFormat::Bgra8,
+                Instant::now(),
+                vec![0; 4],
+            );
+            (frame.storage_identity(), frame.sequence)
+        };
+
+        for status in [
+            ScreenCaptureFrameStatus::Idle,
+            ScreenCaptureFrameStatus::Blank,
+            ScreenCaptureFrameStatus::Suspended,
+            ScreenCaptureFrameStatus::Started,
+            ScreenCaptureFrameStatus::Stopped,
+            ScreenCaptureFrameStatus::Unknown,
+        ] {
+            assert!(!record_screen_capture_callback_status(
+                &shared,
+                Instant::now(),
+                status
+            ));
+        }
+
+        let guard = shared.lock().unwrap();
+        let latest = guard.frame_store.latest().expect("static complete frame");
+        assert_eq!(latest.storage_identity(), expected_identity);
+        assert_eq!(latest.sequence, expected_sequence);
+        assert_eq!(guard.frames_captured, 1);
+        assert_eq!(guard.capture_callback_count, 6);
+        assert_eq!(guard.dropped_frames, 6);
+        assert_eq!(guard.frame_statuses.idle, 1);
+        assert_eq!(guard.frame_statuses.blank, 1);
+        assert_eq!(guard.frame_statuses.suspended, 1);
+        assert_eq!(guard.frame_statuses.started, 1);
+        assert_eq!(guard.frame_statuses.stopped, 1);
+        assert_eq!(guard.frame_statuses.unknown, 1);
+        assert_eq!(guard.frame_statuses.complete, 0);
+    }
 
     #[test]
     fn direct_d3d11_consumer_lease_releases_exactly_once() {

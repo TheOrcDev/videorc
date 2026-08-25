@@ -46,9 +46,10 @@
 //   VIDEORC_BASELINE_LAYOUT_PRESET  force layout preset; otherwise inferred from selected sources
 //   VIDEORC_SMOKE_FFMPEG_PATH / VIDEORC_SMOKE_FFPROBE_PATH
 
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { deflateSync } from 'node:zlib'
 
 import { launchDevApp, repoRoot, stopProcess } from './lib/app-launcher.mjs'
@@ -60,6 +61,7 @@ import {
   launchScreenMotionStimulus,
   refreshScreenMotionStimulusVisibility,
   screenMotionStimulusOptionsForSource,
+  stimulusVisibilityFromBgraBmp,
   stopScreenMotionStimulus
 } from './lib/screen-motion-stimulus.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -201,6 +203,9 @@ const config = {
 if (config.packagedExecutable && !existsSync(config.packagedExecutable)) {
   throw new Error(`Packaged app executable not found: ${config.packagedExecutable}`)
 }
+const packagedSmokeCommandCapability = config.packagedExecutable
+  ? randomBytes(32).toString('base64url')
+  : undefined
 
 const performanceReportScenario =
   process.env.VIDEORC_PERF_SCENARIO ??
@@ -404,9 +409,13 @@ async function main() {
   const requiresPreviewHostCommandServer = !config.noPreviewSurface && !config.fallbackLivePreview
   const needsSmokeResourceAuthorization = !config.packagedExecutable
   const needsSmokeCommandServer =
-    requiresPreviewHostCommandServer || config.notesOverlay || needsSmokeResourceAuthorization
+    requiresPreviewHostCommandServer ||
+    config.notesOverlay ||
+    needsSmokeResourceAuthorization ||
+    config.performanceReportRequested
   launched = await launchDevApp({
     timeoutMs: config.timeoutMs,
+    packagedSmokeCommandCapability,
     spawnSpec: config.packagedExecutable
       ? {
           command: config.packagedExecutable,
@@ -428,6 +437,13 @@ async function main() {
       VIDEORC_SMOKE_COMMAND_SERVER: needsSmokeCommandServer ? '1' : '0',
       VIDEORC_SMOKE_PACKAGED_APP: config.packagedExecutable ? '1' : '0',
       VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED: requiresPreviewHostCommandServer ? '1' : '0',
+      ...(config.packagedExecutable
+        ? {
+            VIDEORC_PACKAGED_SMOKE_TEST: '1',
+            VIDEORC_SMOKE_COMMAND_CAPABILITY: packagedSmokeCommandCapability,
+            VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
+          }
+        : {}),
       ...(config.noPreviewSurface ? { VIDEORC_SMOKE_DISABLE_ELECTRON_GPU: '1' } : {}),
       ...(config.notesOverlay
         ? {
@@ -613,7 +629,7 @@ async function main() {
           targetFps: 60,
           source: previewSurfaceSource(sourceSelection)
         })
-        const hostStatus = await applyPendingNativePreviewHostCommands(ws)
+        const hostStatus = await applyPendingNativePreviewHostCommands()
         previewTransport = hostStatus?.transport ?? status?.transport ?? previewTransport
       })
     }
@@ -1001,18 +1017,46 @@ async function setupNotesOverlay(screenSource) {
 
 async function requireMotionStimulusVisibleBeforeRecording() {
   if (!config.screenMotionStimulus || !motionStimulus) return
-  const visibility = await refreshScreenMotionStimulusVisibility(motionStimulus, {
-    outputDirectory: config.outputDirectory,
-    ffmpegPath: config.ffmpegPath
-  })
+  const visibility =
+    process.env.VIDEORC_SCREEN_MOTION_VERIFY_VISIBLE === '0'
+      ? await verifyMotionStimulusThroughBackendCapture()
+      : await refreshScreenMotionStimulusVisibility(motionStimulus, {
+          outputDirectory: config.outputDirectory,
+          ffmpegPath: config.ffmpegPath
+        })
+  motionStimulus.visibility = visibility
   console.log(
-    `Screen motion stimulus pre-recording visibility: ${visibility?.visible ? 'PASS' : 'FAIL'} (${visibility?.reason ?? 'not measured'}; ${visibility?.screenshotPath ?? 'no screenshot'}).`
+    `Screen motion stimulus pre-recording visibility: ${visibility?.visible ? 'PASS' : 'FAIL'} (${visibility?.reason ?? 'not measured'}; ${visibility?.screenshotPath ?? 'no screenshot'}; source=${visibility?.source ?? 'system-screenshot'}).`
   )
   if (!visibility?.visible) {
     throw new Error(
       `Screen motion stimulus is not visible immediately before recording (${visibility?.reason ?? 'not measured'}). ` +
         `Bring the Chromium stimulus window to the selected screen foreground or adjust VIDEORC_SCREEN_MOTION_* bounds.`
     )
+  }
+}
+
+async function verifyMotionStimulusThroughBackendCapture() {
+  const connection = launched?.connections?.['backend-ready']
+  if (!connection) {
+    throw new Error('Backend-ready connection was unavailable for motion stimulus proof.')
+  }
+  const url = new URL(`http://${connection.host}:${connection.port}/preview/screen/latest.bmp`)
+  url.searchParams.set('token', connection.token)
+  url.searchParams.set('maxWidth', '1280')
+  const response = await fetch(url, { cache: 'no-store' })
+  if (response.status !== 200) {
+    throw new Error(`Backend screen frame proof failed with HTTP ${response.status}.`)
+  }
+  const bytes = Buffer.from(await response.arrayBuffer())
+  mkdirSync(config.outputDirectory, { recursive: true })
+  const screenshotPath = join(config.outputDirectory, 'screen-motion-stimulus-backend.bmp')
+  writeFileSync(screenshotPath, bytes)
+  const visibility = stimulusVisibilityFromBgraBmp(bytes)
+  return {
+    ...visibility,
+    screenshotPath,
+    captureRegion: { x: 0, y: 0, width: visibility.width, height: visibility.height }
   }
 }
 
@@ -3612,22 +3656,15 @@ function crc32(bytes) {
   return (c ^ 0xffffffff) >>> 0
 }
 
-async function applyPendingNativePreviewHostCommands(ws) {
+async function applyPendingNativePreviewHostCommands() {
   const smoke = launched?.connections?.['preview-motion-ready']
   if (!smoke) {
     throw new Error('Preview host command server was not available for visible-preview baseline.')
   }
-  const commands = await request(ws, config.timeoutMs, 'preview.surface.take_native_host_commands')
-  if (!Array.isArray(commands)) {
-    throw new Error('Backend returned an invalid native preview host command batch.')
-  }
-  if (commands.length === 0) {
-    return await smokeCommand(smoke, 'native-preview-surface-status')
-  }
-  console.log(
-    `Applying ${commands.length} native preview host command(s) to Electron preview host.`
-  )
-  return await smokeCommand(smoke, 'apply-native-preview-host-commands', { commands })
+  // Native-host command draining requires Electron main's private backend
+  // credential. The public backend-ready marker intentionally contains only
+  // the renderer token, so the harness asks main to perform the bounded drain.
+  return await smokeCommand(smoke, 'drain-native-preview-host-commands')
 }
 
 async function smokeCommand(smoke, command, params = {}, timeoutMs = config.timeoutMs) {

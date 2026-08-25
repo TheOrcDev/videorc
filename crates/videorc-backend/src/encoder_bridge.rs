@@ -1,11 +1,9 @@
-#[cfg(target_os = "macos")]
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Write as StdWrite};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Condvar, Mutex as StdMutex, OnceLock};
 use std::thread;
@@ -35,7 +33,7 @@ use crate::preview_camera::PreviewCameraFrameSource;
 use crate::preview_screen::PreviewScreenD3D11FrameSource;
 use crate::process_job::spawn_owned_tokio;
 use crate::protocol::{
-    DiagnosticStats, EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult,
+    DiagnosticStats, EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult, HealthLevel,
 };
 #[cfg(target_os = "windows")]
 use crate::scene_geometry::{PixelRect, SceneCrop, SceneMask};
@@ -137,7 +135,7 @@ const WINDOWS_D3D11_GENERATION_RECOVERY_POLL: Duration = Duration::from_millis(5
 /// Cadence of the encoder drain's bounded wait for a freshly published
 /// primary frame. Small enough to drain two-frame pump bursts within one
 /// clock period; large enough that the idle wait stays negligible.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 const WINDOWS_D3D11_ENCODER_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 /// Whether a newly published primary sequence must be drained before the next
@@ -190,6 +188,843 @@ pub enum EncoderBridgeOutputRole {
     Shared,
     Recording,
     Stream,
+}
+
+impl EncoderBridgeOutputRole {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Recording => "recording",
+            Self::Stream => "stream",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EncoderBridgeLifecycleSnapshot {
+    pub live_outer_writers: usize,
+    pub live_fifo_writers: usize,
+    pub live_resources: usize,
+    pub detached_writers: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncoderBridgeLifecycleTransition {
+    pub sequence: u64,
+    pub writer_id: String,
+    pub session_id: String,
+    pub role: EncoderBridgeOutputRole,
+    pub state: &'static str,
+    pub lifecycle: EncoderBridgeLifecycleSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EncoderBridgeLifecycleWorkerRecord {
+    Transition(EncoderBridgeLifecycleTransition),
+    Overflow {
+        dropped_transitions: usize,
+        latest_sequence: u64,
+        lifecycle: EncoderBridgeLifecycleSnapshot,
+    },
+}
+
+const ENCODER_BRIDGE_LIFECYCLE_TRANSITION_CAPACITY: usize = 64;
+
+#[derive(Default)]
+struct EncoderBridgeLifecycleOverflowState {
+    dropped: AtomicUsize,
+    version: AtomicU64,
+    latest_sequence: AtomicU64,
+    live_outer_writers: AtomicUsize,
+    live_fifo_writers: AtomicUsize,
+    live_resources: AtomicUsize,
+    detached_writers: AtomicUsize,
+    closed_gates: AtomicUsize,
+}
+
+impl EncoderBridgeLifecycleOverflowState {
+    fn record(&self, transition: &EncoderBridgeLifecycleTransition) {
+        // A tiny seqlock keeps the coalesced snapshot internally consistent
+        // without ever blocking the stop/reap producer.
+        self.version.fetch_add(1, Ordering::AcqRel);
+        self.latest_sequence
+            .store(transition.sequence, Ordering::Relaxed);
+        self.live_outer_writers
+            .store(transition.lifecycle.live_outer_writers, Ordering::Relaxed);
+        self.live_fifo_writers
+            .store(transition.lifecycle.live_fifo_writers, Ordering::Relaxed);
+        self.live_resources
+            .store(transition.lifecycle.live_resources, Ordering::Relaxed);
+        self.detached_writers
+            .store(transition.lifecycle.detached_writers, Ordering::Relaxed);
+        self.version.fetch_add(1, Ordering::Release);
+        self.dropped.fetch_add(1, Ordering::Release);
+    }
+
+    fn take(&self) -> Option<EncoderBridgeLifecycleWorkerRecord> {
+        if self.closed_gates.load(Ordering::Acquire) > 0 {
+            return None;
+        }
+        let dropped_transitions = self.dropped.swap(0, Ordering::AcqRel);
+        if dropped_transitions == 0 {
+            return None;
+        }
+        let (latest_sequence, lifecycle) = loop {
+            let before = self.version.load(Ordering::Acquire);
+            if !before.is_multiple_of(2) {
+                thread::yield_now();
+                continue;
+            }
+            let latest_sequence = self.latest_sequence.load(Ordering::Relaxed);
+            let lifecycle = EncoderBridgeLifecycleSnapshot {
+                live_outer_writers: self.live_outer_writers.load(Ordering::Relaxed),
+                live_fifo_writers: self.live_fifo_writers.load(Ordering::Relaxed),
+                live_resources: self.live_resources.load(Ordering::Relaxed),
+                detached_writers: self.detached_writers.load(Ordering::Relaxed),
+            };
+            let after = self.version.load(Ordering::Acquire);
+            if before == after {
+                break (latest_sequence, lifecycle);
+            }
+        };
+        Some(EncoderBridgeLifecycleWorkerRecord::Overflow {
+            dropped_transitions,
+            latest_sequence,
+            lifecycle,
+        })
+    }
+}
+
+struct EncoderBridgeLifecyclePersistenceGateState {
+    open: AtomicBool,
+    overflow: Arc<EncoderBridgeLifecycleOverflowState>,
+}
+
+impl EncoderBridgeLifecyclePersistenceGateState {
+    fn new(overflow: Arc<EncoderBridgeLifecycleOverflowState>) -> Self {
+        Self {
+            open: AtomicBool::new(true),
+            overflow,
+        }
+    }
+
+    fn close(&self) {
+        if self.open.swap(false, Ordering::AcqRel) {
+            self.overflow.closed_gates.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn open(&self) {
+        if !self.open.swap(true, Ordering::AcqRel) {
+            self.overflow.closed_gates.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        self.open.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for EncoderBridgeLifecyclePersistenceGateState {
+    fn drop(&mut self) {
+        if !self.open.load(Ordering::Acquire) {
+            self.overflow.closed_gates.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+struct EncoderBridgeLifecycleTransitionEnvelope {
+    transition: EncoderBridgeLifecycleTransition,
+    state: Option<AppState>,
+    gate: Arc<EncoderBridgeLifecyclePersistenceGateState>,
+}
+
+#[derive(Clone)]
+struct EncoderBridgeLifecycleTransitionPublisher {
+    sender: std_mpsc::SyncSender<EncoderBridgeLifecycleTransitionEnvelope>,
+    overflow: Arc<EncoderBridgeLifecycleOverflowState>,
+}
+
+impl EncoderBridgeLifecycleTransitionPublisher {
+    fn publish(&self, envelope: EncoderBridgeLifecycleTransitionEnvelope) {
+        match self.sender.try_send(envelope) {
+            Ok(()) => {}
+            Err(
+                std_mpsc::TrySendError::Full(envelope)
+                | std_mpsc::TrySendError::Disconnected(envelope),
+            ) => {
+                self.overflow.record(&envelope.transition);
+            }
+        }
+    }
+
+    fn persistence_gate(&self) -> Arc<EncoderBridgeLifecyclePersistenceGateState> {
+        Arc::new(EncoderBridgeLifecyclePersistenceGateState::new(
+            self.overflow.clone(),
+        ))
+    }
+}
+
+struct PendingEncoderBridgeLifecycleRecord {
+    record: EncoderBridgeLifecycleWorkerRecord,
+    state: Option<AppState>,
+    gate: Option<Arc<EncoderBridgeLifecyclePersistenceGateState>>,
+}
+
+impl PendingEncoderBridgeLifecycleRecord {
+    fn sequence(&self) -> u64 {
+        match &self.record {
+            EncoderBridgeLifecycleWorkerRecord::Transition(transition) => transition.sequence,
+            EncoderBridgeLifecycleWorkerRecord::Overflow {
+                latest_sequence, ..
+            } => *latest_sequence,
+        }
+    }
+
+    fn ready(&self) -> bool {
+        self.gate.as_ref().is_none_or(|gate| gate.is_open())
+    }
+}
+
+fn run_encoder_bridge_lifecycle_persistence_worker<F>(
+    receiver: std_mpsc::Receiver<EncoderBridgeLifecycleTransitionEnvelope>,
+    overflow: Arc<EncoderBridgeLifecycleOverflowState>,
+    start: Option<std_mpsc::Receiver<()>>,
+    mut persist: F,
+) where
+    F: FnMut(EncoderBridgeLifecycleWorkerRecord, Option<AppState>),
+{
+    if let Some(start) = start {
+        let _ = start.recv();
+    }
+    let mut pending = BTreeMap::<u64, PendingEncoderBridgeLifecycleRecord>::new();
+    let mut last_state = None;
+    loop {
+        let mut disconnected = false;
+        match receiver.recv_timeout(Duration::from_millis(20)) {
+            Ok(envelope) => {
+                if envelope.state.is_some() {
+                    last_state = envelope.state.clone();
+                }
+                let sequence = envelope.transition.sequence;
+                pending.insert(
+                    sequence,
+                    PendingEncoderBridgeLifecycleRecord {
+                        record: EncoderBridgeLifecycleWorkerRecord::Transition(envelope.transition),
+                        state: envelope.state,
+                        gate: Some(envelope.gate),
+                    },
+                );
+            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => disconnected = true,
+        }
+        while let Ok(envelope) = receiver.try_recv() {
+            if envelope.state.is_some() {
+                last_state = envelope.state.clone();
+            }
+            let sequence = envelope.transition.sequence;
+            pending.insert(
+                sequence,
+                PendingEncoderBridgeLifecycleRecord {
+                    record: EncoderBridgeLifecycleWorkerRecord::Transition(envelope.transition),
+                    state: envelope.state,
+                    gate: Some(envelope.gate),
+                },
+            );
+        }
+        if let Some(record) = overflow.take() {
+            let item = PendingEncoderBridgeLifecycleRecord {
+                record,
+                state: last_state.clone(),
+                gate: None,
+            };
+            pending.insert(item.sequence(), item);
+        }
+        while let Some(sequence) = pending.keys().next().copied() {
+            if !pending.get(&sequence).is_some_and(|item| item.ready()) {
+                break;
+            }
+            let item = pending
+                .remove(&sequence)
+                .expect("pending lifecycle record exists");
+            persist(item.record, item.state);
+        }
+        if disconnected && pending.is_empty() && overflow.dropped.load(Ordering::Acquire) == 0 {
+            break;
+        }
+        if disconnected {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+fn persist_encoder_bridge_lifecycle_worker_record(
+    record: EncoderBridgeLifecycleWorkerRecord,
+    state: Option<AppState>,
+) {
+    let Some(state) = state else {
+        return;
+    };
+    match record {
+        EncoderBridgeLifecycleWorkerRecord::Transition(transition) => {
+            let message = format!(
+                "sequence={} writerId={} sessionId={} role={} state={} liveOuter={} liveFifo={} liveResources={} detached={}",
+                transition.sequence,
+                transition.writer_id,
+                transition.session_id,
+                transition.role.label(),
+                transition.state,
+                transition.lifecycle.live_outer_writers,
+                transition.lifecycle.live_fifo_writers,
+                transition.lifecycle.live_resources,
+                transition.lifecycle.detached_writers,
+            );
+            if let Ok(entry) = state.database.add_session_log(
+                &transition.session_id,
+                if transition.state == "detached" {
+                    HealthLevel::Warn
+                } else {
+                    HealthLevel::Info
+                },
+                "encoder-bridge-writer-lifecycle",
+                &message,
+                None,
+            ) {
+                state.emit_event("session.log", entry);
+            }
+        }
+        EncoderBridgeLifecycleWorkerRecord::Overflow {
+            dropped_transitions,
+            latest_sequence,
+            lifecycle,
+        } => state.emit_log(
+            "warn",
+            format!(
+                "Encoder bridge lifecycle persistence queue overflowed by {dropped_transitions} transition(s); latestSequence={latest_sequence} liveOuter={} liveFifo={} liveResources={} detached={}",
+                lifecycle.live_outer_writers,
+                lifecycle.live_fifo_writers,
+                lifecycle.live_resources,
+                lifecycle.detached_writers,
+            ),
+        ),
+    }
+}
+
+fn spawn_encoder_bridge_lifecycle_publisher<F>(
+    capacity: usize,
+    start: Option<std_mpsc::Receiver<()>>,
+    persist: F,
+) -> (
+    EncoderBridgeLifecycleTransitionPublisher,
+    thread::JoinHandle<()>,
+)
+where
+    F: FnMut(EncoderBridgeLifecycleWorkerRecord, Option<AppState>) + Send + 'static,
+{
+    let (sender, receiver) = std_mpsc::sync_channel(capacity);
+    let overflow = Arc::new(EncoderBridgeLifecycleOverflowState::default());
+    let worker_overflow = overflow.clone();
+    let worker = thread::Builder::new()
+        .name("videorc-encoder-lifecycle-persistence".to_string())
+        .spawn(move || {
+            run_encoder_bridge_lifecycle_persistence_worker(
+                receiver,
+                worker_overflow,
+                start,
+                persist,
+            );
+        })
+        .expect("could not start encoder lifecycle persistence worker");
+    (
+        EncoderBridgeLifecycleTransitionPublisher { sender, overflow },
+        worker,
+    )
+}
+
+static ENCODER_BRIDGE_LIFECYCLE_PUBLISHER: OnceLock<EncoderBridgeLifecycleTransitionPublisher> =
+    OnceLock::new();
+
+fn encoder_bridge_lifecycle_transition_publisher()
+-> &'static EncoderBridgeLifecycleTransitionPublisher {
+    ENCODER_BRIDGE_LIFECYCLE_PUBLISHER.get_or_init(|| {
+        let (publisher, worker) = spawn_encoder_bridge_lifecycle_publisher(
+            ENCODER_BRIDGE_LIFECYCLE_TRANSITION_CAPACITY,
+            None,
+            persist_encoder_bridge_lifecycle_worker_record,
+        );
+        drop(worker);
+        publisher
+    })
+}
+
+#[derive(Debug)]
+struct EncoderBridgeWriterRegistryEntry {
+    session_id: String,
+    role: EncoderBridgeOutputRole,
+    outer_live: bool,
+    fifo_writers_live: usize,
+    resource_live: bool,
+    stop_signalled: bool,
+    detached: bool,
+}
+
+#[derive(Debug, Default)]
+struct EncoderBridgeWriterRegistry {
+    writers: HashMap<String, EncoderBridgeWriterRegistryEntry>,
+    next_transition_sequence: u64,
+}
+
+impl EncoderBridgeWriterRegistry {
+    fn register(
+        &mut self,
+        writer_id: impl Into<String>,
+        session_id: impl Into<String>,
+        role: EncoderBridgeOutputRole,
+    ) {
+        self.writers.insert(
+            writer_id.into(),
+            EncoderBridgeWriterRegistryEntry {
+                session_id: session_id.into(),
+                role,
+                outer_live: true,
+                fifo_writers_live: 0,
+                resource_live: true,
+                stop_signalled: false,
+                detached: false,
+            },
+        );
+    }
+
+    fn snapshot_excluding_session(
+        &self,
+        excluded_session_id: Option<&str>,
+    ) -> EncoderBridgeLifecycleSnapshot {
+        let mut snapshot = EncoderBridgeLifecycleSnapshot::default();
+        for writer in self.writers.values().filter(|writer| {
+            excluded_session_id.is_none_or(|session_id| writer.session_id != session_id)
+        }) {
+            snapshot.live_outer_writers += usize::from(writer.outer_live);
+            snapshot.live_fifo_writers += writer.fifo_writers_live;
+            snapshot.live_resources += usize::from(writer.resource_live);
+            snapshot.detached_writers += usize::from(writer.detached && writer.resource_live);
+        }
+        snapshot
+    }
+
+    fn snapshot(&self) -> EncoderBridgeLifecycleSnapshot {
+        self.snapshot_excluding_session(None)
+    }
+
+    fn admission_blocker(&self, next_session_id: &str) -> Option<EncoderBridgeLifecycleSnapshot> {
+        let snapshot = self.snapshot_excluding_session(Some(next_session_id));
+        (snapshot.live_resources > 0).then_some(snapshot)
+    }
+
+    fn sequenced_snapshot(&mut self) -> (u64, EncoderBridgeLifecycleSnapshot) {
+        self.next_transition_sequence = self.next_transition_sequence.wrapping_add(1).max(1);
+        (self.next_transition_sequence, self.snapshot())
+    }
+
+    fn signal_stop(&mut self, writer_id: &str) -> Option<(u64, EncoderBridgeLifecycleSnapshot)> {
+        let writer = self.writers.get_mut(writer_id)?;
+        if writer.stop_signalled {
+            return None;
+        }
+        writer.stop_signalled = true;
+        Some(self.sequenced_snapshot())
+    }
+
+    fn fifo_started(&mut self, writer_id: &str) -> Option<(u64, EncoderBridgeLifecycleSnapshot)> {
+        let writer = self.writers.get_mut(writer_id)?;
+        writer.fifo_writers_live = writer.fifo_writers_live.saturating_add(1);
+        Some(self.sequenced_snapshot())
+    }
+
+    fn fifo_exited(
+        &mut self,
+        writer_id: &str,
+    ) -> Option<(&'static str, u64, EncoderBridgeLifecycleSnapshot)> {
+        let should_release = self.writers.get_mut(writer_id).is_some_and(|writer| {
+            writer.fifo_writers_live = writer.fifo_writers_live.saturating_sub(1);
+            !writer.outer_live && writer.fifo_writers_live == 0
+        });
+        if !self.writers.contains_key(writer_id) {
+            return None;
+        }
+        if should_release {
+            self.writers.remove(writer_id);
+        }
+        let (sequence, snapshot) = self.sequenced_snapshot();
+        Some((
+            if should_release {
+                "fifo-exited/resource-released"
+            } else {
+                "fifo-exited"
+            },
+            sequence,
+            snapshot,
+        ))
+    }
+
+    fn outer_exited(
+        &mut self,
+        writer_id: &str,
+    ) -> Option<(&'static str, u64, EncoderBridgeLifecycleSnapshot)> {
+        let should_release = self.writers.get_mut(writer_id).is_some_and(|writer| {
+            writer.outer_live = false;
+            writer.fifo_writers_live == 0
+        });
+        if !self.writers.contains_key(writer_id) {
+            return None;
+        }
+        if should_release {
+            self.writers.remove(writer_id);
+        }
+        let (sequence, snapshot) = self.sequenced_snapshot();
+        Some((
+            if should_release {
+                "outer-exited/resource-released"
+            } else {
+                "outer-exited"
+            },
+            sequence,
+            snapshot,
+        ))
+    }
+
+    fn mark_detached(&mut self, writer_id: &str) -> Option<(u64, EncoderBridgeLifecycleSnapshot)> {
+        let writer = self.writers.get_mut(writer_id)?;
+        writer.detached = true;
+        Some(self.sequenced_snapshot())
+    }
+}
+
+static ENCODER_BRIDGE_WRITER_REGISTRY: OnceLock<StdMutex<EncoderBridgeWriterRegistry>> =
+    OnceLock::new();
+
+#[cfg(test)]
+pub(crate) static ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+fn encoder_bridge_writer_registry() -> &'static StdMutex<EncoderBridgeWriterRegistry> {
+    ENCODER_BRIDGE_WRITER_REGISTRY
+        .get_or_init(|| StdMutex::new(EncoderBridgeWriterRegistry::default()))
+}
+
+pub fn encoder_bridge_lifecycle_snapshot() -> EncoderBridgeLifecycleSnapshot {
+    encoder_bridge_writer_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .snapshot()
+}
+
+pub async fn wait_for_encoder_bridge_start_admission(
+    session_id: &str,
+    grace: Duration,
+) -> Result<EncoderBridgeLifecycleSnapshot> {
+    let deadline = Instant::now() + grace;
+    loop {
+        let blocker = encoder_bridge_writer_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admission_blocker(session_id);
+        match blocker {
+            None => return Ok(encoder_bridge_lifecycle_snapshot()),
+            Some(_) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Some(blocker) => {
+                bail!(
+                    "A previous recording still owns encoder resources (outer writers: {}, FIFO writers: {}, resources: {}, detached: {}). Restart Videorc to recover the encoder, then try recording again.",
+                    blocker.live_outer_writers,
+                    blocker.live_fifo_writers,
+                    blocker.live_resources,
+                    blocker.detached_writers,
+                );
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct EncoderBridgeWriterLifecycle {
+    state: Option<AppState>,
+    writer_id: String,
+    session_id: String,
+    role: EncoderBridgeOutputRole,
+    detached_ever: Arc<AtomicBool>,
+    publisher: EncoderBridgeLifecycleTransitionPublisher,
+    persistence_gate: Arc<EncoderBridgeLifecyclePersistenceGateState>,
+}
+
+impl std::fmt::Debug for EncoderBridgeWriterLifecycle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EncoderBridgeWriterLifecycle")
+            .field("writer_id", &self.writer_id)
+            .field("session_id", &self.session_id)
+            .field("role", &self.role)
+            .field("detached_ever", &self.detached_ever())
+            .finish_non_exhaustive()
+    }
+}
+
+impl EncoderBridgeWriterLifecycle {
+    fn register(state: AppState, session_id: String, role: EncoderBridgeOutputRole) -> Self {
+        let publisher = encoder_bridge_lifecycle_transition_publisher().clone();
+        let lifecycle = Self {
+            state: Some(state),
+            writer_id: Uuid::new_v4().to_string(),
+            session_id,
+            role,
+            detached_ever: Arc::new(AtomicBool::new(false)),
+            persistence_gate: publisher.persistence_gate(),
+            publisher,
+        };
+        encoder_bridge_writer_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register(
+                lifecycle.writer_id.clone(),
+                lifecycle.session_id.clone(),
+                lifecycle.role,
+            );
+        lifecycle.emit("started", encoder_bridge_lifecycle_snapshot());
+        lifecycle
+    }
+
+    #[cfg(test)]
+    fn register_for_test(session_id: &str, role: EncoderBridgeOutputRole) -> Self {
+        Self::register_for_test_with_publisher(
+            session_id,
+            role,
+            encoder_bridge_lifecycle_transition_publisher().clone(),
+        )
+    }
+
+    #[cfg(test)]
+    fn register_for_test_with_publisher(
+        session_id: &str,
+        role: EncoderBridgeOutputRole,
+        publisher: EncoderBridgeLifecycleTransitionPublisher,
+    ) -> Self {
+        let lifecycle = Self {
+            state: None,
+            writer_id: Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            role,
+            detached_ever: Arc::new(AtomicBool::new(false)),
+            persistence_gate: publisher.persistence_gate(),
+            publisher,
+        };
+        encoder_bridge_writer_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register(
+                lifecycle.writer_id.clone(),
+                lifecycle.session_id.clone(),
+                lifecycle.role,
+            );
+        lifecycle
+    }
+
+    fn registered_role(&self) -> EncoderBridgeOutputRole {
+        encoder_bridge_writer_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .writers
+            .get(&self.writer_id)
+            .map_or(self.role, |writer| writer.role)
+    }
+
+    fn stop_signalled(&self) {
+        let mut registry = encoder_bridge_writer_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let transition = registry.signal_stop(&self.writer_id);
+        if let Some((sequence, snapshot)) = transition {
+            self.buffer_transition(sequence, "stop-signalled", snapshot);
+        }
+        drop(registry);
+    }
+
+    fn fifo_started(&self) {
+        let mut registry = encoder_bridge_writer_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let transition = registry.fifo_started(&self.writer_id);
+        if let Some((sequence, snapshot)) = transition {
+            self.buffer_transition(sequence, "fifo-started", snapshot);
+        }
+        drop(registry);
+    }
+
+    fn fifo_exited(&self) {
+        let mut registry = encoder_bridge_writer_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let transition = registry.fifo_exited(&self.writer_id);
+        if let Some((state, sequence, snapshot)) = transition {
+            self.buffer_transition(sequence, state, snapshot);
+        }
+        drop(registry);
+    }
+
+    fn outer_exited(&self) {
+        let mut registry = encoder_bridge_writer_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let transition = registry.outer_exited(&self.writer_id);
+        if let Some((state, sequence, snapshot)) = transition {
+            self.buffer_transition(sequence, state, snapshot);
+        }
+        drop(registry);
+    }
+
+    fn mark_detached(&self) {
+        if self.detached_ever.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let mut registry = encoder_bridge_writer_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let transition = registry.mark_detached(&self.writer_id);
+        if let Some((sequence, snapshot)) = transition {
+            self.buffer_transition(sequence, "detached", snapshot);
+        }
+        drop(registry);
+    }
+
+    fn detached_ever(&self) -> bool {
+        self.detached_ever.load(Ordering::Acquire)
+    }
+
+    fn buffer_transition(
+        &self,
+        sequence: u64,
+        state: &'static str,
+        lifecycle: EncoderBridgeLifecycleSnapshot,
+    ) {
+        self.publisher
+            .publish(EncoderBridgeLifecycleTransitionEnvelope {
+                transition: EncoderBridgeLifecycleTransition {
+                    sequence,
+                    writer_id: self.writer_id.clone(),
+                    session_id: self.session_id.clone(),
+                    role: self.role,
+                    state,
+                    lifecycle,
+                },
+                state: self.state.clone(),
+                gate: self.persistence_gate.clone(),
+            });
+    }
+
+    fn persistence_gate(&self) -> Arc<EncoderBridgeLifecyclePersistenceGateState> {
+        self.persistence_gate.clone()
+    }
+
+    fn cancel_failed_start(&self) {
+        let snapshot = {
+            let mut registry = encoder_bridge_writer_registry()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.writers.remove(&self.writer_id);
+            registry.snapshot()
+        };
+        self.emit("start-failed/resource-released", snapshot);
+    }
+
+    fn emit(&self, transition: &str, snapshot: EncoderBridgeLifecycleSnapshot) {
+        let Some(state) = self.state.as_ref() else {
+            return;
+        };
+        let message = format!(
+            "writerId={} role={} state={transition} liveOuter={} liveFifo={} liveResources={} detached={}",
+            self.writer_id,
+            encoder_bridge_output_role_label(self.registered_role()),
+            snapshot.live_outer_writers,
+            snapshot.live_fifo_writers,
+            snapshot.live_resources,
+            snapshot.detached_writers,
+        );
+        if let Ok(entry) = state.database.add_session_log(
+            &self.session_id,
+            if transition == "detached" {
+                HealthLevel::Warn
+            } else {
+                HealthLevel::Info
+            },
+            "encoder-bridge-writer-lifecycle",
+            &message,
+            None,
+        ) {
+            state.emit_event("session.log", entry);
+        }
+    }
+}
+
+struct EncoderBridgeOuterWriterGuard {
+    lifecycle: EncoderBridgeWriterLifecycle,
+}
+
+impl Drop for EncoderBridgeOuterWriterGuard {
+    fn drop(&mut self) {
+        self.lifecycle.outer_exited();
+    }
+}
+
+struct EncoderBridgeFifoWriterGuard {
+    lifecycle: Option<EncoderBridgeWriterLifecycle>,
+}
+
+impl EncoderBridgeFifoWriterGuard {
+    fn enter(lifecycle: Option<EncoderBridgeWriterLifecycle>) -> Self {
+        if let Some(lifecycle) = lifecycle.as_ref() {
+            lifecycle.fifo_started();
+        }
+        Self { lifecycle }
+    }
+}
+
+impl Drop for EncoderBridgeFifoWriterGuard {
+    fn drop(&mut self) {
+        if let Some(lifecycle) = self.lifecycle.as_ref() {
+            lifecycle.fifo_exited();
+        }
+    }
+}
+
+type RegisteredFifoWriterTask = Box<dyn FnOnce() + Send + 'static>;
+
+fn spawn_registered_fifo_writer<F>(
+    lifecycle: Option<EncoderBridgeWriterLifecycle>,
+    builder: thread::Builder,
+    writer: F,
+) -> io::Result<thread::JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+{
+    spawn_registered_fifo_writer_with(lifecycle, writer, move |task| builder.spawn(task))
+}
+
+fn spawn_registered_fifo_writer_with<F, S>(
+    lifecycle: Option<EncoderBridgeWriterLifecycle>,
+    writer: F,
+    spawn: S,
+) -> io::Result<thread::JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+    S: FnOnce(RegisteredFifoWriterTask) -> io::Result<thread::JoinHandle<()>>,
+{
+    // Registration is synchronous. The guard moves into the exact closure
+    // handed to the thread spawner, so an unsuccessful spawn drops that
+    // closure and immediately rolls back the live-FIFO registry count.
+    let guard = EncoderBridgeFifoWriterGuard::enter(lifecycle);
+    spawn(Box::new(move || {
+        let _guard = guard;
+        writer();
+    }))
 }
 
 /// Production admission decision made before a compositor frame enters
@@ -699,6 +1534,71 @@ fn read_encoder_bridge_terminal_failure(signal: &Arc<StdMutex<Option<String>>>) 
         .clone()
 }
 
+#[derive(Debug, Default)]
+struct EncoderBridgeDrainState {
+    downstream_closed: bool,
+}
+
+impl EncoderBridgeDrainState {
+    fn observe_error(&mut self, error: &io::Error) -> bool {
+        let downstream_closed = io_error_is_downstream_closed(error);
+        self.downstream_closed |= downstream_closed;
+        downstream_closed
+    }
+
+    fn pending_timeout_is_terminal(
+        &self,
+        pending_video_toolbox_frames: u64,
+        pending_fifo_frames: u64,
+    ) -> bool {
+        !self.downstream_closed && (pending_video_toolbox_frames > 0 || pending_fifo_frames > 0)
+    }
+
+    fn record_main_loop_error(
+        &mut self,
+        terminal_failure: &Arc<StdMutex<Option<String>>>,
+        role: EncoderBridgeOutputRole,
+        error: &io::Error,
+    ) -> String {
+        if self.observe_error(error) {
+            format!(
+                "{} encoder output ended: downstream closed ({error})",
+                encoder_bridge_output_role_label(role)
+            )
+        } else {
+            record_encoder_bridge_terminal_failure(
+                terminal_failure,
+                format!(
+                    "{} encoder output stopped: {error}",
+                    encoder_bridge_output_role_label(role)
+                ),
+            )
+        }
+    }
+
+    fn record_video_toolbox_loop_error(
+        &mut self,
+        terminal_failure: &Arc<StdMutex<Option<String>>>,
+        role: EncoderBridgeOutputRole,
+        error: &io::Error,
+    ) -> String {
+        if self.observe_error(error) {
+            format!(
+                "{} VideoToolbox output ended: downstream closed ({error})",
+                encoder_bridge_output_role_label(role)
+            )
+        } else {
+            record_encoder_bridge_terminal_failure(
+                terminal_failure,
+                format!(
+                    "{} VideoToolbox output stopped: {error}",
+                    encoder_bridge_output_role_label(role)
+                ),
+            )
+        }
+    }
+}
+
 fn signal_encoder_bridge_startup(
     sender: &mut Option<oneshot::Sender<std::result::Result<(), String>>>,
     result: std::result::Result<(), String>,
@@ -716,6 +1616,7 @@ pub struct EncoderBridgeRecordingSession {
     fifo_path: PathBuf,
     writer: Option<thread::JoinHandle<()>>,
     diagnostics_task: Option<TokioJoinHandle<()>>,
+    lifecycle: Option<EncoderBridgeWriterLifecycle>,
     #[cfg(target_os = "windows")]
     d3d11_input: Option<WindowsD3d11EncoderTicketSource>,
 }
@@ -723,39 +1624,69 @@ pub struct EncoderBridgeRecordingSession {
 impl EncoderBridgeRecordingSession {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+        if let Some(lifecycle) = self.lifecycle.as_ref() {
+            lifecycle.stop_signalled();
+        }
     }
 
     /// Deterministic teardown: signal stop, then reap the writer thread within
-    /// `deadline`. Returns false when the writer failed to exit in time — the
-    /// thread is then deliberately detached (a hung writer must never block
-    /// session finalization) and the caller must report the leak loudly.
-    ///
-    /// Why this exists (2026-08-24 second-session-lag incident): the handles
-    /// used to die implicitly at the end of the session monitor, AFTER awaits
-    /// that can stall (idle-preview restart, export). Any stall left the
-    /// writer thread alive and still encoding 4K through VideoToolbox with no
-    /// session attached, competing with the next session's capture pipeline.
-    pub fn stop_and_reap(mut self, deadline: Duration) -> bool {
+    /// `deadline`. The report preserves terminal failures learned while the
+    /// writer drains and keeps detached children visible to later admission.
+    #[cfg(test)]
+    fn stop_and_reap(self, deadline: Duration) -> EncoderBridgeShutdownReport {
+        self.stop_and_reap_until(Instant::now() + deadline)
+    }
+
+    pub fn stop_and_reap_until(mut self, deadline_at: Instant) -> EncoderBridgeShutdownReport {
+        let started_at = Instant::now();
         self.stop();
-        let mut reaped = true;
-        if let Some(writer) = self.writer.take() {
-            let deadline_at = std::time::Instant::now() + deadline;
-            while !writer.is_finished() && std::time::Instant::now() < deadline_at {
-                thread::sleep(Duration::from_millis(25));
-            }
-            if writer.is_finished() {
-                let _ = writer.join();
-            } else {
-                // Dropping the JoinHandle detaches the thread; Drop below
-                // must not retry the join (writer is already taken).
-                drop(writer);
-                reaped = false;
-            }
-        }
+        let outer_reaped = self.reap_writer_until(deadline_at);
         if let Some(task) = self.diagnostics_task.take() {
             task.abort();
         }
-        reaped
+        let detached = !outer_reaped
+            || self
+                .lifecycle
+                .as_ref()
+                .is_some_and(EncoderBridgeWriterLifecycle::detached_ever);
+        EncoderBridgeShutdownReport {
+            writer_id: self
+                .lifecycle
+                .as_ref()
+                .map(|lifecycle| lifecycle.writer_id.clone()),
+            session_id: self
+                .lifecycle
+                .as_ref()
+                .map(|lifecycle| lifecycle.session_id.clone()),
+            role: self.lifecycle.as_ref().map(|lifecycle| lifecycle.role),
+            reaped: outer_reaped && !detached,
+            detached,
+            terminal_failure: self.terminal_failure(),
+            teardown_duration_ms: started_at.elapsed().as_millis() as u64,
+            lifecycle: encoder_bridge_lifecycle_snapshot(),
+        }
+    }
+
+    fn reap_writer_until(&mut self, deadline_at: Instant) -> bool {
+        let Some(writer) = self.writer.take() else {
+            return true;
+        };
+        while !writer.is_finished() {
+            let now = Instant::now();
+            if now >= deadline_at {
+                // Dropping the JoinHandle detaches the thread. The lifecycle
+                // registry retains ownership until the actual outer/FIFO
+                // guards leave, so the next recording still fails admission.
+                drop(writer);
+                if let Some(lifecycle) = self.lifecycle.as_ref() {
+                    lifecycle.mark_detached();
+                }
+                return false;
+            }
+            thread::sleep((deadline_at - now).min(Duration::from_millis(25)));
+        }
+        let _ = writer.join();
+        true
     }
 
     #[cfg(target_os = "windows")]
@@ -785,6 +1716,43 @@ impl EncoderBridgeRecordingSession {
             Ok(Err(_)) => bail!("Encoder bridge stopped before its first frame was ready"),
             Err(_) => bail!("Encoder bridge first-frame priming timed out"),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn blocked_for_lifecycle_test(
+        session_id: &str,
+        role: EncoderBridgeOutputRole,
+    ) -> (Self, Arc<AtomicBool>, std_mpsc::Sender<()>) {
+        let lifecycle = EncoderBridgeWriterLifecycle::register_for_test(session_id, role);
+        let writer_lifecycle = lifecycle.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let writer = thread::spawn(move || {
+            let _outer = EncoderBridgeOuterWriterGuard {
+                lifecycle: writer_lifecycle,
+            };
+            ready_tx.send(()).expect("publish blocked writer readiness");
+            release_rx.recv().expect("release blocked writer");
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocked lifecycle test writer became live");
+        (
+            Self {
+                stop: stop.clone(),
+                terminal_failure: Arc::new(StdMutex::new(None)),
+                startup_ready: None,
+                fifo_path: PathBuf::from("/nonexistent-test-fifo"),
+                writer: Some(writer),
+                diagnostics_task: None,
+                lifecycle: Some(lifecycle),
+                #[cfg(target_os = "windows")]
+                d3d11_input: None,
+            },
+            stop,
+            release_tx,
+        )
     }
 
     #[cfg(target_os = "windows")]
@@ -825,14 +1793,138 @@ impl EncoderBridgeRecordingSession {
 
 impl Drop for EncoderBridgeRecordingSession {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(writer) = self.writer.take() {
-            let _ = writer.join();
-        }
+        // Explicit recording exits use `begin_encoder_bridge_shutdown`, but a
+        // partially constructed or panicking owner can still reach Drop. Keep
+        // that last-resort cleanup bounded so Drop can never restore the old
+        // unbounded process-shutdown/startup-failure hang.
+        const DROP_JOIN_GRACE: Duration = Duration::from_millis(250);
+        self.stop();
+        self.reap_writer_until(Instant::now() + DROP_JOIN_GRACE);
         if let Some(task) = self.diagnostics_task.take() {
             task.abort();
         }
         let _ = crate::fifo::cleanup(&self.fifo_path);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncoderBridgeShutdownReport {
+    pub writer_id: Option<String>,
+    pub session_id: Option<String>,
+    pub role: Option<EncoderBridgeOutputRole>,
+    pub reaped: bool,
+    pub detached: bool,
+    pub terminal_failure: Option<String>,
+    pub teardown_duration_ms: u64,
+    pub lifecycle: EncoderBridgeLifecycleSnapshot,
+}
+
+/// A signal-all/reap-all teardown begun against one absolute deadline.
+/// Lifecycle transitions are buffered without I/O while the deadline is live;
+/// callers persist the returned drain only after `finish` completes.
+pub struct EncoderBridgeShutdownBatch {
+    started_at: Instant,
+    reap_task: Option<TokioJoinHandle<Vec<EncoderBridgeShutdownReport>>>,
+    persistence_gate: EncoderBridgeLifecyclePersistenceGate,
+}
+
+#[derive(Debug, Default)]
+pub struct EncoderBridgeShutdownBatchReport {
+    pub reports: Vec<EncoderBridgeShutdownReport>,
+    pub lifecycle: EncoderBridgeLifecycleSnapshot,
+    pub teardown_duration_ms: u64,
+    pub task_error: Option<String>,
+}
+
+pub struct EncoderBridgeLifecyclePersistenceGate {
+    gates: Vec<Arc<EncoderBridgeLifecyclePersistenceGateState>>,
+    released: bool,
+}
+
+impl EncoderBridgeLifecyclePersistenceGate {
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        for gate in &self.gates {
+            gate.open();
+        }
+        self.released = true;
+    }
+}
+
+impl Drop for EncoderBridgeLifecyclePersistenceGate {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+pub fn gate_encoder_bridge_lifecycle_persistence<'a>(
+    sessions: impl IntoIterator<Item = &'a EncoderBridgeRecordingSession>,
+) -> EncoderBridgeLifecyclePersistenceGate {
+    let gates = sessions
+        .into_iter()
+        .filter_map(|session| session.lifecycle.as_ref())
+        .map(|lifecycle| lifecycle.persistence_gate())
+        .collect::<Vec<_>>();
+    for gate in &gates {
+        gate.close();
+    }
+    EncoderBridgeLifecyclePersistenceGate {
+        gates,
+        released: false,
+    }
+}
+
+pub fn begin_encoder_bridge_shutdown(
+    sessions: Vec<EncoderBridgeRecordingSession>,
+    deadline: Duration,
+) -> Option<EncoderBridgeShutdownBatch> {
+    if sessions.is_empty() {
+        return None;
+    }
+    let started_at = Instant::now();
+    let deadline_at = started_at + deadline;
+    let persistence_gate = gate_encoder_bridge_lifecycle_persistence(&sessions);
+    // Signal every leg before spawning the blocking reap and before callers
+    // drop any other ActiveRecording-owned resource.
+    for session in &sessions {
+        session.stop();
+    }
+    let reap_task = tokio::task::spawn_blocking(move || {
+        sessions
+            .into_iter()
+            .map(|session| session.stop_and_reap_until(deadline_at))
+            .collect()
+    });
+    Some(EncoderBridgeShutdownBatch {
+        started_at,
+        reap_task: Some(reap_task),
+        persistence_gate,
+    })
+}
+
+impl EncoderBridgeShutdownBatch {
+    pub async fn finish(mut self) -> EncoderBridgeShutdownBatchReport {
+        let (reports, task_error) = match self
+            .reap_task
+            .take()
+            .expect("encoder bridge reap task exists")
+            .await
+        {
+            Ok(reports) => (reports, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+        // Release only after the blocking reap resolves. The autonomous worker
+        // may now persist all queued transitions; late detached exits use the
+        // same already-open gate and persist without another recording.
+        self.persistence_gate.release();
+        EncoderBridgeShutdownBatchReport {
+            reports,
+            lifecycle: encoder_bridge_lifecycle_snapshot(),
+            teardown_duration_ms: self.started_at.elapsed().as_millis() as u64,
+            task_error,
+        }
     }
 }
 
@@ -1041,6 +2133,11 @@ pub fn start_synthetic_recording_bridge(
     video_epoch: Arc<OnceLock<Instant>>,
 ) -> Result<EncoderBridgeRecordingSession> {
     let byte_len = raw_yuv420p_len(width, height)?;
+    let lifecycle = EncoderBridgeWriterLifecycle::register(
+        state.clone(),
+        session_id.clone(),
+        effective_encoder_bridge_output_role(diagnostics_context),
+    );
     let stop = Arc::new(AtomicBool::new(false));
     let terminal_failure = Arc::new(StdMutex::new(None));
     let (startup_ready_tx, startup_ready_rx) = oneshot::channel();
@@ -1068,6 +2165,7 @@ pub fn start_synthetic_recording_bridge(
             .await;
         }
     });
+    let writer_lifecycle = lifecycle.clone();
     let writer = thread::Builder::new()
         .name("videorc-recording-encoder-bridge".to_string())
         .spawn(move || {
@@ -1093,10 +2191,17 @@ pub fn start_synthetic_recording_bridge(
                 startup_ready_tx: Some(startup_ready_tx),
                 diagnostics_tx,
                 video_epoch,
+                lifecycle: writer_lifecycle,
             };
             write_synthetic_recording_frames(params);
-        })
-        .context("Could not start recording encoder bridge writer thread")?;
+        });
+    let writer = match writer {
+        Ok(writer) => writer,
+        Err(error) => {
+            lifecycle.cancel_failed_start();
+            return Err(error).context("Could not start recording encoder bridge writer thread");
+        }
+    };
 
     Ok(EncoderBridgeRecordingSession {
         stop,
@@ -1105,6 +2210,7 @@ pub fn start_synthetic_recording_bridge(
         fifo_path,
         writer: Some(writer),
         diagnostics_task: Some(diagnostics_task),
+        lifecycle: Some(lifecycle),
         #[cfg(target_os = "windows")]
         d3d11_input,
     })
@@ -1296,6 +2402,7 @@ struct SyntheticRecordingWriterParams {
     diagnostics_tx: watch::Sender<Option<EncoderBridgeWriterEvent>>,
     diagnostics_context: EncoderBridgeDiagnosticsContext,
     video_epoch: Arc<OnceLock<Instant>>,
+    lifecycle: EncoderBridgeWriterLifecycle,
 }
 
 #[derive(Debug, Clone)]
@@ -1307,33 +2414,7 @@ struct EncoderBridgeWriterEvent {
     error: Option<String>,
 }
 
-/// Live synthetic writer threads in this process. A session start observing a
-/// nonzero count from a PREVIOUS session means that session's writer never
-/// exited — the leaked-encoder condition behind the 2026-08-24 frozen-frames
-/// incident — and must be reported loudly before recording proceeds.
-static LIVE_SYNTHETIC_WRITERS: AtomicUsize = AtomicUsize::new(0);
-
-pub fn live_synthetic_writers() -> usize {
-    LIVE_SYNTHETIC_WRITERS.load(Ordering::Relaxed)
-}
-
-struct SyntheticWriterLiveGuard;
-
-impl SyntheticWriterLiveGuard {
-    fn enter() -> Self {
-        LIVE_SYNTHETIC_WRITERS.fetch_add(1, Ordering::Relaxed);
-        Self
-    }
-}
-
-impl Drop for SyntheticWriterLiveGuard {
-    fn drop(&mut self) {
-        LIVE_SYNTHETIC_WRITERS.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
 fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
-    let _live_guard = SyntheticWriterLiveGuard::enter();
     let SyntheticRecordingWriterParams {
         session_id,
         target_fps,
@@ -1359,7 +2440,14 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         diagnostics_tx,
         diagnostics_context,
         video_epoch,
+        lifecycle,
     } = params;
+    // Declared after destructuring and before every writer-owned resource so
+    // the registry cannot release admission until the outer thread has
+    // dropped its encoder/FIFO state.
+    let _outer_writer_guard = EncoderBridgeOuterWriterGuard {
+        lifecycle: lifecycle.clone(),
+    };
     #[cfg(target_os = "windows")]
     let direct_d3d11_enabled = direct_d3d11_source.is_some();
     #[cfg(not(target_os = "windows"))]
@@ -1438,6 +2526,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 video_output,
                 output_queue_policy,
                 stop.clone(),
+                Some(lifecycle.clone()),
             )),
         )
     } else {
@@ -1447,6 +2536,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 output_queue_policy,
                 stop.clone(),
                 terminal_failure.clone(),
+                Some(lifecycle.clone()),
             )),
             None,
         )
@@ -1514,6 +2604,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 output_queue_policy,
                 stop.clone(),
                 terminal_failure.clone(),
+                Some(lifecycle.clone()),
             )),
             None,
             None,
@@ -1526,6 +2617,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         output_queue_policy,
         stop.clone(),
         terminal_failure.clone(),
+        Some(lifecycle.clone()),
     ));
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
     let source = SyntheticMovingSource;
@@ -1667,6 +2759,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         initial_bridge_wait_sequence(video_output, frame_store.as_ref());
     let mut consecutive_repeated_frames = 0_u64;
     let mut terminal_writer_error = None;
+    let mut drain_state = EncoderBridgeDrainState::default();
 
     macro_rules! current_input_fps {
         () => {
@@ -2554,20 +3647,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             // death condemn a healthy recording: the stream writer died, the
             // shared FFmpeg exited cleanly, and the recording writer's EPIPE
             // was then indistinguishable from a real encoder failure.
-            let error = if io_error_is_downstream_closed(&error) {
-                format!(
-                    "{} encoder output ended: downstream closed ({error})",
-                    encoder_bridge_output_role_label(output_queue_policy.role)
-                )
-            } else {
-                record_encoder_bridge_terminal_failure(
-                    &terminal_failure,
-                    format!(
-                        "{} encoder output stopped: {error}",
-                        encoder_bridge_output_role_label(output_queue_policy.role)
-                    ),
-                )
-            };
+            let error = drain_state.record_main_loop_error(
+                &terminal_failure,
+                output_queue_policy.role,
+                &error,
+            );
             terminal_writer_error = Some(error.clone());
             emit_encoder_bridge_diagnostics_from_thread(
                 &diagnostics_tx,
@@ -2650,12 +3734,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 )
             })
         {
-            let error = record_encoder_bridge_terminal_failure(
+            let error = drain_state.record_video_toolbox_loop_error(
                 &terminal_failure,
-                format!(
-                    "{} VideoToolbox output stopped: {error}",
-                    encoder_bridge_output_role_label(output_queue_policy.role)
-                ),
+                output_queue_policy.role,
+                &error,
             );
             terminal_writer_error = Some(error.clone());
             emit_encoder_bridge_diagnostics_from_thread(
@@ -2836,8 +3918,16 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
 
     #[cfg(target_os = "macos")]
     if video_output.uses_encoded_h264() {
-        if video_toolbox_probe.complete_pending().is_err() {
+        if let Err(error) = video_toolbox_probe.complete_pending() {
             video_toolbox_probe_errors = video_toolbox_probe_errors.saturating_add(1);
+            let error = record_encoder_bridge_terminal_failure(
+                &terminal_failure,
+                format!(
+                    "{} encoder final drain failed while completing VideoToolbox frames: {error}",
+                    encoder_bridge_output_role_label(output_queue_policy.role),
+                ),
+            );
+            terminal_writer_error.get_or_insert(error);
         }
         let drain_started_at = Instant::now();
         while (pending_video_toolbox_output_frames > 0 || pending_video_toolbox_fifo_frames > 0)
@@ -2846,7 +3936,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             let writer = video_toolbox_fifo_writer
                 .as_mut()
                 .expect("VideoToolbox FIFO writer must be running");
-            if drain_video_toolbox_output_frames(
+            let drain_result = drain_video_toolbox_output_frames(
                 &mut video_toolbox_probe,
                 writer,
                 &mut pending_video_toolbox_output_frames,
@@ -2869,18 +3959,42 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     &mut video_toolbox_output_bytes,
                     &mut video_toolbox_fifo_write_times_ms,
                 )
-            })
-            .is_err()
-            {
+            });
+            if let Err(error) = drain_result {
+                if !drain_state.observe_error(&error) {
+                    let error = record_encoder_bridge_terminal_failure(
+                        &terminal_failure,
+                        format!(
+                            "{} encoder final drain failed: {error}",
+                            encoder_bridge_output_role_label(output_queue_policy.role),
+                        ),
+                    );
+                    terminal_writer_error.get_or_insert(error);
+                }
                 break;
             }
             if pending_video_toolbox_output_frames > 0 || pending_video_toolbox_fifo_frames > 0 {
                 thread::sleep(Duration::from_millis(2));
             }
         }
+        if drain_state.pending_timeout_is_terminal(
+            pending_video_toolbox_output_frames,
+            pending_video_toolbox_fifo_frames,
+        ) {
+            let error = record_encoder_bridge_terminal_failure(
+                &terminal_failure,
+                format!(
+                    "{} encoder final drain timed out with {} VideoToolbox frame(s) and {} FIFO frame(s) pending",
+                    encoder_bridge_output_role_label(output_queue_policy.role),
+                    pending_video_toolbox_output_frames,
+                    pending_video_toolbox_fifo_frames,
+                ),
+            );
+            terminal_writer_error.get_or_insert(error);
+        }
         if let Some(writer) = video_toolbox_fifo_writer.as_mut() {
             writer.close_and_join();
-            let _ = drain_video_toolbox_fifo_writer_results(
+            if let Err(error) = drain_video_toolbox_fifo_writer_results(
                 writer,
                 &mut pending_video_toolbox_fifo_frames,
                 &mut pending_video_toolbox_fifo_started_at,
@@ -2888,7 +4002,17 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 &mut video_toolbox_output_frames,
                 &mut video_toolbox_output_bytes,
                 &mut video_toolbox_fifo_write_times_ms,
-            );
+            ) && !io_error_is_downstream_closed(&error)
+            {
+                let error = record_encoder_bridge_terminal_failure(
+                    &terminal_failure,
+                    format!(
+                        "{} encoder FIFO final drain failed: {error}",
+                        encoder_bridge_output_role_label(output_queue_policy.role),
+                    ),
+                );
+                terminal_writer_error.get_or_insert(error);
+            }
         }
         queue_depth =
             pending_video_toolbox_output_frames.saturating_add(pending_video_toolbox_fifo_frames);
@@ -3224,6 +4348,7 @@ struct RawVideoFifoWriter {
     frame_mailbox: Arc<LatestRawVideoFrameMailbox>,
     result_rx: std_mpsc::Receiver<RawVideoFifoWriterResult>,
     join: Option<thread::JoinHandle<()>>,
+    lifecycle: Option<EncoderBridgeWriterLifecycle>,
 }
 
 #[derive(Default)]
@@ -3327,7 +4452,7 @@ struct QueuedRawVideoFrame {
 impl QueuedRawVideoFrame {
     fn compositor(frame: &FedCompositorFrame) -> Self {
         Self {
-            payload: RawVideoFramePayload::Compositor(Arc::clone(&frame.frame)),
+            payload: RawVideoFramePayload::Compositor(frame.frame.clone()),
             had_metal_target: frame.has_metal_iosurface_target,
             had_metal_export_handle: frame.has_metal_export_handle,
         }
@@ -3375,15 +4500,30 @@ impl RawVideoFifoWriter {
         policy: EncoderBridgeOutputQueuePolicy,
         stop: Arc<AtomicBool>,
         terminal_failure: Arc<StdMutex<Option<String>>>,
+        lifecycle: Option<EncoderBridgeWriterLifecycle>,
     ) -> Self {
+        Self::start_with_sink(fifo, policy, stop, terminal_failure, lifecycle)
+    }
+
+    fn start_with_sink<W>(
+        fifo: W,
+        policy: EncoderBridgeOutputQueuePolicy,
+        stop: Arc<AtomicBool>,
+        terminal_failure: Arc<StdMutex<Option<String>>>,
+        lifecycle: Option<EncoderBridgeWriterLifecycle>,
+    ) -> Self
+    where
+        W: StdWrite + Send + 'static,
+    {
         let max_frames = RAW_VIDEO_FIFO_QUEUE_MAX_FRAMES;
         let frame_mailbox = Arc::new(LatestRawVideoFrameMailbox::default());
         let writer_mailbox = frame_mailbox.clone();
         // Queue + one in-flight result + one terminal flush result.
         let (result_tx, result_rx) = std_mpsc::sync_channel(max_frames + 2);
-        let join = thread::Builder::new()
-            .name(format!("videorc-{:?}-raw-video-fifo-writer", policy.role))
-            .spawn(move || {
+        let join = spawn_registered_fifo_writer(
+            lifecycle.clone(),
+            thread::Builder::new().name(format!("videorc-{:?}-raw-video-fifo-writer", policy.role)),
+            move || {
                 run_raw_video_fifo_writer_loop_with_receiver(
                     fifo,
                     || writer_mailbox.receive(),
@@ -3392,12 +4532,14 @@ impl RawVideoFifoWriter {
                     terminal_failure,
                     policy.role,
                 );
-            })
-            .expect("could not start raw-video FIFO writer thread");
+            },
+        )
+        .expect("could not start raw-video FIFO writer thread");
         Self {
             frame_mailbox,
             result_rx,
             join: Some(join),
+            lifecycle,
         }
     }
 
@@ -3433,9 +4575,22 @@ impl RawVideoFifoWriter {
     }
 
     fn close_and_join(&mut self) {
+        const WRITER_CLOSE_JOIN_GRACE: Duration = Duration::from_secs(3);
+        self.close_and_join_until(Instant::now() + WRITER_CLOSE_JOIN_GRACE);
+    }
+
+    fn close_and_join_until(&mut self, deadline_at: Instant) -> BoundedWriterJoinOutcome {
         self.frame_mailbox.close();
         if let Some(join) = self.join.take() {
-            bounded_writer_join(join);
+            let outcome = bounded_writer_join_until(join, deadline_at);
+            if outcome == BoundedWriterJoinOutcome::Detached
+                && let Some(lifecycle) = self.lifecycle.as_ref()
+            {
+                lifecycle.mark_detached();
+            }
+            outcome
+        } else {
+            BoundedWriterJoinOutcome::Joined
         }
     }
 }
@@ -3615,6 +4770,7 @@ struct VideoToolboxFifoWriter {
     result_rx: std_mpsc::Receiver<VideoToolboxFifoWriterResult>,
     join: Option<thread::JoinHandle<()>>,
     policy: EncoderBridgeOutputQueuePolicy,
+    lifecycle: Option<EncoderBridgeWriterLifecycle>,
 }
 
 #[cfg(target_os = "macos")]
@@ -3648,6 +4804,7 @@ impl VideoToolboxFifoWriter {
         video_output: EncoderBridgeVideoOutput,
         policy: EncoderBridgeOutputQueuePolicy,
         stop: Arc<AtomicBool>,
+        lifecycle: Option<EncoderBridgeWriterLifecycle>,
     ) -> Self {
         let (frame_tx, frame_rx) = std_mpsc::sync_channel(policy.max_frames);
         // The writer can have the full input queue plus one frame in flight.
@@ -3665,9 +4822,10 @@ impl VideoToolboxFifoWriter {
         } else {
             policy.max_age
         };
-        let join = thread::Builder::new()
-            .name(format!("videorc-{:?}-h264-fifo-writer", policy.role))
-            .spawn(move || {
+        let join = spawn_registered_fifo_writer(
+            lifecycle.clone(),
+            thread::Builder::new().name(format!("videorc-{:?}-h264-fifo-writer", policy.role)),
+            move || {
                 run_video_toolbox_fifo_writer_loop(
                     fifo,
                     VideoToolboxH264PipeWriter::for_output(video_output),
@@ -3676,13 +4834,15 @@ impl VideoToolboxFifoWriter {
                     stop,
                     write_frame_age,
                 );
-            })
-            .expect("could not start VideoToolbox FIFO writer thread");
+            },
+        )
+        .expect("could not start VideoToolbox FIFO writer thread");
         Self {
             frame_tx: Some(frame_tx),
             result_rx,
             join: Some(join),
             policy,
+            lifecycle,
         }
     }
 
@@ -3725,8 +4885,11 @@ impl VideoToolboxFifoWriter {
 
     fn close_and_join(&mut self) {
         self.frame_tx.take();
-        if let Some(join) = self.join.take() {
-            bounded_writer_join(join);
+        if let Some(join) = self.join.take()
+            && bounded_writer_join(join) == BoundedWriterJoinOutcome::Detached
+            && let Some(lifecycle) = self.lifecycle.as_ref()
+        {
+            lifecycle.mark_detached();
         }
     }
 }
@@ -3737,16 +4900,30 @@ impl VideoToolboxFifoWriter {
 /// stop against an unresponsive Twitch endpoint hung until Force stop
 /// (owner report, 2026-08-19). A detached thread is reaped when the fifo/pipe
 /// closes or at process teardown.
-fn bounded_writer_join<T>(join: std::thread::JoinHandle<T>) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundedWriterJoinOutcome {
+    Joined,
+    Detached,
+}
+
+fn bounded_writer_join<T>(join: std::thread::JoinHandle<T>) -> BoundedWriterJoinOutcome {
     const WRITER_CLOSE_JOIN_GRACE: Duration = Duration::from_secs(3);
-    let deadline = Instant::now() + WRITER_CLOSE_JOIN_GRACE;
+    bounded_writer_join_until(join, Instant::now() + WRITER_CLOSE_JOIN_GRACE)
+}
+
+fn bounded_writer_join_until<T>(
+    join: std::thread::JoinHandle<T>,
+    deadline_at: Instant,
+) -> BoundedWriterJoinOutcome {
     while !join.is_finished() {
-        if Instant::now() >= deadline {
-            return;
+        if Instant::now() >= deadline_at {
+            drop(join);
+            return BoundedWriterJoinOutcome::Detached;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     let _ = join.join();
+    BoundedWriterJoinOutcome::Joined
 }
 
 enum PreservingOutputFrameOffer<T> {
@@ -4694,7 +5871,7 @@ fn latest_compositor_frame(
     #[cfg(target_os = "macos")]
     let metal_target = frame.metadata.metal_target_pixel_buffer();
     Some(FedCompositorFrame {
-        frame: Arc::clone(&frame),
+        frame: frame.clone(),
         sequence: frame.sequence,
         captured_at: frame.captured_at,
         age_ms: frame.captured_at.elapsed().as_millis() as u64,
@@ -5385,9 +6562,208 @@ mod tests {
     use super::*;
     use crate::diagnostics::idle_diagnostics;
 
+    fn test_lifecycle_publisher(
+        capacity: usize,
+        start: Option<std_mpsc::Receiver<()>>,
+    ) -> (
+        EncoderBridgeLifecycleTransitionPublisher,
+        std_mpsc::Receiver<EncoderBridgeLifecycleWorkerRecord>,
+        thread::JoinHandle<()>,
+    ) {
+        let (record_tx, record_rx) = std_mpsc::channel();
+        let (publisher, worker) =
+            spawn_encoder_bridge_lifecycle_publisher(capacity, start, move |record, _state| {
+                let _ = record_tx.send(record);
+            });
+        (publisher, record_rx, worker)
+    }
+
+    fn recv_lifecycle_records(
+        receiver: &std_mpsc::Receiver<EncoderBridgeLifecycleWorkerRecord>,
+        count: usize,
+    ) -> Vec<EncoderBridgeLifecycleWorkerRecord> {
+        (0..count)
+            .map(|_| {
+                receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("autonomous lifecycle worker persists the next record")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn encoder_bridge_lifecycle_admission_refuses_a_live_previous_session_resource() {
+        let mut registry = EncoderBridgeWriterRegistry::default();
+        registry.register(
+            "writer-previous",
+            "session-previous",
+            EncoderBridgeOutputRole::Shared,
+        );
+
+        let blocker = registry
+            .admission_blocker("session-next")
+            .expect("a capture-relevant writer from another session must fail admission");
+
+        assert_eq!(blocker.live_outer_writers, 1);
+        assert_eq!(blocker.live_fifo_writers, 0);
+        assert_eq!(blocker.live_resources, 1);
+        let writer = registry
+            .writers
+            .get("writer-previous")
+            .expect("registered writer identity");
+        assert_eq!(writer.session_id, "session-previous");
+        assert_eq!(writer.role, EncoderBridgeOutputRole::Shared);
+    }
+
+    #[test]
+    fn autonomous_lifecycle_worker_persists_without_a_recording_side_drain() {
+        let (publisher, persisted, worker) = test_lifecycle_publisher(4, None);
+        let gate = publisher.persistence_gate();
+        publisher.publish(EncoderBridgeLifecycleTransitionEnvelope {
+            transition: EncoderBridgeLifecycleTransition {
+                sequence: 1,
+                writer_id: "writer-autonomous".to_string(),
+                session_id: "session-autonomous".to_string(),
+                role: EncoderBridgeOutputRole::Recording,
+                state: "outer-exited/resource-released",
+                lifecycle: EncoderBridgeLifecycleSnapshot::default(),
+            },
+            state: None,
+            gate: gate.clone(),
+        });
+
+        assert!(matches!(
+            persisted
+                .recv_timeout(Duration::from_secs(1))
+                .expect("dedicated worker consumes on every platform"),
+            EncoderBridgeLifecycleWorkerRecord::Transition(transition)
+                if transition.sequence == 1
+                    && transition.state == "outer-exited/resource-released"
+        ));
+        drop(gate);
+        drop(publisher);
+        worker.join().expect("test persistence worker joins");
+    }
+
+    #[test]
+    fn lifecycle_queue_overflow_coalesces_the_latest_authoritative_snapshot() {
+        let (start_tx, start_rx) = std_mpsc::channel();
+        let (publisher, persisted, worker) = test_lifecycle_publisher(1, Some(start_rx));
+        let gate = publisher.persistence_gate();
+        for sequence in 1..=3 {
+            publisher.publish(EncoderBridgeLifecycleTransitionEnvelope {
+                transition: EncoderBridgeLifecycleTransition {
+                    sequence,
+                    writer_id: format!("writer-{sequence}"),
+                    session_id: "session-overflow".to_string(),
+                    role: EncoderBridgeOutputRole::Recording,
+                    state: "overflow-fixture",
+                    lifecycle: EncoderBridgeLifecycleSnapshot {
+                        live_outer_writers: sequence as usize,
+                        live_fifo_writers: sequence as usize,
+                        live_resources: sequence as usize,
+                        detached_writers: sequence as usize,
+                    },
+                },
+                state: None,
+                gate: gate.clone(),
+            });
+        }
+        start_tx.send(()).expect("release persistence worker");
+
+        let records = recv_lifecycle_records(&persisted, 2);
+        assert!(matches!(
+            &records[0],
+            EncoderBridgeLifecycleWorkerRecord::Transition(transition)
+                if transition.sequence == 1
+        ));
+        assert!(matches!(
+            &records[1],
+            EncoderBridgeLifecycleWorkerRecord::Overflow {
+                dropped_transitions: 2,
+                latest_sequence: 3,
+                lifecycle,
+            } if lifecycle.live_outer_writers == 3
+                && lifecycle.live_fifo_writers == 3
+                && lifecycle.live_resources == 3
+                && lifecycle.detached_writers == 3
+        ));
+        drop(gate);
+        drop(publisher);
+        worker.join().expect("test persistence worker joins");
+    }
+
+    #[test]
+    fn fifo_registration_precedes_spawn_and_failed_spawn_rolls_it_back() {
+        let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (publisher, persisted, worker) = test_lifecycle_publisher(8, None);
+        let lifecycle = EncoderBridgeWriterLifecycle::register_for_test_with_publisher(
+            "session-failed-fifo-spawn",
+            EncoderBridgeOutputRole::Recording,
+            publisher.clone(),
+        );
+
+        let error = spawn_registered_fifo_writer_with(
+            Some(lifecycle.clone()),
+            || panic!("writer body must not run when spawn fails"),
+            |task| {
+                assert_eq!(encoder_bridge_lifecycle_snapshot().live_fifo_writers, 1);
+                drop(task);
+                Err(io::Error::other("injected thread spawn failure"))
+            },
+        )
+        .expect_err("injected spawner fails");
+
+        assert!(error.to_string().contains("injected thread spawn failure"));
+        assert_eq!(encoder_bridge_lifecycle_snapshot().live_fifo_writers, 0);
+        let records = recv_lifecycle_records(&persisted, 2);
+        let transitions = records
+            .iter()
+            .filter_map(|record| match record {
+                EncoderBridgeLifecycleWorkerRecord::Transition(transition) => Some(transition),
+                EncoderBridgeLifecycleWorkerRecord::Overflow { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transitions
+                .iter()
+                .map(|transition| transition.state)
+                .collect::<Vec<_>>(),
+            vec!["fifo-started", "fifo-exited"]
+        );
+        assert!(transitions[0].sequence < transitions[1].sequence);
+        lifecycle.cancel_failed_start();
+        assert_eq!(encoder_bridge_lifecycle_snapshot().live_resources, 0);
+        drop(lifecycle);
+        drop(publisher);
+        worker.join().expect("test persistence worker joins");
+    }
+
+    #[test]
+    fn main_loop_downstream_close_survives_into_final_drain_timeout_verdict() {
+        let terminal_failure = Arc::new(StdMutex::new(None));
+        let mut drain_state = EncoderBridgeDrainState::default();
+        let message = drain_state.record_main_loop_error(
+            &terminal_failure,
+            EncoderBridgeOutputRole::Recording,
+            &io::Error::new(io::ErrorKind::BrokenPipe, "muxer closed FIFO"),
+        );
+
+        assert!(message.contains("downstream closed"));
+        assert_eq!(
+            read_encoder_bridge_terminal_failure(&terminal_failure),
+            None
+        );
+        assert!(drain_state.downstream_closed);
+        assert!(!drain_state.pending_timeout_is_terminal(3, 2));
+    }
+
     fn test_session_with_writer(
         stop: Arc<AtomicBool>,
         writer: thread::JoinHandle<()>,
+        lifecycle: EncoderBridgeWriterLifecycle,
     ) -> EncoderBridgeRecordingSession {
         EncoderBridgeRecordingSession {
             stop,
@@ -5396,61 +6772,445 @@ mod tests {
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: Some(writer),
             diagnostics_task: None,
+            lifecycle: Some(lifecycle),
             #[cfg(target_os = "windows")]
             d3d11_input: None,
         }
     }
 
-    /// Serializes the two live-writer-counter tests: the counter is process
-    /// global, so parallel test threads would race each other's deltas.
-    static LIVE_WRITER_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+    fn wait_for_lifecycle_resources_to_clear() {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while encoder_bridge_lifecycle_snapshot().live_resources != 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(encoder_bridge_lifecycle_snapshot().live_resources, 0);
+    }
 
     #[test]
     fn stop_and_reap_joins_a_cooperative_writer_and_reports_success() {
-        let _serial = LIVE_WRITER_TEST_LOCK
+        let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let base = live_synthetic_writers();
+        let lifecycle = EncoderBridgeWriterLifecycle::register_for_test(
+            "session-cooperative",
+            EncoderBridgeOutputRole::Shared,
+        );
+        let writer_lifecycle = lifecycle.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let writer_stop = stop.clone();
         let writer = thread::spawn(move || {
-            let _live = SyntheticWriterLiveGuard::enter();
+            let _outer = EncoderBridgeOuterWriterGuard {
+                lifecycle: writer_lifecycle,
+            };
             while !writer_stop.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(5));
             }
         });
-        let session = test_session_with_writer(stop, writer);
-        assert!(session.stop_and_reap(Duration::from_secs(2)));
-        assert!(live_synthetic_writers() <= base);
+        let session = test_session_with_writer(stop, writer, lifecycle);
+        let report = session.stop_and_reap(Duration::from_secs(2));
+        assert!(report.reaped);
+        assert_eq!(report.lifecycle.live_resources, 0);
+    }
+
+    #[test]
+    fn encoder_bridge_lifecycle_tracks_cooperative_outer_and_fifo_exit() {
+        let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lifecycle = EncoderBridgeWriterLifecycle::register_for_test(
+            "session-outer-fifo",
+            EncoderBridgeOutputRole::Recording,
+        );
+        let writer_lifecycle = lifecycle.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_stop = stop.clone();
+        let (fifo_ready_tx, fifo_ready_rx) = std_mpsc::channel();
+        let writer = thread::spawn(move || {
+            let _outer = EncoderBridgeOuterWriterGuard {
+                lifecycle: writer_lifecycle.clone(),
+            };
+            let fifo_stop = writer_stop.clone();
+            let fifo_lifecycle = writer_lifecycle.clone();
+            let fifo = thread::spawn(move || {
+                let _fifo = EncoderBridgeFifoWriterGuard::enter(Some(fifo_lifecycle));
+                fifo_ready_tx.send(()).expect("publish FIFO readiness");
+                while !fifo_stop.load(Ordering::Relaxed) {
+                    thread::yield_now();
+                }
+            });
+            while !writer_stop.load(Ordering::Relaxed) {
+                thread::yield_now();
+            }
+            fifo.join().expect("cooperative FIFO writer joins");
+        });
+        fifo_ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("FIFO writer became live");
+        let live = encoder_bridge_lifecycle_snapshot();
+        assert_eq!(live.live_outer_writers, 1);
+        assert_eq!(live.live_fifo_writers, 1);
+        assert_eq!(live.live_resources, 1);
+
+        let session = test_session_with_writer(stop, writer, lifecycle);
+        let report = session.stop_and_reap(Duration::from_secs(1));
+        assert!(report.reaped);
+        assert!(!report.detached);
+        assert_eq!(report.lifecycle, EncoderBridgeLifecycleSnapshot::default());
+    }
+
+    #[test]
+    fn raw_fifo_close_and_join_detach_remains_visible_after_outer_exit() {
+        struct BlockingSink {
+            started: Option<std_mpsc::SyncSender<()>>,
+            release: std_mpsc::Receiver<()>,
+        }
+
+        impl StdWrite for BlockingSink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if let Some(started) = self.started.take() {
+                    started.send(()).map_err(|_| {
+                        io::Error::new(io::ErrorKind::BrokenPipe, "test observer closed")
+                    })?;
+                }
+                self.release.recv().map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "test release closed")
+                })?;
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (publisher, persisted, worker) = test_lifecycle_publisher(16, None);
+        let lifecycle = EncoderBridgeWriterLifecycle::register_for_test_with_publisher(
+            "session-nested-fifo-detach",
+            EncoderBridgeOutputRole::Recording,
+            publisher.clone(),
+        );
+        let outer_guard = EncoderBridgeOuterWriterGuard {
+            lifecycle: lifecycle.clone(),
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let terminal_failure = Arc::new(StdMutex::new(None));
+        let (started_tx, started_rx) = std_mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        let mut fifo_writer = RawVideoFifoWriter::start_with_sink(
+            BlockingSink {
+                started: Some(started_tx),
+                release: release_rx,
+            },
+            policy,
+            stop.clone(),
+            terminal_failure.clone(),
+            Some(lifecycle.clone()),
+        );
+        fifo_writer
+            .enqueue_startup(QueuedRawVideoFrame::synthetic(vec![1, 2, 3, 4]))
+            .expect("enqueue frame into production mailbox path");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("nested FIFO entered its real sink write");
+        assert_eq!(
+            fifo_writer.close_and_join_until(Instant::now() + Duration::from_millis(80)),
+            BoundedWriterJoinOutcome::Detached,
+        );
+        drop(outer_guard);
+
+        let session = EncoderBridgeRecordingSession {
+            stop,
+            terminal_failure,
+            startup_ready: None,
+            fifo_path: PathBuf::from("/nonexistent-test-fifo"),
+            writer: None,
+            diagnostics_task: None,
+            lifecycle: Some(lifecycle),
+            #[cfg(target_os = "windows")]
+            d3d11_input: None,
+        };
+        let report = session.stop_and_reap(Duration::ZERO);
+        assert!(report.detached);
+        assert!(!report.reaped);
+        assert_eq!(report.lifecycle.live_outer_writers, 0);
+        assert_eq!(report.lifecycle.live_fifo_writers, 1);
+        assert_eq!(report.lifecycle.live_resources, 1);
+        assert_eq!(report.lifecycle.detached_writers, 1);
+        assert!(
+            encoder_bridge_writer_registry()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .admission_blocker("session-after-nested-detach")
+                .is_some(),
+            "a detached nested FIFO must block the next session"
+        );
+
+        release_tx.send(()).expect("release nested FIFO sink");
+        drop(fifo_writer);
+        wait_for_lifecycle_resources_to_clear();
+        assert!(
+            report.detached,
+            "the per-bridge report retains detach history"
+        );
+        let records = recv_lifecycle_records(&persisted, 5);
+        let transitions = records
+            .iter()
+            .filter_map(|record| match record {
+                EncoderBridgeLifecycleWorkerRecord::Transition(transition) => Some(transition),
+                EncoderBridgeLifecycleWorkerRecord::Overflow { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(transitions.iter().any(|transition| {
+            transition.state == "fifo-started"
+                && transition.session_id == "session-nested-fifo-detach"
+                && transition.role == EncoderBridgeOutputRole::Recording
+        }));
+        assert!(transitions.iter().any(|transition| {
+            transition.state == "detached"
+                && transition.lifecycle.live_fifo_writers == 1
+                && transition.lifecycle.detached_writers == 1
+        }));
+        assert!(transitions.iter().any(|transition| {
+            transition.state == "fifo-exited/resource-released"
+                && transition.lifecycle.live_resources == 0
+        }));
+        assert!(
+            transitions
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence),
+            "autonomous persistence preserves registry mutation order"
+        );
+        drop(publisher);
+        worker.join().expect("test persistence worker joins");
+    }
+
+    #[test]
+    fn encoder_bridge_lifecycle_reaps_after_unsolicited_outer_exit() {
+        let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lifecycle = EncoderBridgeWriterLifecycle::register_for_test(
+            "session-unsolicited-exit",
+            EncoderBridgeOutputRole::Shared,
+        );
+        let writer_lifecycle = lifecycle.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (exit_tx, exit_rx) = std_mpsc::channel();
+        let (exited_tx, exited_rx) = std_mpsc::channel();
+        let writer = thread::spawn(move || {
+            let _outer = EncoderBridgeOuterWriterGuard {
+                lifecycle: writer_lifecycle,
+            };
+            exit_rx.recv().expect("simulate muxer exit");
+            drop(_outer);
+            exited_tx.send(()).expect("publish writer exit");
+        });
+        let session = test_session_with_writer(stop.clone(), writer, lifecycle);
+        exit_tx
+            .send(())
+            .expect("release writer without stop intent");
+        exited_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer exited before monitor reap");
+        assert!(!stop.load(Ordering::Relaxed));
+
+        let report = session.stop_and_reap(Duration::from_secs(1));
+        assert!(report.reaped);
+        assert!(stop.load(Ordering::Relaxed));
+        assert_eq!(report.lifecycle.live_resources, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_batch_signals_both_bridges_and_shares_one_absolute_deadline() {
+        let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (publisher, persisted, worker) = test_lifecycle_publisher(16, None);
+        let mut sessions = Vec::new();
+        let mut releases = Vec::new();
+        let mut stops = Vec::new();
+        for (suffix, role) in [
+            ("recording", EncoderBridgeOutputRole::Recording),
+            ("stream", EncoderBridgeOutputRole::Stream),
+        ] {
+            let lifecycle = EncoderBridgeWriterLifecycle::register_for_test_with_publisher(
+                &format!("session-two-bridges-{suffix}"),
+                role,
+                publisher.clone(),
+            );
+            let writer_lifecycle = lifecycle.clone();
+            let stop = Arc::new(AtomicBool::new(false));
+            let (ready_tx, ready_rx) = std_mpsc::channel();
+            let (release_tx, release_rx) = std_mpsc::channel();
+            let writer = thread::spawn(move || {
+                let _outer = EncoderBridgeOuterWriterGuard {
+                    lifecycle: writer_lifecycle,
+                };
+                ready_tx.send(()).expect("publish writer readiness");
+                release_rx.recv().expect("release detached writer");
+            });
+            ready_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("writer became live");
+            stops.push(stop.clone());
+            sessions.push(test_session_with_writer(stop, writer, lifecycle));
+            releases.push(release_tx);
+        }
+        let started_at = Instant::now();
+        let batch = begin_encoder_bridge_shutdown(sessions, Duration::from_millis(120))
+            .expect("two sessions start one batch");
+        assert!(
+            stops.iter().all(|stop| stop.load(Ordering::Relaxed)),
+            "both bridge stop edges happen synchronously before reap begins"
+        );
+        assert!(
+            matches!(
+                persisted.recv_timeout(Duration::from_millis(50)),
+                Err(std_mpsc::RecvTimeoutError::Timeout)
+            ),
+            "deadline gate withholds lifecycle I/O until reap finishes"
+        );
+        let report = batch.finish().await;
+        assert!(report.reports.iter().all(|bridge| bridge.detached));
+        assert!(
+            started_at.elapsed() < Duration::from_millis(300),
+            "two bridges must not receive sequential teardown budgets"
+        );
+        assert!(report.task_error.is_none());
+        let teardown_records = recv_lifecycle_records(&persisted, 4);
+        assert_eq!(
+            teardown_records
+                .iter()
+                .filter(|record| matches!(
+                    record,
+                    EncoderBridgeLifecycleWorkerRecord::Transition(transition)
+                        if transition.state == "stop-signalled"
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(encoder_bridge_lifecycle_snapshot().detached_writers, 2);
+        for release in releases {
+            release.send(()).expect("release detached writer");
+        }
+        wait_for_lifecycle_resources_to_clear();
+        let late_records = recv_lifecycle_records(&persisted, 2);
+        assert!(late_records.iter().all(|record| matches!(
+            record,
+            EncoderBridgeLifecycleWorkerRecord::Transition(transition)
+                if transition.state == "outer-exited/resource-released"
+        )));
+        drop(publisher);
+        worker.join().expect("test persistence worker joins");
+    }
+
+    #[test]
+    fn encoder_bridge_lifecycle_preserves_failure_discovered_during_final_drain() {
+        let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lifecycle = EncoderBridgeWriterLifecycle::register_for_test(
+            "session-final-drain-failure",
+            EncoderBridgeOutputRole::Recording,
+        );
+        let writer_lifecycle = lifecycle.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_stop = stop.clone();
+        let terminal_failure = Arc::new(StdMutex::new(None));
+        let writer_failure = terminal_failure.clone();
+        let writer = thread::spawn(move || {
+            let _outer = EncoderBridgeOuterWriterGuard {
+                lifecycle: writer_lifecycle,
+            };
+            while !writer_stop.load(Ordering::Relaxed) {
+                thread::yield_now();
+            }
+            record_encoder_bridge_terminal_failure(
+                &writer_failure,
+                "final FIFO drain failed".to_string(),
+            );
+        });
+        let session = EncoderBridgeRecordingSession {
+            stop,
+            terminal_failure,
+            startup_ready: None,
+            fifo_path: PathBuf::from("/nonexistent-test-fifo"),
+            writer: Some(writer),
+            diagnostics_task: None,
+            lifecycle: Some(lifecycle),
+            #[cfg(target_os = "windows")]
+            d3d11_input: None,
+        };
+
+        let report = session.stop_and_reap(Duration::from_secs(1));
+        assert!(report.reaped);
+        assert_eq!(
+            report.terminal_failure.as_deref(),
+            Some("final FIFO drain failed")
+        );
+        assert_eq!(report.lifecycle.live_resources, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn encoder_bridge_lifecycle_start_admission_refuses_live_resource() {
+        let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lifecycle = EncoderBridgeWriterLifecycle::register_for_test(
+            "session-admission-blocker",
+            EncoderBridgeOutputRole::Shared,
+        );
+        let error =
+            wait_for_encoder_bridge_start_admission("session-admission-next", Duration::ZERO)
+                .await
+                .expect_err("a previous live writer must fail closed");
+        assert!(error.to_string().contains("Restart Videorc"));
+        lifecycle.cancel_failed_start();
+        assert_eq!(encoder_bridge_lifecycle_snapshot().live_resources, 0);
     }
 
     #[test]
     fn stop_and_reap_detaches_a_hung_writer_and_reports_the_leak() {
-        let _serial = LIVE_WRITER_TEST_LOCK
+        let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lifecycle = EncoderBridgeWriterLifecycle::register_for_test(
+            "session-hung",
+            EncoderBridgeOutputRole::Shared,
+        );
+        let writer_lifecycle = lifecycle.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let writer = thread::spawn(move || {
-            let _live = SyntheticWriterLiveGuard::enter();
+            let _outer = EncoderBridgeOuterWriterGuard {
+                lifecycle: writer_lifecycle,
+            };
             // Deliberately ignores the stop flag until released, like the
             // leaked writers in the 2026-08-24 incident.
             let _ = release_rx.recv();
         });
-        let session = test_session_with_writer(stop.clone(), writer);
-        assert!(!session.stop_and_reap(Duration::from_millis(120)));
+        let session = test_session_with_writer(stop.clone(), writer, lifecycle);
+        let report = session.stop_and_reap(Duration::from_millis(120));
+        assert!(!report.reaped);
+        assert!(report.detached);
         assert!(stop.load(Ordering::Relaxed), "stop flag must still be set");
-        assert_eq!(
-            live_synthetic_writers(),
-            1,
-            "leak stays visible in the counter"
-        );
+        assert_eq!(report.lifecycle.live_outer_writers, 1);
+        assert_eq!(report.lifecycle.live_resources, 1);
+        assert_eq!(report.lifecycle.detached_writers, 1);
+        let blocker = encoder_bridge_writer_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admission_blocker("session-next");
+        assert!(blocker.is_some(), "detached writer must fail admission");
         release_tx.send(()).expect("release the fake writer");
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while live_synthetic_writers() != 0 && std::time::Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(live_synthetic_writers(), 0);
+        wait_for_lifecycle_resources_to_clear();
     }
 
     #[test]
@@ -5875,6 +7635,7 @@ mod tests {
             )),
             writer: None,
             diagnostics_task: None,
+            lifecycle: None,
             #[cfg(target_os = "windows")]
             d3d11_input: None,
         };
@@ -5931,11 +7692,11 @@ mod tests {
         let fed =
             next_raw_compositor_frame(Some(&frame_store), None, Duration::ZERO, expected.len())
                 .expect("shared compositor frame");
-        assert!(Arc::ptr_eq(&published, &fed.frame));
+        assert!(CompositorFrameHandle::ptr_eq(&published, &fed.frame));
 
         let queued = QueuedRawVideoFrame::compositor(&fed);
         assert_eq!(queued.bytes().as_ptr(), published.bytes.as_ptr());
-        let retained_before_write = Arc::strong_count(&published);
+        let retained_before_write = published.strong_count();
         drop(fed);
 
         let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
@@ -5962,7 +7723,7 @@ mod tests {
             panic!("shared raw frame must be reported as written")
         };
         assert!(synthetic_buffer.is_none());
-        assert_eq!(Arc::strong_count(&published), retained_before_write - 2);
+        assert_eq!(published.strong_count(), retained_before_write - 2);
     }
 
     #[test]
@@ -6542,7 +8303,7 @@ mod tests {
             next_raw_compositor_frame(Some(&frame_store), None, Duration::ZERO, expected.len())
                 .expect("ready compositor frame");
 
-        assert!(Arc::ptr_eq(&fed.frame, &published));
+        assert!(CompositorFrameHandle::ptr_eq(&fed.frame, &published));
         assert_eq!(fed.sequence, 11);
         assert_eq!(fed.captured_at, captured_at);
         assert!(fed.age_ms >= 80);
@@ -6581,7 +8342,7 @@ mod tests {
             next_raw_compositor_frame(Some(&frame_store), None, Duration::ZERO, expected.len())
                 .expect("ready compositor frame");
 
-        assert!(Arc::ptr_eq(&fed.frame, &published));
+        assert!(CompositorFrameHandle::ptr_eq(&fed.frame, &published));
         assert_eq!(fed.sequence, 12);
         assert!(fed.has_metal_iosurface_target);
         assert!(!fed.has_metal_export_handle);
@@ -6684,7 +8445,7 @@ mod tests {
             next_raw_compositor_frame(Some(&frame_store), None, Duration::ZERO, expected.len())
                 .expect("ready compositor frame");
 
-        assert!(Arc::ptr_eq(&fed.frame, &published));
+        assert!(CompositorFrameHandle::ptr_eq(&fed.frame, &published));
         assert_eq!(fed.sequence, 13);
         assert!(fed.has_metal_iosurface_target);
         assert!(fed.has_metal_export_handle);
@@ -6723,7 +8484,7 @@ mod tests {
         let latest = frame_store.lock().unwrap().latest().expect("latest frame");
 
         assert_eq!(fed.sequence, 12);
-        assert!(Arc::ptr_eq(&fed.frame, &latest));
+        assert!(CompositorFrameHandle::ptr_eq(&fed.frame, &latest));
         assert_eq!(fed.frame.bytes, second);
     }
 
@@ -6746,7 +8507,7 @@ mod tests {
         .expect("latest compositor frame");
 
         assert_eq!(fed.sequence, 11);
-        assert!(Arc::ptr_eq(&fed.frame, &published));
+        assert!(CompositorFrameHandle::ptr_eq(&fed.frame, &published));
         assert_eq!(fed.frame.bytes, expected);
     }
 

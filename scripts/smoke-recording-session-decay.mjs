@@ -11,11 +11,13 @@
 // with hard (per-frame noise) content, so a held frame is a literal duplicate,
 // and holds EVERY session — not just the first — to the analyzer's freshness
 // gates (freezedetect + exact-repeat), plus the bridge's own fresh/repeat
-// accounting from diagnostics.stats.
+// counters from the authoritative final recording-frame-accounting event. The
+// live diagnostics snapshot is retained as context, never as the final oracle.
 //
 // Usage: pnpm smoke:session-decay
 //   VIDEORC_DECAY_SESSIONS=6           session count (default 6)
-//   VIDEORC_DECAY_RECORDING_MS=15000   per-session capture length
+//   VIDEORC_DECAY_RECORDING_MS=15000   per-session capture length (real-source
+//                                      default: 65000)
 //   VIDEORC_DECAY_IDLE_MS=8000         idle gap between sessions
 //   VIDEORC_DECAY_REAL_SCREEN=1        capture the real screen (needs the
 //                                      dev app's Screen Recording TCC grant;
@@ -43,6 +45,11 @@ import {
 } from './lib/screen-motion-stimulus.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { pickDevice } from './lib/source-selection.mjs'
+import {
+  evaluateSessionDecayEvidence,
+  evaluateSessionDecayLifecycleEvents,
+  waitForSessionTerminalStatus
+} from './lib/session-decay-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const outputDirectory = resolve(
@@ -52,12 +59,14 @@ const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-session-decay-user-data-
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = siblingFfprobePath(ffmpegPath) ?? 'ffprobe'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
-const sessionCount = Number(process.env.VIDEORC_DECAY_SESSIONS ?? 6)
-const recordingMs = Number(process.env.VIDEORC_DECAY_RECORDING_MS ?? 15000)
-const idleMs = Number(process.env.VIDEORC_DECAY_IDLE_MS ?? 8000)
-
 const realScreen = process.env.VIDEORC_DECAY_REAL_SCREEN === '1'
 const realCamera = process.env.VIDEORC_DECAY_REAL_CAMERA === '1'
+const sessionCount = Number(process.env.VIDEORC_DECAY_SESSIONS ?? 6)
+const recordingMs = Number(
+  process.env.VIDEORC_DECAY_RECORDING_MS ?? (realScreen || realCamera ? 65000 : 15000)
+)
+const idleMs = Number(process.env.VIDEORC_DECAY_IDLE_MS ?? 8000)
+
 // VIDEORC_DECAY_PACKAGED_APP: drive the INSTALLED app instead of the dev app.
 // The packaged bundle carries the user's real TCC camera/screen grants, which
 // the ad-hoc dev Electron cannot obtain on this box (macOS refuses to prompt).
@@ -84,11 +93,12 @@ const PROFILE = {
 // hard failures on EVERY session index. The owner's frozen 0.9.71 recording
 // had 51 freeze spans up to 1.3s — 400ms is loose enough for encoder jitter
 // under noise content and still fails that file on dozens of counts. Real
-// sources can be legitimately static, so there freezedetect is evidence only
-// and the bridge repeat-ratio gate carries the verdict.
+// sources can be legitimately static, so there freezedetect is evidence only;
+// authoritative final source freshness/age and bridge accounting carry the verdict.
 const DECAY_GATES = Object.freeze({
   requireMotion: !realScreen && !realCamera,
   maxFreezeMs: 400,
+  minUniqueFrameRatio: 0.95,
   requireColorTags: true,
   requireValidLevel: true,
   keyframeMaxIntervalSeconds: 2.5,
@@ -156,7 +166,9 @@ const FRESHNESS_KEYS = [
   'compositorFramesRendered',
   'compositorTickSkipped',
   'encoderBridgeInputFps',
+  'encoderBridgeFreshFrames',
   'encoderBridgeRepeatedFrames',
+  'encoderBridgeSyntheticFrames',
   'encoderBridgeDroppedFrames',
   'encoderBridgeEncodedOutputFrames',
   'encoderBridgeCompositorWaitP95Ms',
@@ -168,31 +180,46 @@ const FRESHNESS_KEYS = [
   'compositorScreenSourceServedAgeMaxMs'
 ]
 
-async function recordSession({ ws, smoke, index, sources }) {
-  const { capabilityId } = await requestSmokeCommand(
-    smoke,
-    'authorize-smoke-resource',
-    { kind: 'output-directory', path: outputDirectory },
-    { timeoutMs }
-  )
+async function recordSession({ ws, smoke, index, sources, backendEvents }) {
+  let capabilityId
+  if (!packagedAppExecutable) {
+    const authorization = await requestSmokeCommand(
+      smoke,
+      'authorize-smoke-resource',
+      { kind: 'output-directory', path: outputDirectory },
+      { timeoutMs }
+    )
+    capabilityId = authorization.capabilityId
+  }
   const started = await request(
     ws,
     timeoutMs,
     'session.start',
     sessionParams(capabilityId, sources)
   )
-  if (started.state !== 'recording') {
+  if (started.state !== 'recording' || !started.sessionId) {
     throw new Error(`session.start state ${started.state}: ${started.message ?? ''}`)
   }
   await new Promise((resolveSleep) => setTimeout(resolveSleep, recordingMs))
   const diagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
-  const bridge = Object.fromEntries(
+  const liveDiagnostics = Object.fromEntries(
     FRESHNESS_KEYS.filter((key) => diagnostics[key] !== undefined).map((key) => [
       key,
       diagnostics[key]
     ])
   )
   const stopped = await request(ws, timeoutMs, 'session.stop')
+  const terminalStatus = await waitForSessionTerminalStatus({
+    events: backendEvents,
+    sessionId: started.sessionId,
+    timeoutMs: Math.min(timeoutMs, 10_000)
+  })
+  const lifecycle = evaluateSessionDecayLifecycleEvents({
+    events: backendEvents,
+    sessionId: started.sessionId
+  })
+  const finalAccounting = lifecycle.accounting
+  const bridge = finalAccounting?.diagnostics ?? {}
   const outputPath = stopped.outputPath ?? started.outputPath
   if (!outputPath || !existsSync(outputPath)) {
     throw new Error('recording produced no output file')
@@ -207,56 +234,26 @@ async function recordSession({ ws, smoke, index, sources }) {
   })
   writeReports(quality)
 
-  const failures = [...quality.verdict.failures]
+  const accounting = evaluateSessionDecayEvidence({
+    diagnostics: bridge,
+    requestedSources: { screen: realScreen, camera: realCamera },
+    targetFps: finalAccounting?.targetFps,
+    elapsedMs: finalAccounting?.elapsedMs
+  })
+  const terminalFailures =
+    terminalStatus.state === 'failed'
+      ? [`session ${started.sessionId} reported terminal recording state failed`]
+      : []
+  const continuationFailures = [...accounting.failures, ...lifecycle.failures, ...terminalFailures]
+  const failures = [
+    ...quality.verdict.failures,
+    ...accounting.failures,
+    ...lifecycle.failures,
+    ...terminalFailures
+  ]
   const observedFps = quality.metrics.observedFps
   if (observedFps != null && Math.abs(observedFps - PROFILE.fps) > PROFILE.fps * 0.05) {
     failures.push(`observed fps ${observedFps.toFixed(2)} != requested ${PROFILE.fps}`)
-  }
-  const encoded = bridge.encoderBridgeEncodedOutputFrames
-  const repeated = bridge.encoderBridgeRepeatedFrames
-  let repeatRatio = null
-  if (typeof encoded === 'number' && typeof repeated === 'number' && encoded + repeated >= 60) {
-    repeatRatio = repeated / (encoded + repeated)
-    // The bridge legitimately repeats a handful of frames around start/stop;
-    // a session that is >10% repeats recorded a slideshow. Under 60 frames
-    // observed (a stats read racing the bridge ramp-up) there is no verdict.
-    if (repeatRatio > 0.1) {
-      failures.push(
-        `bridge served ${(repeatRatio * 100).toFixed(1)}% repeated frames ` +
-          `(${repeated} repeated vs ${encoded} encoded)`
-      )
-    }
-  }
-  // The owner's 0.9.71–0.9.73 decay lives UPSTREAM of the bridge: capture
-  // producers (ScreenCaptureKit / camera) slow to 6–16 fps while the
-  // compositor faithfully re-serves held frames at full cadence — bridge
-  // repeats stay near zero, so only the source-serve counters can see it.
-  // With the motion stimulus on the real screen, fresh serves must track the
-  // session fps; held-serve dominance is the producer-stall signature.
-  if (realScreen) {
-    const fresh = bridge.compositorScreenSourceFreshServes
-    const held = bridge.compositorScreenSourceHeldServes
-    if (typeof fresh === 'number' && typeof held === 'number' && fresh + held >= 60) {
-      const freshRate = fresh / ((fresh + held) / PROFILE.fps)
-      if (held > fresh) {
-        failures.push(
-          `screen producer stalled: ${fresh} fresh vs ${held} held serves ` +
-            `(~${freshRate.toFixed(1)} fresh fps against ${PROFILE.fps} target)`
-        )
-      }
-    }
-  }
-  if (realCamera) {
-    const fresh = bridge.compositorCameraSourceFreshServes
-    const held = bridge.compositorCameraSourceHeldServes
-    if (
-      typeof fresh === 'number' &&
-      typeof held === 'number' &&
-      fresh + held >= 60 &&
-      held > fresh
-    ) {
-      failures.push(`camera producer stalled: ${fresh} fresh vs ${held} held serves`)
-    }
   }
   return {
     session: index + 1,
@@ -267,15 +264,26 @@ async function recordSession({ ws, smoke, index, sources }) {
     longestFreezeMs: quality.metrics.longestFreezeMs ?? null,
     freezeCount: quality.metrics.freezeCount ?? null,
     observedFps,
-    repeatRatio,
-    bridge
+    degradedRatio: accounting.bridge.degradedRatio,
+    bridge,
+    liveDiagnostics,
+    accounting,
+    lifecycle,
+    continuationFailures
   }
 }
 
 const results = []
+const backendEvents = []
 let stopApp = async () => {}
 let motionStimulus = null
 let launchedOk = false
+if (!realScreen && !realCamera) {
+  console.log(
+    '[session-decay] synthetic hard-content mode proves lifecycle/accounting only; ' +
+      'it does not prove real-device source freshness (run with REAL_SCREEN/REAL_CAMERA under TCC).'
+  )
+}
 try {
   const launch = await launchDevApp({
     spawnSpec: packagedAppExecutable ? { command: packagedAppExecutable, args: [] } : undefined,
@@ -304,6 +312,20 @@ try {
   stopApp = launch.stop
   launchedOk = true
   const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
+  ws.addEventListener('message', (event) => {
+    try {
+      const message = JSON.parse(event.data)
+      if (
+        message?.event === 'health.event' ||
+        message?.event === 'session.log' ||
+        message?.event === 'recording.status'
+      ) {
+        backendEvents.push(message)
+      }
+    } catch {
+      // Ignore non-JSON socket noise.
+    }
+  })
   const smoke = launch.connections['preview-motion-ready']
   const sources = await resolveRealSources(ws)
   if (realScreen) {
@@ -316,7 +338,7 @@ try {
 
   for (let index = 0; index < sessionCount; index += 1) {
     try {
-      const result = await recordSession({ ws, smoke, index, sources })
+      const result = await recordSession({ ws, smoke, index, sources, backendEvents })
       results.push(result)
       const status = result.failures.length === 0 ? 'PASS' : 'FAIL'
       const serves = (kind) => {
@@ -329,22 +351,40 @@ try {
         `Session decay [${result.session}/${sessionCount}] ${status}: ` +
           `${(result.sizeBytes / 1024).toFixed(0)}KB, ` +
           `fps ${result.observedFps == null ? '?' : result.observedFps.toFixed(2)}, ` +
-          `repeats ${result.repeatRatio == null ? 'n/a' : `${(result.repeatRatio * 100).toFixed(1)}%`}, ` +
+          `degraded bridge ${Number.isFinite(result.degradedRatio) ? `${(result.degradedRatio * 100).toFixed(1)}%` : 'n/a'}, ` +
           `serves screen ${serves('Screen')} camera ${serves('Camera')}`
       )
       for (const failure of result.failures) {
         console.error(`  ❌ ${failure}`)
       }
+      if (result.continuationFailures.length > 0) {
+        console.error(
+          'Session decay is aborting before the next session because final accounting or writer lifecycle evidence failed.'
+        )
+        break
+      }
     } catch (error) {
-      results.push({ session: index + 1, failures: [String(error?.message ?? error)] })
+      const failures = [String(error?.message ?? error)]
       console.error(
         `Session decay [${index + 1}/${sessionCount}] FAIL: ${String(error?.message ?? error)}`
       )
       try {
-        await request(ws, timeoutMs, 'session.stop')
-      } catch {
-        // No live session to stop — expected for start-time refusals.
+        const recoveryStopped = await request(ws, timeoutMs, 'session.stop')
+        if (recoveryStopped?.state !== 'idle') {
+          failures.push(
+            `recovery session.stop did not confirm idle state (got ${recoveryStopped?.state ?? 'missing'})`
+          )
+        }
+      } catch (stopError) {
+        failures.push(
+          `recovery session.stop could not be confirmed: ${String(stopError?.message ?? stopError)}`
+        )
       }
+      results.push({ session: index + 1, failures })
+      console.error(
+        'Session decay is aborting before the next session after an unconfirmed failure.'
+      )
+      break
     }
     if (index + 1 < sessionCount) {
       await new Promise((resolveSleep) => setTimeout(resolveSleep, idleMs))

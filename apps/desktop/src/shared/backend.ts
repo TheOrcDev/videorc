@@ -1962,6 +1962,31 @@ export interface WebSocketTransportDiagnosticStats {
   slowPressureDisconnectCount: number
 }
 
+export interface PreviewCameraDropReasonStats {
+  frameWasLate: number
+  outOfBuffers: number
+  discontinuity: number
+  unknown: number
+}
+
+export interface PreviewScreenFrameStatusStats {
+  complete: number
+  idle: number
+  blank: number
+  suspended: number
+  started: number
+  stopped: number
+  unknown: number
+}
+
+export interface PreviewSourceSurfaceBackingStats {
+  liveCount: number
+  peakCount: number
+  estimatedBytes: number
+  peakEstimatedBytes: number
+  oldestAgeMs?: number
+}
+
 export interface DiagnosticStats {
   sessionId?: string
   activeOutputMode?: string
@@ -2211,6 +2236,14 @@ export interface DiagnosticStats {
   compositorSourceCvpixelbufferImportFrames: number
   /** Cumulative live-source frames uploaded to Metal from CPU BGRA bytes. */
   compositorSourceByteUploadFrames: number
+  /** Cumulative held capture frames that reused an already imported Metal texture. */
+  compositorSourceCaptureTextureReuses: number
+  /** Camera subset of held capture texture reuses. */
+  compositorCameraSourceCaptureTextureReuses: number
+  /** Screen/window subset of held capture texture reuses. */
+  compositorScreenSourceCaptureTextureReuses: number
+  /** Completed-command boundaries that flushed the CoreVideo Metal texture cache. */
+  compositorSourceTextureCacheFlushes: number
   /** Cumulative live-source zero-copy import attempts that fell back to byte upload. */
   compositorSourceImportFailures: number
   /** Cumulative camera frames imported from IOSurface storage into Metal. */
@@ -2278,6 +2311,20 @@ export interface DiagnosticStats {
   previewCameraFrameAgeMs?: number
   previewCameraSourceFps?: number
   previewCameraDroppedFrames: number
+  /** AVFoundation didOutput callbacks observed before local validation/publication. */
+  previewCameraCaptureCallbackCount: number
+  /** AVFoundation didDrop callbacks, excluding locally rejected didOutput samples. */
+  previewCameraDidDropCallbackCount: number
+  /** Camera frames successfully published to the source FrameStore. */
+  previewCameraFrameStorePublications: number
+  /** Age of the latest AVFoundation didOutput callback, whether or not it published. */
+  previewCameraCaptureCallbackAgeMs?: number
+  /** Latest camera FrameStore sequence visible to consumers. */
+  previewCameraLatestSequence?: number
+  /** FourCC delivered by the latest valid AVFoundation sample. */
+  previewCameraCapturePixelFormat?: string
+  previewCameraDropReasons: PreviewCameraDropReasonStats
+  previewCameraSurfaceBacking: PreviewSourceSurfaceBackingStats
   /** Latest native camera state reported by the AVFoundation preview source. */
   previewCameraState?: PreviewCameraState
   /** Native AVFoundation unique ID for the selected camera. */
@@ -2329,6 +2376,16 @@ export interface DiagnosticStats {
   previewScreenFrameAgeMs?: number
   previewScreenSourceFps?: number
   previewScreenDroppedFrames: number
+  /** ScreenCaptureKit callbacks observed before status/image validation. */
+  previewScreenCaptureCallbackCount: number
+  /** Screen frames successfully published to the source FrameStore. */
+  previewScreenFrameStorePublications: number
+  /** Age of the latest ScreenCaptureKit callback, including non-complete statuses. */
+  previewScreenCaptureCallbackAgeMs?: number
+  /** Latest screen FrameStore sequence visible to consumers. */
+  previewScreenLatestSequence?: number
+  previewScreenFrameStatuses: PreviewScreenFrameStatusStats
+  previewScreenSurfaceBacking: PreviewSourceSurfaceBackingStats
   /** Latest native ScreenCaptureKit status message, including permission/startup errors. */
   previewScreenMessage?: string
   /** Native ScreenCaptureKit source width selected for the live screen/window source. */
@@ -2361,7 +2418,9 @@ export interface DiagnosticStats {
   previewScreenFrameBytes: number
   /** ScreenCaptureKit queue depth requested for the live screen source. */
   previewScreenCaptureQueueDepth: number
+  /** CPU buffers currently owned by the camera/screen stores and spare pools. */
   previewSourceFrameBufferCount: number
+  /** CPU bytes currently owned by the camera/screen stores and spare pools. */
   previewSourceFrameBytes: number
   previewSourceFrameDroppedFrames: number
   micCapturedFrames?: number

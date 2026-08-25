@@ -692,7 +692,7 @@ impl CompositorLiveSources {
         }
         if let Some((frame, _layout)) = self.last_camera_frame.as_ref() {
             self.camera_fetch.record_serve(
-                std::sync::Arc::as_ptr(frame).cast::<()>(),
+                frame.as_ptr().cast::<()>(),
                 frame.captured_at.elapsed().as_millis() as u64,
             );
         }
@@ -732,7 +732,7 @@ impl CompositorLiveSources {
         }
         if let Some(frame) = self.last_screen_frame.as_ref() {
             self.screen_fetch.record_serve(
-                std::sync::Arc::as_ptr(frame).cast::<()>(),
+                frame.as_ptr().cast::<()>(),
                 frame.captured_at.elapsed().as_millis() as u64,
             );
         }
@@ -2581,6 +2581,7 @@ struct CompositorPublishTimings {
 
 impl CompositorPublishTimings {
     fn merge_gpu(&mut self, timings: GpuCompositorTimings) {
+        self.source_import_stats.merge(timings.source_import_stats);
         self.gpu_readbacks = self.gpu_readbacks.saturating_add(timings.gpu_readbacks);
         self.bgra_bytes_copied = self
             .bgra_bytes_copied
@@ -2602,6 +2603,11 @@ enum PreparedGpuSourcePixels<'a> {
     Borrowed(&'a [u8]),
     Owned(Vec<u8>),
 }
+
+#[cfg(target_os = "macos")]
+const CAMERA_CAPTURE_STORAGE_CONTENT_NAMESPACE: u64 = 4;
+#[cfg(target_os = "macos")]
+const SCREEN_CAPTURE_STORAGE_CONTENT_NAMESPACE: u64 = 5;
 
 #[cfg(target_os = "macos")]
 impl<'a> PreparedGpuSourcePixels<'a> {
@@ -3099,7 +3105,11 @@ fn try_gpu_compose(
                     prepared_sources.push(PreparedGpuSource {
                         pixels: PreparedGpuSourcePixels::Borrowed(&frame.bytes),
                         kind: crate::metal_compositor::GpuSourceKind::Camera,
-                        content_key: None,
+                        content_key: Some(crate::metal_compositor::GpuSourceContentKey {
+                            namespace: CAMERA_CAPTURE_STORAGE_CONTENT_NAMESPACE,
+                            revision: frame.storage_identity(),
+                            variant: 0,
+                        }),
                         iosurface: frame.source_iosurface.as_ref(),
                         pixel_buffer: frame.source_pixel_buffer.as_ref(),
                         width: frame.width as usize,
@@ -3189,7 +3199,11 @@ fn try_gpu_compose(
                     prepared_sources.push(PreparedGpuSource {
                         pixels: PreparedGpuSourcePixels::Borrowed(&frame.bytes),
                         kind: source_kind,
-                        content_key: None,
+                        content_key: Some(crate::metal_compositor::GpuSourceContentKey {
+                            namespace: SCREEN_CAPTURE_STORAGE_CONTENT_NAMESPACE,
+                            revision: frame.storage_identity(),
+                            variant: 0,
+                        }),
                         iosurface: frame.source_iosurface.as_ref(),
                         pixel_buffer: frame.source_pixel_buffer.as_ref(),
                         width: frame.width as usize,
@@ -3322,6 +3336,10 @@ fn source_import_stats_from_metal(
         iosurface_frames: stats.iosurface_frames,
         cvpixelbuffer_frames: stats.cvpixelbuffer_frames,
         byte_upload_frames: stats.byte_upload_frames,
+        capture_texture_reuses: stats.capture_texture_reuses,
+        camera_capture_texture_reuses: stats.camera_capture_texture_reuses,
+        screen_capture_texture_reuses: stats.screen_capture_texture_reuses,
+        texture_cache_flushes: stats.texture_cache_flushes,
         import_failures: stats.import_failures,
         camera_iosurface_frames: stats.camera_iosurface_frames,
         camera_cvpixelbuffer_frames: stats.camera_cvpixelbuffer_frames,
@@ -3333,6 +3351,23 @@ fn source_import_stats_from_metal(
         screen_import_failures: stats.screen_import_failures,
         import_time_ms: stats.import_time_ms,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn take_failed_gpu_timings(gpu: Option<&mut GpuCompositor>) -> GpuCompositorTimings {
+    let source_import_stats = gpu
+        .map(GpuCompositor::take_pending_source_import_stats)
+        .map(source_import_stats_from_metal)
+        .unwrap_or_default();
+    GpuCompositorTimings {
+        source_import_stats,
+        ..GpuCompositorTimings::default()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn take_failed_gpu_timings(_gpu: Option<&mut GpuCompositor>) -> GpuCompositorTimings {
+    GpuCompositorTimings::default()
 }
 
 #[cfg(target_os = "macos")]
@@ -3889,7 +3924,7 @@ async fn publish_compositor_frame(
     height: u32,
     live_sources: &mut CompositorLiveSources,
     render_cache: &mut CompositorRenderCache,
-    gpu: Option<&mut GpuCompositor>,
+    mut gpu: Option<&mut GpuCompositor>,
     frame_consumer: CompositorFrameConsumer,
     stream_output: Option<CompositorAuxiliaryOutput>,
     stream_gpu: Option<&mut GpuCompositor>,
@@ -3996,20 +4031,25 @@ async fn publish_compositor_frame(
             },
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
-        match try_gpu_compose(gpu, &inputs, frame_consumer.publishes_cpu_yuv()) {
+        match try_gpu_compose(
+            gpu.as_deref_mut(),
+            &inputs,
+            frame_consumer.publishes_cpu_yuv(),
+        ) {
             Ok(frame) => {
                 bytes = frame.yuv;
                 pixel_format = frame.pixel_format;
                 export_handle = frame.export_handle;
                 timings.gpu_prepare_ms = frame.timings.prepare_ms;
                 timings.gpu_source_texture_ms = frame.timings.source_texture_ms;
-                timings.source_import_stats = frame.timings.source_import_stats;
                 timings.gpu_command_wait_ms = frame.timings.command_wait_ms;
                 timings.gpu_total_ms = frame.timings.total_ms;
                 timings.merge_gpu(frame.timings);
                 compositor_backend = CompositorBackend::Metal;
             }
             Err(reason) => {
+                let failed_gpu_timings = take_failed_gpu_timings(gpu);
+                timings.merge_gpu(failed_gpu_timings);
                 // On macOS a Metal miss is a real degradation worth surfacing;
                 // off macOS the CPU compositor IS the path, so the "why not
                 // Metal" reason is noise (backend already set to Cpu above).
@@ -4132,20 +4172,22 @@ fn publish_auxiliary_compositor_frame(
     captured_at: Instant,
     frame_store: CompositorFrameStore,
     inputs: CompositorRenderInputs<'_>,
-    gpu: Option<&mut GpuCompositor>,
+    mut gpu: Option<&mut GpuCompositor>,
     frame_consumer: CompositorFrameConsumer,
 ) -> Option<GpuCompositorTimings> {
     let width = inputs.width;
     let height = inputs.height;
     let mut pixel_format = CompositorPixelFormat::yuv420p_cpu_buffer();
     let mut export_handle = CompositorFrameExportHandle::default();
-    let mut gpu_timings = None;
-    let bytes = match try_gpu_compose(gpu, &inputs, frame_consumer.publishes_cpu_yuv()) {
+    let (bytes, gpu_timings) = match try_gpu_compose(
+        gpu.as_deref_mut(),
+        &inputs,
+        frame_consumer.publishes_cpu_yuv(),
+    ) {
         Ok(frame) => {
             pixel_format = frame.pixel_format;
             export_handle = frame.export_handle;
-            gpu_timings = Some(frame.timings);
-            frame.yuv
+            (frame.yuv, Some(frame.timings))
         }
         Err(_) if frame_consumer.requires_cpu_fallback() => {
             let mut bytes = {
@@ -4155,9 +4197,9 @@ fn publish_auxiliary_compositor_frame(
                 store.checkout_buffer(raw_yuv420p_len(width, height))
             };
             render_compositor_yuv420p_frame(inputs, &mut bytes);
-            bytes
+            (bytes, Some(take_failed_gpu_timings(gpu)))
         }
-        Err(_) => return None,
+        Err(_) => return Some(take_failed_gpu_timings(gpu)),
     };
     let mut store = frame_store
         .lock()
@@ -5915,40 +5957,44 @@ mod tests {
             (),
         >(3, None));
 
-        let fresh_frame = std::sync::Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 1,
-            height: 1,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: vec![0, 0, 0, 255],
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            source_d3d11_texture: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
+        let fresh_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 1,
+                height: 1,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: vec![0, 0, 0, 255],
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
         assert!(!should_blocking_refresh_live_source(1, Some(&fresh_frame)));
         assert!(!should_blocking_refresh_live_source(
             100,
             Some(&fresh_frame)
         ));
 
-        let contended_frame = std::sync::Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 1,
-            height: 1,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: vec![0, 0, 0, 255],
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            source_d3d11_texture: None,
-            recycle_pool: None,
-            captured_at: Instant::now()
-                - COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_AFTER
-                - Duration::from_millis(1),
-        });
+        let contended_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 1,
+                height: 1,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: vec![0, 0, 0, 255],
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now()
+                    - COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_AFTER
+                    - Duration::from_millis(1),
+            });
         assert!(!should_blocking_refresh_live_source(
             COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_MISSES - 1,
             Some(&contended_frame)
@@ -5958,21 +6004,23 @@ mod tests {
             Some(&contended_frame)
         ));
 
-        let stale_frame = std::sync::Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 1,
-            height: 1,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: vec![0, 0, 0, 255],
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            source_d3d11_texture: None,
-            recycle_pool: None,
-            captured_at: Instant::now()
-                - COMPOSITOR_LIVE_SOURCE_STALE_RECOVERY_AFTER
-                - Duration::from_millis(1),
-        });
+        let stale_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 1,
+                height: 1,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: vec![0, 0, 0, 255],
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now()
+                    - COMPOSITOR_LIVE_SOURCE_STALE_RECOVERY_AFTER
+                    - Duration::from_millis(1),
+            });
         assert!(should_blocking_refresh_live_source(1, Some(&stale_frame)));
     }
 
@@ -6040,6 +6088,87 @@ mod tests {
         assert!(!metal_compositor_enabled_from_env(Some("false")));
         assert!(!metal_compositor_enabled_from_env(Some("off")));
         assert!(!metal_compositor_enabled_from_env(Some("no")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_source_texture_cache_failed_fallback_reports_once_in_compositor_timings() {
+        use crate::metal_compositor::{
+            GpuSource, GpuSourceContentKey, GpuSourceKind, MetalSceneCompositor, SourceMask,
+            make_test_iosurface_bgra_pixel_buffer, source_zerocopy_enabled,
+        };
+
+        assert!(
+            source_zerocopy_enabled(),
+            "focused CVMetal cache tests require VIDEORC_ZEROCOPY_SOURCES enabled"
+        );
+        let mut gpu = MetalSceneCompositor::new()
+            .expect("focused CVMetal cache tests require a Metal compositor");
+        let (width, height) = (16usize, 16usize);
+        let pixel_buffer = make_test_iosurface_bgra_pixel_buffer(width, height)
+            .expect("focused CVMetal cache tests require local IOSurface allocation");
+        let source = GpuSource {
+            kind: GpuSourceKind::Camera,
+            bgra: &[],
+            content_key: Some(GpuSourceContentKey {
+                namespace: 4,
+                revision: 141,
+                variant: 0,
+            }),
+            iosurface: None,
+            pixel_buffer: Some(&pixel_buffer),
+            width,
+            height,
+            dest: [0.0, 0.0, 1.0, 1.0],
+            crop: [0.0; 4],
+            mirror: false,
+            mask: SourceMask::None,
+            blend: false,
+            chroma_key: None,
+        };
+
+        gpu.force_next_pixel_buffer_import_failure();
+        assert!(
+            gpu.compose_target_with_timings(
+                width,
+                height,
+                [0.0, 0.0, 0.0, 1.0],
+                std::slice::from_ref(&source),
+            )
+            .is_none(),
+            "empty byte fallback must force the outer compositor fallback seam"
+        );
+
+        let mut fallback_timings = CompositorPublishTimings::default();
+        fallback_timings.merge_gpu(take_failed_gpu_timings(Some(&mut gpu)));
+        assert_eq!(fallback_timings.source_import_stats.import_failures, 1);
+        assert_eq!(
+            fallback_timings.source_import_stats.camera_import_failures,
+            1
+        );
+        assert_eq!(
+            fallback_timings.source_import_stats.texture_cache_flushes,
+            1
+        );
+
+        let already_reported = take_failed_gpu_timings(Some(&mut gpu));
+        assert_eq!(already_reported.source_import_stats.import_failures, 0);
+        assert_eq!(
+            already_reported.source_import_stats.texture_cache_flushes,
+            0
+        );
+
+        let recovered = gpu
+            .compose_target_with_timings(
+                width,
+                height,
+                [0.0, 0.0, 0.0, 1.0],
+                std::slice::from_ref(&source),
+            )
+            .expect("post-fallback retry must recover through the live import seam");
+        assert_eq!(recovered.source_import_stats.cvpixelbuffer_frames, 1);
+        assert_eq!(recovered.source_import_stats.import_failures, 0);
+        assert_eq!(recovered.source_import_stats.texture_cache_flushes, 0);
     }
 
     #[test]
@@ -6735,32 +6864,36 @@ mod tests {
             layout,
             active_screen: None,
         };
-        let screen_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 4,
-            height: 4,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [255, 0, 0, 255].repeat(16),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            source_d3d11_texture: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
-        let camera_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 4,
-            height: 4,
-            pixel_format: PreviewCameraPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [0, 0, 255, 255].repeat(16),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            source_d3d11_texture: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
+        let screen_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 4,
+                height: 4,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [255, 0, 0, 255].repeat(16),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
+        let camera_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 4,
+                height: 4,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [0, 0, 255, 255].repeat(16),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
 
         let output = try_gpu_compose(
             Some(&mut gpu),
@@ -6844,19 +6977,21 @@ mod tests {
             state: "live".to_string(),
             message: None,
         };
-        let screen_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 100,
-            height: 100,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [255, 0, 0, 255].repeat(100 * 100),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            source_d3d11_texture: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
+        let screen_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 100,
+                height: 100,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [255, 0, 0, 255].repeat(100 * 100),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
 
         let frame = try_gpu_compose(
             Some(&mut gpu),
@@ -9213,19 +9348,21 @@ mod tests {
             state: "live".to_string(),
             message: None,
         };
-        let screen_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 100,
-            height: 100,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [255, 0, 0, 255].repeat(100 * 100),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            source_d3d11_texture: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
+        let screen_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 100,
+                height: 100,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [255, 0, 0, 255].repeat(100 * 100),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
         let mut bytes = vec![0; raw_yuv420p_len(100, 100)];
 
         render_compositor_yuv420p_frame(
@@ -9290,32 +9427,36 @@ mod tests {
             active_screen: None,
         };
         // Landscape sources into portrait bands: red camera, blue screen (BGRA).
-        let camera_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 160,
-            height: 90,
-            pixel_format: PreviewCameraPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [0, 0, 255, 255].repeat(160 * 90),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            source_d3d11_texture: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
-        let screen_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 160,
-            height: 90,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [255, 0, 0, 255].repeat(160 * 90),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            source_d3d11_texture: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
+        let camera_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 160,
+                height: 90,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [0, 0, 255, 255].repeat(160 * 90),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
+        let screen_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 160,
+                height: 90,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [255, 0, 0, 255].repeat(160 * 90),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
         let mut bytes = vec![0; raw_yuv420p_len(90, 160)];
 
         render_compositor_yuv420p_frame(
@@ -9504,19 +9645,21 @@ mod tests {
             layout,
             active_screen: None,
         };
-        let camera_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 4,
-            height: 4,
-            pixel_format: PreviewCameraPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [0, 0, 255, 255].repeat(16),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            source_d3d11_texture: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
+        let camera_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 4,
+                height: 4,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [0, 0, 255, 255].repeat(16),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
         let mut bytes = vec![0; raw_yuv420p_len(4, 4)];
 
         render_compositor_yuv420p_frame(
@@ -9687,19 +9830,21 @@ mod tests {
         let camera_captured_at = Instant::now()
             .checked_sub(Duration::from_millis(77))
             .unwrap_or_else(Instant::now);
-        let camera_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 7,
-            width: 4,
-            height: 4,
-            pixel_format: PreviewCameraPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [0, 0, 255, 255].repeat(16),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            source_d3d11_texture: None,
-            recycle_pool: None,
-            captured_at: camera_captured_at,
-        });
+        let camera_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 7,
+                width: 4,
+                height: 4,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [0, 0, 255, 255].repeat(16),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: camera_captured_at,
+            });
         let mut live_sources = CompositorLiveSources {
             last_camera_frame: Some((camera_frame, layout)),
             ..CompositorLiveSources::default()

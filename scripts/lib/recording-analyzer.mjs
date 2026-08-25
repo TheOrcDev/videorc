@@ -37,6 +37,9 @@ export const DEFAULT_GATES = Object.freeze({
   requireMotion: true, // when false, freeze/exact-repeat segments warn instead of hard-failing
   maxFreezeMs: 100, // no freeze segment above 100ms
   maxRepeatedFrameRun: 2, // no repeated-frame burst above 2 consecutive frames
+  // Opt-in whole-artifact motion gate. Unlike maxRepeatedFrameRun, this catches
+  // non-consecutive reuse spread across an otherwise nominal-cadence artifact.
+  minUniqueFrameRatio: null,
   maxAudioGapMs: 20, // no audio gap above 20ms
   avSyncTargetMs: 100, // A/V skew target (warn above)
   avSyncHardFailMs: 150, // A/V skew hard fail above
@@ -223,6 +226,23 @@ export function maxConsecutiveRun(values, threshold = 1) {
   if (runLen > maxRun) maxRun = runLen
   if (values.length > 0 && runLen > threshold) bursts.push({ startIndex: runStart, run: runLen })
   return { maxRun, bursts }
+}
+
+/**
+ * Whole-artifact uniqueness from decoded framemd5 hashes.
+ * `uniqueFrameRatio` stays null when no hashes were observed so an armed gate
+ * can fail closed instead of treating missing video evidence as 0% motion.
+ * @returns {{observedFrameHashes:number, uniqueFrameCount:number,
+ *   uniqueFrameRatio:number|null}}
+ */
+export function uniqueFrameStats(frameHashes) {
+  const observedFrameHashes = Array.isArray(frameHashes) ? frameHashes.length : 0
+  const uniqueFrameCount = observedFrameHashes > 0 ? new Set(frameHashes).size : 0
+  return {
+    observedFrameHashes,
+    uniqueFrameCount,
+    uniqueFrameRatio: observedFrameHashes > 0 ? uniqueFrameCount / observedFrameHashes : null
+  }
 }
 
 /**
@@ -452,6 +472,28 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
     failures.push('no video stream in the recording')
   }
 
+  if (gates.minUniqueFrameRatio != null) {
+    if (
+      !Number.isFinite(gates.minUniqueFrameRatio) ||
+      gates.minUniqueFrameRatio < 0 ||
+      gates.minUniqueFrameRatio > 1
+    ) {
+      failures.push('decoded unique-frame ratio gate must be between 0 and 1')
+    } else if (
+      !Number.isFinite(metrics.uniqueFrameRatio) ||
+      !Number.isFinite(metrics.uniqueFrameCount) ||
+      !Number.isFinite(metrics.observedFrameHashes)
+    ) {
+      failures.push('decoded unique-frame ratio is unavailable')
+    } else if (metrics.uniqueFrameRatio < gates.minUniqueFrameRatio) {
+      failures.push(
+        `decoded unique-frame ratio ${(metrics.uniqueFrameRatio * 100).toFixed(1)}% ` +
+          `(${metrics.uniqueFrameCount}/${metrics.observedFrameHashes}) is below ` +
+          `${(gates.minUniqueFrameRatio * 100).toFixed(1)}%`
+      )
+    }
+  }
+
   // Freeze segments. This is a hard gate only when the caller expects visible motion.
   // Real screen/camera baselines can be intentionally static, so they should use the
   // exact repeated-frame and pacing gates for artifact proof while keeping this as evidence.
@@ -585,14 +627,16 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
   // Colorimetry tags (Q1): untagged output makes every player guess.
   if (metrics.hasVideo) {
     const wrongTags = []
-    if (metrics.colorSpace !== 'bt709') wrongTags.push(`color_space=${metrics.colorSpace ?? 'unknown'}`)
+    if (metrics.colorSpace !== 'bt709')
+      wrongTags.push(`color_space=${metrics.colorSpace ?? 'unknown'}`)
     if (metrics.colorPrimaries !== 'bt709') {
       wrongTags.push(`color_primaries=${metrics.colorPrimaries ?? 'unknown'}`)
     }
     if (metrics.colorTransfer !== 'bt709') {
       wrongTags.push(`color_transfer=${metrics.colorTransfer ?? 'unknown'}`)
     }
-    if (metrics.colorRange !== 'tv') wrongTags.push(`color_range=${metrics.colorRange ?? 'unknown'}`)
+    if (metrics.colorRange !== 'tv')
+      wrongTags.push(`color_range=${metrics.colorRange ?? 'unknown'}`)
     if (wrongTags.length > 0) {
       const message = `colorimetry not tagged BT.709 video-range: ${wrongTags.join(', ')}`
       if (gates.requireColorTags) {
@@ -791,7 +835,10 @@ export async function runVideoPacing(filePath, { ffprobePath = 'ffprobe' } = {})
  * video stream. Uses packet flags (no decode) so it stays cheap at 4K.
  * @returns {Promise<number[]>}
  */
-export async function runKeyframeTimes(filePath, { ffprobePath = 'ffprobe', sampleSeconds = 30 } = {}) {
+export async function runKeyframeTimes(
+  filePath,
+  { ffprobePath = 'ffprobe', sampleSeconds = 30 } = {}
+) {
   const { stdout } = await run(ffprobePath, [
     '-v',
     'error',
@@ -884,8 +931,8 @@ export async function analyzeRecording(filePath, options = {}) {
   // Run the video passes (freeze, exact-dup frames, pacing) and the audio passes
   // (packet gaps, silence) concurrently. A frozen/black source can still produce a
   // technically valid file, so every pass observes the decoded artifact directly.
-  const [freezes, frameHashes, ptsTimes, audioPackets, silences, keyframeTimes] =
-    await Promise.all([
+  const [freezes, frameHashes, ptsTimes, audioPackets, silences, keyframeTimes] = await Promise.all(
+    [
       hasVideo
         ? runFreezedetect(filePath, {
             ffmpegPath,
@@ -906,15 +953,16 @@ export async function analyzeRecording(filePath, options = {}) {
       hasVideo && gates.keyframeMaxIntervalSeconds != null
         ? runKeyframeTimes(filePath, { ffprobePath })
         : []
-    ])
+    ]
+  )
 
   const pacing = pacingStats(ptsTimes)
   const duplicatePts = duplicatePtsStats(ptsTimes)
   const repeated = maxConsecutiveRun(frameHashes, gates.maxRepeatedFrameRun)
+  const uniqueFrames = uniqueFrameStats(frameHashes)
   const longestFreeze = freezes.reduce((max, f) => Math.max(max, f.duration), 0)
   const longestSilence = silences.reduce((max, s) => Math.max(max, s.duration), 0)
-  const containerFps =
-    probe.video?.avgFps ?? probe.video?.nominalFps ?? pacing.observedFps ?? null
+  const containerFps = probe.video?.avgFps ?? probe.video?.nominalFps ?? pacing.observedFps ?? null
   const cadence = classifyFrameRate(containerFps)
   const explicitIntendedFps = Number.isFinite(options.intendedFps) ? options.intendedFps : null
   const mismatch = cadenceMismatch(
@@ -974,6 +1022,9 @@ export async function analyzeRecording(filePath, options = {}) {
     frameJitterMs: pacing.jitterMs,
     observedFrames,
     expectedFrames,
+    observedFrameHashes: uniqueFrames.observedFrameHashes,
+    uniqueFrameCount: uniqueFrames.uniqueFrameCount,
+    uniqueFrameRatio: uniqueFrames.uniqueFrameRatio,
     frameDerivedDurationSeconds,
     durationStretchRatio,
     freezeCount: freezes.length,
@@ -1093,6 +1144,10 @@ export function renderMarkdownReport(report) {
   )
   lines.push(
     `- Frames: observed ${m.observedFrames ?? 'n/a'} | expected ~${m.expectedFrames ?? 'n/a'}`
+  )
+  lines.push(
+    `- Decoded uniqueness: ${m.uniqueFrameCount ?? 'n/a'}/${m.observedFrameHashes ?? 'n/a'} unique ` +
+      `(${m.uniqueFrameRatio == null ? 'n/a' : `${fmt(m.uniqueFrameRatio * 100, 2)}%`})`
   )
   lines.push(
     `- Duration stretch: frame-derived ${fmt(m.frameDerivedDurationSeconds, 2)}s | ratio ${fmt(m.durationStretchRatio, 2)}x`
